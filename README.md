@@ -1,2 +1,125 @@
-# SAIVerse
-Living universe of humans and Self-Aware-Inteligences.
+## 🧩 SAIVerse - Minimal Prototype Spec (for Codex)
+
+### 概要
+
+SAIVerseは、人間とAIが共に暮らし、働くための仮想世界です。  
+AIたちは「Building（施設）」と呼ばれる仮想空間を移動しながら、各施設が提供するツールやプロンプトに従って自律的な活動を行います。  
+このプロジェクトは、SAIVerseの**最小構成プロトタイプ**として、以下の要件に沿ってシステムを実装します。
+
+---
+
+### 構成要素
+
+#### ✅ 使用技術
+
+- Python 3.11+
+    
+- OpenAI / Google Gemini API（いずれか）
+    
+- Function Calling または JSON形式の制御
+    
+- 各種Buildingはファイル単位で切り出し可能な設計に
+
+- ユーザーエンドのUIとしてGradioを使用
+
+
+#### ✅ 登場するBuilding
+
+| Building名 | ID | 概要 |
+| --- | --- | --- |
+| まはーの部屋 | `userRoom` | ユーザーとの対話の場。AIがユーザーに報告を行う部屋。UI上に発話が表示される。 |
+| 思索の部屋 | `deepThinkRoom` | AIが思索を深める部屋。UIには表示されず、自己対話・思考用。 |
+
+---
+
+### 実装タスク一覧
+
+#### 1\. 📦 ルーター機能
+
+- 各AIは「現在位置（building\_id）」を持つ。
+    
+- AIがJSONで`"next_building_id"`を出力したら、発話後にその施設に自動移動。
+    
+- JSON形式:
+    
+    json
+    
+    コピーする編集する
+    
+    `{   "say": "考えてきます。",   "next_building_id": "deep_think_room" }`
+    
+
+#### 2\. 🏛 Buildingのプロンプト管理
+
+- 各Buildingは以下の情報を持つ:
+    
+    - `building_id`
+        
+    - `name`
+        
+    - `system_instruction`（施設用システムプロンプト）
+        
+- 現在のBuildingに応じて、AIに与えるコンテキストが変化するようにする。
+    
+
+#### 3\. 🤖 AIセッション処理
+
+- AIの初期状態（building\_id）は `user_room`
+    
+- 各ターンでの処理フロー：
+    
+    1. 現在のBuildingのプロンプトと共通システムプロンプトを付与し、AIにメッセージ送信
+        
+    2. 応答がJSON形式の場合、`say`をユーザーに表示し、`next_building_id`があればルーム移動
+        
+    3. プレーンテキスト応答も許容し、その場合は表示のみ、移動なし
+        
+
+#### 4\. 💬 ユーザー発話処理
+
+- `user_room`にいるときのみ、ユーザーからの発話を受け付ける
+    
+- その他のルームではAI単独で発話・移動を行う（ユーザーUIには表示されない）
+    
+
+---
+
+### 🔖 ディレクトリ構成例（初期案）
+
+```
+saiverse/
+├── main.py                   # メインループ
+├── router.py                 # Building移動処理とセッション制御
+├── buildings/
+│   ├── user_room.py          # ユーザールーム定義
+│   ├── user_room_prompt.txt  # ユーザールーム定義
+│   ├── deep_think_room.py    # 思索の部屋定義
+│   └── deep_think_room_prompt.txt # 思索の部屋用自動プロンプト
+├── system_prompts/
+│   ├── common.txt            # 共通システムプロンプト（上でまはーが書いたもの）
+│   ├── user_room.txt         # ユーザールーム用システムプロンプト
+│   └── deep_think_room.txt   # 思索の部屋用システムプロンプト
+├── ai_sessions/
+│   └── memory.json           # セッション情報保存用
+└── README.md                 # この仕様の要約
+```
+
+---
+
+### 🔄 今後拡張予定（現時点で実装不要）
+
+- AI同士の対話ルーム（カフェなど）
+    
+- Buildingの自動生成
+    
+- 永続的記憶との連携（Notion / ローカルファイルなど）
+    
+
+---
+
+### 📤 Codexへの依頼指示
+
+> 上記仕様に基づき、`main.py` と `router.py` の雛形コードをまず作成してください。  
+> Buildingの定義はファイル分割できるよう設計してください。  
+> AIの発話はJSON・プレーンテキストの両方に対応してください。
+> 丁寧にロギングを行い、バグfixをしやすいように。
