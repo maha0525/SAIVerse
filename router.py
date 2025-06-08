@@ -30,6 +30,7 @@ class Router:
         self.common_prompt = common_prompt_path.read_text(encoding="utf-8")
         self.memory_path = memory_path
         self.current_building_id = "user_room"
+        # 会話履歴を保持する
         self.messages: List[Dict[str, str]] = []
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -40,17 +41,39 @@ class Router:
         self.client = OpenAI(api_key=api_key)
         self._load_session()
 
+    def _add_to_history(self, msg: Dict[str, str]) -> None:
+        """Append a message to history and trim to 120000 characters."""
+        self.messages.append(msg)
+        total = sum(len(m.get("content", "")) for m in self.messages)
+        while total > 120000 and self.messages:
+            removed = self.messages.pop(0)
+            total -= len(removed.get("content", ""))
+
+    def _recent_history(self, max_chars: int) -> List[Dict[str, str]]:
+        selected = []
+        count = 0
+        for msg in reversed(self.messages):
+            count += len(msg.get("content", ""))
+            if count > max_chars:
+                break
+            selected.append(msg)
+        return list(reversed(selected))
+
     def _load_session(self) -> None:
         if self.memory_path.exists():
             try:
                 data = json.loads(self.memory_path.read_text(encoding="utf-8"))
                 self.current_building_id = data.get("current_building_id", "user_room")
+                self.messages = data.get("messages", [])
             except json.JSONDecodeError:
                 logging.warning("Failed to load session memory, starting fresh")
 
     def _save_session(self) -> None:
-        data = {"current_building_id": self.current_building_id}
-        self.memory_path.write_text(json.dumps(data), encoding="utf-8")
+        data = {
+            "current_building_id": self.current_building_id,
+            "messages": self.messages,
+        }
+        self.memory_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
     def _build_messages(self, user_message: Optional[str]) -> List[Dict[str, str]]:
         building = self.buildings[self.current_building_id]
@@ -62,10 +85,21 @@ class Router:
             current_persona_system_instruction="",
             current_time=current_time,
         )
-        msgs = [
-            {"role": "system", "content": system_text},
-            {"role": "system", "content": building.auto_prompt},
-        ]
+
+        auto_prompt = building.auto_prompt
+
+        base_chars = len(system_text) + len(auto_prompt)
+        if user_message:
+            base_chars += len(user_message)
+
+        history_limit = 120000 - base_chars
+        if history_limit < 0:
+            history_limit = 0
+
+        history_msgs = self._recent_history(history_limit)
+
+        msgs = [{"role": "system", "content": system_text}] + history_msgs
+        msgs.append({"role": "system", "content": auto_prompt})
         if user_message:
             msgs.append({"role": "user", "content": user_message})
         return msgs
@@ -88,6 +122,12 @@ class Router:
             content = "{\"say\": \"エラーが発生しました。\"}"
         logging.debug("Raw response: %s", content)
         say, next_id = self._parse_response(content)
+        building = self.buildings[self.current_building_id]
+        # auto prompt を履歴に保存（ユーザー扱い）
+        self._add_to_history({"role": "user", "content": building.auto_prompt})
+        if message:
+            self._add_to_history({"role": "user", "content": message})
+        self._add_to_history({"role": "assistant", "content": say})
         if next_id and next_id in self.buildings:
             logging.info("Moving to building: %s", next_id)
             self.current_building_id = next_id
