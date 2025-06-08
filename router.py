@@ -3,6 +3,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
+from datetime import datetime
 
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -60,11 +61,13 @@ class Router:
 
     def _build_messages(self, user_message: Optional[str]) -> List[Dict[str, str]]:
         building = self.buildings[self.current_building_id]
+        current_time = datetime.now().strftime("%H:%M")
         system_text = self.common_prompt.format(
             current_building_name=building.name,
-            current_building_system_instruction=building.system_instruction,
+            current_building_system_instruction=building.system_instruction.format(current_time=current_time),
             current_persona_name="AI",
             current_persona_system_instruction="",
+            current_time=current_time,
         )
         msgs = [
             {"role": "system", "content": system_text},
