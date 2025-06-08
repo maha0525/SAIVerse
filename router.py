@@ -15,20 +15,38 @@ from buildings.user_room import load as load_user_room
 from buildings.deep_think_room import load as load_deep_think_room
 
 
-def build_router() -> "Router":
+def build_router(persona_id: str = "air") -> "Router":
     buildings = [load_user_room(), load_deep_think_room()]
+    base = Path("ai_sessions") / persona_id
     return Router(
         buildings=buildings,
         common_prompt_path=Path("system_prompts/common.txt"),
-        memory_path=Path("ai_sessions/memory.json"),
+        persona_base=base,
     )
 
 
 class Router:
-    def __init__(self, buildings: List[Building], common_prompt_path: Path, memory_path: Path):
+    def __init__(self, buildings: List[Building], common_prompt_path: Path, persona_base: Path):
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
         self.common_prompt = common_prompt_path.read_text(encoding="utf-8")
-        self.memory_path = memory_path
+        self.persona_base = persona_base
+        self.memory_path = persona_base / "memory.json"
+        self.persona_system_instruction = (persona_base / "system_prompt.txt").read_text(encoding="utf-8")
+        persona_data = json.loads((persona_base / "base.json").read_text(encoding="utf-8"))
+        self.persona_name = persona_data.get("persona_name", "AI")
+        self.building_memory_paths: Dict[str, Path] = {b_id: persona_base / "buildings" / b_id / "memory.json" for b_id in self.buildings}
+        self.building_histories: Dict[str, List[Dict[str, str]]] = {}
+        for b_id, path in self.building_memory_paths.items():
+            if path.exists():
+                try:
+                    self.building_histories[b_id] = json.loads(path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    logging.warning("Failed to load building history %s", b_id)
+                    self.building_histories[b_id] = []
+            else:
+                self.building_histories[b_id] = []
+            self.buildings[b_id].memory_path = path
+            self.buildings[b_id].memory = self.building_histories[b_id]
         self.current_building_id = "user_room"
         # 会話履歴を保持する
         self.messages: List[Dict[str, str]] = []
@@ -42,9 +60,16 @@ class Router:
         self.auto_count = 0  # consecutive auto prompts in deep_think_room
         self._load_session()
 
-    def _add_to_history(self, msg: Dict[str, str]) -> None:
+    def _add_to_history(self, msg: Dict[str, str], building_id: Optional[str] = None) -> None:
         """Append a message to history and trim to 120000 characters."""
         self.messages.append(msg)
+        b_id = building_id or self.current_building_id
+        hist = self.building_histories.setdefault(b_id, [])
+        hist.append(msg)
+        total_b = sum(len(m.get("content", "")) for m in hist)
+        while total_b > 120000 and hist:
+            removed = hist.pop(0)
+            total_b -= len(removed.get("content", ""))
         total = sum(len(m.get("content", "")) for m in self.messages)
         while total > 120000 and self.messages:
             removed = self.messages.pop(0)
@@ -69,6 +94,12 @@ class Router:
                 self.auto_count = data.get("auto_count", 0)
             except json.JSONDecodeError:
                 logging.warning("Failed to load session memory, starting fresh")
+        for b_id, path in self.building_memory_paths.items():
+            if path.exists():
+                try:
+                    self.building_histories[b_id] = json.loads(path.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    logging.warning("Failed to load building history %s", b_id)
 
     def _save_session(self) -> None:
         data = {
@@ -77,6 +108,10 @@ class Router:
             "auto_count": self.auto_count,
         }
         self.memory_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        for b_id, path in self.building_memory_paths.items():
+            hist = self.building_histories.get(b_id, [])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(hist, ensure_ascii=False), encoding="utf-8")
 
     def _build_messages(self, user_message: Optional[str]) -> List[Dict[str, str]]:
         building = self.buildings[self.current_building_id]
@@ -84,8 +119,8 @@ class Router:
         system_text = self.common_prompt.format(
             current_building_name=building.name,
             current_building_system_instruction=building.system_instruction.format(current_time=current_time),
-            current_persona_name="AI",
-            current_persona_system_instruction="",
+            current_persona_name=self.persona_name,
+            current_persona_system_instruction=self.persona_system_instruction,
             current_time=current_time,
         )
 
@@ -122,10 +157,10 @@ class Router:
         logging.debug("Raw response: %s", content)
         say, next_id = self._parse_response(content)
         building = self.buildings[self.current_building_id]
-        self._add_to_history({"role": "user", "content": building.auto_prompt})
+        self._add_to_history({"role": "user", "content": building.auto_prompt}, building_id=self.current_building_id)
         if user_message:
-            self._add_to_history({"role": "user", "content": user_message})
-        self._add_to_history({"role": "assistant", "content": say})
+            self._add_to_history({"role": "user", "content": user_message}, building_id=self.current_building_id)
+        self._add_to_history({"role": "assistant", "content": say}, building_id=self.current_building_id)
         prev_id = self.current_building_id
         if next_id and next_id in self.buildings:
             logging.info("Moving to building: %s", next_id)
@@ -179,6 +214,9 @@ class Router:
         elif self.current_building_id == "deep_think_room" and (next_id is None or next_id == "deep_think_room"):
             replies.extend(self.run_auto_conversation(initial=False))
         return replies
+
+    def get_building_history(self, building_id: str) -> List[Dict[str, str]]:
+        return self.building_histories.get(building_id, [])
 
     @staticmethod
     def _parse_response(content: str) -> tuple[str, Optional[str]]:
