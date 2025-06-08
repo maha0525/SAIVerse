@@ -10,16 +10,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from buildings import Building
 from buildings.user_room import load as load_user_room
 from buildings.deep_think_room import load as load_deep_think_room
-
-
-class Building:
-    def __init__(self, building_id: str, name: str, system_instruction: str, auto_prompt: str):
-        self.building_id = building_id
-        self.name = name
-        self.system_instruction = system_instruction
-        self.auto_prompt = auto_prompt
 
 
 def build_router() -> "Router":
