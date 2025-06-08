@@ -9,10 +9,12 @@ router = build_router()
 
 
 def respond(message, history):
-    reply = router.handle_user_input(message)
+    replies = router.handle_user_input(message)
     history = history or []
-    history.append({"role": "user", "content": message})
-    history.append({"role": "assistant", "content": reply})
+    if message:
+        history.append({"role": "user", "content": message})
+    for rep in replies:
+        history.append({"role": "assistant", "content": rep})
     return history, history
 
 
