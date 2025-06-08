@@ -130,6 +130,17 @@ class Router:
         if next_id and next_id in self.buildings:
             logging.info("Moving to building: %s", next_id)
             self.current_building_id = next_id
+        else:
+            if next_id and next_id not in self.buildings:
+                logging.info(
+                    "Unknown building id received: %s, staying at %s",
+                    next_id,
+                    self.current_building_id,
+                )
+            elif next_id is None:
+                logging.debug(
+                    "No next_building_id provided, staying at %s", self.current_building_id
+                )
         changed = self.current_building_id != prev_id
         if changed:
             self.auto_count = 0
@@ -175,7 +186,11 @@ class Router:
             data = json.loads(content)
             say = data.get("say", "")
             next_id = data.get("next_building_id")
+            logging.debug(
+                "Parsed JSON response - say: %s, next_building_id: %s", say, next_id
+            )
             return say, next_id
         except json.JSONDecodeError:
+            logging.warning("Failed to parse response as JSON: %s", content)
             return content, None
 
