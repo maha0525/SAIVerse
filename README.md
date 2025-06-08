@@ -22,6 +22,14 @@ AIたちは「Building（施設）」と呼ばれる仮想空間を移動しな�
 
 - ユーザーエンドのUIとしてGradioを使用
 
+### セットアップ
+ルートディレクトリに `.env` ファイルを作成し、`OPENAI_API_KEY` を設定します。
+例:
+```bash
+OPENAI_API_KEY=sk-...
+```
+`python-dotenv` により自動で読み込まれます。
+
 
 #### ✅ 登場するBuilding
 
