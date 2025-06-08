@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 __all__ = ["Building"]
 
@@ -8,3 +9,5 @@ class Building:
     name: str
     system_instruction: str
     auto_prompt: str
+    memory: list | None = None
+    memory_path: Path | None = None
