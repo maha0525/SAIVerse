@@ -72,7 +72,7 @@ class Router:
         logging.debug("Messages sent to API: %s", msgs)
         try:
             response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo-1106",
+                model="gpt-4o",
                 messages=msgs,
             )
             content = response["choices"][0]["message"]["content"]
@@ -88,7 +88,7 @@ class Router:
         return say
 
     @staticmethod
-    def _parse_response(content: str) -> (str, Optional[str]):
+    def _parse_response(content: str) -> tuple[str, Optional[str]]:
         try:
             data = json.loads(content)
             say = data.get("say", "")
