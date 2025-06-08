@@ -1,9 +1,13 @@
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from buildings.user_room import load as load_user_room
 from buildings.deep_think_room import load as load_deep_think_room
@@ -33,7 +37,13 @@ class Router:
         self.memory_path = memory_path
         self.current_building_id = "user_room"
         self.messages: List[Dict[str, str]] = []
-        self.client = OpenAI()
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY environment variable is not set. "
+                "Please set it to your OpenAI API key."
+            )
+        self.client = OpenAI(api_key=api_key)
         self._load_session()
 
     def _load_session(self) -> None:
