@@ -3,7 +3,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import openai
+from openai import OpenAI
 
 from buildings.user_room import load as load_user_room
 from buildings.deep_think_room import load as load_deep_think_room
@@ -33,6 +33,7 @@ class Router:
         self.memory_path = memory_path
         self.current_building_id = "user_room"
         self.messages: List[Dict[str, str]] = []
+        self.client = OpenAI()
         self._load_session()
 
     def _load_session(self) -> None:
@@ -71,11 +72,11 @@ class Router:
         msgs = self._build_messages(message)
         logging.debug("Messages sent to API: %s", msgs)
         try:
-            response = openai.ChatCompletion.create(
+            response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=msgs,
             )
-            content = response["choices"][0]["message"]["content"]
+            content = response.choices[0].message.content
         except Exception as e:
             logging.error("OpenAI API call failed: %s", e)
             content = "{\"say\": \"エラーが発生しました。\"}"
