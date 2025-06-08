@@ -8,10 +8,11 @@ logging.basicConfig(level=logging.INFO)
 router = build_router()
 
 
-def respond(message, _):
+def respond(message: str):
+    """Process user input and return updated chat history."""
     router.handle_user_input(message)
     history = router.get_building_history("user_room")
-    return history, history
+    return history
 
 
 def main():
@@ -19,7 +20,7 @@ def main():
         chatbot = gr.Chatbot(type="messages", height=600)
         with gr.Row():
             txt = gr.Textbox()
-        txt.submit(respond, [txt, None], [chatbot, None])
+        txt.submit(respond, txt, chatbot)
     demo.launch()
 
 
