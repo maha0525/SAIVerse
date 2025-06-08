@@ -39,6 +39,7 @@ class Router:
                 "Please set it to your OpenAI API key."
             )
         self.client = OpenAI(api_key=api_key)
+        self.auto_count = 0  # consecutive auto prompts in deep_think_room
         self._load_session()
 
     def _add_to_history(self, msg: Dict[str, str]) -> None:
@@ -65,6 +66,7 @@ class Router:
                 data = json.loads(self.memory_path.read_text(encoding="utf-8"))
                 self.current_building_id = data.get("current_building_id", "user_room")
                 self.messages = data.get("messages", [])
+                self.auto_count = data.get("auto_count", 0)
             except json.JSONDecodeError:
                 logging.warning("Failed to load session memory, starting fresh")
 
@@ -72,6 +74,7 @@ class Router:
         data = {
             "current_building_id": self.current_building_id,
             "messages": self.messages,
+            "auto_count": self.auto_count,
         }
         self.memory_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
@@ -104,12 +107,8 @@ class Router:
             msgs.append({"role": "user", "content": user_message})
         return msgs
 
-    def handle_user_input(self, message: str) -> str:
-        logging.info("User input: %s", message)
-        if self.current_building_id != "user_room":
-            logging.info("User input ignored outside user_room")
-            message = ""
-        msgs = self._build_messages(message)
+    def _generate(self, user_message: Optional[str]) -> tuple[str, Optional[str], bool]:
+        msgs = self._build_messages(user_message)
         logging.debug("Messages sent to API: %s", msgs)
         try:
             response = self.client.chat.completions.create(
@@ -123,16 +122,52 @@ class Router:
         logging.debug("Raw response: %s", content)
         say, next_id = self._parse_response(content)
         building = self.buildings[self.current_building_id]
-        # auto prompt を履歴に保存（ユーザー扱い）
         self._add_to_history({"role": "user", "content": building.auto_prompt})
-        if message:
-            self._add_to_history({"role": "user", "content": message})
+        if user_message:
+            self._add_to_history({"role": "user", "content": user_message})
         self._add_to_history({"role": "assistant", "content": say})
+        prev_id = self.current_building_id
         if next_id and next_id in self.buildings:
             logging.info("Moving to building: %s", next_id)
             self.current_building_id = next_id
+        changed = self.current_building_id != prev_id
+        if changed:
+            self.auto_count = 0
         self._save_session()
-        return say
+        return say, next_id, changed
+
+    def run_auto_conversation(self, initial: bool = False) -> List[str]:
+        replies: List[str] = []
+        next_id: Optional[str] = None
+        if initial:
+            say, next_id, _ = self._generate(None)
+            replies.append(say)
+        while (
+            self.current_building_id == "deep_think_room"
+            and (next_id is None or next_id == "deep_think_room")
+            and self.auto_count < 10
+        ):
+            self.auto_count += 1
+            say, next_id, changed = self._generate(None)
+            replies.append(say)
+            if changed and self.current_building_id != "deep_think_room":
+                if self.current_building_id in ("user_room", "deep_think_room"):
+                    replies.extend(self.run_auto_conversation(initial=True))
+                break
+        return replies
+
+    def handle_user_input(self, message: str) -> List[str]:
+        logging.info("User input: %s", message)
+        if self.current_building_id != "user_room":
+            logging.info("User input ignored outside user_room")
+            message = ""
+        say, next_id, changed = self._generate(message)
+        replies = [say]
+        if changed and self.current_building_id in ("user_room", "deep_think_room"):
+            replies.extend(self.run_auto_conversation(initial=True))
+        elif self.current_building_id == "deep_think_room" and (next_id is None or next_id == "deep_think_room"):
+            replies.extend(self.run_auto_conversation(initial=False))
+        return replies
 
     @staticmethod
     def _parse_response(content: str) -> tuple[str, Optional[str]]:
