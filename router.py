@@ -13,10 +13,11 @@ load_dotenv()
 from buildings import Building
 from buildings.user_room import load as load_user_room
 from buildings.deep_think_room import load as load_deep_think_room
+from buildings.air_room import load as load_air_room
 
 
 def build_router(persona_id: str = "air") -> "Router":
-    buildings = [load_user_room(), load_deep_think_room()]
+    buildings = [load_user_room(), load_deep_think_room(), load_air_room()]
     base = Path("ai_sessions") / persona_id
     return Router(
         buildings=buildings,
@@ -47,7 +48,7 @@ class Router:
                 self.building_histories[b_id] = []
             self.buildings[b_id].memory_path = path
             self.buildings[b_id].memory = self.building_histories[b_id]
-        self.current_building_id = "user_room"
+        self.current_building_id = "air_room"
         # 会話履歴を保持する
         self.messages: List[Dict[str, str]] = []
         api_key = os.getenv("OPENAI_API_KEY")
@@ -89,7 +90,7 @@ class Router:
         if self.memory_path.exists():
             try:
                 data = json.loads(self.memory_path.read_text(encoding="utf-8"))
-                self.current_building_id = data.get("current_building_id", "user_room")
+                self.current_building_id = data.get("current_building_id", "air_room")
                 self.messages = data.get("messages", [])
                 self.auto_count = data.get("auto_count", 0)
             except json.JSONDecodeError:
@@ -204,16 +205,33 @@ class Router:
 
     def handle_user_input(self, message: str) -> List[str]:
         logging.info("User input: %s", message)
-        if self.current_building_id != "user_room":
+        if self.current_building_id == "user_room":
+            say, next_id, changed = self._generate(message)
+            replies = [say]
+            if changed and self.current_building_id in ("user_room", "deep_think_room"):
+                replies.extend(self.run_auto_conversation(initial=True))
+            return replies
+        if self.current_building_id == "deep_think_room":
             logging.info("User input ignored outside user_room")
-            message = ""
-        say, next_id, changed = self._generate(message)
-        replies = [say]
-        if changed and self.current_building_id in ("user_room", "deep_think_room"):
-            replies.extend(self.run_auto_conversation(initial=True))
-        elif self.current_building_id == "deep_think_room" and (next_id is None or next_id == "deep_think_room"):
-            replies.extend(self.run_auto_conversation(initial=False))
-        return replies
+            say, next_id, changed = self._generate("")
+            replies = [say]
+            if changed and self.current_building_id in ("user_room", "deep_think_room"):
+                replies.extend(self.run_auto_conversation(initial=True))
+            elif self.current_building_id == "deep_think_room" and (next_id is None or next_id == "deep_think_room"):
+                replies.extend(self.run_auto_conversation(initial=False))
+            return replies
+        logging.info("User input ignored outside user_room")
+        return []
+
+    def summon_air(self) -> List[str]:
+        """Force move AI to user_room and return any initial replies."""
+        prev = self.current_building_id
+        self.current_building_id = "user_room"
+        self.auto_count = 0
+        self._save_session()
+        if prev != "user_room":
+            return self.run_auto_conversation(initial=True)
+        return []
 
     def get_building_history(self, building_id: str) -> List[Dict[str, str]]:
         return self.building_histories.get(building_id, [])
