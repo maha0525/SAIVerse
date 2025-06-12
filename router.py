@@ -3,12 +3,23 @@ import logging
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from pydantic import BaseModel
 from datetime import datetime
 
 from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+class SAIVerseResponse(BaseModel):
+    say: str
+    next_building_id: Optional[str] = None
+
+    class Config:
+        extra = "ignore"
+
 
 from buildings import Building
 from buildings.user_room import load as load_user_room
@@ -147,16 +158,33 @@ class Router:
         msgs = self._build_messages(user_message)
         logging.debug("Messages sent to API: %s", msgs)
         try:
-            response = self.client.chat.completions.create(
+            response = self.client.responses.parse(
                 model="gpt-4o",
-                messages=msgs,
+                input=msgs,
+                text_format=SAIVerseResponse,
             )
-            content = response.choices[0].message.content
+            parsed = response.output_parsed
+            say = parsed.say
+            next_id = parsed.next_building_id
+            logging.debug(
+                "Parsed structured response - say: %s, next_building_id: %s",
+                say,
+                next_id,
+            )
         except Exception as e:
-            logging.error("OpenAI API call failed: %s", e)
-            content = "{\"say\": \"エラーが発生しました。\"}"
-        logging.debug("Raw response: %s", content)
-        say, next_id = self._parse_response(content)
+            logging.error("OpenAI Structured Output failed: %s", e)
+            try:
+                fallback = self.client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=msgs,
+                )
+                content = fallback.choices[0].message.content
+                logging.debug("Raw fallback response: %s", content)
+                say, next_id = self._parse_response(content)
+            except Exception as e2:
+                logging.error("Fallback OpenAI call failed: %s", e2)
+                say = "エラーが発生しました。"
+                next_id = None
         building = self.buildings[self.current_building_id]
         self._add_to_history({"role": "user", "content": building.auto_prompt}, building_id=self.current_building_id)
         if user_message:
