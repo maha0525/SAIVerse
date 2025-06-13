@@ -87,6 +87,15 @@ class Router:
             removed = self.messages.pop(0)
             total -= len(removed.get("content", ""))
 
+    def _add_to_building_history_only(self, b_id: str, msg: Dict[str, str]) -> None:
+        """Append a message only to a building's history (for UI notifications)."""
+        hist = self.building_histories.setdefault(b_id, [])
+        hist.append(msg)
+        total_b = sum(len(m.get("content", "")) for m in hist)
+        while total_b > 120000 and hist:
+            removed = hist.pop(0)
+            total_b -= len(removed.get("content", ""))
+
     def _recent_history(self, max_chars: int) -> List[Dict[str, str]]:
         selected = []
         count = 0
@@ -225,6 +234,23 @@ class Router:
         changed = self.current_building_id != prev_id
         if changed:
             self.auto_count = 0
+            if prev_id != "user_room" and self.current_building_id == "user_room":
+                self._add_to_building_history_only(
+                    "user_room",
+                    {
+                        "role": "system",
+                        "content": f"{self.persona_name}が入室しました",
+                    },
+                )
+            elif prev_id == "user_room" and self.current_building_id != "user_room":
+                dest_name = self.buildings[self.current_building_id].name
+                self._add_to_building_history_only(
+                    "user_room",
+                    {
+                        "role": "system",
+                        "content": f"{self.persona_name}が{dest_name}に向かいました",
+                    },
+                )
         self._save_session()
         return say, next_id, changed
 
@@ -287,6 +313,14 @@ class Router:
         prev = self.current_building_id
         self.current_building_id = "user_room"
         self.auto_count = 0
+        if prev != "user_room":
+            self._add_to_building_history_only(
+                "user_room",
+                {
+                    "role": "system",
+                    "content": f"{self.persona_name}が入室しました",
+                },
+            )
         self._save_session()
         if prev != "user_room":
             return self.run_auto_conversation(initial=True)
