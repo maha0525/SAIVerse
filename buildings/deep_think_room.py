@@ -11,5 +11,8 @@ def load() -> Building:
         building_id='deep_think_room',
         name='思索の部屋',
         system_instruction=sys_prompt,
+        entry_prompt=auto_prompt,
         auto_prompt=auto_prompt,
+        run_entry_llm=True,
+        run_auto_llm=True,
     )
