@@ -125,7 +125,9 @@ class Router:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(hist, ensure_ascii=False), encoding="utf-8")
 
-    def _build_messages(self, user_message: Optional[str]) -> List[Dict[str, str]]:
+    def _build_messages(
+        self, user_message: Optional[str], extra_system_prompt: Optional[str] = None
+    ) -> List[Dict[str, str]]:
         building = self.buildings[self.current_building_id]
         current_time = datetime.now().strftime("%H:%M")
         system_text = self.common_prompt.format(
@@ -136,9 +138,9 @@ class Router:
             current_time=current_time,
         )
 
-        auto_prompt = building.auto_prompt
-
-        base_chars = len(system_text) + len(auto_prompt)
+        base_chars = len(system_text)
+        if extra_system_prompt:
+            base_chars += len(extra_system_prompt)
         if user_message:
             base_chars += len(user_message)
 
@@ -149,13 +151,16 @@ class Router:
         history_msgs = self._recent_history(history_limit)
 
         msgs = [{"role": "system", "content": system_text}] + history_msgs
-        msgs.append({"role": "system", "content": auto_prompt})
+        if extra_system_prompt:
+            msgs.append({"role": "system", "content": extra_system_prompt})
         if user_message:
             msgs.append({"role": "user", "content": user_message})
         return msgs
 
-    def _generate(self, user_message: Optional[str]) -> tuple[str, Optional[str], bool]:
-        msgs = self._build_messages(user_message)
+    def _generate(
+        self, user_message: Optional[str], system_prompt_extra: Optional[str] = None
+    ) -> tuple[str, Optional[str], bool]:
+        msgs = self._build_messages(user_message, system_prompt_extra)
         logging.debug("Messages sent to API: %s", msgs)
         try:
             response = self.client.responses.parse(
@@ -185,8 +190,11 @@ class Router:
                 logging.error("Fallback OpenAI call failed: %s", e2)
                 say = "エラーが発生しました。"
                 next_id = None
-        building = self.buildings[self.current_building_id]
-        self._add_to_history({"role": "user", "content": building.auto_prompt}, building_id=self.current_building_id)
+        if system_prompt_extra:
+            self._add_to_history(
+                {"role": "user", "content": system_prompt_extra},
+                building_id=self.current_building_id,
+            )
         if user_message:
             self._add_to_history({"role": "user", "content": user_message}, building_id=self.current_building_id)
         self._add_to_history({"role": "assistant", "content": say}, building_id=self.current_building_id)
@@ -214,42 +222,56 @@ class Router:
     def run_auto_conversation(self, initial: bool = False) -> List[str]:
         replies: List[str] = []
         next_id: Optional[str] = None
-        if initial:
-            say, next_id, _ = self._generate(None)
-            replies.append(say)
+        building = self.buildings[self.current_building_id]
+        if initial and building.entry_prompt:
+            if building.run_entry_llm:
+                say, next_id, _ = self._generate(None, building.entry_prompt)
+                replies.append(say)
+            else:
+                self._add_to_history(
+                    {"role": "user", "content": building.entry_prompt},
+                    building_id=self.current_building_id,
+                )
         while (
-            self.current_building_id == "deep_think_room"
-            and (next_id is None or next_id == "deep_think_room")
+            building.auto_prompt
+            and building.run_auto_llm
+            and self.current_building_id == building.building_id
+            and (next_id is None or next_id == building.building_id)
             and self.auto_count < 10
         ):
             self.auto_count += 1
-            say, next_id, changed = self._generate(None)
+            say, next_id, changed = self._generate(None, building.auto_prompt)
             replies.append(say)
-            if changed and self.current_building_id != "deep_think_room":
-                if self.current_building_id in ("user_room", "deep_think_room"):
-                    replies.extend(self.run_auto_conversation(initial=True))
+            if changed:
+                building = self.buildings[self.current_building_id]
+                replies.extend(self.run_auto_conversation(initial=True))
                 break
         return replies
 
     def handle_user_input(self, message: str) -> List[str]:
         logging.info("User input: %s", message)
+        building = self.buildings[self.current_building_id]
         if self.current_building_id == "user_room":
             say, next_id, changed = self._generate(message)
             replies = [say]
-            if changed and self.current_building_id in ("user_room", "deep_think_room"):
-                replies.extend(self.run_auto_conversation(initial=True))
-            return replies
-        if self.current_building_id == "deep_think_room":
+        else:
             logging.info("User input ignored outside user_room")
-            say, next_id, changed = self._generate("")
-            replies = [say]
-            if changed and self.current_building_id in ("user_room", "deep_think_room"):
-                replies.extend(self.run_auto_conversation(initial=True))
-            elif self.current_building_id == "deep_think_room" and (next_id is None or next_id == "deep_think_room"):
-                replies.extend(self.run_auto_conversation(initial=False))
-            return replies
-        logging.info("User input ignored outside user_room")
-        return []
+            if building.run_auto_llm:
+                say, next_id, changed = self._generate("")
+                replies = [say]
+            else:
+                return []
+
+        building = self.buildings[self.current_building_id]
+        if changed:
+            replies.extend(self.run_auto_conversation(initial=True))
+        elif (
+            building.auto_prompt
+            and building.run_auto_llm
+            and (next_id is None or next_id == building.building_id)
+        ):
+            replies.extend(self.run_auto_conversation(initial=False))
+        return replies
 
     def summon_air(self) -> List[str]:
         """Force move AI to user_room and return any initial replies."""
