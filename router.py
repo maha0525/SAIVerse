@@ -202,7 +202,11 @@ class Router:
             )
         if user_message:
             self._add_to_history({"role": "user", "content": user_message}, building_id=self.current_building_id)
-        self._add_to_history({"role": "assistant", "content": full_response}, building_id=self.current_building_id)
+        parsed_response = json.dumps({"say": say, "next_building_id": next_id}, ensure_ascii=False)
+        self._add_to_history(
+            {"role": "assistant", "content": parsed_response},
+            building_id=self.current_building_id,
+        )
         prev_id = self.current_building_id
         if next_id and next_id in self.buildings:
             logging.info("Moving to building: %s", next_id)
