@@ -171,7 +171,9 @@ class Router:
             parsed = response.output_parsed
             say = parsed.say
             next_id = parsed.next_building_id
-            full_response = response.model_dump_json(ensure_ascii=False)
+            # `model_dump_json` does not support ensure_ascii in recent
+            # pydantic versions, so dump to dict first and then to JSON.
+            full_response = json.dumps(response.model_dump(), ensure_ascii=False)
             logging.debug(
                 "Parsed structured response - say: %s, next_building_id: %s",
                 say,
