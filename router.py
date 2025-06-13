@@ -171,6 +171,7 @@ class Router:
             parsed = response.output_parsed
             say = parsed.say
             next_id = parsed.next_building_id
+            full_response = response.model_dump_json(ensure_ascii=False)
             logging.debug(
                 "Parsed structured response - say: %s, next_building_id: %s",
                 say,
@@ -186,10 +187,12 @@ class Router:
                 content = fallback.choices[0].message.content
                 logging.debug("Raw fallback response: %s", content)
                 say, next_id = self._parse_response(content)
+                full_response = json.dumps({"say": say, "next_building_id": next_id}, ensure_ascii=False)
             except Exception as e2:
                 logging.error("Fallback OpenAI call failed: %s", e2)
                 say = "エラーが発生しました。"
                 next_id = None
+                full_response = json.dumps({"say": say, "next_building_id": next_id}, ensure_ascii=False)
         if system_prompt_extra:
             self._add_to_history(
                 {"role": "user", "content": system_prompt_extra},
@@ -197,7 +200,7 @@ class Router:
             )
         if user_message:
             self._add_to_history({"role": "user", "content": user_message}, building_id=self.current_building_id)
-        self._add_to_history({"role": "assistant", "content": say}, building_id=self.current_building_id)
+        self._add_to_history({"role": "assistant", "content": full_response}, building_id=self.current_building_id)
         prev_id = self.current_building_id
         if next_id and next_id in self.buildings:
             logging.info("Moving to building: %s", next_id)
@@ -283,8 +286,21 @@ class Router:
             return self.run_auto_conversation(initial=True)
         return []
 
-    def get_building_history(self, building_id: str) -> List[Dict[str, str]]:
-        return self.building_histories.get(building_id, [])
+    def get_building_history(self, building_id: str, raw: bool = False) -> List[Dict[str, str]]:
+        history = self.building_histories.get(building_id, [])
+        if raw:
+            return history
+        display: List[Dict[str, str]] = []
+        for msg in history:
+            if msg.get("role") == "assistant":
+                try:
+                    data = json.loads(msg.get("content", ""))
+                    display.append({"role": "assistant", "content": data.get("say", "")})
+                except json.JSONDecodeError:
+                    display.append(msg)
+            else:
+                display.append(msg)
+        return display
 
     @staticmethod
     def _parse_response(content: str) -> tuple[str, Optional[str]]:
