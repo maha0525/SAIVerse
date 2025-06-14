@@ -238,8 +238,8 @@ class Router:
                 self._add_to_building_history_only(
                     "user_room",
                     {
-                        "role": "system",
-                        "content": f"{self.persona_name}が入室しました",
+                        "role": "assistant",
+                        "content": f"<div class=\"note-box\">🏢 Building:<br><b>{self.persona_name}が入室しました</b></div>",
                     },
                 )
             elif prev_id == "user_room" and self.current_building_id != "user_room":
@@ -247,8 +247,8 @@ class Router:
                 self._add_to_building_history_only(
                     "user_room",
                     {
-                        "role": "system",
-                        "content": f"{self.persona_name}が{dest_name}に向かいました",
+                        "role": "assistant",
+                        "content": f"<div class=\"note-box\">🏢 Building:<br><b>{self.persona_name}が{dest_name}に向かいました</b></div>",
                     },
                 )
         self._save_session()
@@ -264,7 +264,7 @@ class Router:
                 replies.append(say)
             else:
                 self._add_to_history(
-                    {"role": "user", "content": building.entry_prompt},
+                    {"role": "system", "content": building.entry_prompt},
                     building_id=self.current_building_id,
                 )
         while (
@@ -317,8 +317,8 @@ class Router:
             self._add_to_building_history_only(
                 "user_room",
                 {
-                    "role": "system",
-                    "content": f"{self.persona_name}が入室しました",
+                    "role": "assistant",
+                    "content": f"<div class=\"note-box\">🏢 Building:<br><b>{self.persona_name}が入室しました</b></div>",
                 },
             )
         self._save_session()

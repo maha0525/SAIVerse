@@ -7,6 +7,20 @@ from router import build_router
 logging.basicConfig(level=logging.INFO)
 router = build_router()
 
+NOTE_CSS = """
+.note-box {
+  background: #fff9db;
+  color: #333350;
+  border-left: 4px solid #ffbf00;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: .92rem;
+}
+.note-box b {
+  color: #333350; /* <b> の強調部分にも明示的に上書き */
+}
+"""
+
 
 def respond(message: str):
     """Process user input and return updated chat history."""
@@ -22,8 +36,8 @@ def call_air():
 
 
 def main():
-    with gr.Blocks() as demo:
-        chatbot = gr.Chatbot(type="messages", height=600)
+    with gr.Blocks(css=NOTE_CSS) as demo:
+        chatbot = gr.Chatbot(type="messages", group_consecutive_messages=False, sanitize_html=False, height=800)
         with gr.Row():
             txt = gr.Textbox()
             call_btn = gr.Button("エアを呼ぶ")
