@@ -25,10 +25,16 @@ from buildings import Building
 from buildings.user_room import load as load_user_room
 from buildings.deep_think_room import load as load_deep_think_room
 from buildings.air_room import load as load_air_room
+from buildings.eris_room import load as load_eris_room
 
 
 def build_router(persona_id: str = "air") -> "Router":
-    buildings = [load_user_room(), load_deep_think_room(), load_air_room()]
+    buildings = [
+        load_user_room(),
+        load_deep_think_room(),
+        load_air_room(),
+        load_eris_room(),
+    ]
     base = Path("ai_sessions") / persona_id
     return Router(
         buildings=buildings,
@@ -45,6 +51,7 @@ class Router:
         persona_base: Path,
         building_histories: Optional[Dict[str, List[Dict[str, str]]]] = None,
         move_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
+        start_building_id: str = "air_room",
     ):
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
         self.common_prompt = common_prompt_path.read_text(encoding="utf-8")
@@ -54,6 +61,7 @@ class Router:
         persona_data = json.loads((persona_base / "base.json").read_text(encoding="utf-8"))
         self.persona_id = persona_data.get("persona_id", persona_base.name)
         self.persona_name = persona_data.get("persona_name", "AI")
+        start_building_id = persona_data.get("start_building_id", start_building_id)
         self.building_memory_paths: Dict[str, Path] = {
             b_id: Path("buildings") / b_id / "memory.json" for b_id in self.buildings
         }
@@ -78,7 +86,7 @@ class Router:
                     self.building_histories[b_id] = []
                 self.buildings[b_id].memory = self.building_histories[b_id]
         self.move_callback = move_callback
-        self.current_building_id = "air_room"
+        self.current_building_id = start_building_id
         # 会話履歴を保持する
         self.messages: List[Dict[str, str]] = []
         api_key = os.getenv("OPENAI_API_KEY")

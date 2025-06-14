@@ -7,6 +7,7 @@ from buildings import Building
 from buildings.user_room import load as load_user_room
 from buildings.deep_think_room import load as load_deep_think_room
 from buildings.air_room import load as load_air_room
+from buildings.eris_room import load as load_eris_room
 from router import Router
 
 
@@ -14,7 +15,12 @@ class SAIVerseManager:
     """Manage multiple personas and building occupancy."""
 
     def __init__(self, persona_list_path: Path = Path("ai_sessions/personas.json")):
-        self.buildings: List[Building] = [load_user_room(), load_deep_think_room(), load_air_room()]
+        self.buildings: List[Building] = [
+            load_user_room(),
+            load_deep_think_room(),
+            load_air_room(),
+            load_eris_room(),
+        ]
         self.building_map: Dict[str, Building] = {b.building_id: b for b in self.buildings}
         self.capacities: Dict[str, int] = {b.building_id: b.capacity for b in self.buildings}
         self.building_memory_paths: Dict[str, Path] = {
@@ -36,12 +42,19 @@ class SAIVerseManager:
         for p in data:
             pid = p["persona_id"]
             base = Path("ai_sessions") / pid
+            start_id = "air_room"
+            try:
+                base_data = json.loads((base / "base.json").read_text(encoding="utf-8"))
+                start_id = base_data.get("start_building_id", start_id)
+            except Exception:
+                pass
             router = Router(
                 buildings=self.buildings,
                 common_prompt_path=Path("system_prompts/common.txt"),
                 persona_base=base,
                 building_histories=self.building_histories,
                 move_callback=self._move_persona,
+                start_building_id=start_id,
             )
             self.routers[pid] = router
             self.occupants[router.current_building_id].append(pid)
