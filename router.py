@@ -2,7 +2,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel
 from datetime import datetime
@@ -25,10 +25,16 @@ from buildings import Building
 from buildings.user_room import load as load_user_room
 from buildings.deep_think_room import load as load_deep_think_room
 from buildings.air_room import load as load_air_room
+from buildings.eris_room import load as load_eris_room
 
 
 def build_router(persona_id: str = "air") -> "Router":
-    buildings = [load_user_room(), load_deep_think_room(), load_air_room()]
+    buildings = [
+        load_user_room(),
+        load_deep_think_room(),
+        load_air_room(),
+        load_eris_room(),
+    ]
     base = Path("ai_sessions") / persona_id
     return Router(
         buildings=buildings,
@@ -38,30 +44,49 @@ def build_router(persona_id: str = "air") -> "Router":
 
 
 class Router:
-    def __init__(self, buildings: List[Building], common_prompt_path: Path, persona_base: Path):
+    def __init__(
+        self,
+        buildings: List[Building],
+        common_prompt_path: Path,
+        persona_base: Path,
+        building_histories: Optional[Dict[str, List[Dict[str, str]]]] = None,
+        move_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
+        start_building_id: str = "air_room",
+    ):
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
         self.common_prompt = common_prompt_path.read_text(encoding="utf-8")
         self.persona_base = persona_base
         self.memory_path = persona_base / "memory.json"
         self.persona_system_instruction = (persona_base / "system_prompt.txt").read_text(encoding="utf-8")
         persona_data = json.loads((persona_base / "base.json").read_text(encoding="utf-8"))
+        self.persona_id = persona_data.get("persona_id", persona_base.name)
         self.persona_name = persona_data.get("persona_name", "AI")
+        start_building_id = persona_data.get("start_building_id", start_building_id)
         self.building_memory_paths: Dict[str, Path] = {
             b_id: Path("buildings") / b_id / "memory.json" for b_id in self.buildings
         }
-        self.building_histories: Dict[str, List[Dict[str, str]]] = {}
-        for b_id, path in self.building_memory_paths.items():
-            if path.exists():
-                try:
-                    self.building_histories[b_id] = json.loads(path.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    logging.warning("Failed to load building history %s", b_id)
+        if building_histories is None:
+            self.building_histories = {}
+            for b_id, path in self.building_memory_paths.items():
+                if path.exists():
+                    try:
+                        self.building_histories[b_id] = json.loads(path.read_text(encoding="utf-8"))
+                    except json.JSONDecodeError:
+                        logging.warning("Failed to load building history %s", b_id)
+                        self.building_histories[b_id] = []
+                else:
                     self.building_histories[b_id] = []
-            else:
-                self.building_histories[b_id] = []
-            self.buildings[b_id].memory_path = path
-            self.buildings[b_id].memory = self.building_histories[b_id]
-        self.current_building_id = "air_room"
+                self.buildings[b_id].memory_path = path
+                self.buildings[b_id].memory = self.building_histories[b_id]
+        else:
+            self.building_histories = building_histories
+            for b_id, path in self.building_memory_paths.items():
+                self.buildings[b_id].memory_path = path
+                if b_id not in self.building_histories:
+                    self.building_histories[b_id] = []
+                self.buildings[b_id].memory = self.building_histories[b_id]
+        self.move_callback = move_callback
+        self.current_building_id = start_building_id
         # 会話履歴を保持する
         self.messages: List[Dict[str, str]] = []
         api_key = os.getenv("OPENAI_API_KEY")
@@ -118,12 +143,17 @@ class Router:
             except json.JSONDecodeError:
                 logging.warning("Failed to load session memory, starting fresh")
         for b_id, path in self.building_memory_paths.items():
+            if b_id in self.building_histories:
+                continue
             if path.exists():
                 try:
                     self.building_histories[b_id] = json.loads(path.read_text(encoding="utf-8"))
                 except json.JSONDecodeError:
                     logging.warning("Failed to load building history %s", b_id)
-
+                    self.building_histories[b_id] = []
+            else:
+                self.building_histories[b_id] = []
+                    
     def _save_session(self) -> None:
         data = {
             "current_building_id": self.current_building_id,
@@ -219,9 +249,21 @@ class Router:
             building_id=self.current_building_id,
         )
         prev_id = self.current_building_id
+        moved = False
         if next_id and next_id in self.buildings:
-            logging.info("Moving to building: %s", next_id)
-            self.current_building_id = next_id
+            allowed, reason = True, None
+            if self.move_callback:
+                allowed, reason = self.move_callback(self.persona_id, self.current_building_id, next_id)
+            if allowed:
+                logging.info("Moving to building: %s", next_id)
+                self.current_building_id = next_id
+                moved = True
+            else:
+                logging.info("Move blocked to building: %s", next_id)
+                self._add_to_history(
+                    {"role": "system", "content": f"移動できませんでした。{reason}"},
+                    building_id=self.current_building_id,
+                )
         else:
             if next_id and next_id not in self.buildings:
                 logging.info(
@@ -233,7 +275,7 @@ class Router:
                 logging.debug(
                     "No next_building_id provided, staying at %s", self.current_building_id
                 )
-        changed = self.current_building_id != prev_id
+        changed = moved
         if changed:
             self.auto_count = 0
             if prev_id != "user_room" and self.current_building_id == "user_room":
@@ -310,23 +352,32 @@ class Router:
             replies.extend(self.run_auto_conversation(initial=False))
         return replies
 
-    def summon_air(self) -> List[str]:
-        """Force move AI to user_room and return any initial replies."""
+    def summon_to_user_room(self) -> List[str]:
+        """Force move AI to user_room respecting capacity."""
         prev = self.current_building_id
-        self.current_building_id = "user_room"
-        self.auto_count = 0
-        if prev != "user_room":
+        if prev == "user_room":
+            return []
+        allowed, reason = True, None
+        if self.move_callback:
+            allowed, reason = self.move_callback(self.persona_id, self.current_building_id, "user_room")
+        if not allowed:
             self._add_to_building_history_only(
                 "user_room",
-                {
-                    "role": "assistant",
-                    "content": f"<div class=\"note-box\">🏢 Building:<br><b>{self.persona_name}が入室しました</b></div>",
-                },
+                {"role": "assistant", "content": f"<div class=\"note-box\">移動できませんでした。{reason}</div>"},
             )
+            self._save_session()
+            return []
+        self.current_building_id = "user_room"
+        self.auto_count = 0
+        self._add_to_building_history_only(
+            "user_room",
+            {
+                "role": "assistant",
+                "content": f"<div class=\"note-box\">🏢 Building:<br><b>{self.persona_name}が入室しました</b></div>",
+            },
+        )
         self._save_session()
-        if prev != "user_room":
-            return self.run_auto_conversation(initial=True)
-        return []
+        return self.run_auto_conversation(initial=True)
 
     def get_building_history(self, building_id: str, raw: bool = False) -> List[Dict[str, str]]:
         history = self.building_histories.get(building_id, [])
