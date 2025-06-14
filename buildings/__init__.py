@@ -10,6 +10,7 @@ class Building:
     system_instruction: str
     entry_prompt: str
     auto_prompt: str
+    capacity: int = 1
     run_entry_llm: bool = False
     run_auto_llm: bool = False
     memory: list | None = None
