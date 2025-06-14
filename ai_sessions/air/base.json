@@ -1,4 +1,5 @@
 {
   "persona_id": "air",
-  "persona_name": "エア"
+  "persona_name": "エア",
+  "start_building_id": "air_room"
 }
