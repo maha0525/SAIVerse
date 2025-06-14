@@ -100,16 +100,28 @@ saiverse/
 ├── main.py                   # メインループ
 ├── router.py                 # Building移動処理とセッション制御
 ├── buildings/
-│   ├── user_room.py          # ユーザールーム定義
-│   ├── user_room_prompt.txt  # ユーザールーム定義
-│   ├── deep_think_room.py    # 思索の部屋定義
-│   └── deep_think_room_prompt.txt # 思索の部屋用自動プロンプト
+│   ├── user_room/
+│   │   ├── __init__.py       # ユーザールーム定義
+│   │   ├── entry_prompt.txt  # 入室時プロンプト
+│   │   ├── system_prompt.txt # ユーザールーム用システムプロンプト
+│   │   └── memory.json       # ルーム共通の履歴
+│   ├── deep_think_room/
+│   │   ├── __init__.py       # 思索の部屋定義
+│   │   ├── auto_prompt.txt   # 自動プロンプト
+│   │   ├── system_prompt.txt # 思索の部屋用システムプロンプト
+│   │   └── memory.json       # ルーム共通の履歴
+│   └── air_room/
+│       ├── __init__.py       # エアの待機部屋定義
+│       ├── entry_prompt.txt  # 入室時プロンプト
+│       ├── system_prompt.txt # エアの部屋用システムプロンプト
+│       └── memory.json       # ルーム共通の履歴
 ├── system_prompts/
-│   ├── common.txt            # 共通システムプロンプト（上でまはーが書いたもの）
-│   ├── user_room.txt         # ユーザールーム用システムプロンプト
-│   └── deep_think_room.txt   # 思索の部屋用システムプロンプト
+│   └── common.txt            # 共通システムプロンプト
 ├── ai_sessions/
-│   └── memory.json           # セッション情報保存用
+│   └── air/
+│       ├── base.json
+│       ├── memory.json       # セッション情報保存用
+│       └── system_prompt.txt
 └── README.md                 # この仕様の要約
 ```
 

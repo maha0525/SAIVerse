@@ -1,12 +1,12 @@
 from pathlib import Path
 
-from . import Building
+from .. import Building
 
 
 def load() -> Building:
     base = Path(__file__).resolve().parent
-    sys_prompt = (base.parent / 'system_prompts' / 'deep_think_room.txt').read_text(encoding='utf-8')
-    auto_prompt = (base / 'deep_think_room_prompt.txt').read_text(encoding='utf-8')
+    sys_prompt = (base / 'system_prompt.txt').read_text(encoding='utf-8')
+    auto_prompt = (base / 'auto_prompt.txt').read_text(encoding='utf-8')
     return Building(
         building_id='deep_think_room',
         name='思索の部屋',

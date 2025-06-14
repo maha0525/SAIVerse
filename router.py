@@ -46,7 +46,9 @@ class Router:
         self.persona_system_instruction = (persona_base / "system_prompt.txt").read_text(encoding="utf-8")
         persona_data = json.loads((persona_base / "base.json").read_text(encoding="utf-8"))
         self.persona_name = persona_data.get("persona_name", "AI")
-        self.building_memory_paths: Dict[str, Path] = {b_id: persona_base / "buildings" / b_id / "memory.json" for b_id in self.buildings}
+        self.building_memory_paths: Dict[str, Path] = {
+            b_id: Path("buildings") / b_id / "memory.json" for b_id in self.buildings
+        }
         self.building_histories: Dict[str, List[Dict[str, str]]] = {}
         for b_id, path in self.building_memory_paths.items():
             if path.exists():
