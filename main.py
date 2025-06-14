@@ -9,7 +9,25 @@ manager = SAIVerseManager()
 PERSONA_CHOICES = list(manager.persona_map.keys())
 
 NOTE_CSS = """
-.note-box {
+/* ① まず器（avatar-container）を拡大 */
+#my_chat .avatar-container {
+  width: 60px !important;
+  height: 60px !important;
+  min-width: 60px !important;   /* ← ここ大事：吹き出しの左余白確保 */
+  min-height: 60px !important;
+  border-radius: 20%;
+  overflow: hidden;             /* はみ出しカット（object-fit と併用可） */
+}
+
+/* ② 中の <img> は「器いっぱい」に張り付け */
+#my_chat .avatar-container img {
+  width: 100% !important;       /* 96px に合わせて伸縮 */
+  height: 100% !important;
+  border-radius: 20%;
+  object-fit: cover;
+}
+
+#my_chat .note-box {
   background: #fff9db;
   color: #333350;
   border-left: 4px solid #ffbf00;
@@ -39,7 +57,17 @@ def call_persona(name: str):
 
 def main():
     with gr.Blocks(css=NOTE_CSS) as demo:
-        chatbot = gr.Chatbot(type="messages", group_consecutive_messages=False, sanitize_html=False, height=800)
+        chatbot = gr.Chatbot(
+            type="messages",
+            group_consecutive_messages=False,
+            sanitize_html=False,
+            elem_id="my_chat",
+            avatar_images=(
+                "assets/icons/user.png", # ← ユーザー
+                "assets/icons/eris.png" # ← アシスタント
+            ),
+            height=800
+        )
         with gr.Row():
             txt = gr.Textbox()
             persona_drop = gr.Dropdown(choices=PERSONA_CHOICES, value=PERSONA_CHOICES[0], label="ペルソナ選択")
