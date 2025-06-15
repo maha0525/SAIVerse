@@ -1,5 +1,6 @@
 {
   "persona_id": "air",
   "persona_name": "エア",
-  "start_building_id": "air_room"
+  "start_building_id": "air_room",
+  "avatar_image": "assets/icons/air.png"
 }

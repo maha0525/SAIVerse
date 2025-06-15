@@ -12,6 +12,7 @@ NOTE_CSS = """
 /* ① まず器（avatar-container）を拡大 */
 #my_chat .avatar-container {
   width: 60px !important;
+  max-width: 60px !important;
   height: 60px !important;
   min-width: 60px !important;   /* ← ここ大事：吹き出しの左余白確保 */
   min-height: 60px !important;
@@ -37,6 +38,23 @@ NOTE_CSS = """
 }
 .note-box b {
   color: #333350; /* <b> の強調部分にも明示的に上書き */
+}
+
+.inline-avatar {
+  width: 60px !important;
+  height: 60px !important;
+  max-width: 60px !important;
+  max-height: 60px !important;
+  float: left;
+  margin-right: 0.5em;
+  border-radius: 20%;
+  object-fit: cover;
+}
+
+/* メッセージの高さがアイコンより低くならないよう調整 */
+#my_chat .message {
+  min-height: 60px;
+  overflow: hidden;
 }
 """
 
@@ -64,7 +82,7 @@ def main():
             elem_id="my_chat",
             avatar_images=(
                 "assets/icons/user.png", # ← ユーザー
-                "assets/icons/eris.png" # ← アシスタント
+                None  # アシスタント側はメッセージ内に表示
             ),
             height=800
         )
