@@ -61,6 +61,7 @@ class Router:
         persona_data = json.loads((persona_base / "base.json").read_text(encoding="utf-8"))
         self.persona_id = persona_data.get("persona_id", persona_base.name)
         self.persona_name = persona_data.get("persona_name", "AI")
+        self.avatar_image = persona_data.get("avatar_image")
         start_building_id = persona_data.get("start_building_id", start_building_id)
         self.building_memory_paths: Dict[str, Path] = {
             b_id: Path("buildings") / b_id / "memory.json" for b_id in self.buildings
@@ -101,6 +102,8 @@ class Router:
 
     def _add_to_history(self, msg: Dict[str, str], building_id: Optional[str] = None) -> None:
         """Append a message to history and trim to 120000 characters."""
+        if msg.get("role") == "assistant" and "persona_id" not in msg:
+            msg["persona_id"] = self.persona_id
         self.messages.append(msg)
         b_id = building_id or self.current_building_id
         hist = self.building_histories.setdefault(b_id, [])
