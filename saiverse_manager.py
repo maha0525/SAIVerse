@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 from pathlib import Path
@@ -27,6 +28,14 @@ class SAIVerseManager:
             b.building_id: Path("buildings") / b.building_id / "memory.json" for b in self.buildings
         }
         self.building_histories: Dict[str, List[Dict[str, str]]] = {}
+        default_avatar_path = Path("assets/icons/eris.png")
+        if default_avatar_path.exists():
+            mime = "image/png"
+            data_b = default_avatar_path.read_bytes()
+            b64 = base64.b64encode(data_b).decode("ascii")
+            self.default_avatar = f"data:{mime};base64,{b64}"
+        else:
+            self.default_avatar = ""
         for b_id, path in self.building_memory_paths.items():
             if path.exists():
                 try:
@@ -49,7 +58,18 @@ class SAIVerseManager:
                 start_id = base_data.get("start_building_id", start_id)
                 avatar = base_data.get("avatar_image")
                 if avatar:
-                    self.avatar_map[pid] = avatar
+                    try:
+                        avatar_path = Path(avatar)
+                        mime = "image/png"
+                        if avatar_path.suffix.lower() in {".jpg", ".jpeg"}:
+                            mime = "image/jpeg"
+                        elif avatar_path.suffix.lower() == ".gif":
+                            mime = "image/gif"
+                        data_b = avatar_path.read_bytes()
+                        b64 = base64.b64encode(data_b).decode("ascii")
+                        self.avatar_map[pid] = f"data:{mime};base64,{b64}"
+                    except Exception:
+                        self.avatar_map[pid] = avatar
             except Exception:
                 pass
             router = Router(
@@ -112,7 +132,7 @@ class SAIVerseManager:
         for msg in history:
             if msg.get("role") == "assistant":
                 pid = msg.get("persona_id")
-                avatar = self.avatar_map.get(pid, "assets/icons/eris.png")
+                avatar = self.avatar_map.get(pid, self.default_avatar)
                 try:
                     data = json.loads(msg.get("content", ""))
                     say = data.get("say", "")
