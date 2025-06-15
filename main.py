@@ -40,11 +40,11 @@ NOTE_CSS = """
 }
 
 .inline-avatar {
-  width: 1.4em;
-  height: 1.4em;
-  vertical-align: middle;
-  margin-right: 0.3em;
-  border-radius: 50%;
+  width: 60px;
+  height: 60px;
+  float: left;
+  margin-right: 0.5em;
+  border-radius: 20%;
   object-fit: cover;
 }
 """
