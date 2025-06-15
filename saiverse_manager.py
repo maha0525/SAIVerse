@@ -28,7 +28,7 @@ class SAIVerseManager:
             b.building_id: Path("buildings") / b.building_id / "memory.json" for b in self.buildings
         }
         self.building_histories: Dict[str, List[Dict[str, str]]] = {}
-        default_avatar_path = Path("assets/icons/eris.png")
+        default_avatar_path = Path("assets/icons/blank.png")
         if default_avatar_path.exists():
             mime = "image/png"
             data_b = default_avatar_path.read_bytes()
@@ -138,7 +138,10 @@ class SAIVerseManager:
                     say = data.get("say", "")
                 except json.JSONDecodeError:
                     say = msg.get("content", "")
-                html = f"<img src='{avatar}' class='inline-avatar'>{say}"
+                if avatar:
+                    html = f"<img src='{avatar}' class='inline-avatar'>{say}"
+                else:
+                    html = f"{say}"
                 display.append({"role": "assistant", "content": html})
             else:
                 display.append(msg)

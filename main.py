@@ -25,6 +25,7 @@ NOTE_CSS = """
   width: 100% !important;       /* 96px に合わせて伸縮 */
   height: 100% !important;
   border-radius: 20%;
+  padding: 0 !important;
   object-fit: cover;
 }
 
@@ -33,6 +34,7 @@ NOTE_CSS = """
   color: #333350;
   border-left: 4px solid #ffbf00;
   padding: 8px 12px;
+  margin: 0;
   border-radius: 6px;
   font-size: .92rem;
 }
@@ -46,7 +48,7 @@ NOTE_CSS = """
   max-width: 60px !important;
   max-height: 60px !important;
   float: left;
-  margin-right: 0.5em;
+  margin: 0.5em !important;
   border-radius: 20%;
   object-fit: cover;
 }
