@@ -41,8 +41,10 @@ NOTE_CSS = """
 }
 
 .inline-avatar {
-  width: 60px;
-  height: 60px;
+  width: 60px !important;
+  height: 60px !important;
+  max-width: 60px !important;
+  max-height: 60px !important;
   float: left;
   margin-right: 0.5em;
   border-radius: 20%;
