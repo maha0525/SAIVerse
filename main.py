@@ -38,6 +38,15 @@ NOTE_CSS = """
 .note-box b {
   color: #333350; /* <b> の強調部分にも明示的に上書き */
 }
+
+.inline-avatar {
+  width: 1.4em;
+  height: 1.4em;
+  vertical-align: middle;
+  margin-right: 0.3em;
+  border-radius: 50%;
+  object-fit: cover;
+}
 """
 
 
@@ -64,7 +73,7 @@ def main():
             elem_id="my_chat",
             avatar_images=(
                 "assets/icons/user.png", # ← ユーザー
-                "assets/icons/eris.png" # ← アシスタント
+                None  # アシスタント側はメッセージ内に表示
             ),
             height=800
         )
