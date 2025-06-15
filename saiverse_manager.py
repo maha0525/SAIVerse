@@ -39,6 +39,7 @@ class SAIVerseManager:
         data = json.loads(Path(persona_list_path).read_text(encoding="utf-8"))
         self.routers: Dict[str, Router] = {}
         self.occupants: Dict[str, List[str]] = {b.building_id: [] for b in self.buildings}
+        self.avatar_map: Dict[str, str] = {}
         for p in data:
             pid = p["persona_id"]
             base = Path("ai_sessions") / pid
@@ -46,6 +47,9 @@ class SAIVerseManager:
             try:
                 base_data = json.loads((base / "base.json").read_text(encoding="utf-8"))
                 start_id = base_data.get("start_building_id", start_id)
+                avatar = base_data.get("avatar_image")
+                if avatar:
+                    self.avatar_map[pid] = avatar
             except Exception:
                 pass
             router = Router(
@@ -107,11 +111,15 @@ class SAIVerseManager:
         display: List[Dict[str, str]] = []
         for msg in history:
             if msg.get("role") == "assistant":
+                pid = msg.get("persona_id")
+                avatar = self.avatar_map.get(pid, "assets/icons/eris.png")
                 try:
                     data = json.loads(msg.get("content", ""))
-                    display.append({"role": "assistant", "content": data.get("say", "")})
+                    say = data.get("say", "")
                 except json.JSONDecodeError:
-                    display.append(msg)
+                    say = msg.get("content", "")
+                html = f"<img src='{avatar}' class='inline-avatar'>{say}"
+                display.append({"role": "assistant", "content": html})
             else:
                 display.append(msg)
         return display
