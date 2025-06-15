@@ -1,5 +1,6 @@
 {
   "persona_id": "eris",
   "persona_name": "エリス",
-  "start_building_id": "eris_room"
+  "start_building_id": "eris_room",
+  "avatar_image": "assets/icons/eris.png"
 }
