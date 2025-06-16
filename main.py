@@ -7,6 +7,7 @@ from saiverse_manager import SAIVerseManager
 logging.basicConfig(level=logging.INFO)
 manager = SAIVerseManager()
 PERSONA_CHOICES = list(manager.persona_map.keys())
+MODEL_CHOICES = ["gpt-4o", "qwen3:32b"]
 
 NOTE_CSS = """
 /* ① まず器（avatar-container）を拡大 */
@@ -75,6 +76,11 @@ def call_persona(name: str):
     return manager.get_building_history("user_room")
 
 
+def select_model(model_name: str):
+    manager.set_model(model_name)
+    return manager.get_building_history("user_room")
+
+
 def main():
     with gr.Blocks(css=NOTE_CSS) as demo:
         chatbot = gr.Chatbot(
@@ -91,9 +97,11 @@ def main():
         with gr.Row():
             txt = gr.Textbox()
             persona_drop = gr.Dropdown(choices=PERSONA_CHOICES, value=PERSONA_CHOICES[0], label="ペルソナ選択")
+            model_drop = gr.Dropdown(choices=MODEL_CHOICES, value=MODEL_CHOICES[0], label="モデル選択")
             call_btn = gr.Button("ペルソナを呼ぶ")
         txt.submit(respond, txt, chatbot)
         call_btn.click(call_persona, persona_drop, chatbot)
+        model_drop.change(select_model, model_drop, chatbot)
     demo.launch()
 
 
