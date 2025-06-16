@@ -12,10 +12,17 @@ from buildings.eris_room import load as load_eris_room
 from router import Router
 
 
+DEFAULT_MODEL = "gpt-4o"
+
+
 class SAIVerseManager:
     """Manage multiple personas and building occupancy."""
 
-    def __init__(self, persona_list_path: Path = Path("ai_sessions/personas.json")):
+    def __init__(
+        self,
+        persona_list_path: Path = Path("ai_sessions/personas.json"),
+        model: str = DEFAULT_MODEL,
+    ):
         self.buildings: List[Building] = [
             load_user_room(),
             load_deep_think_room(),
@@ -27,6 +34,7 @@ class SAIVerseManager:
         self.building_memory_paths: Dict[str, Path] = {
             b.building_id: Path("buildings") / b.building_id / "memory.json" for b in self.buildings
         }
+        self.model = model
         self.building_histories: Dict[str, List[Dict[str, str]]] = {}
         default_avatar_path = Path("assets/icons/blank.png")
         if default_avatar_path.exists():
@@ -79,6 +87,7 @@ class SAIVerseManager:
                 building_histories=self.building_histories,
                 move_callback=self._move_persona,
                 start_building_id=start_id,
+                model=self.model,
             )
             self.routers[pid] = router
             self.occupants[router.current_building_id].append(pid)
@@ -125,6 +134,12 @@ class SAIVerseManager:
         for router in self.routers.values():
             router._save_session()
         return replies
+
+    def set_model(self, model: str) -> None:
+        """Update LLM model for all routers."""
+        self.model = model
+        for router in self.routers.values():
+            router.set_model(model)
 
     def get_building_history(self, building_id: str) -> List[Dict[str, str]]:
         history = self.building_histories.get(building_id, [])
