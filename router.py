@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from datetime import datetime
 
 from openai import OpenAI
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -28,7 +29,7 @@ from buildings.air_room import load as load_air_room
 from buildings.eris_room import load as load_eris_room
 
 
-def build_router(persona_id: str = "air") -> "Router":
+def build_router(persona_id: str = "air", model: str = "gpt-4o") -> "Router":
     buildings = [
         load_user_room(),
         load_deep_think_room(),
@@ -40,6 +41,7 @@ def build_router(persona_id: str = "air") -> "Router":
         buildings=buildings,
         common_prompt_path=Path("system_prompts/common.txt"),
         persona_base=base,
+        model=model,
     )
 
 
@@ -52,6 +54,7 @@ class Router:
         building_histories: Optional[Dict[str, List[Dict[str, str]]]] = None,
         move_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
         start_building_id: str = "air_room",
+        model: str = "gpt-4o",
     ):
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
         self.common_prompt = common_prompt_path.read_text(encoding="utf-8")
@@ -88,15 +91,19 @@ class Router:
                 self.buildings[b_id].memory = self.building_histories[b_id]
         self.move_callback = move_callback
         self.current_building_id = start_building_id
+        self.model = model
         # 会話履歴を保持する
         self.messages: List[Dict[str, str]] = []
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError(
-                "OPENAI_API_KEY environment variable is not set. "
-                "Please set it to your OpenAI API key."
-            )
-        self.client = OpenAI(api_key=api_key)
+        if self.model == "gpt-4o":
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                raise RuntimeError(
+                    "OPENAI_API_KEY environment variable is not set. "
+                    "Please set it to your OpenAI API key."
+                )
+            self.client = OpenAI(api_key=api_key)
+        else:
+            self.client = None
         self.auto_count = 0  # consecutive auto prompts in deep_think_room
         self._load_session()
 
@@ -169,6 +176,20 @@ class Router:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(hist, ensure_ascii=False), encoding="utf-8")
 
+    def set_model(self, model: str) -> None:
+        """Update model and (re)initialize client if needed."""
+        self.model = model
+        if self.model == "gpt-4o":
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                raise RuntimeError(
+                    "OPENAI_API_KEY environment variable is not set. "
+                    "Please set it to your OpenAI API key."
+                )
+            self.client = OpenAI(api_key=api_key)
+        else:
+            self.client = None
+
     def _build_messages(
         self, user_message: Optional[str], extra_system_prompt: Optional[str] = None
     ) -> List[Dict[str, str]]:
@@ -206,36 +227,56 @@ class Router:
     ) -> tuple[str, Optional[str], bool]:
         msgs = self._build_messages(user_message, system_prompt_extra)
         logging.debug("Messages sent to API: %s", msgs)
-        try:
-            response = self.client.responses.parse(
-                model="gpt-4o",
-                input=msgs,
-                text_format=SAIVerseResponse,
-            )
-            parsed = response.output_parsed
-            say = parsed.say
-            next_id = parsed.next_building_id
-            # `model_dump_json` does not support ensure_ascii in recent
-            # pydantic versions, so dump to dict first and then to JSON.
-            full_response = json.dumps(response.model_dump(), ensure_ascii=False)
-            logging.debug(
-                "Parsed structured response - say: %s, next_building_id: %s",
-                say,
-                next_id,
-            )
-        except Exception as e:
-            logging.error("OpenAI Structured Output failed: %s", e)
+        say = ""
+        next_id = None
+        full_response = ""
+        if self.model == "gpt-4o":
             try:
-                fallback = self.client.chat.completions.create(
+                response = self.client.responses.parse(
                     model="gpt-4o",
-                    messages=msgs,
+                    input=msgs,
+                    text_format=SAIVerseResponse,
                 )
-                content = fallback.choices[0].message.content
-                logging.debug("Raw fallback response: %s", content)
+                parsed = response.output_parsed
+                say = parsed.say
+                next_id = parsed.next_building_id
+                full_response = json.dumps(response.model_dump(), ensure_ascii=False)
+                logging.debug(
+                    "Parsed structured response - say: %s, next_building_id: %s",
+                    say,
+                    next_id,
+                )
+            except Exception as e:
+                logging.error("OpenAI Structured Output failed: %s", e)
+                try:
+                    fallback = self.client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=msgs,
+                    )
+                    content = fallback.choices[0].message.content
+                    logging.debug("Raw fallback response: %s", content)
+                    say, next_id = self._parse_response(content)
+                    full_response = json.dumps({"say": say, "next_building_id": next_id}, ensure_ascii=False)
+                except Exception as e2:
+                    logging.error("Fallback OpenAI call failed: %s", e2)
+                    say = "エラーが発生しました。"
+                    next_id = None
+                    full_response = json.dumps({"say": say, "next_building_id": next_id}, ensure_ascii=False)
+        else:
+            try:
+                resp = requests.post(
+                    "http://localhost:11434/v1/chat/completions",
+                    json={"model": self.model, "messages": msgs, "stream": False},
+                    timeout=60,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                logging.debug("Raw ollama response: %s", content)
                 say, next_id = self._parse_response(content)
                 full_response = json.dumps({"say": say, "next_building_id": next_id}, ensure_ascii=False)
-            except Exception as e2:
-                logging.error("Fallback OpenAI call failed: %s", e2)
+            except Exception as e:
+                logging.error("Ollama call failed: %s", e)
                 say = "エラーが発生しました。"
                 next_id = None
                 full_response = json.dumps({"say": say, "next_building_id": next_id}, ensure_ascii=False)
