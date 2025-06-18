@@ -6,6 +6,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel
 from datetime import datetime
+import time
 
 from openai import OpenAI
 import requests
@@ -17,6 +18,7 @@ load_dotenv()
 class SAIVerseResponse(BaseModel):
     say: str
     next_building_id: Optional[str] = None
+    think: Optional[str] = None
 
     class Config:
         extra = "ignore"
@@ -27,6 +29,7 @@ from buildings.user_room import load as load_user_room
 from buildings.deep_think_room import load as load_deep_think_room
 from buildings.air_room import load as load_air_room
 from buildings.eris_room import load as load_eris_room
+from buildings.const_test_room import load as load_const_test_room
 
 
 def build_router(persona_id: str = "air", model: str = "gpt-4o") -> "Router":
@@ -35,6 +38,7 @@ def build_router(persona_id: str = "air", model: str = "gpt-4o") -> "Router":
         load_deep_think_room(),
         load_air_room(),
         load_eris_room(),
+        load_const_test_room(),
     ]
     base = Path("ai_sessions") / persona_id
     return Router(
@@ -105,6 +109,7 @@ class Router:
         else:
             self.client = None
         self.auto_count = 0  # consecutive auto prompts in deep_think_room
+        self.last_auto_prompt_times: Dict[str, float] = {b_id: time.time() for b_id in self.buildings}
         self._load_session()
 
     def _add_to_history(self, msg: Dict[str, str], building_id: Optional[str] = None) -> None:
@@ -150,6 +155,7 @@ class Router:
                 self.current_building_id = data.get("current_building_id", "air_room")
                 self.messages = data.get("messages", [])
                 self.auto_count = data.get("auto_count", 0)
+                self.last_auto_prompt_times.update(data.get("last_auto_prompt_times", {}))
             except json.JSONDecodeError:
                 logging.warning("Failed to load session memory, starting fresh")
         for b_id, path in self.building_memory_paths.items():
@@ -169,6 +175,7 @@ class Router:
             "current_building_id": self.current_building_id,
             "messages": self.messages,
             "auto_count": self.auto_count,
+            "last_auto_prompt_times": self.last_auto_prompt_times,
         }
         self.memory_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         for b_id, path in self.building_memory_paths.items():
@@ -229,6 +236,7 @@ class Router:
         logging.debug("Messages sent to API: %s", msgs)
         say = ""
         next_id = None
+        think = None
         full_response = ""
         if self.model == "gpt-4o":
             try:
@@ -240,6 +248,7 @@ class Router:
                 parsed = response.output_parsed
                 say = parsed.say
                 next_id = parsed.next_building_id
+                think = parsed.think
                 full_response = json.dumps(response.model_dump(), ensure_ascii=False)
                 logging.debug(
                     "Parsed structured response - say: %s, next_building_id: %s",
@@ -255,13 +264,14 @@ class Router:
                     )
                     content = fallback.choices[0].message.content
                     logging.debug("Raw fallback response: %s", content)
-                    say, next_id = self._parse_response(content)
-                    full_response = json.dumps({"say": say, "next_building_id": next_id}, ensure_ascii=False)
+                    say, next_id, think = self._parse_response(content)
+                    full_response = json.dumps({"say": say, "next_building_id": next_id, "think": think}, ensure_ascii=False)
                 except Exception as e2:
                     logging.error("Fallback OpenAI call failed: %s", e2)
                     say = "エラーが発生しました。"
                     next_id = None
-                    full_response = json.dumps({"say": say, "next_building_id": next_id}, ensure_ascii=False)
+                    think = None
+                    full_response = json.dumps({"say": say, "next_building_id": next_id, "think": think}, ensure_ascii=False)
         else:
             try:
                 resp = requests.post(
@@ -273,13 +283,14 @@ class Router:
                 data = resp.json()
                 content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                 logging.debug("Raw ollama response: %s", content)
-                say, next_id = self._parse_response(content)
-                full_response = json.dumps({"say": say, "next_building_id": next_id}, ensure_ascii=False)
+                say, next_id, think = self._parse_response(content)
+                full_response = json.dumps({"say": say, "next_building_id": next_id, "think": think}, ensure_ascii=False)
             except Exception as e:
                 logging.error("Ollama call failed: %s", e)
                 say = "エラーが発生しました。"
                 next_id = None
-                full_response = json.dumps({"say": say, "next_building_id": next_id}, ensure_ascii=False)
+                think = None
+                full_response = json.dumps({"say": say, "next_building_id": next_id, "think": think}, ensure_ascii=False)
         if system_prompt_extra:
             self._add_to_history(
                 {"role": "user", "content": system_prompt_extra},
@@ -287,7 +298,7 @@ class Router:
             )
         if user_message:
             self._add_to_history({"role": "user", "content": user_message}, building_id=self.current_building_id)
-        parsed_response = json.dumps({"say": say, "next_building_id": next_id}, ensure_ascii=False)
+        parsed_response = json.dumps({"say": say, "next_building_id": next_id, "think": think}, ensure_ascii=False)
         self._add_to_history(
             {"role": "assistant", "content": parsed_response},
             building_id=self.current_building_id,
@@ -348,7 +359,8 @@ class Router:
         building = self.buildings[self.current_building_id]
         if initial and building.entry_prompt:
             if building.run_entry_llm:
-                say, next_id, _ = self._generate(None, building.entry_prompt)
+                entry_text = building.entry_prompt.format(persona_name=self.persona_name)
+                say, next_id, _ = self._generate(None, entry_text)
                 replies.append(say)
             else:
                 self._add_to_history(
@@ -363,12 +375,31 @@ class Router:
             and self.auto_count < 10
         ):
             self.auto_count += 1
-            say, next_id, changed = self._generate(None, building.auto_prompt)
+            auto_text = building.auto_prompt.format(persona_name=self.persona_name)
+            say, next_id, changed = self._generate(None, auto_text)
             replies.append(say)
             if changed:
                 building = self.buildings[self.current_building_id]
                 replies.extend(self.run_auto_conversation(initial=True))
                 break
+        return replies
+
+    def run_scheduled_prompt(self) -> List[str]:
+        """Run auto prompt based on interval if applicable."""
+        building = self.buildings[self.current_building_id]
+        interval = getattr(building, "auto_interval_sec", 0)
+        if not (building.auto_prompt and building.run_auto_llm and interval > 0):
+            return []
+        last = self.last_auto_prompt_times.get(self.current_building_id, 0)
+        now = time.time()
+        if now - last < interval:
+            return []
+        self.last_auto_prompt_times[self.current_building_id] = now
+        auto_text = building.auto_prompt.format(persona_name=self.persona_name)
+        say, next_id, changed = self._generate(None, auto_text)
+        replies = [say]
+        if changed:
+            replies.extend(self.run_auto_conversation(initial=True))
         return replies
 
     def handle_user_input(self, message: str) -> List[str]:
@@ -440,16 +471,17 @@ class Router:
         return display
 
     @staticmethod
-    def _parse_response(content: str) -> tuple[str, Optional[str]]:
+    def _parse_response(content: str) -> tuple[str, Optional[str], Optional[str]]:
         try:
             data = json.loads(content)
             say = data.get("say", "")
             next_id = data.get("next_building_id")
+            think = data.get("think")
             logging.debug(
                 "Parsed JSON response - say: %s, next_building_id: %s", say, next_id
             )
-            return say, next_id
+            return say, next_id, think
         except json.JSONDecodeError:
             logging.warning("Failed to parse response as JSON: %s", content)
-            return content, None
+            return content, None, None
 
