@@ -14,7 +14,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-
 class SAIVerseResponse(BaseModel):
     say: str
     next_building_id: Optional[str] = None
