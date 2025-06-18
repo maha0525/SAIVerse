@@ -19,6 +19,7 @@ class SAIVerseResponse(BaseModel):
     say: str
     next_building_id: Optional[str] = None
     think: Optional[str] = None
+    emotion_delta: Optional[List[Dict[str, int]]] = None
 
     class Config:
         extra = "ignore"
@@ -45,6 +46,7 @@ def build_router(persona_id: str = "air", model: str = "gpt-4o") -> "Router":
         buildings=buildings,
         common_prompt_path=Path("system_prompts/common.txt"),
         persona_base=base,
+        emotion_prompt_path=Path("system_prompts/emotion_parameter.txt"),
         model=model,
     )
 
@@ -55,6 +57,7 @@ class Router:
         buildings: List[Building],
         common_prompt_path: Path,
         persona_base: Path,
+        emotion_prompt_path: Path = Path("system_prompts/emotion_parameter.txt"),
         building_histories: Optional[Dict[str, List[Dict[str, str]]]] = None,
         move_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
         start_building_id: str = "air_room",
@@ -62,6 +65,7 @@ class Router:
     ):
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
         self.common_prompt = common_prompt_path.read_text(encoding="utf-8")
+        self.emotion_prompt = emotion_prompt_path.read_text(encoding="utf-8")
         self.persona_base = persona_base
         self.memory_path = persona_base / "memory.json"
         self.persona_system_instruction = (persona_base / "system_prompt.txt").read_text(encoding="utf-8")
@@ -98,6 +102,7 @@ class Router:
         self.model = model
         # 会話履歴を保持する
         self.messages: List[Dict[str, str]] = []
+        self.emotion = {"valence": 0, "arousal": 0}
         if self.model == "gpt-4o":
             api_key = os.getenv("OPENAI_API_KEY")
             if not api_key:
@@ -148,6 +153,23 @@ class Router:
             selected.append(msg)
         return list(reversed(selected))
 
+    def _apply_emotion_delta(self, delta: Optional[List[Dict[str, int]]]) -> None:
+        if not delta:
+            return
+        if isinstance(delta, dict):
+            delta = [delta]
+        for item in delta:
+            if not isinstance(item, dict):
+                continue
+            for key, val in item.items():
+                if key not in {"valence", "arousal"}:
+                    continue
+                try:
+                    diff = int(val)
+                except (ValueError, TypeError):
+                    continue
+                self.emotion[key] = max(-100, min(100, self.emotion.get(key, 0) + diff))
+
     def _load_session(self) -> None:
         if self.memory_path.exists():
             try:
@@ -156,8 +178,11 @@ class Router:
                 self.messages = data.get("messages", [])
                 self.auto_count = data.get("auto_count", 0)
                 self.last_auto_prompt_times.update(data.get("last_auto_prompt_times", {}))
+                self.emotion = data.get("emotion", {"valence": 0, "arousal": 0})
             except json.JSONDecodeError:
                 logging.warning("Failed to load session memory, starting fresh")
+        else:
+            self.emotion = {"valence": 0, "arousal": 0}
         for b_id, path in self.building_memory_paths.items():
             if b_id in self.building_histories:
                 continue
@@ -176,6 +201,7 @@ class Router:
             "messages": self.messages,
             "auto_count": self.auto_count,
             "last_auto_prompt_times": self.last_auto_prompt_times,
+            "emotion": self.emotion,
         }
         self.memory_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         for b_id, path in self.building_memory_paths.items():
@@ -209,6 +235,10 @@ class Router:
             current_persona_system_instruction=self.persona_system_instruction,
             current_time=current_time,
         )
+        emotion_text = self.emotion_prompt.format(
+            emotion={"valence": self.emotion["valence"], "arousal": self.emotion["arousal"]}
+        )
+        system_text = system_text + "\n" + emotion_text
 
         base_chars = len(system_text)
         if extra_system_prompt:
@@ -241,6 +271,7 @@ class Router:
         say = ""
         next_id = None
         think = None
+        delta = None
         full_response = ""
         if self.model == "gpt-4o":
             try:
@@ -253,6 +284,7 @@ class Router:
                 say = parsed.say
                 next_id = parsed.next_building_id
                 think = parsed.think
+                delta = parsed.emotion_delta
                 full_response = json.dumps(response.model_dump(), ensure_ascii=False)
                 logging.debug(
                     "Parsed structured response - say: %s, next_building_id: %s",
@@ -268,8 +300,8 @@ class Router:
                     )
                     content = fallback.choices[0].message.content
                     logging.debug("Raw fallback response: %s", content)
-                    say, next_id, think = self._parse_response(content)
-                    full_response = json.dumps({"say": say, "next_building_id": next_id, "think": think}, ensure_ascii=False)
+                    say, next_id, think, delta = self._parse_response(content)
+                    full_response = json.dumps({"say": say, "next_building_id": next_id, "think": think, "emotion_delta": delta}, ensure_ascii=False)
                 except Exception as e2:
                     logging.error("Fallback OpenAI call failed: %s", e2)
                     say = "エラーが発生しました。"
@@ -287,8 +319,8 @@ class Router:
                 data = resp.json()
                 content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                 logging.debug("Raw ollama response: %s", content)
-                say, next_id, think = self._parse_response(content)
-                full_response = json.dumps({"say": say, "next_building_id": next_id, "think": think}, ensure_ascii=False)
+                say, next_id, think, delta = self._parse_response(content)
+                full_response = json.dumps({"say": say, "next_building_id": next_id, "think": think, "emotion_delta": delta}, ensure_ascii=False)
             except Exception as e:
                 logging.error("Ollama call failed: %s", e)
                 say = "エラーが発生しました。"
@@ -302,11 +334,12 @@ class Router:
             )
         if user_message:
             self._add_to_history({"role": "user", "content": user_message}, building_id=self.current_building_id)
-        parsed_response = json.dumps({"say": say, "next_building_id": next_id, "think": think}, ensure_ascii=False)
+        parsed_response = json.dumps({"say": say, "next_building_id": next_id, "think": think, "emotion_delta": delta}, ensure_ascii=False)
         self._add_to_history(
             {"role": "assistant", "content": parsed_response},
             building_id=self.current_building_id,
         )
+        self._apply_emotion_delta(delta)
         prev_id = self.current_building_id
         moved = False
         if next_id and next_id in self.buildings:
@@ -475,17 +508,18 @@ class Router:
         return display
 
     @staticmethod
-    def _parse_response(content: str) -> tuple[str, Optional[str], Optional[str]]:
+    def _parse_response(content: str) -> tuple[str, Optional[str], Optional[str], Optional[List[Dict[str, int]]]]:
         try:
             data = json.loads(content)
             say = data.get("say", "")
             next_id = data.get("next_building_id")
             think = data.get("think")
+            delta = data.get("emotion_delta")
             logging.debug(
                 "Parsed JSON response - say: %s, next_building_id: %s", say, next_id
             )
-            return say, next_id, think
+            return say, next_id, think, delta
         except json.JSONDecodeError:
             logging.warning("Failed to parse response as JSON: %s", content)
-            return content, None, None
+            return content, None, None, None
 
