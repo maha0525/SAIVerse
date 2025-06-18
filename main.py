@@ -9,7 +9,7 @@ from saiverse_manager import SAIVerseManager
 logging.basicConfig(level=logging.INFO)
 manager = SAIVerseManager()
 PERSONA_CHOICES = list(manager.persona_map.keys())
-MODEL_CHOICES = ["gpt-4o", "qwen3:32b"]
+MODEL_CHOICES = ["gpt-4o", "qwen3:32b", "qwen3:3b"]
 
 NOTE_CSS = """
 /* ① まず器（avatar-container）を拡大 */
