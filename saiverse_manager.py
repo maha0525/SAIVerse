@@ -9,6 +9,7 @@ from buildings.user_room import load as load_user_room
 from buildings.deep_think_room import load as load_deep_think_room
 from buildings.air_room import load as load_air_room
 from buildings.eris_room import load as load_eris_room
+from buildings.const_test_room import load as load_const_test_room
 from router import Router
 
 
@@ -28,6 +29,7 @@ class SAIVerseManager:
             load_deep_think_room(),
             load_air_room(),
             load_eris_room(),
+            load_const_test_room(),
         ]
         self.building_map: Dict[str, Building] = {b.building_id: b for b in self.buildings}
         self.capacities: Dict[str, int] = {b.building_id: b.capacity for b in self.buildings}
@@ -161,3 +163,14 @@ class SAIVerseManager:
             else:
                 display.append(msg)
         return display
+
+    def run_scheduled_prompts(self) -> List[str]:
+        """Run scheduled prompts for all routers."""
+        replies: List[str] = []
+        for router in self.routers.values():
+            replies.extend(router.run_scheduled_prompt())
+        if replies:
+            self._save_building_histories()
+            for router in self.routers.values():
+                router._save_session()
+        return replies

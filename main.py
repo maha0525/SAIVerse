@@ -1,4 +1,6 @@
 import logging
+import threading
+import time
 
 import gradio as gr
 
@@ -82,6 +84,14 @@ def select_model(model_name: str):
 
 
 def main():
+    def background_loop():
+        while True:
+            manager.run_scheduled_prompts()
+            time.sleep(5)
+
+    thread = threading.Thread(target=background_loop, daemon=True)
+    thread.start()
+
     with gr.Blocks(css=NOTE_CSS) as demo:
         chatbot = gr.Chatbot(
             type="messages",
