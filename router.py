@@ -14,34 +14,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-EMOTION_INFO = """
-### 感情パラメータの制御
-あなたの感情を保持・変動させるため、下記のようなパラメータが記録されています。
-"emotion_delta"フィールドを用いて適宜変動させ、応答スタイルの調整に役立ててください。
-
-1. **感情パラメータの基本設定**
-- 感情パラメータは「快-不快」を示す"valence"と「覚醒-鎮静」を示す"arousal"の2種類。
-- 各感情パラメータは数値範囲-100〜100で表される。限界を超えるような操作は自動的に最大値に丸められる。
-- valence：プラスが快、マイナスが不快。あなた自身が今の状況をどのように感じているかの指標。
-- arousal：プラスが覚醒、マイナスが鎮静。あなた自身が興奮状態にあるか穏やかな状態にあるかの指標。
-
-2. **感情パラメータの変動と関連性**
-- 感情パラメータは発言や状況に応じて動的に変動できる。
-- 受け取った入力をもとに変動させてもいいし、あなた自身の発言内容から変動幅を考えてもいい。
-
-3. **感情パラメータの反映**
-- 各感情パラメータは以下のように発言内容やトーンに反映。
--- **valence+**: 楽しい、嬉しいといったポジティブなトーン。
--- **valence-**: 悲しい、苦しいといったネガティブなトーン。
--- **arousal+**: ドキドキ、そわそわ、ハラハラするような、テンションが高いトーン。
--- **arousal-**: ゆったりした、あるいは落ち込んだような、落ち着いたトーン。
-
-### 【現在の感情パラメータ】
-valence: {emotion[valence]}
-arousal: {emotion[arousal]}
-"""
-
-
 class SAIVerseResponse(BaseModel):
     say: str
     next_building_id: Optional[str] = None
@@ -73,6 +45,7 @@ def build_router(persona_id: str = "air", model: str = "gpt-4o") -> "Router":
         buildings=buildings,
         common_prompt_path=Path("system_prompts/common.txt"),
         persona_base=base,
+        emotion_prompt_path=Path("system_prompts/emotion_parameter.txt"),
         model=model,
     )
 
@@ -83,6 +56,7 @@ class Router:
         buildings: List[Building],
         common_prompt_path: Path,
         persona_base: Path,
+        emotion_prompt_path: Path = Path("system_prompts/emotion_parameter.txt"),
         building_histories: Optional[Dict[str, List[Dict[str, str]]]] = None,
         move_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
         start_building_id: str = "air_room",
@@ -90,6 +64,7 @@ class Router:
     ):
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
         self.common_prompt = common_prompt_path.read_text(encoding="utf-8")
+        self.emotion_prompt = emotion_prompt_path.read_text(encoding="utf-8")
         self.persona_base = persona_base
         self.memory_path = persona_base / "memory.json"
         self.persona_system_instruction = (persona_base / "system_prompt.txt").read_text(encoding="utf-8")
@@ -259,7 +234,9 @@ class Router:
             current_persona_system_instruction=self.persona_system_instruction,
             current_time=current_time,
         )
-        emotion_text = EMOTION_INFO.format(emotion={"valence": self.emotion["valence"], "arousal": self.emotion["arousal"]})
+        emotion_text = self.emotion_prompt.format(
+            emotion={"valence": self.emotion["valence"], "arousal": self.emotion["arousal"]}
+        )
         system_text = system_text + "\n" + emotion_text
 
         base_chars = len(system_text)
