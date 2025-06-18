@@ -221,8 +221,12 @@ class Router:
             history_limit = 0
 
         history_msgs = self._recent_history(history_limit)
+        sanitized_history = [
+            {"role": m.get("role", ""), "content": m.get("content", "")}
+            for m in history_msgs
+        ]
 
-        msgs = [{"role": "system", "content": system_text}] + history_msgs
+        msgs = [{"role": "system", "content": system_text}] + sanitized_history
         if extra_system_prompt:
             msgs.append({"role": "system", "content": extra_system_prompt})
         if user_message:
