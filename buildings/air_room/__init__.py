@@ -16,4 +16,5 @@ def load() -> Building:
         capacity=1,
         run_entry_llm=False,
         run_auto_llm=False,
+        auto_interval_sec=0,
     )
