@@ -235,6 +235,7 @@ class Router:
         system_text = self.common_prompt.format(
             current_building_name=building.name,
             current_building_system_instruction=building.system_instruction.format(current_time=current_time),
+            current_persona_id=self.persona_id,
             current_persona_name=self.persona_name,
             current_persona_system_instruction=self.persona_system_instruction,
             current_time=current_time,
