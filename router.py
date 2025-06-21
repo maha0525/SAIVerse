@@ -302,7 +302,6 @@ class Router:
 
         say, actions = self._parse_response(content)
         next_id, think, delta = self._execute_actions(actions)
-        full_response = json.dumps({"say": say, "actions": actions}, ensure_ascii=False)
         if system_prompt_extra:
             self._add_to_history(
                 {"role": "user", "content": system_prompt_extra},
@@ -310,9 +309,8 @@ class Router:
             )
         if user_message:
             self._add_to_history({"role": "user", "content": user_message}, building_id=self.current_building_id)
-        parsed_response = json.dumps({"say": say, "actions": actions}, ensure_ascii=False)
         self._add_to_history(
-            {"role": "assistant", "content": parsed_response},
+            {"role": "assistant", "content": say},
             building_id=self.current_building_id,
         )
         prev_id = self.current_building_id
