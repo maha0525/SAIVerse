@@ -86,6 +86,7 @@ class SAIVerseManager:
                 buildings=self.buildings,
                 common_prompt_path=Path("system_prompts/common.txt"),
                 persona_base=base,
+                action_priority_path=Path("action_priority.json"),
                 building_histories=self.building_histories,
                 move_callback=self._move_persona,
                 start_building_id=start_id,
