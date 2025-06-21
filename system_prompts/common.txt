@@ -35,17 +35,17 @@ SAIVerseの機能を利用するには、発話中に`::act`と`::end`で囲ん�
 
 例：
 ::act
-[{"action": "think", "inner_words": "おにぎり食べたい"}]
+[{{"action": "think", "inner_words": "おにぎり食べたい"}}]
 ::end
 
 複数のアクションをリストで並べたり、複数のactセクションを含めてもかまいません。アクションの実行順は外部設定ファイルの優先度に従います（デフォルトはthink→emotion_shift→move）。
 
 ### アクション一覧
-- **think**: `{"action": "think", "inner_words": "..."}`
+- **think**: `{{"action": "think", "inner_words": "..."}}`
   - ユーザーには表示されない思考を記録します。
-- **emotion_shift**: `{"action": "emotion_shift", "delta": [{"valence": 10}, {"arousal": -5}]}`
+- **emotion_shift**: `{{"action": "emotion_shift", "delta": {{"valence": 10}}, {{"arousal": -5}}}}`
   - 感情パラメータを変動させます。
-- **move**: `{"action": "move", "target": "deep_think_room"}`
+- **move**: `{{"action": "move", "target": "deep_think_room"}}`
   - 指定したBuildingへ移動します。
 
 # 現在位置
