@@ -1,10 +1,10 @@
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
-from pydantic import BaseModel
 from datetime import datetime
 import time
 
@@ -14,14 +14,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-class SAIVerseResponse(BaseModel):
-    say: str
-    next_building_id: Optional[str] = None
-    think: Optional[str] = None
-    emotion_delta: Optional[List[Dict[str, int]]] = None
 
-    class Config:
-        extra = "ignore"
 
 
 from buildings import Building
@@ -46,6 +39,7 @@ def build_router(persona_id: str = "air", model: str = "gpt-4o") -> "Router":
         common_prompt_path=Path("system_prompts/common.txt"),
         persona_base=base,
         emotion_prompt_path=Path("system_prompts/emotion_parameter.txt"),
+        action_priority_path=Path("action_priority.json"),
         model=model,
     )
 
@@ -57,6 +51,7 @@ class Router:
         common_prompt_path: Path,
         persona_base: Path,
         emotion_prompt_path: Path = Path("system_prompts/emotion_parameter.txt"),
+        action_priority_path: Path = Path("action_priority.json"),
         building_histories: Optional[Dict[str, List[Dict[str, str]]]] = None,
         move_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
         start_building_id: str = "air_room",
@@ -76,6 +71,7 @@ class Router:
         self.building_memory_paths: Dict[str, Path] = {
             b_id: Path("buildings") / b_id / "memory.json" for b_id in self.buildings
         }
+        self.action_priority = self._load_action_priority(action_priority_path)
         if building_histories is None:
             self.building_histories = {}
             for b_id, path in self.building_memory_paths.items():
@@ -168,6 +164,15 @@ class Router:
                 except (ValueError, TypeError):
                     continue
                 self.emotion[key] = max(-100, min(100, self.emotion.get(key, 0) + diff))
+
+    def _load_action_priority(self, path: Path) -> Dict[str, int]:
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                return {str(k): int(v) for k, v in data.items()}
+            except Exception:
+                logging.warning("Failed to load action priority from %s", path)
+        return {"think": 1, "emotion_shift": 2, "move": 3}
 
     def _load_session(self) -> None:
         if self.memory_path.exists():
@@ -268,45 +273,18 @@ class Router:
         msgs = self._build_messages(user_message, system_prompt_extra)
         logging.debug("Messages sent to API: %s", msgs)
         say = ""
-        next_id = None
-        think = None
-        delta = None
-        full_response = ""
+        actions: List[Dict[str, object]] = []
         if self.model == "gpt-4o":
             try:
-                response = self.client.responses.parse(
+                resp = self.client.chat.completions.create(
                     model="gpt-4o",
-                    input=msgs,
-                    text_format=SAIVerseResponse,
+                    messages=msgs,
                 )
-                parsed = response.output_parsed
-                say = parsed.say
-                next_id = parsed.next_building_id
-                think = parsed.think
-                delta = parsed.emotion_delta
-                full_response = json.dumps(response.model_dump(), ensure_ascii=False)
-                logging.debug(
-                    "Parsed structured response - say: %s, next_building_id: %s",
-                    say,
-                    next_id,
-                )
+                content = resp.choices[0].message.content
+                logging.debug("Raw openai response: %s", content)
             except Exception as e:
-                logging.error("OpenAI Structured Output failed: %s", e)
-                try:
-                    fallback = self.client.chat.completions.create(
-                        model="gpt-4o",
-                        messages=msgs,
-                    )
-                    content = fallback.choices[0].message.content
-                    logging.debug("Raw fallback response: %s", content)
-                    say, next_id, think, delta = self._parse_response(content)
-                    full_response = json.dumps({"say": say, "next_building_id": next_id, "think": think, "emotion_delta": delta}, ensure_ascii=False)
-                except Exception as e2:
-                    logging.error("Fallback OpenAI call failed: %s", e2)
-                    say = "エラーが発生しました。"
-                    next_id = None
-                    think = None
-                    full_response = json.dumps({"say": say, "next_building_id": next_id, "think": think}, ensure_ascii=False)
+                logging.error("OpenAI call failed: %s", e)
+                content = "エラーが発生しました。"
         else:
             try:
                 resp = requests.post(
@@ -318,14 +296,13 @@ class Router:
                 data = resp.json()
                 content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                 logging.debug("Raw ollama response: %s", content)
-                say, next_id, think, delta = self._parse_response(content)
-                full_response = json.dumps({"say": say, "next_building_id": next_id, "think": think, "emotion_delta": delta}, ensure_ascii=False)
             except Exception as e:
                 logging.error("Ollama call failed: %s", e)
-                say = "エラーが発生しました。"
-                next_id = None
-                think = None
-                full_response = json.dumps({"say": say, "next_building_id": next_id, "think": think}, ensure_ascii=False)
+                content = "エラーが発生しました。"
+
+        say, actions = self._parse_response(content)
+        next_id, think, delta = self._execute_actions(actions)
+        full_response = json.dumps({"say": say, "actions": actions}, ensure_ascii=False)
         if system_prompt_extra:
             self._add_to_history(
                 {"role": "user", "content": system_prompt_extra},
@@ -333,12 +310,11 @@ class Router:
             )
         if user_message:
             self._add_to_history({"role": "user", "content": user_message}, building_id=self.current_building_id)
-        parsed_response = json.dumps({"say": say, "next_building_id": next_id, "think": think, "emotion_delta": delta}, ensure_ascii=False)
+        parsed_response = json.dumps({"say": say, "actions": actions}, ensure_ascii=False)
         self._add_to_history(
             {"role": "assistant", "content": parsed_response},
             building_id=self.current_building_id,
         )
-        self._apply_emotion_delta(delta)
         prev_id = self.current_building_id
         moved = False
         if next_id and next_id in self.buildings:
@@ -364,7 +340,7 @@ class Router:
                 )
             elif next_id is None:
                 logging.debug(
-                    "No next_building_id provided, staying at %s", self.current_building_id
+                    "No move target provided, staying at %s", self.current_building_id
                 )
         changed = moved
         if changed:
@@ -501,24 +477,45 @@ class Router:
                     data = json.loads(msg.get("content", ""))
                     display.append({"role": "assistant", "content": data.get("say", "")})
                 except json.JSONDecodeError:
-                    display.append(msg)
+                    say, _ = self._parse_response(msg.get("content", ""))
+                    display.append({"role": "assistant", "content": say})
             else:
                 display.append(msg)
         return display
 
     @staticmethod
-    def _parse_response(content: str) -> tuple[str, Optional[str], Optional[str], Optional[List[Dict[str, int]]]]:
-        try:
-            data = json.loads(content)
-            say = data.get("say", "")
-            next_id = data.get("next_building_id")
-            think = data.get("think")
-            delta = data.get("emotion_delta")
-            logging.debug(
-                "Parsed JSON response - say: %s, next_building_id: %s", say, next_id
-            )
-            return say, next_id, think, delta
-        except json.JSONDecodeError:
-            logging.warning("Failed to parse response as JSON: %s", content)
-            return content, None, None, None
+    def _parse_response(content: str) -> tuple[str, List[Dict[str, object]]]:
+        pattern = re.compile(r"::act\s*(.*?)\s*::end", re.DOTALL)
+        actions: List[Dict[str, object]] = []
+        for match in pattern.finditer(content):
+            snippet = match.group(1).strip()
+            try:
+                data = json.loads(snippet)
+                if isinstance(data, dict):
+                    actions.append(data)
+                elif isinstance(data, list):
+                    actions.extend(data)
+            except json.JSONDecodeError:
+                logging.warning("Failed to parse act section: %s", snippet)
+        say = pattern.sub("", content).strip()
+        return say, actions
+
+    def _execute_actions(self, actions: List[Dict[str, object]]) -> tuple[Optional[str], Optional[str], Optional[List[Dict[str, int]]]]:
+        sorted_actions = sorted(
+            actions,
+            key=lambda a: self.action_priority.get(str(a.get("action", "")), 100),
+        )
+        next_id = None
+        think = None
+        delta = None
+        for act in sorted_actions:
+            action = act.get("action")
+            if action == "think":
+                think = act.get("inner_words")
+            elif action == "emotion_shift":
+                delta = act.get("delta")
+                self._apply_emotion_delta(delta)
+            elif action == "move":
+                next_id = act.get("target")
+        return next_id, think, delta
 
