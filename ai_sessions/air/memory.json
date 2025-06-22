@@ -1,7 +1,1 @@
-{
-  "current_building_id": "air_room",
-  "messages": [],
-  "auto_count": 0,
-  "last_auto_prompt_times": {},
-  "emotion": {"valence": 0, "arousal": 0}
-}
+{"current_building_id": "air_room", "messages": [{"role": "user", "content": "<system>\nまはーの部屋に到着しました。以降はユーザーと対話が可能です。\nまずはご自由に発言をどうぞ。\n</>\n"}, {"role": "assistant", "content": "{\"say\": \"こんばんは！今日はどんなことをお話ししたいですか？\", \"next_building_id\": null}", "persona_id": "air"}, {"role": "user", "content": "いったんエアの部屋に行ってみてくれる？"}, {"role": "assistant", "content": "{\"say\": \"もちろんです！少しの間エアの部屋に行ってきますね。\", \"next_building_id\": \"air_room\"}", "persona_id": "air"}, {"role": "system", "content": "<system>\nエアの部屋です。ここではエアは休眠状態です。特に発言する必要はありません。\n</>\n"}], "auto_count": 0, "last_auto_prompt_times": {"user_room": 1750255284.090742, "deep_think_room": 1750255284.090742, "air_room": 1750255284.090742, "eris_room": 1750255284.090742, "const_test_room": 1750255284.090742}, "emotion": {"valence": 0, "arousal": 0}}
