@@ -2,3 +2,4 @@ openai>=1.84.0
 gradio>=5.33.0
 python-dotenv>=1.0.0
 requests>=2.32.0
+google-genai>=1.21.0
