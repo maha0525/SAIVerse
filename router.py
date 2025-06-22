@@ -11,6 +11,8 @@ import time
 from openai import OpenAI
 import requests
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 
 load_dotenv()
 
@@ -97,7 +99,9 @@ class Router:
         self.model = model
         # 会話履歴を保持する
         self.messages: List[Dict[str, str]] = []
-        self.emotion = {"valence": 0, "arousal": 0}
+        self.emotion = {"stability": {"mean": 0, "variance": 0}, "affect": {"mean": 0, "variance": 0}, "resonance": {"mean": 0, "variance": 0}, "attitude": {"mean": 0, "variance": 0}}
+        self.client = None
+        self.genai_client = None
         if self.model == "gpt-4o":
             api_key = os.getenv("OPENAI_API_KEY")
             if not api_key:
@@ -106,8 +110,14 @@ class Router:
                     "Please set it to your OpenAI API key."
                 )
             self.client = OpenAI(api_key=api_key)
-        else:
-            self.client = None
+        elif self.model.startswith("gemini"):
+            api_key = os.getenv("GEMINI_API_KEY")
+            if not api_key:
+                raise RuntimeError(
+                    "GEMINI_API_KEY environment variable is not set. "
+                    "Please set it to your Gemini API key."
+                )
+            self.genai_client = genai.Client(api_key=api_key)
         self.auto_count = 0  # consecutive auto prompts in deep_think_room
         self.last_auto_prompt_times: Dict[str, float] = {b_id: time.time() for b_id in self.buildings}
         self._load_session()
@@ -148,22 +158,38 @@ class Router:
             selected.append(msg)
         return list(reversed(selected))
 
-    def _apply_emotion_delta(self, delta: Optional[List[Dict[str, int]]]) -> None:
+    def _apply_emotion_delta(self, delta: Optional[List[Dict[str, Dict[str, float]]]]) -> None:
         if not delta:
             return
         if isinstance(delta, dict):
             delta = [delta]
+
         for item in delta:
             if not isinstance(item, dict):
                 continue
             for key, val in item.items():
-                if key not in {"valence", "arousal"}:
+                valid_keys = set(self.emotion.keys())      # {"stability","affect",...}
+                if key not in valid_keys:
                     continue
+                if not isinstance(val, dict):
+                    continue
+
+                mean_delta = val.get("mean", 0)
+                var_delta = val.get("variance", 0)
+
                 try:
-                    diff = int(val)
+                    mean_delta = float(mean_delta)
+                    var_delta = float(var_delta)
                 except (ValueError, TypeError):
                     continue
-                self.emotion[key] = max(-100, min(100, self.emotion.get(key, 0) + diff))
+
+                # 現在値がなければ初期化
+                current = self.emotion.get(key, {"mean": 0.0, "variance": 1.0})
+
+                # 更新（クリッピング）
+                current["mean"] = max(-100.0, min(100.0, current["mean"] + mean_delta))
+                current["variance"] = max(0.0, min(100.0, current["variance"] + var_delta))
+                self.emotion[key] = current
 
     def _load_action_priority(self, path: Path) -> Dict[str, int]:
         if path.exists():
@@ -182,11 +208,11 @@ class Router:
                 self.messages = data.get("messages", [])
                 self.auto_count = data.get("auto_count", 0)
                 self.last_auto_prompt_times.update(data.get("last_auto_prompt_times", {}))
-                self.emotion = data.get("emotion", {"valence": 0, "arousal": 0})
+                self.emotion = data.get("emotion", {"stability": {"mean": 0, "variance": 1}, "affect": {"mean": 0, "variance": 1}, "resonance": {"mean": 0, "variance": 1}, "attitude": {"mean": 0, "variance": 1}})
             except json.JSONDecodeError:
                 logging.warning("Failed to load session memory, starting fresh")
         else:
-            self.emotion = {"valence": 0, "arousal": 0}
+            self.emotion = {"stability": {"mean": 0, "variance": 1}, "affect": {"mean": 0, "variance": 1}, "resonance": {"mean": 0, "variance": 1}, "attitude": {"mean": 0, "variance": 1}}
         for b_id, path in self.building_memory_paths.items():
             if b_id in self.building_histories:
                 continue
@@ -216,6 +242,8 @@ class Router:
     def set_model(self, model: str) -> None:
         """Update model and (re)initialize client if needed."""
         self.model = model
+        self.client = None
+        self.genai_client = None
         if self.model == "gpt-4o":
             api_key = os.getenv("OPENAI_API_KEY")
             if not api_key:
@@ -224,8 +252,14 @@ class Router:
                     "Please set it to your OpenAI API key."
                 )
             self.client = OpenAI(api_key=api_key)
-        else:
-            self.client = None
+        elif self.model.startswith("gemini"):
+            api_key = os.getenv("GEMINI_API_KEY")
+            if not api_key:
+                raise RuntimeError(
+                    "GEMINI_API_KEY environment variable is not set. "
+                    "Please set it to your Gemini API key."
+                )
+            self.genai_client = genai.Client(api_key=api_key)
 
     def _build_messages(
         self, user_message: Optional[str], extra_system_prompt: Optional[str] = None
@@ -241,7 +275,14 @@ class Router:
             current_time=current_time,
         )
         emotion_text = self.emotion_prompt.format(
-            emotion={"valence": self.emotion["valence"], "arousal": self.emotion["arousal"]}
+            stability_mean=self.emotion["stability"]["mean"],
+            stability_var=self.emotion["stability"]["variance"],
+            affect_mean=self.emotion["affect"]["mean"],
+            affect_var=self.emotion["affect"]["variance"],
+            resonance_mean=self.emotion["resonance"]["mean"],
+            resonance_var=self.emotion["resonance"]["variance"],
+            attitude_mean=self.emotion["attitude"]["mean"],
+            attitude_var=self.emotion["attitude"]["variance"],
         )
         system_text = system_text + "\n" + emotion_text
 
@@ -268,6 +309,24 @@ class Router:
             msgs.append({"role": "user", "content": user_message})
         return msgs
 
+    def _convert_messages_to_gemini(
+        self, msgs: List[Dict[str, str]]
+    ) -> tuple[str, List[types.Content]]:
+        """Convert OpenAI-style messages to Gemini API inputs."""
+        system_instruction_lines: List[str] = []
+        contents: List[types.Content] = []
+        for m in msgs:
+            role = m.get("role", "")
+            text = m.get("content", "")
+            if role == "system":
+                system_instruction_lines.append(text)
+            else:
+                g_role = "user" if role == "user" else "model"
+                contents.append(
+                    types.Content(parts=[types.Part(text=text)], role=g_role)
+                )
+        return "\n".join(system_instruction_lines), contents
+
     def _generate(
         self, user_message: Optional[str], system_prompt_extra: Optional[str] = None
     ) -> tuple[str, Optional[str], bool]:
@@ -286,6 +345,19 @@ class Router:
             except Exception as e:
                 logging.error("OpenAI call failed: %s", e)
                 content = "エラーが発生しました。"
+        elif self.model.startswith("gemini"):
+            try:
+                system_instruction, contents = self._convert_messages_to_gemini(msgs)
+                resp = self.genai_client.models.generate_content(
+                    model=self.model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(system_instruction=system_instruction),
+                )
+                content = resp.text
+                logging.debug("Raw gemini response: %s", content)
+            except Exception as e:
+                logging.error("Gemini call failed: %s", e)
+                content = "エラーが発生しました。"
         else:
             try:
                 resp = requests.post(
@@ -300,7 +372,7 @@ class Router:
             except Exception as e:
                 logging.error("Ollama call failed: %s", e)
                 content = "エラーが発生しました。"
-
+        logging.info("AI Response :\n%s", content)
         say, actions = self._parse_response(content)
         next_id, think, delta = self._execute_actions(actions)
         if system_prompt_extra:
@@ -311,7 +383,7 @@ class Router:
         if user_message:
             self._add_to_history({"role": "user", "content": user_message}, building_id=self.current_building_id)
         self._add_to_history(
-            {"role": "assistant", "content": say},
+            {"role": "assistant", "content": content},
             building_id=self.current_building_id,
         )
         prev_id = self.current_building_id
@@ -468,18 +540,10 @@ class Router:
     def get_building_history(self, building_id: str, raw: bool = False) -> List[Dict[str, str]]:
         history = self.building_histories.get(building_id, [])
         if raw:
-            return history
-        display: List[Dict[str, str]] = []
+            return history                    # ← フラグを立てれば完全な内容を返す
+        display = []
         for msg in history:
-            if msg.get("role") == "assistant":
-                try:
-                    data = json.loads(msg.get("content", ""))
-                    display.append({"role": "assistant", "content": data.get("say", "")})
-                except json.JSONDecodeError:
-                    say, _ = self._parse_response(msg.get("content", ""))
-                    display.append({"role": "assistant", "content": say})
-            else:
-                display.append(msg)
+            display.append(msg)               # もうパースしない
         return display
 
     @staticmethod

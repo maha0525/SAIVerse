@@ -9,7 +9,15 @@ from saiverse_manager import SAIVerseManager
 logging.basicConfig(level=logging.INFO)
 manager = SAIVerseManager()
 PERSONA_CHOICES = list(manager.persona_map.keys())
-MODEL_CHOICES = ["gpt-4o", "qwen3:32b", "qwen3:3b"]
+
+MODEL_CHOICES = [
+    "gpt-4o",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "qwen3:32b",
+    "qwen3:30b",
+    "llama4:16x17b"
+]
 
 NOTE_CSS = """
 /* ① まず器（avatar-container）を拡大 */
@@ -104,10 +112,11 @@ def main():
             ),
             height=800
         )
+        txt = gr.Textbox(label="しゃべること")
         with gr.Row():
-            txt = gr.Textbox()
-            persona_drop = gr.Dropdown(choices=PERSONA_CHOICES, value=PERSONA_CHOICES[0], label="ペルソナ選択")
             model_drop = gr.Dropdown(choices=MODEL_CHOICES, value=MODEL_CHOICES[0], label="モデル選択")
+        with gr.Row():
+            persona_drop = gr.Dropdown(choices=PERSONA_CHOICES, value=PERSONA_CHOICES[0], label="ペルソナ選択")
             call_btn = gr.Button("ペルソナを呼ぶ")
         txt.submit(respond, txt, chatbot)
         call_btn.click(call_persona, persona_drop, chatbot)
