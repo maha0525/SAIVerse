@@ -11,6 +11,8 @@ import time
 from openai import OpenAI
 import requests
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 
 load_dotenv()
 
@@ -98,6 +100,8 @@ class Router:
         # 会話履歴を保持する
         self.messages: List[Dict[str, str]] = []
         self.emotion = {"valence": 0, "arousal": 0}
+        self.client = None
+        self.genai_client = None
         if self.model == "gpt-4o":
             api_key = os.getenv("OPENAI_API_KEY")
             if not api_key:
@@ -106,8 +110,14 @@ class Router:
                     "Please set it to your OpenAI API key."
                 )
             self.client = OpenAI(api_key=api_key)
-        else:
-            self.client = None
+        elif self.model.startswith("gemini"):
+            api_key = os.getenv("GEMINI_API_KEY")
+            if not api_key:
+                raise RuntimeError(
+                    "GEMINI_API_KEY environment variable is not set. "
+                    "Please set it to your Gemini API key."
+                )
+            self.genai_client = genai.Client(api_key=api_key)
         self.auto_count = 0  # consecutive auto prompts in deep_think_room
         self.last_auto_prompt_times: Dict[str, float] = {b_id: time.time() for b_id in self.buildings}
         self._load_session()
@@ -216,6 +226,8 @@ class Router:
     def set_model(self, model: str) -> None:
         """Update model and (re)initialize client if needed."""
         self.model = model
+        self.client = None
+        self.genai_client = None
         if self.model == "gpt-4o":
             api_key = os.getenv("OPENAI_API_KEY")
             if not api_key:
@@ -224,8 +236,14 @@ class Router:
                     "Please set it to your OpenAI API key."
                 )
             self.client = OpenAI(api_key=api_key)
-        else:
-            self.client = None
+        elif self.model.startswith("gemini"):
+            api_key = os.getenv("GEMINI_API_KEY")
+            if not api_key:
+                raise RuntimeError(
+                    "GEMINI_API_KEY environment variable is not set. "
+                    "Please set it to your Gemini API key."
+                )
+            self.genai_client = genai.Client(api_key=api_key)
 
     def _build_messages(
         self, user_message: Optional[str], extra_system_prompt: Optional[str] = None
@@ -268,6 +286,24 @@ class Router:
             msgs.append({"role": "user", "content": user_message})
         return msgs
 
+    def _convert_messages_to_gemini(
+        self, msgs: List[Dict[str, str]]
+    ) -> tuple[str, List[types.Content]]:
+        """Convert OpenAI-style messages to Gemini API inputs."""
+        system_instruction_lines: List[str] = []
+        contents: List[types.Content] = []
+        for m in msgs:
+            role = m.get("role", "")
+            text = m.get("content", "")
+            if role == "system":
+                system_instruction_lines.append(text)
+            else:
+                g_role = "user" if role == "user" else "model"
+                contents.append(
+                    types.Content(parts=[types.Part(text=text)], role=g_role)
+                )
+        return "\n".join(system_instruction_lines), contents
+
     def _generate(
         self, user_message: Optional[str], system_prompt_extra: Optional[str] = None
     ) -> tuple[str, Optional[str], bool]:
@@ -285,6 +321,19 @@ class Router:
                 logging.debug("Raw openai response: %s", content)
             except Exception as e:
                 logging.error("OpenAI call failed: %s", e)
+                content = "エラーが発生しました。"
+        elif self.model.startswith("gemini"):
+            try:
+                system_instruction, contents = self._convert_messages_to_gemini(msgs)
+                resp = self.genai_client.models.generate_content(
+                    model=self.model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(system_instruction=system_instruction),
+                )
+                content = resp.text
+                logging.debug("Raw gemini response: %s", content)
+            except Exception as e:
+                logging.error("Gemini call failed: %s", e)
                 content = "エラーが発生しました。"
         else:
             try:
