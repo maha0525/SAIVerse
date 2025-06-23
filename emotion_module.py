@@ -3,6 +3,7 @@ import logging
 import os
 from pathlib import Path
 
+import re
 from google import genai
 from google.genai import types
 
@@ -30,10 +31,17 @@ class EmotionControlModule:
             resp = self.client.models.generate_content(
                 model=self.model,
                 contents=[types.Content(parts=[types.Part(text=prompt)], role="user")],
+                config=types.GenerateContentConfig(response_mime_type="application/json"),
             )
             content = resp.text.strip()
             logging.info("Emotion control module response:\n%s", content)
-            return json.loads(content)
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError:
+                match = re.search(r"\{.*\}", content, re.DOTALL)
+                if match:
+                    return json.loads(match.group(0))
+                raise
         except Exception as e:
             logging.error("Emotion control module failed: %s", e)
             return None
