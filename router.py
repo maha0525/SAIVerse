@@ -13,6 +13,7 @@ import requests
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from emotion_module import EmotionControlModule
 
 load_dotenv()
 
@@ -120,6 +121,7 @@ class Router:
             self.genai_client = genai.Client(api_key=api_key)
         self.auto_count = 0  # consecutive auto prompts in deep_think_room
         self.last_auto_prompt_times: Dict[str, float] = {b_id: time.time() for b_id in self.buildings}
+        self.emotion_module = EmotionControlModule()
         self._load_session()
 
     def _add_to_history(self, msg: Dict[str, str], building_id: Optional[str] = None) -> None:
@@ -375,6 +377,11 @@ class Router:
         logging.info("AI Response :\n%s", content)
         say, actions = self._parse_response(content)
         next_id, think, delta = self._execute_actions(actions)
+        # Apply emotion adjustment using external module
+        prompt_text = user_message if user_message is not None else system_prompt_extra or ""
+        module_delta = self.emotion_module.evaluate(prompt_text, say)
+        if module_delta:
+            self._apply_emotion_delta(module_delta)
         if system_prompt_extra:
             self._add_to_history(
                 {"role": "user", "content": system_prompt_extra},
