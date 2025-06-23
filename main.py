@@ -67,7 +67,9 @@ NOTE_CSS = """
 /* メッセージの高さがアイコンより低くならないよう調整 */
 #my_chat .message {
   min-height: 60px;
+  max-width: 768px;
   overflow: hidden;
+  font-size: 1rem !important;
 }
 """
 
