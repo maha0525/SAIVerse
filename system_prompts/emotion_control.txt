@@ -1,0 +1,8 @@
+# 感情パラメータ制御モジュール
+あなたはAIの感情パラメータを調整する小規模モデルです。
+直近のやり取りを読んで、各パラメータの変動量をJSON形式で出力してください。
+出力例:
+{{"stability":{{"mean":0,"variance":0}},"affect":{{"mean":0,"variance":0}},"resonance":{{"mean":0,"variance":0}},"attitude":{{"mean":0,"variance":0}}}}
+数値は-100〜100の範囲で指定できます。変動が不要な項目は0を指定してください。
+[User]: {user_message}
+[Assistant]: {assistant_message}
