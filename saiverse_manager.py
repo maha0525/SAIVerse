@@ -33,8 +33,10 @@ class SAIVerseManager:
         ]
         self.building_map: Dict[str, Building] = {b.building_id: b for b in self.buildings}
         self.capacities: Dict[str, int] = {b.building_id: b.capacity for b in self.buildings}
+        self.saiverse_home = Path.home() / ".saiverse"
         self.building_memory_paths: Dict[str, Path] = {
-            b.building_id: Path("buildings") / b.building_id / "memory.json" for b in self.buildings
+            b.building_id: self.saiverse_home / "buildings" / b.building_id / "log.json"
+            for b in self.buildings
         }
         self.model = model
         self.building_histories: Dict[str, List[Dict[str, str]]] = {}
@@ -54,7 +56,14 @@ class SAIVerseManager:
                     logging.warning("Failed to load building history %s", b_id)
                     self.building_histories[b_id] = []
             else:
-                self.building_histories[b_id] = []
+                fallback = Path("buildings") / b_id / "memory.json"
+                if fallback.exists():
+                    try:
+                        self.building_histories[b_id] = json.loads(fallback.read_text(encoding="utf-8"))
+                    except json.JSONDecodeError:
+                        self.building_histories[b_id] = []
+                else:
+                    self.building_histories[b_id] = []
         data = json.loads(Path(persona_list_path).read_text(encoding="utf-8"))
         self.routers: Dict[str, Router] = {}
         self.occupants: Dict[str, List[str]] = {b.building_id: [] for b in self.buildings}

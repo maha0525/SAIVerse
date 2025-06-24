@@ -65,14 +65,19 @@ class Router:
         self.emotion_prompt = emotion_prompt_path.read_text(encoding="utf-8")
         self.persona_base = persona_base
         self.memory_path = persona_base / "memory.json"
+        self.saiverse_home = Path.home() / ".saiverse"
         self.persona_system_instruction = (persona_base / "system_prompt.txt").read_text(encoding="utf-8")
         persona_data = json.loads((persona_base / "base.json").read_text(encoding="utf-8"))
         self.persona_id = persona_data.get("persona_id", persona_base.name)
         self.persona_name = persona_data.get("persona_name", "AI")
         self.avatar_image = persona_data.get("avatar_image")
         start_building_id = persona_data.get("start_building_id", start_building_id)
+        self.persona_log_path = (
+            self.saiverse_home / "personas" / self.persona_id / "log.json"
+        )
         self.building_memory_paths: Dict[str, Path] = {
-            b_id: Path("buildings") / b_id / "memory.json" for b_id in self.buildings
+            b_id: self.saiverse_home / "buildings" / b_id / "log.json"
+            for b_id in self.buildings
         }
         self.action_priority = self._load_action_priority(action_priority_path)
         if building_histories is None:
@@ -124,6 +129,24 @@ class Router:
         self.emotion_module = EmotionControlModule()
         self._load_session()
 
+    def _append_to_old_log(self, base_dir: Path, msgs: List[Dict[str, str]]) -> None:
+        """Append messages to a rotating log under base_dir/old_log"""
+        old_dir = base_dir / "old_log"
+        old_dir.mkdir(parents=True, exist_ok=True)
+        files = sorted(old_dir.glob("*.json"))
+        target = files[-1] if files else None
+        if target is None or target.stat().st_size > 100 * 1024:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            target = old_dir / f"{timestamp}.json"
+            if not target.exists():
+                target.write_text("[]", encoding="utf-8")
+        try:
+            data = json.loads(target.read_text(encoding="utf-8"))
+        except Exception:
+            data = []
+        data.extend(msgs)
+        target.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
     def _add_to_history(self, msg: Dict[str, str], building_id: Optional[str] = None) -> None:
         """Append a message to history and trim to 120000 characters."""
         if msg.get("role") == "assistant" and "persona_id" not in msg:
@@ -135,10 +158,12 @@ class Router:
         total_b = sum(len(m.get("content", "")) for m in hist)
         while total_b > 120000 and hist:
             removed = hist.pop(0)
+            self._append_to_old_log(self.building_memory_paths[b_id].parent, [removed])
             total_b -= len(removed.get("content", ""))
         total = sum(len(m.get("content", "")) for m in self.messages)
         while total > 120000 and self.messages:
             removed = self.messages.pop(0)
+            self._append_to_old_log(self.persona_log_path.parent, [removed])
             total -= len(removed.get("content", ""))
 
     def _add_to_building_history_only(self, b_id: str, msg: Dict[str, str]) -> None:
@@ -148,6 +173,7 @@ class Router:
         total_b = sum(len(m.get("content", "")) for m in hist)
         while total_b > 120000 and hist:
             removed = hist.pop(0)
+            self._append_to_old_log(self.building_memory_paths[b_id].parent, [removed])
             total_b -= len(removed.get("content", ""))
 
     def _recent_history(self, max_chars: int) -> List[Dict[str, str]]:
@@ -207,14 +233,36 @@ class Router:
             try:
                 data = json.loads(self.memory_path.read_text(encoding="utf-8"))
                 self.current_building_id = data.get("current_building_id", "air_room")
-                self.messages = data.get("messages", [])
                 self.auto_count = data.get("auto_count", 0)
                 self.last_auto_prompt_times.update(data.get("last_auto_prompt_times", {}))
-                self.emotion = data.get("emotion", {"stability": {"mean": 0, "variance": 1}, "affect": {"mean": 0, "variance": 1}, "resonance": {"mean": 0, "variance": 1}, "attitude": {"mean": 0, "variance": 1}})
+                self.emotion = data.get(
+                    "emotion",
+                    {
+                        "stability": {"mean": 0, "variance": 1},
+                        "affect": {"mean": 0, "variance": 1},
+                        "resonance": {"mean": 0, "variance": 1},
+                        "attitude": {"mean": 0, "variance": 1},
+                    },
+                )
             except json.JSONDecodeError:
                 logging.warning("Failed to load session memory, starting fresh")
         else:
             self.emotion = {"stability": {"mean": 0, "variance": 1}, "affect": {"mean": 0, "variance": 1}, "resonance": {"mean": 0, "variance": 1}, "attitude": {"mean": 0, "variance": 1}}
+        if self.persona_log_path.exists():
+            try:
+                self.messages = json.loads(self.persona_log_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                logging.warning("Failed to load persona log, starting empty")
+                self.messages = []
+        else:
+            if self.memory_path.exists():
+                try:
+                    data = json.loads(self.memory_path.read_text(encoding="utf-8"))
+                    self.messages = data.get("messages", [])
+                except Exception:
+                    self.messages = []
+            else:
+                self.messages = []
         for b_id, path in self.building_memory_paths.items():
             if b_id in self.building_histories:
                 continue
@@ -225,17 +273,27 @@ class Router:
                     logging.warning("Failed to load building history %s", b_id)
                     self.building_histories[b_id] = []
             else:
-                self.building_histories[b_id] = []
+                fallback = Path("buildings") / b_id / "memory.json"
+                if fallback.exists():
+                    try:
+                        self.building_histories[b_id] = json.loads(fallback.read_text(encoding="utf-8"))
+                    except json.JSONDecodeError:
+                        self.building_histories[b_id] = []
+                else:
+                    self.building_histories[b_id] = []
                     
     def _save_session(self) -> None:
         data = {
             "current_building_id": self.current_building_id,
-            "messages": self.messages,
             "auto_count": self.auto_count,
             "last_auto_prompt_times": self.last_auto_prompt_times,
             "emotion": self.emotion,
         }
         self.memory_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        self.persona_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.persona_log_path.write_text(
+            json.dumps(self.messages, ensure_ascii=False), encoding="utf-8"
+        )
         for b_id, path in self.building_memory_paths.items():
             hist = self.building_histories.get(b_id, [])
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -365,7 +423,7 @@ class Router:
                 resp = requests.post(
                     "http://localhost:11434/v1/chat/completions",
                     json={"model": self.model, "messages": msgs, "stream": False},
-                    timeout=60,
+                    timeout=300,
                 )
                 resp.raise_for_status()
                 data = resp.json()
