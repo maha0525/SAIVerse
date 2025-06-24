@@ -21,6 +21,7 @@ AIたちは「Building（施設）」と呼ばれる仮想空間を移動しな�
 - 各種Buildingはファイル単位で切り出し可能な設計に
 
 - ユーザーエンドのUIとしてGradioを使用
+- OpenAI / Gemini / Ollama でストリーミング応答に対応
 
 ### セットアップ
 ルートディレクトリに `.env` ファイルを作成し、`OPENAI_API_KEY` または
@@ -31,6 +32,9 @@ OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=AIza...
 ```
 `python-dotenv` により自動で読み込まれます。
+
+### ストリーミング表示
+`main.py` のGradioインタフェースでは、AIの応答を逐次表示します。OpenAI、Gemini、Ollama の各モデルで利用可能です。
 
 
 #### ✅ 登場するBuilding
