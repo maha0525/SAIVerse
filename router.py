@@ -379,7 +379,9 @@ class Router:
         next_id, think, delta = self._execute_actions(actions)
         # Apply emotion adjustment using external module
         prompt_text = user_message if user_message is not None else system_prompt_extra or ""
-        module_delta = self.emotion_module.evaluate(prompt_text, say)
+        module_delta = self.emotion_module.evaluate(
+            prompt_text, say, current_emotion=self.emotion
+        )
         if module_delta:
             self._apply_emotion_delta(module_delta)
         if system_prompt_extra:

@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 from google import genai
 from google.genai import types
+from typing import Dict, Optional
 
 
 class EmotionControlModule:
@@ -22,10 +23,25 @@ class EmotionControlModule:
             )
         self.client = genai.Client(api_key=api_key)
 
-    def evaluate(self, user_message: str, assistant_message: str):
+    def evaluate(
+        self,
+        user_message: str,
+        assistant_message: str,
+        current_emotion: Optional[Dict[str, Dict[str, float]]] = None,
+    ):
         """Return emotion delta dict based on the latest interaction."""
+        emotion_vals = current_emotion or {}
         prompt = self.prompt_template.format(
-            user_message=user_message, assistant_message=assistant_message
+            user_message=user_message,
+            assistant_message=assistant_message,
+            stability_mean=emotion_vals.get("stability", {}).get("mean", 0),
+            stability_var=emotion_vals.get("stability", {}).get("variance", 0),
+            affect_mean=emotion_vals.get("affect", {}).get("mean", 0),
+            affect_var=emotion_vals.get("affect", {}).get("variance", 0),
+            resonance_mean=emotion_vals.get("resonance", {}).get("mean", 0),
+            resonance_var=emotion_vals.get("resonance", {}).get("variance", 0),
+            attitude_mean=emotion_vals.get("attitude", {}).get("mean", 0),
+            attitude_var=emotion_vals.get("attitude", {}).get("variance", 0),
         )
         try:
             resp = self.client.models.generate_content(
