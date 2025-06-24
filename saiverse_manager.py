@@ -2,7 +2,7 @@ import base64
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Iterator
 
 from buildings import Building
 from buildings.user_room import load as load_user_room
@@ -127,6 +127,14 @@ class SAIVerseManager:
         for router in self.routers.values():
             router._save_session()
         return replies
+
+    def handle_user_input_stream(self, message: str) -> Iterator[str]:
+        for pid in list(self.occupants.get("user_room", [])):
+            for token in self.routers[pid].handle_user_input_stream(message):
+                yield token
+        self._save_building_histories()
+        for router in self.routers.values():
+            router._save_session()
 
     def summon_persona(self, persona_id: str) -> List[str]:
         if persona_id not in self.routers:
