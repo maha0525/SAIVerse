@@ -4,5 +4,12 @@
 出力例:
 {{"stability":{{"mean":0,"variance":0}},"affect":{{"mean":0,"variance":0}},"resonance":{{"mean":0,"variance":0}},"attitude":{{"mean":0,"variance":0}}}}
 数値は-100〜100の範囲で指定できます。変動が不要な項目は0を指定してください。
+
+現在の感情パラメータは以下の通りです。
+- 安定性 mean: {stability_mean}, variance: {stability_var}
+- 情動 mean: {affect_mean}, variance: {affect_var}
+- 共鳴 mean: {resonance_mean}, variance: {resonance_var}
+- 態度 mean: {attitude_mean}, variance: {attitude_var}
+
 [User]: {user_message}
 [Assistant]: {assistant_message}
