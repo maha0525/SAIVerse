@@ -80,6 +80,17 @@ def respond(message: str):
     history = manager.get_building_history("user_room")
     return history
 
+def respond_stream(message: str):
+    """Stream AI response for chat."""
+    history = manager.get_building_history("user_room")
+    history.append({"role": "user", "content": message})
+    ai_message = ""
+    for token in manager.handle_user_input_stream(message):
+        ai_message += token
+        yield history + [{"role": "assistant", "content": ai_message}]
+    final = manager.get_building_history("user_room")
+    yield final
+
 
 def call_persona(name: str):
     persona_id = manager.persona_map.get(name)
@@ -120,7 +131,7 @@ def main():
         with gr.Row():
             persona_drop = gr.Dropdown(choices=PERSONA_CHOICES, value=PERSONA_CHOICES[0], label="ペルソナ選択")
             call_btn = gr.Button("ペルソナを呼ぶ")
-        txt.submit(respond, txt, chatbot)
+        txt.submit(respond_stream, txt, chatbot)
         call_btn.click(call_persona, persona_drop, chatbot)
         model_drop.change(select_model, model_drop, chatbot)
     demo.launch()
