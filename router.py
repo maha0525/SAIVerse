@@ -423,7 +423,7 @@ class Router:
                 resp = requests.post(
                     "http://localhost:11434/v1/chat/completions",
                     json={"model": self.model, "messages": msgs, "stream": False},
-                    timeout=60,
+                    timeout=300,
                 )
                 resp.raise_for_status()
                 data = resp.json()
