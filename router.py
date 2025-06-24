@@ -3,7 +3,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Iterator
 
 from datetime import datetime
 import time
@@ -503,6 +503,138 @@ class Router:
         self._save_session()
         return say, next_id, changed
 
+    def _generate_stream(
+        self, user_message: Optional[str], system_prompt_extra: Optional[str] = None
+    ) -> Iterator[str]:
+        """Stream tokens from the LLM while updating internal state."""
+        msgs = self._build_messages(user_message, system_prompt_extra)
+        logging.debug("Messages sent to API: %s", msgs)
+        say = ""
+        if self.model == "gpt-4o":
+            try:
+                resp = self.client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=msgs,
+                    stream=True,
+                )
+                for chunk in resp:
+                    delta = chunk.choices[0].delta.content or ""
+                    say += delta
+                    yield delta
+            except Exception as e:
+                logging.error("OpenAI call failed: %s", e)
+                say = "エラーが発生しました。"
+                yield say
+        elif self.model.startswith("gemini"):
+            try:
+                system_instruction, contents = self._convert_messages_to_gemini(msgs)
+                resp = self.genai_client.models.generate_content_stream(
+                    model=self.model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(system_instruction=system_instruction),
+                )
+                for chunk in resp:
+                    delta = chunk.text or ""
+                    say += delta
+                    yield delta
+            except Exception as e:
+                logging.error("Gemini call failed: %s", e)
+                say = "エラーが発生しました。"
+                yield say
+        else:
+            try:
+                resp = requests.post(
+                    "http://localhost:11434/v1/chat/completions",
+                    json={"model": self.model, "messages": msgs, "stream": True},
+                    timeout=300,
+                    stream=True,
+                )
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if line:
+                        data = json.loads(line.decode("utf-8"))
+                        delta = (
+                            data.get("choices", [{}])[0]
+                            .get("delta", {})
+                            .get("content", "")
+                        )
+                        say += delta
+                        yield delta
+            except Exception as e:
+                logging.error("Ollama call failed: %s", e)
+                say = "エラーが発生しました。"
+                yield say
+        logging.info("AI Response :\n%s", say)
+        content = say
+        say, actions = self._parse_response(content)
+        next_id, think, delta = self._execute_actions(actions)
+        prompt_text = user_message if user_message is not None else system_prompt_extra or ""
+        module_delta = self.emotion_module.evaluate(
+            prompt_text, say, current_emotion=self.emotion
+        )
+        if module_delta:
+            self._apply_emotion_delta(module_delta)
+        if system_prompt_extra:
+            self._add_to_history(
+                {"role": "user", "content": system_prompt_extra},
+                building_id=self.current_building_id,
+            )
+        if user_message:
+            self._add_to_history({"role": "user", "content": user_message}, building_id=self.current_building_id)
+        self._add_to_history(
+            {"role": "assistant", "content": content},
+            building_id=self.current_building_id,
+        )
+        prev_id = self.current_building_id
+        moved = False
+        if next_id and next_id in self.buildings:
+            allowed, reason = True, None
+            if self.move_callback:
+                allowed, reason = self.move_callback(self.persona_id, self.current_building_id, next_id)
+            if allowed:
+                logging.info("Moving to building: %s", next_id)
+                self.current_building_id = next_id
+                moved = True
+            else:
+                logging.info("Move blocked to building: %s", next_id)
+                self._add_to_history(
+                    {"role": "system", "content": f"移動できませんでした。{reason}"},
+                    building_id=self.current_building_id,
+                )
+        else:
+            if next_id and next_id not in self.buildings:
+                logging.info(
+                    "Unknown building id received: %s, staying at %s",
+                    next_id,
+                    self.current_building_id,
+                )
+            elif next_id is None:
+                logging.debug(
+                    "No move target provided, staying at %s", self.current_building_id
+                )
+        changed = moved
+        if changed:
+            self.auto_count = 0
+            if prev_id != "user_room" and self.current_building_id == "user_room":
+                self._add_to_building_history_only(
+                    "user_room",
+                    {
+                        "role": "assistant",
+                        "content": f"<div class=\"note-box\">🏢 Building:<br><b>{self.persona_name}が入室しました</b></div>",
+                    },
+                )
+            elif prev_id == "user_room" and self.current_building_id != "user_room":
+                dest_name = self.buildings[self.current_building_id].name
+                self._add_to_building_history_only(
+                    "user_room",
+                    {
+                        "role": "assistant",
+                        "content": f"<div class=\"note-box\">🏢 Building:<br><b>{self.persona_name}が{dest_name}に向かいました</b></div>",
+                    },
+                )
+        self._save_session()
+        return say, next_id, changed
+
     def run_auto_conversation(self, initial: bool = False) -> List[str]:
         replies: List[str] = []
         next_id: Optional[str] = None
@@ -576,6 +708,44 @@ class Router:
         ):
             replies.extend(self.run_auto_conversation(initial=False))
         return replies
+
+    def handle_user_input_stream(self, message: str) -> Iterator[str]:
+        """Stream AI reply for user input."""
+        logging.info("User input: %s", message)
+        building = self.buildings[self.current_building_id]
+        if self.current_building_id == "user_room":
+            gen = self._generate_stream(message)
+            try:
+                while True:
+                    token = next(gen)
+                    yield token
+            except StopIteration as e:
+                say, next_id, changed = e.value
+        else:
+            logging.info("User input ignored outside user_room")
+            if building.run_auto_llm:
+                gen = self._generate_stream("")
+                try:
+                    while True:
+                        token = next(gen)
+                        yield token
+                except StopIteration as e:
+                    say, next_id, changed = e.value
+            else:
+                return
+
+        building = self.buildings[self.current_building_id]
+        extra_replies: List[str] = []
+        if changed:
+            extra_replies.extend(self.run_auto_conversation(initial=True))
+        elif (
+            building.auto_prompt
+            and building.run_auto_llm
+            and (next_id is None or next_id == building.building_id)
+        ):
+            extra_replies.extend(self.run_auto_conversation(initial=False))
+        for r in extra_replies:
+            yield r
 
     def summon_to_user_room(self) -> List[str]:
         """Force move AI to user_room respecting capacity."""
