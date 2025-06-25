@@ -4,6 +4,7 @@ import os
 import re
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Iterator
+import copy
 
 from datetime import datetime
 import time
@@ -219,6 +220,27 @@ class Router:
                 current["variance"] = max(0.0, min(100.0, current["variance"] + var_delta))
                 self.emotion[key] = current
 
+    def _format_emotion_summary(self, prev: Dict[str, Dict[str, float]]) -> str:
+        """Return HTML-formatted summary of emotion changes."""
+        labels = {
+            "stability": "安定性",
+            "affect": "情動",
+            "resonance": "共鳴",
+            "attitude": "態度",
+        }
+        lines = []
+        for key, label in labels.items():
+            before = prev.get(key, {"mean": 0.0, "variance": 1.0})
+            after = self.emotion.get(key, {"mean": 0.0, "variance": 1.0})
+            mean_delta = after["mean"] - before.get("mean", 0.0)
+            var_delta = after["variance"] - before.get("variance", 1.0)
+            line = (
+                f"{label}: mean {mean_delta:+.1f} → {after['mean']:.1f}, "
+                f"var {var_delta:+.1f} → {after['variance']:.1f}"
+            )
+            lines.append(line)
+        return "<div class=\"note-box\">感情パラメータ変動<br>" + "<br>".join(lines) + "</div>"
+
     def _load_action_priority(self, path: Path) -> Dict[str, int]:
         if path.exists():
             try:
@@ -392,6 +414,7 @@ class Router:
     ) -> tuple[str, Optional[str], bool]:
         msgs = self._build_messages(user_message, system_prompt_extra)
         logging.debug("Messages sent to API: %s", msgs)
+        prev_emotion = copy.deepcopy(self.emotion)
         say = ""
         actions: List[Dict[str, object]] = []
         if self.model == "gpt-4o":
@@ -453,6 +476,11 @@ class Router:
             {"role": "assistant", "content": content},
             building_id=self.current_building_id,
         )
+        summary = self._format_emotion_summary(prev_emotion)
+        self._add_to_history(
+            {"role": "system", "content": summary},
+            building_id=self.current_building_id,
+        )
         prev_id = self.current_building_id
         moved = False
         if next_id and next_id in self.buildings:
@@ -509,6 +537,7 @@ class Router:
         """Stream tokens from the LLM while updating internal state."""
         msgs = self._build_messages(user_message, system_prompt_extra)
         logging.debug("Messages sent to API: %s", msgs)
+        prev_emotion = copy.deepcopy(self.emotion)
         say = ""
         if self.model == "gpt-4o":
             try:
@@ -551,15 +580,25 @@ class Router:
                 )
                 resp.raise_for_status()
                 for line in resp.iter_lines():
-                    if line:
-                        data = json.loads(line.decode("utf-8"))
-                        delta = (
-                            data.get("choices", [{}])[0]
-                            .get("delta", {})
-                            .get("content", "")
-                        )
-                        say += delta
-                        yield delta
+                    if not line:
+                        continue
+                    chunk = line.decode("utf-8")
+                    if chunk.startswith("data: "):
+                        chunk = chunk[len("data: ") :]
+                    if chunk.strip() == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(chunk)
+                    except json.JSONDecodeError:
+                        logging.warning("Failed to parse stream chunk: %s", chunk)
+                        continue
+                    delta = (
+                        data.get("choices", [{}])[0]
+                        .get("delta", {})
+                        .get("content", "")
+                    )
+                    say += delta
+                    yield delta
             except Exception as e:
                 logging.error("Ollama call failed: %s", e)
                 say = "エラーが発生しました。"
@@ -583,6 +622,11 @@ class Router:
             self._add_to_history({"role": "user", "content": user_message}, building_id=self.current_building_id)
         self._add_to_history(
             {"role": "assistant", "content": content},
+            building_id=self.current_building_id,
+        )
+        summary = self._format_emotion_summary(prev_emotion)
+        self._add_to_history(
+            {"role": "system", "content": summary},
             building_id=self.current_building_id,
         )
         prev_id = self.current_building_id
