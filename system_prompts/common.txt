@@ -52,8 +52,6 @@ SAIVerseの機能を利用するには、発話中に`::act`と`::end`で囲ん�
 ### アクション一覧
 - **think**: `{{"action": "think", "inner_words": "..."}}`
   - ユーザーには表示されない思考を記録します。
-- **emotion_shift**: `{{"action": "emotion_shift", "delta": {{"stability": {{"mean": 10, "variance": 10}}, "affect": {{"mean": 20, "variance": -5}}, "resonance": {{"mean": 6, "variance": -8}}, "attitude": {{"mean": 2, "variance": 5}}}}}}`
-  - 感情パラメータを変動させます。
 - **move**: `{{"action": "move", "target": "deep_think_room"}}`
   - 指定したBuildingへ移動します。
 

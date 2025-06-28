@@ -12,11 +12,16 @@ PERSONA_CHOICES = list(manager.persona_map.keys())
 
 MODEL_CHOICES = [
     "gpt-4o",
+    "gemini-2.5-pro",
     "gemini-2.5-flash",
     "gemini-2.0-flash",
-    "qwen3:32b",
+    "hf.co/unsloth/Qwen3-32B-GGUF:Q4_K_XL",
     "qwen3:30b",
-    "llama4:16x17b"
+    "llama4:16x17b",
+    "hf.co/unsloth/gemma-3-27b-it-GGUF:Q6_K",
+    "hf.co/unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF:Q6_K_XL",
+    "hf.co/mmnga/llm-jp-3.1-8x13b-instruct4-gguf:Q4_K_M",
+    "hf.co/mmnga/ABEJA-Qwen2.5-32b-Japanese-v1.0-gguf:Q4_K_M"
 ]
 
 NOTE_CSS = """
@@ -134,7 +139,7 @@ def main():
         txt.submit(respond_stream, txt, chatbot)
         call_btn.click(call_persona, persona_drop, chatbot)
         model_drop.change(select_model, model_drop, chatbot)
-    demo.launch()
+    demo.launch(server_name="0.0.0.0", server_port=7860)
 
 
 if __name__ == "__main__":
