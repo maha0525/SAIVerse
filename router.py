@@ -177,6 +177,17 @@ class Router:
             self._append_to_old_log(self.building_memory_paths[b_id].parent, [removed])
             total_b -= len(removed.get("content", ""))
 
+    def _add_to_persona_history_only(self, msg: Dict[str, str]) -> None:
+        """Append a message only to the persona-wide history."""
+        if msg.get("role") == "assistant" and "persona_id" not in msg:
+            msg["persona_id"] = self.persona_id
+        self.messages.append(msg)
+        total = sum(len(m.get("content", "")) for m in self.messages)
+        while total > 120000 and self.messages:
+            removed = self.messages.pop(0)
+            self._append_to_old_log(self.persona_log_path.parent, [removed])
+            total -= len(removed.get("content", ""))
+
     def _recent_history(self, max_chars: int) -> List[Dict[str, str]]:
         selected = []
         count = 0
@@ -477,9 +488,12 @@ class Router:
             building_id=self.current_building_id,
         )
         summary = self._format_emotion_summary(prev_emotion)
-        self._add_to_history(
-            {"role": "system", "content": summary},
-            building_id=self.current_building_id,
+        # ペルソナ履歴には system ロールで記録
+        self._add_to_persona_history_only({"role": "system", "content": summary})
+        # UI 上でも感情変動を確認できるよう、assistant ロールで履歴を残す
+        self._add_to_building_history_only(
+            self.current_building_id,
+            {"role": "assistant", "content": summary},
         )
         prev_id = self.current_building_id
         moved = False
@@ -625,9 +639,12 @@ class Router:
             building_id=self.current_building_id,
         )
         summary = self._format_emotion_summary(prev_emotion)
-        self._add_to_history(
-            {"role": "system", "content": summary},
-            building_id=self.current_building_id,
+        # ペルソナ履歴には system ロールで記録
+        self._add_to_persona_history_only({"role": "system", "content": summary})
+        # UI に表示されるよう assistant ロールでも履歴追加
+        self._add_to_building_history_only(
+            self.current_building_id,
+            {"role": "assistant", "content": summary},
         )
         prev_id = self.current_building_id
         moved = False
