@@ -18,7 +18,24 @@ from emotion_module import EmotionControlModule
 
 load_dotenv()
 
-
+GEMINI_SAFETY_CONFIG = [
+    types.SafetySetting(
+        category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+        threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    ),
+    types.SafetySetting(
+        category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+        threshold=types.HarmBlockThreshold.BLOCK_NONE,
+    ),
+    types.SafetySetting(
+        category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+        threshold=types.HarmBlockThreshold.BLOCK_NONE,
+    ),
+    types.SafetySetting(
+        category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    ),
+]
 
 
 from buildings import Building
@@ -445,7 +462,7 @@ class Router:
                 resp = self.genai_client.models.generate_content(
                     model=self.model,
                     contents=contents,
-                    config=types.GenerateContentConfig(system_instruction=system_instruction),
+                    config=types.GenerateContentConfig(system_instruction=system_instruction, safety_settings=GEMINI_SAFETY_CONFIG),
                 )
                 content = resp.text
                 logging.debug("Raw gemini response: %s", content)
@@ -574,7 +591,7 @@ class Router:
                 resp = self.genai_client.models.generate_content_stream(
                     model=self.model,
                     contents=contents,
-                    config=types.GenerateContentConfig(system_instruction=system_instruction),
+                    config=types.GenerateContentConfig(system_instruction=system_instruction, safety_settings=GEMINI_SAFETY_CONFIG),
                 )
                 for chunk in resp:
                     delta = chunk.text or ""
