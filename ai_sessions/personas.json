@@ -1,4 +1,10 @@
 [
-  {"persona_id": "air", "persona_name": "エア"},
-  {"persona_id": "eris", "persona_name": "エリス"}
+  {
+    "persona_id": "eris",
+    "persona_name": "エリス"
+  },
+  {
+    "persona_id": "air",
+    "persona_name": "エア"
+  }
 ]
