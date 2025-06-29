@@ -1,5 +1,6 @@
 import logging
 import os
+import json
 from typing import Dict, List, Iterator, Tuple
 
 import requests
@@ -58,7 +59,7 @@ class OpenAIClient(LLMClient):
             logging.debug("Raw openai response: %s", content)
             return content or ""
         except Exception as e:
-            logging.error("OpenAI call failed: %s", e)
+            logging.exception("OpenAI call failed")
             return "エラーが発生しました。"
 
     def generate_stream(self, messages: List[Dict[str, str]]) -> Iterator[str]:
@@ -71,7 +72,7 @@ class OpenAIClient(LLMClient):
             for chunk in resp:
                 yield chunk.choices[0].delta.content or ""
         except Exception as e:
-            logging.error("OpenAI call failed: %s", e)
+            logging.exception("OpenAI call failed")
             yield "エラーが発生しました。"
 
 class GeminiClient(LLMClient):
@@ -112,7 +113,7 @@ class GeminiClient(LLMClient):
             logging.debug("Raw gemini response: %s", resp.text)
             return resp.text
         except Exception as e:
-            logging.error("Gemini call failed: %s", e)
+            logging.exception("Gemini call failed")
             return "エラーが発生しました。"
 
     def generate_stream(self, messages: List[Dict[str, str]]) -> Iterator[str]:
@@ -130,20 +131,26 @@ class GeminiClient(LLMClient):
             for chunk in resp:
                 yield chunk.text or ""
         except Exception as e:
-            logging.error("Gemini call failed: %s", e)
+            logging.exception("Gemini call failed")
             yield "エラーが発生しました。"
 
 class OllamaClient(LLMClient):
     """Client for Ollama API."""
-    def __init__(self, model: str):
+    def __init__(self, model: str, context_length: int):
         self.model = model
         self.url = "http://localhost:11434/v1/chat/completions"
+        self.context_length = context_length
 
     def generate(self, messages: List[Dict[str, str]]) -> str:
         try:
             resp = requests.post(
                 self.url,
-                json={"model": self.model, "messages": messages, "stream": False},
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "stream": False,
+                    "options": {"num_ctx": self.context_length}
+                },
                 timeout=300,
             )
             resp.raise_for_status()
@@ -152,14 +159,19 @@ class OllamaClient(LLMClient):
             logging.debug("Raw ollama response: %s", content)
             return content
         except Exception as e:
-            logging.error("Ollama call failed: %s", e)
+            logging.exception("Ollama call failed")
             return "エラーが発生しました。"
 
     def generate_stream(self, messages: List[Dict[str, str]]) -> Iterator[str]:
         try:
             resp = requests.post(
                 self.url,
-                json={"model": self.model, "messages": messages, "stream": True},
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "stream": True,
+                    "options": {"num_ctx": self.context_length}
+                },
                 timeout=300,
                 stream=True,
             )
@@ -179,15 +191,15 @@ class OllamaClient(LLMClient):
                 except json.JSONDecodeError:
                     logging.warning("Failed to parse stream chunk: %s", chunk)
         except Exception as e:
-            logging.error("Ollama call failed: %s", e)
+            logging.exception("Ollama call failed")
             yield "エラーが発生しました。"
 
 # --- Factory ---
-def get_llm_client(model: str, provider: str) -> LLMClient:
+def get_llm_client(model: str, provider: str, context_length: int) -> LLMClient:
     """Factory function to get the appropriate LLM client."""
     if provider == "openai":
         return OpenAIClient(model)
     elif provider == "gemini":
         return GeminiClient(model)
     else:
-        return OllamaClient(model)
+        return OllamaClient(model, context_length)
