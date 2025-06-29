@@ -5,24 +5,13 @@ import time
 import gradio as gr
 
 from saiverse_manager import SAIVerseManager
+from model_configs import get_model_choices
 
 logging.basicConfig(level=logging.INFO)
 manager = SAIVerseManager()
 PERSONA_CHOICES = list(manager.persona_map.keys())
 
-MODEL_CHOICES = [
-    "gpt-4o",
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "hf.co/unsloth/Qwen3-32B-GGUF:Q4_K_XL",
-    "qwen3:30b",
-    "llama4:16x17b",
-    "hf.co/unsloth/gemma-3-27b-it-GGUF:Q6_K",
-    "hf.co/unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF:Q6_K_XL",
-    "hf.co/mmnga/llm-jp-3.1-8x13b-instruct4-gguf:Q4_K_M",
-    "hf.co/mmnga/ABEJA-Qwen2.5-32b-Japanese-v1.0-gguf:Q4_K_M"
-]
+MODEL_CHOICES = get_model_choices()
 
 NOTE_CSS = """
 /* ① まず器（avatar-container）を拡大 */

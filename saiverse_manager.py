@@ -11,6 +11,7 @@ from buildings.air_room import load as load_air_room
 from buildings.eris_room import load as load_eris_room
 from buildings.const_test_room import load as load_const_test_room
 from router import Router
+from model_configs import get_model_provider, get_context_length
 
 
 DEFAULT_MODEL = "gpt-4o"
@@ -39,6 +40,8 @@ class SAIVerseManager:
             for b in self.buildings
         }
         self.model = model
+        self.context_length = get_context_length(model)
+        self.provider = get_model_provider(model)
         self.building_histories: Dict[str, List[Dict[str, str]]] = {}
         default_avatar_path = Path("assets/icons/blank.png")
         if default_avatar_path.exists():
@@ -100,6 +103,8 @@ class SAIVerseManager:
                 move_callback=self._move_persona,
                 start_building_id=start_id,
                 model=self.model,
+                context_length=self.context_length,
+                provider=self.provider,
             )
             self.routers[pid] = router
             self.occupants[router.current_building_id].append(pid)
@@ -158,8 +163,10 @@ class SAIVerseManager:
     def set_model(self, model: str) -> None:
         """Update LLM model for all routers."""
         self.model = model
+        self.context_length = get_context_length(model)
+        self.provider = get_model_provider(model)
         for router in self.routers.values():
-            router.set_model(model)
+            router.set_model(model, self.context_length, self.provider)
 
     def get_building_history(self, building_id: str) -> List[Dict[str, str]]:
         history = self.building_histories.get(building_id, [])
