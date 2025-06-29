@@ -130,13 +130,17 @@ def main():
             ),
             height=800
         )
-        txt = gr.Textbox(label="しゃべること")
+        with gr.Row():
+            with gr.Column(scale=4):
+                txt = gr.Textbox(placeholder="ここにメッセージを入力...", lines=4)
+            with gr.Column(scale=1):
+                submit = gr.Button("送信")
         with gr.Row():
             model_drop = gr.Dropdown(choices=MODEL_CHOICES, value=MODEL_CHOICES[0], label="モデル選択")
         with gr.Row():
             persona_drop = gr.Dropdown(choices=PERSONA_CHOICES, value=PERSONA_CHOICES[0], label="ペルソナ選択")
             call_btn = gr.Button("ペルソナを呼ぶ")
-        txt.submit(respond_stream, txt, chatbot)
+        submit.click(respond_stream, txt, chatbot)
         call_btn.click(call_persona, persona_drop, chatbot)
         model_drop.change(select_model, model_drop, chatbot)
     demo.launch(server_name="0.0.0.0", server_port=7860)
