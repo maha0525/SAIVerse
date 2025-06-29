@@ -104,7 +104,7 @@ class Router:
         self.move_callback = move_callback
         self.model = model
         self.context_length = context_length
-        self.llm_client = get_llm_client(model, provider)
+        self.llm_client = get_llm_client(model, provider, self.context_length)
         self.emotion_module = EmotionControlModule()
 
     def _load_action_priority(self, path: Path) -> Dict[str, int]:
@@ -159,7 +159,7 @@ class Router:
     def set_model(self, model: str, context_length: int, provider: str) -> None:
         self.model = model
         self.context_length = context_length
-        self.llm_client = get_llm_client(model, provider)
+        self.llm_client = get_llm_client(model, provider, context_length)
 
     def _build_messages(
         self, user_message: Optional[str], extra_system_prompt: Optional[str] = None
