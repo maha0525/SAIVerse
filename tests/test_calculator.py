@@ -5,6 +5,9 @@ class TestCalculator(unittest.TestCase):
     def test_calculate_expression(self):
         self.assertEqual(calculate_expression("(3+2-9)*6/2"), -12.0)
 
+    def test_factorial(self):
+        self.assertEqual(calculate_expression("5^"), 120.0)
+
     def test_tool_specs(self):
         gem_tool = get_gemini_tool()
         self.assertEqual(gem_tool.function_declarations[0].name, "calculate_expression")
