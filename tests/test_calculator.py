@@ -5,6 +5,7 @@ from tools.calculator import (
     get_gemini_tool,
     get_openai_tool,
     logger,
+    call_history,
 )
 
 class TestCalculator(unittest.TestCase):
@@ -14,7 +15,7 @@ class TestCalculator(unittest.TestCase):
     def test_factorial(self):
         self.assertEqual(calculate_expression("5^"), 120.0)
 
-    def test_logging_file(self):
+    def test_call_history_and_file(self):
         log_file = Path("saiverse_log.txt")
         # Logger initialization should create the file
         self.assertTrue(log_file.exists())
@@ -22,12 +23,15 @@ class TestCalculator(unittest.TestCase):
             init_content = f.read()
         self.assertIn("calculator logger initialized", init_content)
 
-        size_before = log_file.stat().st_size
+        size_before_len = len(call_history)
+        file_size_before = log_file.stat().st_size
         calculate_expression("1+1")
+        self.assertEqual(len(call_history), size_before_len + 1)
+        self.assertEqual(call_history[-1], "1+1")
         for h in logger.handlers:
             h.flush()
         with open(log_file) as f:
-            f.seek(size_before)
+            f.seek(file_size_before)
             content = f.read()
         self.assertIn("calculate_expression called with: 1+1", content)
 
