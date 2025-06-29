@@ -16,11 +16,16 @@ class TestCalculator(unittest.TestCase):
 
     def test_logging_file(self):
         log_file = Path("saiverse_log.txt")
-        size_before = log_file.stat().st_size if log_file.exists() else 0
+        # Logger initialization should create the file
+        self.assertTrue(log_file.exists())
+        with open(log_file) as f:
+            init_content = f.read()
+        self.assertIn("calculator logger initialized", init_content)
+
+        size_before = log_file.stat().st_size
         calculate_expression("1+1")
         for h in logger.handlers:
             h.flush()
-        self.assertTrue(log_file.exists())
         with open(log_file) as f:
             f.seek(size_before)
             content = f.read()
