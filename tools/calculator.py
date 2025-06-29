@@ -17,7 +17,10 @@ LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 LOG_FILE.touch(exist_ok=True)
 
 logger = logging.getLogger(__name__)
-if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(LOG_FILE) for h in logger.handlers):
+if not any(
+    isinstance(h, logging.FileHandler) and h.baseFilename == str(LOG_FILE)
+    for h in logger.handlers
+):
     handler = logging.FileHandler(LOG_FILE)
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     handler.setFormatter(formatter)
@@ -25,6 +28,9 @@ if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(LOG_FILE
 logger.setLevel(logging.INFO)
 logger.propagate = False
 logger.info("calculator logger initialized")
+
+# Keep in-memory history of tool calls for verification without relying on file output
+call_history: list[str] = []
 
 # Supported operators
 _OPERATORS = {
@@ -76,6 +82,7 @@ def _expand_factorial(expression: str) -> str:
 def calculate_expression(expression: str) -> float:
     """Evaluate a simple arithmetic expression with factorial support."""
     logger.info("calculate_expression called with: %s", expression)
+    call_history.append(expression)
     expression = _expand_factorial(expression)
     tree = ast.parse(expression, mode="eval")
     return float(_eval(tree.body))
