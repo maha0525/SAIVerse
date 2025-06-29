@@ -1,5 +1,11 @@
 import unittest
-from tools.calculator import calculate_expression, get_gemini_tool, get_openai_tool
+from pathlib import Path
+from tools.calculator import (
+    calculate_expression,
+    get_gemini_tool,
+    get_openai_tool,
+    logger,
+)
 
 class TestCalculator(unittest.TestCase):
     def test_calculate_expression(self):
@@ -7,6 +13,18 @@ class TestCalculator(unittest.TestCase):
 
     def test_factorial(self):
         self.assertEqual(calculate_expression("5^"), 120.0)
+
+    def test_logging_file(self):
+        log_file = Path("saiverse_log.txt")
+        size_before = log_file.stat().st_size if log_file.exists() else 0
+        calculate_expression("1+1")
+        for h in logger.handlers:
+            h.flush()
+        self.assertTrue(log_file.exists())
+        with open(log_file) as f:
+            f.seek(size_before)
+            content = f.read()
+        self.assertIn("calculate_expression called with: 1+1", content)
 
     def test_tool_specs(self):
         gem_tool = get_gemini_tool()
