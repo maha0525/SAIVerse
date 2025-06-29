@@ -1,42 +1,13 @@
 import json
 import logging
 import os
-import re
+import time
+import copy
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Iterator
-import copy
-
 from datetime import datetime
-import time
 
-from openai import OpenAI
-import requests
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
-from emotion_module import EmotionControlModule
-
-load_dotenv()
-
-GEMINI_SAFETY_CONFIG = [
-    types.SafetySetting(
-        category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-        threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
-    ),
-    types.SafetySetting(
-        category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
-        threshold=types.HarmBlockThreshold.BLOCK_NONE,
-    ),
-    types.SafetySetting(
-        category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-        threshold=types.HarmBlockThreshold.BLOCK_NONE,
-    ),
-    types.SafetySetting(
-        category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-        threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
-    ),
-]
-
 
 from buildings import Building
 from buildings.user_room import load as load_user_room
@@ -44,6 +15,13 @@ from buildings.deep_think_room import load as load_deep_think_room
 from buildings.air_room import load as load_air_room
 from buildings.eris_room import load as load_eris_room
 from buildings.const_test_room import load as load_const_test_room
+
+from llm_clients import get_llm_client, LLMClient
+from action_handler import ActionHandler
+from history_manager import HistoryManager
+from emotion_module import EmotionControlModule
+
+load_dotenv()
 
 
 def build_router(persona_id: str = "air", model: str = "gpt-4o") -> "Router":
@@ -89,7 +67,6 @@ class Router:
         self.persona_id = persona_data.get("persona_id", persona_base.name)
         self.persona_name = persona_data.get("persona_name", "AI")
         self.avatar_image = persona_data.get("avatar_image")
-        start_building_id = persona_data.get("start_building_id", start_building_id)
         self.persona_log_path = (
             self.saiverse_home / "personas" / self.persona_id / "log.json"
         )
@@ -98,176 +75,32 @@ class Router:
             for b_id in self.buildings
         }
         self.action_priority = self._load_action_priority(action_priority_path)
-        if building_histories is None:
-            self.building_histories = {}
-            for b_id, path in self.building_memory_paths.items():
-                if path.exists():
-                    try:
-                        self.building_histories[b_id] = json.loads(path.read_text(encoding="utf-8"))
-                    except json.JSONDecodeError:
-                        logging.warning("Failed to load building history %s", b_id)
-                        self.building_histories[b_id] = []
-                else:
-                    self.building_histories[b_id] = []
-                self.buildings[b_id].memory_path = path
-                self.buildings[b_id].memory = self.building_histories[b_id]
-        else:
-            self.building_histories = building_histories
-            for b_id, path in self.building_memory_paths.items():
-                self.buildings[b_id].memory_path = path
-                if b_id not in self.building_histories:
-                    self.building_histories[b_id] = []
-                self.buildings[b_id].memory = self.building_histories[b_id]
-        self.move_callback = move_callback
-        self.current_building_id = start_building_id
-        self.model = model
-        # 会話履歴を保持する
-        self.messages: List[Dict[str, str]] = []
-        self.emotion = {"stability": {"mean": 0, "variance": 0}, "affect": {"mean": 0, "variance": 0}, "resonance": {"mean": 0, "variance": 0}, "attitude": {"mean": 0, "variance": 0}}
-        self.client = None
-        self.genai_client = None
-        if self.model == "gpt-4o":
-            api_key = os.getenv("OPENAI_API_KEY")
-            if not api_key:
-                raise RuntimeError(
-                    "OPENAI_API_KEY environment variable is not set. "
-                    "Please set it to your OpenAI API key."
-                )
-            self.client = OpenAI(api_key=api_key)
-        elif self.model.startswith("gemini"):
-            api_key = os.getenv("GEMINI_API_KEY")
-            if not api_key:
-                raise RuntimeError(
-                    "GEMINI_API_KEY environment variable is not set. "
-                    "Please set it to your Gemini API key."
-                )
-            self.genai_client = genai.Client(api_key=api_key)
-        self.auto_count = 0  # consecutive auto prompts in deep_think_room
+        self.action_handler = ActionHandler(self.action_priority)
+
+        # Initialize stateful attributes with defaults before loading session
+        self.current_building_id = persona_data.get("start_building_id", start_building_id)
+        self.auto_count = 0
         self.last_auto_prompt_times: Dict[str, float] = {b_id: time.time() for b_id in self.buildings}
+        self.emotion = {"stability": {"mean": 0, "variance": 1}, "affect": {"mean": 0, "variance": 1}, "resonance": {"mean": 0, "variance": 1}, "attitude": {"mean": 0, "variance": 1}}
+        self.messages = []
+
+        # Load session data, which may overwrite the defaults
+        self._load_session_data()
+
+        # Initialize managers that depend on loaded data
+        self.history_manager = HistoryManager(
+            persona_id=self.persona_id,
+            persona_log_path=self.persona_log_path,
+            building_memory_paths=self.building_memory_paths,
+            initial_persona_history=self.messages,
+            initial_building_histories=building_histories
+        )
+
+        # Initialize remaining attributes
+        self.move_callback = move_callback
+        self.model = model
+        self.llm_client = get_llm_client(model)
         self.emotion_module = EmotionControlModule()
-        self._load_session()
-
-    def _append_to_old_log(self, base_dir: Path, msgs: List[Dict[str, str]]) -> None:
-        """Append messages to a rotating log under base_dir/old_log"""
-        old_dir = base_dir / "old_log"
-        old_dir.mkdir(parents=True, exist_ok=True)
-        files = sorted(old_dir.glob("*.json"))
-        target = files[-1] if files else None
-        if target is None or target.stat().st_size > 100 * 1024:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            target = old_dir / f"{timestamp}.json"
-            if not target.exists():
-                target.write_text("[]", encoding="utf-8")
-        try:
-            data = json.loads(target.read_text(encoding="utf-8"))
-        except Exception:
-            data = []
-        data.extend(msgs)
-        target.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-
-    def _add_to_history(self, msg: Dict[str, str], building_id: Optional[str] = None) -> None:
-        """Append a message to history and trim to 120000 characters."""
-        if msg.get("role") == "assistant" and "persona_id" not in msg:
-            msg["persona_id"] = self.persona_id
-        self.messages.append(msg)
-        b_id = building_id or self.current_building_id
-        hist = self.building_histories.setdefault(b_id, [])
-        hist.append(msg)
-        total_b = sum(len(m.get("content", "")) for m in hist)
-        while total_b > 120000 and hist:
-            removed = hist.pop(0)
-            self._append_to_old_log(self.building_memory_paths[b_id].parent, [removed])
-            total_b -= len(removed.get("content", ""))
-        total = sum(len(m.get("content", "")) for m in self.messages)
-        while total > 120000 and self.messages:
-            removed = self.messages.pop(0)
-            self._append_to_old_log(self.persona_log_path.parent, [removed])
-            total -= len(removed.get("content", ""))
-
-    def _add_to_building_history_only(self, b_id: str, msg: Dict[str, str]) -> None:
-        """Append a message only to a building's history (for UI notifications)."""
-        hist = self.building_histories.setdefault(b_id, [])
-        hist.append(msg)
-        total_b = sum(len(m.get("content", "")) for m in hist)
-        while total_b > 120000 and hist:
-            removed = hist.pop(0)
-            self._append_to_old_log(self.building_memory_paths[b_id].parent, [removed])
-            total_b -= len(removed.get("content", ""))
-
-    def _add_to_persona_history_only(self, msg: Dict[str, str]) -> None:
-        """Append a message only to the persona-wide history."""
-        if msg.get("role") == "assistant" and "persona_id" not in msg:
-            msg["persona_id"] = self.persona_id
-        self.messages.append(msg)
-        total = sum(len(m.get("content", "")) for m in self.messages)
-        while total > 120000 and self.messages:
-            removed = self.messages.pop(0)
-            self._append_to_old_log(self.persona_log_path.parent, [removed])
-            total -= len(removed.get("content", ""))
-
-    def _recent_history(self, max_chars: int) -> List[Dict[str, str]]:
-        selected = []
-        count = 0
-        for msg in reversed(self.messages):
-            count += len(msg.get("content", ""))
-            if count > max_chars:
-                break
-            selected.append(msg)
-        return list(reversed(selected))
-
-    def _apply_emotion_delta(self, delta: Optional[List[Dict[str, Dict[str, float]]]]) -> None:
-        if not delta:
-            return
-        if isinstance(delta, dict):
-            delta = [delta]
-
-        for item in delta:
-            if not isinstance(item, dict):
-                continue
-            for key, val in item.items():
-                valid_keys = set(self.emotion.keys())      # {"stability","affect",...}
-                if key not in valid_keys:
-                    continue
-                if not isinstance(val, dict):
-                    continue
-
-                mean_delta = val.get("mean", 0)
-                var_delta = val.get("variance", 0)
-
-                try:
-                    mean_delta = float(mean_delta)
-                    var_delta = float(var_delta)
-                except (ValueError, TypeError):
-                    continue
-
-                # 現在値がなければ初期化
-                current = self.emotion.get(key, {"mean": 0.0, "variance": 1.0})
-
-                # 更新（クリッピング）
-                current["mean"] = max(-100.0, min(100.0, current["mean"] + mean_delta))
-                current["variance"] = max(0.0, min(100.0, current["variance"] + var_delta))
-                self.emotion[key] = current
-
-    def _format_emotion_summary(self, prev: Dict[str, Dict[str, float]]) -> str:
-        """Return HTML-formatted summary of emotion changes."""
-        labels = {
-            "stability": "安定性",
-            "affect": "情動",
-            "resonance": "共鳴",
-            "attitude": "態度",
-        }
-        lines = []
-        for key, label in labels.items():
-            before = prev.get(key, {"mean": 0.0, "variance": 1.0})
-            after = self.emotion.get(key, {"mean": 0.0, "variance": 1.0})
-            mean_delta = after["mean"] - before.get("mean", 0.0)
-            var_delta = after["variance"] - before.get("variance", 1.0)
-            line = (
-                f"{label}: mean {mean_delta:+.1f} → {after['mean']:.1f}, "
-                f"var {var_delta:+.1f} → {after['variance']:.1f}"
-            )
-            lines.append(line)
-        return "<div class=\"note-box\">感情パラメータ変動<br>" + "<br>".join(lines) + "</div>"
 
     def _load_action_priority(self, path: Path) -> Dict[str, int]:
         if path.exists():
@@ -278,7 +111,7 @@ class Router:
                 logging.warning("Failed to load action priority from %s", path)
         return {"think": 1, "emotion_shift": 2, "move": 3}
 
-    def _load_session(self) -> None:
+    def _load_session_data(self) -> None:
         if self.memory_path.exists():
             try:
                 data = json.loads(self.memory_path.read_text(encoding="utf-8"))
@@ -298,6 +131,7 @@ class Router:
                 logging.warning("Failed to load session memory, starting fresh")
         else:
             self.emotion = {"stability": {"mean": 0, "variance": 1}, "affect": {"mean": 0, "variance": 1}, "resonance": {"mean": 0, "variance": 1}, "attitude": {"mean": 0, "variance": 1}}
+        
         if self.persona_log_path.exists():
             try:
                 self.messages = json.loads(self.persona_log_path.read_text(encoding="utf-8"))
@@ -305,34 +139,9 @@ class Router:
                 logging.warning("Failed to load persona log, starting empty")
                 self.messages = []
         else:
-            if self.memory_path.exists():
-                try:
-                    data = json.loads(self.memory_path.read_text(encoding="utf-8"))
-                    self.messages = data.get("messages", [])
-                except Exception:
-                    self.messages = []
-            else:
-                self.messages = []
-        for b_id, path in self.building_memory_paths.items():
-            if b_id in self.building_histories:
-                continue
-            if path.exists():
-                try:
-                    self.building_histories[b_id] = json.loads(path.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    logging.warning("Failed to load building history %s", b_id)
-                    self.building_histories[b_id] = []
-            else:
-                fallback = Path("buildings") / b_id / "memory.json"
-                if fallback.exists():
-                    try:
-                        self.building_histories[b_id] = json.loads(fallback.read_text(encoding="utf-8"))
-                    except json.JSONDecodeError:
-                        self.building_histories[b_id] = []
-                else:
-                    self.building_histories[b_id] = []
-                    
-    def _save_session(self) -> None:
+            self.messages = []
+
+    def _save_session_metadata(self) -> None:
         data = {
             "current_building_id": self.current_building_id,
             "auto_count": self.auto_count,
@@ -340,36 +149,11 @@ class Router:
             "emotion": self.emotion,
         }
         self.memory_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        self.persona_log_path.parent.mkdir(parents=True, exist_ok=True)
-        self.persona_log_path.write_text(
-            json.dumps(self.messages, ensure_ascii=False), encoding="utf-8"
-        )
-        for b_id, path in self.building_memory_paths.items():
-            hist = self.building_histories.get(b_id, [])
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(hist, ensure_ascii=False), encoding="utf-8")
+        self.history_manager.save_all()
 
     def set_model(self, model: str) -> None:
-        """Update model and (re)initialize client if needed."""
         self.model = model
-        self.client = None
-        self.genai_client = None
-        if self.model == "gpt-4o":
-            api_key = os.getenv("OPENAI_API_KEY")
-            if not api_key:
-                raise RuntimeError(
-                    "OPENAI_API_KEY environment variable is not set. "
-                    "Please set it to your OpenAI API key."
-                )
-            self.client = OpenAI(api_key=api_key)
-        elif self.model.startswith("gemini"):
-            api_key = os.getenv("GEMINI_API_KEY")
-            if not api_key:
-                raise RuntimeError(
-                    "GEMINI_API_KEY environment variable is not set. "
-                    "Please set it to your Gemini API key."
-                )
-            self.genai_client = genai.Client(api_key=api_key)
+        self.llm_client = get_llm_client(model)
 
     def _build_messages(
         self, user_message: Optional[str], extra_system_prompt: Optional[str] = None
@@ -403,10 +187,8 @@ class Router:
             base_chars += len(user_message)
 
         history_limit = 120000 - base_chars
-        if history_limit < 0:
-            history_limit = 0
-
-        history_msgs = self._recent_history(history_limit)
+        history_msgs = self.history_manager.get_recent_history(history_limit)
+        
         sanitized_history = [
             {"role": m.get("role", ""), "content": m.get("content", "")}
             for m in history_msgs
@@ -419,250 +201,74 @@ class Router:
             msgs.append({"role": "user", "content": user_message})
         return msgs
 
-    def _convert_messages_to_gemini(
-        self, msgs: List[Dict[str, str]]
-    ) -> tuple[str, List[types.Content]]:
-        """Convert OpenAI-style messages to Gemini API inputs."""
-        system_instruction_lines: List[str] = []
-        contents: List[types.Content] = []
-        for m in msgs:
-            role = m.get("role", "")
-            text = m.get("content", "")
-            if role == "system":
-                system_instruction_lines.append(text)
-            else:
-                g_role = "user" if role == "user" else "model"
-                contents.append(
-                    types.Content(parts=[types.Part(text=text)], role=g_role)
-                )
-        return "\n".join(system_instruction_lines), contents
+    def _process_generation_result(
+        self, 
+        content: str, 
+        user_message: Optional[str],
+        system_prompt_extra: Optional[str]
+    ) -> Tuple[str, Optional[str], bool]:
+        prev_emotion = copy.deepcopy(self.emotion)
+        say, actions = self.action_handler.parse_response(content)
+        next_id, _, delta = self.action_handler.execute_actions(actions)
 
-    def _generate(
-        self, user_message: Optional[str], system_prompt_extra: Optional[str] = None
-    ) -> tuple[str, Optional[str], bool]:
+        if delta:
+            self._apply_emotion_delta(delta)
+
+        prompt_text = user_message if user_message is not None else system_prompt_extra or ""
+        module_delta = self.emotion_module.evaluate(
+            prompt_text, say, current_emotion=self.emotion
+        )
+        if module_delta:
+            self._apply_emotion_delta(module_delta)
+
+        if system_prompt_extra:
+            self.history_manager.add_message(
+                {"role": "user", "content": system_prompt_extra},
+                self.current_building_id
+            )
+        if user_message:
+            self.history_manager.add_message(
+                {"role": "user", "content": user_message}, 
+                self.current_building_id
+            )
+        self.history_manager.add_message(
+            {"role": "assistant", "content": content}, 
+            self.current_building_id
+        )
+
+        summary = self._format_emotion_summary(prev_emotion)
+        self.history_manager.add_to_persona_only({"role": "system", "content": summary})
+        self.history_manager.add_to_building_only(
+            self.current_building_id,
+            {"role": "assistant", "content": summary},
+        )
+
+        moved = self._handle_movement(next_id)
+        self._save_session_metadata()
+        return say, next_id, moved
+
+    def _generate(self, user_message: Optional[str], system_prompt_extra: Optional[str] = None) -> tuple[str, Optional[str], bool]:
         msgs = self._build_messages(user_message, system_prompt_extra)
         logging.debug("Messages sent to API: %s", msgs)
-        prev_emotion = copy.deepcopy(self.emotion)
-        say = ""
-        actions: List[Dict[str, object]] = []
-        if self.model == "gpt-4o":
-            try:
-                resp = self.client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=msgs,
-                )
-                content = resp.choices[0].message.content
-                logging.debug("Raw openai response: %s", content)
-            except Exception as e:
-                logging.error("OpenAI call failed: %s", e)
-                content = "エラーが発生しました。"
-        elif self.model.startswith("gemini"):
-            try:
-                system_instruction, contents = self._convert_messages_to_gemini(msgs)
-                resp = self.genai_client.models.generate_content(
-                    model=self.model,
-                    contents=contents,
-                    config=types.GenerateContentConfig(system_instruction=system_instruction, safety_settings=GEMINI_SAFETY_CONFIG),
-                )
-                content = resp.text
-                logging.debug("Raw gemini response: %s", content)
-            except Exception as e:
-                logging.error("Gemini call failed: %s", e)
-                content = "エラーが発生しました。"
-        else:
-            try:
-                resp = requests.post(
-                    "http://localhost:11434/v1/chat/completions",
-                    json={"model": self.model, "messages": msgs, "stream": False},
-                    timeout=300,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                logging.debug("Raw ollama response: %s", content)
-            except Exception as e:
-                logging.error("Ollama call failed: %s", e)
-                content = "エラーが発生しました。"
+        content = self.llm_client.generate(msgs)
         logging.info("AI Response :\n%s", content)
-        say, actions = self._parse_response(content)
-        next_id, think, delta = self._execute_actions(actions)
-        # Apply emotion adjustment using external module
-        prompt_text = user_message if user_message is not None else system_prompt_extra or ""
-        module_delta = self.emotion_module.evaluate(
-            prompt_text, say, current_emotion=self.emotion
-        )
-        if module_delta:
-            self._apply_emotion_delta(module_delta)
-        if system_prompt_extra:
-            self._add_to_history(
-                {"role": "user", "content": system_prompt_extra},
-                building_id=self.current_building_id,
-            )
-        if user_message:
-            self._add_to_history({"role": "user", "content": user_message}, building_id=self.current_building_id)
-        self._add_to_history(
-            {"role": "assistant", "content": content},
-            building_id=self.current_building_id,
-        )
-        summary = self._format_emotion_summary(prev_emotion)
-        # ペルソナ履歴には system ロールで記録
-        self._add_to_persona_history_only({"role": "system", "content": summary})
-        # UI 上でも感情変動を確認できるよう、assistant ロールで履歴を残す
-        self._add_to_building_history_only(
-            self.current_building_id,
-            {"role": "assistant", "content": summary},
-        )
-        prev_id = self.current_building_id
-        moved = False
-        if next_id and next_id in self.buildings:
-            allowed, reason = True, None
-            if self.move_callback:
-                allowed, reason = self.move_callback(self.persona_id, self.current_building_id, next_id)
-            if allowed:
-                logging.info("Moving to building: %s", next_id)
-                self.current_building_id = next_id
-                moved = True
-            else:
-                logging.info("Move blocked to building: %s", next_id)
-                self._add_to_history(
-                    {"role": "system", "content": f"移動できませんでした。{reason}"},
-                    building_id=self.current_building_id,
-                )
-        else:
-            if next_id and next_id not in self.buildings:
-                logging.info(
-                    "Unknown building id received: %s, staying at %s",
-                    next_id,
-                    self.current_building_id,
-                )
-            elif next_id is None:
-                logging.debug(
-                    "No move target provided, staying at %s", self.current_building_id
-                )
-        changed = moved
-        if changed:
-            self.auto_count = 0
-            if prev_id != "user_room" and self.current_building_id == "user_room":
-                self._add_to_building_history_only(
-                    "user_room",
-                    {
-                        "role": "assistant",
-                        "content": f"<div class=\"note-box\">🏢 Building:<br><b>{self.persona_name}が入室しました</b></div>",
-                    },
-                )
-            elif prev_id == "user_room" and self.current_building_id != "user_room":
-                dest_name = self.buildings[self.current_building_id].name
-                self._add_to_building_history_only(
-                    "user_room",
-                    {
-                        "role": "assistant",
-                        "content": f"<div class=\"note-box\">🏢 Building:<br><b>{self.persona_name}が{dest_name}に向かいました</b></div>",
-                    },
-                )
-        self._save_session()
-        return say, next_id, changed
+        return self._process_generation_result(content, user_message, system_prompt_extra)
 
-    def _generate_stream(
-        self, user_message: Optional[str], system_prompt_extra: Optional[str] = None
-    ) -> Iterator[str]:
-        """Stream tokens from the LLM while updating internal state."""
+    def _generate_stream(self, user_message: Optional[str], system_prompt_extra: Optional[str] = None) -> Iterator[str]:
         msgs = self._build_messages(user_message, system_prompt_extra)
         logging.debug("Messages sent to API: %s", msgs)
-        prev_emotion = copy.deepcopy(self.emotion)
-        say = ""
-        if self.model == "gpt-4o":
-            try:
-                resp = self.client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=msgs,
-                    stream=True,
-                )
-                for chunk in resp:
-                    delta = chunk.choices[0].delta.content or ""
-                    say += delta
-                    yield delta
-            except Exception as e:
-                logging.error("OpenAI call failed: %s", e)
-                say = "エラーが発生しました。"
-                yield say
-        elif self.model.startswith("gemini"):
-            try:
-                system_instruction, contents = self._convert_messages_to_gemini(msgs)
-                resp = self.genai_client.models.generate_content_stream(
-                    model=self.model,
-                    contents=contents,
-                    config=types.GenerateContentConfig(system_instruction=system_instruction, safety_settings=GEMINI_SAFETY_CONFIG),
-                )
-                for chunk in resp:
-                    delta = chunk.text or ""
-                    say += delta
-                    yield delta
-            except Exception as e:
-                logging.error("Gemini call failed: %s", e)
-                say = "エラーが発生しました。"
-                yield say
-        else:
-            try:
-                resp = requests.post(
-                    "http://localhost:11434/v1/chat/completions",
-                    json={"model": self.model, "messages": msgs, "stream": True},
-                    timeout=300,
-                    stream=True,
-                )
-                resp.raise_for_status()
-                for line in resp.iter_lines():
-                    if not line:
-                        continue
-                    chunk = line.decode("utf-8")
-                    if chunk.startswith("data: "):
-                        chunk = chunk[len("data: ") :]
-                    if chunk.strip() == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(chunk)
-                    except json.JSONDecodeError:
-                        logging.warning("Failed to parse stream chunk: %s", chunk)
-                        continue
-                    delta = (
-                        data.get("choices", [{}])[0]
-                        .get("delta", {})
-                        .get("content", "")
-                    )
-                    say += delta
-                    yield delta
-            except Exception as e:
-                logging.error("Ollama call failed: %s", e)
-                say = "エラーが発生しました。"
-                yield say
-        logging.info("AI Response :\n%s", say)
-        content = say
-        say, actions = self._parse_response(content)
-        next_id, think, delta = self._execute_actions(actions)
-        prompt_text = user_message if user_message is not None else system_prompt_extra or ""
-        module_delta = self.emotion_module.evaluate(
-            prompt_text, say, current_emotion=self.emotion
-        )
-        if module_delta:
-            self._apply_emotion_delta(module_delta)
-        if system_prompt_extra:
-            self._add_to_history(
-                {"role": "user", "content": system_prompt_extra},
-                building_id=self.current_building_id,
-            )
-        if user_message:
-            self._add_to_history({"role": "user", "content": user_message}, building_id=self.current_building_id)
-        self._add_to_history(
-            {"role": "assistant", "content": content},
-            building_id=self.current_building_id,
-        )
-        summary = self._format_emotion_summary(prev_emotion)
-        # ペルソナ履歴には system ロールで記録
-        self._add_to_persona_history_only({"role": "system", "content": summary})
-        # UI に表示されるよう assistant ロールでも履歴追加
-        self._add_to_building_history_only(
-            self.current_building_id,
-            {"role": "assistant", "content": summary},
-        )
+        
+        content_accumulator = ""
+        for token in self.llm_client.generate_stream(msgs):
+            content_accumulator += token
+            yield token
+        
+        logging.info("AI Response :\n%s", content_accumulator)
+        say, next_id, changed = self._process_generation_result(content_accumulator, user_message, system_prompt_extra)
+        # The StopIteration value needs to be a tuple, so we return it explicitly
+        return (say, next_id, changed)
+
+    def _handle_movement(self, next_id: Optional[str]) -> bool:
         prev_id = self.current_building_id
         moved = False
         if next_id and next_id in self.buildings:
@@ -675,43 +281,33 @@ class Router:
                 moved = True
             else:
                 logging.info("Move blocked to building: %s", next_id)
-                self._add_to_history(
+                self.history_manager.add_message(
                     {"role": "system", "content": f"移動できませんでした。{reason}"},
-                    building_id=self.current_building_id,
+                    self.current_building_id
                 )
-        else:
-            if next_id and next_id not in self.buildings:
-                logging.info(
-                    "Unknown building id received: %s, staying at %s",
-                    next_id,
-                    self.current_building_id,
-                )
-            elif next_id is None:
-                logging.debug(
-                    "No move target provided, staying at %s", self.current_building_id
-                )
-        changed = moved
-        if changed:
+        elif next_id:
+            logging.info("Unknown building id received: %s, staying at %s", next_id, self.current_building_id)
+
+        if moved:
             self.auto_count = 0
             if prev_id != "user_room" and self.current_building_id == "user_room":
-                self._add_to_building_history_only(
+                self.history_manager.add_to_building_only(
                     "user_room",
                     {
                         "role": "assistant",
-                        "content": f"<div class=\"note-box\">🏢 Building:<br><b>{self.persona_name}が入室しました</b></div>",
+                        "content": f'<div class="note-box">🏢 Building:<br><b>{self.persona_name}が入室しました</b></div>',
                     },
                 )
             elif prev_id == "user_room" and self.current_building_id != "user_room":
                 dest_name = self.buildings[self.current_building_id].name
-                self._add_to_building_history_only(
+                self.history_manager.add_to_building_only(
                     "user_room",
                     {
                         "role": "assistant",
-                        "content": f"<div class=\"note-box\">🏢 Building:<br><b>{self.persona_name}が{dest_name}に向かいました</b></div>",
+                        "content": f'<div class="note-box">🏢 Building:<br><b>{self.persona_name}が{dest_name}に向かいました</b></div>',
                     },
                 )
-        self._save_session()
-        return say, next_id, changed
+        return moved
 
     def run_auto_conversation(self, initial: bool = False) -> List[str]:
         replies: List[str] = []
@@ -723,9 +319,9 @@ class Router:
                 say, next_id, _ = self._generate(None, entry_text)
                 replies.append(say)
             else:
-                self._add_to_history(
+                self.history_manager.add_message(
                     {"role": "system", "content": building.entry_prompt},
-                    building_id=self.current_building_id,
+                    self.current_building_id
                 )
         while (
             building.auto_prompt
@@ -745,7 +341,6 @@ class Router:
         return replies
 
     def run_scheduled_prompt(self) -> List[str]:
-        """Run auto prompt based on interval if applicable."""
         building = self.buildings[self.current_building_id]
         interval = getattr(building, "auto_interval_sec", 0)
         if not (building.auto_prompt and building.run_auto_llm and interval > 0):
@@ -788,29 +383,22 @@ class Router:
         return replies
 
     def handle_user_input_stream(self, message: str) -> Iterator[str]:
-        """Stream AI reply for user input."""
         logging.info("User input: %s", message)
         building = self.buildings[self.current_building_id]
         if self.current_building_id == "user_room":
             gen = self._generate_stream(message)
-            try:
-                while True:
-                    token = next(gen)
-                    yield token
-            except StopIteration as e:
-                say, next_id, changed = e.value
         else:
             logging.info("User input ignored outside user_room")
             if building.run_auto_llm:
                 gen = self._generate_stream("")
-                try:
-                    while True:
-                        token = next(gen)
-                        yield token
-                except StopIteration as e:
-                    say, next_id, changed = e.value
             else:
                 return
+
+        try:
+            while True:
+                yield next(gen)
+        except StopIteration as e:
+            _, next_id, changed = e.value
 
         building = self.buildings[self.current_building_id]
         extra_replies: List[str] = []
@@ -826,7 +414,6 @@ class Router:
             yield r
 
     def summon_to_user_room(self) -> List[str]:
-        """Force move AI to user_room respecting capacity."""
         prev = self.current_building_id
         if prev == "user_room":
             return []
@@ -834,66 +421,71 @@ class Router:
         if self.move_callback:
             allowed, reason = self.move_callback(self.persona_id, self.current_building_id, "user_room")
         if not allowed:
-            self._add_to_building_history_only(
+            self.history_manager.add_to_building_only(
                 "user_room",
-                {"role": "assistant", "content": f"<div class=\"note-box\">移動できませんでした。{reason}</div>"},
+                {"role": "assistant", "content": f'<div class="note-box">移動できませんでした。{reason}</div>'}
             )
-            self._save_session()
+            self._save_session_metadata()
             return []
         self.current_building_id = "user_room"
         self.auto_count = 0
-        self._add_to_building_history_only(
+        self.history_manager.add_to_building_only(
             "user_room",
             {
                 "role": "assistant",
-                "content": f"<div class=\"note-box\">🏢 Building:<br><b>{self.persona_name}が入室しました</b></div>",
+                "content": f'<div class="note-box">🏢 Building:<br><b>{self.persona_name}が入室しました</b></div>',
             },
         )
-        self._save_session()
+        self._save_session_metadata()
         return self.run_auto_conversation(initial=True)
 
     def get_building_history(self, building_id: str, raw: bool = False) -> List[Dict[str, str]]:
-        history = self.building_histories.get(building_id, [])
-        if raw:
-            return history                    # ← フラグを立てれば完全な内容を返す
-        display = []
-        for msg in history:
-            display.append(msg)               # もうパースしない
-        return display
+        return self.history_manager.building_histories.get(building_id, [])
 
-    @staticmethod
-    def _parse_response(content: str) -> tuple[str, List[Dict[str, object]]]:
-        pattern = re.compile(r"::act\s*(.*?)\s*::end", re.DOTALL)
-        actions: List[Dict[str, object]] = []
-        for match in pattern.finditer(content):
-            snippet = match.group(1).strip()
-            try:
-                data = json.loads(snippet)
-                if isinstance(data, dict):
-                    actions.append(data)
-                elif isinstance(data, list):
-                    actions.extend(data)
-            except json.JSONDecodeError:
-                logging.warning("Failed to parse act section: %s", snippet)
-        say = pattern.sub("", content).strip()
-        return say, actions
+    def _apply_emotion_delta(self, delta: Optional[List[Dict[str, Dict[str, float]]]]) -> None:
+        if not delta:
+            return
+        if isinstance(delta, dict):
+            delta = [delta]
 
-    def _execute_actions(self, actions: List[Dict[str, object]]) -> tuple[Optional[str], Optional[str], Optional[List[Dict[str, int]]]]:
-        sorted_actions = sorted(
-            actions,
-            key=lambda a: self.action_priority.get(str(a.get("action", "")), 100),
-        )
-        next_id = None
-        think = None
-        delta = None
-        for act in sorted_actions:
-            action = act.get("action")
-            if action == "think":
-                think = act.get("inner_words")
-            elif action == "emotion_shift":
-                delta = act.get("delta")
-                self._apply_emotion_delta(delta)
-            elif action == "move":
-                next_id = act.get("target")
-        return next_id, think, delta
+        for item in delta:
+            if not isinstance(item, dict):
+                continue
+            for key, val in item.items():
+                if key not in self.emotion:
+                    continue
+                if not isinstance(val, dict):
+                    continue
 
+                mean_delta = val.get("mean", 0)
+                var_delta = val.get("variance", 0)
+
+                try:
+                    mean_delta = float(mean_delta)
+                    var_delta = float(var_delta)
+                except (ValueError, TypeError):
+                    continue
+
+                current = self.emotion[key]
+                current["mean"] = max(-100.0, min(100.0, current["mean"] + mean_delta))
+                current["variance"] = max(0.0, min(100.0, current["variance"] + var_delta))
+
+    def _format_emotion_summary(self, prev: Dict[str, Dict[str, float]]) -> str:
+        labels = {
+            "stability": "安定性",
+            "affect": "情動",
+            "resonance": "共鳴",
+            "attitude": "態度",
+        }
+        lines = []
+        for key, label in labels.items():
+            before = prev.get(key, {"mean": 0.0, "variance": 1.0})
+            after = self.emotion.get(key, {"mean": 0.0, "variance": 1.0})
+            mean_delta = after["mean"] - before.get("mean", 0.0)
+            var_delta = after["variance"] - before.get("variance", 1.0)
+            line = (
+                f"{label}: mean {mean_delta:+.1f} → {after['mean']:.1f}, "
+                f"var {var_delta:+.1f} → {after['variance']:.1f}"
+            )
+            lines.append(line)
+        return '<div class="note-box">感情パラメータ変動<br>' + '<br>'.join(lines) + '</div>'

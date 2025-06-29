@@ -125,7 +125,7 @@ class SAIVerseManager:
             replies.extend(self.routers[pid].handle_user_input(message))
         self._save_building_histories()
         for router in self.routers.values():
-            router._save_session()
+            router._save_session_metadata()
         return replies
 
     def handle_user_input_stream(self, message: str) -> Iterator[str]:
@@ -134,7 +134,7 @@ class SAIVerseManager:
                 yield token
         self._save_building_histories()
         for router in self.routers.values():
-            router._save_session()
+            router._save_session_metadata()
 
     def summon_persona(self, persona_id: str) -> List[str]:
         if persona_id not in self.routers:
@@ -152,7 +152,7 @@ class SAIVerseManager:
         replies = self.routers[persona_id].summon_to_user_room()
         self._save_building_histories()
         for router in self.routers.values():
-            router._save_session()
+            router._save_session_metadata()
         return replies
 
     def set_model(self, model: str) -> None:
@@ -190,5 +190,5 @@ class SAIVerseManager:
         if replies:
             self._save_building_histories()
             for router in self.routers.values():
-                router._save_session()
+                router._save_session_metadata()
         return replies

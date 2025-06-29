@@ -51,7 +51,7 @@ GEMINI_API_KEY=AIza...
 
 #### 1\. 📦 ルーター機能
 
-- 各AIは「現在位置（building\_id）」を持つ。
+- 各AIは「現在位置（building_id）」を持つ。
     
 - AIが`::act`セクションで`move`アクションを出力したら、発話後にその施設に自動移動。
 
@@ -79,7 +79,7 @@ GEMINI_API_KEY=AIza...
 
 #### 3\. 🤖 AIセッション処理
 
-- AIの初期状態（building\_id）は `user_room`
+- AIの初期状態（building_id）は `user_room`
     
 - 各ターンでの処理フロー：
     
@@ -106,12 +106,15 @@ GEMINI_API_KEY=AIza...
 
 ---
 
-### 🔖 ディレクトリ構成例（初期案）
+### 🔖 ディレクトリ構成例
 
 ```
 saiverse/
 ├── main.py                   # メインループ
-├── router.py                 # Building移動処理とセッション制御
+├── router.py                 # AIの行動ルーティングとセッション管理
+├── llm_clients.py            # LLMとの通信を抽象化
+├── action_handler.py         # AIの行動（アクション）の解析と実行
+├── history_manager.py        # 会話履歴の管理と永続化
 ├── buildings/
 │   ├── user_room/
 │   │   ├── __init__.py       # ユーザールーム定義
