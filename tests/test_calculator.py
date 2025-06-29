@@ -7,6 +7,7 @@ from tools.calculator import (
     logger,
     call_history,
 )
+from tools.tool_tracker import get_called_count
 
 class TestCalculator(unittest.TestCase):
     def test_calculate_expression(self):
@@ -34,6 +35,11 @@ class TestCalculator(unittest.TestCase):
             f.seek(file_size_before)
             content = f.read()
         self.assertIn("calculate_expression called with: 1+1", content)
+
+    def test_called_count(self):
+        prev = get_called_count("calculate_expression")
+        calculate_expression("2+2")
+        self.assertEqual(get_called_count("calculate_expression"), prev + 1)
 
     def test_tool_specs(self):
         gem_tool = get_gemini_tool()

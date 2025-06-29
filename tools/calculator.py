@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .tool_tracker import record_tool_call
+
 from google.genai import types
 
 # Log file location can be customized via SAIVERSE_LOG_PATH.
@@ -82,6 +84,7 @@ def _expand_factorial(expression: str) -> str:
 def calculate_expression(expression: str) -> float:
     """Evaluate a simple arithmetic expression with factorial support."""
     logger.info("calculate_expression called with: %s", expression)
+    record_tool_call("calculate_expression")
     call_history.append(expression)
     expression = _expand_factorial(expression)
     tree = ast.parse(expression, mode="eval")
