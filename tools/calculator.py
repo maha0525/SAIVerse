@@ -3,9 +3,20 @@ import operator as op
 import logging
 import math
 import re
+from pathlib import Path
 from typing import Any
 
 from google.genai import types
+
+LOG_FILE = Path(__file__).resolve().parent.parent / "saiverse_log.txt"
+
+logger = logging.getLogger(__name__)
+if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(LOG_FILE) for h in logger.handlers):
+    handler = logging.FileHandler(LOG_FILE)
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 # Supported operators
 _OPERATORS = {
@@ -56,7 +67,7 @@ def _expand_factorial(expression: str) -> str:
 
 def calculate_expression(expression: str) -> float:
     """Evaluate a simple arithmetic expression with factorial support."""
-    logging.info("calculate_expression called with: %s", expression)
+    logger.info("calculate_expression called with: %s", expression)
     expression = _expand_factorial(expression)
     tree = ast.parse(expression, mode="eval")
     return float(_eval(tree.body))
