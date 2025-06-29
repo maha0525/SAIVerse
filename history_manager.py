@@ -19,13 +19,18 @@ class HistoryManager:
         self.messages = initial_persona_history if initial_persona_history is not None else []
         self.building_histories = initial_building_histories if initial_building_histories is not None else {}
 
+    def _ensure_size_limit(self, log_list: List[Dict[str, str]], path: Path) -> None:
+        while log_list and len(json.dumps(log_list, ensure_ascii=False).encode("utf-8")) > 2000 * 1024:
+            removed = log_list.pop(0)
+            self._append_to_old_log(path.parent, [removed])
+
     def _append_to_old_log(self, base_dir: Path, msgs: List[Dict[str, str]]) -> None:
         """Append messages to a rotating log under base_dir/old_log."""
         old_dir = base_dir / "old_log"
         old_dir.mkdir(parents=True, exist_ok=True)
         files = sorted(old_dir.glob("*.json"))
         target = files[-1] if files else None
-        if target is None or target.stat().st_size > 100 * 1024:
+        if target is None or target.stat().st_size > 2000 * 1024:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             target = old_dir / f"{timestamp}.json"
             if not target.exists():
@@ -42,43 +47,27 @@ class HistoryManager:
         if msg.get("role") == "assistant" and "persona_id" not in msg:
             msg["persona_id"] = self.persona_id
         
-        # Add to persona history and trim
+        # Add to persona history and trim by size
         self.messages.append(msg)
-        total = sum(len(m.get("content", "")) for m in self.messages)
-        while total > 120000 and self.messages:
-            removed = self.messages.pop(0)
-            self._append_to_old_log(self.persona_log_path.parent, [removed])
-            total -= len(removed.get("content", ""))
+        self._ensure_size_limit(self.messages, self.persona_log_path)
 
         # Add to building history and trim
         hist = self.building_histories.setdefault(building_id, [])
         hist.append(msg)
-        total_b = sum(len(m.get("content", "")) for m in hist)
-        while total_b > 120000 and hist:
-            removed = hist.pop(0)
-            self._append_to_old_log(self.building_memory_paths[building_id].parent, [removed])
-            total_b -= len(removed.get("content", ""))
+        self._ensure_size_limit(hist, self.building_memory_paths[building_id])
 
     def add_to_building_only(self, building_id: str, msg: Dict[str, str]) -> None:
         """Adds a message only to a specific building's history."""
         hist = self.building_histories.setdefault(building_id, [])
         hist.append(msg)
-        total_b = sum(len(m.get("content", "")) for m in hist)
-        while total_b > 120000 and hist:
-            removed = hist.pop(0)
-            self._append_to_old_log(self.building_memory_paths[building_id].parent, [removed])
-            total_b -= len(removed.get("content", ""))
+        self._ensure_size_limit(hist, self.building_memory_paths[building_id])
 
     def add_to_persona_only(self, msg: Dict[str, str]) -> None:
         """Adds a message only to the persona's main history."""
         if msg.get("role") == "assistant" and "persona_id" not in msg:
             msg["persona_id"] = self.persona_id
         self.messages.append(msg)
-        total = sum(len(m.get("content", "")) for m in self.messages)
-        while total > 120000 and self.messages:
-            removed = self.messages.pop(0)
-            self._append_to_old_log(self.persona_log_path.parent, [removed])
-            total -= len(removed.get("content", ""))
+        self._ensure_size_limit(self.messages, self.persona_log_path)
 
     def get_recent_history(self, max_chars: int) -> List[Dict[str, str]]:
         """Retrieves recent messages from persona history up to a character limit."""

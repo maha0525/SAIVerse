@@ -183,11 +183,11 @@ class OllamaClient(LLMClient):
             yield "エラーが発生しました。"
 
 # --- Factory ---
-def get_llm_client(model: str) -> LLMClient:
+def get_llm_client(model: str, provider: str) -> LLMClient:
     """Factory function to get the appropriate LLM client."""
-    if model == "gpt-4o":
+    if provider == "openai":
         return OpenAIClient(model)
-    elif model.startswith("gemini"):
+    elif provider == "gemini":
         return GeminiClient(model)
     else:
         return OllamaClient(model)
