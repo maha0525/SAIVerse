@@ -2,15 +2,19 @@ import ast
 import operator as op
 import logging
 import math
+import os
 import re
 from pathlib import Path
 from typing import Any
 
 from google.genai import types
 
-# Log file placed in the current working directory so logs appear
-# alongside the running process rather than inside the package directory.
-LOG_FILE = Path.cwd() / "saiverse_log.txt"
+# Log file location can be customized via SAIVERSE_LOG_PATH.
+# Default is saiverse_log.txt in the current working directory so that
+# the user can easily locate the logs.
+LOG_FILE = Path(os.getenv("SAIVERSE_LOG_PATH", str(Path.cwd() / "saiverse_log.txt")))
+LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+LOG_FILE.touch(exist_ok=True)
 
 logger = logging.getLogger(__name__)
 if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(LOG_FILE) for h in logger.handlers):
@@ -19,6 +23,8 @@ if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(LOG_FILE
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 logger.setLevel(logging.INFO)
+logger.propagate = False
+logger.info("calculator logger initialized")
 
 # Supported operators
 _OPERATORS = {
