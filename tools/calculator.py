@@ -8,7 +8,9 @@ from typing import Any
 
 from google.genai import types
 
-LOG_FILE = Path(__file__).resolve().parent.parent / "saiverse_log.txt"
+# Log file placed in the current working directory so logs appear
+# alongside the running process rather than inside the package directory.
+LOG_FILE = Path.cwd() / "saiverse_log.txt"
 
 logger = logging.getLogger(__name__)
 if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(LOG_FILE) for h in logger.handlers):
