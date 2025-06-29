@@ -1,7 +1,7 @@
 import logging
 import os
 import json
-from typing import Dict, List, Iterator, Tuple
+from typing import Dict, List, Iterator, Tuple, Optional
 
 import requests
 from openai import OpenAI
@@ -37,10 +37,15 @@ GROUNDING_TOOL = types.Tool(google_search=types.GoogleSearch())
 # --- Base Client ---
 class LLMClient:
     """Base class for LLM clients."""
-    def generate(self, messages: List[Dict[str, str]]) -> str:
+
+    def generate(
+        self, messages: List[Dict[str, str]], tools: Optional[list] | None = None
+    ) -> str:
         raise NotImplementedError
 
-    def generate_stream(self, messages: List[Dict[str, str]]) -> Iterator[str]:
+    def generate_stream(
+        self, messages: List[Dict[str, str]], tools: Optional[list] | None = None
+    ) -> Iterator[str]:
         raise NotImplementedError
 
 # --- Concrete Clients ---
@@ -53,11 +58,12 @@ class OpenAIClient(LLMClient):
         self.client = OpenAI(api_key=api_key)
         self.model = model
 
-    def generate(self, messages: List[Dict[str, str]]) -> str:
+    def generate(self, messages: List[Dict[str, str]], tools: Optional[list] | None = None) -> str:
         try:
             resp = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
+                tools=tools,
             )
             content = resp.choices[0].message.content
             logging.debug("Raw openai response: %s", content)
@@ -66,11 +72,12 @@ class OpenAIClient(LLMClient):
             logging.exception("OpenAI call failed")
             return "エラーが発生しました。"
 
-    def generate_stream(self, messages: List[Dict[str, str]]) -> Iterator[str]:
+    def generate_stream(self, messages: List[Dict[str, str]], tools: Optional[list] | None = None) -> Iterator[str]:
         try:
             resp = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
+                tools=tools,
                 stream=True,
             )
             for chunk in resp:
@@ -102,16 +109,17 @@ class GeminiClient(LLMClient):
                 contents.append(types.Content(parts=[types.Part(text=text)], role=g_role))
         return "\n".join(system_instruction_lines), contents
 
-    def generate(self, messages: List[Dict[str, str]]) -> str:
+    def generate(self, messages: List[Dict[str, str]], tools: Optional[list] | None = None) -> str:
         try:
             system_instruction, contents = self._convert_messages(messages)
+            tool_list = [GROUNDING_TOOL] + (tools or [])
             resp = self.client.models.generate_content(
                 model=self.model,
                 contents=contents,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
                     safety_settings=GEMINI_SAFETY_CONFIG,
-                    tools=[GROUNDING_TOOL]
+                    tools=tool_list
                 ),
             )
             logging.debug("Raw gemini response: %s", resp.text)
@@ -120,16 +128,17 @@ class GeminiClient(LLMClient):
             logging.exception("Gemini call failed")
             return "エラーが発生しました。"
 
-    def generate_stream(self, messages: List[Dict[str, str]]) -> Iterator[str]:
+    def generate_stream(self, messages: List[Dict[str, str]], tools: Optional[list] | None = None) -> Iterator[str]:
         try:
             system_instruction, contents = self._convert_messages(messages)
+            tool_list = [GROUNDING_TOOL] + (tools or [])
             resp = self.client.models.generate_content_stream(
                 model=self.model,
                 contents=contents,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
                     safety_settings=GEMINI_SAFETY_CONFIG,
-                    tools=[GROUNDING_TOOL]
+                    tools=tool_list
                 ),
             )
             for chunk in resp:
@@ -145,7 +154,7 @@ class OllamaClient(LLMClient):
         self.url = "http://localhost:11434/v1/chat/completions"
         self.context_length = context_length
 
-    def generate(self, messages: List[Dict[str, str]]) -> str:
+    def generate(self, messages: List[Dict[str, str]], tools: Optional[list] | None = None) -> str:
         try:
             resp = requests.post(
                 self.url,
@@ -166,7 +175,7 @@ class OllamaClient(LLMClient):
             logging.exception("Ollama call failed")
             return "エラーが発生しました。"
 
-    def generate_stream(self, messages: List[Dict[str, str]]) -> Iterator[str]:
+    def generate_stream(self, messages: List[Dict[str, str]], tools: Optional[list] | None = None) -> Iterator[str]:
         try:
             resp = requests.post(
                 self.url,

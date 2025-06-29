@@ -9,13 +9,9 @@ from llm_clients import LLMClient, OpenAIClient, GeminiClient, OllamaClient, get
 
 class TestLLMClients(unittest.TestCase):
 
-    @patch('os.getenv')
-    def setUp(self, mock_getenv):
-        # os.getenvをモック化してAPIキーを注入
-        mock_getenv.side_effect = lambda key: {
-            'OPENAI_API_KEY': 'test_openai_key',
-            'GEMINI_API_KEY': 'test_gemini_key'
-        }.get(key)
+    def setUp(self):
+        os.environ['OPENAI_API_KEY'] = 'test_openai_key'
+        os.environ['GEMINI_API_KEY'] = 'test_gemini_key'
 
     def test_get_llm_client(self):
         # OpenAIClientのテスト
@@ -47,7 +43,8 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(response, "Test OpenAI response")
         mock_client_instance.chat.completions.create.assert_called_once_with(
             model="gpt-4.1-nano",
-            messages=messages
+            messages=messages,
+            tools=None
         )
 
     @patch('llm_clients.OpenAI')
@@ -70,6 +67,7 @@ class TestLLMClients(unittest.TestCase):
         mock_client_instance.chat.completions.create.assert_called_once_with(
             model="gpt-4.1-nano",
             messages=messages,
+            tools=None,
             stream=True
         )
 
@@ -88,6 +86,7 @@ class TestLLMClients(unittest.TestCase):
         mock_genai.Client.return_value.models.generate_content.assert_called_once()
         args, kwargs = mock_genai.Client.return_value.models.generate_content.call_args
         self.assertEqual(kwargs['model'], "gemini-1.5-flash")
+        self.assertTrue(kwargs['config'].tools)
         # contentsの構造を考慮して検証
         self.assertEqual(len(kwargs['contents']), 1)
         self.assertEqual(kwargs['contents'][0].role, "user")
@@ -113,6 +112,7 @@ class TestLLMClients(unittest.TestCase):
         mock_genai.Client.return_value.models.generate_content_stream.assert_called_once()
         args, kwargs = mock_genai.Client.return_value.models.generate_content_stream.call_args
         self.assertEqual(kwargs['model'], "gemini-1.5-flash")
+        self.assertTrue(kwargs['config'].tools)
         # contentsの構造を考慮して検証
         self.assertEqual(len(kwargs['contents']), 1)
         self.assertEqual(kwargs['contents'][0].role, "user")
