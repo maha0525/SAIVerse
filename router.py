@@ -24,7 +24,7 @@ from emotion_module import EmotionControlModule
 load_dotenv()
 
 
-def build_router(persona_id: str = "air", model: str = "gpt-4o") -> "Router":
+def build_router(persona_id: str = "air", model: str = "gpt-4o", context_length: int = 120000, provider: str = "ollama") -> "Router":
     buildings = [
         load_user_room(),
         load_deep_think_room(),
@@ -40,6 +40,8 @@ def build_router(persona_id: str = "air", model: str = "gpt-4o") -> "Router":
         emotion_prompt_path=Path("system_prompts/emotion_parameter.txt"),
         action_priority_path=Path("action_priority.json"),
         model=model,
+        context_length=context_length,
+        provider=provider,
     )
 
 
@@ -55,6 +57,8 @@ class Router:
         move_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
         start_building_id: str = "air_room",
         model: str = "gpt-4o",
+        context_length: int = 120000,
+        provider: str = "ollama",
     ):
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
         self.common_prompt = common_prompt_path.read_text(encoding="utf-8")
@@ -99,7 +103,8 @@ class Router:
         # Initialize remaining attributes
         self.move_callback = move_callback
         self.model = model
-        self.llm_client = get_llm_client(model)
+        self.context_length = context_length
+        self.llm_client = get_llm_client(model, provider)
         self.emotion_module = EmotionControlModule()
 
     def _load_action_priority(self, path: Path) -> Dict[str, int]:
@@ -151,9 +156,10 @@ class Router:
         self.memory_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         self.history_manager.save_all()
 
-    def set_model(self, model: str) -> None:
+    def set_model(self, model: str, context_length: int, provider: str) -> None:
         self.model = model
-        self.llm_client = get_llm_client(model)
+        self.context_length = context_length
+        self.llm_client = get_llm_client(model, provider)
 
     def _build_messages(
         self, user_message: Optional[str], extra_system_prompt: Optional[str] = None
@@ -186,7 +192,7 @@ class Router:
         if user_message:
             base_chars += len(user_message)
 
-        history_limit = 120000 - base_chars
+        history_limit = max(0, self.context_length - base_chars)
         history_msgs = self.history_manager.get_recent_history(history_limit)
         
         sanitized_history = [
