@@ -1,6 +1,24 @@
 {
-  "gpt-4o": {"provider": "openai", "context_length": 128000},
-  "gemini-2.5-pro": {"provider": "gemini", "context_length": 128000},
+  "gpt-4.1": {
+    "provider": "openai",
+    "context_length": 128000
+  },
+  "gpt-4o": {
+    "provider": "openai",
+    "context_length": 128000
+  },
+  "o3": {
+    "provider": "openai",
+    "context_length": 200000
+  },
+  "chatgpt-4o-latest": {
+    "provider": "openai",
+    "context_length": 128000
+  },
+  "gemini-2.5-pro": {
+    "provider": "gemini",
+    "context_length": 128000
+  },
   "gemini-2.5-flash": {
     "provider": "gemini",
     "context_length": 128000
@@ -9,8 +27,14 @@
     "provider": "gemini",
     "context_length": 1000000
   },
-  "hf.co/unsloth/Qwen3-32B-GGUF:Q4_K_XL": {"provider": "ollama", "context_length": 32768},
-  "qwen3:30b": {"provider": "ollama", "context_length": 32768},
+  "hf.co/unsloth/Qwen3-32B-GGUF:Q4_K_XL": {
+    "provider": "ollama",
+    "context_length": 32768
+  },
+  "qwen3:30b": {
+    "provider": "ollama",
+    "context_length": 32768
+  },
   "llama4:16x17b": {
     "provider": "ollama",
     "context_length": 1000000
@@ -19,7 +43,28 @@
     "provider": "ollama",
     "context_length": 128000
   },
-  "hf.co/unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF:Q6_K_XL": {"provider": "ollama", "context_length": 128000},
-  "hf.co/mmnga/llm-jp-3.1-8x13b-instruct4-gguf:Q4_K_M": {"provider": "ollama", "context_length": 4096},
-  "hf.co/mmnga/ABEJA-Qwen2.5-32b-Japanese-v1.0-gguf:Q4_K_M": {"provider": "ollama", "context_length": 32768}
+  "hf.co/unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF:Q6_K_XL": {
+    "provider": "ollama",
+    "context_length": 128000
+  },
+  "hf.co/mmnga/llm-jp-3.1-8x13b-instruct4-gguf:Q4_K_M": {
+    "provider": "ollama",
+    "context_length": 4096
+  },
+  "hf.co/mmnga/ABEJA-Qwen2.5-32b-Japanese-v1.0-gguf:Q4_K_M": {
+    "provider": "ollama",
+    "context_length": 32768
+  },
+  "gpt-4.1-nano": {
+    "provider": "openai",
+    "context_length": 128000
+  },
+  "gemini-1.5-flash": {
+    "provider": "gemini",
+    "context_length": 1000000
+  },
+  "hf.co/unsloth/gemma-3-1b-it-GGUF:BF16": {
+    "provider": "ollama",
+    "context_length": 32768
+  }
 }
