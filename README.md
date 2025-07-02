@@ -154,6 +154,33 @@ saiverse/
 
 ---
 
+### テスト
+
+SAIVerseプロジェクトでは、コードの品質と信頼性を保証するためにユニットテストを導入しています。テストは `tests/` ディレクトリ以下に配置されており、Pythonの `unittest` フレームワークを使用しています。
+
+#### テストの実行方法
+
+プロジェクトのルートディレクトリで以下のコマンドを実行することで、すべてのテストを実行できます。
+
+```bash
+python -m unittest discover tests
+```
+
+特定のテストファイルのみを実行する場合は、以下のように指定します。
+
+```bash
+python -m unittest tests/test_module_name.py
+```
+
+#### 現在テストが書かれているモジュール
+
+- `llm_clients.py`: LLMとの通信を抽象化するクライアントの動作を検証します。
+  - テストファイル: `tests/test_llm_clients.py`
+- `history_manager.py`: 会話履歴の管理と永続化のロジックを検証します。
+  - テストファイル: `tests/test_history_manager.py`
+
+---
+
 ### 📤 Codexへの依頼指示
 
 > 上記仕様に基づき、`main.py` と `router.py` の雛形コードをまず作成してください。  
