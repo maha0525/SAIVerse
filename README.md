@@ -17,6 +17,7 @@ AIたちは「Building（施設）」と呼ばれる仮想空間を移動しな�
 - OpenAI / Google Gemini API（いずれか）
     
 - Function Calling または JSON形式の制御
+- ツール呼び出しを行うルーターと計算ツール `calculate_expression`
     
 - 各種Buildingはファイル単位で切り出し可能な設計に
 
@@ -103,6 +104,11 @@ GEMINI_API_KEY=AIza...
 - Gemini呼び出し時に`response_mime_type="application/json"`を指定することで、コードブロックのない純粋なJSONを受け取れる。
 - 応答にコードブロックが含まれていても、先頭の`{`から末尾の`}`までを抽出してパースするため安全。
 
+#### 6\. 🛠 ツール呼び出しと計算機能
+
+- `llm_router.py` がユーザー発話を解析し、計算式なら `calculate_expression` ツールを実行するよう指示。
+- ツール定義は `tools/defs/` 以下に配置し、OpenAI/Gemini の Function Calling に対応。
+
 
 ---
 
@@ -131,6 +137,11 @@ saiverse/
 │       ├── entry_prompt.txt  # 入室時プロンプト
 │       ├── system_prompt.txt # エアの部屋用システムプロンプト
 │       └── memory.json       # ルーム共通の履歴
+├── tools/
+│   ├── __init__.py
+│   ├── defs/
+│   │   └── calculator.py     # Function Calling 用計算ツール
+│   └── adapters/             # OpenAI/Gemini 形式への変換
 ├── system_prompts/
 │   └── common.txt            # 共通システムプロンプト
 ├── ai_sessions/
@@ -138,6 +149,10 @@ saiverse/
 │       ├── base.json
 │       ├── memory.json       # セッション情報保存用
 │       └── system_prompt.txt
+├── tests/                    # ユニットテスト
+│   ├── test_llm_clients.py
+│   ├── test_history_manager.py
+│   └── test_calculator.py
 └── README.md                 # この仕様の要約
 ```
 
@@ -178,6 +193,8 @@ python -m unittest tests/test_module_name.py
   - テストファイル: `tests/test_llm_clients.py`
 - `history_manager.py`: 会話履歴の管理と永続化のロジックを検証します。
   - テストファイル: `tests/test_history_manager.py`
+- `tools.calculator`: 計算ツールの動作を検証します。
+  - テストファイル: `tests/test_calculator.py`
 
 ---
 
