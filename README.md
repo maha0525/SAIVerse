@@ -111,6 +111,7 @@ GEMINI_FREE_API_KEY=AIza...
 
 - `llm_router.py` がユーザー発話を解析し、計算式なら `calculate_expression` ツールを実行するよう指示。
 - ツール定義は `tools/defs/` 以下に配置し、OpenAI/Gemini の Function Calling に対応。
+- Gemini の画像生成APIを利用する `generate_image` ツールを追加し、Base64データURI を返す。
 
 
 ---
