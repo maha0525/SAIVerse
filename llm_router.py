@@ -1,6 +1,6 @@
-﻿import json, logging
+import json, logging
 from typing import Dict, Any, List
-from openai import OpenAI
+from google import genai
 from google.genai import types as gtypes
 from dotenv import load_dotenv
 import os
@@ -9,11 +9,12 @@ load_dotenv()
 
 log = logging.getLogger("saiverse.router")
 
-ROUTER_MODEL = "gpt-4.1-nano"
-api_key = os.getenv("OPENAI_API_KEY")
-if not api_key:
-    raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
-client = OpenAI(api_key=api_key)
+ROUTER_MODEL = "gemini-2.0-flash"
+free_key = os.getenv("GEMINI_FREE_API_KEY")
+paid_key = os.getenv("GEMINI_API_KEY")
+if not free_key and not paid_key:
+    raise RuntimeError("GEMINI_FREE_API_KEY or GEMINI_API_KEY environment variable is not set.")
+client = genai.Client(api_key=free_key or paid_key)
 
 SYS_TEMPLATE = """\
 You are a tool-router.
@@ -26,6 +27,25 @@ RULES:
 - If the user message is an arithmetic expression -> call:"yes", tool:"{default_tool}".
 - Otherwise -> call:"no".
 """
+
+GEMINI_SAFETY_CONFIG = [
+    gtypes.SafetySetting(
+        category=gtypes.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+        threshold=gtypes.HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    ),
+    gtypes.SafetySetting(
+        category=gtypes.HarmCategory.HARM_CATEGORY_HARASSMENT,
+        threshold=gtypes.HarmBlockThreshold.BLOCK_NONE,
+    ),
+    gtypes.SafetySetting(
+        category=gtypes.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+        threshold=gtypes.HarmBlockThreshold.BLOCK_NONE,
+    ),
+    gtypes.SafetySetting(
+        category=gtypes.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        threshold=gtypes.HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    ),
+]
 
 def build_tools_block(tools_spec: list) -> str:
     """
@@ -60,21 +80,26 @@ def route(user_message: str,
         default_tool=default_tool,
     )
 
-    resp = client.chat.completions.create(
+    resp = client.models.generate_content(
         model=ROUTER_MODEL,
-        messages=[
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": user_message},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0,
+        contents=[gtypes.Content(role="user", parts=[gtypes.Part(text=user_message)])],
+        config=gtypes.GenerateContentConfig(
+            system_instruction=sys_prompt,
+            safety_settings=GEMINI_SAFETY_CONFIG,
+            response_mime_type="application/json",
+            temperature=0,
+        ),
     )
     try:
-        decision = json.loads(resp.choices[0].message.content)
+        cand = resp.candidates[0]
+        text = getattr(cand, "text", None)
+        if not text and getattr(cand, "content", None) and cand.content.parts:
+            text = cand.content.parts[0].text
+        decision = json.loads(text)
         if not isinstance(decision, dict):
             raise ValueError
         return decision
     except Exception:
-        log.warning("Router JSON parse failed, fallback to auto. Raw: %s",
-                    resp.choices[0].message.content)
+        raw = text if 'text' in locals() else str(resp)
+        log.warning("Router JSON parse failed, fallback to auto. Raw: %s", raw)
         return {"call": "no", "tool": "", "args": {}}
