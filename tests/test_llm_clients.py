@@ -5,7 +5,14 @@ import json
 from typing import List, Dict, Iterator
 
 # テスト対象のモジュールをインポート
-from llm_clients import LLMClient, OpenAIClient, GeminiClient, OllamaClient, get_llm_client
+from llm_clients import (
+    LLMClient,
+    OpenAIClient,
+    GeminiClient,
+    OllamaClient,
+    get_llm_client,
+    OPENAI_TOOLS_SPEC,
+)
 
 class TestLLMClients(unittest.TestCase):
 
@@ -44,7 +51,9 @@ class TestLLMClients(unittest.TestCase):
         mock_client_instance.chat.completions.create.assert_called_once_with(
             model="gpt-4.1-nano",
             messages=messages,
-            tools=None
+            tools=OPENAI_TOOLS_SPEC,
+            tool_choice="auto",
+            n=1,
         )
 
     @patch('llm_clients.OpenAI')
@@ -54,9 +63,19 @@ class TestLLMClients(unittest.TestCase):
 
         # ストリーム応答のモック
         mock_chunk1 = MagicMock()
-        mock_chunk1.choices[0].delta.content = "Stream "
+        delta1 = MagicMock()
+        delta1.content = "Stream "
+        delta1.tool_calls = None
+        mock_choice1 = MagicMock(delta=delta1)
+        mock_chunk1.choices = [mock_choice1]
+
         mock_chunk2 = MagicMock()
-        mock_chunk2.choices[0].delta.content = "test"
+        delta2 = MagicMock()
+        delta2.content = "test"
+        delta2.tool_calls = None
+        mock_choice2 = MagicMock(delta=delta2)
+        mock_chunk2.choices = [mock_choice2]
+
         mock_client_instance.chat.completions.create.return_value = [mock_chunk1, mock_chunk2]
 
         client = OpenAIClient("gpt-4.1-nano")
@@ -67,7 +86,8 @@ class TestLLMClients(unittest.TestCase):
         mock_client_instance.chat.completions.create.assert_called_once_with(
             model="gpt-4.1-nano",
             messages=messages,
-            tools=None,
+            tools=OPENAI_TOOLS_SPEC,
+            tool_choice="auto",
             stream=True
         )
 
@@ -75,7 +95,11 @@ class TestLLMClients(unittest.TestCase):
     def test_gemini_client_generate(self, mock_genai):
         mock_client_instance = MagicMock()
         mock_genai.Client.return_value = mock_client_instance
-        mock_client_instance.models.generate_content.return_value.text = "Test Gemini response"
+        mock_resp = MagicMock()
+        mock_candidate = MagicMock()
+        mock_candidate.content.parts = [MagicMock(text="Test Gemini response", function_call=None)]
+        mock_resp.candidates = [mock_candidate]
+        mock_client_instance.models.generate_content.return_value = mock_resp
 
         client = GeminiClient("gemini-1.5-flash")
         messages = [{"role": "user", "content": "Hello"}]
@@ -99,9 +123,15 @@ class TestLLMClients(unittest.TestCase):
 
         # ストリーム応答のモック
         mock_chunk1 = MagicMock()
-        mock_chunk1.text = "Stream "
+        cand1 = MagicMock()
+        cand1.content = MagicMock()
+        cand1.content.parts = [MagicMock(text="Stream ", function_call=None)]
+        mock_chunk1.candidates = [cand1]
         mock_chunk2 = MagicMock()
-        mock_chunk2.text = "test"
+        cand2 = MagicMock()
+        cand2.content = MagicMock()
+        cand2.content.parts = [MagicMock(text="test", function_call=None)]
+        mock_chunk2.candidates = [cand2]
         mock_client_instance.models.generate_content_stream.return_value = [mock_chunk1, mock_chunk2]
 
         client = GeminiClient("gemini-1.5-flash")
