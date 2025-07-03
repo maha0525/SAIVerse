@@ -298,12 +298,24 @@ class OpenAIClient(LLMClient):
 
 class GeminiClient(LLMClient):
     """Client for Google Gemini API."""
+
     def __init__(self, model: str):
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise RuntimeError("GEMINI_API_KEY environment variable is not set.")
-        self.client = genai.Client(api_key=api_key)
+        free_key = os.getenv("GEMINI_FREE_API_KEY")
+        paid_key = os.getenv("GEMINI_API_KEY")
+        if not free_key and not paid_key:
+            raise RuntimeError(
+                "GEMINI_FREE_API_KEY or GEMINI_API_KEY environment variable is not set."
+            )
+        self.free_client = genai.Client(api_key=free_key) if free_key else None
+        self.paid_client = genai.Client(api_key=paid_key) if paid_key else None
+        # デフォルトでは無料枠を使用
+        self.client = self.free_client or self.paid_client
         self.model = model
+
+    @staticmethod
+    def _is_rate_limit_error(err: Exception) -> bool:
+        msg = str(err).lower()
+        return "rate" in msg or "429" in msg or "quota" in msg
 
     @staticmethod
     def _convert_messages(msgs: List[Dict[str, str] | types.Content]
@@ -371,11 +383,11 @@ class GeminiClient(LLMClient):
 
         tool_cfg = types.ToolConfig(functionCallingConfig=fc_cfg)
 
-        try:
+        def _call(client):
             for _ in range(10):
                 sys_msg, contents = self._convert_messages(messages)
                 tool_list = _merge_tools_for_gemini(tools)
-                resp = self.client.models.generate_content(
+                resp = client.models.generate_content(
                     model=self.model,
                     contents=contents,
                     config=types.GenerateContentConfig(
@@ -424,7 +436,19 @@ class GeminiClient(LLMClient):
                     )
                 )
             return "ツール呼び出しが 10 回を超えました。"
-        except Exception:
+
+        active_client = self.client
+        try:
+            return _call(active_client)
+        except Exception as e:
+            if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(e):
+                logging.info("Retrying with paid Gemini API key due to rate limit")
+                active_client = self.paid_client
+                try:
+                    return _call(active_client)
+                except Exception:
+                    logging.exception("Gemini call failed")
+                    return "エラーが発生しました。"
             logging.exception("Gemini call failed")
             return "エラーが発生しました。"
 
@@ -470,18 +494,30 @@ class GeminiClient(LLMClient):
 
         tool_cfg = types.ToolConfig(functionCallingConfig=fc_cfg)
 
-        # ---------- ② ツール呼び出しストリーム ----------
-        sys_msg, contents = self._convert_messages(messages)
-        stream = self.client.models.generate_content_stream(
-            model=self.model,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=sys_msg,
-                safety_settings=GEMINI_SAFETY_CONFIG,
-                tools=tool_list,
-                tool_config=tool_cfg,
-            ),
-        )
+        def _stream(client):
+            sys_msg, contents = self._convert_messages(messages)
+            return client.models.generate_content_stream(
+                model=self.model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=sys_msg,
+                    safety_settings=GEMINI_SAFETY_CONFIG,
+                    tools=tool_list,
+                    tool_config=tool_cfg,
+                ),
+            )
+        active_client = self.client
+        try:
+            stream = _stream(active_client)
+        except Exception as e:
+            if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(e):
+                logging.info("Retrying with paid Gemini API key due to rate limit")
+                active_client = self.paid_client
+                stream = _stream(active_client)
+            else:
+                logging.exception("Gemini call failed")
+                yield "エラーが発生しました。"
+                return
 
         fcall: types.FunctionCall | None = None
         for chunk in stream:
@@ -531,7 +567,7 @@ class GeminiClient(LLMClient):
         tool_cfg_none = types.ToolConfig(functionCallingConfig=fc_none)
 
         sys_msg2, contents2 = self._convert_messages(messages)
-        stream2 = self.client.models.generate_content_stream(
+        stream2 = active_client.models.generate_content_stream(
             model=self.model,
             contents=contents2,
             config=types.GenerateContentConfig(

@@ -15,13 +15,15 @@ class EmotionControlModule:
     def __init__(self, prompt_path: Path = Path("system_prompts/emotion_control.txt"), model: str = "gemini-2.0-flash") -> None:
         self.prompt_template = prompt_path.read_text(encoding="utf-8")
         self.model = model
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
+        free_key = os.getenv("GEMINI_FREE_API_KEY")
+        paid_key = os.getenv("GEMINI_API_KEY")
+        if not free_key and not paid_key:
             raise RuntimeError(
-                "GEMINI_API_KEY environment variable is not set. "
-                "Please set it to your Gemini API key."
+                "GEMINI_FREE_API_KEY or GEMINI_API_KEY environment variable is not set."
             )
-        self.client = genai.Client(api_key=api_key)
+        self.free_client = genai.Client(api_key=free_key) if free_key else None
+        self.paid_client = genai.Client(api_key=paid_key) if paid_key else None
+        self.client = self.free_client or self.paid_client
 
     def evaluate(
         self,
@@ -43,21 +45,36 @@ class EmotionControlModule:
             attitude_mean=emotion_vals.get("attitude", {}).get("mean", 0),
             attitude_var=emotion_vals.get("attitude", {}).get("variance", 0),
         )
-        try:
-            resp = self.client.models.generate_content(
+
+        def _call(client):
+            return client.models.generate_content(
                 model=self.model,
                 contents=[types.Content(parts=[types.Part(text=prompt)], role="user")],
                 config=types.GenerateContentConfig(response_mime_type="application/json"),
             )
-            content = resp.text.strip()
-            logging.info("Emotion control module response:\n%s", content)
-            try:
-                return json.loads(content)
-            except json.JSONDecodeError:
-                match = re.search(r"\{.*\}", content, re.DOTALL)
-                if match:
-                    return json.loads(match.group(0))
-                raise
+
+        active_client = self.client
+        try:
+            resp = _call(active_client)
         except Exception as e:
-            logging.error("Emotion control module failed: %s", e)
-            return None
+            if active_client is self.free_client and self.paid_client and "rate" in str(e).lower():
+                logging.info("Retrying emotion module with paid Gemini API key due to rate limit")
+                active_client = self.paid_client
+                try:
+                    resp = _call(active_client)
+                except Exception as e2:
+                    logging.error("Emotion control module failed: %s", e2)
+                    return None
+            else:
+                logging.error("Emotion control module failed: %s", e)
+                return None
+
+        content = resp.text.strip()
+        logging.info("Emotion control module response:\n%s", content)
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if match:
+                return json.loads(match.group(0))
+            raise

@@ -19,6 +19,7 @@ class TestLLMClients(unittest.TestCase):
     def setUp(self):
         os.environ['OPENAI_API_KEY'] = 'test_openai_key'
         os.environ['GEMINI_API_KEY'] = 'test_gemini_key'
+        os.environ['GEMINI_FREE_API_KEY'] = 'test_free_key'
 
     def test_get_llm_client(self):
         # OpenAIClientのテスト
@@ -37,8 +38,9 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(client.model, "hf.co/unsloth/gemma-3-1b-it-GGUF:BF16")
         self.assertEqual(client.context_length, 1000)
 
+    @patch('llm_router.client')
     @patch('llm_clients.OpenAI')
-    def test_openai_client_generate(self, mock_openai):
+    def test_openai_client_generate(self, mock_openai, mock_router_client):
         mock_client_instance = MagicMock()
         mock_openai.return_value = mock_client_instance
         mock_client_instance.chat.completions.create.return_value.choices[0].message.content = "Test OpenAI response"
@@ -56,8 +58,9 @@ class TestLLMClients(unittest.TestCase):
             n=1,
         )
 
+    @patch('llm_router.client')
     @patch('llm_clients.OpenAI')
-    def test_openai_client_generate_stream(self, mock_openai):
+    def test_openai_client_generate_stream(self, mock_openai, mock_router_client):
         mock_client_instance = MagicMock()
         mock_openai.return_value = mock_client_instance
 
@@ -91,8 +94,9 @@ class TestLLMClients(unittest.TestCase):
             stream=True
         )
 
+    @patch('llm_router.client')
     @patch('llm_clients.genai')
-    def test_gemini_client_generate(self, mock_genai):
+    def test_gemini_client_generate(self, mock_genai, mock_router_client):
         mock_client_instance = MagicMock()
         mock_genai.Client.return_value = mock_client_instance
         mock_resp = MagicMock()
@@ -116,8 +120,9 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(kwargs['contents'][0].role, "user")
         self.assertEqual(kwargs['contents'][0].parts[0].text, "Hello")
 
+    @patch('llm_router.client')
     @patch('llm_clients.genai')
-    def test_gemini_client_generate_stream(self, mock_genai):
+    def test_gemini_client_generate_stream(self, mock_genai, mock_router_client):
         mock_client_instance = MagicMock()
         mock_genai.Client.return_value = mock_client_instance
 
@@ -147,6 +152,26 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(len(kwargs['contents']), 1)
         self.assertEqual(kwargs['contents'][0].role, "user")
         self.assertEqual(kwargs['contents'][0].parts[0].text, "Hello")
+
+    @patch('llm_router.client')
+    @patch('llm_clients.genai')
+    def test_gemini_client_free_key_fallback(self, mock_genai, mock_router_client):
+        mock_free = MagicMock()
+        mock_paid = MagicMock()
+        mock_genai.Client.side_effect = [mock_free, mock_paid]
+        mock_free.models.generate_content.side_effect = Exception("429")
+        mock_paid_resp = MagicMock()
+        cand = MagicMock()
+        cand.content.parts = [MagicMock(text="OK", function_call=None)]
+        mock_paid_resp.candidates = [cand]
+        mock_paid.models.generate_content.return_value = mock_paid_resp
+
+        client = GeminiClient("gemini-1.5-flash")
+        messages = [{"role": "user", "content": "Hi"}]
+        response = client.generate(messages)
+
+        self.assertEqual(response, "OK")
+        mock_paid.models.generate_content.assert_called_once()
 
     @patch('llm_clients.requests.post')
     def test_ollama_client_generate(self, mock_post):
