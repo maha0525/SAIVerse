@@ -28,6 +28,25 @@ RULES:
 - Otherwise -> call:"no".
 """
 
+GEMINI_SAFETY_CONFIG = [
+    gtypes.SafetySetting(
+        category=gtypes.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+        threshold=gtypes.HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    ),
+    gtypes.SafetySetting(
+        category=gtypes.HarmCategory.HARM_CATEGORY_HARASSMENT,
+        threshold=gtypes.HarmBlockThreshold.BLOCK_NONE,
+    ),
+    gtypes.SafetySetting(
+        category=gtypes.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+        threshold=gtypes.HarmBlockThreshold.BLOCK_NONE,
+    ),
+    gtypes.SafetySetting(
+        category=gtypes.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        threshold=gtypes.HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    ),
+]
+
 def build_tools_block(tools_spec: list) -> str:
     """
     tools_spec が
@@ -66,6 +85,7 @@ def route(user_message: str,
         contents=[gtypes.Content(role="user", parts=[gtypes.Part(text=user_message)])],
         config=gtypes.GenerateContentConfig(
             system_instruction=sys_prompt,
+            safety_settings=GEMINI_SAFETY_CONFIG,
             response_mime_type="application/json",
             temperature=0,
         ),
