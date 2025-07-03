@@ -7,7 +7,7 @@ import gradio as gr
 from saiverse_manager import SAIVerseManager
 from model_configs import get_model_choices
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 manager = SAIVerseManager()
 PERSONA_CHOICES = list(manager.persona_map.keys())
 
