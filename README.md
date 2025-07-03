@@ -26,11 +26,14 @@ AIたちは「Building（施設）」と呼ばれる仮想空間を移動しな�
 
 ### セットアップ
 ルートディレクトリに `.env` ファイルを作成し、`OPENAI_API_KEY` または
-`GEMINI_API_KEY` を設定します。
+`GEMINI_API_KEY` を設定します。Google Gemini には無料枠があるため、
+まず `GEMINI_FREE_API_KEY` を設定しておくと、レート制限内の利用は
+課金なしで行えます。
 例:
 ```bash
 OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=AIza...
+GEMINI_FREE_API_KEY=AIza...
 ```
 `python-dotenv` により自動で読み込まれます。
 
