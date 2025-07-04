@@ -496,6 +496,7 @@ class GeminiClient(LLMClient):
         # ------------- 前処理 -------------
         tools_spec = tools or GEMINI_TOOLS_SPEC
         tool_list  = _merge_tools_for_gemini(tools_spec)
+        history_snippets = history_snippets or []
 
         # 直近 user メッセージ抽出（dict と Content 混在対応）
         def _last_user(msgs) -> str:
