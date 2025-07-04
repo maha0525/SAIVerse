@@ -22,7 +22,7 @@ def generate_image(prompt: str) -> str:
         model="gemini-2.0-flash-preview-image-generation",
         contents=prompt,
         config=types.GenerateContentConfig(
-            response_modalities=["IMAGE"]
+            response_modalities=["TEXT", "IMAGE"]  # Å© TEXT ÇïKÇ∏ä‹ÇﬂÇÈ
         )
     )
     if not resp.candidates:
