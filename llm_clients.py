@@ -519,15 +519,19 @@ class GeminiClient(LLMClient):
 
         fcall: types.FunctionCall | None = None
         for chunk in stream:
+            raw_logger.debug("Gemini stream chunk:\n%s", chunk)
             if not chunk.candidates:                    # keep-alive
                 continue
             cand = chunk.candidates[0]
+            raw_logger.debug("Gemini stream candidate:\n%s", cand)
             if not cand.content or not cand.content.parts:
                 continue
             part = cand.content.parts[0]
             if part.function_call:
+                raw_logger.debug("Gemini function_call: %s", part.function_call)
                 fcall = part.function_call             # 後で実行
             elif part.text:
+                raw_logger.debug("Gemini text: %s", part.text)
                 yield part.text                        # モデルが text を返した場合
         # ---------- ③ ツール実行 ----------
         if fcall is None:
@@ -578,10 +582,13 @@ class GeminiClient(LLMClient):
 
         yielded = False
         for chunk in stream2:
+            raw_logger.debug("Gemini stream2 chunk:\n%s", chunk)
             if not chunk.candidates:
                 continue
             cand = chunk.candidates[0]
+            raw_logger.debug("Gemini stream2 candidate:\n%s", cand)
             if cand.content and cand.content.parts and cand.content.parts[0].text:
+                raw_logger.debug("Gemini text2: %s", cand.content.parts[0].text)
                 yield cand.content.parts[0].text
                 yielded = True
 
