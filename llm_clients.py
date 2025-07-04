@@ -90,7 +90,7 @@ class OpenAIClient(LLMClient):
         # ── Router 判定（最後の user メッセージだけ渡す） ──
         user_msg = next((m["content"] for m in reversed(messages)
                          if m.get("role") == "user"), "")
-        decision = route(user_msg, tools, default_tool="calculate_expression")
+        decision = route(user_msg, tools)
         
         # ログ出力（JSON フォーマットで見やすく）
         try:
@@ -174,7 +174,7 @@ class OpenAIClient(LLMClient):
         if force_tool_choice is None:                       # 再帰呼び出し時はスキップ
             user_msg = next((m["content"] for m in reversed(messages)
                              if m.get("role") == "user"), "")
-            decision = route(user_msg, tools, default_tool="calculate_expression")
+            decision = route(user_msg, tools)
             logging.info("Router decision:\n%s", json.dumps(decision, indent=2, ensure_ascii=False))
             if decision["call"] == "yes" and decision["tool"]:
                 force_tool_choice = {
@@ -368,8 +368,7 @@ class GeminiClient(LLMClient):
             return ""
 
         # ---------- ① Router ----------
-        decision = route(_last_user(messages), tools_spec,
-                         default_tool="calculate_expression")
+        decision = route(_last_user(messages), tools_spec)
         logging.info("Router decision:\n%s",
                      json.dumps(decision, indent=2, ensure_ascii=False))
 
@@ -479,8 +478,7 @@ class GeminiClient(LLMClient):
             return ""
 
         # ---------- ① Router ----------
-        decision = route(_last_user(messages), tools_spec,
-                         default_tool="calculate_expression")
+        decision = route(_last_user(messages), tools_spec)
         logging.info("Router decision:\n%s",
                      json.dumps(decision, indent=2, ensure_ascii=False))
 

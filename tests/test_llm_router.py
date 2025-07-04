@@ -25,7 +25,7 @@ class TestLLMRouter(unittest.TestCase):
         mock_resp.candidates = [cand]
         mock_client.models.generate_content.return_value = mock_resp
 
-        decision = route('猫の画像を生成して', OPENAI_TOOLS_SPEC, 'calculate_expression')
+        decision = route('猫の画像を生成して', OPENAI_TOOLS_SPEC)
         self.assertEqual(decision['tool'], 'generate_image')
         mock_client.models.generate_content.assert_called_once()
 

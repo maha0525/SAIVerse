@@ -27,8 +27,7 @@ TOOLS:
 RULES:
  - Pick the tool whose name or description best matches the user message.
  - Arguments must use the parameter names from that tool's schema.
- - If no tool fits, respond with call:"no".
- - When uncertain, you may choose the default tool "{default_tool}".
+ - If no tool fits or you are uncertain, respond with call:"no".
 """
 
 GEMINI_SAFETY_CONFIG = [
@@ -87,13 +86,10 @@ def build_tools_block(tools_spec: list) -> str:
         # その他は無視
     return "\n".join(lines)
 
-def route(user_message: str,
-          tools_spec: List[Any],
-          default_tool: str) -> Dict[str, Any]:
+def route(user_message: str, tools_spec: List[Any]) -> Dict[str, Any]:
     """Return {"call":"yes/no","tool": name, "args": {...}}"""
     sys_prompt = SYS_TEMPLATE.format(
         tools_block=build_tools_block(tools_spec),
-        default_tool=default_tool,
     )
 
     resp = client.models.generate_content(
