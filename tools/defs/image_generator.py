@@ -1,13 +1,23 @@
 import base64
+import os
 from google import genai
 from google.genai import types
+from dotenv import load_dotenv
 
 from tools.defs import ToolSchema
+
+load_dotenv()
 
 
 def generate_image(prompt: str) -> str:
     """Generate an image from text prompt and return a data URI."""
-    client = genai.Client()
+    free_key = os.getenv("GEMINI_FREE_API_KEY")
+    paid_key = os.getenv("GEMINI_API_KEY")
+    if not free_key and not paid_key:
+        raise RuntimeError(
+            "GEMINI_FREE_API_KEY or GEMINI_API_KEY environment variable is not set."
+        )
+    client = genai.Client(api_key=free_key or paid_key)
     resp = client.models.generate_content(
         model="gemini-2.0-flash-preview-image-generation",
         contents=prompt,

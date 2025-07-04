@@ -3,6 +3,7 @@ from unittest.mock import patch, MagicMock
 
 from tools.defs.image_generator import generate_image
 from tools import TOOL_REGISTRY, OPENAI_TOOLS_SPEC, GEMINI_TOOLS_SPEC
+import os
 
 class TestImageGenerator(unittest.TestCase):
     @patch('tools.defs.image_generator.genai')
@@ -19,10 +20,23 @@ class TestImageGenerator(unittest.TestCase):
         mock_resp.candidates = [mock_candidate]
         mock_client.models.generate_content.return_value = mock_resp
 
-        result = generate_image('a cat')
+        with patch.dict(os.environ, {"GEMINI_FREE_API_KEY": "FREE", "GEMINI_API_KEY": ""}):
+            result = generate_image('a cat')
         self.assertTrue(result.startswith('data:image/png;base64,'))
-        mock_genai.Client.assert_called_once()
+        mock_genai.Client.assert_called_once_with(api_key='FREE')
         mock_client.models.generate_content.assert_called_once()
+
+    @patch('tools.defs.image_generator.genai')
+    def test_generate_image_fallback(self, mock_genai):
+        mock_client = MagicMock()
+        mock_genai.Client.return_value = mock_client
+        mock_resp = MagicMock()
+        mock_resp.candidates = []
+        mock_client.models.generate_content.return_value = mock_resp
+
+        with patch.dict(os.environ, {"GEMINI_FREE_API_KEY": "", "GEMINI_API_KEY": "PAID"}):
+            generate_image('nothing')
+        mock_genai.Client.assert_called_with(api_key='PAID')
 
     def test_tool_registration(self):
         self.assertIn('generate_image', TOOL_REGISTRY)
