@@ -25,6 +25,7 @@ TOOLS:
 
 RULES:
 - If the user message is an arithmetic expression -> call:"yes", tool:"{default_tool}".
+ - If the user requests an image -> call:"yes", tool:"generate_image", args:{{"prompt": user_message}}.
 - Otherwise -> call:"no".
 """
 
