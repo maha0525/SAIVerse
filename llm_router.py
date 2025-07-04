@@ -25,9 +25,10 @@ TOOLS:
 {tools_block}
 
 RULES:
+ - "call" must be either "yes" or "no". Do NOT use other values.
  - Pick the tool whose name or description best matches the user message.
  - Arguments must use the parameter names from that tool's schema.
- - If no tool fits or you are uncertain, respond with call:"no".
+ - If no tool fits or you are uncertain, respond with call:"no" and an empty "tool".
 """
 
 GEMINI_SAFETY_CONFIG = [
@@ -86,6 +87,22 @@ def build_tools_block(tools_spec: list) -> str:
         # その他は無視
     return "\n".join(lines)
 
+def extract_tool_names(tools_spec: list) -> set[str]:
+    names: set[str] = set()
+    for t in tools_spec:
+        if isinstance(t, dict):
+            name = t.get("function", {}).get("name")
+            if name:
+                names.add(name)
+            continue
+        if isinstance(t, gtypes.Tool) and t.function_declarations:
+            for decl in t.function_declarations:
+                names.add(decl.name)
+            continue
+        if isinstance(t, ToolSchema):
+            names.add(t.name)
+    return names
+
 def route(user_message: str, tools_spec: List[Any]) -> Dict[str, Any]:
     """Return {"call":"yes/no","tool": name, "args": {...}}"""
     sys_prompt = SYS_TEMPLATE.format(
@@ -110,7 +127,13 @@ def route(user_message: str, tools_spec: List[Any]) -> Dict[str, Any]:
         decision = json.loads(text)
         if not isinstance(decision, dict):
             raise ValueError
-        return decision
+
+        tool_names = extract_tool_names(tools_spec)
+        call = str(decision.get("call", "")).strip().lower()
+        tool = str(decision.get("tool", "")).strip()
+        if call not in {"yes", "no"}:
+            call = "yes" if tool in tool_names else "no"
+        return {"call": call, "tool": tool, "args": decision.get("args", {})}
     except Exception:
         raw = text if 'text' in locals() else str(resp)
         log.warning("Router JSON parse failed, fallback to auto. Raw: %s", raw)

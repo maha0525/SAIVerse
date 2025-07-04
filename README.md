@@ -114,6 +114,7 @@ GEMINI_FREE_API_KEY=AIza...
 - ユーザーの要望がツールの説明に合致する場合、そのツールへ自動ルーティングされる。
 - ツール定義は `tools/defs/` 以下に配置し、OpenAI/Gemini の Function Calling に対応。
 - Gemini の画像生成APIを利用する `generate_image` ツールを追加し、Base64データURI を返す。
+- ルーターは `call` フィールドに `yes` か `no` のみを返す。その他の値は認められない。
 
 
 ---

@@ -29,5 +29,37 @@ class TestLLMRouter(unittest.TestCase):
         self.assertEqual(decision['tool'], 'generate_image')
         mock_client.models.generate_content.assert_called_once()
 
+    @patch('llm_router.client')
+    def test_route_invalid_call(self, mock_client):
+        mock_resp = MagicMock()
+        cand = MagicMock()
+        cand.text = None
+        cand.content = MagicMock()
+        part = MagicMock()
+        part.text = '{"call":"generate_image","tool":"generate_image","args":{"prompt":"cat"}}'
+        cand.content.parts = [part]
+        mock_resp.candidates = [cand]
+        mock_client.models.generate_content.return_value = mock_resp
+
+        decision = route('猫の画像を生成して', OPENAI_TOOLS_SPEC)
+        self.assertEqual(decision['call'], 'yes')
+        self.assertEqual(decision['tool'], 'generate_image')
+
+    @patch('llm_router.client')
+    def test_route_invalid_call_unknown_tool(self, mock_client):
+        mock_resp = MagicMock()
+        cand = MagicMock()
+        cand.text = None
+        cand.content = MagicMock()
+        part = MagicMock()
+        part.text = '{"call":"maybe","tool":"nonexistent","args":{}}'
+        cand.content.parts = [part]
+        mock_resp.candidates = [cand]
+        mock_client.models.generate_content.return_value = mock_resp
+
+        decision = route('テスト', OPENAI_TOOLS_SPEC)
+        self.assertEqual(decision['call'], 'no')
+        self.assertEqual(decision['tool'], 'nonexistent')
+
 if __name__ == '__main__':
     unittest.main()
