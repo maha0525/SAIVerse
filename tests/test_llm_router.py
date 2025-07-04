@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 from llm_router import build_tools_block, route
-from tools import OPENAI_TOOLS_SPEC, GEMINI_TOOLS_SPEC
+from tools import OPENAI_TOOLS_SPEC, GEMINI_TOOLS_SPEC, TOOL_SCHEMAS
 
 class TestLLMRouter(unittest.TestCase):
     def test_build_tools_block(self):
@@ -10,6 +10,8 @@ class TestLLMRouter(unittest.TestCase):
         self.assertIn('generate_image', block)
         block2 = build_tools_block(GEMINI_TOOLS_SPEC)
         self.assertIn('generate_image', block2)
+        block3 = build_tools_block(TOOL_SCHEMAS)
+        self.assertIn('generate_image', block3)
 
     @patch('llm_router.client')
     def test_route_image(self, mock_client):

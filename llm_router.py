@@ -1,5 +1,6 @@
 import json, logging
 from typing import Dict, Any, List
+from tools.defs import ToolSchema
 from google import genai
 from google.genai import types as gtypes
 from dotenv import load_dotenv
@@ -24,9 +25,9 @@ TOOLS:
 {tools_block}
 
 RULES:
-- If the user message is an arithmetic expression -> call:"yes", tool:"{default_tool}".
- - If the user requests an image -> call:"yes", tool:"generate_image", args:{{"prompt": user_message}}.
-- Otherwise -> call:"no".
+ - If the user message is an arithmetic expression -> call:"yes", tool:"{default_tool}", args:{{"expression": user_message}}.
+ - If the user request matches one of the tool descriptions or names, choose that tool and set suitable args (image requests use {{"prompt": user_message}}).
+ - Otherwise -> call:"no".
 """
 
 GEMINI_SAFETY_CONFIG = [
@@ -69,13 +70,18 @@ def build_tools_block(tools_spec: list) -> str:
                 lines.append(f"- {decl.name} : {decl.description}")
             continue
 
+        # ---- ToolSchema ----
+        if isinstance(t, ToolSchema):
+            lines.append(f"- {t.name} : {t.description}")
+            continue
+
         # その他は無視
     return "\n".join(lines)
 
 def route(user_message: str,
-          tools_spec: List[Dict[str, Any]],
+          tools_spec: List[Any],
           default_tool: str) -> Dict[str, Any]:
-    """Return {"call":"yes/no","tool":name,"args":{...}}"""
+    """Return {"call":"yes/no","tool": name, "args": {...}}"""
     sys_prompt = SYS_TEMPLATE.format(
         tools_block=build_tools_block(tools_spec),
         default_tool=default_tool,
