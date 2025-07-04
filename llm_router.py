@@ -25,9 +25,10 @@ TOOLS:
 {tools_block}
 
 RULES:
- - If the user message is an arithmetic expression -> call:"yes", tool:"{default_tool}", args:{{"expression": user_message}}.
- - If the user request matches one of the tool descriptions or names, choose that tool and set suitable args (image requests use {{"prompt": user_message}}).
- - Otherwise -> call:"no".
+ - Pick the tool whose name or description best matches the user message.
+ - Arguments must use the parameter names from that tool's schema.
+ - If no tool fits, respond with call:"no".
+ - When uncertain, you may choose the default tool "{default_tool}".
 """
 
 GEMINI_SAFETY_CONFIG = [
@@ -61,18 +62,26 @@ def build_tools_block(tools_spec: list) -> str:
         # ---- OpenAI 形式 dict ----
         if isinstance(t, dict):
             fn = t.get("function", {})
-            lines.append(f"- {fn.get('name','?')} : {fn.get('description','')}")
+            props = fn.get("parameters", {}).get("properties", {})
+            arglist = ", ".join(props.keys())
+            lines.append(f"- {fn.get('name','?')} : {fn.get('description','')} (args: {arglist})")
             continue
 
         # ---- Gemini 形式 Tool ----
         if isinstance(t, gtypes.Tool) and t.function_declarations:
             for decl in t.function_declarations:
-                lines.append(f"- {decl.name} : {decl.description}")
+                if hasattr(decl, "parameters") and decl.parameters is not None:
+                    props = getattr(decl.parameters, "properties", {})
+                else:
+                    props = {}
+                arglist = ", ".join(props.keys())
+                lines.append(f"- {decl.name} : {decl.description} (args: {arglist})")
             continue
 
         # ---- ToolSchema ----
         if isinstance(t, ToolSchema):
-            lines.append(f"- {t.name} : {t.description}")
+            arglist = ", ".join(t.parameters.get("properties", {}).keys())
+            lines.append(f"- {t.name} : {t.description} (args: {arglist})")
             continue
 
         # その他は無視
