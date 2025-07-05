@@ -23,7 +23,7 @@ def generate_image(prompt: str) -> tuple[str, ToolResult, str | None]:
         model="gemini-2.0-flash-preview-image-generation",
         contents=prompt,
         config=types.GenerateContentConfig(
-            response_modalities=["IMAGE"]
+            response_modalities=["TEXT", "IMAGE"]  # ← TEXT を必ず含める
         )
     )
     if not resp.candidates:
@@ -40,8 +40,10 @@ def generate_image(prompt: str) -> tuple[str, ToolResult, str | None]:
             file_path = img_dir / f"{timestamp}.{ext}"
             file_path.write_bytes(data)
             snippet = f"![画像が生成されました]({file_path.as_posix()})"
-            return prompt, ToolResult(snippet), file_path.as_posix()
-    return prompt, ToolResult(None), None
+            text = f"やっほー！お絵描き妖精だよ！画像ができたから使ってね！\n\n使ったプロンプトはこれだよ：\n{prompt}\n\nそれじゃ、また呼んでね！"
+            return text, ToolResult(snippet), file_path.as_posix()
+    text = "こんにちは、お絵描き妖精だよ！ごめん、失敗しちゃった……。\n\n使ったプロンプトはこれだよ：\n{prompt}\n\n次は頑張るから、また呼んでね！"
+    return text, ToolResult(None), None
 
 
 def schema() -> ToolSchema:

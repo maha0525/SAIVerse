@@ -10,6 +10,7 @@ from google.genai import types
 from google.genai.types import FunctionResponse
 
 from dotenv import load_dotenv
+import mimetypes
 
 from tools import TOOL_REGISTRY, OPENAI_TOOLS_SPEC, GEMINI_TOOLS_SPEC
 from tools.defs import parse_tool_result
@@ -459,14 +460,14 @@ class GeminiClient(LLMClient):
                     )
                 ]
                 if file_path:
-                    import mimetypes
-                    mime, _ = mimetypes.guess_type(file_path)
+                    with open(file_path, "rb") as f:
+                        img_bytes = f.read()
+                    mime = mimetypes.guess_type(file_path)[0] or "image/png"
+
                     parts.append(
-                        types.Part(
-                            file_data=types.FileData(
-                                file_uri=file_path,
-                                mime_type=mime or "application/octet-stream",
-                            )
+                        types.Part.from_bytes(           # ← Part を bytes から生成
+                            data=img_bytes,
+                            mime_type=mime,
                         )
                     )
 
@@ -615,14 +616,14 @@ class GeminiClient(LLMClient):
             )
         ]
         if file_path:
-            import mimetypes
-            mime, _ = mimetypes.guess_type(file_path)
+            with open(file_path, "rb") as f:
+                img_bytes = f.read()
+            mime = mimetypes.guess_type(file_path)[0] or "image/png"
+
             file_parts.append(
-                types.Part(
-                    file_data=types.FileData(
-                        file_uri=file_path,
-                        mime_type=mime or "application/octet-stream",
-                    )
+                types.Part.from_bytes(           # ← Part を bytes から生成
+                    data=img_bytes,
+                    mime_type=mime,
                 )
             )
 
