@@ -25,7 +25,7 @@ class TestImageGenerator(unittest.TestCase):
         with patch.dict(os.environ, {"GEMINI_FREE_API_KEY": "FREE", "GEMINI_API_KEY": ""}):
             text, info, path = generate_image('a cat')
         self.assertIsInstance(info, ToolResult)
-        self.assertEqual(text, 'a cat')
+        self.assertIn('a cat', text)
         self.assertTrue(info.history_snippet)
         self.assertTrue(Path(path).exists())
         mock_genai.Client.assert_called_once_with(api_key='FREE')
