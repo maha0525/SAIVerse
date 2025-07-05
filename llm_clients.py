@@ -151,7 +151,7 @@ class OpenAIClient(LLMClient):
                     if fn is None:
                         raise RuntimeError(f"Unsupported tool: {tc.function.name}")
                     args = json.loads(tc.function.arguments)
-                    result_text, snippet = parse_tool_result(fn(**args))
+                    result_text, snippet, _ = parse_tool_result(fn(**args))
                     if snippet:
                         snippets.append(snippet)
                     messages.append({
@@ -278,7 +278,7 @@ class OpenAIClient(LLMClient):
                         continue
 
                     try:
-                        result_text, snippet = parse_tool_result(fn(**args))
+                        result_text, snippet, _ = parse_tool_result(fn(**args))
                         logging.info("tool_call %s executed -> %s", tc["id"], result_text)
                         if snippet:
                             history_snippets.append(snippet)
@@ -446,21 +446,34 @@ class GeminiClient(LLMClient):
                 fn = TOOL_REGISTRY.get(fc.name)
                 if fn is None:
                     raise RuntimeError(f"Unsupported tool: {fc.name}")
-                result_text, snippet = parse_tool_result(fn(**fc.args))
+                result_text, snippet, file_path = parse_tool_result(fn(**fc.args))
                 if snippet:
                     snippets.append(snippet)
+
+                parts = [
+                    types.Part(
+                        function_response=FunctionResponse(
+                            name=fc.name,
+                            response={"result": result_text}
+                        )
+                    )
+                ]
+                if file_path:
+                    import mimetypes
+                    mime, _ = mimetypes.guess_type(file_path)
+                    parts.append(
+                        types.Part(
+                            file_data=types.FileData(
+                                file_uri=file_path,
+                                mime_type=mime or "application/octet-stream",
+                            )
+                        )
+                    )
 
                 messages.append(
                     types.Content(
                         role="tool",
-                        parts=[
-                            types.Part(
-                                function_response=FunctionResponse(
-                                    name=fc.name,
-                                    response={"result": result_text}   # ← JSON で渡す
-                                )
-                            )
-                        ],
+                        parts=parts,
                     )
                 )
             return "ツール呼び出しが 10 回を超えました。"
@@ -578,7 +591,7 @@ class GeminiClient(LLMClient):
             return
 
         try:
-            result_text, snippet = parse_tool_result(fn(**fcall.args))
+            result_text, snippet, file_path = parse_tool_result(fn(**fcall.args))
             if snippet:
                 history_snippets.append(snippet)
             result = result_text
@@ -590,16 +603,32 @@ class GeminiClient(LLMClient):
         logging.info("Gemini tool '%s' executed -> %s", fcall.name, result)
 
         # function_call と tool_response を履歴へ
+        parts = [
+            types.Part(function_call=fcall)
+        ]
+        file_parts = [
+            types.Part(
+                function_response=types.FunctionResponse(
+                    name=fcall.name,
+                    response={"result": result}
+                )
+            )
+        ]
+        if file_path:
+            import mimetypes
+            mime, _ = mimetypes.guess_type(file_path)
+            file_parts.append(
+                types.Part(
+                    file_data=types.FileData(
+                        file_uri=file_path,
+                        mime_type=mime or "application/octet-stream",
+                    )
+                )
+            )
+
         messages.extend([
-            types.Content(role="model",
-                       parts=[types.Part(function_call=fcall)]),
-            types.Content(role="tool",
-                       parts=[types.Part(
-                           function_response=types.FunctionResponse(
-                               name=fcall.name,
-                               response={"result": result}
-                           )
-                       )]),
+            types.Content(role="model", parts=parts),
+            types.Content(role="tool", parts=file_parts),
         ])
 
         # ---------- ④ mode=NONE で自然文ストリーム ----------

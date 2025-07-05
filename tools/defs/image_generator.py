@@ -1,4 +1,3 @@
-import base64
 import os
 from datetime import datetime
 from pathlib import Path
@@ -11,8 +10,8 @@ from tools.defs import ToolSchema, ToolResult
 load_dotenv()
 
 
-def generate_image(prompt: str) -> tuple[str, ToolResult]:
-    """Generate an image and return (data URI, snippet holder)."""
+def generate_image(prompt: str) -> tuple[str, ToolResult, str | None]:
+    """Generate an image and return (prompt, snippet, file path)."""
     free_key = os.getenv("GEMINI_FREE_API_KEY")
     paid_key = os.getenv("GEMINI_API_KEY")
     if not free_key and not paid_key:
@@ -28,13 +27,12 @@ def generate_image(prompt: str) -> tuple[str, ToolResult]:
         )
     )
     if not resp.candidates:
-        return "", ToolResult(None)
+        return prompt, ToolResult(None), None
     cand = resp.candidates[0]
     for part in cand.content.parts:
         if part.inline_data is not None:
             data = part.inline_data.data
             mime = part.inline_data.mime_type or "image/png"
-            b64 = base64.b64encode(data).decode("ascii")
             img_dir = Path("generate_image")
             img_dir.mkdir(exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -42,14 +40,14 @@ def generate_image(prompt: str) -> tuple[str, ToolResult]:
             file_path = img_dir / f"{timestamp}.{ext}"
             file_path.write_bytes(data)
             snippet = f"![画像が生成されました]({file_path.as_posix()})"
-            return f"data:{mime};base64,{b64}", ToolResult(snippet)
-    return "", ToolResult(None)
+            return prompt, ToolResult(snippet), file_path.as_posix()
+    return prompt, ToolResult(None), None
 
 
 def schema() -> ToolSchema:
     return ToolSchema(
         name="generate_image",
-        description="Generate an image from a text prompt using Gemini and return it as a data URI.",
+        description="Generate an image from a text prompt using Gemini and save it to a file.",
         parameters={
             "type": "object",
             "properties": {
