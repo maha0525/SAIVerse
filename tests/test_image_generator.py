@@ -23,11 +23,10 @@ class TestImageGenerator(unittest.TestCase):
         mock_client.models.generate_content.return_value = mock_resp
 
         with patch.dict(os.environ, {"GEMINI_FREE_API_KEY": "FREE", "GEMINI_API_KEY": ""}):
-            data_uri, info = generate_image('a cat')
+            text, info, path = generate_image('a cat')
         self.assertIsInstance(info, ToolResult)
-        self.assertTrue(data_uri.startswith('data:image/png;base64,'))
+        self.assertEqual(text, 'a cat')
         self.assertTrue(info.history_snippet)
-        path = info.history_snippet.split('(')[-1].rstrip(')')
         self.assertTrue(Path(path).exists())
         mock_genai.Client.assert_called_once_with(api_key='FREE')
         mock_client.models.generate_content.assert_called_once()
