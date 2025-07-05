@@ -10,8 +10,10 @@ from google.genai import types
 from google.genai.types import FunctionResponse
 
 from dotenv import load_dotenv
+import mimetypes
 
 from tools import TOOL_REGISTRY, OPENAI_TOOLS_SPEC, GEMINI_TOOLS_SPEC
+from tools.defs import parse_tool_result
 from llm_router import route
 
 load_dotenv()
@@ -83,16 +85,22 @@ class OpenAIClient(LLMClient):
         self.client = OpenAI(api_key=api_key)
         self.model = model
 
-    def generate(self, messages: List[Dict[str, str]], tools: Optional[list] | None = None) -> str:
+    def generate(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[list] | None = None,
+        history_snippets: Optional[List[str]] | None = None,
+    ) -> str:
         """ツールコールを解決しながら最終テキストを返す（最大 10 回ループ）"""
         tools = tools or OPENAI_TOOLS_SPEC
 
         # ── Router 判定（最後の user メッセージだけ渡す） ──
         user_msg = next((m["content"] for m in reversed(messages)
                          if m.get("role") == "user"), "")
-        decision = route(user_msg, tools, default_tool="calculate_expression")
+        decision = route(user_msg, tools)
         
         # ログ出力（JSON フォーマットで見やすく）
+        snippets: List[str] = []
         try:
             logging.info("Router decision:\n%s", json.dumps(decision, indent=2, ensure_ascii=False))
         except Exception:
@@ -134,7 +142,8 @@ class OpenAIClient(LLMClient):
 
                 # ---------- ツールが無い → 通常応答 ----------
                 if not isinstance(tool_calls, list) or len(tool_calls) == 0:
-                    return target_choice.message.content or ""
+                    prefix = "".join(s + "\n" for s in snippets)
+                    return prefix + (target_choice.message.content or "")
 
                 # ---------- ツール有り → 実行 ----------
                 messages.append(target_choice.message)
@@ -143,12 +152,14 @@ class OpenAIClient(LLMClient):
                     if fn is None:
                         raise RuntimeError(f"Unsupported tool: {tc.function.name}")
                     args = json.loads(tc.function.arguments)
-                    result = str(fn(**args))
+                    result_text, snippet, _ = parse_tool_result(fn(**args))
+                    if snippet:
+                        snippets.append(snippet)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "name": tc.function.name,
-                        "content": result,
+                        "content": result_text,
                     })
                 continue    # -> 次ラウンドへ
             return "ツール呼び出しが 10 回を超えました。"
@@ -160,7 +171,8 @@ class OpenAIClient(LLMClient):
         self,
         messages: List[Dict[str, str]],
         tools: Optional[list] | None = None,
-        force_tool_choice: Optional[dict | str] = None,   # ← ★追加
+        force_tool_choice: Optional[dict | str] = None,
+        history_snippets: Optional[List[str]] | None = None,
     ) -> Iterator[str]:
         """
         ユーザ向けに逐次テキストを yield するストリーム版。
@@ -168,13 +180,14 @@ class OpenAIClient(LLMClient):
         - 再帰呼び出し時はデフォルト None → 自動で "auto"
         """
         tools = tools or OPENAI_TOOLS_SPEC
+        history_snippets = history_snippets or []
         # ----------------------------------------
         # 初回呼び出しなら router で強制指定を決定
         # ----------------------------------------
         if force_tool_choice is None:                       # 再帰呼び出し時はスキップ
             user_msg = next((m["content"] for m in reversed(messages)
                              if m.get("role") == "user"), "")
-            decision = route(user_msg, tools, default_tool="calculate_expression")
+            decision = route(user_msg, tools)
             logging.info("Router decision:\n%s", json.dumps(decision, indent=2, ensure_ascii=False))
             if decision["call"] == "yes" and decision["tool"]:
                 force_tool_choice = {
@@ -197,6 +210,7 @@ class OpenAIClient(LLMClient):
 
         call_buffer: dict[str, dict] = {}
         state = "TEXT"
+        prefix_yielded = False
 
         try:
             current_call_id = None           # 直近の有効 id を保持
@@ -231,6 +245,9 @@ class OpenAIClient(LLMClient):
 
                 # ----- 通常テキスト delta -----
                 if state == "TEXT" and delta.content:
+                    if not prefix_yielded and history_snippets:
+                        yield "\n".join(history_snippets) + "\n"
+                        prefix_yielded = True
                     yield delta.content
 
             # ----------------------------------------
@@ -262,8 +279,10 @@ class OpenAIClient(LLMClient):
                         continue
 
                     try:
-                        result = str(fn(**args))
-                        logging.info("tool_call %s executed -> %s", tc["id"], result)
+                        result_text, snippet, _ = parse_tool_result(fn(**args))
+                        logging.info("tool_call %s executed -> %s", tc["id"], result_text)
+                        if snippet:
+                            history_snippets.append(snippet)
                     except Exception:
                         logging.exception("tool_call %s execution failed", tc["id"])
                         continue
@@ -279,7 +298,7 @@ class OpenAIClient(LLMClient):
                         "role": "tool",
                         "tool_call_id": tc["id"],
                         "name": name,
-                        "content": result,
+                        "content": result_text,
                     })
                 # ② assistant/tool_calls を tool 応答より前に挿入
                 insert_pos = len(messages) - len(call_buffer)  # 直前に挿入
@@ -290,6 +309,7 @@ class OpenAIClient(LLMClient):
                     messages,
                     tools,
                     force_tool_choice="auto",   # ← 2 回目以降は常に auto
+                    history_snippets=history_snippets,
                 )
 
         except Exception:
@@ -352,10 +372,16 @@ class GeminiClient(LLMClient):
 
         return "\n".join(system_lines), contents
 
-    def generate(self, messages: List[Dict[str, str]], tools: Optional[list] | None = None) -> str:
+    def generate(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[list] | None = None,
+        history_snippets: Optional[List[str]] | None = None,
+    ) -> str:
         # ------------- 前処理 -------------
         tools_spec = tools or GEMINI_TOOLS_SPEC
         tool_list  = _merge_tools_for_gemini(tools_spec)
+        history_snippets = history_snippets or []
 
         # 直近 user メッセージ抽出（dict と Content 混在対応）
         def _last_user(msgs) -> str:
@@ -368,8 +394,7 @@ class GeminiClient(LLMClient):
             return ""
 
         # ---------- ① Router ----------
-        decision = route(_last_user(messages), tools_spec,
-                         default_tool="calculate_expression")
+        decision = route(_last_user(messages), tools_spec)
         logging.info("Router decision:\n%s",
                      json.dumps(decision, indent=2, ensure_ascii=False))
 
@@ -382,6 +407,7 @@ class GeminiClient(LLMClient):
             fc_cfg = types.FunctionCallingConfig(mode="AUTO")
 
         tool_cfg = types.ToolConfig(functionCallingConfig=fc_cfg)
+        snippets: List[str] = history_snippets
 
         def _call(client):
             for _ in range(10):
@@ -406,7 +432,8 @@ class GeminiClient(LLMClient):
                 # ----- どの part に function_call があるか探索 -----
                 fcall_part = next((p for p in cand.content.parts if p.function_call), None)
                 if fcall_part is None:                       # ★ ツール呼び出しなし
-                    return cand.content.parts[0].text or ""
+                    prefix = "".join(s + "\n" for s in snippets)
+                    return prefix + (cand.content.parts[0].text or "")
 
                 # ----- assistant/tool_calls -----
                 messages.append(
@@ -420,19 +447,34 @@ class GeminiClient(LLMClient):
                 fn = TOOL_REGISTRY.get(fc.name)
                 if fn is None:
                     raise RuntimeError(f"Unsupported tool: {fc.name}")
-                result = str(fn(**fc.args))
+                result_text, snippet, file_path = parse_tool_result(fn(**fc.args))
+                if snippet:
+                    snippets.append(snippet)
+
+                parts = [
+                    types.Part(
+                        function_response=FunctionResponse(
+                            name=fc.name,
+                            response={"result": result_text}
+                        )
+                    )
+                ]
+                if file_path:
+                    with open(file_path, "rb") as f:
+                        img_bytes = f.read()
+                    mime = mimetypes.guess_type(file_path)[0] or "image/png"
+
+                    parts.append(
+                        types.Part.from_bytes(           # ← Part を bytes から生成
+                            data=img_bytes,
+                            mime_type=mime,
+                        )
+                    )
 
                 messages.append(
                     types.Content(
                         role="tool",
-                        parts=[
-                            types.Part(
-                                function_response=FunctionResponse(
-                                    name=fc.name,
-                                    response={"result": result}   # ← JSON で渡す
-                                )
-                            )
-                        ],
+                        parts=parts,
                     )
                 )
             return "ツール呼び出しが 10 回を超えました。"
@@ -456,6 +498,7 @@ class GeminiClient(LLMClient):
         self,
         messages: List[types.Content | Dict[str, str]],
         tools: Optional[list] | None = None,
+        history_snippets: Optional[List[str]] | None = None,
     ) -> Iterator[str]:
         """
         1) Router でツール要否を判定
@@ -467,6 +510,7 @@ class GeminiClient(LLMClient):
         # ------------- 前処理 -------------
         tools_spec = tools or GEMINI_TOOLS_SPEC
         tool_list  = _merge_tools_for_gemini(tools_spec)
+        history_snippets = history_snippets or []
 
         # 直近 user メッセージ抽出（dict と Content 混在対応）
         def _last_user(msgs) -> str:
@@ -479,8 +523,7 @@ class GeminiClient(LLMClient):
             return ""
 
         # ---------- ① Router ----------
-        decision = route(_last_user(messages), tools_spec,
-                         default_tool="calculate_expression")
+        decision = route(_last_user(messages), tools_spec)
         logging.info("Router decision:\n%s",
                      json.dumps(decision, indent=2, ensure_ascii=False))
 
@@ -520,16 +563,24 @@ class GeminiClient(LLMClient):
                 return
 
         fcall: types.FunctionCall | None = None
+        prefix_yielded = False
         for chunk in stream:
+            raw_logger.debug("Gemini stream chunk:\n%s", chunk)
             if not chunk.candidates:                    # keep-alive
                 continue
             cand = chunk.candidates[0]
+            raw_logger.debug("Gemini stream candidate:\n%s", cand)
             if not cand.content or not cand.content.parts:
                 continue
             part = cand.content.parts[0]
             if part.function_call:
+                raw_logger.debug("Gemini function_call: %s", part.function_call)
                 fcall = part.function_call             # 後で実行
             elif part.text:
+                raw_logger.debug("Gemini text: %s", part.text)
+                if not prefix_yielded and history_snippets:
+                    yield "\n".join(history_snippets) + "\n"
+                    prefix_yielded = True
                 yield part.text                        # モデルが text を返した場合
         # ---------- ③ ツール実行 ----------
         if fcall is None:
@@ -541,7 +592,10 @@ class GeminiClient(LLMClient):
             return
 
         try:
-            result = str(fn(**fcall.args))
+            result_text, snippet, file_path = parse_tool_result(fn(**fcall.args))
+            if snippet:
+                history_snippets.append(snippet)
+            result = result_text
         except Exception:
             logging.exception("Tool '%s' execution failed", fcall.name)
             yield "エラー: ツール実行に失敗しました。"
@@ -550,16 +604,32 @@ class GeminiClient(LLMClient):
         logging.info("Gemini tool '%s' executed -> %s", fcall.name, result)
 
         # function_call と tool_response を履歴へ
+        parts = [
+            types.Part(function_call=fcall)
+        ]
+        file_parts = [
+            types.Part(
+                function_response=types.FunctionResponse(
+                    name=fcall.name,
+                    response={"result": result}
+                )
+            )
+        ]
+        if file_path:
+            with open(file_path, "rb") as f:
+                img_bytes = f.read()
+            mime = mimetypes.guess_type(file_path)[0] or "image/png"
+
+            file_parts.append(
+                types.Part.from_bytes(           # ← Part を bytes から生成
+                    data=img_bytes,
+                    mime_type=mime,
+                )
+            )
+
         messages.extend([
-            types.Content(role="model",
-                       parts=[types.Part(function_call=fcall)]),
-            types.Content(role="tool",
-                       parts=[types.Part(
-                           function_response=types.FunctionResponse(
-                               name=fcall.name,
-                               response={"result": result}
-                           )
-                       )]),
+            types.Content(role="model", parts=parts),
+            types.Content(role="tool", parts=file_parts),
         ])
 
         # ---------- ④ mode=NONE で自然文ストリーム ----------
@@ -579,17 +649,27 @@ class GeminiClient(LLMClient):
         )
 
         yielded = False
+        prefix_yielded2 = False
         for chunk in stream2:
+            raw_logger.debug("Gemini stream2 chunk:\n%s", chunk)
             if not chunk.candidates:
                 continue
             cand = chunk.candidates[0]
+            raw_logger.debug("Gemini stream2 candidate:\n%s", cand)
             if cand.content and cand.content.parts and cand.content.parts[0].text:
+                raw_logger.debug("Gemini text2: %s", cand.content.parts[0].text)
+                if not prefix_yielded2 and history_snippets:
+                    yield "\n".join(history_snippets) + "\n"
+                    prefix_yielded2 = True
                 yield cand.content.parts[0].text
                 yielded = True
 
         # ---------- ⑤ 保険：モデルが無言の場合 ----------
         if not yielded:
-            yield result
+            if history_snippets:
+                yield "\n".join(history_snippets) + "\n" + result
+            else:
+                yield result
 
 class OllamaClient(LLMClient):
     """Client for Ollama API."""
