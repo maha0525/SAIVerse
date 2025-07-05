@@ -18,22 +18,25 @@ class ToolSchema:
 
 @dataclass
 class ToolResult:
-    """Return type for tools that want to provide history snippets."""
+    """Container for history snippets returned by tools."""
 
-    content: str
     history_snippet: Optional[str] = None
 
 
 def parse_tool_result(res: Any) -> Tuple[str, Optional[str]]:
     """Normalize various tool return formats."""
     if isinstance(res, ToolResult):
-        return res.content, res.history_snippet
+        return "", res.history_snippet
     if isinstance(res, dict):
         content = str(res.get("content", ""))
         snippet = res.get("history_snippet")
         return content, snippet
     if isinstance(res, tuple) and len(res) == 2:
-        return str(res[0]), res[1]
+        content = str(res[0])
+        snip = res[1]
+        if isinstance(snip, ToolResult):
+            snip = snip.history_snippet
+        return content, snip
     return str(res), None
 
 # ここに共通ヘルパを追加しても良い
