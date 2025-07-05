@@ -11,8 +11,8 @@ from tools.defs import ToolSchema, ToolResult
 load_dotenv()
 
 
-def generate_image(prompt: str) -> ToolResult:
-    """Generate an image from text prompt and return a data URI."""
+def generate_image(prompt: str) -> tuple[str, ToolResult]:
+    """Generate an image and return (data URI, snippet holder)."""
     free_key = os.getenv("GEMINI_FREE_API_KEY")
     paid_key = os.getenv("GEMINI_API_KEY")
     if not free_key and not paid_key:
@@ -28,7 +28,7 @@ def generate_image(prompt: str) -> ToolResult:
         )
     )
     if not resp.candidates:
-        return ToolResult("", None)
+        return "", ToolResult(None)
     cand = resp.candidates[0]
     for part in cand.content.parts:
         if part.inline_data is not None:
@@ -42,8 +42,8 @@ def generate_image(prompt: str) -> ToolResult:
             file_path = img_dir / f"{timestamp}.{ext}"
             file_path.write_bytes(data)
             snippet = f"![画像が生成されました]({file_path.as_posix()})"
-            return ToolResult(f"data:{mime};base64,{b64}", snippet)
-    return ToolResult("", None)
+            return f"data:{mime};base64,{b64}", ToolResult(snippet)
+    return "", ToolResult(None)
 
 
 def schema() -> ToolSchema:
