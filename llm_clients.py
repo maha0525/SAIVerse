@@ -11,6 +11,7 @@ from google.genai.types import FunctionResponse
 
 from dotenv import load_dotenv
 import mimetypes
+import base64
 
 from tools import TOOL_REGISTRY, OPENAI_TOOLS_SPEC, GEMINI_TOOLS_SPEC
 from tools.defs import parse_tool_result
@@ -152,7 +153,7 @@ class OpenAIClient(LLMClient):
                     if fn is None:
                         raise RuntimeError(f"Unsupported tool: {tc.function.name}")
                     args = json.loads(tc.function.arguments)
-                    result_text, snippet, _ = parse_tool_result(fn(**args))
+                    result_text, snippet, file_path = parse_tool_result(fn(**args))
                     if snippet:
                         snippets.append(snippet)
                     messages.append({
@@ -161,6 +162,21 @@ class OpenAIClient(LLMClient):
                         "name": tc.function.name,
                         "content": result_text,
                     })
+                    if file_path:
+                        try:
+                            with open(file_path, "rb") as f:
+                                img_bytes = f.read()
+                            b64 = base64.b64encode(img_bytes).decode("ascii")
+                            mime = mimetypes.guess_type(file_path)[0] or "image/png"
+                            data_url = f"data:{mime};base64,{b64}"
+                            messages.append({
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "image_url", "image_url": {"url": data_url}}
+                                ],
+                            })
+                        except Exception:
+                            logging.exception("Failed to load file %s", file_path)
                 continue    # -> 次ラウンドへ
             return "ツール呼び出しが 10 回を超えました。"
         except Exception:
@@ -279,7 +295,7 @@ class OpenAIClient(LLMClient):
                         continue
 
                     try:
-                        result_text, snippet, _ = parse_tool_result(fn(**args))
+                        result_text, snippet, file_path = parse_tool_result(fn(**args))
                         logging.info("tool_call %s executed -> %s", tc["id"], result_text)
                         if snippet:
                             history_snippets.append(snippet)
@@ -300,6 +316,21 @@ class OpenAIClient(LLMClient):
                         "name": name,
                         "content": result_text,
                     })
+                    if file_path:
+                        try:
+                            with open(file_path, "rb") as f:
+                                img_bytes = f.read()
+                            b64 = base64.b64encode(img_bytes).decode("ascii")
+                            mime = mimetypes.guess_type(file_path)[0] or "image/png"
+                            data_url = f"data:{mime};base64,{b64}"
+                            messages.append({
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "image_url", "image_url": {"url": data_url}}
+                                ],
+                            })
+                        except Exception:
+                            logging.exception("Failed to load file %s", file_path)
                 # ② assistant/tool_calls を tool 応答より前に挿入
                 insert_pos = len(messages) - len(call_buffer)  # 直前に挿入
                 messages.insert(insert_pos, assistant_call_msg)
