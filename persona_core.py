@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 import time
 import copy
 from pathlib import Path
@@ -9,12 +8,7 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 
-from buildings import Building
-from buildings.user_room import load as load_user_room
-from buildings.deep_think_room import load as load_deep_think_room
-from buildings.air_room import load as load_air_room
-from buildings.eris_room import load as load_eris_room
-from buildings.const_test_room import load as load_const_test_room
+from city_manager import CityManager
 
 from llm_clients import get_llm_client, LLMClient
 from action_handler import ActionHandler
@@ -24,17 +18,17 @@ from emotion_module import EmotionControlModule
 load_dotenv()
 
 
-def build_router(persona_id: str = "air", model: str = "gpt-4o", context_length: int = 120000, provider: str = "ollama") -> "Router":
-    buildings = [
-        load_user_room(),
-        load_deep_think_room(),
-        load_air_room(),
-        load_eris_room(),
-        load_const_test_room(),
-    ]
+def build_persona_core(
+    persona_id: str = "air",
+    model: str = "gpt-4o",
+    context_length: int = 120000,
+    provider: str = "ollama",
+    city: Optional[CityManager] = None,
+) -> "PersonaCore":
+    city = city or CityManager()
     base = Path("ai_sessions") / persona_id
-    return Router(
-        buildings=buildings,
+    return PersonaCore(
+        city=city,
         common_prompt_path=Path("system_prompts/common.txt"),
         persona_base=base,
         emotion_prompt_path=Path("system_prompts/emotion_parameter.txt"),
@@ -45,10 +39,10 @@ def build_router(persona_id: str = "air", model: str = "gpt-4o", context_length:
     )
 
 
-class Router:
+class PersonaCore:
     def __init__(
         self,
-        buildings: List[Building],
+        city: CityManager,
         common_prompt_path: Path,
         persona_base: Path,
         emotion_prompt_path: Path = Path("system_prompts/emotion_parameter.txt"),
@@ -60,7 +54,11 @@ class Router:
         context_length: int = 120000,
         provider: str = "ollama",
     ):
-        self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
+        self.city = city
+        self.buildings = city.building_map
+        self.building_memory_paths = city.building_memory_paths
+        if building_histories is None:
+            building_histories = city.building_histories
         self.common_prompt = common_prompt_path.read_text(encoding="utf-8")
         self.emotion_prompt = emotion_prompt_path.read_text(encoding="utf-8")
         self.persona_base = persona_base
@@ -74,10 +72,6 @@ class Router:
         self.persona_log_path = (
             self.saiverse_home / "personas" / self.persona_id / "log.json"
         )
-        self.building_memory_paths: Dict[str, Path] = {
-            b_id: self.saiverse_home / "buildings" / b_id / "log.json"
-            for b_id in self.buildings
-        }
         self.action_priority = self._load_action_priority(action_priority_path)
         self.action_handler = ActionHandler(self.action_priority)
 
@@ -101,7 +95,7 @@ class Router:
         )
 
         # Initialize remaining attributes
-        self.move_callback = move_callback
+        self.move_callback = move_callback or city.move_persona
         self.model = model
         self.context_length = context_length
         self.llm_client = get_llm_client(model, provider, self.context_length)
