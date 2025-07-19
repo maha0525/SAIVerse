@@ -102,6 +102,14 @@ def select_model(model_name: str):
 
 
 def main():
+    # --- API Serverを別プロセスで起動 ---
+    api_server_path = Path(__file__).parent / "database" / "api_server.py"
+    if api_server_path.exists():
+        logging.info(f"Starting API Server from: {api_server_path}")
+        subprocess.Popen([sys.executable, str(api_server_path)])
+    else:
+        logging.warning(f"API Server not found at {api_server_path}, skipping.")
+
     # --- DB Managerを別プロセスで起動 ---
     db_manager_path = Path(__file__).parent / "database" / "db_manager.py"
     if db_manager_path.exists():
