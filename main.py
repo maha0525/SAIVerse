@@ -1,6 +1,9 @@
 import logging
 import threading
 import time
+import subprocess
+import sys
+from pathlib import Path
 
 import gradio as gr
 
@@ -99,6 +102,15 @@ def select_model(model_name: str):
 
 
 def main():
+    # --- DB Managerを別プロセスで起動 ---
+    db_manager_path = Path(__file__).parent / "database" / "db_manager.py"
+    if db_manager_path.exists():
+        logging.info(f"Starting DB Manager from: {db_manager_path}")
+        # Popenを使い、DB Managerのプロセスを待たずにメインアプリを続行する
+        subprocess.Popen([sys.executable, str(db_manager_path)])
+    else:
+        logging.warning(f"DB Manager not found at {db_manager_path}, skipping.")
+
     def background_loop():
         while True:
             manager.run_scheduled_prompts()
@@ -137,4 +149,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
