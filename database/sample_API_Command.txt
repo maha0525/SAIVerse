@@ -1,0 +1,13 @@
+全件取得
+curl http://localhost:7920/db-api/user
+
+レコード追加・更新
+curl -X POST -H "Content-Type: application/json" \
+-d '{"USERNAME": "api_user_2", "PASSWORD": "password456"}' \
+http://localhost:7920/db-api/user
+
+レコード削除
+curl -X DELETE "http://localhost:7920/db-api/user?USERID=1"
+
+複合主キーのレコード削除
+curl -X DELETE "http://localhost:7920/db-api/user_ai_link?USERID=1&AIID=2"
