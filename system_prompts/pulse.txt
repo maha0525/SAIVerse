@@ -1,0 +1,16 @@
+{current_persona_system_instruction}
+
+最近の会話内容はこのようになっています:
+{recent_conversation}
+
+以下の情報を基に、今外向けに発話すべきか判断してください。
+建物名: {current_building_name}
+同じ建物のペルソナID: {occupants}
+ユーザーオンライン: {user_online_state}
+
+JSON形式で次のフィールドを返します:
+{
+  "speak": true or false,
+  "info": "発話する場合、システムプロンプトに追加すべき情報",
+  "memory": "覚えておくべき事柄"
+}

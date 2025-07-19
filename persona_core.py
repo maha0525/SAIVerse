@@ -64,6 +64,8 @@ class PersonaCore:
         self.persona_base = persona_base
         self.memory_path = persona_base / "memory.json"
         self.saiverse_home = Path.home() / ".saiverse"
+        self.conscious_log_path = self.persona_base / "conscious_log.json"
+        self.pulse_indices: Dict[str, int] = {}
         self.persona_system_instruction = (persona_base / "system_prompt.txt").read_text(encoding="utf-8")
         persona_data = json.loads((persona_base / "base.json").read_text(encoding="utf-8"))
         self.persona_id = persona_data.get("persona_id", persona_base.name)
@@ -126,6 +128,7 @@ class PersonaCore:
                         "attitude": {"mean": 0, "variance": 1},
                     },
                 )
+                self.pulse_indices.update(data.get("pulse_indices", {}))
             except json.JSONDecodeError:
                 logging.warning("Failed to load session memory, starting fresh")
         else:
@@ -140,15 +143,26 @@ class PersonaCore:
         else:
             self.messages = []
 
+        if self.conscious_log_path.exists():
+            try:
+                self.conscious_log = json.loads(self.conscious_log_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                logging.warning("Failed to load conscious log, starting empty")
+                self.conscious_log = []
+        else:
+            self.conscious_log = []
+
     def _save_session_metadata(self) -> None:
         data = {
             "current_building_id": self.current_building_id,
             "auto_count": self.auto_count,
             "last_auto_prompt_times": self.last_auto_prompt_times,
             "emotion": self.emotion,
+            "pulse_indices": self.pulse_indices,
         }
         self.memory_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         self.history_manager.save_all()
+        self._save_conscious_log()
 
     def set_model(self, model: str, context_length: int, provider: str) -> None:
         self.model = model
@@ -489,3 +503,68 @@ class PersonaCore:
             )
             lines.append(line)
         return '<div class="note-box">感情パラメータ変動<br>' + '<br>'.join(lines) + '</div>'
+
+    # ------------------------------------------------------------------
+    # Pulse related utilities
+    # ------------------------------------------------------------------
+
+    def _save_conscious_log(self) -> None:
+        self.conscious_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conscious_log_path.write_text(
+            json.dumps(self.conscious_log, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def run_pulse(self, user_online: bool = True, decision_model: Optional[str] = None) -> List[str]:
+        """Execute one autonomous pulse cycle."""
+        building_id = self.current_building_id
+        hist = self.history_manager.building_histories.get(building_id, [])
+        idx = self.pulse_indices.get(building_id, len(hist))
+        new_msgs = hist[idx:]
+        self.pulse_indices[building_id] = len(hist)
+
+        convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in new_msgs)
+        occupants = ",".join(self.city.occupants.get(building_id, []))
+        info = (
+            f"{convo}\noccupants:{occupants}\nuser_online:{user_online}"
+        )
+        self.conscious_log.append({"role": "user", "content": info})
+
+        recent = self.history_manager.building_histories.get(building_id, [])[-6:]
+        recent_text = "\n".join(
+            f"{m.get('role')}: {m.get('content')}" for m in recent if m.get("role") != "system"
+        )
+
+        pulse_prompt = Path("system_prompts/pulse.txt").read_text(encoding="utf-8")
+        prompt = pulse_prompt.format(
+            current_persona_system_instruction=self.persona_system_instruction,
+            current_building_name=self.buildings[building_id].name,
+            recent_conversation=recent_text,
+            occupants=occupants,
+            user_online_state="online" if user_online else "offline",
+        )
+        msgs = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": info},
+        ]
+
+        client = self.llm_client
+        if decision_model and decision_model != self.model:
+            client = get_llm_client(decision_model, self.provider, self.context_length)
+
+        content = client.generate(msgs)
+        self.conscious_log.append({"role": "assistant", "content": content})
+        self._save_conscious_log()
+
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            return []
+
+        replies: List[str] = []
+        if data.get("speak"):
+            info_text = data.get("info", "")
+            say, _, _ = self._generate(None, info_text)
+            replies.append(say)
+
+        self._save_session_metadata()
+        return replies

@@ -25,6 +25,7 @@ class SAIVerseManager:
         self.model = model
         self.context_length = get_context_length(model)
         self.provider = get_model_provider(model)
+        self.user_online = True
 
         self.buildings = self.city.buildings
         self.building_map = self.city.building_map
@@ -144,4 +145,27 @@ class SAIVerseManager:
             self.city.save_histories()
             for persona in self.personas.values():
                 persona._save_session_metadata()
+        return replies
+
+    # ------------------------------------------------------------------
+    # Pulse management
+    # ------------------------------------------------------------------
+
+    def set_user_online(self, online: bool) -> None:
+        self.user_online = online
+
+    def run_pulse(self, persona_id: str) -> List[str]:
+        if persona_id not in self.personas:
+            return []
+        replies = self.personas[persona_id].run_pulse(user_online=self.user_online)
+        if replies:
+            self.city.save_histories()
+            for persona in self.personas.values():
+                persona._save_session_metadata()
+        return replies
+
+    def run_all_pulses(self) -> List[str]:
+        replies: List[str] = []
+        for pid in self.personas.keys():
+            replies.extend(self.run_pulse(pid))
         return replies
