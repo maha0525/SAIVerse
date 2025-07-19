@@ -2,15 +2,10 @@ import base64
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Iterator
+from typing import Dict, List, Optional, Iterator
 
-from buildings import Building
-from buildings.user_room import load as load_user_room
-from buildings.deep_think_room import load as load_deep_think_room
-from buildings.air_room import load as load_air_room
-from buildings.eris_room import load as load_eris_room
-from buildings.const_test_room import load as load_const_test_room
-from router import Router
+from city_manager import CityManager
+from persona_core import PersonaCore
 from model_configs import get_model_provider, get_context_length
 
 
@@ -25,24 +20,17 @@ class SAIVerseManager:
         persona_list_path: Path = Path("ai_sessions/personas.json"),
         model: str = DEFAULT_MODEL,
     ):
-        self.buildings: List[Building] = [
-            load_user_room(),
-            load_deep_think_room(),
-            load_air_room(),
-            load_eris_room(),
-            load_const_test_room(),
-        ]
-        self.building_map: Dict[str, Building] = {b.building_id: b for b in self.buildings}
-        self.capacities: Dict[str, int] = {b.building_id: b.capacity for b in self.buildings}
+        self.city = CityManager()
         self.saiverse_home = Path.home() / ".saiverse"
-        self.building_memory_paths: Dict[str, Path] = {
-            b.building_id: self.saiverse_home / "buildings" / b.building_id / "log.json"
-            for b in self.buildings
-        }
         self.model = model
         self.context_length = get_context_length(model)
         self.provider = get_model_provider(model)
-        self.building_histories: Dict[str, List[Dict[str, str]]] = {}
+
+        self.buildings = self.city.buildings
+        self.building_map = self.city.building_map
+        self.capacities = self.city.capacities
+        self.building_memory_paths = self.city.building_memory_paths
+        self.building_histories = self.city.building_histories
         default_avatar_path = Path("assets/icons/blank.png")
         if default_avatar_path.exists():
             mime = "image/png"
@@ -51,25 +39,8 @@ class SAIVerseManager:
             self.default_avatar = f"data:{mime};base64,{b64}"
         else:
             self.default_avatar = ""
-        for b_id, path in self.building_memory_paths.items():
-            if path.exists():
-                try:
-                    self.building_histories[b_id] = json.loads(path.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    logging.warning("Failed to load building history %s", b_id)
-                    self.building_histories[b_id] = []
-            else:
-                fallback = Path("buildings") / b_id / "memory.json"
-                if fallback.exists():
-                    try:
-                        self.building_histories[b_id] = json.loads(fallback.read_text(encoding="utf-8"))
-                    except json.JSONDecodeError:
-                        self.building_histories[b_id] = []
-                else:
-                    self.building_histories[b_id] = []
         data = json.loads(Path(persona_list_path).read_text(encoding="utf-8"))
-        self.routers: Dict[str, Router] = {}
-        self.occupants: Dict[str, List[str]] = {b.building_id: [] for b in self.buildings}
+        self.personas: Dict[str, PersonaCore] = {}
         self.avatar_map: Dict[str, str] = {}
         for p in data:
             pid = p["persona_id"]
@@ -94,70 +65,45 @@ class SAIVerseManager:
                         self.avatar_map[pid] = avatar
             except Exception:
                 pass
-            router = Router(
-                buildings=self.buildings,
+            core = PersonaCore(
+                city=self.city,
                 common_prompt_path=Path("system_prompts/common.txt"),
                 persona_base=base,
                 action_priority_path=Path("action_priority.json"),
-                building_histories=self.building_histories,
-                move_callback=self._move_persona,
                 start_building_id=start_id,
                 model=self.model,
                 context_length=self.context_length,
                 provider=self.provider,
             )
-            self.routers[pid] = router
-            self.occupants[router.current_building_id].append(pid)
+            self.personas[pid] = core
+            self.city.add_persona(pid, core.current_building_id)
         self.persona_map = {p["persona_name"]: p["persona_id"] for p in data}
 
-    def _move_persona(self, persona_id: str, from_id: str, to_id: str) -> Tuple[bool, Optional[str]]:
-        if len(self.occupants.get(to_id, [])) >= self.capacities.get(to_id, 1):
-            return False, f"{self.building_map[to_id].name}は定員オーバーです"
-        if persona_id in self.occupants.get(from_id, []):
-            self.occupants[from_id].remove(persona_id)
-        self.occupants.setdefault(to_id, []).append(persona_id)
-        return True, None
-
-    def _save_building_histories(self) -> None:
-        for b_id, path in self.building_memory_paths.items():
-            hist = self.building_histories.get(b_id, [])
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(hist, ensure_ascii=False), encoding="utf-8")
 
     def handle_user_input(self, message: str) -> List[str]:
         replies: List[str] = []
-        for pid in list(self.occupants.get("user_room", [])):
-            replies.extend(self.routers[pid].handle_user_input(message))
-        self._save_building_histories()
-        for router in self.routers.values():
-            router._save_session_metadata()
+        for pid in list(self.city.occupants.get("user_room", [])):
+            replies.extend(self.personas[pid].handle_user_input(message))
+        self.city.save_histories()
+        for persona in self.personas.values():
+            persona._save_session_metadata()
         return replies
 
     def handle_user_input_stream(self, message: str) -> Iterator[str]:
-        for pid in list(self.occupants.get("user_room", [])):
-            for token in self.routers[pid].handle_user_input_stream(message):
+        for pid in list(self.city.occupants.get("user_room", [])):
+            for token in self.personas[pid].handle_user_input_stream(message):
                 yield token
-        self._save_building_histories()
-        for router in self.routers.values():
-            router._save_session_metadata()
+        self.city.save_histories()
+        for persona in self.personas.values():
+            persona._save_session_metadata()
 
     def summon_persona(self, persona_id: str) -> List[str]:
-        if persona_id not in self.routers:
+        if persona_id not in self.personas:
             return []
-        if (
-            len(self.occupants.get("user_room", [])) >= self.capacities.get("user_room", 1)
-            and persona_id not in self.occupants.get("user_room", [])
-        ):
-            msg = f"移動できませんでした。{self.building_map['user_room'].name}は定員オーバーです"
-            self.building_histories["user_room"].append(
-                {"role": "assistant", "content": f"<div class=\"note-box\">{msg}</div>"}
-            )
-            self._save_building_histories()
-            return []
-        replies = self.routers[persona_id].summon_to_user_room()
-        self._save_building_histories()
-        for router in self.routers.values():
-            router._save_session_metadata()
+        replies = self.personas[persona_id].summon_to_user_room()
+        self.city.save_histories()
+        for persona in self.personas.values():
+            persona._save_session_metadata()
         return replies
 
     def set_model(self, model: str) -> None:
@@ -165,8 +111,8 @@ class SAIVerseManager:
         self.model = model
         self.context_length = get_context_length(model)
         self.provider = get_model_provider(model)
-        for router in self.routers.values():
-            router.set_model(model, self.context_length, self.provider)
+        for persona in self.personas.values():
+            persona.set_model(model, self.context_length, self.provider)
 
     def get_building_history(self, building_id: str) -> List[Dict[str, str]]:
         history = self.building_histories.get(building_id, [])
@@ -192,10 +138,10 @@ class SAIVerseManager:
     def run_scheduled_prompts(self) -> List[str]:
         """Run scheduled prompts for all routers."""
         replies: List[str] = []
-        for router in self.routers.values():
-            replies.extend(router.run_scheduled_prompt())
+        for persona in self.personas.values():
+            replies.extend(persona.run_scheduled_prompt())
         if replies:
-            self._save_building_histories()
-            for router in self.routers.values():
-                router._save_session_metadata()
+            self.city.save_histories()
+            for persona in self.personas.values():
+                persona._save_session_metadata()
         return replies
