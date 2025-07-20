@@ -120,9 +120,11 @@ def main():
         pulse_idx = 0
         while True:
             manager.run_scheduled_prompts()
+            logging.debug("Background loop tick")
             now = time.time()
             if persona_ids and now - last_pulse >= 120:
                 pid = persona_ids[pulse_idx % len(persona_ids)]
+                logging.info("Background loop running pulse for %s", pid)
                 manager.run_pulse(pid)
                 pulse_idx += 1
                 last_pulse = now

@@ -161,11 +161,15 @@ class SAIVerseManager:
 
     def set_user_online(self, online: bool) -> None:
         self.user_online = online
+        logging.info("User online state set to %s", online)
 
     def run_pulse(self, persona_id: str) -> List[str]:
         if persona_id not in self.personas:
+            logging.warning("run_pulse called with unknown persona id: %s", persona_id)
             return []
+        logging.info("Triggering pulse for %s", persona_id)
         replies = self.personas[persona_id].run_pulse(user_online=self.user_online)
+        logging.info("Pulse for %s produced %d replies", persona_id, len(replies))
         if replies:
             self.city.save_histories()
             for persona in self.personas.values():
@@ -173,7 +177,9 @@ class SAIVerseManager:
         return replies
 
     def run_all_pulses(self) -> List[str]:
+        logging.info("Running pulses for all personas")
         replies: List[str] = []
         for pid in self.personas.keys():
             replies.extend(self.run_pulse(pid))
+        logging.info("Completed run_all_pulses with %d total replies", len(replies))
         return replies

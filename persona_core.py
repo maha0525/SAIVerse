@@ -517,16 +517,20 @@ class PersonaCore:
     def run_pulse(self, user_online: bool = True, decision_model: Optional[str] = None) -> List[str]:
         """Execute one autonomous pulse cycle."""
         building_id = self.current_building_id
+        logging.info("[pulse] %s starting pulse in %s", self.persona_id, building_id)
+
         hist = self.history_manager.building_histories.get(building_id, [])
         idx = self.pulse_indices.get(building_id, len(hist))
         new_msgs = hist[idx:]
         self.pulse_indices[building_id] = len(hist)
+        logging.debug("[pulse] new messages since last pulse: %s", new_msgs)
 
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in new_msgs)
         occupants = ",".join(self.city.occupants.get(building_id, []))
         info = (
             f"{convo}\noccupants:{occupants}\nuser_online:{user_online}"
         )
+        logging.debug("[pulse] context info: %s", info)
         self.conscious_log.append({"role": "user", "content": info})
 
         recent = self.history_manager.building_histories.get(building_id, [])[-6:]
@@ -551,20 +555,27 @@ class PersonaCore:
         if decision_model and decision_model != self.model:
             client = get_llm_client(decision_model, self.provider, self.context_length)
 
+        logging.debug("[pulse] sending prompt to model")
         content = client.generate(msgs)
+        logging.info("[pulse] raw decision:\n%s", content)
         self.conscious_log.append({"role": "assistant", "content": content})
         self._save_conscious_log()
 
         try:
             data = json.loads(content)
         except json.JSONDecodeError:
+            logging.warning("[pulse] failed to parse decision JSON")
             return []
 
         replies: List[str] = []
         if data.get("speak"):
             info_text = data.get("info", "")
+            logging.info("[pulse] generating speech with extra info: %s", info_text)
             say, _, _ = self._generate(None, info_text)
             replies.append(say)
+        else:
+            logging.info("[pulse] decision: remain silent")
 
         self._save_session_metadata()
+        logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))
         return replies
