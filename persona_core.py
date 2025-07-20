@@ -175,7 +175,10 @@ class PersonaCore:
         self.llm_client = get_llm_client(model, provider, context_length)
 
     def _build_messages(
-        self, user_message: Optional[str], extra_system_prompt: Optional[str] = None
+        self,
+        user_message: Optional[str],
+        extra_system_prompt: Optional[str] = None,
+        info_text: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         building = self.buildings[self.current_building_id]
         current_time = datetime.now().strftime("%H:%M")
@@ -198,6 +201,12 @@ class PersonaCore:
             attitude_var=self.emotion["attitude"]["variance"],
         )
         system_text = system_text + "\n" + emotion_text
+        if info_text:
+            system_text += (
+                "\n\n## 追加情報\n"
+                "常時稼働モジュールから以下の情報が提供されています。今回の発話にこの情報を利用してください。\n"
+                f"{info_text}"
+            )
 
         base_chars = len(system_text)
         if extra_system_prompt:
@@ -221,10 +230,11 @@ class PersonaCore:
         return msgs
 
     def _process_generation_result(
-        self, 
-        content: str, 
+        self,
+        content: str,
         user_message: Optional[str],
-        system_prompt_extra: Optional[str]
+        system_prompt_extra: Optional[str],
+        log_extra_prompt: bool = True,
     ) -> Tuple[str, Optional[str], bool]:
         prev_emotion = copy.deepcopy(self.emotion)
         say, actions = self.action_handler.parse_response(content)
@@ -240,7 +250,7 @@ class PersonaCore:
         if module_delta:
             self._apply_emotion_delta(module_delta)
 
-        if system_prompt_extra:
+        if system_prompt_extra and log_extra_prompt:
             self.history_manager.add_message(
                 {"role": "user", "content": system_prompt_extra},
                 self.current_building_id
@@ -266,15 +276,32 @@ class PersonaCore:
         self._save_session_metadata()
         return say, next_id, moved
 
-    def _generate(self, user_message: Optional[str], system_prompt_extra: Optional[str] = None) -> tuple[str, Optional[str], bool]:
-        msgs = self._build_messages(user_message, system_prompt_extra)
+    def _generate(
+        self,
+        user_message: Optional[str],
+        system_prompt_extra: Optional[str] = None,
+        info_text: Optional[str] = None,
+        log_extra_prompt: bool = True,
+    ) -> tuple[str, Optional[str], bool]:
+        msgs = self._build_messages(user_message, system_prompt_extra, info_text)
         logging.debug("Messages sent to API: %s", msgs)
         content = self.llm_client.generate(msgs)
         logging.info("AI Response :\n%s", content)
-        return self._process_generation_result(content, user_message, system_prompt_extra)
+        return self._process_generation_result(
+            content,
+            user_message,
+            system_prompt_extra,
+            log_extra_prompt,
+        )
 
-    def _generate_stream(self, user_message: Optional[str], system_prompt_extra: Optional[str] = None) -> Iterator[str]:
-        msgs = self._build_messages(user_message, system_prompt_extra)
+    def _generate_stream(
+        self,
+        user_message: Optional[str],
+        system_prompt_extra: Optional[str] = None,
+        info_text: Optional[str] = None,
+        log_extra_prompt: bool = True,
+    ) -> Iterator[str]:
+        msgs = self._build_messages(user_message, system_prompt_extra, info_text)
         logging.debug("Messages sent to API: %s", msgs)
         
         content_accumulator = ""
@@ -283,7 +310,12 @@ class PersonaCore:
             yield token
         
         logging.info("AI Response :\n%s", content_accumulator)
-        say, next_id, changed = self._process_generation_result(content_accumulator, user_message, system_prompt_extra)
+        say, next_id, changed = self._process_generation_result(
+            content_accumulator,
+            user_message,
+            system_prompt_extra,
+            log_extra_prompt,
+        )
         # The StopIteration value needs to be a tuple, so we return it explicitly
         return (say, next_id, changed)
 
@@ -604,7 +636,12 @@ class PersonaCore:
         if data.get("speak"):
             info_text = data.get("info", "")
             logging.info("[pulse] generating speech with extra info: %s", info_text)
-            say, _, _ = self._generate(None, info_text)
+            say, _, _ = self._generate(
+                None,
+                system_prompt_extra=None,
+                info_text=info_text,
+                log_extra_prompt=False,
+            )
             replies.append(say)
         else:
             logging.info("[pulse] decision: remain silent")
