@@ -2,15 +2,20 @@ import json
 import logging
 import time
 import copy
+import os
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Iterator
 from datetime import datetime
+
+from google import genai
+from google.genai import types
 
 from dotenv import load_dotenv
 
 from city_manager import CityManager
 
 from llm_clients import get_llm_client, LLMClient
+import llm_clients
 from action_handler import ActionHandler
 from history_manager import HistoryManager
 from emotion_module import EmotionControlModule
@@ -546,17 +551,45 @@ class PersonaCore:
             occupants=occupants,
             user_online_state="online" if user_online else "offline",
         )
-        msgs = [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": info},
-        ]
+        model_name = decision_model or "gemini-2.0-flash"
 
-        client = self.llm_client
-        if decision_model and decision_model != self.model:
-            client = get_llm_client(decision_model, self.provider, self.context_length)
+        free_key = os.getenv("GEMINI_FREE_API_KEY")
+        paid_key = os.getenv("GEMINI_API_KEY")
+        if not free_key and not paid_key:
+            logging.error("[pulse] Gemini API key not set")
+            return []
 
-        logging.debug("[pulse] sending prompt to model")
-        content = client.generate(msgs)
+        free_client = genai.Client(api_key=free_key) if free_key else None
+        paid_client = genai.Client(api_key=paid_key) if paid_key else None
+        active_client = free_client or paid_client
+
+        def _call(client: genai.Client):
+            return client.models.generate_content(
+                model=model_name,
+                contents=[types.Content(parts=[types.Part(text=info)], role="user")],
+                config=types.GenerateContentConfig(
+                    system_instruction=prompt,
+                    safety_settings=llm_clients.GEMINI_SAFETY_CONFIG,
+                    response_mime_type="application/json",
+                ),
+            )
+
+        try:
+            resp = _call(active_client)
+        except Exception as e:
+            if active_client is free_client and paid_client and "rate" in str(e).lower():
+                logging.info("[pulse] retrying with paid Gemini key due to rate limit")
+                active_client = paid_client
+                try:
+                    resp = _call(active_client)
+                except Exception as e2:
+                    logging.error("[pulse] Gemini call failed: %s", e2)
+                    return []
+            else:
+                logging.error("[pulse] Gemini call failed: %s", e)
+                return []
+
+        content = resp.text.strip()
         logging.info("[pulse] raw decision:\n%s", content)
         self.conscious_log.append({"role": "assistant", "content": content})
         self._save_conscious_log()
