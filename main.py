@@ -115,17 +115,10 @@ def main():
         logging.warning(f"DB Manager not found at {db_manager_path}, skipping.")
 
     def background_loop():
-        persona_ids = list(manager.personas.keys())
-        pulse_idx = 0
         while True:
             manager.run_scheduled_prompts()
             logging.debug("Background loop tick")
-            now = time.time()
-            if persona_ids and now >= manager.next_scheduled_pulse_time:
-                pid = persona_ids[pulse_idx % len(persona_ids)]
-                logging.info("Background loop running pulse for %s", pid)
-                manager.run_pulse(pid)
-                pulse_idx = (pulse_idx + 1) % len(persona_ids)
+            manager.maybe_run_scheduled_pulse()
             time.sleep(5)
 
     thread = threading.Thread(target=background_loop, daemon=True)
