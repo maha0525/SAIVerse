@@ -285,7 +285,17 @@ class PersonaCore:
     ) -> tuple[str, Optional[str], bool]:
         msgs = self._build_messages(user_message, system_prompt_extra, info_text)
         logging.debug("Messages sent to API: %s", msgs)
+
         content = self.llm_client.generate(msgs)
+        attempt = 1
+        while content.strip() == "エラーが発生しました。" and attempt < 3:
+            logging.warning(
+                "LLM generation failed; retrying in 10s (%d/3)", attempt
+            )
+            time.sleep(10)
+            content = self.llm_client.generate(msgs)
+            attempt += 1
+
         logging.info("AI Response :\n%s", content)
         return self._process_generation_result(
             content,
@@ -303,12 +313,26 @@ class PersonaCore:
     ) -> Iterator[str]:
         msgs = self._build_messages(user_message, system_prompt_extra, info_text)
         logging.debug("Messages sent to API: %s", msgs)
-        
-        content_accumulator = ""
-        for token in self.llm_client.generate_stream(msgs):
-            content_accumulator += token
-            yield token
-        
+
+        attempt = 1
+        while True:
+            content_accumulator = ""
+            tokens: List[str] = []
+            for token in self.llm_client.generate_stream(msgs):
+                content_accumulator += token
+                tokens.append(token)
+
+            if content_accumulator.strip() != "エラーが発生しました。" or attempt >= 3:
+                for t in tokens:
+                    yield t
+                break
+
+            logging.warning(
+                "LLM stream generation failed; retrying in 10s (%d/3)", attempt
+            )
+            attempt += 1
+            time.sleep(10)
+
         logging.info("AI Response :\n%s", content_accumulator)
         say, next_id, changed = self._process_generation_result(
             content_accumulator,
@@ -316,7 +340,6 @@ class PersonaCore:
             system_prompt_extra,
             log_extra_prompt,
         )
-        # The StopIteration value needs to be a tuple, so we return it explicitly
         return (say, next_id, changed)
 
     def _handle_movement(self, next_id: Optional[str]) -> bool:
