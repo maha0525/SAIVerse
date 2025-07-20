@@ -199,9 +199,14 @@ class SAIVerseManager:
         if not self.pulse_order:
             return []
         if now >= self.next_scheduled_pulse_time:
-            pid = self.pulse_order[self.pulse_index % len(self.pulse_order)]
-            self.pulse_index = (self.pulse_index + 1) % len(self.pulse_order)
-            return self.run_pulse(pid)
+            attempts = 0
+            while attempts < len(self.pulse_order):
+                pid = self.pulse_order[self.pulse_index % len(self.pulse_order)]
+                self.pulse_index = (self.pulse_index + 1) % len(self.pulse_order)
+                if self.personas[pid].active:
+                    return self.run_pulse(pid)
+                attempts += 1
+            self.next_scheduled_pulse_time = time.time() + self.pulse_interval
         return []
 
     def run_all_pulses(self) -> List[str]:

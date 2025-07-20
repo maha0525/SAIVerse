@@ -71,11 +71,17 @@ class PersonaCore:
         self.saiverse_home = Path.home() / ".saiverse"
         self.conscious_log_path = self.persona_base / "conscious_log.json"
         self.pulse_indices: Dict[str, int] = {}
-        self.persona_system_instruction = (persona_base / "system_prompt.txt").read_text(encoding="utf-8")
-        persona_data = json.loads((persona_base / "base.json").read_text(encoding="utf-8"))
+        self.persona_system_instruction = (
+            persona_base / "system_prompt.txt"
+        ).read_text(encoding="utf-8")
+        persona_data = json.loads(
+            (persona_base / "base.json").read_text(encoding="utf-8")
+        )
         self.persona_id = persona_data.get("persona_id", persona_base.name)
         self.persona_name = persona_data.get("persona_name", "AI")
         self.avatar_image = persona_data.get("avatar_image")
+        # Each persona's private room is treated as their home base
+        self.home_building_id = persona_data.get("start_building_id", start_building_id)
         self.persona_log_path = (
             self.saiverse_home / "personas" / self.persona_id / "log.json"
         )
@@ -88,6 +94,7 @@ class PersonaCore:
         self.last_auto_prompt_times: Dict[str, float] = {b_id: time.time() for b_id in self.buildings}
         self.emotion = {"stability": {"mean": 0, "variance": 1}, "affect": {"mean": 0, "variance": 1}, "resonance": {"mean": 0, "variance": 1}, "attitude": {"mean": 0, "variance": 1}}
         self.messages = []
+        self.active = True
 
         # Load session data, which may overwrite the defaults
         self._load_session_data()
@@ -156,6 +163,12 @@ class PersonaCore:
                 self.conscious_log = []
         else:
             self.conscious_log = []
+
+        self._update_active_state()
+
+    def _update_active_state(self) -> None:
+        """Update the persona's active/sleeping state based on location."""
+        self.active = self.current_building_id != self.home_building_id
 
     def _save_session_metadata(self) -> None:
         data = {
@@ -364,6 +377,7 @@ class PersonaCore:
 
         if moved:
             self.auto_count = 0
+            self._update_active_state()
             if prev_id != "user_room" and self.current_building_id == "user_room":
                 self.history_manager.add_to_building_only(
                     "user_room",
@@ -576,6 +590,10 @@ class PersonaCore:
 
     def run_pulse(self, user_online: bool = True, decision_model: Optional[str] = None) -> List[str]:
         """Execute one autonomous pulse cycle."""
+        if not self.active:
+            logging.info("[pulse] %s is sleeping; skipping", self.persona_id)
+            return []
+
         building_id = self.current_building_id
         logging.info("[pulse] %s starting pulse in %s", self.persona_id, building_id)
 
