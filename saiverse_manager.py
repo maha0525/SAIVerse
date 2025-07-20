@@ -85,6 +85,8 @@ class SAIVerseManager:
             self.pulse_running[pid] = False
         self.pulse_interval = 120
         self.next_scheduled_pulse_time = time.time() + self.pulse_interval
+        self.pulse_order = list(self.personas.keys())
+        self.pulse_index = 0
 
 
     def handle_user_input(self, message: str) -> List[str]:
@@ -190,6 +192,17 @@ class SAIVerseManager:
             self.pulse_running[persona_id] = False
             self.next_scheduled_pulse_time = time.time() + self.pulse_interval
         return replies
+
+    def maybe_run_scheduled_pulse(self) -> List[str]:
+        """Run the next scheduled pulse if the interval has elapsed."""
+        now = time.time()
+        if not self.pulse_order:
+            return []
+        if now >= self.next_scheduled_pulse_time:
+            pid = self.pulse_order[self.pulse_index % len(self.pulse_order)]
+            self.pulse_index = (self.pulse_index + 1) % len(self.pulse_order)
+            return self.run_pulse(pid)
+        return []
 
     def run_all_pulses(self) -> List[str]:
         logging.info("Running pulses for all personas")
