@@ -116,18 +116,16 @@ def main():
 
     def background_loop():
         persona_ids = list(manager.personas.keys())
-        last_pulse = time.time()
         pulse_idx = 0
         while True:
             manager.run_scheduled_prompts()
             logging.debug("Background loop tick")
             now = time.time()
-            if persona_ids and now - last_pulse >= 120:
+            if persona_ids and now >= manager.next_scheduled_pulse_time:
                 pid = persona_ids[pulse_idx % len(persona_ids)]
                 logging.info("Background loop running pulse for %s", pid)
                 manager.run_pulse(pid)
-                pulse_idx += 1
-                last_pulse = now
+                pulse_idx = (pulse_idx + 1) % len(persona_ids)
             time.sleep(5)
 
     thread = threading.Thread(target=background_loop, daemon=True)
