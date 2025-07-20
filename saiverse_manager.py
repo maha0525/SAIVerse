@@ -82,21 +82,29 @@ class SAIVerseManager:
 
 
     def handle_user_input(self, message: str) -> List[str]:
+        occupants = list(self.city.occupants.get("user_room", []))
+        msg = {"role": "user", "content": message}
+        if occupants:
+            self.personas[occupants[0]].history_manager.add_to_building_only(
+                "user_room", msg
+            )
+        else:
+            hist = self.city.building_histories.setdefault("user_room", [])
+            hist.append(msg)
+        for pid in occupants:
+            self.personas[pid].history_manager.add_to_persona_only(msg)
+
         replies: List[str] = []
-        for pid in list(self.city.occupants.get("user_room", [])):
-            replies.extend(self.personas[pid].handle_user_input(message))
+        for pid in occupants:
+            replies.extend(self.run_pulse(pid))
         self.city.save_histories()
         for persona in self.personas.values():
             persona._save_session_metadata()
         return replies
 
     def handle_user_input_stream(self, message: str) -> Iterator[str]:
-        for pid in list(self.city.occupants.get("user_room", [])):
-            for token in self.personas[pid].handle_user_input_stream(message):
-                yield token
-        self.city.save_histories()
-        for persona in self.personas.values():
-            persona._save_session_metadata()
+        self.handle_user_input(message)
+        yield from []
 
     def summon_persona(self, persona_id: str) -> List[str]:
         if persona_id not in self.personas:

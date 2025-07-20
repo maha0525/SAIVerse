@@ -78,13 +78,8 @@ def respond(message: str):
     return history
 
 def respond_stream(message: str):
-    """Stream AI response for chat."""
-    history = manager.get_building_history("user_room")
-    history.append({"role": "user", "content": message})
-    ai_message = ""
-    for token in manager.handle_user_input_stream(message):
-        ai_message += token
-        yield history + [{"role": "assistant", "content": ai_message}]
+    """Handle user input and return updated history."""
+    manager.handle_user_input(message)
     final = manager.get_building_history("user_room")
     yield final
 
@@ -120,8 +115,17 @@ def main():
         logging.warning(f"DB Manager not found at {db_manager_path}, skipping.")
 
     def background_loop():
+        persona_ids = list(manager.personas.keys())
+        last_pulse = time.time()
+        pulse_idx = 0
         while True:
             manager.run_scheduled_prompts()
+            now = time.time()
+            if persona_ids and now - last_pulse >= 120:
+                pid = persona_ids[pulse_idx % len(persona_ids)]
+                manager.run_pulse(pid)
+                pulse_idx += 1
+                last_pulse = now
             time.sleep(5)
 
     thread = threading.Thread(target=background_loop, daemon=True)
@@ -146,12 +150,21 @@ def main():
                 submit = gr.Button("送信")
         with gr.Row():
             model_drop = gr.Dropdown(choices=MODEL_CHOICES, value=MODEL_CHOICES[0], label="モデル選択")
+            online_state = gr.State(True)
+            online_btn = gr.Button("オンライン")
         with gr.Row():
             persona_drop = gr.Dropdown(choices=PERSONA_CHOICES, value=PERSONA_CHOICES[0], label="ペルソナ選択")
             call_btn = gr.Button("ペルソナを呼ぶ")
         submit.click(respond_stream, txt, chatbot)
         call_btn.click(call_persona, persona_drop, chatbot)
         model_drop.change(select_model, model_drop, chatbot)
+        def toggle_online(state):
+            new_state = not state
+            manager.set_user_online(new_state)
+            label = "オンライン" if new_state else "オフライン"
+            return new_state, gr.update(value=label)
+
+        online_btn.click(toggle_online, online_state, [online_state, online_btn])
     demo.launch(server_name="0.0.0.0", server_port=7860)
 
 
