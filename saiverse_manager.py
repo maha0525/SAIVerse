@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Iterator
 
@@ -25,6 +26,7 @@ class SAIVerseManager:
         self.model = model
         self.context_length = get_context_length(model)
         self.provider = get_model_provider(model)
+        self.user_online = True
 
         self.buildings = self.city.buildings
         self.building_map = self.city.building_map
@@ -42,6 +44,7 @@ class SAIVerseManager:
         data = json.loads(Path(persona_list_path).read_text(encoding="utf-8"))
         self.personas: Dict[str, PersonaCore] = {}
         self.avatar_map: Dict[str, str] = {}
+        self.pulse_running: Dict[str, bool] = {}
         for p in data:
             pid = p["persona_id"]
             base = Path("ai_sessions") / pid
@@ -78,24 +81,38 @@ class SAIVerseManager:
             self.personas[pid] = core
             self.city.add_persona(pid, core.current_building_id)
         self.persona_map = {p["persona_name"]: p["persona_id"] for p in data}
+        for pid in self.personas.keys():
+            self.pulse_running[pid] = False
+        self.pulse_interval = 120
+        self.next_scheduled_pulse_time = time.time() + self.pulse_interval
+        self.pulse_order = list(self.personas.keys())
+        self.pulse_index = 0
 
 
     def handle_user_input(self, message: str) -> List[str]:
+        occupants = list(self.city.occupants.get("user_room", []))
+        msg = {"role": "user", "content": message}
+        if occupants:
+            self.personas[occupants[0]].history_manager.add_to_building_only(
+                "user_room", msg
+            )
+        else:
+            hist = self.city.building_histories.setdefault("user_room", [])
+            hist.append(msg)
+        for pid in occupants:
+            self.personas[pid].history_manager.add_to_persona_only(msg)
+
         replies: List[str] = []
-        for pid in list(self.city.occupants.get("user_room", [])):
-            replies.extend(self.personas[pid].handle_user_input(message))
+        for pid in occupants:
+            replies.extend(self.run_pulse(pid))
         self.city.save_histories()
         for persona in self.personas.values():
             persona._save_session_metadata()
         return replies
 
     def handle_user_input_stream(self, message: str) -> Iterator[str]:
-        for pid in list(self.city.occupants.get("user_room", [])):
-            for token in self.personas[pid].handle_user_input_stream(message):
-                yield token
-        self.city.save_histories()
-        for persona in self.personas.values():
-            persona._save_session_metadata()
+        self.handle_user_input(message)
+        yield from []
 
     def summon_persona(self, persona_id: str) -> List[str]:
         if persona_id not in self.personas:
@@ -144,4 +161,58 @@ class SAIVerseManager:
             self.city.save_histories()
             for persona in self.personas.values():
                 persona._save_session_metadata()
+        return replies
+
+    # ------------------------------------------------------------------
+    # Pulse management
+    # ------------------------------------------------------------------
+
+    def set_user_online(self, online: bool) -> None:
+        self.user_online = online
+        logging.info("User online state set to %s", online)
+
+    def run_pulse(self, persona_id: str) -> List[str]:
+        if persona_id not in self.personas:
+            logging.warning("run_pulse called with unknown persona id: %s", persona_id)
+            return []
+        if self.pulse_running.get(persona_id):
+            logging.info("Pulse already running for %s; ignoring request", persona_id)
+            return []
+
+        self.pulse_running[persona_id] = True
+        try:
+            logging.info("Triggering pulse for %s", persona_id)
+            replies = self.personas[persona_id].run_pulse(user_online=self.user_online)
+            logging.info("Pulse for %s produced %d replies", persona_id, len(replies))
+            if replies:
+                self.city.save_histories()
+                for persona in self.personas.values():
+                    persona._save_session_metadata()
+        finally:
+            self.pulse_running[persona_id] = False
+            self.next_scheduled_pulse_time = time.time() + self.pulse_interval
+        return replies
+
+    def maybe_run_scheduled_pulse(self) -> List[str]:
+        """Run the next scheduled pulse if the interval has elapsed."""
+        now = time.time()
+        if not self.pulse_order:
+            return []
+        if now >= self.next_scheduled_pulse_time:
+            attempts = 0
+            while attempts < len(self.pulse_order):
+                pid = self.pulse_order[self.pulse_index % len(self.pulse_order)]
+                self.pulse_index = (self.pulse_index + 1) % len(self.pulse_order)
+                if self.personas[pid].active:
+                    return self.run_pulse(pid)
+                attempts += 1
+            self.next_scheduled_pulse_time = time.time() + self.pulse_interval
+        return []
+
+    def run_all_pulses(self) -> List[str]:
+        logging.info("Running pulses for all personas")
+        replies: List[str] = []
+        for pid in self.personas.keys():
+            replies.extend(self.run_pulse(pid))
+        logging.info("Completed run_all_pulses with %d total replies", len(replies))
         return replies
