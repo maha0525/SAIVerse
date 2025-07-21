@@ -2,6 +2,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional
+import re
 from datetime import datetime
 
 class HistoryManager:
@@ -42,31 +43,38 @@ class HistoryManager:
         data.extend(msgs)
         target.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
+    def _prepare_message(self, msg: Dict[str, str]) -> Dict[str, str]:
+        """Ensures a message has a timestamp and persona_id if applicable."""
+        new_msg = msg.copy()
+        if "timestamp" not in new_msg:
+            new_msg["timestamp"] = datetime.now().isoformat()
+        if new_msg.get("role") == "assistant" and "persona_id" not in new_msg:
+            new_msg["persona_id"] = self.persona_id
+        return new_msg
+
     def add_message(self, msg: Dict[str, str], building_id: str) -> None:
         """Adds a message to both persona and building history."""
-        if msg.get("role") == "assistant" and "persona_id" not in msg:
-            msg["persona_id"] = self.persona_id
-        
+        prepared_msg = self._prepare_message(msg)
         # Add to persona history and trim by size
-        self.messages.append(msg)
+        self.messages.append(prepared_msg)
         self._ensure_size_limit(self.messages, self.persona_log_path)
 
         # Add to building history and trim
         hist = self.building_histories.setdefault(building_id, [])
-        hist.append(msg)
+        hist.append(prepared_msg)
         self._ensure_size_limit(hist, self.building_memory_paths[building_id])
 
     def add_to_building_only(self, building_id: str, msg: Dict[str, str]) -> None:
         """Adds a message only to a specific building's history."""
+        prepared_msg = self._prepare_message(msg)
         hist = self.building_histories.setdefault(building_id, [])
-        hist.append(msg)
+        hist.append(prepared_msg)
         self._ensure_size_limit(hist, self.building_memory_paths[building_id])
 
     def add_to_persona_only(self, msg: Dict[str, str]) -> None:
         """Adds a message only to the persona's main history."""
-        if msg.get("role") == "assistant" and "persona_id" not in msg:
-            msg["persona_id"] = self.persona_id
-        self.messages.append(msg)
+        prepared_msg = self._prepare_message(msg)
+        self.messages.append(prepared_msg)
         self._ensure_size_limit(self.messages, self.persona_log_path)
 
     def get_recent_history(self, max_chars: int) -> List[Dict[str, str]]:
@@ -75,6 +83,21 @@ class HistoryManager:
         count = 0
         for msg in reversed(self.messages):
             count += len(msg.get("content", ""))
+            if count > max_chars:
+                break
+            selected.append(msg)
+        return list(reversed(selected))
+
+    def get_building_recent_history(self, building_id: str, max_chars: int) -> List[Dict[str, str]]:
+        """Retrieves recent messages from a specific building's history up to a character limit."""
+        history = self.building_histories.get(building_id, [])
+        selected = []
+        count = 0
+        for msg in reversed(history):
+            # HTMLタグを含む可能性があるため、簡易的に除去して文字数をカウント
+            content = msg.get("content", "")
+            plain_content = re.sub('<[^<]+?>', '', content)
+            count += len(plain_content)
             if count > max_chars:
                 break
             selected.append(msg)

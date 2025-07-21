@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from fastapi import Request
 from fastapi.responses import JSONResponse
 import os
+from datetime import datetime
 
 # --- 1. データベース設定 ---
 
@@ -39,16 +40,24 @@ class User(Base):
 
 class AI(Base):
     __tablename__ = "ai"
-    AIID = Column(Integer, primary_key=True)
-    AINAME = Column(String(32))
-    SYSTEMPROMPT = Column(String(1024))
+    AIID = Column(String(255), primary_key=True)  # persona_id
+    AINAME = Column(String(32), nullable=False)
+    SYSTEMPROMPT = Column(String(4096))
     DESCRIPTION = Column(String(1024))
+    AVATAR_IMAGE = Column(String(255))
+    EMOTION = Column(String(1024))  # JSON形式で保存
+    AUTO_COUNT = Column(Integer, default=0, nullable=False)
+    LAST_AUTO_PROMPT_TIMES = Column(String(2048)) # JSON形式で保存
+    INTERACTION_MODE = Column(String(32), default='auto', nullable=False) # auto / user
 
 class Building(Base):
     __tablename__ = "building"
-    BUILDINGID = Column(Integer, primary_key=True)
-    BUILDINGNAME = Column(String(32))
-    ASSISTANTPROMPT = Column(String(1024))
+    BUILDINGID = Column(String(255), primary_key=True)  # building_id
+    BUILDINGNAME = Column(String(32), nullable=False)
+    CAPACITY = Column(Integer, default=1)
+    SYSTEM_INSTRUCTION = Column(String(4096))
+    ENTRY_PROMPT = Column(String(4096))
+    AUTO_PROMPT = Column(String(4096))
     DESCRIPTION = Column(String(1024))
 
 class City(Base):
@@ -83,12 +92,13 @@ class CityBuildingLink(Base):
     CITYID = Column(Integer, ForeignKey("city.CITYID"), primary_key=True)
     BUILDINGID = Column(Integer, ForeignKey("building.BUILDINGID"), primary_key=True)
 
-class BuildingAiLink(Base):
-    __tablename__ = "building_ai_link"
-    BUILDINGID = Column(Integer, ForeignKey("building.BUILDINGID"), primary_key=True)
-    AIID = Column(Integer, ForeignKey("ai.AIID"), primary_key=True)
-    ENTERDT = Column(DateTime)
-    EXITDT = Column(DateTime)
+class BuildingOccupancyLog(Base):
+    __tablename__ = "building_occupancy_log"
+    ID = Column(Integer, primary_key=True, autoincrement=True)
+    BUILDINGID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=False)
+    AIID = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
+    ENTRY_TIMESTAMP = Column(DateTime, nullable=False)
+    EXIT_TIMESTAMP = Column(DateTime)
 
 
 def init_db():
@@ -112,7 +122,7 @@ TABLE_MODEL_MAP = {
     "ai_tool_link": AiToolLink,
     "building_tool_link": BuildingToolLink,
     "city_building_link": CityBuildingLink,
-    "building_ai_link": BuildingAiLink,
+    "building_occupancy_log": BuildingOccupancyLog
 }
 
 # --- 3. CRUD (Create, Read, Update, Delete) 操作関数 ---
@@ -153,10 +163,21 @@ def add_or_update_record(model_class, data_dict):
 
     db = SessionLocal()
     try:
-        # 空の文字列をNoneに変換
+        # 空の文字列をNoneに変換 & 日付文字列をdatetimeオブジェクトに変換
         for key, value in data_dict.items():
             if value == "":
                 data_dict[key] = None
+                continue
+
+            column = mapper.columns.get(key)
+            if column is not None and isinstance(column.type, DateTime) and isinstance(value, str):
+                try:
+                    if '.' in value:
+                        data_dict[key] = datetime.strptime(value, '%Y-%m-%d %H:%M:%S.%f')
+                    else:
+                        data_dict[key] = datetime.strptime(value, '%Y-%m-%d %H:%M:%S')
+                except (ValueError, TypeError):
+                    return f"Error: Invalid datetime format for {key}. Please use YYYY-MM-DD HH:MM:SS."
 
         instance = model_class(**data_dict)
         db.merge(instance)
@@ -206,9 +227,20 @@ def create_management_tab(model_class):
             with gr.Column(scale=2):
                 gr.Markdown("### Add / Update / Delete Record")
                 inputs = {}
+                long_text_fields = {
+                    "SYSTEMPROMPT",
+                    "DESCRIPTION",
+                    "SYSTEM_INSTRUCTION",
+                    "ENTRY_PROMPT",
+                    "AUTO_PROMPT",
+                }
                 for c in mapper.columns:
                     if isinstance(c.type, (Integer,)):
                         inputs[c.name] = gr.Number(label=c.name)
+                    elif c.name in long_text_fields:
+                        inputs[c.name] = gr.Textbox(
+                            label=c.name, lines=5, max_lines=20
+                        )
                     else:
                         inputs[c.name] = gr.Textbox(label=c.name)
 
@@ -221,16 +253,19 @@ def create_management_tab(model_class):
 
         # --- イベントハンドラ ---
 
-        def on_select(evt: gr.SelectData):
+        def on_select(df_data: pd.DataFrame, evt: gr.SelectData):
             """DataFrameで行が選択されたとき、フォームに値をセットする"""
-            row = evt.value
+            # evt.indexは(行, 列)のタプルなので、行インデックスを取得
+            row_index = evt.index[0]
+            selected_row = df_data.iloc[row_index]
+
             updates = []
             for c in mapper.columns:
-                # GradioのNumberはNoneを扱えないため、0にフォールバック
-                value = row.get(c.name)
-                if isinstance(c.type, (Integer,)) and value is None:
-                    value = 0
-                updates.append(inputs[c.name].update(value=value))
+                value = selected_row.get(c.name)
+                # pandasの欠損値(nan)をNoneに変換
+                if pd.isna(value):
+                    value = None
+                updates.append(gr.update(value=value))
             return updates
 
         def on_add_update_click(*args):
@@ -250,7 +285,7 @@ def create_management_tab(model_class):
 
         dataframe.select(
             fn=on_select,
-            inputs=None,
+            inputs=[dataframe],
             outputs=list(inputs.values()),
         )
         add_update_btn.click(
@@ -297,8 +332,8 @@ def main():
                 create_management_tab(BuildingToolLink)
             with gr.TabItem("City-Building Link"):
                 create_management_tab(CityBuildingLink)
-            with gr.TabItem("Building-AI Link"):
-                create_management_tab(BuildingAiLink)
+            with gr.TabItem("building_occupancy_log"):
+                create_management_tab(BuildingOccupancyLog)
 
         # --- API Endpoints ---
         @demo.app.get("/db-api/{table_name}")
