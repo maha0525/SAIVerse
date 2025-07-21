@@ -84,6 +84,11 @@ def respond_stream(message: str):
     yield final
 
 
+def refresh_history():
+    """Return current chat history for polling."""
+    return manager.get_building_history("user_room")
+
+
 def call_persona(name: str):
     persona_id = manager.persona_map.get(name)
     if persona_id:
@@ -148,6 +153,8 @@ def main():
         with gr.Row():
             persona_drop = gr.Dropdown(choices=PERSONA_CHOICES, value=PERSONA_CHOICES[0], label="ペルソナ選択")
             call_btn = gr.Button("ペルソナを呼ぶ")
+        pulse_timer = gr.Timer(value=2.0, render=False)
+        pulse_timer.tick(refresh_history, None, chatbot)
         submit.click(respond_stream, txt, chatbot)
         call_btn.click(call_persona, persona_drop, chatbot)
         model_drop.change(select_model, model_drop, chatbot)
