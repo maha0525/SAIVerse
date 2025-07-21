@@ -2,15 +2,20 @@ import json
 import logging
 import time
 import copy
+import os
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Iterator
 from datetime import datetime
+
+from google import genai
+from google.genai import types
 
 from dotenv import load_dotenv
 
 from city_manager import CityManager
 
 from llm_clients import get_llm_client, LLMClient
+import llm_clients
 from action_handler import ActionHandler
 from history_manager import HistoryManager
 from emotion_module import EmotionControlModule
@@ -64,11 +69,19 @@ class PersonaCore:
         self.persona_base = persona_base
         self.memory_path = persona_base / "memory.json"
         self.saiverse_home = Path.home() / ".saiverse"
-        self.persona_system_instruction = (persona_base / "system_prompt.txt").read_text(encoding="utf-8")
-        persona_data = json.loads((persona_base / "base.json").read_text(encoding="utf-8"))
+        self.conscious_log_path = self.persona_base / "conscious_log.json"
+        self.pulse_indices: Dict[str, int] = {}
+        self.persona_system_instruction = (
+            persona_base / "system_prompt.txt"
+        ).read_text(encoding="utf-8")
+        persona_data = json.loads(
+            (persona_base / "base.json").read_text(encoding="utf-8")
+        )
         self.persona_id = persona_data.get("persona_id", persona_base.name)
         self.persona_name = persona_data.get("persona_name", "AI")
         self.avatar_image = persona_data.get("avatar_image")
+        # Each persona's private room is treated as their home base
+        self.home_building_id = persona_data.get("start_building_id", start_building_id)
         self.persona_log_path = (
             self.saiverse_home / "personas" / self.persona_id / "log.json"
         )
@@ -81,6 +94,7 @@ class PersonaCore:
         self.last_auto_prompt_times: Dict[str, float] = {b_id: time.time() for b_id in self.buildings}
         self.emotion = {"stability": {"mean": 0, "variance": 1}, "affect": {"mean": 0, "variance": 1}, "resonance": {"mean": 0, "variance": 1}, "attitude": {"mean": 0, "variance": 1}}
         self.messages = []
+        self.active = True
 
         # Load session data, which may overwrite the defaults
         self._load_session_data()
@@ -126,6 +140,7 @@ class PersonaCore:
                         "attitude": {"mean": 0, "variance": 1},
                     },
                 )
+                self.pulse_indices.update(data.get("pulse_indices", {}))
             except json.JSONDecodeError:
                 logging.warning("Failed to load session memory, starting fresh")
         else:
@@ -140,15 +155,32 @@ class PersonaCore:
         else:
             self.messages = []
 
+        if self.conscious_log_path.exists():
+            try:
+                self.conscious_log = json.loads(self.conscious_log_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                logging.warning("Failed to load conscious log, starting empty")
+                self.conscious_log = []
+        else:
+            self.conscious_log = []
+
+        self._update_active_state()
+
+    def _update_active_state(self) -> None:
+        """Update the persona's active/sleeping state based on location."""
+        self.active = self.current_building_id != self.home_building_id
+
     def _save_session_metadata(self) -> None:
         data = {
             "current_building_id": self.current_building_id,
             "auto_count": self.auto_count,
             "last_auto_prompt_times": self.last_auto_prompt_times,
             "emotion": self.emotion,
+            "pulse_indices": self.pulse_indices,
         }
         self.memory_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         self.history_manager.save_all()
+        self._save_conscious_log()
 
     def set_model(self, model: str, context_length: int, provider: str) -> None:
         self.model = model
@@ -156,7 +188,10 @@ class PersonaCore:
         self.llm_client = get_llm_client(model, provider, context_length)
 
     def _build_messages(
-        self, user_message: Optional[str], extra_system_prompt: Optional[str] = None
+        self,
+        user_message: Optional[str],
+        extra_system_prompt: Optional[str] = None,
+        info_text: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         building = self.buildings[self.current_building_id]
         current_time = datetime.now().strftime("%H:%M")
@@ -179,6 +214,12 @@ class PersonaCore:
             attitude_var=self.emotion["attitude"]["variance"],
         )
         system_text = system_text + "\n" + emotion_text
+        if info_text:
+            system_text += (
+                "\n\n## 追加情報\n"
+                "常時稼働モジュールから以下の情報が提供されています。今回の発話にこの情報を利用してください。\n"
+                f"{info_text}"
+            )
 
         base_chars = len(system_text)
         if extra_system_prompt:
@@ -202,10 +243,11 @@ class PersonaCore:
         return msgs
 
     def _process_generation_result(
-        self, 
-        content: str, 
+        self,
+        content: str,
         user_message: Optional[str],
-        system_prompt_extra: Optional[str]
+        system_prompt_extra: Optional[str],
+        log_extra_prompt: bool = True,
     ) -> Tuple[str, Optional[str], bool]:
         prev_emotion = copy.deepcopy(self.emotion)
         say, actions = self.action_handler.parse_response(content)
@@ -221,7 +263,7 @@ class PersonaCore:
         if module_delta:
             self._apply_emotion_delta(module_delta)
 
-        if system_prompt_extra:
+        if system_prompt_extra and log_extra_prompt:
             self.history_manager.add_message(
                 {"role": "user", "content": system_prompt_extra},
                 self.current_building_id
@@ -247,25 +289,90 @@ class PersonaCore:
         self._save_session_metadata()
         return say, next_id, moved
 
-    def _generate(self, user_message: Optional[str], system_prompt_extra: Optional[str] = None) -> tuple[str, Optional[str], bool]:
-        msgs = self._build_messages(user_message, system_prompt_extra)
-        logging.debug("Messages sent to API: %s", msgs)
-        content = self.llm_client.generate(msgs)
-        logging.info("AI Response :\n%s", content)
-        return self._process_generation_result(content, user_message, system_prompt_extra)
+    def _generate(
+        self,
+        user_message: Optional[str],
+        system_prompt_extra: Optional[str] = None,
+        info_text: Optional[str] = None,
+        log_extra_prompt: bool = True,
+        log_user_message: bool = True,
+    ) -> tuple[str, Optional[str], bool]:
+        actual_user_message = user_message
+        if user_message is None and system_prompt_extra is None:
+            history = self.history_manager.building_histories.get(
+                self.current_building_id, []
+            )
+            if not history or history[-1].get("role") != "user":
+                actual_user_message = "意識モジュールが発話することを意思決定しました。自由に発言してください"
+                logging.debug("Injected user message for context")
 
-    def _generate_stream(self, user_message: Optional[str], system_prompt_extra: Optional[str] = None) -> Iterator[str]:
-        msgs = self._build_messages(user_message, system_prompt_extra)
+        msgs = self._build_messages(actual_user_message, system_prompt_extra, info_text)
         logging.debug("Messages sent to API: %s", msgs)
-        
-        content_accumulator = ""
-        for token in self.llm_client.generate_stream(msgs):
-            content_accumulator += token
-            yield token
-        
+
+        content = self.llm_client.generate(msgs)
+        attempt = 1
+        while content.strip() == "エラーが発生しました。" and attempt < 3:
+            logging.warning(
+                "LLM generation failed; retrying in 10s (%d/3)", attempt
+            )
+            time.sleep(10)
+            content = self.llm_client.generate(msgs)
+            attempt += 1
+
+        logging.info("AI Response :\n%s", content)
+        return self._process_generation_result(
+            content,
+            user_message if log_user_message else None,
+            system_prompt_extra,
+            log_extra_prompt,
+        )
+
+    def _generate_stream(
+        self,
+        user_message: Optional[str],
+        system_prompt_extra: Optional[str] = None,
+        info_text: Optional[str] = None,
+        log_extra_prompt: bool = True,
+        log_user_message: bool = True,
+    ) -> Iterator[str]:
+        actual_user_message = user_message
+        if user_message is None and system_prompt_extra is None:
+            history = self.history_manager.building_histories.get(
+                self.current_building_id, []
+            )
+            if not history or history[-1].get("role") != "user":
+                actual_user_message = "意識モジュールが発話することを意思決定しました。自由に発言してください"
+                logging.debug("Injected user message for context")
+
+        msgs = self._build_messages(actual_user_message, system_prompt_extra, info_text)
+        logging.debug("Messages sent to API: %s", msgs)
+
+        attempt = 1
+        while True:
+            content_accumulator = ""
+            tokens: List[str] = []
+            for token in self.llm_client.generate_stream(msgs):
+                content_accumulator += token
+                tokens.append(token)
+
+            if content_accumulator.strip() != "エラーが発生しました。" or attempt >= 3:
+                for t in tokens:
+                    yield t
+                break
+
+            logging.warning(
+                "LLM stream generation failed; retrying in 10s (%d/3)", attempt
+            )
+            attempt += 1
+            time.sleep(10)
+
         logging.info("AI Response :\n%s", content_accumulator)
-        say, next_id, changed = self._process_generation_result(content_accumulator, user_message, system_prompt_extra)
-        # The StopIteration value needs to be a tuple, so we return it explicitly
+        say, next_id, changed = self._process_generation_result(
+            content_accumulator,
+            user_message if log_user_message else None,
+            system_prompt_extra,
+            log_extra_prompt,
+        )
         return (say, next_id, changed)
 
     def _handle_movement(self, next_id: Optional[str]) -> bool:
@@ -290,6 +397,7 @@ class PersonaCore:
 
         if moved:
             self.auto_count = 0
+            self._update_active_state()
             if prev_id != "user_room" and self.current_building_id == "user_room":
                 self.history_manager.add_to_building_only(
                     "user_room",
@@ -489,3 +597,117 @@ class PersonaCore:
             )
             lines.append(line)
         return '<div class="note-box">感情パラメータ変動<br>' + '<br>'.join(lines) + '</div>'
+
+    # ------------------------------------------------------------------
+    # Pulse related utilities
+    # ------------------------------------------------------------------
+
+    def _save_conscious_log(self) -> None:
+        self.conscious_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conscious_log_path.write_text(
+            json.dumps(self.conscious_log, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def run_pulse(self, user_online: bool = True, decision_model: Optional[str] = None) -> List[str]:
+        """Execute one autonomous pulse cycle."""
+        if not self.active:
+            logging.info("[pulse] %s is sleeping; skipping", self.persona_id)
+            return []
+
+        building_id = self.current_building_id
+        logging.info("[pulse] %s starting pulse in %s", self.persona_id, building_id)
+
+        hist = self.history_manager.building_histories.get(building_id, [])
+        idx = self.pulse_indices.get(building_id, len(hist))
+        new_msgs = hist[idx:]
+        self.pulse_indices[building_id] = len(hist)
+        logging.debug("[pulse] new messages since last pulse: %s", new_msgs)
+
+        convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in new_msgs)
+        occupants = ",".join(self.city.occupants.get(building_id, []))
+        info = (
+            f"{convo}\noccupants:{occupants}\nuser_online:{user_online}"
+        )
+        logging.debug("[pulse] context info: %s", info)
+        self.conscious_log.append({"role": "user", "content": info})
+
+        recent = self.history_manager.building_histories.get(building_id, [])[-6:]
+        recent_text = "\n".join(
+            f"{m.get('role')}: {m.get('content')}" for m in recent if m.get("role") != "system"
+        )
+
+        pulse_prompt = Path("system_prompts/pulse.txt").read_text(encoding="utf-8")
+        prompt = pulse_prompt.format(
+            current_persona_system_instruction=self.persona_system_instruction,
+            current_building_name=self.buildings[building_id].name,
+            recent_conversation=recent_text,
+            occupants=occupants,
+            user_online_state="online" if user_online else "offline",
+        )
+        model_name = decision_model or "gemini-2.0-flash"
+
+        free_key = os.getenv("GEMINI_FREE_API_KEY")
+        paid_key = os.getenv("GEMINI_API_KEY")
+        if not free_key and not paid_key:
+            logging.error("[pulse] Gemini API key not set")
+            return []
+
+        free_client = genai.Client(api_key=free_key) if free_key else None
+        paid_client = genai.Client(api_key=paid_key) if paid_key else None
+        active_client = free_client or paid_client
+
+        def _call(client: genai.Client):
+            return client.models.generate_content(
+                model=model_name,
+                contents=[types.Content(parts=[types.Part(text=info)], role="user")],
+                config=types.GenerateContentConfig(
+                    system_instruction=prompt,
+                    safety_settings=llm_clients.GEMINI_SAFETY_CONFIG,
+                    response_mime_type="application/json",
+                ),
+            )
+
+        try:
+            resp = _call(active_client)
+        except Exception as e:
+            if active_client is free_client and paid_client and "rate" in str(e).lower():
+                logging.info("[pulse] retrying with paid Gemini key due to rate limit")
+                active_client = paid_client
+                try:
+                    resp = _call(active_client)
+                except Exception as e2:
+                    logging.error("[pulse] Gemini call failed: %s", e2)
+                    return []
+            else:
+                logging.error("[pulse] Gemini call failed: %s", e)
+                return []
+
+        content = resp.text.strip()
+        logging.info("[pulse] raw decision:\n%s", content)
+        self.conscious_log.append({"role": "assistant", "content": content})
+        self._save_conscious_log()
+
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            logging.warning("[pulse] failed to parse decision JSON")
+            return []
+
+        replies: List[str] = []
+        if data.get("speak"):
+            info_text = data.get("info", "")
+            logging.info("[pulse] generating speech with extra info: %s", info_text)
+            say, _, _ = self._generate(
+                None,
+                system_prompt_extra=None,
+                info_text=info_text,
+                log_extra_prompt=False,
+                log_user_message=False,
+            )
+            replies.append(say)
+        else:
+            logging.info("[pulse] decision: remain silent")
+
+        self._save_session_metadata()
+        logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))
+        return replies

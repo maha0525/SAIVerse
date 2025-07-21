@@ -78,15 +78,15 @@ def respond(message: str):
     return history
 
 def respond_stream(message: str):
-    """Stream AI response for chat."""
-    history = manager.get_building_history("user_room")
-    history.append({"role": "user", "content": message})
-    ai_message = ""
-    for token in manager.handle_user_input_stream(message):
-        ai_message += token
-        yield history + [{"role": "assistant", "content": ai_message}]
+    """Handle user input and return updated history."""
+    manager.handle_user_input(message)
     final = manager.get_building_history("user_room")
     yield final
+
+
+def refresh_history():
+    """Return current chat history for polling."""
+    return manager.get_building_history("user_room")
 
 
 def call_persona(name: str):
@@ -119,13 +119,26 @@ def main():
     else:
         logging.warning(f"DB Manager not found at {db_manager_path}, skipping.")
 
+    background_running = False
+    background_thread = None
+
     def background_loop():
-        while True:
+        while background_running:
             manager.run_scheduled_prompts()
+            logging.debug("Background loop tick")
+            manager.maybe_run_scheduled_pulse()
             time.sleep(5)
 
-    thread = threading.Thread(target=background_loop, daemon=True)
-    thread.start()
+    def start_background():
+        nonlocal background_running, background_thread
+        if not background_running:
+            background_running = True
+            background_thread = threading.Thread(target=background_loop, daemon=True)
+            background_thread.start()
+
+    def stop_background():
+        nonlocal background_running
+        background_running = False
 
     with gr.Blocks(css=NOTE_CSS) as demo:
         chatbot = gr.Chatbot(
@@ -146,12 +159,37 @@ def main():
                 submit = gr.Button("送信")
         with gr.Row():
             model_drop = gr.Dropdown(choices=MODEL_CHOICES, value=MODEL_CHOICES[0], label="モデル選択")
+            online_state = gr.State(True)
+            online_btn = gr.Button("オンライン")
+            bg_state = gr.State(False)
+            bg_btn = gr.Button("自動実行開始")
         with gr.Row():
             persona_drop = gr.Dropdown(choices=PERSONA_CHOICES, value=PERSONA_CHOICES[0], label="ペルソナ選択")
             call_btn = gr.Button("ペルソナを呼ぶ")
+        pulse_timer = gr.Timer(value=2.0, render=False)
+        pulse_timer.tick(refresh_history, None, chatbot)
         submit.click(respond_stream, txt, chatbot)
         call_btn.click(call_persona, persona_drop, chatbot)
         model_drop.change(select_model, model_drop, chatbot)
+        def toggle_online(state):
+            new_state = not state
+            manager.set_user_online(new_state)
+            label = "オンライン" if new_state else "オフライン"
+            return new_state, gr.update(value=label)
+
+        online_btn.click(toggle_online, online_state, [online_state, online_btn])
+
+        def toggle_background(state):
+            new_state = not state
+            if new_state:
+                start_background()
+                label = "自動実行停止"
+            else:
+                stop_background()
+                label = "自動実行開始"
+            return new_state, gr.update(value=label)
+
+        bg_btn.click(toggle_background, bg_state, [bg_state, bg_btn])
     demo.launch(server_name="0.0.0.0", server_port=7860)
 
 
