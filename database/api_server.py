@@ -10,10 +10,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.exc import IntegrityError
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, APIRouter, Request
 from fastapi.responses import JSONResponse
 import uvicorn
 import os
+from datetime import datetime
 
 # --- 1. データベース設定 ---
 
@@ -28,16 +30,74 @@ Base = declarative_base()
 
 # --- 2. テーブルモデル定義 (db_manager.pyと共通) ---
 
-class User(Base): __tablename__ = "user"; USERID = Column(Integer, primary_key=True); PASSWORD = Column(String(32)); USERNAME = Column(String(32)); MAILADDRESS = Column(String(64))
-class AI(Base): __tablename__ = "ai"; AIID = Column(Integer, primary_key=True); AINAME = Column(String(32)); SYSTEMPROMPT = Column(String(1024)); DESCRIPTION = Column(String(1024))
-class Building(Base): __tablename__ = "building"; BUILDINGID = Column(Integer, primary_key=True); BUILDINGNAME = Column(String(32)); ASSISTANTPROMPT = Column(String(1024)); DESCRIPTION = Column(String(1024))
-class City(Base): __tablename__ = "city"; CITYID = Column(Integer, primary_key=True); CITYNAME = Column(String(32)); DESCRIPTION = Column(String(1024))
-class Tool(Base): __tablename__ = "tool"; TOOLID = Column(Integer, primary_key=True); TOOLNAME = Column(String(32)); DESCRIPTION = Column(String(1024))
-class UserAiLink(Base): __tablename__ = "user_ai_link"; USERID = Column(Integer, ForeignKey("user.USERID"), primary_key=True); AIID = Column(Integer, ForeignKey("ai.AIID"), primary_key=True)
-class AiToolLink(Base): __tablename__ = "ai_tool_link"; AIID = Column(Integer, ForeignKey("ai.AIID"), primary_key=True); TOOLID = Column(Integer, ForeignKey("tool.TOOLID"), primary_key=True)
-class BuildingToolLink(Base): __tablename__ = "building_tool_link"; BUILDINGID = Column(Integer, ForeignKey("building.BUILDINGID"), primary_key=True); TOOLID = Column(Integer, ForeignKey("tool.TOOLID"), primary_key=True)
-class CityBuildingLink(Base): __tablename__ = "city_building_link"; CITYID = Column(Integer, ForeignKey("city.CITYID"), primary_key=True); BUILDINGID = Column(Integer, ForeignKey("building.BUILDINGID"), primary_key=True)
-class BuildingAiLink(Base): __tablename__ = "building_ai_link"; BUILDINGID = Column(Integer, ForeignKey("building.BUILDINGID"), primary_key=True); AIID = Column(Integer, ForeignKey("ai.AIID"), primary_key=True); ENTERDT = Column(DateTime); EXITDT = Column(DateTime)
+class User(Base):
+    __tablename__ = "user"
+    USERID = Column(Integer, primary_key=True)
+    PASSWORD = Column(String(32))
+    USERNAME = Column(String(32))
+    MAILADDRESS = Column(String(64))
+
+class AI(Base):
+    __tablename__ = "ai"
+    AIID = Column(String(255), primary_key=True)
+    AINAME = Column(String(32), nullable=False)
+    SYSTEMPROMPT = Column(String(4096))
+    DESCRIPTION = Column(String(1024))
+    AVATAR_IMAGE = Column(String(255))
+    EMOTION = Column(String(1024))  # JSON形式で保存
+    AUTO_COUNT = Column(Integer, default=0, nullable=False)
+    LAST_AUTO_PROMPT_TIMES = Column(String(2048)) # JSON形式で保存
+    INTERACTION_MODE = Column(String(32), default='auto', nullable=False) # auto / user
+
+class Building(Base):
+    __tablename__ = "building"
+    BUILDINGID = Column(String(255), primary_key=True)
+    BUILDINGNAME = Column(String(32), nullable=False)
+    CAPACITY = Column(Integer, default=1)
+    SYSTEM_INSTRUCTION = Column(String(4096))
+    ENTRY_PROMPT = Column(String(4096))
+    AUTO_PROMPT = Column(String(4096))
+    DESCRIPTION = Column(String(1024))
+
+class City(Base):
+    __tablename__ = "city"
+    CITYID = Column(Integer, primary_key=True)
+    CITYNAME = Column(String(32))
+    DESCRIPTION = Column(String(1024))
+
+class Tool(Base):
+    __tablename__ = "tool"
+    TOOLID = Column(Integer, primary_key=True)
+    TOOLNAME = Column(String(32))
+    DESCRIPTION = Column(String(1024))
+
+class UserAiLink(Base):
+    __tablename__ = "user_ai_link"
+    USERID = Column(Integer, ForeignKey("user.USERID"), primary_key=True)
+    AIID = Column(String(255), ForeignKey("ai.AIID"), primary_key=True)
+
+class AiToolLink(Base):
+    __tablename__ = "ai_tool_link"
+    AIID = Column(String(255), ForeignKey("ai.AIID"), primary_key=True)
+    TOOLID = Column(Integer, ForeignKey("tool.TOOLID"), primary_key=True)
+
+class BuildingToolLink(Base):
+    __tablename__ = "building_tool_link"
+    BUILDINGID = Column(String(255), ForeignKey("building.BUILDINGID"), primary_key=True)
+    TOOLID = Column(Integer, ForeignKey("tool.TOOLID"), primary_key=True)
+
+class CityBuildingLink(Base):
+    __tablename__ = "city_building_link"
+    CITYID = Column(Integer, ForeignKey("city.CITYID"), primary_key=True)
+    BUILDINGID = Column(String(255), ForeignKey("building.BUILDINGID"), primary_key=True)
+
+class BuildingOccupancyLog(Base):
+    __tablename__ = "building_occupancy_log"
+    ID = Column(Integer, primary_key=True, autoincrement=True)
+    BUILDINGID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=False)
+    AIID = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
+    ENTRY_TIMESTAMP = Column(DateTime, nullable=False)
+    EXIT_TIMESTAMP = Column(DateTime)
 
 def init_db():
     if not os.path.exists(DB_FILE_PATH):
@@ -47,7 +107,18 @@ def init_db():
     else:
         print(f"API Server: Database file '{DB_FILE_PATH}' already exists.")
 
-TABLE_MODEL_MAP = { "user": User, "ai": AI, "building": Building, "city": City, "tool": Tool, "user_ai_link": UserAiLink, "ai_tool_link": AiToolLink, "building_tool_link": BuildingToolLink, "city_building_link": CityBuildingLink, "building_ai_link": BuildingAiLink }
+TABLE_MODEL_MAP = {
+    "user": User,
+    "ai": AI,
+    "building": Building,
+    "city": City,
+    "tool": Tool,
+    "user_ai_link": UserAiLink,
+    "ai_tool_link": AiToolLink,
+    "building_tool_link": BuildingToolLink,
+    "city_building_link": CityBuildingLink,
+    "building_occupancy_log": BuildingOccupancyLog,
+}
 
 # --- 3. CRUD 操作関数 (db_manager.pyから移動) ---
 
@@ -57,13 +128,26 @@ def get_dataframe(model_class):
 def add_or_update_record(model_class, data_dict):
     mapper = inspect(model_class); pk_cols = [c.name for c in mapper.primary_key]; is_new = all(data_dict.get(pk) is None for pk in pk_cols)
     if is_new:
-        excluded_cols = {"DESCRIPTION", "EXITDT"}; validation_targets = [c.name for c in mapper.columns if not c.primary_key and c.name not in excluded_cols]
+        excluded_cols = {"DESCRIPTION", "EXIT_TIMESTAMP"}; validation_targets = [c.name for c in mapper.columns if not c.primary_key and c.name not in excluded_cols]
         is_all_empty = all(data_dict.get(col_name) is None or data_dict.get(col_name) == "" for col_name in validation_targets)
-        if is_all_empty and validation_targets: return "Error: To add a new record, at least one required field (other than DESCRIPTION or EXITDT) must be filled."
+        if is_all_empty and validation_targets: return "Error: To add a new record, at least one required field (other than DESCRIPTION or EXIT_TIMESTAMP) must be filled."
     db = SessionLocal()
     try:
+        # 空の文字列をNoneに変換 & 日付文字列をdatetimeオブジェクトに変換
         for key, value in data_dict.items():
-            if value == "": data_dict[key] = None
+            if value == "":
+                data_dict[key] = None
+                continue
+
+            column = mapper.columns.get(key)
+            if column is not None and isinstance(column.type, DateTime) and isinstance(value, str):
+                try:
+                    if '.' in value:
+                        data_dict[key] = datetime.strptime(value, '%Y-%m-%d %H:%M:%S.%f')
+                    else:
+                        data_dict[key] = datetime.strptime(value, '%Y-%m-%d %H:%M:%S')
+                except (ValueError, TypeError):
+                    return f"Error: Invalid datetime format for {key}. Please use YYYY-MM-DD HH:MM:SS."
         instance = model_class(**data_dict); db.merge(instance); db.commit()
         return f"Success: Record added/updated in {model_class.__tablename__}."
     except IntegrityError as e: db.rollback(); return f"Error: Integrity constraint failed. {e.orig}"
@@ -122,11 +206,14 @@ def create_api_router() -> APIRouter:
 
 # --- 5. サーバー起動 ---
 
-app = FastAPI(title="SAIVerse DB API")
-
-@app.on_event("startup")
-def on_startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # アプリケーション起動時に実行
     init_db()
+    yield
+    # アプリケーション終了時に実行 (今回は何もしない)
+
+app = FastAPI(title="SAIVerse DB API", lifespan=lifespan)
 
 api_router = create_api_router()
 app.include_router(api_router)

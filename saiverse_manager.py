@@ -2,7 +2,9 @@ import base64
 import json
 import logging
 from pathlib import Path
+import mimetypes
 from typing import Dict, List, Optional, Tuple, Iterator
+from datetime import datetime
 
 from buildings import Building
 from buildings.user_room import load as load_user_room
@@ -12,9 +14,13 @@ from buildings.eris_room import load as load_eris_room
 from buildings.const_test_room import load as load_const_test_room
 from router import Router
 from model_configs import get_model_provider, get_context_length
+from conversation_manager import ConversationManager
+from database.api_server import (
+    SessionLocal, AI as AIModel, Building as BuildingModel, BuildingOccupancyLog
+)
 
 
-DEFAULT_MODEL = "gpt-4o"
+DEFAULT_MODEL = "gemini-2.0-flash"#"gpt-4o"
 
 
 class SAIVerseManager:
@@ -22,35 +28,38 @@ class SAIVerseManager:
 
     def __init__(
         self,
-        persona_list_path: Path = Path("ai_sessions/personas.json"),
         model: str = DEFAULT_MODEL,
     ):
-        self.buildings: List[Building] = [
-            load_user_room(),
-            load_deep_think_room(),
-            load_air_room(),
-            load_eris_room(),
-            load_const_test_room(),
-        ]
+        # 1. DBからBuilding情報を読み込み、オブジェクトを動的に生成
+        self.buildings: List[Building] = self._load_and_create_buildings_from_db()
         self.building_map: Dict[str, Building] = {b.building_id: b for b in self.buildings}
         self.capacities: Dict[str, int] = {b.building_id: b.capacity for b in self.buildings}
+
+        # 3. 各種パスとデフォルトアバターの設定
         self.saiverse_home = Path.home() / ".saiverse"
         self.building_memory_paths: Dict[str, Path] = {
             b.building_id: self.saiverse_home / "buildings" / b.building_id / "log.json"
             for b in self.buildings
         }
-        self.model = model
-        self.context_length = get_context_length(model)
-        self.provider = get_model_provider(model)
-        self.building_histories: Dict[str, List[Dict[str, str]]] = {}
         default_avatar_path = Path("assets/icons/blank.png")
         if default_avatar_path.exists():
-            mime = "image/png"
+            mime = mimetypes.guess_type(default_avatar_path.name)[0] or "image/png"
             data_b = default_avatar_path.read_bytes()
             b64 = base64.b64encode(data_b).decode("ascii")
             self.default_avatar = f"data:{mime};base64,{b64}"
         else:
             self.default_avatar = ""
+        host_avatar_path = Path("assets/icons/host.png")
+        if host_avatar_path.exists():
+            mime = mimetypes.guess_type(host_avatar_path.name)[0] or "image/png"
+            data_b = host_avatar_path.read_bytes()
+            b64 = base64.b64encode(data_b).decode("ascii")
+            self.host_avatar = f"data:{mime};base64,{b64}"
+        else:
+            self.host_avatar = self.default_avatar
+
+        # 4. Buildingの会話履歴をロード
+        self.building_histories: Dict[str, List[Dict[str, str]]] = {}
         for b_id, path in self.building_memory_paths.items():
             if path.exists():
                 try:
@@ -59,70 +68,206 @@ class SAIVerseManager:
                     logging.warning("Failed to load building history %s", b_id)
                     self.building_histories[b_id] = []
             else:
-                fallback = Path("buildings") / b_id / "memory.json"
-                if fallback.exists():
-                    try:
-                        self.building_histories[b_id] = json.loads(fallback.read_text(encoding="utf-8"))
-                    except json.JSONDecodeError:
-                        self.building_histories[b_id] = []
-                else:
-                    self.building_histories[b_id] = []
-        data = json.loads(Path(persona_list_path).read_text(encoding="utf-8"))
+                self.building_histories[b_id] = []
+
+        # 5. ペルソナと入室状況のコンテナを先に初期化
+        self.model = model
+        self.context_length = get_context_length(model)
+        self.provider = get_model_provider(model)
         self.routers: Dict[str, Router] = {}
-        self.occupants: Dict[str, List[str]] = {b.building_id: [] for b in self.buildings}
         self.avatar_map: Dict[str, str] = {}
-        for p in data:
-            pid = p["persona_id"]
-            base = Path("ai_sessions") / pid
-            start_id = "air_room"
-            try:
-                base_data = json.loads((base / "base.json").read_text(encoding="utf-8"))
-                start_id = base_data.get("start_building_id", start_id)
-                avatar = base_data.get("avatar_image")
-                if avatar:
+        self.occupants: Dict[str, List[str]] = {b.building_id: [] for b in self.buildings}
+        self.id_to_name_map: Dict[str, str] = {}
+
+        # 6. DBからペルソナ(Router)をロード
+        self._load_personas_from_db()
+
+        # 7. ペルソナ名とIDのマップを作成し、Routerに反映
+        self.persona_map = {r.persona_name: r.persona_id for r in self.routers.values()}
+        self.id_to_name_map.update({pid: r.persona_name for pid, r in self.routers.items()})
+
+        # 8. DBから現在の入室状況をロード
+        self._load_occupancy_from_db()
+
+        # 9. 会話進行マネージャーを準備 (起動はしない)
+        self.autonomous_conversation_running: bool = False
+        self.conversation_managers: Dict[str, ConversationManager] = {}
+        for b_id in self.building_map.keys():
+            # user_roomはユーザー操作起点なので自律会話は不要
+            if b_id != "user_room":
+                manager = ConversationManager(building_id=b_id, saiverse_manager=self)
+                self.conversation_managers[b_id] = manager
+        logging.info(f"Initialized {len(self.conversation_managers)} conversation managers.")
+
+    def _load_and_create_buildings_from_db(self) -> List[Building]:
+        """DBからBuilding情報を読み込み、Buildingオブジェクトのリストを生成する"""
+        db = SessionLocal()
+        try:
+            db_buildings = db.query(BuildingModel).all()
+            buildings = []
+            for db_b in db_buildings:
+                building = Building(
+                    building_id=db_b.BUILDINGID,
+                    name=db_b.BUILDINGNAME,
+                    capacity=db_b.CAPACITY or 1,
+                    system_instruction=db_b.SYSTEM_INSTRUCTION or "",
+                    entry_prompt=db_b.ENTRY_PROMPT or "",
+                    auto_prompt=db_b.AUTO_PROMPT or ""
+                )
+                buildings.append(building)
+            logging.info(f"Loaded and created {len(buildings)} buildings from database.")
+            return buildings
+        except Exception as e:
+            logging.error(f"Failed to load buildings from DB: {e}", exc_info=True)
+            return [] # エラー時は空リストを返す
+        finally:
+            db.close()
+
+    def _load_personas_from_db(self):
+        """DBからペルソナ情報を読み込み、Routerインスタンスを生成する"""
+        db = SessionLocal()
+        try:
+            db_personas = db.query(AIModel).all()
+            for db_ai in db_personas:
+                pid = db_ai.AIID
+                # デフォルトの開始位置。後でDBのoccupancyで上書きされる
+                start_id = f"{pid}_room"
+
+                # アバター画像処理 (DBのパスを優先)
+                avatar_source = db_ai.AVATAR_IMAGE
+                if avatar_source:
                     try:
-                        avatar_path = Path(avatar)
-                        mime = "image/png"
-                        if avatar_path.suffix.lower() in {".jpg", ".jpeg"}:
-                            mime = "image/jpeg"
-                        elif avatar_path.suffix.lower() == ".gif":
-                            mime = "image/gif"
-                        data_b = avatar_path.read_bytes()
-                        b64 = base64.b64encode(data_b).decode("ascii")
-                        self.avatar_map[pid] = f"data:{mime};base64,{b64}"
-                    except Exception:
-                        self.avatar_map[pid] = avatar
-            except Exception:
-                pass
-            router = Router(
-                buildings=self.buildings,
-                common_prompt_path=Path("system_prompts/common.txt"),
-                persona_base=base,
-                action_priority_path=Path("action_priority.json"),
-                building_histories=self.building_histories,
-                move_callback=self._move_persona,
-                start_building_id=start_id,
-                model=self.model,
-                context_length=self.context_length,
-                provider=self.provider,
-            )
-            self.routers[pid] = router
-            self.occupants[router.current_building_id].append(pid)
-        self.persona_map = {p["persona_name"]: p["persona_id"] for p in data}
+                        avatar_path = Path(avatar_source)
+                        if avatar_path.exists():
+                            mime = mimetypes.guess_type(avatar_path.name)[0] or "image/png"
+                            data_b = avatar_path.read_bytes()
+                            b64 = base64.b64encode(data_b).decode("ascii")
+                            self.avatar_map[pid] = f"data:{mime};base64,{b64}"
+                        else:
+                            # URLやBase64文字列かもしれないのでそのままセット
+                            self.avatar_map[pid] = avatar_source
+                    except Exception as e:
+                        logging.error(f"Failed to process avatar for {pid}: {e}")
+                        self.avatar_map[pid] = self.default_avatar
+                else:
+                    self.avatar_map[pid] = self.default_avatar
+
+                # Routerインスタンス生成
+                router = Router(
+                    persona_id=pid,
+                    persona_name=db_ai.AINAME,
+                    persona_system_instruction=db_ai.SYSTEMPROMPT or "",
+                    avatar_image=db_ai.AVATAR_IMAGE,
+                    buildings=self.buildings,
+                    common_prompt_path=Path("system_prompts/common.txt"),
+                    action_priority_path=Path("action_priority.json"),
+                    building_histories=self.building_histories,
+                    occupants=self.occupants,
+                    id_to_name_map=self.id_to_name_map,
+                    move_callback=self._move_persona,
+                    start_building_id=start_id, # これは後でDBのoccupancyで上書きされる
+                    model=self.model,
+                    context_length=self.context_length,
+                    provider=self.provider,
+                )
+
+                self.routers[pid] = router
+            logging.info(f"Loaded {len(self.routers)} personas from database.")
+        except Exception as e:
+            logging.error(f"Failed to load personas from DB: {e}", exc_info=True)
+        finally:
+            db.close()
+
+    def _load_occupancy_from_db(self):
+        """DBから現在の入室状況を読み込み、RouterとManagerの状態を更新する"""
+        db = SessionLocal()
+        try:
+            # 現在入室中のログを取得 (exit_timestamp is NULL)
+            current_occupancy = db.query(BuildingOccupancyLog).filter(
+                BuildingOccupancyLog.EXIT_TIMESTAMP.is_(None)
+            ).all()
+
+            # self.occupantsをクリアして再構築
+            self.occupants = {b.building_id: [] for b in self.buildings}
+
+            for log in current_occupancy:
+                pid = log.AIID
+                bid = log.BUILDINGID
+                if pid in self.routers and bid in self.building_map:
+                    self.occupants[bid].append(pid)
+                    # Routerの現在地も更新
+                    self.routers[pid].current_building_id = bid
+                else:
+                    logging.warning(f"Invalid occupancy record found: AI '{pid}' or Building '{bid}' does not exist.")
+            logging.info("Loaded current occupancy from database.")
+        except Exception as e:
+            logging.error(f"Failed to load occupancy from DB: {e}", exc_info=True)
+        finally:
+            db.close()
 
     def _move_persona(self, persona_id: str, from_id: str, to_id: str) -> Tuple[bool, Optional[str]]:
         if len(self.occupants.get(to_id, [])) >= self.capacities.get(to_id, 1):
             return False, f"{self.building_map[to_id].name}は定員オーバーです"
-        if persona_id in self.occupants.get(from_id, []):
-            self.occupants[from_id].remove(persona_id)
-        self.occupants.setdefault(to_id, []).append(persona_id)
-        return True, None
+        
+        db = SessionLocal()
+        try:
+            now = datetime.now()
+            # 1. 退室記録を更新
+            last_log = db.query(BuildingOccupancyLog).filter(
+                BuildingOccupancyLog.AIID == persona_id,
+                BuildingOccupancyLog.BUILDINGID == from_id,
+                BuildingOccupancyLog.EXIT_TIMESTAMP.is_(None)
+            ).order_by(BuildingOccupancyLog.ENTRY_TIMESTAMP.desc()).first()
+
+            if last_log:
+                last_log.EXIT_TIMESTAMP = now
+                db.merge(last_log)
+            else:
+                logging.warning(f"Could not find an open session for {persona_id} in {from_id} to close.")
+
+            # 2. 入室記録を作成
+            new_log = BuildingOccupancyLog(
+                AIID=persona_id,
+                BUILDINGID=to_id,
+                ENTRY_TIMESTAMP=now
+            )
+            db.add(new_log)
+            
+            db.commit()
+
+            # 3. メモリ上の状態を更新
+            if persona_id in self.occupants.get(from_id, []):
+                self.occupants[from_id].remove(persona_id)
+            self.occupants.setdefault(to_id, []).append(persona_id)
+            
+            logging.info(f"Moved {persona_id} from {from_id} to {to_id} and updated DB.")
+            return True, None
+
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to move persona {persona_id} in DB: {e}", exc_info=True)
+            return False, "データベースの更新中にエラーが発生しました。"
+        finally:
+            db.close()
 
     def _save_building_histories(self) -> None:
         for b_id, path in self.building_memory_paths.items():
             hist = self.building_histories.get(b_id, [])
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(hist, ensure_ascii=False), encoding="utf-8")
+
+    def shutdown(self):
+        """Safely shutdown all managers and save data."""
+        logging.info("Shutting down SAIVerseManager...")
+        # Stop all conversation managers
+        for manager in self.conversation_managers.values():
+            manager.stop()
+        
+        # Save all router and building states
+        for router in self.routers.values():
+            router._save_session_metadata()
+        self._save_building_histories()
+        logging.info("SAIVerseManager shutdown complete.")
 
     def handle_user_input(self, message: str) -> List[str]:
         replies: List[str] = []
@@ -144,6 +289,26 @@ class SAIVerseManager:
     def summon_persona(self, persona_id: str) -> List[str]:
         if persona_id not in self.routers:
             return []
+        
+        # --- DBを更新してペルソナの対話モードを'user'に設定 ---
+        db = SessionLocal()
+        try:
+            db.query(AIModel).filter(AIModel.AIID == persona_id).update({"INTERACTION_MODE": "user"})
+            db.commit()
+            logging.info(f"Set INTERACTION_MODE to 'user' for {persona_id}.")
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to update INTERACTION_MODE for {persona_id}: {e}", exc_info=True)
+            # エラーが発生した場合、ユーザーに通知して処理を中断
+            msg = f"{self.id_to_name_map.get(persona_id, persona_id)}を呼び出す際にデータベースエラーが発生しました。"
+            self.building_histories["user_room"].append(
+                {"role": "host", "content": f"<div class=\"note-box\">{msg}</div>"}
+            )
+            self._save_building_histories()
+            return []
+        finally:
+            db.close()
+
         if (
             len(self.occupants.get("user_room", [])) >= self.capacities.get("user_room", 1)
             and persona_id not in self.occupants.get("user_room", [])
@@ -160,6 +325,60 @@ class SAIVerseManager:
             router._save_session_metadata()
         return replies
 
+    def end_conversation(self, persona_id: str) -> None:
+        """Release a persona from user_room and return it to its previous building."""
+        if persona_id not in self.routers:
+            logging.error(f"Attempted to end conversation with non-existent persona: {persona_id}")
+            return
+
+        db = SessionLocal()
+        try:
+            # 1. Find the previous building for the persona
+            # Get the last two entries to find the previous location
+            logs = db.query(BuildingOccupancyLog).filter(
+                BuildingOccupancyLog.AIID == persona_id
+            ).order_by(BuildingOccupancyLog.ENTRY_TIMESTAMP.desc()).limit(2).all()
+
+            # The most recent log should be for user_room.
+            if not logs or logs[0].BUILDINGID != "user_room":
+                logging.warning(f"Could not determine previous location for {persona_id}. Sending to home room.")
+                destination_id = f"{persona_id}_room"
+            elif len(logs) < 2:
+                # Only one log entry (user_room), so no "previous" location. Fallback to home room.
+                logging.info(f"{persona_id} has no previous location. Sending to home room.")
+                destination_id = f"{persona_id}_room"
+            else:
+                # The second-to-last entry is the previous location.
+                destination_id = logs[1].BUILDINGID
+
+            # Ensure destination is valid
+            if destination_id not in self.building_map:
+                logging.error(f"Invalid destination building '{destination_id}' found for {persona_id}. Falling back to home room.")
+                destination_id = f"{persona_id}_room"
+                if destination_id not in self.building_map:
+                    # This is a critical failure, the persona has no valid place to go.
+                    logging.error(f"Home room '{destination_id}' not found. Cannot move persona.")
+                    msg = f"{self.id_to_name_map.get(persona_id, persona_id)}の帰る場所が見つかりませんでした。"
+                    self.building_histories["user_room"].append(
+                        {"role": "host", "content": f"<div class=\"note-box\">{msg}</div>"}
+                    )
+                    self._save_building_histories()
+                    return # Abort the move
+
+            # 2. Update interaction mode to 'auto'
+            db.query(AIModel).filter(AIModel.AIID == persona_id).update({"INTERACTION_MODE": "auto"})
+            db.commit()
+            logging.info(f"Set INTERACTION_MODE to 'auto' for {persona_id}.")
+
+            # 3. Move the persona
+            self._move_persona(persona_id, "user_room", destination_id)
+
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to end conversation for {persona_id}: {e}", exc_info=True)
+        finally:
+            db.close()
+
     def set_model(self, model: str) -> None:
         """Update LLM model for all routers."""
         self.model = model
@@ -168,25 +387,54 @@ class SAIVerseManager:
         for router in self.routers.values():
             router.set_model(model, self.context_length, self.provider)
 
+    def start_autonomous_conversations(self):
+        """Start all autonomous conversation managers."""
+        if self.autonomous_conversation_running:
+            logging.warning("Autonomous conversations are already running.")
+            return
+        
+        logging.info("Starting all autonomous conversation managers...")
+        for manager in self.conversation_managers.values():
+            manager.start()
+        self.autonomous_conversation_running = True
+        logging.info("All autonomous conversation managers have been started.")
+
+    def stop_autonomous_conversations(self):
+        """Stop all autonomous conversation managers."""
+        if not self.autonomous_conversation_running:
+            logging.warning("Autonomous conversations are not running.")
+            return
+
+        logging.info("Stopping all autonomous conversation managers...")
+        for manager in self.conversation_managers.values():
+            manager.stop()
+        self.autonomous_conversation_running = False
+        logging.info("All autonomous conversation managers have been stopped.")
+
     def get_building_history(self, building_id: str) -> List[Dict[str, str]]:
         history = self.building_histories.get(building_id, [])
         display: List[Dict[str, str]] = []
         for msg in history:
-            if msg.get("role") == "assistant":
+            role = msg.get("role")
+            if role == "assistant":
                 pid = msg.get("persona_id")
                 avatar = self.avatar_map.get(pid, self.default_avatar)
-                try:
-                    data = json.loads(msg.get("content", ""))
-                    say = data.get("say", "")
-                except json.JSONDecodeError:
-                    say = msg.get("content", "")
+                say = msg.get("content", "")
                 if avatar:
-                    html = f"<img src='{avatar}' class='inline-avatar'>{say}"
+                    html = f"<div class='message-row'><div class='avatar-container'><img src='{avatar}'></div><div class='message'>{say}</div></div>"
                 else:
                     html = f"{say}"
                 display.append({"role": "assistant", "content": html})
-            else:
+            elif role == "user":
                 display.append(msg)
+            elif role == "host":
+                say = msg.get("content", "")
+                if self.host_avatar:
+                    html = f"<div class='message-row'><div class='avatar-container'><img src='{self.host_avatar}'></div><div class='message'>{say}</div></div>"
+                else:
+                    html = f"<b>[HOST]</b> {say}"
+                display.append({"role": "assistant", "content": html})
+            # "system" role messages are filtered out from the display
         return display
 
     def run_scheduled_prompts(self) -> List[str]:

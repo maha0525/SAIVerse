@@ -20,6 +20,9 @@ from llm_clients import get_llm_client, LLMClient
 from action_handler import ActionHandler
 from history_manager import HistoryManager
 from emotion_module import EmotionControlModule
+from database.api_server import (
+    SessionLocal, AI as AIModel
+)
 
 load_dotenv()
 
@@ -48,12 +51,17 @@ def build_router(persona_id: str = "air", model: str = "gpt-4o", context_length:
 class Router:
     def __init__(
         self,
+        persona_id: str,
+        persona_name: str,
+        persona_system_instruction: str,
+        avatar_image: Optional[str],
         buildings: List[Building],
         common_prompt_path: Path,
-        persona_base: Path,
         emotion_prompt_path: Path = Path("system_prompts/emotion_parameter.txt"),
         action_priority_path: Path = Path("action_priority.json"),
         building_histories: Optional[Dict[str, List[Dict[str, str]]]] = None,
+        occupants: Optional[Dict[str, List[str]]] = None,
+        id_to_name_map: Optional[Dict[str, str]] = None,
         move_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
         start_building_id: str = "air_room",
         model: str = "gpt-4o",
@@ -63,14 +71,11 @@ class Router:
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
         self.common_prompt = common_prompt_path.read_text(encoding="utf-8")
         self.emotion_prompt = emotion_prompt_path.read_text(encoding="utf-8")
-        self.persona_base = persona_base
-        self.memory_path = persona_base / "memory.json"
+        self.persona_id = persona_id
+        self.persona_name = persona_name
+        self.persona_system_instruction = persona_system_instruction
+        self.avatar_image = avatar_image
         self.saiverse_home = Path.home() / ".saiverse"
-        self.persona_system_instruction = (persona_base / "system_prompt.txt").read_text(encoding="utf-8")
-        persona_data = json.loads((persona_base / "base.json").read_text(encoding="utf-8"))
-        self.persona_id = persona_data.get("persona_id", persona_base.name)
-        self.persona_name = persona_data.get("persona_name", "AI")
-        self.avatar_image = persona_data.get("avatar_image")
         self.persona_log_path = (
             self.saiverse_home / "personas" / self.persona_id / "log.json"
         )
@@ -81,15 +86,27 @@ class Router:
         self.action_priority = self._load_action_priority(action_priority_path)
         self.action_handler = ActionHandler(self.action_priority)
 
+        self.occupants = occupants if occupants is not None else {}
+        self.id_to_name_map = id_to_name_map if id_to_name_map is not None else {}
+
         # Initialize stateful attributes with defaults before loading session
-        self.current_building_id = persona_data.get("start_building_id", start_building_id)
+        self.current_building_id = start_building_id
         self.auto_count = 0
         self.last_auto_prompt_times: Dict[str, float] = {b_id: time.time() for b_id in self.buildings}
         self.emotion = {"stability": {"mean": 0, "variance": 1}, "affect": {"mean": 0, "variance": 1}, "resonance": {"mean": 0, "variance": 1}, "attitude": {"mean": 0, "variance": 1}}
-        self.messages = []
 
         # Load session data, which may overwrite the defaults
         self._load_session_data()
+
+        # Load persona history from file before initializing HistoryManager
+        if self.persona_log_path.exists():
+            try:
+                self.messages = json.loads(self.persona_log_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                logging.warning(f"Failed to load persona log for {self.persona_id}, starting empty")
+                self.messages = []
+        else:
+            self.messages = []
 
         # Initialize managers that depend on loaded data
         self.history_manager = HistoryManager(
@@ -117,43 +134,51 @@ class Router:
         return {"think": 1, "emotion_shift": 2, "move": 3}
 
     def _load_session_data(self) -> None:
-        if self.memory_path.exists():
-            try:
-                data = json.loads(self.memory_path.read_text(encoding="utf-8"))
-                self.current_building_id = data.get("current_building_id", "air_room")
-                self.auto_count = data.get("auto_count", 0)
-                self.last_auto_prompt_times.update(data.get("last_auto_prompt_times", {}))
-                self.emotion = data.get(
-                    "emotion",
-                    {
-                        "stability": {"mean": 0, "variance": 1},
-                        "affect": {"mean": 0, "variance": 1},
-                        "resonance": {"mean": 0, "variance": 1},
-                        "attitude": {"mean": 0, "variance": 1},
-                    },
-                )
-            except json.JSONDecodeError:
-                logging.warning("Failed to load session memory, starting fresh")
-        else:
-            self.emotion = {"stability": {"mean": 0, "variance": 1}, "affect": {"mean": 0, "variance": 1}, "resonance": {"mean": 0, "variance": 1}, "attitude": {"mean": 0, "variance": 1}}
-        
-        if self.persona_log_path.exists():
-            try:
-                self.messages = json.loads(self.persona_log_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                logging.warning("Failed to load persona log, starting empty")
-                self.messages = []
-        else:
-            self.messages = []
+        """ペルソナの動的な状態をDBから読み込む"""
+        db = SessionLocal()
+        try:
+            db_ai = db.query(AIModel).filter(AIModel.AIID == self.persona_id).first()
+            if not db_ai:
+                logging.warning(f"No AI record found in DB for {self.persona_id}. Using default state.")
+                return
+
+            # auto_count
+            self.auto_count = db_ai.AUTO_COUNT or 0
+
+            # last_auto_prompt_times
+            if db_ai.LAST_AUTO_PROMPT_TIMES:
+                try:
+                    self.last_auto_prompt_times.update(json.loads(db_ai.LAST_AUTO_PROMPT_TIMES))
+                except json.JSONDecodeError:
+                    logging.warning(f"Could not parse LAST_AUTO_PROMPT_TIMES from DB for {self.persona_name}.")
+            
+            # emotion
+            if db_ai.EMOTION:
+                try:
+                    self.emotion = json.loads(db_ai.EMOTION)
+                except json.JSONDecodeError:
+                    logging.warning(f"Could not parse EMOTION from DB for {self.persona_name}.")
+            
+            logging.info(f"Loaded dynamic state from DB for {self.persona_name}.")
+
+        except Exception as e:
+            logging.error(f"Failed to load session data from DB for {self.persona_name}: {e}", exc_info=True)
+        finally:
+            db.close()
 
     def _save_session_metadata(self) -> None:
-        data = {
-            "current_building_id": self.current_building_id,
-            "auto_count": self.auto_count,
-            "last_auto_prompt_times": self.last_auto_prompt_times,
-            "emotion": self.emotion,
-        }
-        self.memory_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        """ペルソナの動的な状態をDBに保存する"""
+        db = SessionLocal()
+        try:
+            update_data = {"EMOTION": json.dumps(self.emotion, ensure_ascii=False),"AUTO_COUNT": self.auto_count,"LAST_AUTO_PROMPT_TIMES": json.dumps(self.last_auto_prompt_times, ensure_ascii=False)}
+            db.query(AIModel).filter(AIModel.AIID == self.persona_id).update(update_data)
+            db.commit()
+            logging.info(f"Saved dynamic state to DB for {self.persona_name}.")
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to save session data to DB for {self.persona_name}: {e}", exc_info=True)
+        finally:
+            db.close()
         self.history_manager.save_all()
 
     def set_model(self, model: str, context_length: int, provider: str) -> None:
@@ -193,7 +218,7 @@ class Router:
             base_chars += len(user_message)
 
         history_limit = max(0, self.context_length - base_chars)
-        history_msgs = self.history_manager.get_recent_history(history_limit)
+        history_msgs = self.history_manager.get_building_recent_history(self.current_building_id, history_limit)
         
         sanitized_history = [
             {"role": m.get("role", ""), "content": m.get("content", "")}
@@ -202,9 +227,11 @@ class Router:
 
         msgs = [{"role": "system", "content": system_text}] + sanitized_history
         if extra_system_prompt:
-            msgs.append({"role": "system", "content": extra_system_prompt})
+            # 自律会話のトリガーは、LLMにはユーザーからの入力として渡す
+            msgs.append({"role": "user", "content": extra_system_prompt})
         if user_message:
             msgs.append({"role": "user", "content": user_message})
+
         return msgs
 
     def _process_generation_result(
@@ -229,7 +256,8 @@ class Router:
 
         if system_prompt_extra:
             self.history_manager.add_message(
-                {"role": "user", "content": system_prompt_extra},
+                # 履歴にはホストの発言として記録
+                {"role": "host", "content": system_prompt_extra},
                 self.current_building_id
             )
         if user_message:
@@ -315,35 +343,29 @@ class Router:
                 )
         return moved
 
+    def trigger_conversation_turn(self, conversation_prompt: str) -> None:
+        """
+        ConversationManagerから呼び出され、自律会話のターンを処理する。
+        特別なシステムプロンプトを受け取り、応答を生成する。
+        """
+        logging.info(f"'{self.persona_name}' is taking a conversation turn in building '{self.current_building_id}'.")
+        # ユーザーからの入力はないため、user_messageはNone
+        # conversation_promptを状況を説明する追加のシステムプロンプトとして渡す
+        self._generate(user_message=None, system_prompt_extra=conversation_prompt)
+
     def run_auto_conversation(self, initial: bool = False) -> List[str]:
         replies: List[str] = []
-        next_id: Optional[str] = None
         building = self.buildings[self.current_building_id]
         if initial and building.entry_prompt:
-            if building.run_entry_llm:
-                entry_text = building.entry_prompt.format(persona_name=self.persona_name)
-                say, next_id, _ = self._generate(None, entry_text)
-                replies.append(say)
-            else:
-                self.history_manager.add_message(
-                    {"role": "system", "content": building.entry_prompt},
-                    self.current_building_id
-                )
-        while (
-            building.auto_prompt
-            and building.run_auto_llm
-            and self.current_building_id == building.building_id
-            and (next_id is None or next_id == building.building_id)
-            and self.auto_count < 10
-        ):
-            self.auto_count += 1
-            auto_text = building.auto_prompt.format(persona_name=self.persona_name)
-            say, next_id, changed = self._generate(None, auto_text)
+            # ENTRY_PROMPTが設定されていれば、必ずLLMを呼び出して応答を生成する
+            occupant_ids = self.occupants.get(self.current_building_id, [])
+            occupant_names = [self.id_to_name_map.get(pid, "不明なペルソナ") for pid in occupant_ids]
+            entry_text = building.entry_prompt.format(
+                occupants_list=", ".join(occupant_names)
+            )
+            # _generateは (say, next_id, moved) を返す
+            say, _, _ = self._generate(None, entry_text)
             replies.append(say)
-            if changed:
-                building = self.buildings[self.current_building_id]
-                replies.extend(self.run_auto_conversation(initial=True))
-                break
         return replies
 
     def run_scheduled_prompt(self) -> List[str]:
