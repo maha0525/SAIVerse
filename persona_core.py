@@ -638,6 +638,7 @@ class PersonaCore:
 
         pulse_prompt = Path("system_prompts/pulse.txt").read_text(encoding="utf-8")
         prompt = pulse_prompt.format(
+            current_persona_name=self.persona_name,
             current_persona_system_instruction=self.persona_system_instruction,
             current_building_name=self.buildings[building_id].name,
             recent_conversation=recent_text,
