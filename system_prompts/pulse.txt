@@ -9,8 +9,8 @@
 ユーザーオンライン: {user_online_state}
 
 JSON形式で次のフィールドを返します:
-{
+{{
   "speak": true or false,
   "info": "発話する場合、システムプロンプトに追加すべき情報",
   "memory": "覚えておくべき事柄"
-}
+}}
