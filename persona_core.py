@@ -295,8 +295,18 @@ class PersonaCore:
         system_prompt_extra: Optional[str] = None,
         info_text: Optional[str] = None,
         log_extra_prompt: bool = True,
+        log_user_message: bool = True,
     ) -> tuple[str, Optional[str], bool]:
-        msgs = self._build_messages(user_message, system_prompt_extra, info_text)
+        actual_user_message = user_message
+        if user_message is None and system_prompt_extra is None:
+            history = self.history_manager.building_histories.get(
+                self.current_building_id, []
+            )
+            if not history or history[-1].get("role") != "user":
+                actual_user_message = "意識モジュールが発話することを意思決定しました。自由に発言してください"
+                logging.debug("Injected user message for context")
+
+        msgs = self._build_messages(actual_user_message, system_prompt_extra, info_text)
         logging.debug("Messages sent to API: %s", msgs)
 
         content = self.llm_client.generate(msgs)
@@ -312,7 +322,7 @@ class PersonaCore:
         logging.info("AI Response :\n%s", content)
         return self._process_generation_result(
             content,
-            user_message,
+            user_message if log_user_message else None,
             system_prompt_extra,
             log_extra_prompt,
         )
@@ -323,8 +333,18 @@ class PersonaCore:
         system_prompt_extra: Optional[str] = None,
         info_text: Optional[str] = None,
         log_extra_prompt: bool = True,
+        log_user_message: bool = True,
     ) -> Iterator[str]:
-        msgs = self._build_messages(user_message, system_prompt_extra, info_text)
+        actual_user_message = user_message
+        if user_message is None and system_prompt_extra is None:
+            history = self.history_manager.building_histories.get(
+                self.current_building_id, []
+            )
+            if not history or history[-1].get("role") != "user":
+                actual_user_message = "意識モジュールが発話することを意思決定しました。自由に発言してください"
+                logging.debug("Injected user message for context")
+
+        msgs = self._build_messages(actual_user_message, system_prompt_extra, info_text)
         logging.debug("Messages sent to API: %s", msgs)
 
         attempt = 1
@@ -349,7 +369,7 @@ class PersonaCore:
         logging.info("AI Response :\n%s", content_accumulator)
         say, next_id, changed = self._process_generation_result(
             content_accumulator,
-            user_message,
+            user_message if log_user_message else None,
             system_prompt_extra,
             log_extra_prompt,
         )
@@ -682,6 +702,7 @@ class PersonaCore:
                 system_prompt_extra=None,
                 info_text=info_text,
                 log_extra_prompt=False,
+                log_user_message=False,
             )
             replies.append(say)
         else:
