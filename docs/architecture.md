@@ -10,34 +10,63 @@ SAIVerseは、自律的なAIエージェント（ペルソナ）が、定義さ�
 - **自律性の中心**: 各AIの「魂」は `PersonaCore` クラスに実装されています。特に `run_pulse` メソッドは、AIが「認知→判断→行動」というサイクルで能動的に活動するための心臓部です。
 - **疎結合**: 各コンポーネントは、`SAIVerseManager` を通じて連携しますが、互いに直接的な依存関係は最小限に抑えられています。
 
-## 2. 主要コンポーネント
+## 2. コンポーネント図
 
-- **`main.py` (起動スクリプト)**
-  - アプリケーション全体のエントリーポイント。
-  - `SAIVerseManager`、`api_server`、`db_manager`など、すべての主要サービスを起動します。
-  - Gradio UIのメインループを管理します。
+```mermaid
+graph TD
+    subgraph "User Interface"
+        UI[main.py / Gradio]
+    end
 
-- **`saiverse_manager.py` (世界の管理者)**
-  - SAIVerse世界の「神」や「管理者」に相当する中央コンポーネント。
-  - すべてのペルソナ (`PersonaCore`) とBuildingのインスタンスをメモリ上に保持・管理します。
-  - AIの移動、ユーザーからの入力、自律会話の開始/停止など、世界で起こるすべてのイベントを統括します。
+    subgraph "Core Logic"
+        Manager[saiverse_manager.py]
+        Persona[persona_core.py]
+        ConvManager[conversation_manager.py]
+    end
 
-- **`persona_core.py` (AIの魂)**
-  - 個々のAIペルソナの「魂」であり「脳」。
-  - `run_pulse`メソッドを通じて、「認知→判断→行動」という自律的な思考サイクルを実行します。
-  - LLMとの対話、感情の管理、行動の決定など、ペルソナのすべての知的活動を担います。
+    subgraph "Data Layer"
+        DB[Database / models.py]
+        API[api_server.py]
+        DB_UI[db_manager.py]
+    end
 
-- **`conversation_manager.py` (会話の進行役)**
-  - 各Buildingに1つずつ存在し、その場所での自律会話の流れを管理します。
-  - 定期的に（例: 10秒ごと）、Building内にいるペルソナを順番に指名し、`run_pulse`を呼び出して思考の機会を与えます。
+    UI -- "User Actions" --> Manager
+    Manager -- "Manages" --> Persona
+    Manager -- "Manages" --> ConvManager
+    ConvManager -- "Triggers Pulse" --> Persona
+    Persona -- "Accesses" --> DB
+    Manager -- "Accesses" --> DB
+    API -- "Manipulates" --> DB
+    DB_UI -- "Manipulates" --> DB
+```
 
-- **`database/` (記憶の保管庫)**
-  - **`models.py`**: データベースのテーブル定義（スキーマ）をSQLAlchemyモデルとして一元管理する、唯一の真実のソース。
-  - **`api_server.py`**: データベース操作のためのFastAPIエンドポイントを提供します。将来的に外部システムとの連携にも利用可能です。
-  - **`db_manager.py`**: Gradio製のデータベース管理UI。データの直接的な閲覧・編集を可能にします。
-  - **`migrate.py`**: データベーススキーマの変更を安全に適用するための移行スクリプト。
+## 3. 主要コンポーネント詳細
 
-## 3. 起動シーケンス
+### `main.py` (起動スクリプト)
+- **役割**: アプリケーション全体のエントリーポイント。
+- **責務**:
+  - `SAIVerseManager`、`api_server`、`db_manager`など、すべての主要サービスを起動する。
+  - Gradio UIのメインループを管理し、ユーザーからの入力を`SAIVerseManager`に中継する。
+
+### `saiverse_manager.py` (世界の管理者)
+- **役割**: SAIVerse世界の「神」や「管理者」に相当する中央コンポーネント。
+- **責務**:
+  - すべてのペルソナ (`PersonaCore`) とBuildingのインスタンスをメモリ上に保持・管理する。
+  - AIの移動、ユーザーからの入力、自律会話の開始/停止など、世界で起こるすべてのイベントを統括する。
+  - データベースから初期状態をロードし、終了時に状態を保存する。
+
+### `persona_core.py` (AIの魂)
+- **役割**: 個々のAIペルソナの「魂」であり「脳」。
+- **責務**:
+  - `run_pulse`メソッドを通じて、「認知→判断→行動」という自律的な思考サイクルを実行する。
+  - LLMとの対話、感情の管理、行動の決定など、ペルソナのすべての知的活動を担う。
+
+### `conversation_manager.py` (会話の進行役)
+- **役割**: 各Buildingに1つずつ存在し、その場所での自律会話の流れを管理する。
+- **責務**:
+  - 定期的に（例: 10秒ごと）、Building内にいるペルソナを順番に指名し、`run_pulse`を呼び出して思考の機会を与える。
+
+## 4. 起動シーケンス
 
 1.  `main.py`が実行されます。
 2.  `main.py`は、`api_server.py`と`db_manager.py`を別プロセスで起動します。
