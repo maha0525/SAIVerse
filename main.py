@@ -4,6 +4,7 @@ import time
 import subprocess
 import sys
 import socket
+import os
 import re
 import atexit
 from typing import Optional
@@ -199,13 +200,19 @@ def kill_process_by_pid(pid: int):
         logging.error(f"An unexpected error occurred while killing process {pid}: {e}")
 
 def cleanup_and_start_server(port: int, script_path: Path, name: str):
-    """ポートをクリーンアップし、指定されたスクリプトをバックグラウンドで起動する"""
+    """ポートをクリーンアップし、指定されたスクリプトをモジュールとしてバックグラウンドで起動する"""
     pid = find_pid_for_port(port)
     if pid:
         logging.warning(f"Port {port} for {name} is already in use by PID {pid}. Attempting to terminate the process.")
         kill_process_by_pid(pid)
-    logging.info(f"Starting {name} from: {script_path}")
-    subprocess.Popen([sys.executable, str(script_path)])
+
+    project_root = Path(__file__).parent
+    # Convert file path to module path (e.g., database\api_server.py -> database.api_server)
+    module_path = str(script_path.relative_to(project_root)).replace(os.sep, '.')[:-3]
+
+    logging.info(f"Starting {name} as module: {module_path}")
+    # Run as a module from the project's root directory to handle relative imports correctly
+    subprocess.Popen([sys.executable, "-m", module_path], cwd=project_root)
 
 def main():
     cleanup_and_start_server(7920, Path(__file__).parent / "database" / "api_server.py", "API Server")
