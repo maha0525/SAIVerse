@@ -65,51 +65,29 @@ class ConversationManager:
         """ラウンドロビンで次の発話者を決定し、発話をトリガーする。"""
         occupants = self.saiverse_manager.occupants.get(self.building_id, [])
 
-        if len(occupants) < 2:
+        # 誰もいなければ何もしない
+        if not occupants:
             return
 
+        # インデックスが範囲外ならリセット
         if self._current_speaker_index >= len(occupants):
-            self.current_speaker_index = 0
+            self._current_speaker_index = 0
         
         speaker_id = occupants[self._current_speaker_index]
-        speaker_router = self.saiverse_manager.routers.get(speaker_id)
+        # .routersから.personasに変更
+        speaker_persona = self.saiverse_manager.personas.get(speaker_id)
         
-        if not speaker_router:
+        if not speaker_persona:
+            # 次のインデックスに進む
             self._current_speaker_index = (self._current_speaker_index + 1) % len(occupants)
             return
         
-        # Buildingの会話履歴を確認し、AIの発言がまだなければ最初のターンと判断
-        building_history = self.saiverse_manager.building_histories.get(self.building_id, [])
-        is_first_turn = not any(msg.get("role") == "assistant" for msg in building_history)
+        # PersonaCoreのrun_pulseを呼び出す
+        # これにより、ペルソナは自ら状況を判断して発話するかどうかを決める
+        logging.info(f"[ConvManager] Triggering pulse for '{speaker_persona.persona_name}' in '{self.building_id}'.")
+        
+        # user_onlineのステータスは将来的には動的に渡せるようにしたいが、今はデフォルト(True)でOK
+        speaker_persona.run_pulse()
 
-        if is_first_turn:
-            # 最初のターンなら、ENTRY_PROMPTを使うrun_auto_conversationを呼び出す
-            logging.info(f"[ConvManager] Triggering initial turn for '{speaker_router.persona_name}' in '{self.building_id}' using ENTRY_PROMPT.")
-            if hasattr(speaker_router, 'run_auto_conversation'):
-                # このメソッドはリストを返すが、自律会話では戻り値は不要
-                speaker_router.run_auto_conversation(initial=True)
-            else:
-                logging.warning(f"Router for {speaker_id} is missing 'run_auto_conversation' method.")
-        else:
-            # 2ターン目以降は、AUTO_PROMPTを使って会話の継続を促す
-            building = self.saiverse_manager.building_map.get(self.building_id)
-            other_persona_names = [self.saiverse_manager.routers[p_id].persona_name for p_id in occupants if p_id != speaker_id and p_id in self.saiverse_manager.routers]
-            
-            # AUTO_PROMPTが設定されていればそれを使用し、なければ固定プロンプトにフォールバック
-            if building and building.auto_prompt:
-                # DBのAUTO_PROMPTで使えるプレースホルダーを増やす
-                conversation_prompt = building.auto_prompt.format(
-                    persona_name=speaker_router.persona_name,
-                    other_persona_names=", ".join(other_persona_names)
-                )
-            else:
-                conversation_prompt = f"あなたは今、「{', '.join(other_persona_names)}」と会話しています。以下の会話履歴に続いて、自然な形で発言してください。"
-            
-            logging.info(f"[ConvManager] Triggering '{speaker_router.persona_name}' to continue conversation in '{self.building_id}'")
-            
-            if hasattr(speaker_router, 'trigger_conversation_turn'):
-                speaker_router.trigger_conversation_turn(conversation_prompt)
-            else:
-                logging.warning(f"Router for {speaker_id} is missing 'trigger_conversation_turn' method.")
-
+        # 次の発話者のためにインデックスを進める
         self._current_speaker_index = (self._current_speaker_index + 1) % len(occupants)

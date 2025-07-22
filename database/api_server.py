@@ -1,14 +1,6 @@
 import pandas as pd
-from sqlalchemy import (
-    create_engine,
-    Column,
-    Integer,
-    String,
-    DateTime,
-    ForeignKey,
-    inspect,
-)
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import create_engine, inspect, DateTime, Integer
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import IntegrityError
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, APIRouter, Request
@@ -25,79 +17,10 @@ DATABASE_URL = f"sqlite:///{DB_FILE_PATH}"
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-
-# --- 2. テーブルモデル定義 (db_manager.pyと共通) ---
-
-class User(Base):
-    __tablename__ = "user"
-    USERID = Column(Integer, primary_key=True)
-    PASSWORD = Column(String(32))
-    USERNAME = Column(String(32))
-    MAILADDRESS = Column(String(64))
-
-class AI(Base):
-    __tablename__ = "ai"
-    AIID = Column(String(255), primary_key=True)
-    AINAME = Column(String(32), nullable=False)
-    SYSTEMPROMPT = Column(String(4096))
-    DESCRIPTION = Column(String(1024))
-    AVATAR_IMAGE = Column(String(255))
-    EMOTION = Column(String(1024))  # JSON形式で保存
-    AUTO_COUNT = Column(Integer, default=0, nullable=False)
-    LAST_AUTO_PROMPT_TIMES = Column(String(2048)) # JSON形式で保存
-    INTERACTION_MODE = Column(String(32), default='auto', nullable=False) # auto / user
-
-class Building(Base):
-    __tablename__ = "building"
-    BUILDINGID = Column(String(255), primary_key=True)
-    BUILDINGNAME = Column(String(32), nullable=False)
-    CAPACITY = Column(Integer, default=1)
-    SYSTEM_INSTRUCTION = Column(String(4096))
-    ENTRY_PROMPT = Column(String(4096))
-    AUTO_PROMPT = Column(String(4096))
-    DESCRIPTION = Column(String(1024))
-
-class City(Base):
-    __tablename__ = "city"
-    CITYID = Column(Integer, primary_key=True)
-    CITYNAME = Column(String(32))
-    DESCRIPTION = Column(String(1024))
-
-class Tool(Base):
-    __tablename__ = "tool"
-    TOOLID = Column(Integer, primary_key=True)
-    TOOLNAME = Column(String(32))
-    DESCRIPTION = Column(String(1024))
-
-class UserAiLink(Base):
-    __tablename__ = "user_ai_link"
-    USERID = Column(Integer, ForeignKey("user.USERID"), primary_key=True)
-    AIID = Column(String(255), ForeignKey("ai.AIID"), primary_key=True)
-
-class AiToolLink(Base):
-    __tablename__ = "ai_tool_link"
-    AIID = Column(String(255), ForeignKey("ai.AIID"), primary_key=True)
-    TOOLID = Column(Integer, ForeignKey("tool.TOOLID"), primary_key=True)
-
-class BuildingToolLink(Base):
-    __tablename__ = "building_tool_link"
-    BUILDINGID = Column(String(255), ForeignKey("building.BUILDINGID"), primary_key=True)
-    TOOLID = Column(Integer, ForeignKey("tool.TOOLID"), primary_key=True)
-
-class CityBuildingLink(Base):
-    __tablename__ = "city_building_link"
-    CITYID = Column(Integer, ForeignKey("city.CITYID"), primary_key=True)
-    BUILDINGID = Column(String(255), ForeignKey("building.BUILDINGID"), primary_key=True)
-
-class BuildingOccupancyLog(Base):
-    __tablename__ = "building_occupancy_log"
-    ID = Column(Integer, primary_key=True, autoincrement=True)
-    BUILDINGID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=False)
-    AIID = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
-    ENTRY_TIMESTAMP = Column(DateTime, nullable=False)
-    EXIT_TIMESTAMP = Column(DateTime)
+from .models import (
+    Base, User, AI, Building, City, Tool, 
+    UserAiLink, AiToolLink, BuildingToolLink, CityBuildingLink, BuildingOccupancyLog
+)
 
 def init_db():
     if not os.path.exists(DB_FILE_PATH):
@@ -119,8 +42,6 @@ TABLE_MODEL_MAP = {
     "city_building_link": CityBuildingLink,
     "building_occupancy_log": BuildingOccupancyLog,
 }
-
-# --- 3. CRUD 操作関数 (db_manager.pyから移動) ---
 
 def get_dataframe(model_class):
     db = SessionLocal(); query = db.query(model_class); return pd.read_sql(query.statement, db.bind)
@@ -162,8 +83,6 @@ def delete_record(model_class, pks_dict):
         return "Error: Record not found."
     except Exception as e: db.rollback(); return f"Error: {e}"
     finally: db.close()
-
-# --- 4. APIルーター (db_manager.pyから移動) ---
 
 def create_api_router() -> APIRouter:
     router = APIRouter(prefix="/db-api")
