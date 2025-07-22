@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import time
 from pathlib import Path
 import mimetypes
 from typing import Dict, List, Optional, Tuple, Iterator
@@ -308,7 +309,20 @@ class SAIVerseManager:
         logging.info("SAIVerseManager shutdown complete.")
 
     def handle_user_input(self, message: str) -> List[str]:
+        occupants = list(self.city.occupants.get("user_room", []))
+        msg = {"role": "user", "content": message}
+        if occupants:
+            self.personas[occupants[0]].history_manager.add_to_building_only(
+                "user_room", msg
+            )
+        else:
+            hist = self.city.building_histories.setdefault("user_room", [])
+            hist.append(msg)
+        for pid in occupants:
+            self.personas[pid].history_manager.add_to_persona_only(msg)
+
         replies: List[str] = []
+
         for pid in list(self.occupants.get("user_room", [])):
             replies.extend(self.personas[pid].handle_user_input(message))
         self._save_building_histories()
@@ -358,7 +372,6 @@ class SAIVerseManager:
             self._save_building_histories()
             return []
         replies = self.personas[persona_id].summon_to_user_room()
-        self._save_building_histories()
         for persona in self.personas.values():
             persona._save_session_metadata()
         return replies
@@ -448,6 +461,7 @@ class SAIVerseManager:
             manager.stop()
         self.autonomous_conversation_running = False
         logging.info("All autonomous conversation managers have been stopped.")
+
 
     def get_building_history(self, building_id: str) -> List[Dict[str, str]]:
         history = self.building_histories.get(building_id, [])

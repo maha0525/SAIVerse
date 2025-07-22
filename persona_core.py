@@ -44,6 +44,7 @@ class PersonaCore:
         context_length: int = 120000,
         provider: str = "ollama",
     ):
+
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
         self.common_prompt = common_prompt_path.read_text(encoding="utf-8")
         self.emotion_prompt = emotion_prompt_path.read_text(encoding="utf-8")
@@ -132,7 +133,6 @@ class PersonaCore:
             logging.error(f"Failed to load session data from DB for {self.persona_name}: {e}", exc_info=True)
         finally:
             db.close()
-
         if self.persona_log_path.exists():
             try:
                 self.messages = json.loads(self.persona_log_path.read_text(encoding="utf-8"))
@@ -172,7 +172,6 @@ class PersonaCore:
             logging.error(f"Failed to save session data to DB for {self.persona_name}: {e}", exc_info=True)
         finally:
             db.close()
-
         self.history_manager.save_all()
         self._save_conscious_log()
 

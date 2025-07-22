@@ -90,16 +90,10 @@ def respond(message: str):
     return history
 
 def respond_stream(message: str):
-    """Stream AI response for chat."""
-    history = manager.get_building_history("user_room")
-    history.append({"role": "user", "content": message})
-    ai_message = ""
-    for token in manager.handle_user_input_stream(message):
-        ai_message += token
-        yield history + [{"role": "assistant", "content": ai_message}]
+    """Handle user input and return updated history."""
+    manager.handle_user_input(message)
     final = manager.get_building_history("user_room")
     yield final
-
 
 def get_user_room_occupant_names():
     """Returns a list of names of personas currently in the user_room."""
@@ -221,13 +215,26 @@ def main():
     # --- アプリケーション終了時にManagerのシャットダウン処理を呼び出す ---
     atexit.register(manager.shutdown)
 
+    background_running = False
+    background_thread = None
+
     def background_loop():
-        while True:
+        while background_running:
             manager.run_scheduled_prompts()
+            logging.debug("Background loop tick")
+            manager.maybe_run_scheduled_pulse()
             time.sleep(5)
 
-    thread = threading.Thread(target=background_loop, daemon=True)
-    thread.start()
+    def start_background():
+        nonlocal background_running, background_thread
+        if not background_running:
+            background_running = True
+            background_thread = threading.Thread(target=background_loop, daemon=True)
+            background_thread.start()
+
+    def stop_background():
+        nonlocal background_running
+        background_running = False
 
     with gr.Blocks(css=NOTE_CSS) as demo:
         with gr.Tabs():
