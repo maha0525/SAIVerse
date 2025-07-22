@@ -14,7 +14,7 @@ from database.api_server import SessionLocal
 from database.models import AI as AIModel, Building as BuildingModel, BuildingOccupancyLog, User as UserModel
 
 
-DEFAULT_MODEL = "gemini-2.0-flash"#"gpt-4o"
+DEFAULT_MODEL = "gpt-4o"
 
 
 class SAIVerseManager:
