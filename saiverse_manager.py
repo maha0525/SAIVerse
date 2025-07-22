@@ -11,7 +11,7 @@ from persona_core import PersonaCore
 from model_configs import get_model_provider, get_context_length
 from conversation_manager import ConversationManager
 from database.api_server import SessionLocal
-from database.models import AI as AIModel, Building as BuildingModel, BuildingOccupancyLog
+from database.models import AI as AIModel, Building as BuildingModel, BuildingOccupancyLog, User as UserModel
 
 
 DEFAULT_MODEL = "gemini-2.0-flash"#"gpt-4o"
@@ -72,11 +72,15 @@ class SAIVerseManager:
         self.avatar_map: Dict[str, str] = {}
         self.occupants: Dict[str, List[str]] = {b.building_id: [] for b in self.buildings}
         self.id_to_name_map: Dict[str, str] = {}
+        self.user_is_online: bool = False
 
         # 6. DBからペルソナ(PersonaCore)をロード
         self._load_personas_from_db()
 
-        # 7. ペルソナ名とIDのマップを作成
+        # 7. ユーザーのログイン状態をロード
+        self._load_user_status_from_db()
+
+        # 8. ペルソナ名とIDのマップを作成
         self.persona_map = {p.persona_name: p.persona_id for p in self.personas.values()}
         self.id_to_name_map.update({pid: p.persona_name for pid, p in self.personas.items()})
 
@@ -196,6 +200,46 @@ class SAIVerseManager:
             logging.info("Loaded current occupancy from database.")
         except Exception as e:
             logging.error(f"Failed to load occupancy from DB: {e}", exc_info=True)
+        finally:
+            db.close()
+
+    def _load_user_status_from_db(self):
+        """DBからユーザーのログイン状態を読み込む (現在はUSERID=1固定)"""
+        db = SessionLocal()
+        try:
+            # USERID=1のユーザーを想定
+            user = db.query(UserModel).filter(UserModel.USERID == 1).first()
+            if user:
+                self.user_is_online = user.LOGGED_IN
+                logging.info(f"Loaded user login status: {'Online' if self.user_is_online else 'Offline'}")
+            else:
+                logging.warning("User with USERID=1 not found. Defaulting to Offline.")
+                self.user_is_online = False
+        except Exception as e:
+            logging.error(f"Failed to load user status from DB: {e}", exc_info=True)
+            self.user_is_online = False
+        finally:
+            db.close()
+
+    def set_user_login_status(self, user_id: int, status: bool) -> str:
+        """ユーザーのログイン状態を更新する"""
+        db = SessionLocal()
+        try:
+            user = db.query(UserModel).filter(UserModel.USERID == user_id).first()
+            if user:
+                user.LOGGED_IN = status
+                db.commit()
+                self.user_is_online = status
+                status_text = "オンライン" if status else "オフライン"
+                logging.info(f"User {user_id} login status set to: {status_text}")
+                return status_text
+            else:
+                logging.error(f"User with USERID={user_id} not found.")
+                return "エラー: ユーザーが見つかりません"
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to update user login status for USERID={user_id}: {e}", exc_info=True)
+            return "エラー: DB更新に失敗"
         finally:
             db.close()
 

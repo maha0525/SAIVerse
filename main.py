@@ -156,6 +156,16 @@ def stop_conversations_ui():
     manager.stop_autonomous_conversations()
     return "停止中"
 
+def login_ui():
+    """UI handler for user login."""
+    # USERID=1をハードコード
+    return manager.set_user_login_status(1, True)
+
+def logout_ui():
+    """UI handler for user logout."""
+    # USERID=1をハードコード
+    return manager.set_user_login_status(1, False)
+
 
 def find_pid_for_port(port: int) -> Optional[int]:
     """指定されたポートを使用しているプロセスのPIDを見つける (Windows専用)"""
@@ -231,6 +241,19 @@ def main():
                         txt = gr.Textbox(placeholder="ここにメッセージを入力...", lines=4)
                     with gr.Column(scale=1):
                         submit = gr.Button("送信")
+                
+                gr.Markdown("---")
+                with gr.Row():
+                    login_status_display = gr.Textbox(
+                        value="オンライン" if manager.user_is_online else "オフライン",
+                        label="ログイン状態",
+                        interactive=False,
+                        scale=1
+                    )
+                    login_btn = gr.Button("ログイン", scale=1)
+                    logout_btn = gr.Button("ログアウト", scale=1)
+                gr.Markdown("---")
+
                 with gr.Row():
                     model_drop = gr.Dropdown(choices=MODEL_CHOICES, value=MODEL_CHOICES[0] if MODEL_CHOICES else None, label="モデル選択")
                 with gr.Row():
@@ -249,6 +272,8 @@ def main():
                 call_btn.click(call_persona_ui, persona_drop, [chatbot, end_persona_drop])
                 end_btn.click(end_conversation_ui, end_persona_drop, [chatbot, end_persona_drop])
                 refresh_btn.click(refresh_ui, None, [chatbot, end_persona_drop])
+                login_btn.click(fn=login_ui, inputs=None, outputs=login_status_display)
+                logout_btn.click(fn=logout_ui, inputs=None, outputs=login_status_display)
                 model_drop.change(select_model, model_drop, chatbot)
 
             with gr.TabItem("自律会話ログ"):

@@ -74,7 +74,6 @@ class ConversationManager:
             self._current_speaker_index = 0
         
         speaker_id = occupants[self._current_speaker_index]
-        # .routersから.personasに変更
         speaker_persona = self.saiverse_manager.personas.get(speaker_id)
         
         if not speaker_persona:
@@ -85,9 +84,7 @@ class ConversationManager:
         # PersonaCoreのrun_pulseを呼び出す
         # これにより、ペルソナは自ら状況を判断して発話するかどうかを決める
         logging.info(f"[ConvManager] Triggering pulse for '{speaker_persona.persona_name}' in '{self.building_id}'.")
-        
-        # user_onlineのステータスは将来的には動的に渡せるようにしたいが、今はデフォルト(True)でOK
-        speaker_persona.run_pulse()
+        speaker_persona.run_pulse(user_online=self.saiverse_manager.user_is_online)
 
         # 次の発話者のためにインデックスを進める
         self._current_speaker_index = (self._current_speaker_index + 1) % len(occupants)

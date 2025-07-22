@@ -4,6 +4,7 @@ from sqlalchemy import (
     String,
     DateTime,
     ForeignKey,
+    Boolean,
 )
 from sqlalchemy.orm import declarative_base
 
@@ -17,6 +18,7 @@ class User(Base):
     PASSWORD = Column(String(32), nullable=False)
     USERNAME = Column(String(32), nullable=False)
     MAILADDRESS = Column(String(64))
+    LOGGED_IN = Column(Boolean, default=False, nullable=False)
 
 class AI(Base):
     __tablename__ = "ai"
