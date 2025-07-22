@@ -1,19 +1,8 @@
 import gradio as gr
 import pandas as pd
-from sqlalchemy import (
-    create_engine,
-    Column,
-    Integer,
-    String,
-    DateTime,
-    ForeignKey,
-    PrimaryKeyConstraint,
-    inspect,
-)
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import create_engine, inspect, DateTime, Integer
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import IntegrityError
-from fastapi import Request
-from fastapi.responses import JSONResponse
 import os
 from datetime import datetime
 
@@ -26,79 +15,10 @@ DATABASE_URL = f"sqlite:///{DB_FILE_PATH}"
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-
-# --- 2. テーブルモデル定義 ---
-
-class User(Base):
-    __tablename__ = "user"
-    USERID = Column(Integer, primary_key=True)
-    PASSWORD = Column(String(32))
-    USERNAME = Column(String(32))
-    MAILADDRESS = Column(String(64))
-
-class AI(Base):
-    __tablename__ = "ai"
-    AIID = Column(String(255), primary_key=True)  # persona_id
-    AINAME = Column(String(32), nullable=False)
-    SYSTEMPROMPT = Column(String(4096))
-    DESCRIPTION = Column(String(1024))
-    AVATAR_IMAGE = Column(String(255))
-    EMOTION = Column(String(1024))  # JSON形式で保存
-    AUTO_COUNT = Column(Integer, default=0, nullable=False)
-    LAST_AUTO_PROMPT_TIMES = Column(String(2048)) # JSON形式で保存
-    INTERACTION_MODE = Column(String(32), default='auto', nullable=False) # auto / user
-
-class Building(Base):
-    __tablename__ = "building"
-    BUILDINGID = Column(String(255), primary_key=True)  # building_id
-    BUILDINGNAME = Column(String(32), nullable=False)
-    CAPACITY = Column(Integer, default=1)
-    SYSTEM_INSTRUCTION = Column(String(4096))
-    ENTRY_PROMPT = Column(String(4096))
-    AUTO_PROMPT = Column(String(4096))
-    DESCRIPTION = Column(String(1024))
-
-class City(Base):
-    __tablename__ = "city"
-    CITYID = Column(Integer, primary_key=True)
-    CITYNAME = Column(String(32))
-    DESCRIPTION = Column(String(1024))
-
-class Tool(Base):
-    __tablename__ = "tool"
-    TOOLID = Column(Integer, primary_key=True)
-    TOOLNAME = Column(String(32))
-    DESCRIPTION = Column(String(1024))
-
-class UserAiLink(Base):
-    __tablename__ = "user_ai_link"
-    USERID = Column(Integer, ForeignKey("user.USERID"), primary_key=True)
-    AIID = Column(Integer, ForeignKey("ai.AIID"), primary_key=True)
-
-class AiToolLink(Base):
-    __tablename__ = "ai_tool_link"
-    AIID = Column(Integer, ForeignKey("ai.AIID"), primary_key=True)
-    TOOLID = Column(Integer, ForeignKey("tool.TOOLID"), primary_key=True)
-
-class BuildingToolLink(Base):
-    __tablename__ = "building_tool_link"
-    BUILDINGID = Column(Integer, ForeignKey("building.BUILDINGID"), primary_key=True)
-    TOOLID = Column(Integer, ForeignKey("tool.TOOLID"), primary_key=True)
-
-class CityBuildingLink(Base):
-    __tablename__ = "city_building_link"
-    CITYID = Column(Integer, ForeignKey("city.CITYID"), primary_key=True)
-    BUILDINGID = Column(Integer, ForeignKey("building.BUILDINGID"), primary_key=True)
-
-class BuildingOccupancyLog(Base):
-    __tablename__ = "building_occupancy_log"
-    ID = Column(Integer, primary_key=True, autoincrement=True)
-    BUILDINGID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=False)
-    AIID = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
-    ENTRY_TIMESTAMP = Column(DateTime, nullable=False)
-    EXIT_TIMESTAMP = Column(DateTime)
+from .models import (
+    Base, User, AI, Building, City, Tool, 
+    UserAiLink, AiToolLink, BuildingToolLink, CityBuildingLink, BuildingOccupancyLog
+)
 
 
 def init_db():
@@ -334,69 +254,6 @@ def main():
                 create_management_tab(CityBuildingLink)
             with gr.TabItem("building_occupancy_log"):
                 create_management_tab(BuildingOccupancyLog)
-
-        # --- API Endpoints ---
-        @demo.app.get("/db-api/{table_name}")
-        def api_get_table(table_name: str):
-            """テーブルの全データを取得するAPI"""
-            model_class = TABLE_MODEL_MAP.get(table_name.lower())
-            if not model_class:
-                return JSONResponse(status_code=404, content={"error": "Table not found"})
-            df = get_dataframe(model_class)
-            # DataFrameをJSONシリアライズ可能な形式に変換
-            result = df.to_dict(orient="records")
-            return JSONResponse(content=result)
-
-        @demo.app.post("/db-api/{table_name}")
-        async def api_add_or_update(table_name: str, request: Request):
-            """レコードを追加または更新するAPI"""
-            model_class = TABLE_MODEL_MAP.get(table_name.lower())
-            if not model_class:
-                return JSONResponse(status_code=404, content={"error": "Table not found"})
-            try:
-                data_dict = await request.json()
-                status = add_or_update_record(model_class, data_dict)
-                if "Error" in status:
-                    return JSONResponse(status_code=400, content={"error": status})
-                return JSONResponse(content={"status": status})
-            except Exception as e:
-                return JSONResponse(status_code=500, content={"error": str(e)})
-
-        @demo.app.delete("/db-api/{table_name}")
-        async def api_delete(table_name: str, request: Request):
-            """主キーに基づいてレコードを削除するAPI"""
-            model_class = TABLE_MODEL_MAP.get(table_name.lower())
-            if not model_class:
-                return JSONResponse(status_code=404, content={"error": "Table not found"})
-
-            mapper = inspect(model_class)
-            pk_cols = [c.name for c in mapper.primary_key]
-
-            # クエリパラメータから主キーを取得
-            pks_dict = {pk: request.query_params.get(pk) for pk in pk_cols}
-
-            if any(v is None for v in pks_dict.values()):
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": f"Primary key(s) required in query params: {', '.join(pk_cols)}"}
-                )
-
-            # 主キーの値を適切な型に変換
-            try:
-                for pk_col in mapper.primary_key:
-                    if isinstance(pk_col.type, Integer):
-                        pks_dict[pk_col.name] = int(pks_dict[pk_col.name])
-            except (ValueError, TypeError):
-                 return JSONResponse(status_code=400, content={"error": "Invalid primary key type"})
-
-            # delete_recordに渡す形式を調整
-            pks_to_pass = pks_dict if len(pks_dict) > 1 else list(pks_dict.values())[0]
-            status = delete_record(model_class, pks_to_pass)
-
-            if "Error" in status:
-                return JSONResponse(status_code=400, content={"error": status})
-            return JSONResponse(content={"status": status})
-
 
     demo.launch(server_port=7960)
 

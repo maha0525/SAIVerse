@@ -7,17 +7,11 @@ from typing import Dict, List, Optional, Tuple, Iterator
 from datetime import datetime
 
 from buildings import Building
-from buildings.user_room import load as load_user_room
-from buildings.deep_think_room import load as load_deep_think_room
-from buildings.air_room import load as load_air_room
-from buildings.eris_room import load as load_eris_room
-from buildings.const_test_room import load as load_const_test_room
-from router import Router
+from persona_core import PersonaCore
 from model_configs import get_model_provider, get_context_length
 from conversation_manager import ConversationManager
-from database.api_server import (
-    SessionLocal, AI as AIModel, Building as BuildingModel, BuildingOccupancyLog
-)
+from database.api_server import SessionLocal
+from database.models import AI as AIModel, Building as BuildingModel, BuildingOccupancyLog
 
 
 DEFAULT_MODEL = "gemini-2.0-flash"#"gpt-4o"
@@ -74,17 +68,17 @@ class SAIVerseManager:
         self.model = model
         self.context_length = get_context_length(model)
         self.provider = get_model_provider(model)
-        self.routers: Dict[str, Router] = {}
+        self.personas: Dict[str, PersonaCore] = {}
         self.avatar_map: Dict[str, str] = {}
         self.occupants: Dict[str, List[str]] = {b.building_id: [] for b in self.buildings}
         self.id_to_name_map: Dict[str, str] = {}
 
-        # 6. DBからペルソナ(Router)をロード
+        # 6. DBからペルソナ(PersonaCore)をロード
         self._load_personas_from_db()
 
-        # 7. ペルソナ名とIDのマップを作成し、Routerに反映
-        self.persona_map = {r.persona_name: r.persona_id for r in self.routers.values()}
-        self.id_to_name_map.update({pid: r.persona_name for pid, r in self.routers.items()})
+        # 7. ペルソナ名とIDのマップを作成
+        self.persona_map = {p.persona_name: p.persona_id for p in self.personas.values()}
+        self.id_to_name_map.update({pid: p.persona_name for pid, p in self.personas.items()})
 
         # 8. DBから現在の入室状況をロード
         self._load_occupancy_from_db()
@@ -124,7 +118,7 @@ class SAIVerseManager:
             db.close()
 
     def _load_personas_from_db(self):
-        """DBからペルソナ情報を読み込み、Routerインスタンスを生成する"""
+        """DBからペルソナ情報を読み込み、PersonaCoreインスタンスを生成する"""
         db = SessionLocal()
         try:
             db_personas = db.query(AIModel).all()
@@ -152,8 +146,8 @@ class SAIVerseManager:
                 else:
                     self.avatar_map[pid] = self.default_avatar
 
-                # Routerインスタンス生成
-                router = Router(
+                # PersonaCoreインスタンス生成
+                persona = PersonaCore(
                     persona_id=pid,
                     persona_name=db_ai.AINAME,
                     persona_system_instruction=db_ai.SYSTEMPROMPT or "",
@@ -171,15 +165,15 @@ class SAIVerseManager:
                     provider=self.provider,
                 )
 
-                self.routers[pid] = router
-            logging.info(f"Loaded {len(self.routers)} personas from database.")
+                self.personas[pid] = persona
+            logging.info(f"Loaded {len(self.personas)} personas from database.")
         except Exception as e:
             logging.error(f"Failed to load personas from DB: {e}", exc_info=True)
         finally:
             db.close()
 
     def _load_occupancy_from_db(self):
-        """DBから現在の入室状況を読み込み、RouterとManagerの状態を更新する"""
+        """DBから現在の入室状況を読み込み、PersonaCoreとManagerの状態を更新する"""
         db = SessionLocal()
         try:
             # 現在入室中のログを取得 (exit_timestamp is NULL)
@@ -193,10 +187,10 @@ class SAIVerseManager:
             for log in current_occupancy:
                 pid = log.AIID
                 bid = log.BUILDINGID
-                if pid in self.routers and bid in self.building_map:
+                if pid in self.personas and bid in self.building_map:
                     self.occupants[bid].append(pid)
-                    # Routerの現在地も更新
-                    self.routers[pid].current_building_id = bid
+                    # PersonaCoreの現在地も更新
+                    self.personas[pid].current_building_id = bid
                 else:
                     logging.warning(f"Invalid occupancy record found: AI '{pid}' or Building '{bid}' does not exist.")
             logging.info("Loaded current occupancy from database.")
@@ -263,31 +257,31 @@ class SAIVerseManager:
         for manager in self.conversation_managers.values():
             manager.stop()
         
-        # Save all router and building states
-        for router in self.routers.values():
-            router._save_session_metadata()
+        # Save all persona and building states
+        for persona in self.personas.values():
+            persona._save_session_metadata()
         self._save_building_histories()
         logging.info("SAIVerseManager shutdown complete.")
 
     def handle_user_input(self, message: str) -> List[str]:
         replies: List[str] = []
         for pid in list(self.occupants.get("user_room", [])):
-            replies.extend(self.routers[pid].handle_user_input(message))
+            replies.extend(self.personas[pid].handle_user_input(message))
         self._save_building_histories()
-        for router in self.routers.values():
-            router._save_session_metadata()
+        for persona in self.personas.values():
+            persona._save_session_metadata()
         return replies
 
     def handle_user_input_stream(self, message: str) -> Iterator[str]:
         for pid in list(self.occupants.get("user_room", [])):
-            for token in self.routers[pid].handle_user_input_stream(message):
+            for token in self.personas[pid].handle_user_input_stream(message):
                 yield token
         self._save_building_histories()
-        for router in self.routers.values():
-            router._save_session_metadata()
+        for persona in self.personas.values():
+            persona._save_session_metadata()
 
     def summon_persona(self, persona_id: str) -> List[str]:
-        if persona_id not in self.routers:
+        if persona_id not in self.personas:
             return []
         
         # --- DBを更新してペルソナの対話モードを'user'に設定 ---
@@ -319,15 +313,15 @@ class SAIVerseManager:
             )
             self._save_building_histories()
             return []
-        replies = self.routers[persona_id].summon_to_user_room()
+        replies = self.personas[persona_id].summon_to_user_room()
         self._save_building_histories()
-        for router in self.routers.values():
-            router._save_session_metadata()
+        for persona in self.personas.values():
+            persona._save_session_metadata()
         return replies
 
     def end_conversation(self, persona_id: str) -> None:
         """Release a persona from user_room and return it to its previous building."""
-        if persona_id not in self.routers:
+        if persona_id not in self.personas:
             logging.error(f"Attempted to end conversation with non-existent persona: {persona_id}")
             return
 
@@ -380,12 +374,12 @@ class SAIVerseManager:
             db.close()
 
     def set_model(self, model: str) -> None:
-        """Update LLM model for all routers."""
+        """Update LLM model for all personas."""
         self.model = model
         self.context_length = get_context_length(model)
         self.provider = get_model_provider(model)
-        for router in self.routers.values():
-            router.set_model(model, self.context_length, self.provider)
+        for persona in self.personas.values():
+            persona.set_model(model, self.context_length, self.provider)
 
     def start_autonomous_conversations(self):
         """Start all autonomous conversation managers."""
@@ -438,12 +432,12 @@ class SAIVerseManager:
         return display
 
     def run_scheduled_prompts(self) -> List[str]:
-        """Run scheduled prompts for all routers."""
+        """Run scheduled prompts for all personas."""
         replies: List[str] = []
-        for router in self.routers.values():
-            replies.extend(router.run_scheduled_prompt())
+        for persona in self.personas.values():
+            replies.extend(persona.run_scheduled_prompt())
         if replies:
             self._save_building_histories()
-            for router in self.routers.values():
-                router._save_session_metadata()
+            for persona in self.personas.values():
+                persona._save_session_metadata()
         return replies

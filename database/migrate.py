@@ -16,7 +16,11 @@ sys.path.insert(0, PROJECT_ROOT)
 
 # --- 必要なモジュールをインポート ---
 try:
-    from database.db_manager import Base, TABLE_MODEL_MAP, DB_FILE_PATH, init_db, SessionLocal, engine as global_engine
+    # モデル定義は models.py から直接インポート
+    from database.models import (
+        Base, User, AI, Building, City, Tool,
+        UserAiLink, AiToolLink, BuildingToolLink, CityBuildingLink, BuildingOccupancyLog
+    )
 except ImportError as e:
     print(f"Error: Could not import necessary modules. Make sure this script is in the 'database' directory. Details: {e}")
     sys.exit(1)
@@ -25,7 +29,25 @@ except ImportError as e:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- 定数定義 ---
+DB_FILE_PATH = os.path.join(SCRIPT_DIR, "saiverse_main.db")
+DATABASE_URL = f"sqlite:///{DB_FILE_PATH}"
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 OLD_DB_FILE_PATH = DB_FILE_PATH + ".old"
+
+# テーブル名とモデルクラスのマッピング
+TABLE_MODEL_MAP = {
+    "user": User,
+    "ai": AI,
+    "building": Building,
+    "city": City,
+    "tool": Tool,
+    "user_ai_link": UserAiLink,
+    "ai_tool_link": AiToolLink,
+    "building_tool_link": BuildingToolLink,
+    "city_building_link": CityBuildingLink,
+    "building_occupancy_log": BuildingOccupancyLog
+}
 
 def get_default_value(column):
     """カラムの型に応じて、NULL不可の場合のフォールバック値を返す"""
@@ -35,6 +57,12 @@ def get_default_value(column):
         return ""
     # その他の型はNoneを返す（エラーになる可能性があるが、その場合は手動での対応が必要）
     return None
+
+def create_new_db_schema():
+    """新しいスキーマでデータベースとテーブルを作成する"""
+    logging.info("Creating new database with the latest schema...")
+    Base.metadata.create_all(bind=engine)
+    logging.info("Tables created successfully.")
 
 def migrate_database():
     """データベースのスキーマを最新に移行する"""
@@ -56,8 +84,7 @@ def migrate_database():
 
     try:
         # 2. 新しいDBを作成
-        logging.info("Step 2: Creating new database with the latest schema...")
-        init_db()
+        create_new_db_schema()
 
         # 3. データ移行
         logging.info("Step 3: Starting data migration from old database...")
@@ -118,7 +145,7 @@ def migrate_database():
         logging.error(f"An error occurred during migration: {e}", exc_info=True)
         logging.info("Attempting to restore the original database file...")
         # ファイル操作の前に、すべてのDBエンジンへの接続を破棄してロックを解放する
-        global_engine.dispose()
+        engine.dispose()
         if 'old_engine' in locals() and old_engine:
             old_engine.dispose()
 
