@@ -17,7 +17,7 @@ engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 from .models import (
     Base, User, AI, Building, City, Tool, 
-    UserAiLink, AiToolLink, BuildingToolLink, CityBuildingLink, BuildingOccupancyLog
+    UserAiLink, AiToolLink, BuildingToolLink, BuildingOccupancyLog
 )
 
 
@@ -41,7 +41,6 @@ TABLE_MODEL_MAP = {
     "user_ai_link": UserAiLink,
     "ai_tool_link": AiToolLink,
     "building_tool_link": BuildingToolLink,
-    "city_building_link": CityBuildingLink,
     "building_occupancy_log": BuildingOccupancyLog
 }
 
@@ -136,6 +135,42 @@ def create_management_tab(model_class):
     mapper = inspect(model_class)
     pk_cols = [c.name for c in mapper.primary_key]
 
+    # --- 外部キー用の選択肢を生成するヘルパー ---
+    def get_fk_choices():
+        fk_choices = {}
+        db = SessionLocal()
+        try:
+            for c in mapper.columns:
+                if c.foreign_keys:
+                    fk = next(iter(c.foreign_keys))
+                    target_model = TABLE_MODEL_MAP.get(fk.column.table.name)
+                    if target_model:
+                        # --- Find a user-friendly display column ---
+                        display_col = None
+                        # List of preferred column names for display
+                        preferred_names = ['USERNAME', 'AINAME', 'CITYNAME', 'BUILDINGNAME']
+                        for name in preferred_names:
+                            if hasattr(target_model, name):
+                                display_col = getattr(target_model, name)
+                                break
+                        
+                        # If no preferred name is found, fallback to the primary key of the target table
+                        if display_col is None:
+                            target_mapper = inspect(target_model)
+                            # Assuming single-column primary key for simplicity in display
+                            if target_mapper.primary_key:
+                                display_col = target_mapper.primary_key[0]
+
+                        # If we still don't have a column, we can't create a dropdown
+                        if display_col is None: continue
+
+                        value_col = fk.column
+                        choices = [(getattr(row, display_col.name), getattr(row, value_col.name)) for row in db.query(target_model).all()]
+                        fk_choices[c.name] = gr.Dropdown(choices=choices, label=c.name)
+        finally:
+            db.close()
+        return fk_choices
+
     with gr.Blocks() as tab_interface:
         with gr.Row():
             with gr.Column(scale=3):
@@ -154,8 +189,13 @@ def create_management_tab(model_class):
                     "ENTRY_PROMPT",
                     "AUTO_PROMPT",
                 }
+                
+                fk_dropdowns = get_fk_choices()
+
                 for c in mapper.columns:
-                    if isinstance(c.type, (Integer,)):
+                    if c.name in fk_dropdowns:
+                        inputs[c.name] = fk_dropdowns[c.name]
+                    elif isinstance(c.type, (Integer,)):
                         inputs[c.name] = gr.Number(label=c.name)
                     elif c.name in long_text_fields:
                         inputs[c.name] = gr.Textbox(
@@ -250,8 +290,6 @@ def main():
                 create_management_tab(AiToolLink)
             with gr.TabItem("Building-Tool Link"):
                 create_management_tab(BuildingToolLink)
-            with gr.TabItem("City-Building Link"):
-                create_management_tab(CityBuildingLink)
             with gr.TabItem("building_occupancy_log"):
                 create_management_tab(BuildingOccupancyLog)
 

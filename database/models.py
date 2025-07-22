@@ -5,6 +5,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Boolean,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import declarative_base
 
@@ -34,6 +35,7 @@ class AI(Base):
 
 class Building(Base):
     __tablename__ = "building"
+    CITYID = Column(Integer, ForeignKey("city.CITYID"), nullable=False)
     BUILDINGID = Column(String(255), primary_key=True)  # building_id
     BUILDINGNAME = Column(String(32), nullable=False)
     CAPACITY = Column(Integer, default=1, nullable=False)
@@ -41,12 +43,15 @@ class Building(Base):
     ENTRY_PROMPT = Column(String(4096), default="", nullable=False)
     AUTO_PROMPT = Column(String(4096), default="", nullable=False)
     DESCRIPTION = Column(String(1024), default="", nullable=False)
+    __table_args__ = (UniqueConstraint('CITYID', 'BUILDINGNAME', name='uq_city_building_name'),)
 
 class City(Base):
     __tablename__ = "city"
-    CITYID = Column(Integer, primary_key=True)
+    USERID = Column(Integer, ForeignKey("user.USERID"), nullable=False)
+    CITYID = Column(Integer, primary_key=True, autoincrement=True)
     CITYNAME = Column(String(32), nullable=False)
     DESCRIPTION = Column(String(1024), default="", nullable=False)
+    __table_args__ = (UniqueConstraint('USERID', 'CITYNAME', name='uq_user_city_name'),)
 
 class Tool(Base):
     __tablename__ = "tool"
@@ -68,11 +73,6 @@ class BuildingToolLink(Base):
     __tablename__ = "building_tool_link"
     BUILDINGID = Column(String(255), ForeignKey("building.BUILDINGID"), primary_key=True)
     TOOLID = Column(Integer, ForeignKey("tool.TOOLID"), primary_key=True)
-
-class CityBuildingLink(Base):
-    __tablename__ = "city_building_link"
-    CITYID = Column(Integer, ForeignKey("city.CITYID"), primary_key=True)
-    BUILDINGID = Column(String(255), ForeignKey("building.BUILDINGID"), primary_key=True)
 
 class BuildingOccupancyLog(Base):
     __tablename__ = "building_occupancy_log"

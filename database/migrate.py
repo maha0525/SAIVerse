@@ -18,8 +18,8 @@ sys.path.insert(0, PROJECT_ROOT)
 try:
     # モデル定義は models.py から直接インポート
     from database.models import (
-        Base, User, AI, Building, City, Tool,
-        UserAiLink, AiToolLink, BuildingToolLink, CityBuildingLink, BuildingOccupancyLog
+        Base, User, AI, Building, City, Tool, 
+        UserAiLink, AiToolLink, BuildingToolLink, BuildingOccupancyLog
     )
 except ImportError as e:
     print(f"Error: Could not import necessary modules. Make sure this script is in the 'database' directory. Details: {e}")
@@ -45,7 +45,6 @@ TABLE_MODEL_MAP = {
     "user_ai_link": UserAiLink,
     "ai_tool_link": AiToolLink,
     "building_tool_link": BuildingToolLink,
-    "city_building_link": CityBuildingLink,
     "building_occupancy_log": BuildingOccupancyLog
 }
 

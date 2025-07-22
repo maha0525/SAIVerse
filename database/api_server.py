@@ -19,7 +19,7 @@ engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 from .models import (
     Base, User, AI, Building, City, Tool, 
-    UserAiLink, AiToolLink, BuildingToolLink, CityBuildingLink, BuildingOccupancyLog
+    UserAiLink, AiToolLink, BuildingToolLink, BuildingOccupancyLog
 )
 
 def init_db():
@@ -39,7 +39,6 @@ TABLE_MODEL_MAP = {
     "user_ai_link": UserAiLink,
     "ai_tool_link": AiToolLink,
     "building_tool_link": BuildingToolLink,
-    "city_building_link": CityBuildingLink,
     "building_occupancy_log": BuildingOccupancyLog,
 }
 
