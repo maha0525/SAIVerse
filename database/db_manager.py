@@ -1,34 +1,14 @@
 import gradio as gr
 import pandas as pd
-from sqlalchemy import create_engine, inspect, DateTime, Integer
+from sqlalchemy import inspect, DateTime, Integer
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import IntegrityError
-import os
 from datetime import datetime
 
-# --- 1. データベース設定 ---
-
-# スクリプトファイルがあるディレクトリを基準にDBファイルの絶対パスを生成
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE_PATH = os.path.join(SCRIPT_DIR, "saiverse_main.db")
-DATABASE_URL = f"sqlite:///{DB_FILE_PATH}"
-
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 from .models import (
-    Base, User, AI, Building, City, Tool, 
+    User, AI, Building, City, Tool,
     UserAiLink, AiToolLink, BuildingToolLink, BuildingOccupancyLog
 )
-
-
-def init_db():
-    """データベースファイルが存在しない場合にテーブルを作成する"""
-    if not os.path.exists(DB_FILE_PATH):
-        print(f"Database file '{DB_FILE_PATH}' not found. Creating tables...")
-        Base.metadata.create_all(bind=engine)
-        print("Tables created successfully.")
-    else:
-        print(f"Database file '{DB_FILE_PATH}' already exists.")
 
 
 # テーブル名とモデルクラスのマッピング
@@ -46,16 +26,16 @@ TABLE_MODEL_MAP = {
 
 # --- 3. CRUD (Create, Read, Update, Delete) 操作関数 ---
 
-def get_dataframe(model_class):
+def get_dataframe(model_class, session_factory: sessionmaker):
     """テーブルからデータをPandas DataFrameとして取得"""
-    db = SessionLocal()
+    db = session_factory()
     try:
         query = db.query(model_class)
         return pd.read_sql(query.statement, db.bind)
     finally:
         db.close()
 
-def add_or_update_record(model_class, data_dict):
+def add_or_update_record(model_class, data_dict, session_factory: sessionmaker):
     """レコードを追加または更新"""
     mapper = inspect(model_class)
     pk_cols = [c.name for c in mapper.primary_key]
@@ -80,7 +60,7 @@ def add_or_update_record(model_class, data_dict):
         if is_all_empty and validation_targets:
             return "Error: To add a new record, at least one required field (other than DESCRIPTION or EXITDT) must be filled."
 
-    db = SessionLocal()
+    db = session_factory()
     try:
         # 空の文字列をNoneに変換 & 日付文字列をdatetimeオブジェクトに変換
         for key, value in data_dict.items():
@@ -111,9 +91,9 @@ def add_or_update_record(model_class, data_dict):
     finally:
         db.close()
 
-def delete_record(model_class, pks_dict):
+def delete_record(model_class, pks_dict, session_factory: sessionmaker):
     """主キーに基づいてレコードを削除"""
-    db = SessionLocal()
+    db = session_factory()
     try:
         instance = db.get(model_class, pks_dict)
         if instance:
@@ -130,15 +110,15 @@ def delete_record(model_class, pks_dict):
 
 # --- 4. Gradio UI ---
 
-def create_management_tab(model_class):
+def create_management_tab(model_class, session_factory: sessionmaker):
     """指定されたモデルの管理用UIタブを生成する"""
     mapper = inspect(model_class)
     pk_cols = [c.name for c in mapper.primary_key]
 
     # --- 外部キー用の選択肢を生成するヘルパー ---
-    def get_fk_choices():
+    def get_fk_choices(session_factory: sessionmaker):
         fk_choices = {}
-        db = SessionLocal()
+        db = session_factory()
         try:
             for c in mapper.columns:
                 if c.foreign_keys:
@@ -175,7 +155,7 @@ def create_management_tab(model_class):
         with gr.Row():
             with gr.Column(scale=3):
                 dataframe = gr.DataFrame(
-                    value=lambda: get_dataframe(model_class),
+                    value=lambda: get_dataframe(model_class, session_factory),
                     label=f"{model_class.__tablename__} Table",
                     interactive=False,
                 )
@@ -190,7 +170,7 @@ def create_management_tab(model_class):
                     "AUTO_PROMPT",
                 }
                 
-                fk_dropdowns = get_fk_choices()
+                fk_dropdowns = get_fk_choices(session_factory)
 
                 for c in mapper.columns:
                     if c.name in fk_dropdowns:
@@ -230,8 +210,8 @@ def create_management_tab(model_class):
 
         def on_add_update_click(*args):
             data_dict = {c.name: val for c, val in zip(mapper.columns, args)}
-            status = add_or_update_record(model_class, data_dict)
-            return status, get_dataframe(model_class)
+            status = add_or_update_record(model_class, data_dict, session_factory)
+            return status, get_dataframe(model_class, session_factory)
 
         def on_delete_click(*args):
             data_dict = {c.name: val for c, val in zip(mapper.columns, args)}
@@ -240,8 +220,8 @@ def create_management_tab(model_class):
             # 複合主キーでない場合は辞書ではなく値を渡す
             pks_to_pass = pks_dict if len(pks_dict) > 1 else list(pks_dict.values())[0]
             
-            status = delete_record(model_class, pks_to_pass)
-            return status, get_dataframe(model_class)
+            status = delete_record(model_class, pks_to_pass, session_factory)
+            return status, get_dataframe(model_class, session_factory)
 
         dataframe.select(
             fn=on_select,
@@ -259,42 +239,34 @@ def create_management_tab(model_class):
             outputs=[status_output, dataframe],
         )
         refresh_btn.click(
-            fn=lambda: get_dataframe(model_class),
+            fn=lambda: get_dataframe(model_class, session_factory),
             inputs=None,
             outputs=dataframe,
         )
 
     return tab_interface
 
-
-def main():
-    # アプリケーション起動時にDBを初期化
-    init_db()
-
-    with gr.Blocks(title="SAIVerse DB Manager", theme=gr.themes.Soft()) as demo:
+def create_db_manager_ui(session_factory: sessionmaker):
+    """Creates the complete DB Manager UI component."""
+    with gr.Blocks(theme=gr.themes.Soft(), analytics_enabled=False) as db_manager_interface:
         gr.Markdown("# SAIVerse Database Manager")
         with gr.Tabs():
             with gr.TabItem("User"):
-                create_management_tab(User)
+                create_management_tab(User, session_factory)
             with gr.TabItem("AI"):
-                create_management_tab(AI)
+                create_management_tab(AI, session_factory)
             with gr.TabItem("Building"):
-                create_management_tab(Building)
+                create_management_tab(Building, session_factory)
             with gr.TabItem("City"):
-                create_management_tab(City)
+                create_management_tab(City, session_factory)
             with gr.TabItem("Tool"):
-                create_management_tab(Tool)
+                create_management_tab(Tool, session_factory)
             with gr.TabItem("User-AI Link"):
-                create_management_tab(UserAiLink)
+                create_management_tab(UserAiLink, session_factory)
             with gr.TabItem("AI-Tool Link"):
-                create_management_tab(AiToolLink)
+                create_management_tab(AiToolLink, session_factory)
             with gr.TabItem("Building-Tool Link"):
-                create_management_tab(BuildingToolLink)
+                create_management_tab(BuildingToolLink, session_factory)
             with gr.TabItem("building_occupancy_log"):
-                create_management_tab(BuildingOccupancyLog)
-
-    demo.launch(server_port=7960)
-
-
-if __name__ == "__main__":
-    main()
+                create_management_tab(BuildingOccupancyLog, session_factory)
+    return db_manager_interface

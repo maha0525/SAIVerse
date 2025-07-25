@@ -18,7 +18,6 @@ import llm_clients
 from action_handler import ActionHandler
 from history_manager import HistoryManager
 from emotion_module import EmotionControlModule
-from database.api_server import SessionLocal
 from database.models import AI as AIModel
 
 load_dotenv()
@@ -33,17 +32,22 @@ class PersonaCore:
         avatar_image: Optional[str],
         buildings: List[Building],
         common_prompt_path: Path,
+        session_factory: Callable,
+        is_visitor: bool = False,
         emotion_prompt_path: Path = Path("system_prompts/emotion_parameter.txt"),
         action_priority_path: Path = Path("action_priority.json"),
         building_histories: Optional[Dict[str, List[Dict[str, str]]]] = None,
         occupants: Optional[Dict[str, List[str]]] = None,
         id_to_name_map: Optional[Dict[str, str]] = None,
         move_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
+        dispatch_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
         start_building_id: str = "air_room",
         model: str = "gpt-4o",
         context_length: int = 120000,
         provider: str = "ollama",
     ):
+        self.is_visitor = is_visitor
+        self.SessionLocal = session_factory
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
         self.common_prompt = common_prompt_path.read_text(encoding="utf-8")
         self.emotion_prompt = emotion_prompt_path.read_text(encoding="utf-8")
@@ -89,6 +93,7 @@ class PersonaCore:
 
         # Initialize remaining attributes
         self.move_callback = move_callback
+        self.dispatch_callback = dispatch_callback
         self.model = model
         self.context_length = context_length
         self.llm_client = get_llm_client(model, provider, self.context_length)
@@ -105,7 +110,13 @@ class PersonaCore:
 
     def _load_session_data(self) -> None:
         """ペルソナの動的な状態をDBから読み込む"""
-        db = SessionLocal()
+        if self.is_visitor:
+            self.messages = []
+            self.conscious_log = []
+            self.pulse_indices = {}
+            return
+
+        db = self.SessionLocal()
         try:
             db_ai = db.query(AIModel).filter(AIModel.AIID == self.persona_id).first()
             if not db_ai:
@@ -157,7 +168,13 @@ class PersonaCore:
 
     def _save_session_metadata(self) -> None:
         """ペルソナの動的な状態をDBに保存し、各種ログファイルを保存する"""
-        db = SessionLocal()
+        if self.is_visitor:
+            # Visitors only save file-based logs, not DB state.
+            self.history_manager.save_all()
+            self._save_conscious_log()
+            return
+
+        db = self.SessionLocal()
         try:
             update_data = {
                 "EMOTION": json.dumps(self.emotion, ensure_ascii=False),
@@ -242,10 +259,10 @@ class PersonaCore:
         user_message: Optional[str],
         system_prompt_extra: Optional[str],
         log_extra_prompt: bool = True,
-    ) -> Tuple[str, Optional[str], bool]:
+    ) -> Tuple[str, Optional[Dict[str, str]], bool]:
         prev_emotion = copy.deepcopy(self.emotion)
         say, actions = self.action_handler.parse_response(content)
-        next_id, _, delta = self.action_handler.execute_actions(actions)
+        move_target, _, delta = self.action_handler.execute_actions(actions)
 
         if delta:
             self._apply_emotion_delta(delta)
@@ -279,9 +296,9 @@ class PersonaCore:
             {"role": "assistant", "content": summary},
         )
 
-        moved = self._handle_movement(next_id)
+        moved = self._handle_movement(move_target)
         self._save_session_metadata()
-        return say, next_id, moved
+        return say, move_target, moved
 
     def _generate(
         self,
@@ -290,7 +307,7 @@ class PersonaCore:
         info_text: Optional[str] = None,
         log_extra_prompt: bool = True,
         log_user_message: bool = True,
-    ) -> tuple[str, Optional[str], bool]:
+    ) -> tuple[str, Optional[Dict[str, str]], bool]:
         actual_user_message = user_message
         if user_message is None and system_prompt_extra is None:
             history = self.history_manager.building_histories.get(
@@ -361,33 +378,64 @@ class PersonaCore:
             time.sleep(10)
 
         logging.info("AI Response :\n%s", content_accumulator)
-        say, next_id, changed = self._process_generation_result(
+        say, move_target, changed = self._process_generation_result(
             content_accumulator,
             user_message if log_user_message else None,
             system_prompt_extra,
             log_extra_prompt,
         )
-        return (say, next_id, changed)
+        return (say, move_target, changed)
 
-    def _handle_movement(self, next_id: Optional[str]) -> bool:
+    def _handle_movement(self, move_target: Optional[Dict[str, str]]) -> bool:
+        if not move_target or not move_target.get("building"):
+            return False
+
         prev_id = self.current_building_id
+        target_building_id = move_target.get("building")
+        target_city_id = move_target.get("city")
         moved = False
-        if next_id and next_id in self.buildings:
+
+        # City間移動の処理
+        if target_city_id:
+            if self.dispatch_callback:
+                logging.info(f"Attempting to dispatch to city: {target_city_id}, building: {target_building_id}")
+                dispatched, reason = self.dispatch_callback(self.persona_id, target_city_id, target_building_id)
+                if dispatched:
+                    # 派遣が成功した場合、このインスタンスはまもなく削除されるため、
+                    # これ以上の状態変更は行わない。
+                    # 'moved' は True とみなし、後続の自律会話ループなどを抑制する。
+                    moved = True
+                else:
+                    logging.warning(f"Dispatch failed: {reason}")
+                    self.history_manager.add_message(
+                        {"role": "system", "content": f"別のCityへの移動に失敗しました。{reason}"},
+                        self.current_building_id
+                    )
+            else:
+                logging.error("Dispatch callback is not set. Cannot move between cities.")
+                self.history_manager.add_message(
+                    {"role": "system", "content": "別のCityへ移動する機能が設定されていません。"},
+                    self.current_building_id
+                )
+            return moved
+
+        # City内移動の処理
+        if target_building_id and target_building_id in self.buildings:
             allowed, reason = True, None
             if self.move_callback:
-                allowed, reason = self.move_callback(self.persona_id, self.current_building_id, next_id)
+                allowed, reason = self.move_callback(self.persona_id, self.current_building_id, target_building_id)
             if allowed:
-                logging.info("Moving to building: %s", next_id)
-                self.current_building_id = next_id
+                logging.info("Moving to building: %s", target_building_id)
+                self.current_building_id = target_building_id
                 moved = True
             else:
-                logging.info("Move blocked to building: %s", next_id)
+                logging.info("Move blocked to building: %s", target_building_id)
                 self.history_manager.add_message(
                     {"role": "system", "content": f"移動できませんでした。{reason}"},
                     self.current_building_id
                 )
-        elif next_id:
-            logging.info("Unknown building id received: %s, staying at %s", next_id, self.current_building_id)
+        elif target_building_id:
+            logging.info("Unknown building id received: %s, staying at %s", target_building_id, self.current_building_id)
 
         if moved:
             self.auto_count = 0
@@ -412,12 +460,12 @@ class PersonaCore:
 
     def run_auto_conversation(self, initial: bool = False) -> List[str]:
         replies: List[str] = []
-        next_id: Optional[str] = None
+        move_target: Optional[Dict[str, str]] = None
         building = self.buildings[self.current_building_id]
         if initial and building.entry_prompt:
             if building.run_entry_llm:
                 entry_text = building.entry_prompt.format(persona_name=self.persona_name)
-                say, next_id, _ = self._generate(None, entry_text)
+                say, move_target, _ = self._generate(None, entry_text)
                 replies.append(say)
             else:
                 self.history_manager.add_message(
@@ -428,12 +476,12 @@ class PersonaCore:
             building.auto_prompt
             and building.run_auto_llm
             and self.current_building_id == building.building_id
-            and (next_id is None or next_id == building.building_id)
+            and (move_target is None or move_target.get("building") == building.building_id)
             and self.auto_count < 10
         ):
             self.auto_count += 1
             auto_text = building.auto_prompt.format(persona_name=self.persona_name)
-            say, next_id, changed = self._generate(None, auto_text)
+            say, move_target, changed = self._generate(None, auto_text)
             replies.append(say)
             if changed:
                 building = self.buildings[self.current_building_id]
@@ -452,7 +500,7 @@ class PersonaCore:
             return []
         self.last_auto_prompt_times[self.current_building_id] = now
         auto_text = building.auto_prompt.format(persona_name=self.persona_name)
-        say, next_id, changed = self._generate(None, auto_text)
+        say, move_target, changed = self._generate(None, auto_text)
         replies = [say]
         if changed:
             replies.extend(self.run_auto_conversation(initial=True))
@@ -462,12 +510,12 @@ class PersonaCore:
         logging.info("User input: %s", message)
         building = self.buildings[self.current_building_id]
         if self.current_building_id == "user_room":
-            say, next_id, changed = self._generate(message)
+            say, move_target, changed = self._generate(message)
             replies = [say]
         else:
             logging.info("User input ignored outside user_room")
             if building.run_auto_llm:
-                say, next_id, changed = self._generate("")
+                say, move_target, changed = self._generate("")
                 replies = [say]
             else:
                 return []
@@ -478,7 +526,7 @@ class PersonaCore:
         elif (
             building.auto_prompt
             and building.run_auto_llm
-            and (next_id is None or next_id == building.building_id)
+            and (move_target is None or move_target.get("building") == building.building_id)
         ):
             replies.extend(self.run_auto_conversation(initial=False))
         return replies
@@ -499,7 +547,7 @@ class PersonaCore:
             while True:
                 yield next(gen)
         except StopIteration as e:
-            _, next_id, changed = e.value
+            _, move_target, changed = e.value
 
         building = self.buildings[self.current_building_id]
         extra_replies: List[str] = []
@@ -508,7 +556,7 @@ class PersonaCore:
         elif (
             building.auto_prompt
             and building.run_auto_llm
-            and (next_id is None or next_id == building.building_id)
+            and (move_target is None or move_target.get("building") == building.building_id)
         ):
             extra_replies.extend(self.run_auto_conversation(initial=False))
         for r in extra_replies:

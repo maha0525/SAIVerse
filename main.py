@@ -3,23 +3,25 @@ import threading
 import time
 import subprocess
 import sys
-import socket
 import os
-import re
+import json
+import argparse
 import atexit
-from typing import Optional
+from typing import Optional, List, Dict
 from pathlib import Path
 
 import gradio as gr
 
 from saiverse_manager import SAIVerseManager
 from model_configs import get_model_choices
+from database.db_manager import create_db_manager_ui
 
 logging.basicConfig(level=logging.INFO)
-manager = SAIVerseManager()
-PERSONA_CHOICES = list(manager.persona_map.keys())
-
+manager: SAIVerseManager = None
+PERSONA_CHOICES = []
 MODEL_CHOICES = get_model_choices()
+AUTONOMOUS_BUILDING_CHOICES = []
+AUTONOMOUS_BUILDING_MAP = {}
 
 NOTE_CSS = """
 /* --- Flexboxを使った新しいレイアウト --- */
@@ -56,6 +58,7 @@ NOTE_CSS = """
     flex-grow: 1; /* 残りのスペースをすべて使う */
     padding: 10px 14px;
     background-color: #f0f0f0; /* 背景色を少しつける */
+    color: #222 !important; /* ★文字色を暗い色に固定 (重要度を上げる) */
     border-radius: 12px;
     min-height: 60px; /* アイコンの高さと合わせる */
     font-size: 1rem !important;
@@ -68,37 +71,74 @@ NOTE_CSS = """
 }
 .user-message .message {
     background-color: #d1e7ff; /* ユーザーのメッセージ色を変更 */
+    color: #222 !important; /* ★ユーザー側の文字色も暗い色に固定 (重要度を上げる) */
 }
 
 /* ホストやシステムノートのスタイル */
 .note-box {
     background: #fff9db;
-    color: #333350;
+    color: #333350 !important; /* ★文字色を暗い色に固定 (重要度を上げる) */
     border-left: 4px solid #ffbf00;
     padding: 8px 12px;
     margin: 0;
     border-radius: 6px;
     font-size: .92rem;
 }
+
+/* ダークモード用の文字色上書き */
+body.dark .message, body.dark .message p {
+    color: #222 !important;
+}
+
+body.dark .note-box, body.dark .note-box * {
+    color: #333350 !important;
+}
 """
+
+def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """生の会話履歴をGradio Chatbotの表示形式（HTML）に変換する"""
+    display: List[Dict[str, str]] = []
+    for msg in raw_history:
+        role = msg.get("role")
+        if role == "assistant":
+            pid = msg.get("persona_id")
+            avatar = manager.avatar_map.get(pid, manager.default_avatar)
+            say = msg.get("content", "")
+            if avatar:
+                html = f"<div class='message-row'><div class='avatar-container'><img src='{avatar}'></div><div class='message'>{say}</div></div>"
+            else:
+                html = f"{say}"
+            display.append({"role": "assistant", "content": html})
+        elif role == "user":
+            display.append(msg)
+        elif role == "host":
+            say = msg.get("content", "")
+            if manager.host_avatar:
+                html = f"<div class='message-row'><div class='avatar-container'><img src='{manager.host_avatar}'></div><div class='message'>{say}</div></div>"
+            else:
+                html = f"<b>[HOST]</b> {say}"
+            display.append({"role": "assistant", "content": html})
+        # "system" role messages are filtered out from the display
+    return display
 
 
 def respond(message: str):
     """Process user input and return updated chat history."""
     manager.handle_user_input(message)
-    history = manager.get_building_history("user_room")
-    return history
+    raw_history = manager.get_building_history("user_room")
+    return format_history_for_chatbot(raw_history)
 
 def respond_stream(message: str):
     """Stream AI response for chat."""
-    history = manager.get_building_history("user_room")
+    raw_history = manager.get_building_history("user_room")
+    history = format_history_for_chatbot(raw_history)
     history.append({"role": "user", "content": message})
     ai_message = ""
     for token in manager.handle_user_input_stream(message):
         ai_message += token
         yield history + [{"role": "assistant", "content": ai_message}]
-    final = manager.get_building_history("user_room")
-    yield final
+    final_raw = manager.get_building_history("user_room")
+    yield format_history_for_chatbot(final_raw)
 
 
 def get_user_room_occupant_names():
@@ -112,40 +152,46 @@ def call_persona_ui(name: str):
         manager.summon_persona(persona_id)
     
     new_occupants = get_user_room_occupant_names()
-    return manager.get_building_history("user_room"), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants))
+    raw_history = manager.get_building_history("user_room")
+    return format_history_for_chatbot(raw_history), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants))
 
 def end_conversation_ui(name: str):
     """Ends a conversation with a persona and updates the UI."""
     if not name: # ドロップダウンが空の場合
+        manager.building_histories["user_room"].append(
+            {"role": "host", "content": '<div class="note-box">退室させるペルソナが選択されていません。</div>'}
+        )
+        manager._save_building_histories()
         new_occupants = get_user_room_occupant_names()
-        return manager.get_building_history("user_room"), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants))
+        raw_history = manager.get_building_history("user_room")
+        return format_history_for_chatbot(raw_history), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants))
 
     persona_id = manager.persona_map.get(name)
     if persona_id:
         manager.end_conversation(persona_id)
     
     new_occupants = get_user_room_occupant_names()
-    return manager.get_building_history("user_room"), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants))
+    raw_history = manager.get_building_history("user_room")
+    return format_history_for_chatbot(raw_history), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants))
 
 def select_model(model_name: str):
     manager.set_model(model_name)
-    return manager.get_building_history("user_room")
+    raw_history = manager.get_building_history("user_room")
+    return format_history_for_chatbot(raw_history)
 
 def refresh_ui():
     """Refreshes the user interaction UI components."""
     new_occupants = get_user_room_occupant_names()
-    return manager.get_building_history("user_room"), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants))
+    raw_history = manager.get_building_history("user_room")
+    return format_history_for_chatbot(raw_history), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants))
 
 def get_autonomous_log(building_name: str):
     """指定されたBuildingの会話ログを取得する"""
     building_id = AUTONOMOUS_BUILDING_MAP.get(building_name)
     if building_id:
-        return manager.get_building_history(building_id)
+        raw_history = manager.get_building_history(building_id)
+        return format_history_for_chatbot(raw_history)
     return []
-
-AUTONOMOUS_BUILDING_CHOICES = [b.name for b in manager.buildings if b.building_id != "user_room"]
-AUTONOMOUS_BUILDING_MAP = {b.name: b.building_id for b in manager.buildings if b.building_id != "user_room"}
-
 
 def start_conversations_ui():
     """UI handler to start autonomous conversations and update status."""
@@ -214,22 +260,58 @@ def cleanup_and_start_server(port: int, script_path: Path, name: str):
     # Run as a module from the project's root directory to handle relative imports correctly
     subprocess.Popen([sys.executable, "-m", module_path], cwd=project_root)
 
+def cleanup_and_start_server_with_args(port: int, script_path: Path, name: str, db_file: str):
+    """ポートをクリーンアップし、引数付きでスクリプトをモジュールとして起動する"""
+    pid = find_pid_for_port(port)
+    if pid:
+        logging.warning(f"Port {port} for {name} is already in use by PID {pid}. Attempting to terminate the process.")
+        kill_process_by_pid(pid)
+
+    project_root = Path(__file__).parent
+    module_path = str(script_path.relative_to(project_root)).replace(os.sep, '.')[:-3]
+
+    logging.info(f"Starting {name} as module: {module_path} with DB: {db_file} on port: {port}")
+    subprocess.Popen([sys.executable, "-m", module_path, "--port", str(port), "--db", db_file], cwd=project_root)
+
 def main():
-    cleanup_and_start_server(7920, Path(__file__).parent / "database" / "api_server.py", "API Server")
-    cleanup_and_start_server(7960, Path(__file__).parent / "database" / "db_manager.py", "DB Manager")
+    parser = argparse.ArgumentParser(description="Run a SAIVerse City instance.")
+    parser.add_argument("city_id", type=str, help="The ID of the city to run (e.g., city_a).")
+    args = parser.parse_args()
+
+    with open("cities.json", "r", encoding="utf-8") as f:
+        cities_config = json.load(f)
+    
+    config = cities_config.get(args.city_id)
+    if not config:
+        raise ValueError(f"City ID '{args.city_id}' not found in cities.json")
+
+    global manager, PERSONA_CHOICES, AUTONOMOUS_BUILDING_CHOICES, AUTONOMOUS_BUILDING_MAP
+    manager = SAIVerseManager(
+        city_id=args.city_id,
+        db_file_name=config["db_file"], 
+        cities_config=cities_config
+    )
+    PERSONA_CHOICES = list(manager.persona_map.keys())
+    AUTONOMOUS_BUILDING_CHOICES = [b.name for b in manager.buildings if b.building_id != "user_room"]
+    AUTONOMOUS_BUILDING_MAP = {b.name: b.building_id for b in manager.buildings if b.building_id != "user_room"}
+
+    cleanup_and_start_server_with_args(config["api_port"], Path(__file__).parent / "database" / "api_server.py", "API Server", config["db_file"])
 
     # --- アプリケーション終了時にManagerのシャットダウン処理を呼び出す ---
     atexit.register(manager.shutdown)
 
     def background_loop():
         while True:
+            manager._check_for_visitors()
             manager.run_scheduled_prompts()
             time.sleep(5)
 
     thread = threading.Thread(target=background_loop, daemon=True)
     thread.start()
 
-    with gr.Blocks(css=NOTE_CSS) as demo:
+    # --- FastAPIとGradioの統合 ---
+    # 3. Gradio UIを作成
+    with gr.Blocks(css=NOTE_CSS, title=f"SAIVerse City: {args.city_id}", theme=gr.themes.Soft()) as demo:
         with gr.Tabs():
             with gr.TabItem("ユーザー対話"):
                 chatbot = gr.Chatbot(
@@ -323,6 +405,9 @@ def main():
                 log_refresh_btn.click(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
                 auto_refresh_log_btn.click(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
 
+            with gr.TabItem("DB Manager"):
+                create_db_manager_ui(manager.SessionLocal)
+
         # UIロード時にJavaScriptを実行し、5秒ごとの自動更新タイマーを設定する
         js_auto_refresh = """
         () => {
@@ -336,7 +421,7 @@ def main():
         """
         demo.load(None, None, None, js=js_auto_refresh)
 
-    demo.launch(server_port=7860, debug=True)
+    demo.launch(server_port=config["ui_port"], debug=True)
 
 
 if __name__ == "__main__":

@@ -81,3 +81,9 @@ class BuildingOccupancyLog(Base):
     AIID = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
     ENTRY_TIMESTAMP = Column(DateTime, nullable=False)
     EXIT_TIMESTAMP = Column(DateTime)
+
+class VisitingAI(Base):
+    __tablename__ = "visiting_ai"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    persona_id = Column(String(255), nullable=False, unique=True)
+    profile_json = Column(String, nullable=False) # JSON文字列でプロファイルを保存
