@@ -35,7 +35,7 @@ class RemotePersonaProxy:
         if not home_city_config:
             raise ValueError(f"Home city '{self.home_city_id}' not found in configuration.")
         
-        self.think_api_url = f"http://localhost:{home_city_config['api_port']}/persona-proxy/{self.persona_id}/think"
+        self.think_api_url = f"{home_city_config['api_base_url']}/persona-proxy/{self.persona_id}/think"
         self.session = requests.Session()
 
     def run_pulse(self, occupants: List[str], user_online: bool) -> List[str]:

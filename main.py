@@ -183,7 +183,7 @@ def refresh_ui():
     """Refreshes the user interaction UI components."""
     new_occupants = get_user_room_occupant_names()
     raw_history = manager.get_building_history("user_room")
-    return format_history_for_chatbot(raw_history), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants))
+    return format_history_for_chatbot(raw_history), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants)), manager.sds_status
 
 def get_autonomous_log(building_name: str):
     """指定されたBuildingの会話ログを取得する"""
@@ -275,27 +275,24 @@ def cleanup_and_start_server_with_args(port: int, script_path: Path, name: str, 
 
 def main():
     parser = argparse.ArgumentParser(description="Run a SAIVerse City instance.")
-    parser.add_argument("city_id", type=str, help="The ID of the city to run (e.g., city_a).")
+    parser.add_argument("city_name", type=str, help="The name of the city to run (e.g., city_a).")
+    parser.add_argument("--db-file", type=str, default="saiverse.db", help="Path to the unified database file.")
+    parser.add_argument("--sds-url", type=str, default="http://127.0.0.1:8080", help="URL of the SAIVerse Directory Service.")
     args = parser.parse_args()
 
-    with open("cities.json", "r", encoding="utf-8") as f:
-        cities_config = json.load(f)
-    
-    config = cities_config.get(args.city_id)
-    if not config:
-        raise ValueError(f"City ID '{args.city_id}' not found in cities.json")
+    db_path = Path(__file__).parent / "database" / args.db_file
 
     global manager, PERSONA_CHOICES, AUTONOMOUS_BUILDING_CHOICES, AUTONOMOUS_BUILDING_MAP
     manager = SAIVerseManager(
-        city_id=args.city_id,
-        db_file_name=config["db_file"], 
-        cities_config=cities_config
+        city_name=args.city_name,
+        db_path=str(db_path),
+        sds_url=args.sds_url
     )
     PERSONA_CHOICES = list(manager.persona_map.keys())
     AUTONOMOUS_BUILDING_CHOICES = [b.name for b in manager.buildings if b.building_id != "user_room"]
     AUTONOMOUS_BUILDING_MAP = {b.name: b.building_id for b in manager.buildings if b.building_id != "user_room"}
 
-    cleanup_and_start_server_with_args(config["api_port"], Path(__file__).parent / "database" / "api_server.py", "API Server", config["db_file"])
+    cleanup_and_start_server_with_args(manager.api_port, Path(__file__).parent / "database" / "api_server.py", "API Server", str(db_path))
 
     # --- アプリケーション終了時にManagerのシャットダウン処理を呼び出す ---
     atexit.register(manager.shutdown)
@@ -312,7 +309,7 @@ def main():
 
     # --- FastAPIとGradioの統合 ---
     # 3. Gradio UIを作成
-    with gr.Blocks(css=NOTE_CSS, title=f"SAIVerse City: {args.city_id}", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(css=NOTE_CSS, title=f"SAIVerse City: {args.city_name}", theme=gr.themes.Soft()) as demo:
         with gr.Tabs():
             with gr.TabItem("ユーザー対話"):
                 chatbot = gr.Chatbot(
@@ -343,6 +340,18 @@ def main():
                     login_btn = gr.Button("ログイン", scale=1)
                     logout_btn = gr.Button("ログアウト", scale=1)
                 gr.Markdown("---")
+                with gr.Row():
+                    sds_status_display = gr.Textbox(
+                        value=manager.sds_status,
+                        label="ネットワークモード",
+                        interactive=False,
+                        scale=2
+                    )
+                    online_btn = gr.Button("オンラインモードへ", scale=1)
+                    offline_btn = gr.Button("オフラインモードへ", scale=1)
+
+
+                gr.Markdown("---")
 
                 with gr.Row():
                     model_drop = gr.Dropdown(choices=MODEL_CHOICES, value=MODEL_CHOICES[0] if MODEL_CHOICES else None, label="モデル選択")
@@ -361,10 +370,12 @@ def main():
                 submit.click(respond_stream, txt, chatbot)
                 call_btn.click(call_persona_ui, persona_drop, [chatbot, end_persona_drop])
                 end_btn.click(end_conversation_ui, end_persona_drop, [chatbot, end_persona_drop])
-                refresh_btn.click(refresh_ui, None, [chatbot, end_persona_drop])
+                refresh_btn.click(refresh_ui, None, [chatbot, end_persona_drop, sds_status_display])
                 login_btn.click(fn=login_ui, inputs=None, outputs=login_status_display)
                 logout_btn.click(fn=logout_ui, inputs=None, outputs=login_status_display)
                 model_drop.change(select_model, model_drop, chatbot)
+                online_btn.click(fn=manager.switch_to_online_mode, inputs=None, outputs=sds_status_display)
+                offline_btn.click(fn=manager.switch_to_offline_mode, inputs=None, outputs=sds_status_display)
 
             with gr.TabItem("自律会話ログ"):
                 with gr.Row():
@@ -422,7 +433,7 @@ def main():
         """
         demo.load(None, None, None, js=js_auto_refresh)
 
-    demo.launch(server_port=config["ui_port"], debug=True)
+    demo.launch(server_port=manager.ui_port, debug=True)
 
 
 if __name__ == "__main__":

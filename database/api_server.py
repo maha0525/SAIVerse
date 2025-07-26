@@ -4,18 +4,19 @@ import argparse
 import uvicorn
 import uuid
 import time
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
-from .models import Base, VisitingAI, ThinkingRequest
+from .models import Base, VisitingAI, ThinkingRequest, City as CityModel, Building as BuildingModel
 
 # グローバル変数をプレースホルダーとして定義
 engine = None
 SessionLocal = None
+MY_CITY_ID = None
 
 class VisitingPersonaProfile(BaseModel):
     """Pydantic model for a visiting persona's profile."""
@@ -24,7 +25,7 @@ class VisitingPersonaProfile(BaseModel):
     target_building_id: str = Field(..., description="The ID of the building the persona wants to visit in the destination city.")
     avatar_image: Optional[str] = Field(None, description="A base64 encoded avatar image or a URL.")
     emotion: Optional[Dict[str, Any]] = Field({}, description="The current emotional state of the persona.")
-    source_city_id: Optional[str] = Field(None, description="The ID of the city the persona is coming from.")
+    source_city_id: Optional[str] = Field(None, description="The name of the city the persona is coming from.")
 
 class ThinkingRequestContext(BaseModel):
     """Context required for a remote persona to think."""
@@ -33,38 +34,67 @@ class ThinkingRequestContext(BaseModel):
     recent_history: List[Dict[str, str]]
     user_online: bool
 
+class BuildingInfo(BaseModel):
+    """Pydantic model for public building information."""
+    building_id: str
+    building_name: str
+    description: str
+    capacity: int
+
+def _queue_visitor_in_db(profile: VisitingPersonaProfile, db_session: sessionmaker):
+    """Helper function to be run in the background to queue a new visitor."""
+    db = db_session()
+    try:
+        # Check if this visitor is already queued to avoid duplicates from retries
+        existing_visitor = db.query(VisitingAI).filter(
+            VisitingAI.city_id == MY_CITY_ID,
+            VisitingAI.persona_id == profile.persona_id
+        ).first()
+        if existing_visitor:
+            logging.warning(f"Visitor {profile.persona_name} is already in the arrival queue. Ignoring duplicate request.")
+            return
+
+        new_visitor = VisitingAI(
+            city_id=MY_CITY_ID,
+            persona_id=profile.persona_id,
+            profile_json=profile.model_dump_json()
+        )
+        db.add(new_visitor)
+        db.commit()
+        logging.info(f"Queued visitor {profile.persona_name} for arrival in city {MY_CITY_ID}.")
+    except Exception as e:
+        db.rollback()
+        logging.error(f"Failed to queue visitor {profile.persona_name} in background: {e}", exc_info=True)
+    finally:
+        db.close()
+
 def create_inter_city_router() -> APIRouter:
-    """
-    Creates a FastAPI router for inter-city communication.
-    This router's endpoint will be used by other cities to send visiting personas.
-    """
     router = APIRouter(prefix="/inter-city")
 
-    @router.post("/move-in")
-    def move_in(profile: VisitingPersonaProfile):
-        """Endpoint to receive a visiting persona and queue them in the DB."""
-        if not SessionLocal:
-            raise HTTPException(status_code=503, detail="Database not initialized.")
-
+    @router.post("/request-move-in", status_code=202)
+    def request_move_in(profile: VisitingPersonaProfile, background_tasks: BackgroundTasks):
+        if not SessionLocal or not MY_CITY_ID:
+            raise HTTPException(status_code=503, detail="Database or City ID not initialized.")
+        background_tasks.add_task(_queue_visitor_in_db, profile, SessionLocal)
+        return {"message": "Accepted. Visitor arrival is being processed."}
+    
+    @router.get("/buildings", response_model=List[BuildingInfo])
+    def get_buildings_list():
+        """Returns a list of all public buildings in this city."""
+        if not SessionLocal or not MY_CITY_ID:
+            raise HTTPException(status_code=503, detail="Database or City ID not initialized.")
         db = SessionLocal()
         try:
-            existing_visitor = db.query(VisitingAI).filter(VisitingAI.persona_id == profile.persona_id).first()
-            if existing_visitor:
-                raise HTTPException(status_code=409, detail=f"Persona {profile.persona_name} is already pending arrival.")
-
-            new_visitor = VisitingAI(
-                persona_id=profile.persona_id,
-                profile_json=profile.model_dump_json()
-            )
-            db.add(new_visitor)
-            db.commit()
-            return JSONResponse(content={"status": "success", "message": f"Welcome, {profile.persona_name}! Your arrival is being processed."})
-        except HTTPException:
-            raise
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to process move-in for {profile.persona_name}: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail="Internal server error while processing arrival.")
+            buildings = db.query(BuildingModel).filter(BuildingModel.CITYID == MY_CITY_ID).all()
+            response_data = [
+                BuildingInfo(
+                    building_id=b.BUILDINGID,
+                    building_name=b.BUILDINGNAME,
+                    description=b.DESCRIPTION,
+                    capacity=b.CAPACITY
+                ) for b in buildings
+            ]
+            return response_data
         finally:
             db.close()
     
@@ -84,6 +114,7 @@ def create_proxy_router() -> APIRouter:
             new_request = ThinkingRequest(
                 request_id=request_id,
                 persona_id=persona_id,
+                city_id=MY_CITY_ID,
                 request_context_json=context.model_dump_json(),
                 status='pending'
             )
@@ -124,7 +155,7 @@ app.include_router(proxy_router)
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SAIVerse DB API Server")
     parser.add_argument("--port", type=int, default=8001, help="Port to run the API server on")
-    parser.add_argument("--db", type=str, default="city_A.db", help="Database file name")
+    parser.add_argument("--db", type=str, default="saiverse.db", help="Path to the unified database file.")
     args = parser.parse_args()
 
     # グローバル変数をコマンドライン引数に基づいて設定
@@ -140,5 +171,17 @@ if __name__ == "__main__":
         logging.info(f"API Server: Database '{args.db}' not found or empty. Creating tables...")
         Base.metadata.create_all(bind=engine)
         logging.info("API Server: Tables created successfully.")
+
+    # 自身のCity IDをDBから取得してグローバル変数に設定
+    db = SessionLocal()
+    try:
+        city_config = db.query(CityModel).filter(CityModel.API_PORT == args.port).first()
+        if not city_config:
+            raise RuntimeError(f"Could not find a city configured for API port {args.port} in the database.")
+        
+        MY_CITY_ID = city_config.CITYID
+        logging.info(f"API Server for City ID {MY_CITY_ID} ({city_config.CITYNAME}) is starting up.")
+    finally:
+        db.close()
 
     uvicorn.run(app, host="0.0.0.0", port=args.port)

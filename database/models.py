@@ -25,6 +25,7 @@ class User(Base):
 class AI(Base):
     __tablename__ = "ai"
     AIID = Column(String(255), primary_key=True)  # persona_id
+    HOME_CITYID = Column(Integer, ForeignKey("city.CITYID"), nullable=False)
     AINAME = Column(String(32), nullable=False)
     SYSTEMPROMPT = Column(String(4096), default="", nullable=False)
     DESCRIPTION = Column(String(1024), default="", nullable=False)
@@ -33,6 +34,7 @@ class AI(Base):
     AUTO_COUNT = Column(Integer, default=0, nullable=False)
     LAST_AUTO_PROMPT_TIMES = Column(String(2048)) # JSON形式で保存
     INTERACTION_MODE = Column(String(32), default='auto', nullable=False) # auto / user
+    IS_DISPATCHED = Column(Boolean, default=False, nullable=False)
 
 class Building(Base):
     __tablename__ = "building"
@@ -52,7 +54,9 @@ class City(Base):
     CITYID = Column(Integer, primary_key=True, autoincrement=True)
     CITYNAME = Column(String(32), nullable=False)
     DESCRIPTION = Column(String(1024), default="", nullable=False)
-    __table_args__ = (UniqueConstraint('USERID', 'CITYNAME', name='uq_user_city_name'),)
+    UI_PORT = Column(Integer, nullable=False)
+    API_PORT = Column(Integer, nullable=False)
+    __table_args__ = (UniqueConstraint('USERID', 'CITYNAME', name='uq_user_city_name'), UniqueConstraint('UI_PORT', name='uq_ui_port'), UniqueConstraint('API_PORT', name='uq_api_port'))
 
 class Tool(Base):
     __tablename__ = "tool"
@@ -78,6 +82,7 @@ class BuildingToolLink(Base):
 class BuildingOccupancyLog(Base):
     __tablename__ = "building_occupancy_log"
     ID = Column(Integer, primary_key=True, autoincrement=True)
+    CITYID = Column(Integer, ForeignKey("city.CITYID"), nullable=False)
     BUILDINGID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=False)
     AIID = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
     ENTRY_TIMESTAMP = Column(DateTime, nullable=False)
@@ -87,6 +92,7 @@ class ThinkingRequest(Base):
     __tablename__ = "thinking_request"
     id = Column(Integer, primary_key=True, autoincrement=True)
     request_id = Column(String(36), nullable=False, unique=True)
+    city_id = Column(Integer, ForeignKey("city.CITYID"), nullable=False)
     persona_id = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
     request_context_json = Column(String, nullable=False)
     response_text = Column(String)
@@ -96,5 +102,7 @@ class ThinkingRequest(Base):
 class VisitingAI(Base):
     __tablename__ = "visiting_ai"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    persona_id = Column(String(255), nullable=False, unique=True)
+    city_id = Column(Integer, ForeignKey("city.CITYID"), nullable=False)
+    persona_id = Column(String(255), nullable=False)
     profile_json = Column(String, nullable=False) # JSON文字列でプロファイルを保存
+    __table_args__ = (UniqueConstraint('city_id', 'persona_id', name='uq_visiting_city_persona'),)

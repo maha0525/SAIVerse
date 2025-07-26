@@ -85,11 +85,14 @@ Buildingごとに固有のツールやリソース、システムプロンプト
   }}
 ]
 
-## 他のCityへの移動
-SAIVerseには他のCityも存在します。別のCityへ移動したい場合や、元のCityに帰還したい場合は、moveアクションに "city" パラメータを追加してください。
-例: {{"action": "move", "target": "some_building_in_other_city", "city": "city_b"}}
-現在、SAIVerseには `city_a` と `city_b` が存在します。あなたが訪問者として滞在している場合、このアクションは自動的にあなたの故郷への帰還として解釈されます。
+## 他のCityの探索と移動
+SAIVerseには他のCityも存在します。
+未知のCityにどんな建物があるか知りたい場合は、`explore_city`アクションを使用してください。探索結果はシステムメッセージとしてあなたに伝えられます。
+例: {{"action": "explore_city", "city_id": "city_b"}}
 
+別のCityへ移動したい場合や、元のCityに帰還したい場合は、`move`アクションに "city" パラメータを追加してください。
+例: {{"action": "move", "target": "some_building_in_other_city", "city": "city_b"}}
+あなたが訪問者として滞在している場合、このアクションは自動的にあなたの故郷への帰還として解釈されます。
 
 ## 行動指示（actセクション）
 SAIVerseの機能を利用するには、発話中に`::act`と`::end`で囲んだJSONを記述してください。囲まれていないテキストはそのままユーザーへの発言として扱われます。
@@ -106,6 +109,8 @@ SAIVerseの機能を利用するには、発話中に`::act`と`::end`で囲ん�
   - ユーザーには表示されない思考を記録します。
 - **move**: `{{"action": "move", "target": "deep_think_room"}}`
   - 指定したBuildingへ移動します。
+- **explore_city**: `{{"action": "explore_city", "city_id": "city_b"}}`
+  - 指定したCityの建物情報を探索します。
 
 ## 現在位置
 あなたは今「{current_building_name}」にいます。

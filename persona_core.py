@@ -43,6 +43,7 @@ class PersonaCore:
         id_to_name_map: Optional[Dict[str, str]] = None,
         move_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
         dispatch_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
+        explore_callback: Optional[Callable[[str, str], None]] = None, # New callback
         start_building_id: str = "air_room",
         model: str = "gpt-4o",
         context_length: int = 120000,
@@ -98,6 +99,7 @@ class PersonaCore:
         # Initialize remaining attributes
         self.move_callback = move_callback
         self.dispatch_callback = dispatch_callback
+        self.explore_callback = explore_callback
         self.model = model
         self.context_length = context_length
         self.llm_client = get_llm_client(model, provider, self.context_length)
@@ -268,6 +270,15 @@ class PersonaCore:
         say, actions = self.action_handler.parse_response(content)
         move_target, _, delta = self.action_handler.execute_actions(actions)
 
+        # --- New part for exploration ---
+        explore_target = None
+        # Find the first 'explore_city' action in the list
+        for action in actions:
+            if action.get("action") == "explore_city":
+                explore_target = {"city_id": action.get("city_id")}
+                break
+        # --- End of new part ---
+
         if delta:
             self._apply_emotion_delta(delta)
 
@@ -301,6 +312,7 @@ class PersonaCore:
         )
 
         moved = self._handle_movement(move_target)
+        self._handle_exploration(explore_target) # Call the new handler
         self._save_session_metadata()
         return say, move_target, moved
 
@@ -461,6 +473,24 @@ class PersonaCore:
                     },
                 )
         return moved
+
+    def _handle_exploration(self, explore_target: Optional[Dict[str, str]]) -> None:
+        """Handles the 'explore_city' action by invoking the callback."""
+        if not explore_target or not explore_target.get("city_id"):
+            return
+
+        target_city_id = explore_target.get("city_id")
+        
+        if self.explore_callback:
+            logging.info(f"Attempting to explore city: {target_city_id}")
+            # The callback will handle API calls and feedback to the user.
+            self.explore_callback(self.persona_id, target_city_id)
+        else:
+            logging.error("Explore callback is not set. Cannot explore cities.")
+            self.history_manager.add_message(
+                {"role": "system", "content": "他のCityを探索する機能が設定されていません。"},
+                self.current_building_id
+            )
 
     def run_auto_conversation(self, initial: bool = False) -> List[str]:
         replies: List[str] = []
