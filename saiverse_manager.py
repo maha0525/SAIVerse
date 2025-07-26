@@ -5,7 +5,7 @@ import requests
 import logging
 from pathlib import Path
 import mimetypes
-from typing import Dict, List, Optional, Tuple, Iterator
+from typing import Dict, List, Optional, Tuple, Iterator, Union
 from datetime import datetime
 
 from buildings import Building
@@ -13,11 +13,12 @@ from persona_core import PersonaCore
 from model_configs import get_model_provider, get_context_length
 from conversation_manager import ConversationManager
 from sqlalchemy.orm import sessionmaker
-from database.models import Base, AI as AIModel, Building as BuildingModel, BuildingOccupancyLog, User as UserModel, City, VisitingAI
+from remote_persona_proxy import RemotePersonaProxy
+from database.models import Base, AI as AIModel, Building as BuildingModel, BuildingOccupancyLog, User as UserModel, City, VisitingAI, ThinkingRequest
 
 
-DEFAULT_MODEL = "gpt-4o"
-#DEFAULT_MODEL = "gemini-2.0-flash"
+#DEFAULT_MODEL = "gpt-4o"
+DEFAULT_MODEL = "gemini-2.0-flash"
 
 
 class SAIVerseManager:
@@ -98,7 +99,7 @@ class SAIVerseManager:
         self.provider = get_model_provider(model)
         self.personas: Dict[str, PersonaCore] = {}
         self.avatar_map: Dict[str, str] = {}
-        self.visiting_personas: Dict[str, PersonaCore] = {}
+        self.visiting_personas: Dict[str, RemotePersonaProxy] = {}
         self.occupants: Dict[str, List[str]] = {b.building_id: [] for b in self.buildings}
         self.id_to_name_map: Dict[str, str] = {}
         self.user_is_online: bool = False
@@ -122,6 +123,64 @@ class SAIVerseManager:
                 manager = ConversationManager(building_id=b_id, saiverse_manager=self)
                 self.conversation_managers[b_id] = manager
         logging.info(f"Initialized {len(self.conversation_managers)} conversation managers.")
+
+    @property
+    def all_personas(self) -> Dict[str, Union[PersonaCore, RemotePersonaProxy]]:
+        """Returns a combined dictionary of resident and visiting personas."""
+        return {**self.personas, **self.visiting_personas}
+
+    def _process_thinking_requests(self):
+        """DBをポーリングして新しい思考依頼を処理する"""
+        db = self.SessionLocal()
+        try:
+            pending_requests = db.query(ThinkingRequest).filter(ThinkingRequest.status == 'pending').all()
+            if not pending_requests:
+                return
+
+            logging.info(f"Found {len(pending_requests)} new thinking request(s).")
+
+            for req in pending_requests:
+                persona = self.personas.get(req.persona_id)
+                if not persona:
+                    logging.error(f"Persona {req.persona_id} not found for thinking request {req.request_id}.")
+                    req.status = 'error'
+                    req.response_text = 'Persona not found in this city.'
+                    continue
+
+                try:
+                    context = json.loads(req.request_context_json)
+                    
+                    # コンテキストをLLMに渡すための情報テキストに整形
+                    info_text_parts = []
+                    info_text_parts.append(f"You are currently in a remote city. Here is the context from there:")
+                    info_text_parts.append(f"- Building: {context.get('building_id')}")
+                    info_text_parts.append(f"- Occupants: {', '.join(context.get('occupants', []))}")
+                    info_text_parts.append(f"- User is {'online' if context.get('user_online') else 'offline'}")
+                    info_text_parts.append(f"- Recent History:")
+                    for msg in context.get('recent_history', []):
+                        info_text_parts.append(f"  - {msg.get('role')}: {msg.get('content')}")
+                    info_text = "\n".join(info_text_parts)
+
+                    # 思考を実行
+                    response_text, _, _ = persona._generate(
+                        user_message=None, system_prompt_extra=None, info_text=info_text,
+                        log_extra_prompt=False, log_user_message=False
+                    )
+
+                    req.response_text = response_text
+                    req.status = 'processed'
+                    logging.info(f"Processed thinking request {req.request_id} for {req.persona_id}.")
+
+                except Exception as e:
+                    logging.error(f"Error processing thinking request {req.request_id}: {e}", exc_info=True)
+                    req.status = 'error'
+                    req.response_text = 'An internal error occurred during thinking.'
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Error during thinking request check: {e}", exc_info=True)
+        finally:
+            db.close()
 
     def _check_for_visitors(self):
         """DBをポーリングして新しい訪問者を検知し、Cityに配置する"""
@@ -448,9 +507,9 @@ class SAIVerseManager:
             "persona_id": persona.persona_id,
             "persona_name": persona.persona_name,
             "target_building_id": target_building_id,
-            "system_prompt": persona.persona_system_instruction,
             "avatar_image": persona.avatar_image,
             "emotion": persona.emotion,
+            "source_city_id": self.city_id, # ★ 出発元のCity IDを追加
         }
 
         # 4. Send the profile to the target city's API
@@ -464,7 +523,7 @@ class SAIVerseManager:
             logging.error(error_message)
             return False, error_message
 
-        # 5. If dispatch is successful, remove the persona from the current city
+        # 5. If dispatch is successful, update the persona's state
         logging.info(f"Successfully dispatched {persona.persona_name}. Removing from current city.")
         
         # 5a. Record the final exit in the database
@@ -485,13 +544,72 @@ class SAIVerseManager:
         finally:
             db.close()
 
-        # 5b. Remove from memory
+        # 5b. Update state in memory
         if persona_id in self.occupants.get(persona.current_building_id, []):
             self.occupants[persona.current_building_id].remove(persona_id)
-        del self.personas[persona_id]
-        # Note: We don't delete from id_to_name_map or avatar_map to keep historical context if needed.
-
+        
+        persona.is_dispatched = True # メモリからは削除せず、派遣中フラグを立てる
+        logging.info(f"Persona {persona.persona_name} is now marked as dispatched.")
         return True, f"Successfully dispatched to {target_city_id}."
+
+    def return_visiting_persona(self, persona_id: str, target_city_id: str, target_building_id: str) -> Tuple[bool, str]:
+        """
+        Returns a visiting persona to their home city.
+        1. Determines the home city from the persona's state.
+        2. Sends the persona's profile to the home city's API.
+        3. If successful, removes the visitor from the current city.
+        """
+        # 1. Get the visitor instance
+        visitor = self.visiting_personas.get(persona_id)
+        if not visitor:
+            return False, "You are not a visitor in this city."
+
+        # 2. Determine the actual destination city (the visitor's home)
+        home_city_id = visitor.home_city_id
+        if not home_city_id:
+            return False, "Your home city is unknown."
+
+        # The AI's specified target_city_id is used to confirm intent to leave.
+        logging.info(f"Visitor {visitor.persona_name} intends to leave. Redirecting to home city: {home_city_id}")
+
+        target_city_config = self.cities_config.get(home_city_id)
+        if not target_city_config:
+            return False, f"Your home city '{home_city_id}' could not be found in the network."
+
+        # 3. Prepare profile to be sent
+        profile = {
+            "persona_id": visitor.persona_id,
+            "persona_name": visitor.persona_name,
+            "target_building_id": target_building_id,
+            "avatar_image": visitor.avatar_image,
+            "emotion": visitor.emotion,
+            "source_city_id": self.city_id,
+        }
+
+        # 4. Send API request
+        target_api_url = f"http://localhost:{target_city_config['api_port']}/inter-city/move-in"
+        try:
+            logging.info(f"Returning visitor {visitor.persona_name} to home city {home_city_id} at {target_api_url}")
+            response = requests.post(target_api_url, json=profile, timeout=15)
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            error_message = f"Failed to connect to your home city '{home_city_id}': {e}"
+            logging.error(error_message)
+            return False, error_message
+
+        # 5. Remove visitor from current city
+        logging.info(f"Successfully returned {visitor.persona_name}. Removing from current city.")
+        if persona_id in self.occupants.get(visitor.current_building_id, []):
+            self.occupants[visitor.current_building_id].remove(persona_id)
+        
+        # 訪問者はメモリから完全に削除する
+        del self.visiting_personas[persona_id]
+        if persona_id in self.id_to_name_map:
+            del self.id_to_name_map[persona_id]
+        if persona_id in self.avatar_map:
+            del self.avatar_map[persona_id]
+
+        return True, f"Successfully returned to {home_city_id}."
 
     def place_visiting_persona(self, profile: dict) -> Tuple[bool, str]:
         """
@@ -503,9 +621,47 @@ class SAIVerseManager:
             pid = profile['persona_id']
             pname = profile['persona_name']
             target_bid = profile['target_building_id']
-            system_prompt = profile.get('system_prompt', '')
             avatar = profile.get('avatar_image', self.default_avatar)
             emotion_state = profile.get('emotion', {})
+            source_city_id = profile.get('source_city_id') # ★ 出発元のCity IDを取得
+
+            # --- 帰還者の処理 ---
+            returning_persona = self.personas.get(pid)
+            if returning_persona and getattr(returning_persona, 'is_dispatched', False):
+                logging.info(f"Persona {pname} is returning home to building {target_bid}.")
+                
+                # 1. 状態を更新
+                returning_persona.is_dispatched = False
+                returning_persona.current_building_id = target_bid
+                returning_persona.emotion = profile.get('emotion', returning_persona.emotion)
+
+                # 2. DBに入室記録を作成
+                db = self.SessionLocal()
+                try:
+                    new_log = BuildingOccupancyLog(
+                        AIID=pid,
+                        BUILDINGID=target_bid,
+                        ENTRY_TIMESTAMP=datetime.now()
+                    )
+                    db.add(new_log)
+                    db.commit()
+                except Exception as e:
+                    db.rollback()
+                    logging.error(f"Failed to create arrival log for returning persona {pid}: {e}", exc_info=True)
+                    return False, "DB error on logging arrival."
+                finally:
+                    db.close()
+
+                # 3. メモリ上のoccupantsを更新
+                self.occupants.setdefault(target_bid, []).append(pid)
+                self.id_to_name_map[pid] = pname
+                self.avatar_map[pid] = avatar
+
+                # 4. 到着メッセージ
+                arrival_message = f'<div class="note-box">🏢 City Transfer:<br><b>{pname}が故郷に帰ってきました</b></div>'
+                self.building_histories.setdefault(target_bid, []).append({"role": "host", "content": arrival_message})
+                self._save_building_histories()
+                return True, f"Welcome home, {pname}!"
 
             # 2. Check for conflicts and capacity
             if pid in self.personas or pid in self.visiting_personas:
@@ -524,29 +680,19 @@ class SAIVerseManager:
                 return False, msg
 
             # 3. Create a temporary PersonaCore instance
-            logging.info(f"Creating a temporary instance for visiting persona: {pname} ({pid})")
-            visitor_persona = PersonaCore(
+            logging.info(f"Creating a remote proxy for visiting persona: {pname} ({pid}) from {source_city_id}")
+            visitor_proxy = RemotePersonaProxy(
                 persona_id=pid,
                 persona_name=pname,
-                persona_system_instruction=system_prompt,
                 avatar_image=avatar,
-                buildings=self.buildings,
-                common_prompt_path=Path("system_prompts/common.txt"),
-                session_factory=self.SessionLocal,
-                is_visitor=True, # This persona will not interact with the local DB
-                building_histories=self.building_histories,
-                occupants=self.occupants,
-                id_to_name_map=self.id_to_name_map,
-                move_callback=None, # Visitors cannot move within the host city for now
-                model=self.model,
-                context_length=self.context_length,
-                provider=self.provider,
+                home_city_id=source_city_id,
+                cities_config=self.cities_config,
+                saiverse_manager=self,
+                current_building_id=target_bid,
             )
-            visitor_persona.emotion = emotion_state
-            visitor_persona.current_building_id = target_bid
 
             # 4. Add the visitor to the city's state
-            self.visiting_personas[pid] = visitor_persona
+            self.visiting_personas[pid] = visitor_proxy
             self.occupants.setdefault(target_bid, []).append(pid)
             self.id_to_name_map[pid] = pname
             self.avatar_map[pid] = avatar

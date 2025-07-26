@@ -34,6 +34,8 @@ class PersonaCore:
         common_prompt_path: Path,
         session_factory: Callable,
         is_visitor: bool = False,
+        home_city_id: Optional[str] = None, # ★ 故郷のCity ID
+        is_dispatched: bool = False, # ★ このペルソナが他のCityに派遣中かどうかのフラグ
         emotion_prompt_path: Path = Path("system_prompts/emotion_parameter.txt"),
         action_priority_path: Path = Path("action_priority.json"),
         building_histories: Optional[Dict[str, List[Dict[str, str]]]] = None,
@@ -47,6 +49,8 @@ class PersonaCore:
         provider: str = "ollama",
     ):
         self.is_visitor = is_visitor
+        self.is_dispatched = is_dispatched
+        self.home_city_id = home_city_id # ★ 故郷の情報を記憶
         self.SessionLocal = session_factory
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
         self.common_prompt = common_prompt_path.read_text(encoding="utf-8")
@@ -651,7 +655,7 @@ class PersonaCore:
         }
         self.conscious_log_path.write_text(json.dumps(data_to_save, ensure_ascii=False), encoding="utf-8")
 
-    def run_pulse(self, user_online: bool = True, decision_model: Optional[str] = None) -> List[str]:
+    def run_pulse(self, occupants: List[str], user_online: bool = True, decision_model: Optional[str] = None) -> List[str]:
         """Execute one autonomous pulse cycle."""
         building_id = self.current_building_id
         logging.info("[pulse] %s starting pulse in %s", self.persona_id, building_id)
@@ -662,9 +666,10 @@ class PersonaCore:
         self.pulse_indices[building_id] = len(hist)
         logging.debug("[pulse] new messages since last pulse: %s", new_msgs)
 
-        occupants = ",".join(self.occupants.get(building_id, []))
+        # 引数で渡された最新のoccupantsリストを使用
+        occupants_str = ",".join(occupants)
         info = (
-            f"occupants:{occupants}\nuser_online:{user_online}"
+            f"occupants:{occupants_str}\nuser_online:{user_online}"
         )
         logging.debug("[pulse] context info: %s", info)
         self.conscious_log.append({"role": "user", "content": info})
@@ -680,7 +685,7 @@ class PersonaCore:
             current_persona_system_instruction=self.persona_system_instruction,
             current_building_name=self.buildings[building_id].name,
             recent_conversation=recent_text,
-            occupants=occupants,
+            occupants=occupants_str,
             user_online_state="online" if user_online else "offline",
         )
         model_name = decision_model or "gemini-2.0-flash"

@@ -303,6 +303,7 @@ def main():
     def background_loop():
         while True:
             manager._check_for_visitors()
+            manager._process_thinking_requests()
             manager.run_scheduled_prompts()
             time.sleep(5)
 

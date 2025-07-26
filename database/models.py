@@ -6,6 +6,7 @@ from sqlalchemy import (
     ForeignKey,
     Boolean,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import declarative_base
 
@@ -81,6 +82,16 @@ class BuildingOccupancyLog(Base):
     AIID = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
     ENTRY_TIMESTAMP = Column(DateTime, nullable=False)
     EXIT_TIMESTAMP = Column(DateTime)
+
+class ThinkingRequest(Base):
+    __tablename__ = "thinking_request"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    request_id = Column(String(36), nullable=False, unique=True)
+    persona_id = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
+    request_context_json = Column(String, nullable=False)
+    response_text = Column(String)
+    status = Column(String(32), default='pending', nullable=False) # pending, processed, error
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 class VisitingAI(Base):
     __tablename__ = "visiting_ai"

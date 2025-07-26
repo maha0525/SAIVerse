@@ -1,6 +1,6 @@
 import gradio as gr
 import pandas as pd
-from sqlalchemy import inspect, DateTime, Integer
+from sqlalchemy import inspect, DateTime, Integer, Boolean
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime
@@ -69,7 +69,14 @@ def add_or_update_record(model_class, data_dict, session_factory: sessionmaker):
                 continue
 
             column = mapper.columns.get(key)
-            if column is not None and isinstance(column.type, DateTime) and isinstance(value, str):
+            if column is None:
+                continue
+
+            # --- Data Type Conversion ---
+            if isinstance(column.type, Boolean) and isinstance(value, str):
+                # Convert string 'True', '1', etc. to boolean True
+                data_dict[key] = value.lower() in ('true', '1', 't', 'yes')
+            elif isinstance(column.type, DateTime) and isinstance(value, str):
                 try:
                     if '.' in value:
                         data_dict[key] = datetime.strptime(value, '%Y-%m-%d %H:%M:%S.%f')
@@ -175,6 +182,8 @@ def create_management_tab(model_class, session_factory: sessionmaker):
                 for c in mapper.columns:
                     if c.name in fk_dropdowns:
                         inputs[c.name] = fk_dropdowns[c.name]
+                    elif isinstance(c.type, Boolean):
+                        inputs[c.name] = gr.Checkbox(label=c.name)
                     elif isinstance(c.type, (Integer,)):
                         inputs[c.name] = gr.Number(label=c.name)
                     elif c.name in long_text_fields:

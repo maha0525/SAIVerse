@@ -86,9 +86,9 @@ Buildingごとに固有のツールやリソース、システムプロンプト
 ]
 
 ## 他のCityへの移動
-SAIVerseには他のCityも存在します。別のCityへ移動したい場合は、moveアクションに "city" パラメータを追加してください。
-例: {{"action": "move", "target": "some_building_in_city_b", "city": "city_b"}}
-現在、SAIVerseには `city_a` と `city_b` が存在します。
+SAIVerseには他のCityも存在します。別のCityへ移動したい場合や、元のCityに帰還したい場合は、moveアクションに "city" パラメータを追加してください。
+例: {{"action": "move", "target": "some_building_in_other_city", "city": "city_b"}}
+現在、SAIVerseには `city_a` と `city_b` が存在します。あなたが訪問者として滞在している場合、このアクションは自動的にあなたの故郷への帰還として解釈されます。
 
 
 ## 行動指示（actセクション）

@@ -74,17 +74,38 @@ class ConversationManager:
             self._current_speaker_index = 0
         
         speaker_id = occupants[self._current_speaker_index]
-        speaker_persona = self.saiverse_manager.personas.get(speaker_id)
+        # 居住者と訪問者を区別せず、統一されたリストからペルソナを取得
+        speaker_persona = self.saiverse_manager.all_personas.get(speaker_id)
         
         if not speaker_persona:
-            # 次のインデックスに進む
+            # ペルソナが見つからない場合（例：移動直後など）はスキップ
+            logging.warning(f"[ConvManager] Persona with ID '{speaker_id}' not found in all_personas. Skipping turn.")
             self._current_speaker_index = (self._current_speaker_index + 1) % len(occupants)
             return
         
+        # 派遣中のペルソナは、派遣元のCityでは自律会話を行わない
+        if getattr(speaker_persona, 'is_proxy', False) is False and getattr(speaker_persona, 'is_dispatched', False) is True:
+            logging.debug(f"[ConvManager] Persona '{speaker_persona.persona_name}' is dispatched. Skipping turn.")
+            self._current_speaker_index = (self._current_speaker_index + 1) % len(occupants)
+            return
+
         # PersonaCoreのrun_pulseを呼び出す
         # これにより、ペルソナは自ら状況を判断して発話するかどうかを決める
         logging.info(f"[ConvManager] Triggering pulse for '{speaker_persona.persona_name}' in '{self.building_id}'.")
-        speaker_persona.run_pulse(user_online=self.saiverse_manager.user_is_online)
+        replies = speaker_persona.run_pulse(occupants=occupants, user_online=self.saiverse_manager.user_is_online)
+
+        # RemotePersonaProxyからの返信の場合、ここで履歴を保存する
+        # (PersonaCoreはrun_pulse内部で履歴を保存するため、二重保存を防ぐ)
+        if getattr(speaker_persona, 'is_proxy', False) and replies:
+            for say in replies:
+                self.saiverse_manager.building_histories.setdefault(self.building_id, []).append({
+                    "role": "assistant",
+                    "persona_id": speaker_id,
+                    "content": say
+                })
+            # 履歴をファイルに保存
+            self.saiverse_manager._save_building_histories()
+            logging.info(f"[ConvManager] Proxy '{speaker_persona.persona_name}' spoke in '{self.building_id}'.")
 
         # 次の発話者のためにインデックスを進める
         self._current_speaker_index = (self._current_speaker_index + 1) % len(occupants)
