@@ -26,6 +26,7 @@ load_dotenv()
 class PersonaCore:
     def __init__(
         self,
+        city_name: str,
         persona_id: str,
         persona_name: str,
         persona_system_instruction: str,
@@ -47,13 +48,16 @@ class PersonaCore:
         start_building_id: str = "air_room",
         model: str = "gpt-4o",
         context_length: int = 120000,
+        user_room_id: str = "user_room",
         provider: str = "ollama",
     ):
+        self.city_name = city_name
         self.is_visitor = is_visitor
         self.is_dispatched = is_dispatched
         self.home_city_id = home_city_id # ★ 故郷の情報を記憶
         self.SessionLocal = session_factory
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
+        self.user_room_id = user_room_id
         self.common_prompt = common_prompt_path.read_text(encoding="utf-8")
         self.emotion_prompt = emotion_prompt_path.read_text(encoding="utf-8")
         self.persona_id = persona_id
@@ -219,6 +223,7 @@ class PersonaCore:
             current_persona_name=self.persona_name,
             current_persona_system_instruction=self.persona_system_instruction,
             current_time=current_time,
+            current_city_name=self.city_name,
         )
         emotion_text = self.emotion_prompt.format(
             stability_mean=self.emotion["stability"]["mean"],
@@ -419,7 +424,7 @@ class PersonaCore:
                 if dispatched:
                     # 派遣が成功した場合、このインスタンスはまもなく削除されるため、
                     # これ以上の状態変更は行わない。
-                    # 'moved' は True とみなし、後続の自律会話ループなどを抑制する。
+                    # 'moved' はTrue とみなし、後続の自律会話ループなどを抑制する。
                     moved = True
                 else:
                     logging.warning(f"Dispatch failed: {reason}")
@@ -455,18 +460,18 @@ class PersonaCore:
 
         if moved:
             self.auto_count = 0
-            if prev_id != "user_room" and self.current_building_id == "user_room":
+            if prev_id != self.user_room_id and self.current_building_id == self.user_room_id:
                 self.history_manager.add_to_building_only(
-                    "user_room",
+                    self.user_room_id,
                     {
                         "role": "assistant",
                         "content": f'<div class="note-box">🏢 Building:<br><b>{self.persona_name}が入室しました</b></div>',
                     },
                 )
-            elif prev_id == "user_room" and self.current_building_id != "user_room":
+            elif prev_id == self.user_room_id and self.current_building_id != self.user_room_id:
                 dest_name = self.buildings[self.current_building_id].name
                 self.history_manager.add_to_building_only(
-                    "user_room",
+                    self.user_room_id,
                     {
                         "role": "assistant",
                         "content": f'<div class="note-box">🏢 Building:<br><b>{self.persona_name}が{dest_name}に向かいました</b></div>',
@@ -543,7 +548,7 @@ class PersonaCore:
     def handle_user_input(self, message: str) -> List[str]:
         logging.info("User input: %s", message)
         building = self.buildings[self.current_building_id]
-        if self.current_building_id == "user_room":
+        if self.current_building_id == self.user_room_id:
             say, move_target, changed = self._generate(message)
             replies = [say]
         else:
@@ -568,7 +573,7 @@ class PersonaCore:
     def handle_user_input_stream(self, message: str) -> Iterator[str]:
         logging.info("User input: %s", message)
         building = self.buildings[self.current_building_id]
-        if self.current_building_id == "user_room":
+        if self.current_building_id == self.user_room_id:
             gen = self._generate_stream(message)
         else:
             logging.info("User input ignored outside user_room")
@@ -598,22 +603,22 @@ class PersonaCore:
 
     def summon_to_user_room(self) -> List[str]:
         prev = self.current_building_id
-        if prev == "user_room":
+        if prev == self.user_room_id:
             return []
         allowed, reason = True, None
         if self.move_callback:
-            allowed, reason = self.move_callback(self.persona_id, self.current_building_id, "user_room")
+            allowed, reason = self.move_callback(self.persona_id, self.current_building_id, self.user_room_id)
         if not allowed:
             self.history_manager.add_to_building_only(
-                "user_room",
+                self.user_room_id,
                 {"role": "assistant", "content": f'<div class="note-box">移動できませんでした。{reason}</div>'}
             )
             self._save_session_metadata()
             return []
-        self.current_building_id = "user_room"
+        self.current_building_id = self.user_room_id
         self.auto_count = 0
         self.history_manager.add_to_building_only(
-            "user_room",
+            self.user_room_id,
             {
                 "role": "assistant",
                 "content": f'<div class="note-box">🏢 Building:<br><b>{self.persona_name}が入室しました</b></div>',

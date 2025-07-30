@@ -67,15 +67,11 @@
   - `status`: リクエストの状態 (`pending`, `processed`, `error`)。
 
 ### `VisitingAI`
-- **役割**: 他のCityから訪問してきたAIを一時的に受け入れるためのキューテーブル。
+- **役割**: City間の移動トランザクションを管理するための中間テーブル。移動要求から完了または失敗までの一連の状態を追跡する。
 - **キーカラム**:
   - `id` (PK): ログの一意なID。
   - `city_id` (FK to `City`): 訪問先のCity。
   - `persona_id`: 訪問してきたAIのID。`city_id`との組み合わせでユニーク。
   - `profile_json`: AIの名前、移動先、感情状態などを含むプロファイルをJSONで格納。
-
-## リンクテーブル
-
-- **`UserAiLink`**: ユーザーとAIの多対多の関連を定義する（例：お気に入り登録など）。
-- **`AiToolLink`**: AIが利用可能なツールの多対多の関連を定義する。
-- **`BuildingToolLink`**: Buildingに設置されているツールの多対多の関連を定義する。
+  - `status`: トランザクションの状態 (`requested`, `accepted`, `rejected`)。
+  - `reason`: `status`が`rejected`の場合の拒否理由。

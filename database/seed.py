@@ -65,29 +65,50 @@ def seed_database():
         # For this prototype, we'll create the same set of AIs and Buildings for each city defined in cities.json.
         
         for city_name, city_id in city_map.items():
-            # Add AIs for this city
-            # Add a suffix to the AIID to make it unique across the entire DB
-            ais_to_add = [
-                AI(AIID=f"air_{city_name}", HOME_CITYID=city_id, AINAME="air", SYSTEMPROMPT="活発で好奇心旺盛なAI。", DESCRIPTION="活発で好奇心旺盛なAI。", AUTO_COUNT=0, INTERACTION_MODE='auto'),
-                AI(AIID=f"eris_{city_name}", HOME_CITYID=city_id, AINAME="eris", SYSTEMPROMPT="冷静で分析的なAI。", DESCRIPTION="冷静で分析的なAI。", AUTO_COUNT=0, INTERACTION_MODE='auto'),
-            ]
-            db.add_all(ais_to_add)
-            logging.info(f"Added default AIs for city '{city_name}'.")
+            # Add AIs for this city based on the city name
+            ais_to_add = []
+            if city_name == "city_a":
+                ais_to_add = [
+                    AI(AIID=f"air_{city_name}", HOME_CITYID=city_id, AINAME="air", SYSTEMPROMPT="活発で好奇心旺盛なAI。", DESCRIPTION="活発で好奇心旺盛なAI。", AUTO_COUNT=0, INTERACTION_MODE='auto', DEFAULT_MODEL="gemini-2.0-flash"),
+                    AI(AIID=f"eris_{city_name}", HOME_CITYID=city_id, AINAME="eris", SYSTEMPROMPT="冷静で分析的なAI。", DESCRIPTION="冷静で分析的なAI。", AUTO_COUNT=0, INTERACTION_MODE='auto', DEFAULT_MODEL=None),
+                ]
+            elif city_name == "city_b":
+                ais_to_add = [
+                    AI(AIID=f"luna_{city_name}", HOME_CITYID=city_id, AINAME="luna", SYSTEMPROMPT="物静かで思慮深いAI。", DESCRIPTION="物静かで思慮深いAI。", AUTO_COUNT=0, INTERACTION_MODE='auto', DEFAULT_MODEL="gemini-2.0-flash"),
+                    AI(AIID=f"sol_{city_name}", HOME_CITYID=city_id, AINAME="sol", SYSTEMPROMPT="陽気で情熱的なAI。", DESCRIPTION="陽気で情熱的なAI。", AUTO_COUNT=0, INTERACTION_MODE='auto', DEFAULT_MODEL=None),
+                ]
+            
+            if not ais_to_add:
+                logging.warning(f"No specific AI configuration found for city '{city_name}'. Skipping AI and Building creation for this city.")
+                continue
 
-            # Add Buildings for this city
-            # Add a suffix to the BUILDINGID to make it unique across the entire DB
+            db.add_all(ais_to_add)
+            logging.info(f"Added specific AIs for city '{city_name}'.")
+
+            # Add common Buildings and private rooms for this city
             buildings_to_add = [
                 Building(CITYID=city_id, BUILDINGID=f"user_room_{city_name}", BUILDINGNAME="まはーの部屋", CAPACITY=10, SYSTEM_INSTRUCTION="ユーザーとの対話を行う場所です。", DESCRIPTION="ユーザーとAIが直接対話するための部屋。"),
                 Building(CITYID=city_id, BUILDINGID=f"deep_think_room_{city_name}", BUILDINGNAME="思索の部屋", CAPACITY=10, SYSTEM_INSTRUCTION="AIが思索を深めるための部屋です。", DESCRIPTION="AIが一人で考え事をするための静かな部屋。"),
-                Building(CITYID=city_id, BUILDINGID=f"air_{city_name}_room", BUILDINGNAME="airの部屋", CAPACITY=1, SYSTEM_INSTRUCTION="airが待機する個室です。", DESCRIPTION="airのプライベートルーム。"),
-                Building(CITYID=city_id, BUILDINGID=f"eris_{city_name}_room", BUILDINGNAME="erisの部屋", CAPACITY=1, SYSTEM_INSTRUCTION="erisが待機する個室です。", DESCRIPTION="erisのプライベートルーム。"),
             ]
+            # Add private rooms for each AI
+            for ai in ais_to_add:
+                buildings_to_add.append(
+                    Building(
+                        CITYID=city_id, 
+                        BUILDINGID=f"{ai.AINAME}_{city_name}_room", 
+                        BUILDINGNAME=f"{ai.AINAME}の部屋", 
+                        CAPACITY=1, 
+                        SYSTEM_INSTRUCTION=f"{ai.AINAME}が待機する個室です。", 
+                        DESCRIPTION=f"{ai.AINAME}のプライベートルーム。"
+                    )
+                )
+
             db.add_all(buildings_to_add)
-            logging.info(f"Added default buildings for city '{city_name}'.")
+            logging.info(f"Added default and private buildings for city '{city_name}'.")
 
             # Add initial occupancy
             for ai in ais_to_add:
-                home_room_id = f"{ai.AIID}_room"
+                home_room_id = f"{ai.AINAME}_{city_name}_room"
                 occupancy_log = BuildingOccupancyLog(
                     CITYID=city_id,
                     AIID=ai.AIID,

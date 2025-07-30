@@ -7,8 +7,10 @@ from datetime import datetime
 
 from .models import (
     User, AI, Building, City, Tool,
-    UserAiLink, AiToolLink, BuildingToolLink, BuildingOccupancyLog
+    UserAiLink, AiToolLink, BuildingToolLink, BuildingOccupancyLog,
+    ThinkingRequest, VisitingAI
 )
+from model_configs import get_model_choices
 
 
 # テーブル名とモデルクラスのマッピング
@@ -21,7 +23,9 @@ TABLE_MODEL_MAP = {
     "user_ai_link": UserAiLink,
     "ai_tool_link": AiToolLink,
     "building_tool_link": BuildingToolLink,
-    "building_occupancy_log": BuildingOccupancyLog
+    "building_occupancy_log": BuildingOccupancyLog,
+    "thinking_request": ThinkingRequest,
+    "visiting_ai": VisitingAI
 }
 
 # --- 3. CRUD (Create, Read, Update, Delete) 操作関数 ---
@@ -178,6 +182,7 @@ def create_management_tab(model_class, session_factory: sessionmaker):
                 }
                 
                 fk_dropdowns = get_fk_choices(session_factory)
+                model_choices = get_model_choices()
 
                 for c in mapper.columns:
                     if c.name in fk_dropdowns:
@@ -185,7 +190,9 @@ def create_management_tab(model_class, session_factory: sessionmaker):
                     elif isinstance(c.type, Boolean):
                         inputs[c.name] = gr.Checkbox(label=c.name)
                     elif isinstance(c.type, (Integer,)):
-                        inputs[c.name] = gr.Number(label=c.name)
+                        inputs[c.name] = gr.Number(label=c.name, precision=0)
+                    elif c.name == 'DEFAULT_MODEL' and model_class is AI:
+                        inputs[c.name] = gr.Dropdown(choices=model_choices, label=c.name, allow_custom_value=True)
                     elif c.name in long_text_fields:
                         inputs[c.name] = gr.Textbox(
                             label=c.name, lines=5, max_lines=20
@@ -214,6 +221,14 @@ def create_management_tab(model_class, session_factory: sessionmaker):
                 # pandasの欠損値(nan)をNoneに変換
                 if pd.isna(value):
                     value = None
+                # --- 型変換の追加 ---
+                # DataFrameから取得した値がfloatになることがあるため、Integer型カラムはintに変換
+                elif isinstance(c.type, Integer) and value is not None:
+                    try:
+                        value = int(value)
+                    except (ValueError, TypeError):
+                        # 変換できない場合はそのまま（エラーはGradio側で発生するかもしれないが、ここでクラッシュするよりは良い）
+                        pass
                 updates.append(gr.update(value=value))
             return updates
 
@@ -278,4 +293,8 @@ def create_db_manager_ui(session_factory: sessionmaker):
                 create_management_tab(BuildingToolLink, session_factory)
             with gr.TabItem("building_occupancy_log"):
                 create_management_tab(BuildingOccupancyLog, session_factory)
+            with gr.TabItem("Thinking Request"):
+                create_management_tab(ThinkingRequest, session_factory)
+            with gr.TabItem("Visiting AI"):
+                create_management_tab(VisitingAI, session_factory)
     return db_manager_interface

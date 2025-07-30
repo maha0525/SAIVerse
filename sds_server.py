@@ -13,19 +13,20 @@ app = FastAPI(title="SAIVerse Directory Service (SDS)")
 # --- Data Structures ---
 
 class CityInfo(BaseModel):
-    city_id: str
-    api_base_url: str = Field(..., description="e.g., http://127.0.0.1:8001")
+    city_id: int # The integer PK from the DB
+    api_base_url: str = Field(..., description="e.g., http://127.0.0.1:8081")
     # 将来的にCityの説明やオーナー情報などを追加可能
 
 class CityRegistration(BaseModel):
-    city_id: str
+    city_name: str
+    city_id_pk: int
     api_port: int
 
 class Heartbeat(BaseModel):
-    city_id: str
+    city_name: str
 
 # 登録されたCityをインメモリで管理
-# Key: city_id, Value: { "info": Dict, "last_heartbeat": timestamp }
+# Key: city_name, Value: { "info": Dict, "last_heartbeat": timestamp }
 registered_cities: Dict[str, Dict[str, Any]] = {}
 lock = threading.Lock()
 
@@ -38,17 +39,17 @@ async def register_city(city_reg: CityRegistration, request: Request):
     """Cityが起動時に自身を登録するためのエンドポイント"""
     client_host = request.client.host
     api_base_url = f"http://{client_host}:{city_reg.api_port}"
-    city_info = CityInfo(city_id=city_reg.city_id, api_base_url=api_base_url)
+    city_info = CityInfo(city_id=city_reg.city_id_pk, api_base_url=api_base_url)
 
     with lock:
-        if city_reg.city_id in registered_cities:
-            logging.warning(f"City '{city_reg.city_id}' is re-registering.")
-        registered_cities[city_reg.city_id] = {
+        if city_reg.city_name in registered_cities:
+            logging.warning(f"City '{city_reg.city_name}' is re-registering.")
+        registered_cities[city_reg.city_name] = {
             "info": city_info.model_dump(),
             "last_heartbeat": time.time()
         }
-        logging.info(f"Registered city: {city_info.model_dump()}")
-    return {"status": "success", "message": f"City '{city_reg.city_id}' registered."}
+        logging.info(f"Registered city: {city_reg.city_name} with info {city_info.model_dump()}")
+    return {"status": "success", "message": f"City '{city_reg.city_name}' registered."}
 
 @app.get("/cities")
 async def get_all_cities():
@@ -60,10 +61,10 @@ async def get_all_cities():
 async def receive_heartbeat(heartbeat: Heartbeat):
     """Cityからの生存通知を受け取る"""
     with lock:
-        if heartbeat.city_id not in registered_cities:
-            raise HTTPException(status_code=404, detail=f"City '{heartbeat.city_id}' not registered.")
-        registered_cities[heartbeat.city_id]["last_heartbeat"] = time.time()
-        logging.debug(f"Heartbeat received from '{heartbeat.city_id}'")
+        if heartbeat.city_name not in registered_cities:
+            raise HTTPException(status_code=404, detail=f"City '{heartbeat.city_name}' not registered.")
+        registered_cities[heartbeat.city_name]["last_heartbeat"] = time.time()
+        logging.debug(f"Heartbeat received from '{heartbeat.city_name}'")
     return {"status": "ok"}
 
 def cleanup_inactive_cities():
@@ -79,4 +80,4 @@ def cleanup_inactive_cities():
 
 if __name__ == "__main__":
     threading.Thread(target=cleanup_inactive_cities, daemon=True).start()
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="127.0.0.1", port=8080)

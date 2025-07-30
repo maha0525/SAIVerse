@@ -137,7 +137,8 @@ def create_proxy_router() -> APIRouter:
                 if req and req.status == 'processed':
                     return JSONResponse(content={"response_text": req.response_text})
                 elif req and req.status == 'error':
-                    raise HTTPException(status_code=500, detail="An error occurred during remote thinking.")
+                    logging.warning(f"Remote thinking for request {request_id} resulted in an error. Sending error details to proxy.")
+                    return JSONResponse(status_code=200, content={"response_text": req.response_text})
             finally:
                 db.close()
             time.sleep(0.5) # 0.5秒ごとにポーリング

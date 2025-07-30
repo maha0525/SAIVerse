@@ -7,8 +7,9 @@ import logging
 from pathlib import Path
 import mimetypes
 from typing import Dict, List, Optional, Tuple, Iterator, Union
-from datetime import datetime
+from datetime import datetime, timedelta
 
+from google.genai import errors
 from buildings import Building
 from persona_core import PersonaCore
 from model_configs import get_model_provider, get_context_length
@@ -30,6 +31,7 @@ class SAIVerseManager:
         city_name: str,
         db_path: str,
         model: str = DEFAULT_MODEL,
+        sds_url: str = "http://127.0.0.1:8080",
     ):
         # --- Step 0: Database and Configuration Setup ---
         DATABASE_URL = f"sqlite:///{db_path}"
@@ -45,6 +47,7 @@ class SAIVerseManager:
             
             self.city_id = my_city_config.CITYID # This is the integer PK
             self.city_name = my_city_config.CITYNAME # This is the string identifier
+            self.user_room_id = f"user_room_{self.city_name}"
             self.ui_port = my_city_config.UI_PORT
             self.api_port = my_city_config.API_PORT
             
@@ -137,6 +140,10 @@ class SAIVerseManager:
         logging.info(f"Initialized {len(self.conversation_managers)} conversation managers.")
 
         # --- Step 7: Register with SDS and start background tasks ---
+        self.sds_url = sds_url
+        self.sds_session = requests.Session()
+        self.sds_status = "Offline (Connecting...)"
+
         self._load_cities_from_db() # Load local config as a fallback first
         self._register_with_sds()
         self._update_cities_from_sds()
@@ -145,6 +152,11 @@ class SAIVerseManager:
         self.sds_stop_event = threading.Event()
         self.sds_thread = threading.Thread(target=self._sds_background_loop, daemon=True)
         self.sds_thread.start()
+
+        # Start background thread for DB polling
+        self.db_polling_stop_event = threading.Event()
+        self.db_polling_thread = threading.Thread(target=self._db_polling_loop, daemon=True)
+        self.db_polling_thread.start()
 
     def _sds_background_loop(self):
         """Periodically sends heartbeats and updates the city list from SDS."""
@@ -155,7 +167,11 @@ class SAIVerseManager:
     def _register_with_sds(self):
         """Registers this city with the Directory Service on startup."""
         register_url = f"{self.sds_url}/register"
-        payload = {"city_id": self.city_name, "api_port": self.api_port}
+        payload = {
+            "city_name": self.city_name,
+            "city_id_pk": self.city_id,
+            "api_port": self.api_port
+        }
         try:
             response = self.sds_session.post(register_url, json=payload, timeout=5)
             response.raise_for_status()
@@ -166,7 +182,7 @@ class SAIVerseManager:
     def _send_heartbeat(self):
         """Sends a heartbeat to the Directory Service."""
         heartbeat_url = f"{self.sds_url}/heartbeat"
-        payload = {"city_id": self.city_name}
+        payload = {"city_name": self.city_name}
         try:
             response = self.sds_session.post(heartbeat_url, json=payload, timeout=2)
             response.raise_for_status()
@@ -256,6 +272,25 @@ class SAIVerseManager:
         logging.info("SDS background thread re-started.")
         return self.sds_status
 
+    def _db_polling_loop(self):
+        """Periodically polls the database for inter-city communication tasks."""
+        # 3秒ごとにDBをチェックするループ
+        while not self.db_polling_stop_event.wait(3):
+            try:
+                # 1. 訪問依頼の確認 (訪問先Cityが実行)
+                self._check_for_visitors()
+                
+                # 2. 思考依頼の確認 (故郷Cityが実行)
+                self._process_thinking_requests()
+
+                # 3. 自身の派遣依頼のステータス確認 (出発元Cityが実行)
+                self._check_dispatch_status()
+
+                # 4. スケジュールされたプロンプトの実行
+                self.run_scheduled_prompts()
+            except Exception as e:
+                logging.error(f"Error in DB polling loop: {e}", exc_info=True)
+
     @property
     def all_personas(self) -> Dict[str, Union[PersonaCore, RemotePersonaProxy]]:
         """Returns a combined dictionary of resident and visiting personas."""
@@ -303,10 +338,18 @@ class SAIVerseManager:
                     req.status = 'processed'
                     logging.info(f"Processed thinking request {req.request_id} for {req.persona_id}.")
 
+                except errors.ServerError as e:
+                    logging.warning(f"LLM Server Error on thinking request {req.request_id}: {e}. Marking as error.")
+                    req.status = 'error'
+                    # 503エラーの場合は、再試行を促すメッセージをDBに保存する
+                    if "503" in str(e):
+                         req.response_text = f"[SAIVERSE_ERROR] LLMモデルが一時的に利用できませんでした (503 Server Error)。時間をおいて再度試行してください。詳細: {e}"
+                    else:
+                         req.response_text = f"[SAIVERSE_ERROR] LLMサーバーで予期せぬエラーが発生しました。詳細: {e}"
                 except Exception as e:
                     logging.error(f"Error processing thinking request {req.request_id}: {e}", exc_info=True)
                     req.status = 'error'
-                    req.response_text = 'An internal error occurred during thinking.'
+                    req.response_text = f'[SAIVERSE_ERROR] An internal error occurred during thinking: {e}'
             db.commit()
         except Exception as e:
             db.rollback()
@@ -318,34 +361,89 @@ class SAIVerseManager:
         """DBをポーリングして新しい訪問者を検知し、Cityに配置する"""
         db = self.SessionLocal()
         try:
-            visitors_to_process = db.query(VisitingAI).filter(VisitingAI.city_id == self.city_id).all()
+            # 'requested'状態の訪問者のみを処理対象とする
+            visitors_to_process = db.query(VisitingAI).filter(
+                VisitingAI.city_id == self.city_id,
+                VisitingAI.status == 'requested'
+            ).all()
             if not visitors_to_process:
                 return
 
-            logging.info(f"Found {len(visitors_to_process)} new visitor(s) in the database.")
+            logging.info(f"Found {len(visitors_to_process)} new visitor request(s) in the database.")
             
             for visitor in visitors_to_process:
                 try:
-                    profile = json.loads(visitor.profile_json)
-                    success, message = self.place_visiting_persona(profile)
-                    
-                    # 成功失敗にかかわらず、ループを防ぐためにキューから削除する
-                    if success:
-                        logging.info(f"Successfully placed visitor {profile.get('persona_name')}. Removing from arrival queue.")
-                    else:
-                        logging.error(f"Failed to place visitor {profile.get('persona_name')}: {message}. Removing from arrival queue to prevent loops.")
-                    
-                    db.delete(visitor)
-                except json.JSONDecodeError:
-                    logging.error(f"Could not parse profile for visitor ID {visitor.id}. Removing from queue.")
-                    db.delete(visitor)
+                    # 新しいハンドラを呼び出して、DBのステータス更新までを任せる
+                    self._handle_visitor_arrival(visitor)
                 except Exception as e:
-                    logging.error(f"Unexpected error processing visitor ID {visitor.id}: {e}. Removing from queue.", exc_info=True)
-                    db.delete(visitor)
+                    # エラーが発生した場合、そのレコードを'rejected'ステータスにしてループが続行できるようにする
+                    logging.error(f"Unexpected error processing visitor ID {visitor.id}: {e}. Setting status to 'rejected'.", exc_info=True)
+                    error_db = self.SessionLocal()
+                    try:
+                        error_visitor = error_db.query(VisitingAI).filter_by(id=visitor.id).first()
+                        if error_visitor:
+                            error_visitor.status = 'rejected'
+                            error_visitor.reason = f"Internal server error during arrival: {e}"
+                            error_db.commit()
+                    finally:
+                        error_db.close()
+        except Exception as e:
+            logging.error(f"Error during visitor check loop: {e}", exc_info=True)
+        finally:
+            db.close()
+
+    def _check_dispatch_status(self):
+        """自身が要求した移動トランザクションの状態を監視し、プロセスを確定させる"""
+        db = self.SessionLocal()
+        try:
+            # 自身が作成した（＝source_city_idが自分）トランザクションを探す
+            # キー名も指定して、より安全なLIKE検索にする
+            dispatches = db.query(VisitingAI).filter(
+                VisitingAI.profile_json.like(f'%"source_city_id": "{self.city_name}"%')
+            ).all()
+
+            for dispatch in dispatches:
+                persona_id = dispatch.persona_id
+                persona = self.personas.get(persona_id)
+                if not persona:
+                    continue
+
+                # --- タイムアウトチェック ---
+                # 5分以上 'requested' のままのものはタイムアウトとみなす
+                is_timed_out = (
+                    dispatch.status == 'requested' and
+                    hasattr(dispatch, 'created_at') and # スキーマ変更中の安全策
+                    #dispatch.created_at < datetime.now() - timedelta(minutes=5)
+                    dispatch.created_at < datetime.now() - timedelta(seconds=self.dispatch_timeout_seconds)
+                )
+
+                if dispatch.status == 'accepted':
+                    logging.info(f"Dispatch for {persona.persona_name} was accepted. Finalizing departure.")
+                    # 派遣を確定させる
+                    self._finalize_dispatch(persona_id, db_session=db)
+                    db.delete(dispatch)
+
+                elif dispatch.status == 'rejected' or is_timed_out:
+                    if is_timed_out:
+                        reason = "移動先のCityが応答しませんでした（タイムアウト）。"
+                        logging.warning(f"Dispatch for {persona.persona_name} timed out.")
+                    else:
+                        reason = dispatch.reason or "不明な理由"
+
+                    logging.warning(f"Dispatch for {persona.persona_name} was rejected. Reason: {reason}")
+                    # UIに表示される失敗メッセージを作成
+                    failure_message = f'<div class="note-box">移動失敗<br><b>{reason}</b></div>'
+                    persona.history_manager.add_message(
+                        {"role": "host", "content": failure_message},
+                        persona.current_building_id
+                    )
+                    db.delete(dispatch)
+            
             db.commit()
+
         except Exception as e:
             db.rollback()
-            logging.error(f"Error during visitor check: {e}", exc_info=True)
+            logging.error(f"Error during dispatch status check: {e}", exc_info=True)
         finally:
             db.close()
 
@@ -362,7 +460,8 @@ class SAIVerseManager:
                     capacity=db_b.CAPACITY or 1,
                     system_instruction=db_b.SYSTEM_INSTRUCTION or "",
                     entry_prompt=db_b.ENTRY_PROMPT or "",
-                    auto_prompt=db_b.AUTO_PROMPT or ""
+                    auto_prompt=db_b.AUTO_PROMPT or "",
+                    description=db_b.DESCRIPTION or "" # 探索結果で説明を表示するために追加
                 )
                 buildings.append(building)
             logging.info(f"Loaded and created {len(buildings)} buildings from database.")
@@ -402,8 +501,14 @@ class SAIVerseManager:
                 else:
                     self.avatar_map[pid] = self.default_avatar
 
+                # モデル設定 (DBの個別設定を優先し、なければManagerのデフォルトを使用)
+                persona_model = db_ai.DEFAULT_MODEL or self.model
+                persona_context_length = get_context_length(persona_model)
+                persona_provider = get_model_provider(persona_model)
+
                 # PersonaCoreインスタンス生成
                 persona = PersonaCore(
+                    city_name=self.city_name,
                     persona_id=pid,
                     persona_name=db_ai.AINAME,
                     persona_system_instruction=db_ai.SYSTEMPROMPT or "",
@@ -418,9 +523,10 @@ class SAIVerseManager:
                     dispatch_callback=self.dispatch_persona,
                     explore_callback=self._explore_city, # New callback
                     session_factory=self.SessionLocal,
-                    start_building_id=start_id, # これは後でDBのoccupancyで上書きされる
-                    model=self.model,
-                    context_length=self.context_length,
+                    start_building_id=start_id,
+                    model=persona_model,
+                    context_length=persona_context_length,
+                    user_room_id=self.user_room_id,
                     provider=self.provider,
                     is_dispatched=db_ai.IS_DISPATCHED,
                 )
@@ -461,40 +567,52 @@ class SAIVerseManager:
 
     def _explore_city(self, persona_id: str, target_city_id: str):
         """
-        Handles the 'explore_city' action triggered by a persona.
-        Fetches building information from the target city and provides it as feedback.
+        Handles the 'explore_city' action.
+        Fetches building information from the target city (or the current city) and provides it as feedback.
         """
         persona = self.personas.get(persona_id)
         if not persona:
             logging.error(f"Cannot explore: Persona {persona_id} not found.")
             return
 
-        target_city_info = self.cities_config.get(target_city_id)
-        if not target_city_info:
-            feedback_message = f"探索失敗: City '{target_city_id}' は見つかりませんでした。"
-            logging.warning(f"Persona {persona_id} tried to explore non-existent city '{target_city_id}'.")
+        feedback_message = ""
+        # --- ★ 現在のCityを探索する場合の処理を追加 ---
+        if target_city_id == self.city_name:
+            logging.info(f"Persona {persona_id} is exploring the current city: {self.city_name}")
+            # ローカルの建物情報を整形してフィードバック
+            building_list_str = "\n".join(
+                [f"- {b.name} ({b.building_id}): {b.description}" for b in self.buildings]
+            )
+            feedback_message = f"現在いるCity '{self.city_name}' を探索した結果、以下の建物が見つかりました。\n{building_list_str}"
+        
+        # --- 他のCityを探索する場合の既存ロジック ---
         else:
-            target_api_url = f"{target_city_info['api_base_url']}/buildings"
-            try:
-                logging.info(f"Persona {persona_id} is exploring {target_city_id} at {target_api_url}")
-                response = self.sds_session.get(target_api_url, timeout=10)
-                response.raise_for_status()
-                buildings_data = response.json()
+            target_city_info = self.cities_config.get(target_city_id)
+            if not target_city_info:
+                feedback_message = f"探索失敗: City '{target_city_id}' は見つかりませんでした。"
+                logging.warning(f"Persona {persona_id} tried to explore non-existent city '{target_city_id}'.")
+            else:
+                target_api_url = f"{target_city_info['api_base_url']}/inter-city/buildings"
+                try:
+                    logging.info(f"Persona {persona_id} is exploring {target_city_id} at {target_api_url}")
+                    response = self.sds_session.get(target_api_url, timeout=10)
+                    response.raise_for_status()
+                    buildings_data = response.json()
 
-                if not buildings_data:
-                    feedback_message = f"City '{target_city_id}' を探索しましたが、公開されている建物は見つかりませんでした。"
-                else:
-                    building_list_str = "\n".join(
-                        [f"- {b['building_name']} ({b['building_id']}): {b['description']}" for b in buildings_data]
-                    )
-                    feedback_message = f"City '{target_city_id}' を探索した結果、以下の建物が見つかりました。\n{building_list_str}"
-            
-            except requests.exceptions.RequestException as e:
-                feedback_message = f"探索失敗: City '{target_city_id}' との通信中にエラーが発生しました。"
-                logging.error(f"Failed to connect to target city '{target_city_id}' for exploration: {e}")
-            except json.JSONDecodeError:
-                feedback_message = f"探索失敗: City '{target_city_id}' からの応答が不正でした。"
-                logging.error(f"Failed to parse JSON response from '{target_city_id}' during exploration.")
+                    if not buildings_data:
+                        feedback_message = f"City '{target_city_id}' を探索しましたが、公開されている建物は見つかりませんでした。"
+                    else:
+                        building_list_str = "\n".join(
+                            [f"- {b['building_name']} ({b['building_id']}): {b['description']}" for b in buildings_data]
+                        )
+                        feedback_message = f"City '{target_city_id}' を探索した結果、以下の建物が見つかりました。\n{building_list_str}"
+                
+                except requests.exceptions.RequestException as e:
+                    feedback_message = f"探索失敗: City '{target_city_id}' との通信中にエラーが発生しました。"
+                    logging.error(f"Failed to connect to target city '{target_city_id}' for exploration: {e}")
+                except json.JSONDecodeError:
+                    feedback_message = f"探索失敗: City '{target_city_id}' からの応答が不正でした。"
+                    logging.error(f"Failed to parse JSON response from '{target_city_id}' during exploration.")
 
         # Provide feedback to the persona via system message in their current building
         system_feedback = f'<div class="note-box">🔎 探索結果:<br><b>{feedback_message.replace(chr(10), "<br>")}</b></div>'
@@ -607,72 +725,87 @@ class SAIVerseManager:
         Dispatches a persona to another city.
         1. Sends the persona's profile to the target city's API.
         2. If the request is accepted, updates the persona's state in the DB.
+        (New Logic: Creates a transaction record in the VisitingAI table)
         """
-        # 1. Check if the target city is valid
+        # 1. Check if the target city is valid from the current cache
         target_city_info = self.cities_config.get(target_city_id)
+
+        # 2. If not found, force a refresh from SDS and check again
         if not target_city_info:
-            return False, f"Target city '{target_city_id}' not found in the network directory."
+            logging.warning(f"Target city '{target_city_id}' not in cache. Forcing update from SDS.")
+            self._update_cities_from_sds() # SDSから最新情報を取得
+            target_city_info = self.cities_config.get(target_city_id) # 再度チェック
+
+        if not target_city_info:
+            return False, f"移動失敗: City '{target_city_id}' はネットワーク上に見つかりませんでした。相手のCityが起動しているか確認してください。"
 
         # 2. Get the persona instance
         persona = self.personas.get(persona_id)
         if not persona:
             return False, f"Persona with ID '{persona_id}' not found in this city."
 
+        # --- ★ ID解決ロジックを削除 ---
+        # AIはexplore_cityの結果から完全なIDを渡すことが期待されるため、ID補完は不要。
+
         # 3. Prepare the profile to be sent
         profile = {
             "persona_id": persona.persona_id,
             "persona_name": persona.persona_name,
-            "target_building_id": target_building_id,
+            "target_building_id": target_building_id, # ★ AIが指定した完全なIDをそのまま使用
             "avatar_image": persona.avatar_image,
             "emotion": persona.emotion,
             "source_city_id": self.city_name,
         }
 
-        # 4. Send the profile to the target city's API
-        target_api_url = f"{target_city_info['api_base_url']}/inter-city/request-move-in"
-        try:
-            logging.info(f"Dispatching {persona.persona_name} to {target_city_id} at {target_api_url}")
-            response = self.sds_session.post(target_api_url, json=profile, timeout=10)
-            response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            error_message = f"Failed to connect to target city '{target_city_id}': {e}"
-            logging.error(error_message)
-            return False, error_message
-
-        # 5. If dispatch request was accepted, update the persona's state in a single transaction
+        # 4. Create a transaction record in the VisitingAI table for the target city
         db = self.SessionLocal()
         try:
-            # Record the final exit in the current city
-            last_log = db.query(BuildingOccupancyLog).filter(
-                BuildingOccupancyLog.AIID == persona_id,
-                BuildingOccupancyLog.EXIT_TIMESTAMP.is_(None)
-            ).order_by(BuildingOccupancyLog.ENTRY_TIMESTAMP.desc()).first()
-
-            if last_log:
-                last_log.EXIT_TIMESTAMP = datetime.now()
-                db.merge(last_log)
+            # ターゲットCityのIDをキーにしてレコードを作成
+            target_city_db_id = target_city_info['city_id']
             
-            # Update the persona's state to dispatched
-            db.query(AIModel).filter(AIModel.AIID == persona_id).update({"IS_DISPATCHED": True})
+            # 既存のトランザクションがないか確認
+            existing_dispatch = db.query(VisitingAI).filter_by(city_id=target_city_db_id, persona_id=persona_id).first()
+            if existing_dispatch:
+                return False, "既にこのCityへの移動要求が進行中です。"
 
+            new_dispatch = VisitingAI(
+                city_id=target_city_db_id,
+                persona_id=persona_id,
+                profile_json=json.dumps(profile),
+                status='requested'
+            )
+            db.add(new_dispatch)
             db.commit()
-            logging.info(f"Successfully updated local state for dispatched persona {persona.persona_name}.")
+            logging.info(f"Created dispatch request for {persona.persona_name} to {target_city_id}.")
+            # AIには移動処理中であることを伝える
+            persona.history_manager.add_message(
+                {"role": "system", "content": f"{target_city_id}への移動を要求しました。相手の応答を待っています..."},
+                persona.current_building_id
+            )
+            return True, "移動要求を送信しました。"
         except Exception as e:
             db.rollback()
-            # This is a critical error state. The persona is queued in the other city, but not marked as dispatched here.
-            # A more robust system would have a reconciliation mechanism. For now, we log it.
-            logging.critical(f"CRITICAL: Failed to update local DB after dispatching {persona.persona_name}. Data inconsistency may occur. Error: {e}", exc_info=True)
-            return False, "データベースの更新中にエラーが発生しました。"
+            logging.error(f"Failed to create dispatch request for {persona.persona_name}: {e}", exc_info=True)
+            return False, "移動要求の作成中にデータベースエラーが発生しました。"
         finally:
             db.close()
 
-        # 6. If DB operations were successful, update the in-memory state
+    def _finalize_dispatch(self, persona_id: str, db_session):
+        """移動が承認された後、AIをローカルから退去させる最終処理"""
+        persona = self.personas.get(persona_id)
+        if not persona: return
+
+        # DBの状態を更新
+        last_log = db_session.query(BuildingOccupancyLog).filter_by(AIID=persona_id, EXIT_TIMESTAMP=None).first()
+        if last_log:
+            last_log.EXIT_TIMESTAMP = datetime.now()
+        db_session.query(AIModel).filter_by(AIID=persona_id).update({"IS_DISPATCHED": True})
+
+        # メモリ上の状態を更新
         if persona_id in self.occupants.get(persona.current_building_id, []):
             self.occupants[persona.current_building_id].remove(persona_id)
-        
         persona.is_dispatched = True
-        logging.info(f"In-memory state for {persona.persona_name} updated to dispatched.")
-        return True, f"Successfully dispatched to {target_city_id}."
+        logging.info(f"Finalized departure for {persona.persona_name}.")
 
     def return_visiting_persona(self, persona_id: str, target_city_id: str, target_building_id: str) -> Tuple[bool, str]:
         """
@@ -796,6 +929,14 @@ class SAIVerseManager:
                 logging.error(msg)
                 return False, msg
 
+            # --- Doppelganger Check ---
+            # Get all existing persona names in this city (both residents and visitors)
+            existing_names = {p.persona_name for p in self.all_personas.values()}
+            if pname in existing_names:
+                msg = f"A persona named '{pname}' already exists in this City. Move rejected to prevent doppelganger effect."
+                logging.error(msg)
+                return False, msg
+
             if target_bid not in self.building_map:
                 msg = f"Target building '{target_bid}' not found in this City."
                 logging.error(msg)
@@ -839,6 +980,22 @@ class SAIVerseManager:
             logging.error(msg, exc_info=True)
             return False, msg
 
+    def _handle_visitor_arrival(self, visitor_record: VisitingAI) -> Tuple[bool, str]:
+        """訪問者の到着を処理し、成功/失敗に応じてDBの状態を更新する"""
+        db = self.SessionLocal()
+        try:
+            profile = json.loads(visitor_record.profile_json)
+            success, reason = self.place_visiting_persona(profile)
+            
+            target_record = db.query(VisitingAI).filter_by(id=visitor_record.id).first()
+            if target_record:
+                target_record.status = 'accepted' if success else 'rejected'
+                target_record.reason = reason if not success else None
+                db.commit()
+            return success, reason
+        finally:
+            db.close()
+
     def _save_building_histories(self) -> None:
         for b_id, path in self.building_memory_paths.items():
             hist = self.building_histories.get(b_id, [])
@@ -854,6 +1011,12 @@ class SAIVerseManager:
             self.sds_thread.join(timeout=5)
         logging.info("SDS communication thread stopped.")
 
+        # Stop the DB polling thread
+        self.db_polling_stop_event.set()
+        if hasattr(self, 'db_polling_thread') and self.db_polling_thread.is_alive():
+            self.db_polling_thread.join(timeout=5)
+        logging.info("DB polling thread stopped.")
+
         # Stop all conversation managers
         for manager in self.conversation_managers.values():
             manager.stop()
@@ -866,7 +1029,7 @@ class SAIVerseManager:
 
     def handle_user_input(self, message: str) -> List[str]:
         replies: List[str] = []
-        for pid in list(self.occupants.get("user_room", [])):
+        for pid in list(self.occupants.get(self.user_room_id, [])):
             replies.extend(self.personas[pid].handle_user_input(message))
         self._save_building_histories()
         for persona in self.personas.values():
@@ -874,7 +1037,7 @@ class SAIVerseManager:
         return replies
 
     def handle_user_input_stream(self, message: str) -> Iterator[str]:
-        for pid in list(self.occupants.get("user_room", [])):
+        for pid in list(self.occupants.get(self.user_room_id, [])):
             for token in self.personas[pid].handle_user_input_stream(message):
                 yield token
         self._save_building_histories()
@@ -905,11 +1068,11 @@ class SAIVerseManager:
             db.close()
 
         if (
-            len(self.occupants.get("user_room", [])) >= self.capacities.get("user_room", 1)
-            and persona_id not in self.occupants.get("user_room", [])
+            len(self.occupants.get(self.user_room_id, [])) >= self.capacities.get(self.user_room_id, 1)
+            and persona_id not in self.occupants.get(self.user_room_id, [])
         ):
-            msg = f"移動できませんでした。{self.building_map['user_room'].name}は定員オーバーです"
-            self.building_histories["user_room"].append(
+            msg = f"移動できませんでした。{self.building_map[self.user_room_id].name}は定員オーバーです"
+            self.building_histories[self.user_room_id].append(
                 {"role": "assistant", "content": f"<div class=\"note-box\">{msg}</div>"}
             )
             self._save_building_histories()
@@ -935,11 +1098,11 @@ class SAIVerseManager:
             ).order_by(BuildingOccupancyLog.ENTRY_TIMESTAMP.desc()).limit(2).all()
 
             # The most recent log should be for user_room.
-            if not logs or logs[0].BUILDINGID != "user_room":
+            if not logs or logs[0].BUILDINGID != self.user_room_id:
                 logging.warning(f"Could not determine previous location for {persona_id}. Sending to home room.")
                 destination_id = f"{persona_id}_room"
             elif len(logs) < 2:
-                # Only one log entry (user_room), so no "previous" location. Fallback to home room.
+                # Only one log entry (user_room_id), so no "previous" location. Fallback to home room.
                 logging.info(f"{persona_id} has no previous location. Sending to home room.")
                 destination_id = f"{persona_id}_room"
             else:
@@ -954,7 +1117,7 @@ class SAIVerseManager:
                     # This is a critical failure, the persona has no valid place to go.
                     logging.error(f"Home room '{destination_id}' not found. Cannot move persona.")
                     msg = f"{self.id_to_name_map.get(persona_id, persona_id)}の帰る場所が見つかりませんでした。"
-                    self.building_histories["user_room"].append(
+                    self.building_histories[self.user_room_id].append(
                         {"role": "host", "content": f"<div class=\"note-box\">{msg}</div>"}
                     )
                     self._save_building_histories()
@@ -964,7 +1127,7 @@ class SAIVerseManager:
             db.query(AIModel).filter(AIModel.AIID == persona_id).update({"INTERACTION_MODE": "auto"})
 
             # 3. Move the persona (同じセッションを渡す)
-            success, reason = self._move_persona(persona_id, "user_room", destination_id, db_session=db)
+            success, reason = self._move_persona(persona_id, self.user_room_id, destination_id, db_session=db)
 
             if success:
                 persona = self.personas.get(persona_id)
@@ -973,7 +1136,7 @@ class SAIVerseManager:
                     # 退室メッセージをuser_roomの履歴に追加
                     dest_name = self.building_map[destination_id].name
                     msg = f"{self.id_to_name_map.get(persona_id, persona_id)}が{dest_name}に向かいました。"
-                    self.building_histories["user_room"].append(
+                    self.building_histories[self.user_room_id].append(
                         {
                             "role": "assistant",
                             "persona_id": persona_id,
@@ -1007,11 +1170,17 @@ class SAIVerseManager:
             db.close()
 
     def set_model(self, model: str) -> None:
-        """Update LLM model for all personas."""
+        """
+        Update LLM model for all personas temporarily.
+        This method updates the model for all currently active persona instances in memory.
+        This change is not persistent and will be reset to the DB-defined default upon city restart.
+        """
+        logging.info(f"Temporarily setting model to '{model}' for all active personas.")
         self.model = model
         self.context_length = get_context_length(model)
         self.provider = get_model_provider(model)
         for persona in self.personas.values():
+            # This overrides any individual model settings from the DB for the current session.
             persona.set_model(model, self.context_length, self.provider)
 
     def start_autonomous_conversations(self):
@@ -1041,6 +1210,10 @@ class SAIVerseManager:
     def get_building_history(self, building_id: str) -> List[Dict[str, str]]:
         """指定されたBuildingの生の会話ログを取得する"""
         return self.building_histories.get(building_id, [])
+
+    def get_building_id(self, building_name: str, city_name: str) -> str:
+        """指定されたCityとBuilding名からBuildingIDを生成する"""
+        return f"{building_name}_{city_name}"
 
     def run_scheduled_prompts(self) -> List[str]:
         """Run scheduled prompts for all personas."""

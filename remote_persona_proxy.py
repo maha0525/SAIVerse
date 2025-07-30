@@ -64,8 +64,15 @@ class RemotePersonaProxy:
             response_text = data.get("response_text")
             
             if response_text:
-                logging.info(f"[ProxyPulse] Received thought from home city for {self.persona_id}: '{response_text[:50]}...'")
-                return [response_text]
+                if response_text.startswith("[SAIVERSE_ERROR]"):
+                    error_msg = response_text.replace("[SAIVERSE_ERROR]", "").strip()
+                    logging.error(f"[ProxyPulse] Received an error from home city for {self.persona_id}: {error_msg}")
+                    # UIに表示するためのシステムメッセージを生成
+                    ui_error_msg = f'<div class="note-box">システムエラー<br><b>{self.persona_name}の思考中に問題が発生しました。</b><br><small>詳細: {error_msg}</small></div>'
+                    return [ui_error_msg]
+                else:
+                    logging.info(f"[ProxyPulse] Received thought from home city for {self.persona_id}: '{response_text[:50]}...'")
+                    return [response_text]
             else:
                 logging.warning(f"[ProxyPulse] Received empty response from home city for {self.persona_id}.")
                 return []

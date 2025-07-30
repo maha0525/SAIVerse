@@ -86,11 +86,11 @@ NOTE_CSS = """
 }
 
 /* ダークモード用の文字色上書き */
-body.dark .message, body.dark .message p {
+body.dark .message, body.dark .message p, body.dark .message b {
     color: #222 !important;
 }
 
-body.dark .note-box, body.dark .note-box * {
+body.dark .note-box, body.dark .note-box *, body.dark .note-box b {
     color: #333350 !important;
 }
 """
@@ -125,25 +125,25 @@ def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[s
 def respond(message: str):
     """Process user input and return updated chat history."""
     manager.handle_user_input(message)
-    raw_history = manager.get_building_history("user_room")
+    raw_history = manager.get_building_history(manager.user_room_id)
     return format_history_for_chatbot(raw_history)
 
 def respond_stream(message: str):
     """Stream AI response for chat."""
-    raw_history = manager.get_building_history("user_room")
+    raw_history = manager.get_building_history(manager.user_room_id)
     history = format_history_for_chatbot(raw_history)
     history.append({"role": "user", "content": message})
     ai_message = ""
     for token in manager.handle_user_input_stream(message):
         ai_message += token
         yield history + [{"role": "assistant", "content": ai_message}]
-    final_raw = manager.get_building_history("user_room")
+    final_raw = manager.get_building_history(manager.user_room_id)
     yield format_history_for_chatbot(final_raw)
 
 
 def get_user_room_occupant_names():
     """Returns a list of names of personas currently in the user_room."""
-    return [manager.id_to_name_map.get(pid) for pid in manager.occupants.get('user_room', []) if pid in manager.id_to_name_map]
+    return [manager.id_to_name_map.get(pid) for pid in manager.occupants.get(manager.user_room_id, []) if pid in manager.id_to_name_map]
 
 def call_persona_ui(name: str):
     """Calls a persona to the user room and updates the UI."""
@@ -152,18 +152,18 @@ def call_persona_ui(name: str):
         manager.summon_persona(persona_id)
     
     new_occupants = get_user_room_occupant_names()
-    raw_history = manager.get_building_history("user_room")
+    raw_history = manager.get_building_history(manager.user_room_id)
     return format_history_for_chatbot(raw_history), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants))
 
 def end_conversation_ui(name: str):
     """Ends a conversation with a persona and updates the UI."""
     if not name: # ドロップダウンが空の場合
-        manager.building_histories["user_room"].append(
+        manager.building_histories[manager.user_room_id].append(
             {"role": "host", "content": '<div class="note-box">退室させるペルソナが選択されていません。</div>'}
         )
         manager._save_building_histories()
         new_occupants = get_user_room_occupant_names()
-        raw_history = manager.get_building_history("user_room")
+        raw_history = manager.get_building_history(manager.user_room_id)
         return format_history_for_chatbot(raw_history), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants))
 
     persona_id = manager.persona_map.get(name)
@@ -171,18 +171,18 @@ def end_conversation_ui(name: str):
         manager.end_conversation(persona_id)
     
     new_occupants = get_user_room_occupant_names()
-    raw_history = manager.get_building_history("user_room")
+    raw_history = manager.get_building_history(manager.user_room_id)
     return format_history_for_chatbot(raw_history), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants))
 
 def select_model(model_name: str):
     manager.set_model(model_name)
-    raw_history = manager.get_building_history("user_room")
+    raw_history = manager.get_building_history(manager.user_room_id)
     return format_history_for_chatbot(raw_history)
 
 def refresh_ui():
     """Refreshes the user interaction UI components."""
     new_occupants = get_user_room_occupant_names()
-    raw_history = manager.get_building_history("user_room")
+    raw_history = manager.get_building_history(manager.user_room_id)
     return format_history_for_chatbot(raw_history), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants)), manager.sds_status
 
 def get_autonomous_log(building_name: str):
@@ -289,23 +289,13 @@ def main():
         sds_url=args.sds_url
     )
     PERSONA_CHOICES = list(manager.persona_map.keys())
-    AUTONOMOUS_BUILDING_CHOICES = [b.name for b in manager.buildings if b.building_id != "user_room"]
-    AUTONOMOUS_BUILDING_MAP = {b.name: b.building_id for b in manager.buildings if b.building_id != "user_room"}
+    AUTONOMOUS_BUILDING_CHOICES = [b.name for b in manager.buildings if b.building_id != manager.user_room_id]
+    AUTONOMOUS_BUILDING_MAP = {b.name: b.building_id for b in manager.buildings if b.building_id != manager.user_room_id}
 
     cleanup_and_start_server_with_args(manager.api_port, Path(__file__).parent / "database" / "api_server.py", "API Server", str(db_path))
 
     # --- アプリケーション終了時にManagerのシャットダウン処理を呼び出す ---
     atexit.register(manager.shutdown)
-
-    def background_loop():
-        while True:
-            manager._check_for_visitors()
-            manager._process_thinking_requests()
-            manager.run_scheduled_prompts()
-            time.sleep(5)
-
-    thread = threading.Thread(target=background_loop, daemon=True)
-    thread.start()
 
     # --- FastAPIとGradioの統合 ---
     # 3. Gradio UIを作成
@@ -354,7 +344,7 @@ def main():
                 gr.Markdown("---")
 
                 with gr.Row():
-                    model_drop = gr.Dropdown(choices=MODEL_CHOICES, value=MODEL_CHOICES[0] if MODEL_CHOICES else None, label="モデル選択")
+                    model_drop = gr.Dropdown(choices=MODEL_CHOICES, value=manager.model, label="システムデフォルトモデル (一時的な一括上書き)")
                 with gr.Row():
                     initial_persona = PERSONA_CHOICES[0] if PERSONA_CHOICES else None
                     persona_drop = gr.Dropdown(choices=PERSONA_CHOICES, value=initial_persona, label="ペルソナを呼ぶ", interactive=bool(PERSONA_CHOICES))

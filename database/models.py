@@ -35,6 +35,7 @@ class AI(Base):
     LAST_AUTO_PROMPT_TIMES = Column(String(2048)) # JSON形式で保存
     INTERACTION_MODE = Column(String(32), default='auto', nullable=False) # auto / user
     IS_DISPATCHED = Column(Boolean, default=False, nullable=False)
+    DEFAULT_MODEL = Column(String(255), nullable=True)
 
 class Building(Base):
     __tablename__ = "building"
@@ -105,4 +106,7 @@ class VisitingAI(Base):
     city_id = Column(Integer, ForeignKey("city.CITYID"), nullable=False)
     persona_id = Column(String(255), nullable=False)
     profile_json = Column(String, nullable=False) # JSON文字列でプロファイルを保存
+    status = Column(String(32), default='requested', nullable=False) # requested, accepted, rejected
+    reason = Column(String(255)) # 拒否された場合の理由など
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
     __table_args__ = (UniqueConstraint('city_id', 'persona_id', name='uq_visiting_city_persona'),)

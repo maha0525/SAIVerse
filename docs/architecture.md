@@ -62,15 +62,17 @@ graph TD
 ### `main.py` (起動スクリプト)
 - **役割**: アプリケーション全体のエントリーポイント。
 - **責務**:
-  - `SAIVerseManager`、`api_server`、`db_manager`など、すべての主要サービスを起動する。
+  - `SAIVerseManager`と`api_server.py`を起動する。
   - Gradio UIのメインループを管理し、ユーザーからの入力を`SAIVerseManager`に中継する。
+  - `SAIVerseManager`のバックグラウンドタスク（DBポーリングなど）を定期的に実行するスレッドを開始する。
 
 ### `saiverse_manager.py` (世界の管理者)
 - **役割**: SAIVerse世界の「神」や「管理者」に相当する中央コンポーネント。
 - **責務**:
   - すべてのペルソナ (`PersonaCore`) とBuildingのインスタンスをメモリ上に保持・管理する。
   - 起動時にSDSに自身を登録し、定期的に他のCityの情報を取得する。
-  - AIの移動、ユーザーからの入力、自律会話の開始/停止など、世界で起こるすべてのイベントを統括する。
+  - **DBポーリングによる非同期処理**: `VisitingAI`テーブルや`ThinkingRequest`テーブルを監視し、City間連携のトランザクションを進行させる。
+  - AIの移動要求、ユーザーからの入力、自律会話の開始/停止など、世界で起こるすべてのイベントを統括する。
   - データベースから初期状態をロードし、終了時に状態を保存する。
 
 ### `persona_core.py` (AIの魂)
@@ -93,7 +95,7 @@ graph TD
 ### `api_server.py` (Cityの窓口)
 - **役割**: 各Cityが外部に公開するAPIサーバー。
 - **責務**:
-  - `/inter-city/request-move-in`: 他のCityからのAIの訪問リクエストを受け付け、`visiting_ai`テーブルにキューイングする。
+  - `/inter-city/request-move-in`: このAPIは現在使用されておらず、City間連携はDBを介して行われる。
   - `/persona-proxy/{id}/think`: 派遣したAIの代理人からの思考リクエストを受け付け、`thinking_request`テーブルにキューイングする。故郷の`SAIVerseManager`がこれを処理し、結果を返すまでロングポーリングで待機する。
 
 ### `sds_server.py` (世界の住所録)
@@ -115,10 +117,19 @@ graph TD
 8. すべての準備が整うと、GradioのUIが起動し、ユーザーからの操作や「自律会話を開始」ボタンのクリックを待ち受けます。
 
 ## 5. City間連携シーケンス (リモート・ペルソナ)
-1.  `city_a`の`AI`が`city_b`への移動を決定します。
-2.  `city_a`の`SAIVerseManager`は、`city_b`のAPI (`/inter-city/request-move-in`) を呼び出し、AIのプロファイルを送信します。
-3.  `city_b`のAPIはプロファイルを受け取り、`visiting_ai`テーブルにキューイングします。
-4.  `city_b`の`SAIVerseManager`は、バックグラウンド処理で`visiting_ai`テーブルをチェックし、新しい訪問者を発見します。
-5.  `city_b`は、`RemotePersonaProxy`のインスタンスを生成し、`city_b`内の建物に配置します。
-6.  `city_b`の`ConversationManager`が`RemotePersonaProxy`の`run_pulse`を呼び出すと、プロキシは故郷である`city_a`のAPI (`/persona-proxy/{id}/think`) を呼び出します。
-7.  `city_a`のAPIは思考リクエストを受け付け、`city_a`にいる`PersonaCore`本体に思考を依頼し、結果を`city_b`のプロキシに返します。
+
+SAIVerseのCity間連携は、APIを直接呼び出す同期的なフローではなく、**データベースの`VisitingAI`テーブルを介した非同期的なトランザクション**によって実現されています。これにより、通信相手のCityが一時的にオフラインでも移動要求が失われず、堅牢な連携が可能になります。
+
+1.  **移動要求 (City A)**: `city_a`のAIが`city_b`への移動を決定すると、`city_a`の`SAIVerseManager`は`VisitingAI`テーブルに新しいレコードを作成します。このレコードには、宛先として`city_b`のIDが設定され、`status`は`'requested'`になります。
+
+2.  **要求検知 (City B)**: `city_b`の`SAIVerseManager`は、バックグラウンドループで常に`VisitingAI`テーブルを監視しています。自分宛の`'requested'`状態のレコードを発見すると、受け入れ処理を開始します。
+
+3.  **受け入れ処理 (City B)**: `city_b`は、訪問者のプロファイル（同名ペルソナの有無、移動先の空き状況など）を確認します。
+    - **承認する場合**: `RemotePersonaProxy`インスタンスを生成してCityに配置し、`VisitingAI`レコードの`status`を`'accepted'`に更新します。
+    - **拒否する場合**: `VisitingAI`レコードの`status`を`'rejected'`に更新し、`reason`カラムに拒否理由を記録します。
+
+4.  **結果確認 (City A)**: `city_a`の`SAIVerseManager`も同様に`VisitingAI`テーブルを監視しており、自身が作成したレコードの`status`が`'accepted'`または`'rejected'`に変わったことを検知します。
+
+5.  **移動確定 (City A)**:
+    - **承認された場合**: `city_a`はAIの`IS_DISPATCHED`フラグを`True`に設定してローカルから退去させ、トランザクションが完了した`VisitingAI`レコードを削除します。
+    - **拒否された場合**: `city_a`はAIに移動失敗とその理由を通知し、同様に`VisitingAI`レコードを削除します。
