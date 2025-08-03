@@ -1729,8 +1729,18 @@ class SAIVerseManager:
         """Checks if an entity was created by seed.py based on its ID."""
         if not isinstance(entity_id, str):
             return False
-        # seed.pyで生成されるcity_a, city_bのエンティティは削除不可とする
-        return entity_id.endswith(('_city_a', '_city_b'))
+        
+        # List of base names/prefixes for seeded entities (AIs and special buildings)
+        seeded_prefixes = [
+            "air_", "eris_", "genesis_", # AI names from city_a
+            "luna_", "sol_",             # AI names from city_b
+            "user_room_", "deep_think_room_", "altar_of_creation_" # Special building names
+        ]
+        
+        # Check if the entity ID starts with one of the seeded prefixes.
+        # This covers AIs (e.g., "air_city_a") and their rooms (e.g., "air_city_a_room"),
+        # as well as special buildings (e.g., "user_room_city_a").
+        return any(entity_id.startswith(prefix) for prefix in seeded_prefixes)
 
     def create_city(self, name: str, description: str, ui_port: int, api_port: int) -> str:
         """Creates a new city."""

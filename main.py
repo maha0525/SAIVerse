@@ -251,9 +251,11 @@ def on_select_city(evt: gr.SelectData):
         selected_row['START_IN_ONLINE_MODE'], selected_row['UI_PORT'], selected_row['API_PORT']
     )
 
-def update_building_ui(b_id: str, name: str, capacity_str: str, desc: str, sys_inst: str, city_id: int):
+def update_building_ui(b_id: str, name: str, capacity_str: str, desc: str, sys_inst: str, city_id: Optional[int]):
     """UI handler to update building settings."""
     if not b_id: return "Error: Select a building to update.", gr.update()
+    if city_id is None:
+        return "Error: City must be selected.", gr.update()
     try:
         capacity = int(capacity_str)
     except (ValueError, TypeError):
@@ -270,7 +272,7 @@ def on_select_building(evt: gr.SelectData):
     selected_row = df.iloc[row_index]
     return (
         selected_row['BUILDINGID'], selected_row['BUILDINGNAME'], selected_row['CAPACITY'],
-        selected_row['DESCRIPTION'], selected_row['SYSTEM_INSTRUCTION'], selected_row['CITYID']
+        selected_row['DESCRIPTION'], selected_row['SYSTEM_INSTRUCTION'], int(selected_row['CITYID'])
     )
 
 def on_select_ai(evt: gr.SelectData):
@@ -288,7 +290,7 @@ def on_select_ai(evt: gr.SelectData):
         details['AINAME'],
         details['DESCRIPTION'],
         details['SYSTEMPROMPT'],
-        details['HOME_CITYID'],
+        int(details['HOME_CITYID']),
         details['DEFAULT_MODEL'],
         details['IS_DISPATCHED']
     )
@@ -307,7 +309,7 @@ def create_world_editor_ui():
     """Creates all UI components for the World Editor tab."""
     # --- ★ UI構築の最初にCity情報を一度だけ取得 ---
     all_cities_df = manager.get_cities_df()
-    city_choices = list(zip(all_cities_df['CITYNAME'], all_cities_df['CITYID']))
+    city_choices = list(zip(all_cities_df['CITYNAME'], all_cities_df['CITYID'].astype(int)))
 
     # --- Handlers for Create/Delete ---
     def create_city_ui(name, desc, ui_port, api_port):
@@ -485,8 +487,8 @@ def create_world_editor_ui():
             df = manager.get_blueprints_df()
             blueprint_id = df.iloc[row_index]['BLUEPRINT_ID']
             details = manager.get_blueprint_details(blueprint_id)
-            if not details: return "", "", None, "", "", "ai"
-            return details['BLUEPRINT_ID'], details['NAME'], details['DESCRIPTION'], details['CITYID'], details['BASE_SYSTEM_PROMPT'], details['ENTITY_TYPE']
+            if not details: return "", "", "", None, "", "ai"
+            return details['BLUEPRINT_ID'], details['NAME'], details['DESCRIPTION'], int(details['CITYID']), details['BASE_SYSTEM_PROMPT'], details['ENTITY_TYPE']
 
         def create_blueprint_ui(name, desc, city_id, sys_prompt, entity_type):
             if not all([name, city_id, sys_prompt, entity_type]): return "Error: Name, City, System Prompt, and Entity Type are required.", gr.update()
