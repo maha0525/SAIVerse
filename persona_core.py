@@ -45,6 +45,7 @@ class PersonaCore:
         move_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
         dispatch_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
         explore_callback: Optional[Callable[[str, str], None]] = None, # New callback
+        create_persona_callback: Optional[Callable[[str, str], Tuple[bool, str]]] = None,
         start_building_id: str = "air_room",
         model: str = "gpt-4o",
         context_length: int = 120000,
@@ -104,6 +105,7 @@ class PersonaCore:
         self.move_callback = move_callback
         self.dispatch_callback = dispatch_callback
         self.explore_callback = explore_callback
+        self.create_persona_callback = create_persona_callback
         self.model = model
         self.context_length = context_length
         self.llm_client = get_llm_client(model, provider, self.context_length)
@@ -131,23 +133,24 @@ class PersonaCore:
             db_ai = db.query(AIModel).filter(AIModel.AIID == self.persona_id).first()
             if not db_ai:
                 logging.warning(f"No AI record found in DB for {self.persona_id}. Using default state.")
-                return
+                # 新規作成されたペルソナの場合、DBからの読み込みはスキップし、デフォルト値を使用する
+            else:
+                # 既存のペルソナの場合、DBから状態を読み込む
+                self.auto_count = db_ai.AUTO_COUNT or 0
 
-            self.auto_count = db_ai.AUTO_COUNT or 0
-
-            if db_ai.LAST_AUTO_PROMPT_TIMES:
-                try:
-                    self.last_auto_prompt_times.update(json.loads(db_ai.LAST_AUTO_PROMPT_TIMES))
-                except json.JSONDecodeError:
-                    logging.warning(f"Could not parse LAST_AUTO_PROMPT_TIMES from DB for {self.persona_name}.")
-            
-            if db_ai.EMOTION:
-                try:
-                    self.emotion = json.loads(db_ai.EMOTION)
-                except json.JSONDecodeError:
-                    logging.warning(f"Could not parse EMOTION from DB for {self.persona_name}.")
-            
-            logging.info(f"Loaded dynamic state from DB for {self.persona_name}.")
+                if db_ai.LAST_AUTO_PROMPT_TIMES:
+                    try:
+                        self.last_auto_prompt_times.update(json.loads(db_ai.LAST_AUTO_PROMPT_TIMES))
+                    except json.JSONDecodeError:
+                        logging.warning(f"Could not parse LAST_AUTO_PROMPT_TIMES from DB for {self.persona_name}.")
+                
+                if db_ai.EMOTION:
+                    try:
+                        self.emotion = json.loads(db_ai.EMOTION)
+                    except json.JSONDecodeError:
+                        logging.warning(f"Could not parse EMOTION from DB for {self.persona_name}.")
+                
+                logging.info(f"Loaded dynamic state from DB for {self.persona_name}.")
 
         except Exception as e:
             logging.error(f"Failed to load session data from DB for {self.persona_name}: {e}", exc_info=True)
@@ -282,7 +285,15 @@ class PersonaCore:
             if action.get("action") == "explore_city":
                 explore_target = {"city_id": action.get("city_id")}
                 break
-        # --- End of new part ---
+
+        # --- New part for creation ---
+        creation_target = None
+        for action in actions:
+            if action.get("action") == "create_persona":
+                creation_target = {
+                    "name": action.get("name"), "system_prompt": action.get("system_prompt")
+                }
+                break # Only handle one creation at a time
 
         if delta:
             self._apply_emotion_delta(delta)
@@ -318,6 +329,7 @@ class PersonaCore:
 
         moved = self._handle_movement(move_target)
         self._handle_exploration(explore_target) # Call the new handler
+        self._handle_creation(creation_target) # Call the creation handler
         self._save_session_metadata()
         return say, move_target, moved
 
@@ -459,7 +471,7 @@ class PersonaCore:
             logging.info("Unknown building id received: %s, staying at %s", target_building_id, self.current_building_id)
 
         if moved:
-            self.auto_count = 0
+            """self.auto_count = 0
             if prev_id != self.user_room_id and self.current_building_id == self.user_room_id:
                 self.history_manager.add_to_building_only(
                     self.user_room_id,
@@ -476,7 +488,7 @@ class PersonaCore:
                         "role": "assistant",
                         "content": f'<div class="note-box">🏢 Building:<br><b>{self.persona_name}が{dest_name}に向かいました</b></div>',
                     },
-                )
+                )"""
         return moved
 
     def _handle_exploration(self, explore_target: Optional[Dict[str, str]]) -> None:
@@ -494,6 +506,31 @@ class PersonaCore:
             logging.error("Explore callback is not set. Cannot explore cities.")
             self.history_manager.add_message(
                 {"role": "system", "content": "他のCityを探索する機能が設定されていません。"},
+                self.current_building_id
+            )
+
+    def _handle_creation(self, creation_target: Optional[Dict[str, str]]) -> None:
+        """Handles the 'create_persona' action by invoking the callback."""
+        if not creation_target or not creation_target.get("name") or not creation_target.get("system_prompt"):
+            return
+
+        name = creation_target.get("name")
+        system_prompt = creation_target.get("system_prompt")
+        
+        if self.create_persona_callback:
+            logging.info(f"Attempting to create persona: {name}")
+            success, message = self.create_persona_callback(name, system_prompt)
+            
+            # Provide feedback to the user/AI
+            feedback_message = f'<div class="note-box">🧬 ペルソナ創造:<br><b>{message}</b></div>'
+            self.history_manager.add_message(
+                {"role": "host", "content": feedback_message},
+                self.current_building_id
+            )
+        else:
+            logging.error("Create persona callback is not set. Cannot create new persona.")
+            self.history_manager.add_message(
+                {"role": "system", "content": "新しいペルソナを創造する機能が設定されていません。"},
                 self.current_building_id
             )
 
@@ -547,18 +584,10 @@ class PersonaCore:
 
     def handle_user_input(self, message: str) -> List[str]:
         logging.info("User input: %s", message)
-        building = self.buildings[self.current_building_id]
-        if self.current_building_id == self.user_room_id:
-            say, move_target, changed = self._generate(message)
-            replies = [say]
-        else:
-            logging.info("User input ignored outside user_room")
-            if building.run_auto_llm:
-                say, move_target, changed = self._generate("")
-                replies = [say]
-            else:
-                return []
+        say, move_target, changed = self._generate(message)
+        replies = [say]
 
+        # This part remains to handle auto-conversation after a user-triggered one.
         building = self.buildings[self.current_building_id]
         if changed:
             replies.extend(self.run_auto_conversation(initial=True))
@@ -572,15 +601,7 @@ class PersonaCore:
 
     def handle_user_input_stream(self, message: str) -> Iterator[str]:
         logging.info("User input: %s", message)
-        building = self.buildings[self.current_building_id]
-        if self.current_building_id == self.user_room_id:
-            gen = self._generate_stream(message)
-        else:
-            logging.info("User input ignored outside user_room")
-            if building.run_auto_llm:
-                gen = self._generate_stream("")
-            else:
-                return
+        gen = self._generate_stream(message)
 
         try:
             while True:

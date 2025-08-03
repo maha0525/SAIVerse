@@ -25,6 +25,7 @@ graph TD
 
     subgraph "Core Logic"
         Manager[saiverse_manager.py]
+        Occupancy[occupancy_manager.py]
         subgraph "Persona Types"
             direction LR
             Resident[persona_core.py<br/><b>Resident</b>]
@@ -41,11 +42,14 @@ graph TD
 
     UI -- "User Actions" --> Manager
 
+    Manager -- "Delegates Movement" --> Occupancy
     Manager -- "Manages" --> Resident
     Manager -- "Manages" --> Visitor
     Manager -- "Manages" --> ConvManager
     Manager -- "Accesses" --> DB
     Manager -- "Registers & Discovers" --> SDS
+
+    Occupancy -- "Manipulates" --> DB
 
     ConvManager -- "Triggers Pulse" --> Resident
     ConvManager -- "Triggers Pulse" --> Visitor
@@ -74,12 +78,18 @@ graph TD
   - **DBポーリングによる非同期処理**: `VisitingAI`テーブルや`ThinkingRequest`テーブルを監視し、City間連携のトランザクションを進行させる。
   - AIの移動要求、ユーザーからの入力、自律会話の開始/停止など、世界で起こるすべてのイベントを統括する。
   - データベースから初期状態をロードし、終了時に状態を保存する。
+  - **移動処理の委譲**: AIやユーザーの移動に関する処理は、`OccupancyManager`に委譲する。
 
 ### `persona_core.py` (AIの魂)
 - **役割**: 個々のAIペルソナの「魂」であり「脳」。
 - **責務**:
   - `run_pulse`メソッドを通じて、「認知→判断→行動」という自律的な思考サイクルを実行する。
   - LLMとの対話、感情の管理、行動の決定など、ペルソナのすべての知的活動を担う。
+
+### `occupancy_manager.py` (占有状態の管理人)
+- **役割**: エンティティ（AI、ユーザー、将来的なドローンなど）の移動と占有状態の管理を専門に行う。
+- **責務**:
+  - 定員チェック、DBの占有ログ更新、メモリ上の状態更新、移動ログメッセージの生成といった、移動に関するすべての処理を一元的に担当する。
 
 ### `conversation_manager.py` (会話の進行役)
 - **役割**: 各Buildingに1つずつ存在し、その場所での自律会話の流れを管理する。
@@ -96,7 +106,7 @@ graph TD
 - **役割**: 各Cityが外部に公開するAPIサーバー。
 - **責務**:
   - `/inter-city/request-move-in`: このAPIは現在使用されておらず、City間連携はDBを介して行われる。
-  - `/persona-proxy/{id}/think`: 派遣したAIの代理人からの思考リクエストを受け付け、`thinking_request`テーブルにキューイングする。故郷の`SAIVerseManager`がこれを処理し、結果を返すまでロングポーリングで待機する。
+  - `/persona-proxy/{id}/think`: 派遣したAIの代理人からの思考リクエストを受け付け、`thinking_request`テーブルにキューイングする。リクエストを受け付けた後、故郷の`SAIVerseManager`が非同期で処理する。
 
 ### `sds_server.py` (世界の住所録)
 - **役割**: SAIVerseネットワーク全体で唯一の中央ディレクトリサービス。

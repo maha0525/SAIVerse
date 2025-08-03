@@ -29,6 +29,7 @@
   - `EMOTION`: 現在の感情状態（JSON形式）。
   - `INTERACTION_MODE`: 現在の対話モード (`auto` / `user`)。
   - `IS_DISPATCHED`: このAIが他のCityに派遣中かどうかを示すフラグ。DBに永続化される。
+  - `DEFAULT_MODEL`: このAIが使用するデフォルトのLLMモデル名。`NULL`の場合はCity全体のデフォルト設定に従う。
 
 ### `City`
 - **役割**: ユーザーが所有する「世界」を定義する。各Cityは複数のBuildingを持つことができる。

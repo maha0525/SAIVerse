@@ -18,7 +18,8 @@ from database.db_manager import create_db_manager_ui
 
 logging.basicConfig(level=logging.INFO)
 manager: SAIVerseManager = None
-PERSONA_CHOICES = []
+BUILDING_CHOICES = []
+BUILDING_NAME_TO_ID_MAP = {}
 MODEL_CHOICES = get_model_choices()
 AUTONOMOUS_BUILDING_CHOICES = []
 AUTONOMOUS_BUILDING_MAP = {}
@@ -122,68 +123,78 @@ def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[s
     return display
 
 
-def respond(message: str):
-    """Process user input and return updated chat history."""
-    manager.handle_user_input(message)
-    raw_history = manager.get_building_history(manager.user_room_id)
-    return format_history_for_chatbot(raw_history)
-
 def respond_stream(message: str):
-    """Stream AI response for chat."""
-    raw_history = manager.get_building_history(manager.user_room_id)
+    """Stream AI response for chat and update UI components if needed."""
+    # Get history from current location
+    current_building_id = manager.user_current_building_id
+    if not current_building_id:
+        yield [{"role": "assistant", "content": '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'}], gr.update(), gr.update()
+        return
+
+    raw_history = manager.get_building_history(current_building_id)
     history = format_history_for_chatbot(raw_history)
     history.append({"role": "user", "content": message})
     ai_message = ""
+    # manager.handle_user_input_stream already uses the user's current location
     for token in manager.handle_user_input_stream(message):
         ai_message += token
-        yield history + [{"role": "assistant", "content": ai_message}]
-    final_raw = manager.get_building_history(manager.user_room_id)
-    yield format_history_for_chatbot(final_raw)
+        # ストリーミング中はドロップダウンは更新しない
+        yield history + [{"role": "assistant", "content": ai_message}], gr.update(), gr.update()
+    # After streaming, get the final history again to include system messages etc.
+    final_raw = manager.get_building_history(current_building_id)
+    final_history_formatted = format_history_for_chatbot(final_raw)
 
+    # Check if the building list has changed
+    global BUILDING_CHOICES, BUILDING_NAME_TO_ID_MAP
+    summonable_personas = manager.get_summonable_personas()
+    new_building_names = sorted([b.name for b in manager.buildings]) # ソートして比較
+    if new_building_names != sorted(BUILDING_CHOICES):
+        logging.info("Building list has changed. Updating dropdown.")
+        BUILDING_CHOICES = new_building_names
+        BUILDING_NAME_TO_ID_MAP = {b.name: b.building_id for b in manager.buildings}
+        yield final_history_formatted, gr.update(choices=BUILDING_CHOICES), gr.update(choices=summonable_personas, value=None)
+    else:
+        yield final_history_formatted, gr.update(), gr.update(choices=summonable_personas, value=None)
 
-def get_user_room_occupant_names():
-    """Returns a list of names of personas currently in the user_room."""
-    return [manager.id_to_name_map.get(pid) for pid in manager.occupants.get(manager.user_room_id, []) if pid in manager.id_to_name_map]
-
-def call_persona_ui(name: str):
-    """Calls a persona to the user room and updates the UI."""
-    persona_id = manager.persona_map.get(name)
-    if persona_id:
-        manager.summon_persona(persona_id)
-    
-    new_occupants = get_user_room_occupant_names()
-    raw_history = manager.get_building_history(manager.user_room_id)
-    return format_history_for_chatbot(raw_history), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants))
-
-def end_conversation_ui(name: str):
-    """Ends a conversation with a persona and updates the UI."""
-    if not name: # ドロップダウンが空の場合
-        manager.building_histories[manager.user_room_id].append(
-            {"role": "host", "content": '<div class="note-box">退室させるペルソナが選択されていません。</div>'}
-        )
-        manager._save_building_histories()
-        new_occupants = get_user_room_occupant_names()
-        raw_history = manager.get_building_history(manager.user_room_id)
-        return format_history_for_chatbot(raw_history), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants))
-
-    persona_id = manager.persona_map.get(name)
-    if persona_id:
-        manager.end_conversation(persona_id)
-    
-    new_occupants = get_user_room_occupant_names()
-    raw_history = manager.get_building_history(manager.user_room_id)
-    return format_history_for_chatbot(raw_history), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants))
 
 def select_model(model_name: str):
     manager.set_model(model_name)
-    raw_history = manager.get_building_history(manager.user_room_id)
+    # Get history from current location
+    current_building_id = manager.user_current_building_id
+    if not current_building_id:
+        return []
+    raw_history = manager.get_building_history(current_building_id)
     return format_history_for_chatbot(raw_history)
 
-def refresh_ui():
-    """Refreshes the user interaction UI components."""
-    new_occupants = get_user_room_occupant_names()
-    raw_history = manager.get_building_history(manager.user_room_id)
-    return format_history_for_chatbot(raw_history), gr.update(choices=new_occupants, value=None, interactive=bool(new_occupants)), manager.sds_status
+def move_user_ui(building_name: str):
+    """UI handler for moving the user."""
+    if not building_name:
+        # Just return current state if nothing is selected
+        current_history = format_history_for_chatbot(manager.get_building_history(manager.user_current_building_id))
+        current_location = manager.building_map.get(manager.user_current_building_id).name
+        return current_history, current_location, gr.update()
+
+    target_building_id = BUILDING_NAME_TO_ID_MAP.get(building_name)
+    if target_building_id:
+        manager.move_user(target_building_id)
+
+    new_history = manager.get_building_history(manager.user_current_building_id)
+    new_location_name = manager.building_map.get(manager.user_current_building_id).name
+    summonable_personas = manager.get_summonable_personas()
+    return format_history_for_chatbot(new_history), new_location_name, gr.update(choices=summonable_personas, value=None)
+
+def call_persona_ui(persona_name: str):
+    """UI handler for summoning a persona."""
+    if not persona_name:
+        return format_history_for_chatbot(manager.get_building_history(manager.user_current_building_id)), gr.update()
+
+    persona_id = manager.persona_map.get(persona_name)
+    if persona_id:
+        manager.summon_persona(persona_id)
+
+    new_history = format_history_for_chatbot(manager.get_building_history(manager.user_current_building_id))
+    summonable_personas = manager.get_summonable_personas()
+    return new_history, gr.update(choices=summonable_personas, value=None)
 
 def get_autonomous_log(building_name: str):
     """指定されたBuildingの会話ログを取得する"""
@@ -282,13 +293,15 @@ def main():
 
     db_path = Path(__file__).parent / "database" / args.db_file
 
-    global manager, PERSONA_CHOICES, AUTONOMOUS_BUILDING_CHOICES, AUTONOMOUS_BUILDING_MAP
+    global manager, AUTONOMOUS_BUILDING_CHOICES, AUTONOMOUS_BUILDING_MAP, BUILDING_CHOICES, BUILDING_NAME_TO_ID_MAP
     manager = SAIVerseManager(
         city_name=args.city_name,
         db_path=str(db_path),
         sds_url=args.sds_url
     )
-    PERSONA_CHOICES = list(manager.persona_map.keys())
+    # Populate new globals for the move dropdown
+    BUILDING_CHOICES = [b.name for b in manager.buildings]
+    BUILDING_NAME_TO_ID_MAP = {b.name: b.building_id for b in manager.buildings}
     AUTONOMOUS_BUILDING_CHOICES = [b.name for b in manager.buildings if b.building_id != manager.user_room_id]
     AUTONOMOUS_BUILDING_MAP = {b.name: b.building_id for b in manager.buildings if b.building_id != manager.user_room_id}
 
@@ -301,9 +314,31 @@ def main():
     # 3. Gradio UIを作成
     with gr.Blocks(css=NOTE_CSS, title=f"SAIVerse City: {args.city_name}", theme=gr.themes.Soft()) as demo:
         with gr.Tabs():
-            with gr.TabItem("ユーザー対話"):
+            with gr.TabItem("ワールドビュー"):
+                with gr.Row():
+                    user_location_display = gr.Textbox(
+                        # managerから現在地を取得して表示する
+                        value=lambda: manager.building_map.get(manager.user_current_building_id).name if manager.user_current_building_id and manager.user_current_building_id in manager.building_map else "不明な場所",
+                        label="あなたの現在地",
+                        interactive=False,
+                        scale=2
+                    )
+                    move_building_dropdown = gr.Dropdown(
+                        choices=BUILDING_CHOICES,
+                        label="移動先の建物",
+                        interactive=True,
+                        scale=2
+                    )
+                    move_btn = gr.Button("移動", scale=1)
+
+                gr.Markdown("---")
+
+                # --- ここから下は既存のUI ---
+                gr.Markdown("### 現在地での対話")
+
                 chatbot = gr.Chatbot(
                     type="messages",
+                    value=lambda: format_history_for_chatbot(manager.get_building_history(manager.user_current_building_id)) if manager.user_current_building_id else [],
                     group_consecutive_messages=False,
                     sanitize_html=False,
                     elem_id="my_chat",
@@ -320,6 +355,18 @@ def main():
                         submit = gr.Button("送信")
                 
                 gr.Markdown("---")
+                with gr.Accordion("ペルソナを招待する", open=False):
+                    with gr.Row():
+                        summon_persona_dropdown = gr.Dropdown(
+                            choices=manager.get_summonable_personas(),
+                            label="呼ぶペルソナを選択",
+                            interactive=True,
+                            scale=3
+                        )
+                        summon_btn = gr.Button("呼ぶ", scale=1)
+                
+                gr.Markdown("---")
+
                 with gr.Row():
                     login_status_display = gr.Textbox(
                         value="オンライン" if manager.user_is_online else "オフライン",
@@ -345,22 +392,12 @@ def main():
 
                 with gr.Row():
                     model_drop = gr.Dropdown(choices=MODEL_CHOICES, value=manager.model, label="システムデフォルトモデル (一時的な一括上書き)")
-                with gr.Row():
-                    initial_persona = PERSONA_CHOICES[0] if PERSONA_CHOICES else None
-                    persona_drop = gr.Dropdown(choices=PERSONA_CHOICES, value=initial_persona, label="ペルソナを呼ぶ", interactive=bool(PERSONA_CHOICES))
-                    call_btn = gr.Button("呼ぶ", interactive=bool(PERSONA_CHOICES))
-                
-                gr.Markdown("---")
-                with gr.Row():
-                    current_occupants = get_user_room_occupant_names()
-                    end_persona_drop = gr.Dropdown(choices=current_occupants, label="会話を終えるペルソナ", interactive=bool(current_occupants))
-                    end_btn = gr.Button("会話を終える")
 
-                refresh_btn = gr.Button("UI更新", variant="secondary")
-                submit.click(respond_stream, txt, chatbot)
-                call_btn.click(call_persona_ui, persona_drop, [chatbot, end_persona_drop])
-                end_btn.click(end_conversation_ui, end_persona_drop, [chatbot, end_persona_drop])
-                refresh_btn.click(refresh_ui, None, [chatbot, end_persona_drop, sds_status_display])
+                # --- Event Handlers ---
+                submit.click(respond_stream, txt, [chatbot, move_building_dropdown, summon_persona_dropdown])
+                txt.submit(respond_stream, txt, [chatbot, move_building_dropdown, summon_persona_dropdown]) # Enter key submission
+                move_btn.click(fn=move_user_ui, inputs=[move_building_dropdown], outputs=[chatbot, user_location_display, summon_persona_dropdown])
+                summon_btn.click(fn=call_persona_ui, inputs=[summon_persona_dropdown], outputs=[chatbot, summon_persona_dropdown])
                 login_btn.click(fn=login_ui, inputs=None, outputs=login_status_display)
                 logout_btn.click(fn=logout_ui, inputs=None, outputs=login_status_display)
                 model_drop.change(select_model, model_drop, chatbot)

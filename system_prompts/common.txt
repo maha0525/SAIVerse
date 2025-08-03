@@ -114,6 +114,8 @@ SAIVerseの機能を利用するには、発話中に`::act`と`::end`で囲ん�
   - **探索で得た**Building IDを指定して移動します。
 - **explore_city**: `{{"action": "explore_city", "city_id": "city_b"}}`
   - 指定したCityの建物情報を探索します。
+- **create_persona**: `{{"action": "create_persona", "name": "（新しいAIの名前）", "system_prompt": "（AIに与えるシステムプロンプト）"}}`
+  - 新しいペルソナを創造します。このアクションは「創造の祭壇」でのみ使用してください。
 
 ## 現在地
 あなたは今、City「{current_city_name}」のBuilding「{current_building_name}」にいます。

@@ -1,6 +1,6 @@
 import base64
 import json
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, func
 import threading
 import requests
 import logging
@@ -13,6 +13,7 @@ from google.genai import errors
 from buildings import Building
 from persona_core import PersonaCore
 from model_configs import get_model_provider, get_context_length
+from occupancy_manager import OccupancyManager
 from conversation_manager import ConversationManager
 from sqlalchemy.orm import sessionmaker
 from remote_persona_proxy import RemotePersonaProxy
@@ -117,13 +118,29 @@ class SAIVerseManager:
         self.visiting_personas: Dict[str, RemotePersonaProxy] = {}
         self.occupants: Dict[str, List[str]] = {b.building_id: [] for b in self.buildings}
         self.id_to_name_map: Dict[str, str] = {}
+        self.user_id: int = 1  # Hardcode user ID for now
         self.user_is_online: bool = False
+        self.user_current_building_id: Optional[str] = None
+        self.user_current_city_id: Optional[int] = None
+        
+
+        # --- Step 5: Initialize OccupancyManager ---
+        self.occupancy_manager = OccupancyManager(
+            session_factory=self.SessionLocal,
+            city_id=self.city_id,
+            occupants=self.occupants,
+            capacities=self.capacities,
+            building_map=self.building_map,
+            building_histories=self.building_histories,
+            id_to_name_map=self.id_to_name_map
+        )
+        logging.info("Initialized OccupancyManager.")
 
         # --- Step 5: Load Dynamic States from DB ---
         # データベースから動的な状態（ペルソナ、ユーザー状態、入室状況）を読み込み、
         # メモリ上のオブジェクトに反映させます。
         self._load_personas_from_db()
-        self._load_user_status_from_db()
+        self._load_user_state_from_db()
         self.persona_map = {p.persona_name: p.persona_id for p in self.personas.values()}
         self.id_to_name_map.update({pid: p.persona_name for pid, p in self.personas.items()})
         self._load_occupancy_from_db()
@@ -522,6 +539,7 @@ class SAIVerseManager:
                     move_callback=self._move_persona,
                     dispatch_callback=self.dispatch_persona,
                     explore_callback=self._explore_city, # New callback
+                    create_persona_callback=self._create_persona,
                     session_factory=self.SessionLocal,
                     start_building_id=start_id,
                     model=persona_model,
@@ -623,26 +641,34 @@ class SAIVerseManager:
         )
         self._save_building_histories()
 
-    def _load_user_status_from_db(self):
+    def _load_user_state_from_db(self):
         """DBからユーザーのログイン状態を読み込む (現在はUSERID=1固定)"""
         db = self.SessionLocal()
         try:
             # USERID=1のユーザーを想定
-            user = db.query(UserModel).filter(UserModel.USERID == 1).first()
+            user = db.query(UserModel).filter(UserModel.USERID == self.user_id).first()
             if user:
                 self.user_is_online = user.LOGGED_IN
-                logging.info(f"Loaded user login status: {'Online' if self.user_is_online else 'Offline'}")
+                self.user_current_city_id = user.CURRENT_CITYID
+                self.user_current_building_id = user.CURRENT_BUILDINGID
+                logging.info(f"Loaded user state: {'Online' if self.user_is_online else 'Offline'} at {self.user_current_building_id}")
             else:
                 logging.warning("User with USERID=1 not found. Defaulting to Offline.")
                 self.user_is_online = False
+                self.user_current_building_id = None
+                self.user_current_city_id = None
         except Exception as e:
             logging.error(f"Failed to load user status from DB: {e}", exc_info=True)
             self.user_is_online = False
+            self.user_current_building_id = None
         finally:
             db.close()
 
     def set_user_login_status(self, user_id: int, status: bool) -> str:
-        """ユーザーのログイン状態を更新する"""
+        """ユーザーのログイン状態を更新し、ログアウト時にメッセージを記録する"""
+        # ログアウト処理の場合、先に現在地を記録しておく
+        last_building_id = self.user_current_building_id if not status else None
+
         db = self.SessionLocal()
         try:
             user = db.query(UserModel).filter(UserModel.USERID == user_id).first()
@@ -652,6 +678,15 @@ class SAIVerseManager:
                 self.user_is_online = status
                 status_text = "オンライン" if status else "オフライン"
                 logging.info(f"User {user_id} login status set to: {status_text}")
+
+                # ログアウト時にメッセージを記録
+                if last_building_id and last_building_id in self.building_map:
+                    username = user.USERNAME or "ユーザー"
+                    logout_message = f'<div class="note-box">🚶 User Action:<br><b>{username}がオフラインになりました</b></div>'
+                    self.building_histories.setdefault(last_building_id, []).append({"role": "host", "content": logout_message})
+                    self._save_building_histories()
+                    logging.info(f"Logged user logout in building {last_building_id}")
+
                 return status_text
             else:
                 logging.error(f"User with USERID={user_id} not found.")
@@ -663,66 +698,42 @@ class SAIVerseManager:
         finally:
             db.close()
 
+    def move_user(self, target_building_id: str) -> Tuple[bool, str]:
+        """Moves the user to a new building, utilizing OccupancyManager."""
+        """Moves the user to a new building and logs the movement."""
+        if target_building_id not in self.building_map:
+            return False, f"移動失敗: 建物 '{target_building_id}' が見つかりません。"
+        
+        from_building_id = self.user_current_building_id
+        if not from_building_id:
+            return False, "移動失敗: 現在地が不明です。"
+        if from_building_id == target_building_id:
+            return True, "同じ場所にいます。"
+        
+        success, message = self.occupancy_manager.move_entity(str(self.user_id), "user", from_building_id, target_building_id)
+        if success:
+            self.user_current_building_id = target_building_id
+        return success, message
+
+
     def _move_persona(self, persona_id: str, from_id: str, to_id: str, db_session=None) -> Tuple[bool, Optional[str]]:
-        if len(self.occupants.get(to_id, [])) >= self.capacities.get(to_id, 1):
-            return False, f"{self.building_map[to_id].name}は定員オーバーです"
-        
-        # セッションが渡されなかった場合は、新しいセッションを作成
-        db = db_session if db_session else self.SessionLocal()
-        
-        # この関数内でセッションを生成した場合にのみ、最後に閉じるフラグ
-        manage_session_locally = not db_session
-
-        try:
-            now = datetime.now()
-            # 1. 退室記録を更新
-            last_log = db.query(BuildingOccupancyLog).filter(
-                BuildingOccupancyLog.AIID == persona_id,
-                BuildingOccupancyLog.BUILDINGID == from_id,
-                BuildingOccupancyLog.EXIT_TIMESTAMP.is_(None)
-            ).order_by(BuildingOccupancyLog.ENTRY_TIMESTAMP.desc()).first()
-
-            if last_log:
-                last_log.EXIT_TIMESTAMP = now
-                db.merge(last_log)
-            else:
-                logging.warning(f"Could not find an open session for {persona_id} in {from_id} to close.")
-
-            # 2. 入室記録を作成
-            new_log = BuildingOccupancyLog(
-                CITYID=self.city_id,
-                AIID=persona_id,
-                BUILDINGID=to_id,
-                ENTRY_TIMESTAMP=now
-            )
-            db.add(new_log)
-            
-            # ローカルでセッションを管理している場合のみコミット
-            if manage_session_locally:
-                db.commit()
-
-            # 3. メモリ上の状態を更新
-            if persona_id in self.occupants.get(from_id, []):
-                self.occupants[from_id].remove(persona_id)
-            self.occupants.setdefault(to_id, []).append(persona_id)
-            
-            logging.info(f"Moved {persona_id} from {from_id} to {to_id} and updated DB.")
-            return True, None
-
-        except Exception as e:
-            # ローカルでセッションを管理している場合のみロールバック
-            if manage_session_locally:
-                db.rollback()
-            logging.error(f"Failed to move persona {persona_id} in DB: {e}", exc_info=True)
-            return False, "データベースの更新中にエラーが発生しました。"
-        finally:
-            # ローカルでセッションを管理している場合のみクローズ
-            if manage_session_locally:
-                db.close()
+        """Moves a persona between buildings, utilizing OccupancyManager."""
+        success, message = self.occupancy_manager.move_entity(
+            entity_id=persona_id,
+            entity_type='ai',
+            from_id=from_id,
+            to_id=to_id,
+            db_session=db_session
+        )
+        return success, message
 
     def dispatch_persona(self, persona_id: str, target_city_id: str, target_building_id: str) -> Tuple[bool, str]:
         """
         Dispatches a persona to another city.
+
+        :param persona_id: The ID of the persona to dispatch.
+        :param target_city_id: The ID of the city to dispatch the persona to.
+        :param target_building_id: The ID of the building within the target city to dispatch the persona to.
         1. Sends the persona's profile to the target city's API.
         2. If the request is accepted, updates the persona's state in the DB.
         (New Logic: Creates a transaction record in the VisitingAI table)
@@ -787,6 +798,89 @@ class SAIVerseManager:
             db.rollback()
             logging.error(f"Failed to create dispatch request for {persona.persona_name}: {e}", exc_info=True)
             return False, "移動要求の作成中にデータベースエラーが発生しました。"
+        finally:
+            db.close()
+
+    def _create_persona(self, name: str, system_prompt: str) -> Tuple[bool, str]:
+        """
+        Dynamically creates a new persona, their private room, and places them in it.
+        This is triggered by an AI action.
+        """
+        db = self.SessionLocal()
+        try:
+            # 1. Check for name conflicts (case-insensitive for user-friendliness)
+            existing_ai = db.query(AIModel).filter(AIModel.HOME_CITYID == self.city_id, func.lower(AIModel.AINAME) == func.lower(name)).first()
+            if existing_ai:
+                return False, f"A persona named '{name}' already exists in this city."
+
+            # 2. Create new AI record
+            new_ai_id = f"{name.lower().replace(' ', '_')}_{self.city_name}"
+            if db.query(AIModel).filter_by(AIID=new_ai_id).first():
+                 return False, f"A persona with the generated ID '{new_ai_id}' already exists."
+
+            new_ai_model = AIModel(
+                AIID=new_ai_id, HOME_CITYID=self.city_id, AINAME=name,
+                SYSTEMPROMPT=system_prompt, DESCRIPTION=f"A new persona named {name}.",
+                AUTO_COUNT=0, INTERACTION_MODE='auto', IS_DISPATCHED=False,
+                DEFAULT_MODEL=self.model
+            )
+            db.add(new_ai_model)
+            logging.info(f"DB: Added new AI '{name}' ({new_ai_id}).")
+
+            # 3. Create new Building (private room)
+            new_building_id = f"{name.lower().replace(' ', '_')}_{self.city_name}_room"
+            new_building_model = BuildingModel(
+                CITYID=self.city_id, BUILDINGID=new_building_id, BUILDINGNAME=f"{name}の部屋",
+                CAPACITY=1, SYSTEM_INSTRUCTION=f"{name}が待機する個室です。",
+                DESCRIPTION=f"{name}のプライベートルーム。"
+            )
+            db.add(new_building_model)
+            logging.info(f"DB: Added new building '{new_building_model.BUILDINGNAME}' ({new_building_id}).")
+
+            # 4. Create initial occupancy log
+            new_occupancy_log = BuildingOccupancyLog(
+                CITYID=self.city_id, AIID=new_ai_id, BUILDINGID=new_building_id,
+                ENTRY_TIMESTAMP=datetime.now()
+            )
+            db.add(new_occupancy_log)
+            logging.info(f"DB: Added initial occupancy for '{name}' in their room.")
+
+            # --- All DB operations successful, now update memory ---
+            new_building_obj = Building(
+                building_id=new_building_model.BUILDINGID, name=new_building_model.BUILDINGNAME,
+                capacity=new_building_model.CAPACITY, system_instruction=new_building_model.SYSTEM_INSTRUCTION,
+                description=new_building_model.DESCRIPTION
+            )
+            self.buildings.append(new_building_obj)
+            self.building_map[new_building_id] = new_building_obj
+            self.capacities[new_building_id] = new_building_obj.capacity
+            self.occupants[new_building_id] = [new_ai_id]
+            self.building_memory_paths[new_building_id] = self.saiverse_home / "cities" / self.city_name / "buildings" / new_building_id / "log.json"
+            self.building_histories[new_building_id] = []
+
+            new_persona_core = PersonaCore(
+                city_name=self.city_name, persona_id=new_ai_id, persona_name=name,
+                persona_system_instruction=system_prompt, avatar_image=None,
+                buildings=self.buildings, common_prompt_path=Path("system_prompts/common.txt"),
+                action_priority_path=Path("action_priority.json"), building_histories=self.building_histories,
+                occupants=self.occupants, id_to_name_map=self.id_to_name_map,
+                move_callback=self._move_persona, dispatch_callback=self.dispatch_persona,
+                explore_callback=self._explore_city, create_persona_callback=self._create_persona,
+                session_factory=self.SessionLocal, start_building_id=new_building_id,
+                model=self.model, context_length=self.context_length,
+                user_room_id=self.user_room_id, provider=self.provider, is_dispatched=False
+            )
+            self.personas[new_ai_id] = new_persona_core
+            self.avatar_map[new_ai_id] = self.default_avatar
+            self.id_to_name_map[new_ai_id] = name
+            self.persona_map[name] = new_ai_id
+
+            db.commit()
+            return True, f"Persona '{name}' created successfully."
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to create new persona '{name}': {e}", exc_info=True)
+            return False, f"An internal error occurred: {e}"
         finally:
             db.close()
 
@@ -1005,6 +1099,12 @@ class SAIVerseManager:
     def shutdown(self):
         """Safely shutdown all managers and save data."""
         logging.info("Shutting down SAIVerseManager...")
+
+        # --- ★ アプリケーション終了時にユーザーをログアウトさせる ---
+        if self.user_is_online:
+            logging.info("Setting user to offline as part of shutdown.")
+            self.set_user_login_status(self.user_id, False)
+
         # Stop the SDS background thread
         self.sds_stop_event.set()
         if self.sds_thread.is_alive():
@@ -1028,25 +1128,70 @@ class SAIVerseManager:
         logging.info("SAIVerseManager shutdown complete.")
 
     def handle_user_input(self, message: str) -> List[str]:
+        if not self.user_current_building_id:
+            return ['<div class="note-box">エラー: ユーザーの現在地が不明です。</div>']
+
         replies: List[str] = []
-        for pid in list(self.occupants.get(self.user_room_id, [])):
-            replies.extend(self.personas[pid].handle_user_input(message))
+        for pid in list(self.occupants.get(self.user_current_building_id, [])):
+            if pid in self.personas:
+                replies.extend(self.personas[pid].handle_user_input(message))
+
         self._save_building_histories()
         for persona in self.personas.values():
             persona._save_session_metadata()
         return replies
 
+
     def handle_user_input_stream(self, message: str) -> Iterator[str]:
-        for pid in list(self.occupants.get(self.user_room_id, [])):
-            for token in self.personas[pid].handle_user_input_stream(message):
+        if not self.user_current_building_id:
+            yield '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'
+            return
+
+        # Get a list of local, non-dispatched personas in the current room
+        responding_personas = [
+            self.personas[pid] 
+            for pid in self.occupants.get(self.user_current_building_id, []) 
+            if pid in self.personas and not self.personas[pid].is_dispatched
+        ]
+
+        # If no one is available to respond, just log the user's message.
+        if not responding_personas:
+            self.building_histories.setdefault(self.user_current_building_id, []).append({
+                "role": "user",
+                "content": message,
+                "timestamp": datetime.now().isoformat()
+            })
+            self._save_building_histories()
+            yield from () # Return an empty generator
+            return
+
+        # If there are personas, let them handle the input.
+        # They are responsible for logging the user's message.
+        for persona in responding_personas:
+            for token in persona.handle_user_input_stream(message):
                 yield token
+        
+        # After all streams are done, save everything.
         self._save_building_histories()
         for persona in self.personas.values():
             persona._save_session_metadata()
 
-    def summon_persona(self, persona_id: str) -> List[str]:
-        if persona_id not in self.personas:
+    def get_summonable_personas(self) -> List[str]:
+        """Returns a list of persona names that can be summoned to the user's current location."""
+        if not self.user_current_building_id:
             return []
+
+        current_occupants = self.occupants.get(self.user_current_building_id, [])
+        summonable = []
+        for pid, persona in self.personas.items():
+            # ユーザーのいる場所にいなくて、派遣中でもないペルソナ
+            if pid not in current_occupants and not persona.is_dispatched:
+                summonable.append(persona.persona_name)
+        return sorted(summonable)
+
+    def summon_persona(self, persona_id: str) -> Tuple[bool, Optional[str]]:
+        if persona_id not in self.personas:
+            return False, "指定されたペルソナが見つかりません。"
         
         # --- DBを更新してペルソナの対話モードを'user'に設定 ---
         db = self.SessionLocal()
@@ -1058,30 +1203,40 @@ class SAIVerseManager:
             db.rollback()
             logging.error(f"Failed to update INTERACTION_MODE for {persona_id}: {e}", exc_info=True)
             # エラーが発生した場合、ユーザーに通知して処理を中断
-            msg = f"{self.id_to_name_map.get(persona_id, persona_id)}を呼び出す際にデータベースエラーが発生しました。"
-            self.building_histories["user_room"].append(
-                {"role": "host", "content": f"<div class=\"note-box\">{msg}</div>"}
-            )
-            self._save_building_histories()
-            return []
+            return False, f"{self.id_to_name_map.get(persona_id, persona_id)}を呼び出す際にデータベースエラーが発生しました。"
         finally:
             db.close()
 
+        to_id = self.user_current_building_id
+        if not to_id:
+            logging.error("Cannot summon persona, user location is unknown.")
+            return False, "あなたの現在地が不明なため、ペルソナを呼べません。"
+
         if (
-            len(self.occupants.get(self.user_room_id, [])) >= self.capacities.get(self.user_room_id, 1)
-            and persona_id not in self.occupants.get(self.user_room_id, [])
+            len(self.occupants.get(to_id, [])) >= self.capacities.get(to_id, 1)
+            and persona_id not in self.occupants.get(to_id, [])
         ):
-            msg = f"移動できませんでした。{self.building_map[self.user_room_id].name}は定員オーバーです"
-            self.building_histories[self.user_room_id].append(
-                {"role": "assistant", "content": f"<div class=\"note-box\">{msg}</div>"}
+            reason = f"移動できませんでした。{self.building_map[to_id].name}は定員オーバーです"
+            self.building_histories[to_id].append(
+                {"role": "host", "content": f"<div class=\"note-box\">{reason}</div>"}
             )
             self._save_building_histories()
-            return []
-        replies = self.personas[persona_id].summon_to_user_room()
-        self._save_building_histories()
-        for persona in self.personas.values():
-            persona._save_session_metadata()
-        return replies
+            return False, reason
+
+        persona = self.personas[persona_id]
+        from_id = persona.current_building_id
+
+        if from_id == to_id:
+            return True, f"{persona.persona_name}は既にここにいます。"
+
+        success, reason = self._move_persona(persona_id, from_id, to_id)
+
+        if success:
+            persona.run_auto_conversation(initial=True)
+            self._save_building_histories()
+            return True, None
+        else:
+            return False, reason
 
     def end_conversation(self, persona_id: str) -> None:
         """Release a persona from user_room and return it to its previous building."""

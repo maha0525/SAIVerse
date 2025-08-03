@@ -21,6 +21,8 @@ class User(Base):
     USERNAME = Column(String(32), nullable=False)
     MAILADDRESS = Column(String(64))
     LOGGED_IN = Column(Boolean, default=False, nullable=False)
+    CURRENT_CITYID = Column(Integer, ForeignKey("city.CITYID"), nullable=True)
+    CURRENT_BUILDINGID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
 
 class AI(Base):
     __tablename__ = "ai"
