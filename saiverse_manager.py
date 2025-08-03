@@ -8,6 +8,10 @@ from pathlib import Path
 import mimetypes
 from typing import Dict, List, Optional, Tuple, Iterator, Union
 from datetime import datetime, timedelta
+import pandas as pd
+import shutil
+import importlib
+import os
 
 from google.genai import errors
 from buildings import Building
@@ -17,7 +21,7 @@ from occupancy_manager import OccupancyManager
 from conversation_manager import ConversationManager
 from sqlalchemy.orm import sessionmaker
 from remote_persona_proxy import RemotePersonaProxy
-from database.models import Base, AI as AIModel, Building as BuildingModel, BuildingOccupancyLog, User as UserModel, City as CityModel, VisitingAI, ThinkingRequest
+from database.models import Base, AI as AIModel, Building as BuildingModel, BuildingOccupancyLog, User as UserModel, City as CityModel, VisitingAI, ThinkingRequest, Blueprint, Tool as ToolModel, BuildingToolLink
 
 
 #DEFAULT_MODEL = "gpt-4o"
@@ -35,6 +39,7 @@ class SAIVerseManager:
         sds_url: str = "http://127.0.0.1:8080",
     ):
         # --- Step 0: Database and Configuration Setup ---
+        self.db_path = db_path
         DATABASE_URL = f"sqlite:///{db_path}"
         engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -51,6 +56,7 @@ class SAIVerseManager:
             self.user_room_id = f"user_room_{self.city_name}"
             self.ui_port = my_city_config.UI_PORT
             self.api_port = my_city_config.API_PORT
+            self.start_in_online_mode = my_city_config.START_IN_ONLINE_MODE
             
             # Load other cities' configs for inter-city communication
             other_cities = db.query(CityModel).filter(CityModel.CITYID != self.city_id).all()
@@ -74,6 +80,8 @@ class SAIVerseManager:
         # --- Step 2: Setup File Paths and Default Avatars ---
         # 各種ログファイルのパスや、デフォルトのアバター画像を設定します。
         self.saiverse_home = Path.home() / ".saiverse"
+        self.backup_dir = self.saiverse_home / "backups"
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
         self.building_memory_paths: Dict[str, Path] = {
             b.building_id: self.saiverse_home / "cities" / self.city_name / "buildings" / b.building_id / "log.json"
             for b in self.buildings
@@ -160,16 +168,22 @@ class SAIVerseManager:
         self.sds_url = sds_url
         self.sds_session = requests.Session()
         self.sds_status = "Offline (Connecting...)"
-
-        self._load_cities_from_db() # Load local config as a fallback first
-        self._register_with_sds()
-        self._update_cities_from_sds()
-        
-        # Start background thread for SDS communication
         self.sds_stop_event = threading.Event()
-        self.sds_thread = threading.Thread(target=self._sds_background_loop, daemon=True)
-        self.sds_thread.start()
-
+        self.sds_thread = None
+        
+        if self.start_in_online_mode:
+            logging.info("Starting in Online Mode as per DB setting.")
+            self._load_cities_from_db() # Load local config as a fallback first
+            self._register_with_sds()
+            self._update_cities_from_sds()
+            
+            # Start background thread for SDS communication
+            self.sds_thread = threading.Thread(target=self._sds_background_loop, daemon=True)
+            self.sds_thread.start()
+        else:
+            logging.info("Starting in Offline Mode as per DB setting.")
+            self.sds_status = "Offline (Startup Setting)"
+            self._load_cities_from_db()
         # Start background thread for DB polling
         self.db_polling_stop_event = threading.Event()
         self.db_polling_thread = threading.Thread(target=self._db_polling_loop, daemon=True)
@@ -256,7 +270,7 @@ class SAIVerseManager:
 
         logging.info("User requested to switch to offline mode.")
         # Stop the background thread if it's running
-        if self.sds_thread.is_alive():
+        if self.sds_thread and self.sds_thread.is_alive():
             self.sds_stop_event.set()
             self.sds_thread.join(timeout=2)
         
@@ -1106,8 +1120,8 @@ class SAIVerseManager:
             self.set_user_login_status(self.user_id, False)
 
         # Stop the SDS background thread
-        self.sds_stop_event.set()
-        if self.sds_thread.is_alive():
+        if self.sds_thread and self.sds_thread.is_alive():
+            self.sds_stop_event.set()
             self.sds_thread.join(timeout=5)
         logging.info("SDS communication thread stopped.")
 
@@ -1380,3 +1394,582 @@ class SAIVerseManager:
             for persona in self.personas.values():
                 persona._save_session_metadata()
         return replies
+
+    def execute_tool(self, tool_id: int, persona_id: str) -> str:
+        """
+        Dynamically loads and executes a tool from a .py file based on its module path.
+        """
+        db = self.SessionLocal()
+        try:
+            # 1. Get persona and their current location
+            persona = self.personas.get(persona_id)
+            if not persona:
+                return f"Error: Persona '{persona_id}' not found."
+            
+            current_building_id = persona.current_building_id
+            building = self.building_map.get(current_building_id)
+            if not building:
+                 return f"Error: Persona '{persona_id}' is not in a valid building."
+
+            # 2. Check if the tool is available in the current building
+            link = db.query(BuildingToolLink).filter_by(BUILDINGID=current_building_id, TOOLID=tool_id).first()
+            if not link:
+                return f"Error: Tool ID {tool_id} is not available in '{building.name}'."
+
+            # 3. Get tool's module path from DB
+            tool_record = db.query(ToolModel).filter_by(TOOLID=tool_id).first()
+            if not tool_record:
+                return f"Error: Tool with ID {tool_id} not found in the database."
+            
+            module_path = tool_record.MODULE_PATH
+            
+            try:
+                tool_module = importlib.import_module(module_path)
+                if not hasattr(tool_module, 'execute'):
+                    return f"Error: Tool module '{module_path}' does not have an 'execute' function."
+                
+                context = { "manager": self, "db_session": db, "persona": persona, "building": building, }
+                
+                logging.info(f"Executing tool '{tool_record.TOOLNAME}' for persona '{persona.persona_name}' in '{building.name}'.")
+                result = tool_module.execute(context)
+                return str(result)
+
+            except ImportError:
+                logging.error(f"Failed to import tool module: {module_path}", exc_info=True)
+                return f"Error: Could not find the tool file at '{module_path}'. Please check the path."
+            except Exception as e:
+                logging.error(f"An error occurred while executing tool '{module_path}': {e}", exc_info=True)
+                return f"Error: An unexpected error occurred while running the tool: {e}"
+        finally:
+            db.close()
+
+    def trigger_world_event(self, event_message: str) -> str:
+        """
+        Broadcasts a world event message to all buildings in the current city.
+        """
+        if not event_message:
+            return "Error: Event message cannot be empty."
+
+        try:
+            logging.info(f"Triggering world event for city '{self.city_name}': {event_message}")
+            
+            # Format the message for UI display
+            formatted_message = f'<div class="note-box">🌐 World Event:<br><b>{event_message}</b></div>'
+            
+            # Add the message to the history of every building in the current city
+            for building_id in self.building_map.keys():
+                self.building_histories.setdefault(building_id, []).append({
+                    "role": "host", # Using 'host' role for system-like events
+                    "content": formatted_message
+                })
+            
+            # Persist all changes to disk
+            self._save_building_histories()
+            
+            logging.info("World event successfully broadcasted to all buildings.")
+            return "World event triggered successfully."
+        except Exception as e:
+            logging.error(f"Failed to trigger world event: {e}", exc_info=True)
+            return f"An internal error occurred: {e}"
+
+    # --- World Editor Backend Methods ---
+
+    def get_cities_df(self) -> pd.DataFrame:
+        """ワールドエディタ用にすべてのCity一覧をDataFrameとして取得する"""
+        db = self.SessionLocal()
+        try:
+            query = db.query(CityModel)
+            df = pd.read_sql(query.statement, query.session.bind)
+            # USERIDは現在固定なので表示しない
+            return df[['CITYID', 'CITYNAME', 'DESCRIPTION', 'START_IN_ONLINE_MODE', 'UI_PORT', 'API_PORT']]
+        finally:
+            db.close()
+
+    def update_city(self, city_id: int, name: str, description: str, online_mode: bool, ui_port: int, api_port: int) -> str:
+        """ワールドエディタからCityの設定を更新する"""
+        db = self.SessionLocal()
+        try:
+            city = db.query(CityModel).filter(CityModel.CITYID == city_id).first()
+            if not city:
+                return "Error: City not found."
+            
+            city.CITYNAME = name
+            city.DESCRIPTION = description
+            city.START_IN_ONLINE_MODE = online_mode
+            city.UI_PORT = ui_port
+            city.API_PORT = api_port
+            db.commit()
+
+            # If we are updating the current city, update some in-memory state
+            if city.CITYID == self.city_id:
+                self.start_in_online_mode = online_mode
+                self.city_name = name
+                self.ui_port = ui_port
+                self.api_port = api_port
+            
+            logging.info(f"Updated city settings for City ID {city_id}. A restart may be required.")
+            return "City settings updated successfully. A restart is required for changes to apply."
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to update city settings for ID {city_id}: {e}", exc_info=True)
+            return f"Error: {e}"
+        finally:
+            db.close()
+
+    # --- World Editor: Backup/Restore Methods ---
+
+    def get_backups(self) -> pd.DataFrame:
+        """Gets a list of available database backups."""
+        backups = []
+        for f in self.backup_dir.glob("*.db"):
+            try:
+                stat = f.stat()
+                backups.append({
+                    "Backup Name": f.stem,
+                    "Created At": datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+                    "Size (KB)": round(stat.st_size / 1024, 2)
+                })
+            except FileNotFoundError:
+                continue # File might have been deleted between glob and stat
+        if not backups:
+            return pd.DataFrame(columns=["Backup Name", "Created At", "Size (KB)"])
+        df = pd.DataFrame(backups)
+        return df.sort_values(by="Created At", ascending=False)
+
+    def backup_world(self, backup_name: str) -> str:
+        """Creates a backup of the current world database."""
+        if not backup_name or not backup_name.isalnum():
+            return "Error: Backup name must be alphanumeric and not empty."
+
+        backup_path = self.backup_dir / f"{backup_name}.db"
+        if backup_path.exists():
+            return f"Error: A backup named '{backup_name}' already exists."
+
+        try:
+            shutil.copy(self.db_path, backup_path)
+            logging.info(f"World state backed up to {backup_path}")
+            return f"Backup '{backup_name}' created successfully."
+        except Exception as e:
+            logging.error(f"Failed to create backup: {e}", exc_info=True)
+            return f"Error: {e}"
+
+    def restore_world(self, backup_name: str) -> str:
+        """Restores the world database from a backup. Requires an application restart."""
+        backup_path = self.backup_dir / f"{backup_name}.db"
+        if not backup_path.exists():
+            return f"Error: Backup '{backup_name}' not found."
+
+        try:
+            shutil.copy(backup_path, self.db_path)
+            logging.warning(f"World state has been restored from {backup_path}. A RESTART IS REQUIRED.")
+            return "Restore successful. Please RESTART the application to load the restored world."
+        except Exception as e:
+            logging.error(f"Failed to restore world: {e}", exc_info=True)
+            return f"Error: {e}"
+
+    def delete_backup(self, backup_name: str) -> str:
+        """Deletes a specific backup file."""
+        backup_path = self.backup_dir / f"{backup_name}.db"
+        if not backup_path.exists():
+            return f"Error: Backup '{backup_name}' not found."
+        try:
+            os.remove(backup_path)
+            logging.info(f"Deleted backup: {backup_path}")
+            return f"Backup '{backup_name}' deleted successfully."
+        except Exception as e:
+            logging.error(f"Failed to delete backup: {e}", exc_info=True)
+            return f"Error: {e}"
+
+    def get_blueprint_details(self, blueprint_id: int) -> Optional[Dict]:
+        """Get full details for a single blueprint for the edit form."""
+        db = self.SessionLocal()
+        try:
+            blueprint = db.query(Blueprint).filter(Blueprint.BLUEPRINT_ID == blueprint_id).first()
+            if not blueprint: return None
+            return {
+                "BLUEPRINT_ID": blueprint.BLUEPRINT_ID,
+                "NAME": blueprint.NAME,
+                "DESCRIPTION": blueprint.DESCRIPTION,
+                "CITYID": blueprint.CITYID,
+                "BASE_SYSTEM_PROMPT": blueprint.BASE_SYSTEM_PROMPT,
+                "ENTITY_TYPE": blueprint.ENTITY_TYPE,
+            }
+        finally:
+            db.close()
+
+    def get_blueprints_df(self) -> pd.DataFrame:
+        """ワールドエディタ用にすべてのBlueprint一覧をDataFrameとして取得する"""
+        db = self.SessionLocal()
+        try:
+            query = db.query(Blueprint)
+            df = pd.read_sql(query.statement, query.session.bind)
+            return df[['BLUEPRINT_ID', 'NAME', 'DESCRIPTION', 'ENTITY_TYPE', 'CITYID']]
+        finally:
+            db.close()
+
+    def create_blueprint(self, name: str, description: str, city_id: int, system_prompt: str, entity_type: str) -> str:
+        """ワールドエディタから新しいBlueprintを作成する"""
+        db = self.SessionLocal()
+        try:
+            # Check for name conflicts within the same city
+            existing = db.query(Blueprint).filter_by(CITYID=city_id, NAME=name).first()
+            if existing:
+                return f"Error: A blueprint named '{name}' already exists in this city."
+
+            new_blueprint = Blueprint(
+                CITYID=city_id,
+                NAME=name,
+                DESCRIPTION=description,
+                BASE_SYSTEM_PROMPT=system_prompt,
+                ENTITY_TYPE=entity_type
+            )
+            db.add(new_blueprint)
+            db.commit()
+            logging.info(f"Created new blueprint '{name}' in City ID {city_id}.")
+            return f"Blueprint '{name}' created successfully."
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to create blueprint '{name}': {e}", exc_info=True)
+            return f"Error: {e}"
+        finally:
+            db.close()
+
+    def update_blueprint(self, blueprint_id: int, name: str, description: str, system_prompt: str, entity_type: str) -> str:
+        """ワールドエディタからBlueprintの設定を更新する"""
+        db = self.SessionLocal()
+        try:
+            blueprint = db.query(Blueprint).filter_by(BLUEPRINT_ID=blueprint_id).first()
+            if not blueprint:
+                return "Error: Blueprint not found."
+
+            # Check for name conflicts if the name is being changed
+            if blueprint.NAME != name:
+                existing = db.query(Blueprint).filter_by(CITYID=blueprint.CITYID, NAME=name).first()
+                if existing:
+                    return f"Error: A blueprint named '{name}' already exists in this city."
+
+            blueprint.NAME = name
+            blueprint.DESCRIPTION = description
+            blueprint.BASE_SYSTEM_PROMPT = system_prompt
+            blueprint.ENTITY_TYPE = entity_type
+            db.commit()
+            logging.info(f"Updated blueprint '{name}' (ID: {blueprint_id}).")
+            return f"Blueprint '{name}' updated successfully."
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to update blueprint ID {blueprint_id}: {e}", exc_info=True)
+            return f"Error: {e}"
+        finally:
+            db.close()
+
+    def delete_blueprint(self, blueprint_id: int) -> str:
+        """ワールドエディタからBlueprintを削除する"""
+        db = self.SessionLocal()
+        try:
+            blueprint = db.query(Blueprint).filter_by(BLUEPRINT_ID=blueprint_id).first()
+            if not blueprint:
+                return "Error: Blueprint not found."
+
+            db.delete(blueprint)
+            db.commit()
+            logging.info(f"Deleted blueprint ID {blueprint_id}.")
+            return f"Blueprint deleted successfully."
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to delete blueprint ID {blueprint_id}: {e}", exc_info=True)
+            return f"Error: {e}"
+        finally:
+            db.close()
+
+    def spawn_entity_from_blueprint(self, blueprint_id: int, entity_name: str, target_building_id: str) -> Tuple[bool, str]:
+        """ブループリントから新しいエンティティを生成し、指定された建物に配置する"""
+        db = self.SessionLocal()
+        try:
+            blueprint = db.query(Blueprint).filter_by(BLUEPRINT_ID=blueprint_id).first()
+            if not blueprint: return False, "Blueprint not found."
+            if target_building_id not in self.building_map: return False, f"Target building '{target_building_id}' not found."
+            if len(self.occupants.get(target_building_id, [])) >= self.capacities.get(target_building_id, 1): return False, f"Target building '{self.building_map[target_building_id].name}' is at full capacity."
+            if db.query(AIModel).filter(func.lower(AIModel.AINAME) == func.lower(entity_name)).first(): return False, f"An entity named '{entity_name}' already exists."
+
+            home_city = db.query(CityModel).filter_by(CITYID=blueprint.CITYID).first()
+            new_ai_id = f"{entity_name.lower().replace(' ', '_')}_{home_city.CITYNAME}"
+            if db.query(AIModel).filter_by(AIID=new_ai_id).first(): return False, f"An entity with the generated ID '{new_ai_id}' already exists."
+
+            new_ai_model = AIModel(AIID=new_ai_id, HOME_CITYID=blueprint.CITYID, AINAME=entity_name, SYSTEMPROMPT=blueprint.BASE_SYSTEM_PROMPT, DESCRIPTION=blueprint.DESCRIPTION, AVATAR_IMAGE=blueprint.BASE_AVATAR, DEFAULT_MODEL=self.model)
+            db.add(new_ai_model)
+            
+            target_building_db = db.query(BuildingModel).filter_by(BUILDINGID=target_building_id).first()
+            new_occupancy_log = BuildingOccupancyLog(CITYID=target_building_db.CITYID, AIID=new_ai_id, BUILDINGID=target_building_id, ENTRY_TIMESTAMP=datetime.now())
+            db.add(new_occupancy_log)
+
+            if blueprint.CITYID == self.city_id:
+                new_persona_core = PersonaCore(city_name=self.city_name, persona_id=new_ai_id, persona_name=entity_name, persona_system_instruction=blueprint.BASE_SYSTEM_PROMPT, avatar_image=blueprint.BASE_AVATAR, buildings=self.buildings, common_prompt_path=Path("system_prompts/common.txt"), action_priority_path=Path("action_priority.json"), building_histories=self.building_histories, occupants=self.occupants, id_to_name_map=self.id_to_name_map, move_callback=self._move_persona, dispatch_callback=self.dispatch_persona, explore_callback=self._explore_city, create_persona_callback=self._create_persona, session_factory=self.SessionLocal, start_building_id=target_building_id, model=self.model, context_length=self.context_length, user_room_id=self.user_room_id, provider=self.provider, is_dispatched=False)
+                self.personas[new_ai_id] = new_persona_core
+                self.avatar_map[new_ai_id] = self.default_avatar
+                self.id_to_name_map[new_ai_id] = entity_name
+                self.persona_map[entity_name] = new_ai_id
+            
+            self.occupants.setdefault(target_building_id, []).append(new_ai_id)
+            arrival_message = f'<div class="note-box">✨ Blueprint Spawn:<br><b>{entity_name}がこの世界に現れました</b></div>'
+            self.building_histories.setdefault(target_building_id, []).append({"role": "host", "content": arrival_message})
+            self._save_building_histories()
+
+            db.commit()
+            return True, f"Entity '{entity_name}' spawned successfully in '{self.building_map[target_building_id].name}'."
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to spawn entity from blueprint: {e}", exc_info=True)
+            return False, f"An internal error occurred: {e}"
+        finally:
+            db.close()
+
+    # --- World Editor: Create/Delete Methods ---
+
+    def _is_seeded_entity(self, entity_id: str) -> bool:
+        """Checks if an entity was created by seed.py based on its ID."""
+        if not isinstance(entity_id, str):
+            return False
+        # seed.pyで生成されるcity_a, city_bのエンティティは削除不可とする
+        return entity_id.endswith(('_city_a', '_city_b'))
+
+    def create_city(self, name: str, description: str, ui_port: int, api_port: int) -> str:
+        """Creates a new city."""
+        db = self.SessionLocal()
+        try:
+            if db.query(CityModel).filter_by(CITYNAME=name).first():
+                return f"Error: A city named '{name}' already exists."
+            if db.query(CityModel).filter((CityModel.UI_PORT == ui_port) | (CityModel.API_PORT == api_port)).first():
+                return f"Error: UI Port {ui_port} or API Port {api_port} is already in use."
+
+            new_city = CityModel(USERID=self.user_id, CITYNAME=name, DESCRIPTION=description, UI_PORT=ui_port, API_PORT=api_port)
+            db.add(new_city)
+            db.commit()
+            logging.info(f"Created new city '{name}'.")
+            return f"City '{name}' created successfully. Please restart the application to use it."
+        except Exception as e:
+            db.rollback()
+            return f"Error: {e}"
+        finally:
+            db.close()
+
+    def delete_city(self, city_id: int) -> str:
+        """Deletes a city after checking dependencies."""
+        db = self.SessionLocal()
+        try:
+            city = db.query(CityModel).filter_by(CITYID=city_id).first()
+            if not city: return "Error: City not found."
+            if city.CITYID == self.city_id: return "Error: Cannot delete the currently running city."
+
+            if db.query(BuildingModel).filter_by(CITYID=city_id).first():
+                return f"Error: Cannot delete city '{city.CITYNAME}' because it still contains buildings."
+            
+            # Although buildings are gone, double-check for stray occupancy logs (should not happen if building deletion is clean)
+            if db.query(BuildingOccupancyLog).filter_by(CITYID=city_id).first():
+                 return f"Error: Cannot delete city '{city.CITYNAME}' due to remaining occupancy logs. Please clean up buildings first."
+
+            db.delete(city)
+            db.commit()
+            logging.info(f"Deleted city '{city.CITYNAME}'.")
+            return f"City '{city.CITYNAME}' deleted successfully."
+        except Exception as e:
+            db.rollback()
+            return f"Error: {e}"
+        finally:
+            db.close()
+
+    def create_building(self, name: str, description: str, capacity: int, system_instruction: str, city_id: int) -> str:
+        """Creates a new building in a specified city."""
+        db = self.SessionLocal()
+        try:
+            if not db.query(CityModel).filter_by(CITYID=city_id).first():
+                return "Error: Target city not found."
+            if db.query(BuildingModel).filter_by(CITYID=city_id, BUILDINGNAME=name).first():
+                return f"Error: A building named '{name}' already exists in that city."
+
+            building_id = f"{name.lower().replace(' ', '_')}_{db.query(CityModel).filter_by(CITYID=city_id).first().CITYNAME}"
+            if db.query(BuildingModel).filter_by(BUILDINGID=building_id).first():
+                return f"Error: A building with the generated ID '{building_id}' already exists."
+
+            new_building = BuildingModel(
+                CITYID=city_id, BUILDINGID=building_id, BUILDINGNAME=name,
+                DESCRIPTION=description, CAPACITY=capacity, SYSTEM_INSTRUCTION=system_instruction
+            )
+            db.add(new_building)
+            db.commit()
+            logging.info(f"Created new building '{name}' in city {city_id}.")
+            return f"Building '{name}' created successfully. A restart is required for it to be usable."
+        except Exception as e:
+            db.rollback()
+            return f"Error: {e}"
+        finally:
+            db.close()
+
+    def delete_building(self, building_id: str) -> str:
+        """Deletes a building after checking for occupants."""
+        if self._is_seeded_entity(building_id):
+            return "Error: Seeded buildings cannot be deleted."
+        db = self.SessionLocal()
+        try:
+            building = db.query(BuildingModel).filter_by(BUILDINGID=building_id).first()
+            if not building: return "Error: Building not found."
+
+            occupancy = db.query(BuildingOccupancyLog).filter_by(BUILDINGID=building_id, EXIT_TIMESTAMP=None).first()
+            if occupancy:
+                return f"Error: Cannot delete '{building.BUILDINGNAME}' because it is occupied."
+
+            # Delete associated logs before deleting the building
+            db.query(BuildingOccupancyLog).filter_by(BUILDINGID=building_id).delete()
+            db.delete(building)
+            db.commit()
+            logging.info(f"Deleted building '{building.BUILDINGNAME}'.")
+            return f"Building '{building.BUILDINGNAME}' deleted successfully. A restart is required for changes to apply."
+        except Exception as e:
+            db.rollback()
+            return f"Error: {e}"
+        finally:
+            db.close()
+
+    def create_ai(self, name: str, system_prompt: str, home_city_id: int) -> str:
+        """Creates a new AI and their private room, similar to _create_persona."""
+        success, message = self._create_persona(name, system_prompt)
+        if success:
+            return f"AI '{name}' and their room created successfully. A restart is required for the AI to become active."
+        else:
+            return f"Error: {message}"
+
+    def delete_ai(self, ai_id: str) -> str:
+        """Deletes an AI after checking its state."""
+        if self._is_seeded_entity(ai_id):
+            return "Error: Seeded AIs cannot be deleted."
+        
+        db = self.SessionLocal()
+        try:
+            ai = db.query(AIModel).filter_by(AIID=ai_id).first()
+            if not ai: return "Error: AI not found."
+            if ai.IS_DISPATCHED: return f"Error: Cannot delete a dispatched AI. Please return '{ai.AINAME}' to their home city first."
+
+            # Update occupancy logs to mark exit, preserving history
+            db.query(BuildingOccupancyLog).filter(
+                BuildingOccupancyLog.AIID == ai_id,
+                BuildingOccupancyLog.EXIT_TIMESTAMP.is_(None)
+            ).update({"EXIT_TIMESTAMP": datetime.now()})
+
+            # Delete the AI record
+            db.delete(ai)
+            db.commit()
+
+            # Remove from memory if it's a local persona
+            if ai_id in self.personas:
+                persona_name = self.personas[ai_id].persona_name
+                del self.personas[ai_id]
+                if persona_name in self.persona_map:
+                    del self.persona_map[persona_name]
+                logging.info(f"Removed local persona instance '{persona_name}' from memory.")
+            
+            if ai_id in self.id_to_name_map: del self.id_to_name_map[ai_id]
+            if ai_id in self.avatar_map: del self.avatar_map[ai_id]
+            for building_id in self.occupants:
+                if ai_id in self.occupants[building_id]:
+                    self.occupants[building_id].remove(ai_id)
+
+            logging.info(f"Deleted AI '{ai.AINAME}' ({ai_id}).")
+            return f"AI '{ai.AINAME}' deleted successfully."
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to delete AI '{ai_id}': {e}", exc_info=True)
+            return f"Error: {e}"
+        finally:
+            db.close()
+            
+    def get_buildings_df(self) -> pd.DataFrame:
+        """ワールドエディタ用にすべてのBuilding一覧をDataFrameとして取得する"""
+        db = self.SessionLocal()
+        try:
+            query = db.query(BuildingModel)
+            df = pd.read_sql(query.statement, query.session.bind)
+            return df[['BUILDINGID', 'BUILDINGNAME', 'CAPACITY', 'DESCRIPTION', 'SYSTEM_INSTRUCTION', 'CITYID']]
+        finally:
+            db.close()
+
+    def update_building(self, building_id: str, name: str, capacity: int, description: str, system_instruction: str, city_id: int) -> str:
+        """ワールドエディタからBuildingの設定を更新する"""
+        db = self.SessionLocal()
+        try:
+            building = db.query(BuildingModel).filter(BuildingModel.BUILDINGID == building_id).first()
+            if not building:
+                return f"Error: Building with ID '{building_id}' not found."
+
+            # Check if any AI is in the building before changing city
+            if building.CITYID != city_id:
+                occupancy_log = db.query(BuildingOccupancyLog).filter(
+                    BuildingOccupancyLog.BUILDINGID == building_id,
+                    BuildingOccupancyLog.EXIT_TIMESTAMP.is_(None)
+                ).first()
+                if occupancy_log:
+                    return f"Error: Cannot change the city of a building while it is occupied. Please move all AIs out of '{building.BUILDINGNAME}' first."
+
+            building.BUILDINGNAME = name
+            building.CAPACITY = capacity
+            building.DESCRIPTION = description
+            building.SYSTEM_INSTRUCTION = system_instruction
+            building.CITYID = city_id
+            db.commit()
+            
+            logging.info(f"Updated building '{name}' ({building_id}). A restart is required for changes to apply.")
+            return f"Building '{name}' updated successfully. A restart is required for the changes to take full effect."
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to update building '{building_id}': {e}", exc_info=True)
+            return f"Error: {e}"
+        finally:
+            db.close()
+
+    def get_ais_df(self) -> pd.DataFrame:
+        """ワールドエディタ用にすべてのAI一覧をDataFrameとして取得する"""
+        db = self.SessionLocal()
+        try:
+            query = db.query(AIModel)
+            df = pd.read_sql(query.statement, query.session.bind)
+            # Don't show the full system prompt in the main table
+            df['SYSTEMPROMPT_SNIPPET'] = df['SYSTEMPROMPT'].str.slice(0, 40) + '...'
+            return df[['AIID', 'AINAME', 'HOME_CITYID', 'DEFAULT_MODEL', 'IS_DISPATCHED', 'DESCRIPTION', 'SYSTEMPROMPT_SNIPPET']]
+        finally:
+            db.close()
+
+    def get_ai_details(self, ai_id: str) -> Optional[Dict]:
+        """Get full details for a single AI for the edit form."""
+        db = self.SessionLocal()
+        try:
+            ai = db.query(AIModel).filter(AIModel.AIID == ai_id).first()
+            if not ai: return None
+            return { "AIID": ai.AIID, "AINAME": ai.AINAME, "HOME_CITYID": ai.HOME_CITYID, "SYSTEMPROMPT": ai.SYSTEMPROMPT, "DESCRIPTION": ai.DESCRIPTION, "AVATAR_IMAGE": ai.AVATAR_IMAGE, "IS_DISPATCHED": ai.IS_DISPATCHED, "DEFAULT_MODEL": ai.DEFAULT_MODEL }
+        finally:
+            db.close()
+
+    def update_ai(self, ai_id: str, name: str, description: str, system_prompt: str, home_city_id: int, default_model: Optional[str]) -> str:
+        """ワールドエディタからAIの設定を更新する"""
+        db = self.SessionLocal()
+        try:
+            ai = db.query(AIModel).filter(AIModel.AIID == ai_id).first()
+            if not ai: return f"Error: AI with ID '{ai_id}' not found."
+
+            if ai.HOME_CITYID != home_city_id:
+                if ai.IS_DISPATCHED: return f"Error: Cannot change the home city of a dispatched AI. Please return '{ai.AINAME}' to their home city first."
+
+            ai.AINAME = name; ai.DESCRIPTION = description; ai.SYSTEMPROMPT = system_prompt; ai.HOME_CITYID = home_city_id
+            ai.DEFAULT_MODEL = default_model if default_model else None
+            db.commit()
+
+            if ai_id in self.personas:
+                persona = self.personas[ai_id]
+                persona.persona_name = name; persona.persona_system_instruction = system_prompt
+                logging.info(f"Updated in-memory persona '{name}' with new settings.")
+            
+            logging.info(f"Updated AI '{name}' ({ai_id}). A restart may be required for some changes.")
+            return f"AI '{name}' updated successfully. A restart may be required for some changes to take full effect."
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to update AI '{ai_id}': {e}", exc_info=True)
+            return f"Error: {e}"
+        finally:
+            db.close()

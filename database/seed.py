@@ -7,7 +7,7 @@ from datetime import datetime
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from models import Base, User, City, AI, Building, BuildingOccupancyLog
+from models import Base, User, City, AI, Building, BuildingOccupancyLog, Blueprint
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 

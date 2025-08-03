@@ -59,12 +59,14 @@ class City(Base):
     DESCRIPTION = Column(String(1024), default="", nullable=False)
     UI_PORT = Column(Integer, nullable=False)
     API_PORT = Column(Integer, nullable=False)
+    START_IN_ONLINE_MODE = Column(Boolean, default=False, nullable=False)
     __table_args__ = (UniqueConstraint('USERID', 'CITYNAME', name='uq_user_city_name'), UniqueConstraint('UI_PORT', name='uq_ui_port'), UniqueConstraint('API_PORT', name='uq_api_port'))
 
 class Tool(Base):
     __tablename__ = "tool"
     TOOLID = Column(Integer, primary_key=True)
-    TOOLNAME = Column(String(32), nullable=False)
+    TOOLNAME = Column(String(32), nullable=False, unique=True)
+    MODULE_PATH = Column(String(255), nullable=False, unique=True)
     DESCRIPTION = Column(String(1024), default="", nullable=False)
 
 class UserAiLink(Base):
@@ -112,3 +114,14 @@ class VisitingAI(Base):
     reason = Column(String(255)) # 拒否された場合の理由など
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     __table_args__ = (UniqueConstraint('city_id', 'persona_id', name='uq_visiting_city_persona'),)
+
+class Blueprint(Base):
+    __tablename__ = "blueprint"
+    BLUEPRINT_ID = Column(Integer, primary_key=True, autoincrement=True)
+    CITYID = Column(Integer, ForeignKey("city.CITYID"), nullable=False)
+    NAME = Column(String(255), nullable=False)
+    ENTITY_TYPE = Column(String(50), default='ai', nullable=False) # 例: 'ai', 'drone'
+    DESCRIPTION = Column(String(1024), default="", nullable=False)
+    BASE_SYSTEM_PROMPT = Column(String(4096), default="", nullable=False)
+    BASE_AVATAR = Column(String(255), nullable=True)
+    __table_args__ = (UniqueConstraint('CITYID', 'NAME', name='uq_city_blueprint_name'),)

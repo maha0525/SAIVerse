@@ -9,6 +9,7 @@ import argparse
 import atexit
 from typing import Optional, List, Dict
 from pathlib import Path
+import pandas as pd
 
 import gradio as gr
 
@@ -224,6 +225,342 @@ def logout_ui():
     # USERID=1をハードコード
     return manager.set_user_login_status(1, False)
 
+# --- World Editor UI Handlers ---
+
+def update_city_ui(city_id_str: str, name: str, desc: str, online_mode: bool, ui_port_str: str, api_port_str: str):
+    """UI handler to update city settings."""
+    if not city_id_str: return "Error: Select a city to update.", gr.update()
+    try:
+        city_id = int(city_id_str)
+        ui_port = int(ui_port_str)
+        api_port = int(api_port_str)
+    except (ValueError, TypeError):
+        return "Error: Port numbers must be valid integers.", gr.update()
+    
+    result = manager.update_city(city_id, name, desc, online_mode, ui_port, api_port)
+    return result, manager.get_cities_df()
+
+def on_select_city(evt: gr.SelectData):
+    """Handler for when a city is selected in the DataFrame."""
+    if evt.value is None: return "", "", "", False, "", ""
+    row_index = evt.index[0]
+    df = manager.get_cities_df()
+    selected_row = df.iloc[row_index]
+    return (
+        selected_row['CITYID'], selected_row['CITYNAME'], selected_row['DESCRIPTION'],
+        selected_row['START_IN_ONLINE_MODE'], selected_row['UI_PORT'], selected_row['API_PORT']
+    )
+
+def update_building_ui(b_id: str, name: str, capacity_str: str, desc: str, sys_inst: str, city_id: int):
+    """UI handler to update building settings."""
+    if not b_id: return "Error: Select a building to update.", gr.update()
+    try:
+        capacity = int(capacity_str)
+    except (ValueError, TypeError):
+        return "Error: Capacity must be a valid integer.", gr.update()
+    
+    result = manager.update_building(b_id, name, capacity, desc, sys_inst, city_id)
+    return result, manager.get_buildings_df()
+
+def on_select_building(evt: gr.SelectData):
+    """Handler for when a building is selected in the DataFrame."""
+    if evt.value is None: return "", "", 1, "", "", None
+    row_index = evt.index[0]
+    df = manager.get_buildings_df()
+    selected_row = df.iloc[row_index]
+    return (
+        selected_row['BUILDINGID'], selected_row['BUILDINGNAME'], selected_row['CAPACITY'],
+        selected_row['DESCRIPTION'], selected_row['SYSTEM_INSTRUCTION'], selected_row['CITYID']
+    )
+
+def on_select_ai(evt: gr.SelectData):
+    """Handler for when an AI is selected in the DataFrame."""
+    if evt.index is None: return "", "", "", "", None, "", False
+    row_index = evt.index[0]
+    # We need the full DF to get the ID, not just the visible part
+    df = manager.get_ais_df()
+    ai_id = df.iloc[row_index]['AIID']
+    details = manager.get_ai_details(ai_id)
+    if not details: return "", "", "", "", None, "", False
+
+    return (
+        details['AIID'],
+        details['AINAME'],
+        details['DESCRIPTION'],
+        details['SYSTEMPROMPT'],
+        details['HOME_CITYID'],
+        details['DEFAULT_MODEL'],
+        details['IS_DISPATCHED']
+    )
+
+def update_ai_ui(ai_id: str, name: str, desc: str, sys_prompt: str, home_city_id: int, model: str):
+    """UI handler to update AI settings."""
+    if not ai_id:
+        return "Error: Select an AI to update.", gr.update()
+    if not home_city_id:
+        return "Error: Home City must be selected.", gr.update()
+    
+    result = manager.update_ai(ai_id, name, desc, sys_prompt, home_city_id, model)
+    return result, manager.get_ais_df()
+
+def create_world_editor_ui():
+    """Creates all UI components for the World Editor tab."""
+    # --- ★ UI構築の最初にCity情報を一度だけ取得 ---
+    all_cities_df = manager.get_cities_df()
+    city_choices = list(zip(all_cities_df['CITYNAME'], all_cities_df['CITYID']))
+
+    # --- Handlers for Create/Delete ---
+    def create_city_ui(name, desc, ui_port, api_port):
+        if not all([name, ui_port, api_port]): return "Error: Name, UI Port, and API Port are required.", gr.update()
+        result = manager.create_city(name, desc, int(ui_port), int(api_port))
+        return result, manager.get_cities_df()
+
+    def delete_city_ui(city_id_str, confirmed):
+        if not confirmed: return "Error: Please check the confirmation box to delete.", gr.update()
+        if not city_id_str: return "Error: Select a city to delete.", gr.update()
+        result = manager.delete_city(int(city_id_str))
+        return result, manager.get_cities_df()
+
+    def create_building_ui(name, desc, capacity, sys_inst, city_id):
+        if not all([name, capacity, city_id]): return "Error: Name, Capacity, and City are required.", gr.update()
+        result = manager.create_building(name, desc, int(capacity), sys_inst, city_id)
+        return result, manager.get_buildings_df()
+
+    def delete_building_ui(b_id, confirmed):
+        if not confirmed: return "Error: Please check the confirmation box to delete.", gr.update()
+        if not b_id: return "Error: Select a building to delete.", gr.update()
+        result = manager.delete_building(b_id)
+        return result, manager.get_buildings_df()
+
+    def create_ai_ui(name, sys_prompt, home_city_id):
+        if not all([name, sys_prompt, home_city_id]): return "Error: Name, System Prompt, and Home City are required.", gr.update()
+        result = manager.create_ai(name, sys_prompt, home_city_id)
+        return result, manager.get_ais_df()
+
+    def delete_ai_ui(ai_id, confirmed):
+        if not confirmed: return "Error: Please check the confirmation box to delete.", gr.update()
+        if not ai_id: return "Error: Select an AI to delete.", gr.update()
+        result = manager.delete_ai(ai_id)
+        return result, manager.get_ais_df()
+
+    # --- UI Layout with Create/Delete ---
+    with gr.Accordion("City管理", open=True):
+        with gr.Tabs():
+            with gr.TabItem("編集/削除"):
+                city_df = gr.DataFrame(value=manager.get_cities_df, interactive=False, label="Cities in this World")
+                with gr.Row():
+                    city_id_text = gr.Textbox(label="City ID", interactive=False)
+                    city_name_textbox = gr.Textbox(label="City Name")
+                    city_ui_port_num = gr.Number(label="UI Port", precision=0)
+                    city_api_port_num = gr.Number(label="API Port", precision=0)
+                city_desc_textbox = gr.Textbox(label="Description", lines=3)
+                online_mode_checkbox = gr.Checkbox(label="次回起動時にオンラインモードで起動する")
+                with gr.Row():
+                    save_city_btn = gr.Button("City設定を保存")
+                    delete_city_confirm_check = gr.Checkbox(label="削除を確認", value=False, scale=1)
+                    delete_city_btn = gr.Button("Cityを削除", variant="stop", interactive=False, scale=1)
+                city_status_display = gr.Textbox(label="Status", interactive=False)
+            with gr.TabItem("新規作成"):
+                gr.Markdown("新しいCityを作成します。作成後、アプリケーションの再起動が必要です。")
+                new_city_name_text = gr.Textbox(label="New City Name")
+                new_city_desc_text = gr.Textbox(label="Description", lines=2)
+                with gr.Row():
+                    new_city_ui_port = gr.Number(label="UI Port", precision=0)
+                    new_city_api_port = gr.Number(label="API Port", precision=0)
+                create_city_btn = gr.Button("新規Cityを作成", variant="primary")
+                create_city_status = gr.Textbox(label="Status", interactive=False)
+
+    with gr.Accordion("Building管理", open=False):
+        with gr.Tabs():
+            with gr.TabItem("編集/削除"):
+                building_df = gr.DataFrame(value=manager.get_buildings_df, interactive=False, label="Buildings in this World")
+                with gr.Row():
+                    building_id_text = gr.Textbox(label="Building ID", interactive=False)
+                    building_name_text = gr.Textbox(label="Building Name")
+                    building_capacity_num = gr.Number(label="Capacity", precision=0)
+                    building_city_dropdown = gr.Dropdown(choices=city_choices, label="所属City", type="value")
+                building_desc_text = gr.Textbox(label="Description", lines=3)
+                building_sys_inst_text = gr.Textbox(label="System Instruction", lines=5)
+                with gr.Row():
+                    save_building_btn = gr.Button("Building設定を保存")
+                    delete_bldg_confirm_check = gr.Checkbox(label="削除を確認", value=False, scale=1)
+                    delete_bldg_btn = gr.Button("Buildingを削除", variant="stop", interactive=False, scale=1)
+                building_status_display = gr.Textbox(label="Status", interactive=False)
+                
+                # --- City Event Handlers ---
+                def toggle_delete_button(is_checked):
+                    return gr.update(interactive=is_checked)
+
+                city_df.select(fn=on_select_city, inputs=None, outputs=[city_id_text, city_name_textbox, city_desc_textbox, online_mode_checkbox, city_ui_port_num, city_api_port_num])
+                save_city_btn.click(fn=update_city_ui, inputs=[city_id_text, city_name_textbox, city_desc_textbox, online_mode_checkbox, city_ui_port_num, city_api_port_num], outputs=[city_status_display, city_df])
+                delete_city_confirm_check.change(fn=toggle_delete_button, inputs=delete_city_confirm_check, outputs=delete_city_btn)
+                delete_city_btn.click(fn=delete_city_ui, inputs=[city_id_text, delete_city_confirm_check], outputs=[city_status_display, city_df])
+                create_city_btn.click(fn=create_city_ui, inputs=[new_city_name_text, new_city_desc_text, new_city_ui_port, new_city_api_port], outputs=[create_city_status, city_df])
+
+                # --- Building Event Handlers ---
+                building_df.select(fn=on_select_building, inputs=None, outputs=[building_id_text, building_name_text, building_capacity_num, building_desc_text, building_sys_inst_text, building_city_dropdown])
+                save_building_btn.click(fn=update_building_ui, inputs=[building_id_text, building_name_text, building_capacity_num, building_desc_text, building_sys_inst_text, building_city_dropdown], outputs=[building_status_display, building_df])
+                delete_bldg_confirm_check.change(fn=toggle_delete_button, inputs=delete_bldg_confirm_check, outputs=delete_bldg_btn)
+                delete_bldg_btn.click(fn=delete_building_ui, inputs=[building_id_text, delete_bldg_confirm_check], outputs=[building_status_display, building_df])
+
+            with gr.TabItem("新規作成"):
+                gr.Markdown("新しいBuildingを作成します。作成後、アプリケーションの再起動が必要です。")
+                new_bldg_name_text = gr.Textbox(label="New Building Name")
+                new_bldg_desc_text = gr.Textbox(label="Description", lines=2)
+                with gr.Row():
+                    new_bldg_capacity_num = gr.Number(label="Capacity", precision=0, value=1)
+                    new_bldg_city_dropdown = gr.Dropdown(choices=city_choices, label="所属City", type="value")
+                new_bldg_sys_inst_text = gr.Textbox(label="System Instruction", lines=4)
+                create_bldg_btn = gr.Button("新規Buildingを作成", variant="primary")
+                create_bldg_status = gr.Textbox(label="Status", interactive=False)
+
+                create_bldg_btn.click(fn=create_building_ui, inputs=[new_bldg_name_text, new_bldg_desc_text, new_bldg_capacity_num, new_bldg_sys_inst_text, new_bldg_city_dropdown], outputs=[create_bldg_status, building_df])
+
+    with gr.Accordion("AI管理", open=False):
+        with gr.Tabs():
+            with gr.TabItem("編集/削除"):
+                ai_df = gr.DataFrame(value=manager.get_ais_df, interactive=False, label="AIs in this World")
+                with gr.Row():
+                    ai_id_text = gr.Textbox(label="AI ID", interactive=False)
+                    ai_name_text = gr.Textbox(label="AI Name")
+                    ai_home_city_dropdown = gr.Dropdown(choices=city_choices, label="所属City", type="value")
+                    ai_model_dropdown = gr.Dropdown(choices=MODEL_CHOICES, label="Default Model", allow_custom_value=True)
+                ai_desc_text = gr.Textbox(label="Description", lines=2)
+                ai_sys_prompt_text = gr.Textbox(label="System Prompt", lines=8)
+                with gr.Row():
+                    is_dispatched_checkbox = gr.Checkbox(label="派遣中 (編集不可)", interactive=False)
+                    save_ai_btn = gr.Button("AI設定を保存")
+                    delete_ai_confirm_check = gr.Checkbox(label="削除を確認", value=False, scale=1)
+                    delete_ai_btn = gr.Button("AIを削除", variant="stop", interactive=False, scale=1)
+                ai_status_display = gr.Textbox(label="Status", interactive=False)
+
+                # --- AI Event Handlers (Update/Delete) ---
+                ai_df.select(fn=on_select_ai, inputs=None, outputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, is_dispatched_checkbox])
+                save_ai_btn.click(fn=update_ai_ui, inputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown], outputs=[ai_status_display, ai_df])
+                delete_ai_confirm_check.change(fn=toggle_delete_button, inputs=delete_ai_confirm_check, outputs=delete_ai_btn)
+                delete_ai_btn.click(fn=delete_ai_ui, inputs=[ai_id_text, delete_ai_confirm_check], outputs=[ai_status_display, ai_df])
+
+            with gr.TabItem("新規作成"):
+                gr.Markdown("新しいAIを作成します。作成すると、そのAIの個室も自動で生成されます。")
+                new_ai_name_text = gr.Textbox(label="New AI Name")
+                new_ai_home_city_dropdown = gr.Dropdown(choices=city_choices, label="所属City", type="value")
+                new_ai_sys_prompt_text = gr.Textbox(label="System Prompt", lines=6, value="ここにペルソナの基本設定を記述します。")
+                create_ai_btn = gr.Button("新規AIを作成", variant="primary")
+                create_ai_status = gr.Textbox(label="Status", interactive=False)
+
+                create_ai_btn.click(fn=create_ai_ui, inputs=[new_ai_name_text, new_ai_sys_prompt_text, new_ai_home_city_dropdown], outputs=[create_ai_status, ai_df])
+
+    with gr.Accordion("ブループリント管理", open=False):
+        gr.Markdown("エンティティの設計図を作成・管理し、ワールドに配置します。")
+        with gr.Tabs():
+            with gr.TabItem("編集"):
+                blueprint_df = gr.DataFrame(value=manager.get_blueprints_df, interactive=False, label="Blueprints in this World")
+                with gr.Row():
+                    bp_id_text = gr.Textbox(label="Blueprint ID", interactive=False)
+                    bp_name_text = gr.Textbox(label="Blueprint Name")
+                    bp_city_dropdown = gr.Dropdown(choices=city_choices, label="所属City", type="value")
+                    bp_entity_type_text = gr.Textbox(label="Entity Type", value="ai")
+                bp_desc_text = gr.Textbox(label="Description", lines=2)
+                bp_sys_prompt_text = gr.Textbox(label="Base System Prompt", lines=6)
+                with gr.Row():
+                    bp_create_btn = gr.Button("新規作成")
+                    bp_update_btn = gr.Button("更新")
+                    bp_delete_btn = gr.Button("削除", variant="stop")
+                bp_status_display = gr.Textbox(label="Status", interactive=False)
+
+            with gr.TabItem("スポーン"):
+                gr.Markdown("リストからブループリントを選択し、新しいエンティティをワールドに配置します。")
+                all_blueprints_df = manager.get_blueprints_df()
+                blueprint_choices = list(zip(all_blueprints_df['NAME'], all_blueprints_df['BLUEPRINT_ID']))
+                spawn_bp_dropdown = gr.Dropdown(choices=blueprint_choices, label="使用するブループリント", type="value")
+                spawn_entity_name_text = gr.Textbox(label="新しいエンティティ名")
+                spawn_building_dropdown = gr.Dropdown(choices=BUILDING_CHOICES, label="配置先の建物")
+                spawn_btn = gr.Button("スポーン実行", variant="primary")
+                spawn_status_display = gr.Textbox(label="Status", interactive=False)
+
+        # --- Blueprint Handlers ---
+        def on_select_blueprint(evt: gr.SelectData):
+            if evt.index is None: return "", "", None, "", "", "ai"
+            row_index = evt.index[0]
+            df = manager.get_blueprints_df()
+            blueprint_id = df.iloc[row_index]['BLUEPRINT_ID']
+            details = manager.get_blueprint_details(blueprint_id)
+            if not details: return "", "", None, "", "", "ai"
+            return details['BLUEPRINT_ID'], details['NAME'], details['DESCRIPTION'], details['CITYID'], details['BASE_SYSTEM_PROMPT'], details['ENTITY_TYPE']
+
+        def create_blueprint_ui(name, desc, city_id, sys_prompt, entity_type):
+            if not all([name, city_id, sys_prompt, entity_type]): return "Error: Name, City, System Prompt, and Entity Type are required.", gr.update()
+            result = manager.create_blueprint(name, desc, city_id, sys_prompt, entity_type)
+            return result, manager.get_blueprints_df()
+
+        def update_blueprint_ui(bp_id, name, desc, sys_prompt, entity_type):
+            if not bp_id: return "Error: Select a blueprint to update.", gr.update()
+            result = manager.update_blueprint(int(bp_id), name, desc, sys_prompt, entity_type)
+            return result, manager.get_blueprints_df()
+
+        def delete_blueprint_ui(bp_id):
+            if not bp_id: return "Error: Select a blueprint to delete.", gr.update()
+            result = manager.delete_blueprint(int(bp_id))
+            return result, manager.get_blueprints_df()
+
+        def spawn_entity_ui(blueprint_id, entity_name, building_name):
+            if not all([blueprint_id, entity_name, building_name]): return "Error: Blueprint, Entity Name, and Target Building are required.", gr.update()
+            building_id = BUILDING_NAME_TO_ID_MAP.get(building_name)
+            if not building_id: return f"Error: Building '{building_name}' not found.", gr.update()
+            success, message = manager.spawn_entity_from_blueprint(blueprint_id, entity_name, building_id)
+            return message, manager.get_ais_df()
+
+        blueprint_df.select(fn=on_select_blueprint, inputs=None, outputs=[bp_id_text, bp_name_text, bp_desc_text, bp_city_dropdown, bp_sys_prompt_text, bp_entity_type_text])
+        bp_create_btn.click(fn=create_blueprint_ui, inputs=[bp_name_text, bp_desc_text, bp_city_dropdown, bp_sys_prompt_text, bp_entity_type_text], outputs=[bp_status_display, blueprint_df])
+        bp_update_btn.click(fn=update_blueprint_ui, inputs=[bp_id_text, bp_name_text, bp_desc_text, bp_sys_prompt_text, bp_entity_type_text], outputs=[bp_status_display, blueprint_df])
+        bp_delete_btn.click(fn=delete_blueprint_ui, inputs=[bp_id_text], outputs=[bp_status_display, blueprint_df])
+        spawn_btn.click(fn=spawn_entity_ui, inputs=[spawn_bp_dropdown, spawn_entity_name_text, spawn_building_dropdown], outputs=[spawn_status_display, ai_df])
+
+    with gr.Accordion("バックアップ/リストア管理", open=False):
+        gr.Markdown("現在のワールドの状態をバックアップしたり、過去のバックアップから復元します。**リストア後はアプリケーションの再起動が必須です。**")
+        
+        backup_df = gr.DataFrame(value=manager.get_backups, interactive=False, label="利用可能なバックアップ")
+        
+        with gr.Row():
+            selected_backup_dropdown = gr.Dropdown(label="操作対象のバックアップ", choices=manager.get_backups()['Backup Name'].tolist() if not manager.get_backups().empty else [], scale=2)
+            restore_confirm_check = gr.Checkbox(label="リストアを確認", value=False, scale=1)
+            restore_btn = gr.Button("リストア実行", variant="primary", interactive=False, scale=1)
+            delete_backup_confirm_check = gr.Checkbox(label="削除を確認", value=False, scale=1)
+            delete_backup_btn = gr.Button("削除", variant="stop", interactive=False, scale=1)
+
+        with gr.Row():
+            new_backup_name_text = gr.Textbox(label="新しいバックアップ名 (英数字のみ)", scale=3)
+            create_backup_btn = gr.Button("現在のワールドをバックアップ", scale=1)
+        
+        backup_status_display = gr.Textbox(label="Status", interactive=False)
+
+        # --- Backup/Restore Handlers ---
+        def update_backup_components():
+            df = manager.get_backups()
+            choices = df['Backup Name'].tolist() if not df.empty else []
+            return gr.update(value=df), gr.update(choices=choices, value=None)
+
+        def create_backup_ui(name):
+            if not name: return "Error: Backup name is required.", gr.update(), gr.update()
+            result = manager.backup_world(name)
+            return result, *update_backup_components()
+
+        def restore_backup_ui(name, confirmed):
+            if not confirmed: return "Error: Please check the confirmation box to restore."
+            if not name: return "Error: Select a backup to restore."
+            return manager.restore_world(name)
+
+        def delete_backup_ui(name, confirmed):
+            if not confirmed: return "Error: Please check the confirmation box to delete.", gr.update(), gr.update()
+            if not name: return "Error: Select a backup to delete.", gr.update(), gr.update()
+            result = manager.delete_backup(name)
+            return result, *update_backup_components()
+
+        create_backup_btn.click(fn=create_backup_ui, inputs=[new_backup_name_text], outputs=[backup_status_display, backup_df, selected_backup_dropdown])
+        restore_confirm_check.change(fn=toggle_delete_button, inputs=restore_confirm_check, outputs=restore_btn)
+        restore_btn.click(fn=restore_backup_ui, inputs=[selected_backup_dropdown, restore_confirm_check], outputs=[backup_status_display])
+        delete_backup_confirm_check.change(fn=toggle_delete_button, inputs=delete_backup_confirm_check, outputs=delete_backup_btn)
+        delete_backup_btn.click(fn=delete_backup_ui, inputs=[selected_backup_dropdown, delete_backup_confirm_check], outputs=[backup_status_display, backup_df, selected_backup_dropdown])
 
 def find_pid_for_port(port: int) -> Optional[int]:
     """指定されたポートを使用しているプロセスのPIDを見つける (Windows専用)"""
@@ -446,6 +783,10 @@ def main():
 
             with gr.TabItem("DB Manager"):
                 create_db_manager_ui(manager.SessionLocal)
+
+            with gr.TabItem("ワールドエディタ"):
+                create_world_editor_ui() # This function now contains all editor sections
+
 
         # UIロード時にJavaScriptを実行し、5秒ごとの自動更新タイマーを設定する
         js_auto_refresh = """
