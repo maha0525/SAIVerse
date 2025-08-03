@@ -311,6 +311,10 @@ def create_world_editor_ui():
     all_cities_df = manager.get_cities_df()
     city_choices = list(zip(all_cities_df['CITYNAME'], all_cities_df['CITYID'].astype(int)))
 
+    # --- ★ Refresh Button ---
+    with gr.Row():
+        refresh_editor_btn = gr.Button("🔄 ワールドエディタ全体を更新", variant="secondary")
+
     # --- Handlers for Create/Delete ---
     def create_city_ui(name, desc, ui_port, api_port):
         if not all([name, ui_port, api_port]): return "Error: Name, UI Port, and API Port are required.", gr.update()
@@ -453,7 +457,7 @@ def create_world_editor_ui():
                 create_ai_btn.click(fn=create_ai_ui, inputs=[new_ai_name_text, new_ai_sys_prompt_text, new_ai_home_city_dropdown], outputs=[create_ai_status, ai_df])
 
     with gr.Accordion("ブループリント管理", open=False):
-        gr.Markdown("エンティティの設計図を作成・管理し、ワールドに配置します。")
+        gr.Markdown("エンティティの設計図を作成・管理し、ワールドに配置します。\n行を選択する際はBLUEPRINT_ID列をクリックしてください。")
         with gr.Tabs():
             with gr.TabItem("編集"):
                 blueprint_df = gr.DataFrame(value=manager.get_blueprints_df, interactive=False, label="Blueprints in this World")
@@ -482,10 +486,18 @@ def create_world_editor_ui():
 
         # --- Blueprint Handlers ---
         def on_select_blueprint(evt: gr.SelectData):
-            if evt.index is None: return "", "", None, "", "", "ai"
-            row_index = evt.index[0]
-            df = manager.get_blueprints_df()
-            blueprint_id = df.iloc[row_index]['BLUEPRINT_ID']
+            # evt.indexの代わりにevt.valueを使用する
+            # evt.valueには選択された行の最初の列の値（BLUEPRINT_ID）が入る
+            if evt.value is None:
+                # 選択が解除されたらフォームをクリア
+                return "", "", "", None, "", "ai"
+
+            try:
+                # valueは文字列として渡されることがあるのでintに変換
+                blueprint_id = int(evt.value)
+            except (ValueError, TypeError):
+                # ヘッダーをクリックした場合など、intに変換できない場合はフォームをクリア
+                return "", "", "", None, "", "ai"
             details = manager.get_blueprint_details(blueprint_id)
             if not details: return "", "", "", None, "", "ai"
             return details['BLUEPRINT_ID'], details['NAME'], details['DESCRIPTION'], int(details['CITYID']), details['BASE_SYSTEM_PROMPT'], details['ENTITY_TYPE']
@@ -564,6 +576,43 @@ def create_world_editor_ui():
         delete_backup_confirm_check.change(fn=toggle_delete_button, inputs=delete_backup_confirm_check, outputs=delete_backup_btn)
         delete_backup_btn.click(fn=delete_backup_ui, inputs=[selected_backup_dropdown, delete_backup_confirm_check], outputs=[backup_status_display, backup_df, selected_backup_dropdown])
 
+    with gr.Accordion("ワールド・イベント", open=False):
+        gr.Markdown("ワールド全体に影響を与えるイベントを発生させます。イベントはシステムメッセージとして各Buildingのログに記録され、AIたちの新たな行動のきっかけとなります。")
+        with gr.Row():
+            world_event_text = gr.Textbox(label="イベントメッセージ", placeholder="例: 空にオーロラが現れた。", scale=3)
+            trigger_event_btn = gr.Button("イベントを発生させる", variant="primary", scale=1)
+        world_event_status_display = gr.Textbox(label="Status", interactive=False)
+
+        trigger_event_btn.click(fn=manager.trigger_world_event, inputs=[world_event_text], outputs=[world_event_status_display])
+
+
+    # --- ★ Refresh Handler Definition ---
+    def refresh_world_editor_data():
+        """Refreshes all DataFrames and related components in the world editor."""
+        logging.info("Refreshing all world editor DataFrames.")
+        
+        cities = manager.get_cities_df()
+        buildings = manager.get_buildings_df()
+        ais = manager.get_ais_df()
+        blueprints = manager.get_blueprints_df()
+        backups = manager.get_backups()
+        
+        backup_choices = backups['Backup Name'].tolist() if not backups.empty else []
+        
+        return (
+            cities,
+            buildings,
+            ais,
+            blueprints,
+            backups,
+            gr.update(choices=backup_choices, value=None) # ドロップダウンも更新
+        )
+
+    # --- ★ Connect Refresh Button to all DataFrames ---
+    refresh_editor_btn.click(
+        fn=refresh_world_editor_data, inputs=None,
+        outputs=[city_df, building_df, ai_df, blueprint_df, backup_df, selected_backup_dropdown])
+
 def find_pid_for_port(port: int) -> Optional[int]:
     """指定されたポートを使用しているプロセスのPIDを見つける (Windows専用)"""
     if sys.platform != "win32":
@@ -625,7 +674,7 @@ def cleanup_and_start_server_with_args(port: int, script_path: Path, name: str, 
 
 def main():
     parser = argparse.ArgumentParser(description="Run a SAIVerse City instance.")
-    parser.add_argument("city_name", type=str, help="The name of the city to run (e.g., city_a).")
+    parser.add_argument("city_name", type=str, nargs='?', default='city_a', help="The name of the city to run (defaults to city_a).")
     parser.add_argument("--db-file", type=str, default="saiverse.db", help="Path to the unified database file.")
     parser.add_argument("--sds-url", type=str, default="http://127.0.0.1:8080", help="URL of the SAIVerse Directory Service.")
     args = parser.parse_args()
