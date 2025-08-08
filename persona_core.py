@@ -202,8 +202,9 @@ class PersonaCore:
             logging.error(f"Failed to save session data to DB for {self.persona_name}: {e}", exc_info=True)
         finally:
             db.close()
-
-        self.history_manager.save_all()
+        # self.messagesが空の場合はlog.jsonを上書きしない
+        if self.messages:
+            self.history_manager.save_all()
         self._save_conscious_log()
 
     def set_model(self, model: str, context_length: int, provider: str) -> None:

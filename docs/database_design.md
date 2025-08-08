@@ -58,6 +58,31 @@
   - `ENTRY_TIMESTAMP`: 入室時刻。
   - `EXIT_TIMESTAMP`: 退室時刻。`NULL`の場合は現在滞在中であることを示す。
 
+### `Blueprint`
+- **役割**: AIやその他のエンティティの設計図（テンプレート）を管理する。ワールドエディタから作成・編集される。
+- **キーカラム**:
+  - `BLUEPRINT_ID` (PK): ブループリントの一意なID。
+  - `CITYID` (FK to `City`): このブループリントが所属するCity。
+  - `NAME`: ブループリントの名前。
+  - `DESCRIPTION`: ブループリントの説明。
+  - `BASE_SYSTEM_PROMPT`: このブループリントから生成されるAIの基本システムプロンプト。
+  - `ENTITY_TYPE`: 生成されるエンティティの種類（例: `ai`）。
+
+### `Tool`
+- **役割**: AIがBuilding内で使用できるツールの定義を管理する。
+- **キーカラム**:
+  - `TOOLID` (PK): ツールの一意なID。
+  - `TOOLNAME`: ツールの名前。
+  - `DESCRIPTION`: ツールの機能説明。
+  - `MODULE_PATH`: 実行されるツールのPythonモジュールへのパス（例: `tools.utility.calculator`）。
+
+### `BuildingToolLink`
+- **役割**: どのBuildingでどのツールが利用可能かを紐付ける中間テーブル。
+- **キーカラム**:
+  - `id` (PK): リンクの一意なID。
+  - `BUILDINGID` (FK to `Building`): Building。
+  - `TOOLID` (FK to `Tool`): ツール。
+
 ### `ThinkingRequest`
 - **役割**: リモート・ペルソナ・アーキテクチャにおいて、訪問先のCityから故郷のCityへの思考依頼をキューイングするためのテーブル。
 - **キーカラム**:

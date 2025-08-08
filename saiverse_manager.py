@@ -9,6 +9,7 @@ import mimetypes
 from typing import Dict, List, Optional, Tuple, Iterator, Union
 from datetime import datetime, timedelta
 import pandas as pd
+import tempfile
 import shutil
 import importlib
 import os
@@ -1519,9 +1520,9 @@ class SAIVerseManager:
     # --- World Editor: Backup/Restore Methods ---
 
     def get_backups(self) -> pd.DataFrame:
-        """Gets a list of available database backups."""
+        """Gets a list of available world backups (.zip)."""
         backups = []
-        for f in self.backup_dir.glob("*.db"):
+        for f in self.backup_dir.glob("*.zip"):
             try:
                 stat = f.stat()
                 backups.append({
@@ -1537,39 +1538,121 @@ class SAIVerseManager:
         return df.sort_values(by="Created At", ascending=False)
 
     def backup_world(self, backup_name: str) -> str:
-        """Creates a backup of the current world database."""
+        """
+        Creates a backup of the entire world state, including the database and all log files,
+        into a single .zip archive.
+        """
         if not backup_name or not backup_name.isalnum():
             return "Error: Backup name must be alphanumeric and not empty."
 
-        backup_path = self.backup_dir / f"{backup_name}.db"
-        if backup_path.exists():
+        backup_zip_path = self.backup_dir / f"{backup_name}.zip"
+        if backup_zip_path.exists():
             return f"Error: A backup named '{backup_name}' already exists."
 
+        # Define paths for backup targets
+        db_file_path = Path(self.db_path)
+        cities_log_path = self.saiverse_home / "cities"
+        personas_log_path = self.saiverse_home / "personas"
+        buildings_log_path = self.saiverse_home / "buildings"
+
         try:
-            shutil.copy(self.db_path, backup_path)
-            logging.info(f"World state backed up to {backup_path}")
+            # Use a temporary directory to assemble the backup contents
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                
+                # 1. Copy database file
+                if db_file_path.exists():
+                    shutil.copy(db_file_path, tmp_path / db_file_path.name)
+                    logging.info(f"Added database to backup staging: {db_file_path}")
+
+                # 2. Copy cities log directory
+                if cities_log_path.exists() and cities_log_path.is_dir():
+                    shutil.copytree(cities_log_path, tmp_path / "cities")
+                    logging.info(f"Added cities logs to backup staging: {cities_log_path}")
+
+                # 3. Copy personas log directory
+                if personas_log_path.exists() and personas_log_path.is_dir():
+                    shutil.copytree(personas_log_path, tmp_path / "personas")
+                    logging.info(f"Added personas logs to backup staging: {personas_log_path}")
+
+                # 4. Copy buildings log directory
+                if buildings_log_path.exists() and buildings_log_path.is_dir():
+                    shutil.copytree(buildings_log_path, tmp_path / "buildings")
+                    logging.info(f"Added buildings logs to backup staging: {buildings_log_path}")
+
+                # 5. Create the zip archive from the temporary directory
+                shutil.make_archive(
+                    base_name=self.backup_dir / backup_name,
+                    format='zip',
+                    root_dir=tmp_path
+                )
+            
+            logging.info(f"World state successfully backed up to {backup_zip_path}")
             return f"Backup '{backup_name}' created successfully."
         except Exception as e:
             logging.error(f"Failed to create backup: {e}", exc_info=True)
             return f"Error: {e}"
 
     def restore_world(self, backup_name: str) -> str:
-        """Restores the world database from a backup. Requires an application restart."""
-        backup_path = self.backup_dir / f"{backup_name}.db"
-        if not backup_path.exists():
+        """
+        Restores the entire world state from a .zip archive.
+        This operation is destructive and requires an application restart.
+        """
+        backup_zip_path = self.backup_dir / f"{backup_name}.zip"
+        if not backup_zip_path.exists():
             return f"Error: Backup '{backup_name}' not found."
 
+        # Define paths for restore targets
+        db_file_path = Path(self.db_path)
+        cities_log_path = self.saiverse_home / "cities"
+        personas_log_path = self.saiverse_home / "personas"
+        buildings_log_path = self.saiverse_home / "buildings"
+
         try:
-            shutil.copy(backup_path, self.db_path)
-            logging.warning(f"World state has been restored from {backup_path}. A RESTART IS REQUIRED.")
+            # --- 1. Safely remove existing data ---
+            logging.warning("Starting world restore. Removing existing data...")
+            if db_file_path.exists():
+                db_file_path.unlink()
+                logging.info(f"Removed existing database file: {db_file_path}")
+            if cities_log_path.exists():
+                shutil.rmtree(cities_log_path)
+                logging.info(f"Removed existing cities log directory: {cities_log_path}")
+            if personas_log_path.exists():
+                shutil.rmtree(personas_log_path)
+                logging.info(f"Removed existing personas log directory: {personas_log_path}")
+            if buildings_log_path.exists():
+                shutil.rmtree(buildings_log_path)
+                logging.info(f"Removed existing buildings log directory: {buildings_log_path}")
+
+            # --- 2. Unpack the backup to a temporary directory ---
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                logging.info(f"Unpacking backup '{backup_zip_path}' to temporary directory '{tmp_path}'")
+                shutil.unpack_archive(backup_zip_path, tmp_path)
+
+                # --- 3. Move restored files to their final destination ---
+                unpacked_db = tmp_path / db_file_path.name
+                if unpacked_db.exists():
+                    shutil.move(str(unpacked_db), str(db_file_path))
+                    logging.info(f"Restored database file to {db_file_path}")
+
+                for log_dir_name in ["cities", "personas", "buildings"]:
+                    unpacked_dir = tmp_path / log_dir_name
+                    if unpacked_dir.exists() and unpacked_dir.is_dir():
+                        shutil.move(str(unpacked_dir), str(self.saiverse_home / log_dir_name))
+                        logging.info(f"Restored {log_dir_name} log directory.")
+
+            logging.warning(f"World state has been restored from {backup_zip_path}. A RESTART IS REQUIRED.")
             return "Restore successful. Please RESTART the application to load the restored world."
+
         except Exception as e:
             logging.error(f"Failed to restore world: {e}", exc_info=True)
-            return f"Error: {e}"
+            # Attempt to clean up in case of partial failure, though it might not be perfect.
+            return f"Error during restore: {e}. The world state may be inconsistent. It is recommended to restore another backup or re-seed the database."
 
     def delete_backup(self, backup_name: str) -> str:
-        """Deletes a specific backup file."""
-        backup_path = self.backup_dir / f"{backup_name}.db"
+        """Deletes a specific backup file (.zip)."""
+        backup_path = self.backup_dir / f"{backup_name}.zip"
         if not backup_path.exists():
             return f"Error: Backup '{backup_name}' not found."
         try:
@@ -1634,22 +1717,28 @@ class SAIVerseManager:
         finally:
             db.close()
 
-    def update_blueprint(self, blueprint_id: int, name: str, description: str, system_prompt: str, entity_type: str) -> str:
+    def update_blueprint(self, blueprint_id: int, name: str, description: str, city_id: int, system_prompt: str, entity_type: str) -> str:
         """ワールドエディタからBlueprintの設定を更新する"""
         db = self.SessionLocal()
         try:
             blueprint = db.query(Blueprint).filter_by(BLUEPRINT_ID=blueprint_id).first()
             if not blueprint:
                 return "Error: Blueprint not found."
+            if not city_id:
+                return "Error: City must be selected."
 
             # Check for name conflicts if the name is being changed
-            if blueprint.NAME != name:
-                existing = db.query(Blueprint).filter_by(CITYID=blueprint.CITYID, NAME=name).first()
+            if blueprint.NAME != name or blueprint.CITYID != city_id:
+                existing = db.query(Blueprint).filter_by(CITYID=city_id, NAME=name).first()
                 if existing:
-                    return f"Error: A blueprint named '{name}' already exists in this city."
+                    # Find the city name for the error message
+                    target_city = db.query(CityModel).filter_by(CITYID=city_id).first()
+                    city_name_for_error = target_city.CITYNAME if target_city else f"ID {city_id}"
+                    return f"Error: A blueprint named '{name}' already exists in city '{city_name_for_error}'."
 
             blueprint.NAME = name
             blueprint.DESCRIPTION = description
+            blueprint.CITYID = city_id
             blueprint.BASE_SYSTEM_PROMPT = system_prompt
             blueprint.ENTITY_TYPE = entity_type
             db.commit()
@@ -1768,6 +1857,8 @@ class SAIVerseManager:
         try:
             city = db.query(CityModel).filter_by(CITYID=city_id).first()
             if not city: return "Error: City not found."
+            if city.CITYNAME in ["city_a", "city_b"]:
+                return "Error: Seeded cities (city_a, city_b) cannot be deleted."
             if city.CITYID == self.city_id: return "Error: Cannot delete the currently running city."
 
             if db.query(BuildingModel).filter_by(CITYID=city_id).first():

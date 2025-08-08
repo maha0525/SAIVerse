@@ -507,9 +507,9 @@ def create_world_editor_ui():
             result = manager.create_blueprint(name, desc, city_id, sys_prompt, entity_type)
             return result, manager.get_blueprints_df()
 
-        def update_blueprint_ui(bp_id, name, desc, sys_prompt, entity_type):
+        def update_blueprint_ui(bp_id, name, desc, city_id, sys_prompt, entity_type):
             if not bp_id: return "Error: Select a blueprint to update.", gr.update()
-            result = manager.update_blueprint(int(bp_id), name, desc, sys_prompt, entity_type)
+            result = manager.update_blueprint(int(bp_id), name, desc, city_id, sys_prompt, entity_type)
             return result, manager.get_blueprints_df()
 
         def delete_blueprint_ui(bp_id):
@@ -526,7 +526,7 @@ def create_world_editor_ui():
 
         blueprint_df.select(fn=on_select_blueprint, inputs=None, outputs=[bp_id_text, bp_name_text, bp_desc_text, bp_city_dropdown, bp_sys_prompt_text, bp_entity_type_text])
         bp_create_btn.click(fn=create_blueprint_ui, inputs=[bp_name_text, bp_desc_text, bp_city_dropdown, bp_sys_prompt_text, bp_entity_type_text], outputs=[bp_status_display, blueprint_df])
-        bp_update_btn.click(fn=update_blueprint_ui, inputs=[bp_id_text, bp_name_text, bp_desc_text, bp_sys_prompt_text, bp_entity_type_text], outputs=[bp_status_display, blueprint_df])
+        bp_update_btn.click(fn=update_blueprint_ui, inputs=[bp_id_text, bp_name_text, bp_desc_text, bp_city_dropdown, bp_sys_prompt_text, bp_entity_type_text], outputs=[bp_status_display, blueprint_df])
         bp_delete_btn.click(fn=delete_blueprint_ui, inputs=[bp_id_text], outputs=[bp_status_display, blueprint_df])
         spawn_btn.click(fn=spawn_entity_ui, inputs=[spawn_bp_dropdown, spawn_entity_name_text, spawn_building_dropdown], outputs=[spawn_status_display, ai_df])
 

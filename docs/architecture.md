@@ -15,51 +15,48 @@ SAIVerseは、自律的なAIエージェント（ペルソナ）が、定義さ�
 
 ```mermaid
 graph TD
-    subgraph "SAIVerse Network"
-        SDS[sds_server.py<br/><b>Directory Service</b>]
+    subgraph "User Interaction Layer"
+        UI[main.py<br><b>Gradio UI</b><br>World View, World Editor, DB Manager]
     end
 
-    subgraph "User Interface"
-        UI[main.py / Gradio]
+    subgraph "Core Orchestration Layer"
+        Manager[saiverse_manager.py<br><b>SAIVerse Manager</b><br>Central orchestrator, state management, background tasks]
     end
 
-    subgraph "Core Logic"
-        Manager[saiverse_manager.py]
-        Occupancy[occupancy_manager.py]
-        subgraph "Persona Types"
-            direction LR
-            Resident[persona_core.py<br/><b>Resident</b>]
-            Visitor[remote_persona_proxy.py<br/><b>Visitor Proxy</b>]
-        end
-        ConvManager[conversation_manager.py]
+    subgraph "Logic Components"
+        direction LR
+        Persona[persona_core.py<br><b>PersonaCore</b><br>Local AI's brain]
+        Proxy[remote_persona_proxy.py<br><b>Visitor Proxy</b><br>Remote AI's agent]
+        Occupancy[occupancy_manager.py<br><b>Occupancy Manager</b><br>Handles all movement]
+        Conversation[conversation_manager.py<br><b>Conversation Manager</b><br>Triggers autonomous pulses]
     end
 
-    subgraph "Data Layer"
-        DB[Database / models.py]
-        API[api_server.py]
-        DB_UI[db_manager.py]
+    subgraph "Data & Network Layer"
+        DB[database/models.py<br><b>SQLite Database</b>]
+        API[database/api_server.py<br><b>City API Server</b>]
+        SDS[sds_server.py<br><b>Directory Service</b>]
     end
 
-    UI -- "User Actions" --> Manager
-
+    UI -- "User Actions, Editor Ops" --> Manager
+    
+    Manager -- "Manages Lifecycle" --> Persona
+    Manager -- "Manages Lifecycle" --> Proxy
     Manager -- "Delegates Movement" --> Occupancy
-    Manager -- "Manages" --> Resident
-    Manager -- "Manages" --> Visitor
-    Manager -- "Manages" --> ConvManager
-    Manager -- "Accesses" --> DB
+    Manager -- "Manages" --> Conversation
+    Manager -- "CRUD Operations" --> DB
     Manager -- "Registers & Discovers" --> SDS
 
-    Occupancy -- "Manipulates" --> DB
+    Persona -- "Reads/Writes State" --> DB
+    Persona -- "Requests Actions" --> Manager
 
-    ConvManager -- "Triggers Pulse" --> Resident
-    ConvManager -- "Triggers Pulse" --> Visitor
+    Proxy -- "Calls Home API" --> API
 
-    Resident -- "Accesses" --> DB
-    Visitor -- "Calls Home API" --> API
+    Occupancy -- "Updates Occupancy" --> DB
+    Conversation -- "Triggers Pulse" --> Persona
+    Conversation -- "Triggers Pulse" --> Proxy
 
-    API -- "Manipulates" --> DB
-    DB_UI -- "Manipulates" --> DB
-```
+    API -- "Accesses DB for Proxy" --> DB
+    ---
 
 ## 3. 主要コンポーネント詳細
 
@@ -67,18 +64,19 @@ graph TD
 - **役割**: アプリケーション全体のエントリーポイント。
 - **責務**:
   - `SAIVerseManager`と`api_server.py`を起動する。
-  - Gradio UIのメインループを管理し、ユーザーからの入力を`SAIVerseManager`に中継する。
-  - `SAIVerseManager`のバックグラウンドタスク（DBポーリングなど）を定期的に実行するスレッドを開始する。
+  - Gradio UI（ワールドビュー、ワールドエディタ、DB Managerを含む）のメインループを管理し、ユーザーからの入力を`SAIVerseManager`に中継する。
+  - `SAIVerseManager`のバックグラウンドタスク（SDS通信、DBポーリング）を定期的に実行するスレッドを開始する。
 
 ### `saiverse_manager.py` (世界の管理者)
 - **役割**: SAIVerse世界の「神」や「管理者」に相当する中央コンポーネント。
 - **責務**:
   - すべてのペルソナ (`PersonaCore`) とBuildingのインスタンスをメモリ上に保持・管理する。
   - 起動時にSDSに自身を登録し、定期的に他のCityの情報を取得する。
-  - **DBポーリングによる非同期処理**: `VisitingAI`テーブルや`ThinkingRequest`テーブルを監視し、City間連携のトランザクションを進行させる。
+  - DBポーリングによる非同期処理: `VisitingAI`テーブルや`ThinkingRequest`テーブルを監視し、City間連携のトランザクションを進行させる。
   - AIの移動要求、ユーザーからの入力、自律会話の開始/停止など、世界で起こるすべてのイベントを統括する。
   - データベースから初期状態をロードし、終了時に状態を保存する。
   - **移動処理の委譲**: AIやユーザーの移動に関する処理は、`OccupancyManager`に委譲する。
+  - ワールドエディタのバックエンド: UIからのCRUD要求（City/Building/AI/Blueprintの作成・更新・削除）を処理する。
 
 ### `persona_core.py` (AIの魂)
 - **役割**: 個々のAIペルソナの「魂」であり「脳」。
@@ -107,6 +105,7 @@ graph TD
 - **責務**:
   - `/inter-city/request-move-in`: このAPIは現在使用されておらず、City間連携はDBを介して行われる。
   - `/persona-proxy/{id}/think`: 派遣したAIの代理人からの思考リクエストを受け付け、`thinking_request`テーブルにキューイングする。リクエストを受け付けた後、故郷の`SAIVerseManager`が非同期で処理する。
+  - `/inter-city/buildings`: City内の建物情報を外部に公開する。
 
 ### `sds_server.py` (世界の住所録)
 - **役割**: SAIVerseネットワーク全体で唯一の中央ディレクトリサービス。

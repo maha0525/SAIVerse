@@ -163,18 +163,23 @@ def seed_database():
             logging.info(f"Added initial occupancy for city '{city_name}'.")
 
         # --- 6. Set default user's initial location ---
+        db.flush()  # 建物追加後にDBへ反映
         user_to_update = db.query(User).filter_by(USERID=1).first()
         if user_to_update:
             initial_city_name = "city_a"
             initial_city_id = city_map.get(initial_city_name)
             initial_building_id = f"user_room_{initial_city_name}"
 
-            if initial_city_id and db.query(Building).filter_by(BUILDINGID=initial_building_id).first():
+            # 建物と都市が存在する場合のみ更新
+            building_exists = db.query(Building).filter_by(BUILDINGID=initial_building_id).first()
+            if initial_city_id and building_exists:
                 user_to_update.CURRENT_CITYID = initial_city_id
                 user_to_update.CURRENT_BUILDINGID = initial_building_id
-                logging.info(f"Set initial location for default user to '{initial_building_id}'.")
+                logging.info(f"Set initial location for default user to '{initial_building_id}' in city '{initial_city_name}'.")
             else:
                 logging.warning("Could not set initial location for default user. 'user_room_city_a' not found.")
+        else:
+            logging.warning("Default user (USERID=1) not found.")
 
         db.commit()
         logging.info("Database seeding completed successfully.")

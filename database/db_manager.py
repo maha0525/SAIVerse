@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 
 from .models import (
-    User, AI, Building, City, Tool,
+    User, AI, Building, City, Tool, Blueprint,
     UserAiLink, AiToolLink, BuildingToolLink, BuildingOccupancyLog,
     ThinkingRequest, VisitingAI
 )
@@ -283,6 +283,8 @@ def create_db_manager_ui(session_factory: sessionmaker):
                 create_management_tab(Building, session_factory)
             with gr.TabItem("City"):
                 create_management_tab(City, session_factory)
+            with gr.TabItem("Blueprint"):
+                create_management_tab(Blueprint, session_factory)
             with gr.TabItem("Tool"):
                 create_management_tab(Tool, session_factory)
             with gr.TabItem("User-AI Link"):
