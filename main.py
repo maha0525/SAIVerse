@@ -59,41 +59,33 @@ NOTE_CSS = """
 .message-row .message {
     flex-grow: 1; /* 残りのスペースをすべて使う */
     padding: 10px 14px;
-    background-color: #f0f0f0; /* 背景色を少しつける */
-    color: #222 !important; /* ★文字色を暗い色に固定 (重要度を上げる) */
+    background-color: #333333; /* 暗いグレーの背景色 */
+    color: #fff !important; /* ★文字色を白に固定 (重要度を上げる) */
     border-radius: 12px;
     min-height: 60px; /* アイコンの高さと合わせる */
     font-size: 1rem !important;
     overflow-wrap: break-word; /* 長い単語でも折り返す */
 }
-
 /* ユーザー側のメッセージを右寄せにする */
 .user-message {
     flex-direction: row-reverse;
 }
 .user-message .message {
     background-color: #d1e7ff; /* ユーザーのメッセージ色を変更 */
-    color: #222 !important; /* ★ユーザー側の文字色も暗い色に固定 (重要度を上げる) */
+    color: #fff !important; /* ★ユーザー側の文字色も白に固定 */
 }
-
 /* ホストやシステムノートのスタイル */
 .note-box {
     background: #fff9db;
-    color: #333350 !important; /* ★文字色を暗い色に固定 (重要度を上げる) */
+    color: #222 !important; /* ★文字色をグレーに固定*/
     border-left: 4px solid #ffbf00;
     padding: 8px 12px;
     margin: 0;
     border-radius: 6px;
     font-size: .92rem;
 }
-
-/* ダークモード用の文字色上書き */
-body.dark .message, body.dark .message p, body.dark .message b {
-    color: #222 !important;
-}
-
-body.dark .note-box, body.dark .note-box *, body.dark .note-box b {
-    color: #333350 !important;
+.note-box b{
+    color: #222 !important; /* ★文字色をグレーに固定*/
 }
 """
 
