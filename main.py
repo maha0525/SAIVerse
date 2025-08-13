@@ -7,11 +7,14 @@ import os
 import json
 import argparse
 import atexit
+from dotenv import load_dotenv
 from typing import Optional, List, Dict
 from pathlib import Path
 import pandas as pd
 
 import gradio as gr
+
+load_dotenv()
 
 from saiverse_manager import SAIVerseManager
 from model_configs import get_model_choices
@@ -269,13 +272,13 @@ def on_select_building(evt: gr.SelectData):
 
 def on_select_ai(evt: gr.SelectData):
     """Handler for when an AI is selected in the DataFrame."""
-    if evt.index is None: return "", "", "", "", None, "", False
+    if evt.index is None: return "", "", "", "", None, "", False, "auto"
     row_index = evt.index[0]
     # We need the full DF to get the ID, not just the visible part
     df = manager.get_ais_df()
     ai_id = df.iloc[row_index]['AIID']
     details = manager.get_ai_details(ai_id)
-    if not details: return "", "", "", "", None, "", False
+    if not details: return "", "", "", "", None, "", False, "auto"
 
     return (
         details['AIID'],
@@ -668,7 +671,8 @@ def main():
     parser = argparse.ArgumentParser(description="Run a SAIVerse City instance.")
     parser.add_argument("city_name", type=str, nargs='?', default='city_a', help="The name of the city to run (defaults to city_a).")
     parser.add_argument("--db-file", type=str, default="saiverse.db", help="Path to the unified database file.")
-    parser.add_argument("--sds-url", type=str, default="http://127.0.0.1:8080", help="URL of the SAIVerse Directory Service.")
+    default_sds_url = os.getenv("SDS_URL", "http://127.0.0.1:8080")
+    parser.add_argument("--sds-url", type=str, default=default_sds_url, help="URL of the SAIVerse Directory Service (or from .env).")
     args = parser.parse_args()
 
     db_path = Path(__file__).parent / "database" / args.db_file

@@ -37,7 +37,7 @@ class SAIVerseManager:
         city_name: str,
         db_path: str,
         model: str = DEFAULT_MODEL,
-        sds_url: str = "http://127.0.0.1:8080",
+        sds_url: str = os.getenv("SDS_URL", "http://127.0.0.1:8080"),
     ):
         # --- Step 0: Database and Configuration Setup ---
         self.db_path = db_path
@@ -561,6 +561,7 @@ class SAIVerseManager:
                     context_length=persona_context_length,
                     user_room_id=self.user_room_id,
                     provider=self.provider,
+                    interaction_mode=db_ai.INTERACTION_MODE,
                     is_dispatched=db_ai.IS_DISPATCHED,
                 )
 
@@ -833,17 +834,19 @@ class SAIVerseManager:
             if db.query(AIModel).filter_by(AIID=new_ai_id).first():
                  return False, f"A persona with the generated ID '{new_ai_id}' already exists."
 
+            # 3. Create new Building (private room)
+            new_building_id = f"{name.lower().replace(' ', '_')}_{self.city_name}_room"
+
             new_ai_model = AIModel(
                 AIID=new_ai_id, HOME_CITYID=self.city_id, AINAME=name,
                 SYSTEMPROMPT=system_prompt, DESCRIPTION=f"A new persona named {name}.",
                 AUTO_COUNT=0, INTERACTION_MODE='auto', IS_DISPATCHED=False,
-                DEFAULT_MODEL=self.model
+                DEFAULT_MODEL=self.model,
+                PRIVATE_ROOM_ID=new_building_id # Link to the private room
             )
             db.add(new_ai_model)
             logging.info(f"DB: Added new AI '{name}' ({new_ai_id}).")
 
-            # 3. Create new Building (private room)
-            new_building_id = f"{name.lower().replace(' ', '_')}_{self.city_name}_room"
             new_building_model = BuildingModel(
                 CITYID=self.city_id, BUILDINGID=new_building_id, BUILDINGNAME=f"{name}の部屋",
                 CAPACITY=1, SYSTEM_INSTRUCTION=f"{name}が待機する個室です。",
@@ -1208,24 +1211,37 @@ class SAIVerseManager:
         if persona_id not in self.personas:
             return False, "指定されたペルソナが見つかりません。"
         
-        # --- DBを更新してペルソナの対話モードを'user'に設定 ---
-        db = self.SessionLocal()
-        try:
-            db.query(AIModel).filter(AIModel.AIID == persona_id).update({"INTERACTION_MODE": "user"})
-            db.commit()
-            logging.info(f"Set INTERACTION_MODE to 'user' for {persona_id}.")
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to update INTERACTION_MODE for {persona_id}: {e}", exc_info=True)
-            # エラーが発生した場合、ユーザーに通知して処理を中断
-            return False, f"{self.id_to_name_map.get(persona_id, persona_id)}を呼び出す際にデータベースエラーが発生しました。"
-        finally:
-            db.close()
-
         to_id = self.user_current_building_id
         if not to_id:
             logging.error("Cannot summon persona, user location is unknown.")
             return False, "あなたの現在地が不明なため、ペルソナを呼べません。"
+
+        # --- DBを更新してペルソナの対話モードを'user'に設定し、以前のモードを退避 ---
+        # ユーザーの部屋に召喚する場合のみモードを変更する
+        if to_id == self.user_room_id:
+            db = self.SessionLocal()
+            try:
+                ai_record = db.query(AIModel).filter(AIModel.AIID == persona_id).first()
+                if not ai_record:
+                    return False, "データベースでペルソナが見つかりません。"
+
+                # 現在のモードを退避
+                ai_record.PREVIOUS_INTERACTION_MODE = ai_record.INTERACTION_MODE
+                # 対話モードを'user'に設定
+                ai_record.INTERACTION_MODE = "user"
+                db.commit()
+                logging.info(f"Set INTERACTION_MODE to 'user' for {persona_id}, previous mode was '{ai_record.PREVIOUS_INTERACTION_MODE}'.")
+                # Update in-memory state
+                self.personas[persona_id].interaction_mode = "user"
+            except Exception as e:
+                db.rollback()
+                logging.error(f"Failed to update INTERACTION_MODE for {persona_id}: {e}", exc_info=True)
+                return False, f"{self.id_to_name_map.get(persona_id, persona_id)}を呼び出す際にデータベースエラーが発生しました。"
+            finally:
+                db.close()
+        else:
+            # ユーザーの部屋以外への召喚はモードを変更しない
+            logging.info(f"Summoning {persona_id} to a non-user room ({to_id}). INTERACTION_MODE is not changed.")
 
         if (
             len(self.occupants.get(to_id, [])) >= self.capacities.get(to_id, 1)
@@ -1261,49 +1277,56 @@ class SAIVerseManager:
 
         db = self.SessionLocal()
         try:
-            # 1. Find the previous building for the persona
-            # Get the last two entries to find the previous location
+            # 1. Get the AI record to access its properties
+            ai_record = db.query(AIModel).filter(AIModel.AIID == persona_id).first()
+            if not ai_record:
+                logging.error(f"AI record not found for {persona_id} in end_conversation.")
+                return
+
+            # 2. Find the previous building for the persona
             logs = db.query(BuildingOccupancyLog).filter(
                 BuildingOccupancyLog.AIID == persona_id
             ).order_by(BuildingOccupancyLog.ENTRY_TIMESTAMP.desc()).limit(2).all()
 
-            # The most recent log should be for user_room.
+            # Determine destination, using PRIVATE_ROOM_ID as a robust fallback
+            private_room_id = ai_record.PRIVATE_ROOM_ID
+            destination_id = private_room_id # Default to private room
+
             if not logs or logs[0].BUILDINGID != self.user_room_id:
-                logging.warning(f"Could not determine previous location for {persona_id}. Sending to home room.")
-                destination_id = f"{persona_id}_room"
+                logging.warning(f"Could not determine previous location for {persona_id}. Sending to private room '{private_room_id}'.")
             elif len(logs) < 2:
-                # Only one log entry (user_room_id), so no "previous" location. Fallback to home room.
-                logging.info(f"{persona_id} has no previous location. Sending to home room.")
-                destination_id = f"{persona_id}_room"
+                logging.info(f"{persona_id} has no previous location. Sending to private room '{private_room_id}'.")
             else:
                 # The second-to-last entry is the previous location.
                 destination_id = logs[1].BUILDINGID
 
             # Ensure destination is valid
             if destination_id not in self.building_map:
-                logging.error(f"Invalid destination building '{destination_id}' found for {persona_id}. Falling back to home room.")
-                destination_id = f"{persona_id}_room"
+                logging.error(f"Invalid destination building '{destination_id}' found for {persona_id}. Falling back to private room '{private_room_id}'.")
+                destination_id = private_room_id
                 if destination_id not in self.building_map:
                     # This is a critical failure, the persona has no valid place to go.
-                    logging.error(f"Home room '{destination_id}' not found. Cannot move persona.")
+                    logging.error(f"Private room '{destination_id}' not found. Cannot move persona.")
                     msg = f"{self.id_to_name_map.get(persona_id, persona_id)}の帰る場所が見つかりませんでした。"
                     self.building_histories[self.user_room_id].append(
                         {"role": "host", "content": f"<div class=\"note-box\">{msg}</div>"}
                     )
                     self._save_building_histories()
-                    return # Abort the move
+                    return
 
-            # 2. Update interaction mode to 'auto'
-            db.query(AIModel).filter(AIModel.AIID == persona_id).update({"INTERACTION_MODE": "auto"})
+            # 3. Restore interaction mode from PREVIOUS_INTERACTION_MODE
+            previous_mode = ai_record.PREVIOUS_INTERACTION_MODE
+            ai_record.INTERACTION_MODE = previous_mode
+            logging.info(f"Restoring INTERACTION_MODE to '{previous_mode}' for {persona_id}.")
 
-            # 3. Move the persona (同じセッションを渡す)
+            # 4. Move the persona (pass the session)
             success, reason = self._move_persona(persona_id, self.user_room_id, destination_id, db_session=db)
 
             if success:
                 persona = self.personas.get(persona_id)
                 if persona:
                     persona.current_building_id = destination_id
-                    # 退室メッセージをuser_roomの履歴に追加
+                    persona.interaction_mode = previous_mode
                     dest_name = self.building_map[destination_id].name
                     msg = f"{self.id_to_name_map.get(persona_id, persona_id)}が{dest_name}に向かいました。"
                     self.building_histories[self.user_room_id].append(
@@ -1314,22 +1337,19 @@ class SAIVerseManager:
                         }
                     )
                     self._save_building_histories()
-                    logging.info(f"Updated {persona_id}'s internal location to {destination_id}.")
+                    logging.info(f"Updated {persona_id}'s internal location to {destination_id} and restored mode to '{previous_mode}'.")
                 else:
-                    # This case should not happen if persona_id is in self.personas
                     logging.error(f"Could not find PersonaCore instance for {persona_id} to update location.")
             else:
-                # Log failure to UI if move fails
                 msg = f"{self.id_to_name_map.get(persona_id, persona_id)}を移動できませんでした: {reason}"
                 self.building_histories["user_room"].append(
                     {"role": "host", "content": f'<div class="note-box">{msg}</div>'}
                 )
                 self._save_building_histories()
-                # 移動に失敗したら、トランザクション全体をロールバック
                 db.rollback() 
-                return # 処理を中断
+                return
 
-            # 4. すべてのDB操作が成功したら、ここで一度にコミット
+            # 5. Commit all DB changes at once
             db.commit()
             logging.info(f"Successfully ended conversation with {persona_id}.")
 
@@ -1784,13 +1804,44 @@ class SAIVerseManager:
             new_ai_id = f"{entity_name.lower().replace(' ', '_')}_{home_city.CITYNAME}"
             if db.query(AIModel).filter_by(AIID=new_ai_id).first(): return False, f"An entity with the generated ID '{new_ai_id}' already exists."
 
-            new_ai_model = AIModel(AIID=new_ai_id, HOME_CITYID=blueprint.CITYID, AINAME=entity_name, SYSTEMPROMPT=blueprint.BASE_SYSTEM_PROMPT, DESCRIPTION=blueprint.DESCRIPTION, AVATAR_IMAGE=blueprint.BASE_AVATAR, DEFAULT_MODEL=self.model)
+            # --- Create private room for the new AI ---
+            private_room_id = f"{new_ai_id}_room"
+            private_room_model = BuildingModel(
+                CITYID=blueprint.CITYID, BUILDINGID=private_room_id, BUILDINGNAME=f"{entity_name}の部屋",
+                CAPACITY=1, SYSTEM_INSTRUCTION=f"{entity_name}が待機する個室です。",
+                DESCRIPTION=f"{entity_name}のプライベートルーム。"
+            )
+            db.add(private_room_model)
+            logging.info(f"DB: Added new private room '{private_room_model.BUILDINGNAME}' ({private_room_id}) for spawned AI.")
+
+            # --- Create AI record and link to private room ---
+            new_ai_model = AIModel(
+                AIID=new_ai_id, HOME_CITYID=blueprint.CITYID, AINAME=entity_name,
+                SYSTEMPROMPT=blueprint.BASE_SYSTEM_PROMPT, DESCRIPTION=blueprint.DESCRIPTION,
+                AVATAR_IMAGE=blueprint.BASE_AVATAR, DEFAULT_MODEL=self.model,
+                PRIVATE_ROOM_ID=private_room_id
+            )
             db.add(new_ai_model)
             
             target_building_db = db.query(BuildingModel).filter_by(BUILDINGID=target_building_id).first()
             new_occupancy_log = BuildingOccupancyLog(CITYID=target_building_db.CITYID, AIID=new_ai_id, BUILDINGID=target_building_id, ENTRY_TIMESTAMP=datetime.now())
             db.add(new_occupancy_log)
 
+            # --- Update memory for the new private room (if it's in the current city) ---
+            if blueprint.CITYID == self.city_id:
+                new_building_obj = Building(
+                    building_id=private_room_model.BUILDINGID, name=private_room_model.BUILDINGNAME,
+                    capacity=private_room_model.CAPACITY, system_instruction=private_room_model.SYSTEM_INSTRUCTION,
+                    description=private_room_model.DESCRIPTION
+                )
+                self.buildings.append(new_building_obj)
+                self.building_map[private_room_id] = new_building_obj
+                self.capacities[private_room_id] = new_building_obj.capacity
+                self.occupants[private_room_id] = [] # Starts empty
+                self.building_memory_paths[private_room_id] = self.saiverse_home / "cities" / self.city_name / "buildings" / private_room_id / "log.json"
+                self.building_histories[private_room_id] = []
+
+            # --- Update memory for the new AI ---
             if blueprint.CITYID == self.city_id:
                 new_persona_core = PersonaCore(city_name=self.city_name, persona_id=new_ai_id, persona_name=entity_name, persona_system_instruction=blueprint.BASE_SYSTEM_PROMPT, avatar_image=blueprint.BASE_AVATAR, buildings=self.buildings, common_prompt_path=Path("system_prompts/common.txt"), action_priority_path=Path("action_priority.json"), building_histories=self.building_histories, occupants=self.occupants, id_to_name_map=self.id_to_name_map, move_callback=self._move_persona, dispatch_callback=self.dispatch_persona, explore_callback=self._explore_city, create_persona_callback=self._create_persona, session_factory=self.SessionLocal, start_building_id=target_building_id, model=self.model, context_length=self.context_length, user_room_id=self.user_room_id, provider=self.provider, is_dispatched=False)
                 self.personas[new_ai_id] = new_persona_core
@@ -2043,11 +2094,20 @@ class SAIVerseManager:
         try:
             ai = db.query(AIModel).filter(AIModel.AIID == ai_id).first()
             if not ai: return None
-            return { "AIID": ai.AIID, "AINAME": ai.AINAME, "HOME_CITYID": ai.HOME_CITYID, "SYSTEMPROMPT": ai.SYSTEMPROMPT, "DESCRIPTION": ai.DESCRIPTION, "AVATAR_IMAGE": ai.AVATAR_IMAGE, "IS_DISPATCHED": ai.IS_DISPATCHED, "DEFAULT_MODEL": ai.DEFAULT_MODEL }
+            return {
+                "AIID": ai.AIID, "AINAME": ai.AINAME, "HOME_CITYID": ai.HOME_CITYID,
+                "SYSTEMPROMPT": ai.SYSTEMPROMPT, "DESCRIPTION": ai.DESCRIPTION,
+                "AVATAR_IMAGE": ai.AVATAR_IMAGE, "IS_DISPATCHED": ai.IS_DISPATCHED,
+                "DEFAULT_MODEL": ai.DEFAULT_MODEL,
+                "INTERACTION_MODE": ai.INTERACTION_MODE
+            }
         finally:
             db.close()
 
-    def update_ai(self, ai_id: str, name: str, description: str, system_prompt: str, home_city_id: int, default_model: Optional[str]) -> str:
+    def update_ai(
+        self, ai_id: str, name: str, description: str, system_prompt: str,
+        home_city_id: int, default_model: Optional[str], interaction_mode: str
+    ) -> str:
         """ワールドエディタからAIの設定を更新する"""
         db = self.SessionLocal()
         try:
@@ -2057,17 +2117,52 @@ class SAIVerseManager:
             if ai.HOME_CITYID != home_city_id:
                 if ai.IS_DISPATCHED: return f"Error: Cannot change the home city of a dispatched AI. Please return '{ai.AINAME}' to their home city first."
 
+            # --- Interaction Mode Change Logic ---
+            original_mode = ai.INTERACTION_MODE
+            mode_changed = original_mode != interaction_mode
+            move_feedback = ""
+
+            if mode_changed:
+                if interaction_mode == "sleep":
+                    ai.INTERACTION_MODE = "sleep"
+                    logging.info(f"AI '{name}' mode changed to 'sleep'. Attempting to move to private room.")
+                    
+                    private_room_id = ai.PRIVATE_ROOM_ID
+                    if not private_room_id or private_room_id not in self.building_map:
+                        move_feedback = f" Note: Could not move to private room because it is not configured or invalid."
+                        logging.warning(f"Cannot move AI '{name}' to sleep. Private room ID '{private_room_id}' is not configured or invalid.")
+                    else:
+                        current_building_id = self.personas[ai_id].current_building_id
+                        if current_building_id != private_room_id:
+                            success, reason = self._move_persona(ai_id, current_building_id, private_room_id, db_session=db)
+                            if success:
+                                self.personas[ai_id].current_building_id = private_room_id
+                                move_feedback = f" Moved to private room '{self.building_map[private_room_id].name}'."
+                                logging.info(f"Successfully moved AI '{name}' to their private room '{private_room_id}'.")
+                            else:
+                                move_feedback = f" Note: Failed to move to private room: {reason}."
+                                logging.error(f"Failed to move AI '{name}' to private room: {reason}")
+                elif interaction_mode == "auto":
+                    ai.INTERACTION_MODE = "auto"
+                else:
+                    # UI should prevent this, but as a safeguard, we don't change the mode.
+                    logging.warning(f"Invalid interaction mode '{interaction_mode}' requested for AI '{name}'. No change made.")
+
+            # --- Update other fields ---
             ai.AINAME = name; ai.DESCRIPTION = description; ai.SYSTEMPROMPT = system_prompt; ai.HOME_CITYID = home_city_id
             ai.DEFAULT_MODEL = default_model if default_model else None
             db.commit()
 
+            # --- Update in-memory state ---
             if ai_id in self.personas:
                 persona = self.personas[ai_id]
                 persona.persona_name = name; persona.persona_system_instruction = system_prompt
+                persona.interaction_mode = ai.INTERACTION_MODE
                 logging.info(f"Updated in-memory persona '{name}' with new settings.")
             
-            logging.info(f"Updated AI '{name}' ({ai_id}). A restart may be required for some changes.")
-            return f"AI '{name}' updated successfully. A restart may be required for some changes to take full effect."
+            status_message = f"AI '{name}' updated successfully."
+            if mode_changed: status_message += f" Mode changed from '{original_mode}' to '{interaction_mode}'."
+            return status_message + move_feedback
         except Exception as e:
             db.rollback()
             logging.error(f"Failed to update AI '{ai_id}': {e}", exc_info=True)

@@ -242,8 +242,8 @@
 
 #### タスク 4.2.1: データベースとバックエンドの基盤実装
 
-- [ ] **`database/models.py`の修正**:
-  - [ ] `Tool`テーブルに、実行するPythonモジュールへのパスを保存する`MODULE_PATH` (String) カラムを追加する。
+- [x] **`database/models.py`の修正**:
+  - [x] `Tool`テーブルに、実行する関数の名前を保存する `FUNCTION_NAME` (String) カラムを追加する。
 - [ ] **`saiverse_manager.py`の修正**:
   - [ ] `execute_tool(tool_id, persona_id)`メソッドを実装する。このメソッドは、DBからモジュールパスを取得し、`importlib`を用いて動的にツールを実行する。
   - [ ] ツール実行時に、AIやBuildingの情報を含む`context`オブジェクトを渡せるようにする。
@@ -292,3 +292,42 @@
   - [x] ワールドエディタに「ワールド・イベント」セクションを新設する。
   - [x] イベントメッセージを入力するテキストボックスと、「イベント発生」ボタンを配置する。
   - [x] ボタンクリックで `manager.trigger_world_event` を呼び出し、結果をステータス表示するUIを実装する。
+
+---
+
+### Step 4.4: ペルソナ・アクティブ状態管理のリファクタリング
+
+- **目的**: ペルソナの行動モードを細分化し、ユーザーとの対話、自律行動、休眠状態を明確に区別・制御できるようにする。
+- **アーキテクチャ概要**:
+  1.  AIの行動モードを`auto` (自律会話), `user` (ユーザー対話), `sleep` (休眠) の3つに定義する。
+  2.  AIがユーザーの部屋に召喚された場合、モードは自動的に`user`に切り替わり、自律会話を停止する。部屋から退出すると、直前のモードに復帰する。
+  3.  ワールドエディタからAIを`sleep`モードに設定すると、AIは自律会話を停止し、自動的に自身の個室に移動する。
+  4.  AIの個室ID (`PRIVATE_ROOM_ID`) と、ユーザー対話直前のモードを退避させる `PREVIOUS_INTERACTION_MODE` をDBで管理する。
+
+---
+
+#### タスク 4.4.1: データベーススキーマの拡張
+
+- [x] **`database/models.py`の修正**:
+  - [x] `AI`テーブルに、AIの個室IDを保存する `PRIVATE_ROOM_ID` (String) カラムを追加する。
+  - [x] `AI`テーブルに、ユーザー対話直前のモードを退避させる `PREVIOUS_INTERACTION_MODE` (String) カラムを追加する。
+
+---
+
+#### タスク 4.4.2: `SAIVerseManager`の改修
+
+- [x] **`summon_persona`メソッドの改修**:
+  - [x] AIを`user_room`に召喚する際、現在の`INTERACTION_MODE`を`PREVIOUS_INTERACTION_MODE`に退避させ、`INTERACTION_MODE`を`"user"`に更新する。
+- [x] **`end_conversation`メソッドの改修**:
+  - [x] AIを`user_room`から退出させる際、`PREVIOUS_INTERACTION_MODE`からモードを復元する。
+- [x] **`update_ai`メソッドの改修**:
+  - [x] ワールドエディタから`INTERACTION_MODE`が`"sleep"`に変更された場合、AIを`PRIVATE_ROOM_ID`で指定された個室に自動で移動させる。
+- [x] **`_create_persona` / `spawn_entity_from_blueprint`メソッドの修正**:
+  - [x] 新しいAIと個室を生成する際に、生成した個室のBuilding IDを、AIの`PRIVATE_ROOM_ID`に紐づけてDBに保存する。
+
+---
+
+#### タスク 4.4.3: `ConversationManager`の改修
+
+- [x] **`_trigger_next_speaker`メソッドの改修**:
+  - [x] `INTERACTION_MODE`が`"auto"`のAIのみを自律会話（パルス）の対象とするようにフィルタリング処理を追加する。

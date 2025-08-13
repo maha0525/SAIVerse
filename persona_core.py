@@ -36,6 +36,7 @@ class PersonaCore:
         session_factory: Callable,
         is_visitor: bool = False,
         home_city_id: Optional[str] = None, # ★ 故郷のCity ID
+        interaction_mode: str = "auto", # ★ 現在の対話モード
         is_dispatched: bool = False, # ★ このペルソナが他のCityに派遣中かどうかのフラグ
         emotion_prompt_path: Path = Path("system_prompts/emotion_parameter.txt"),
         action_priority_path: Path = Path("action_priority.json"),
@@ -55,6 +56,7 @@ class PersonaCore:
         self.city_name = city_name
         self.is_visitor = is_visitor
         self.is_dispatched = is_dispatched
+        self.interaction_mode = interaction_mode
         self.home_city_id = home_city_id # ★ 故郷の情報を記憶
         self.SessionLocal = session_factory
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
