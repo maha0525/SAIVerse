@@ -89,6 +89,14 @@ class ConversationManager:
             self._current_speaker_index = (self._current_speaker_index + 1) % len(ai_occupants)
             return
         
+        # 'user' or 'sleep'モードのペルソナは自律会話を行わない
+        # is_proxyチェックで、このロジックがローカルのPersonaCoreインスタンスにのみ適用されるようにする
+        if not getattr(speaker_persona, 'is_proxy', False):
+            if speaker_persona.interaction_mode != 'auto':
+                logging.debug(f"[ConvManager] Persona '{speaker_persona.persona_name}' is in '{speaker_persona.interaction_mode}' mode. Skipping turn.")
+                self._current_speaker_index = (self._current_speaker_index + 1) % len(ai_occupants)
+                return
+
         # 派遣中のペルソナは、派遣元のCityでは自律会話を行わない
         if getattr(speaker_persona, 'is_proxy', False) is False and getattr(speaker_persona, 'is_dispatched', False) is True:
             logging.debug(f"[ConvManager] Persona '{speaker_persona.persona_name}' is dispatched. Skipping turn.")

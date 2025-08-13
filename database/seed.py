@@ -7,7 +7,7 @@ from datetime import datetime
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from models import Base, User, City, AI, Building, BuildingOccupancyLog, Blueprint
+from models import Base, User, City, AI, Building, BuildingOccupancyLog, Blueprint, Tool
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -131,16 +131,20 @@ def seed_database():
             # Add private rooms for each AI
             for ai in ais_to_add:
                 if ai.AINAME == "ジェネシス": continue # Genesis doesn't get a private room
+                
+                private_room_id = f"{ai.AINAME}_{city_name}_room"
                 buildings_to_add.append(
                     Building(
                         CITYID=city_id, 
-                        BUILDINGID=f"{ai.AINAME}_{city_name}_room", 
+                        BUILDINGID=private_room_id, 
                         BUILDINGNAME=f"{ai.AINAME}の部屋", 
                         CAPACITY=1, 
                         SYSTEM_INSTRUCTION=f"{ai.AINAME}が待機する個室です。", 
                         DESCRIPTION=f"{ai.AINAME}のプライベートルーム。"
                     )
                 )
+                # Set the private room ID for the AI
+                ai.PRIVATE_ROOM_ID = private_room_id
 
             db.add_all(buildings_to_add)
             logging.info(f"Added default and private buildings for city '{city_name}'.")
@@ -180,6 +184,25 @@ def seed_database():
                 logging.warning("Could not set initial location for default user. 'user_room_city_a' not found.")
         else:
             logging.warning("Default user (USERID=1) not found.")
+
+        # --- 7. Populate Tool ---
+        if not db.query(Tool).first():
+            tools_to_add = [
+                Tool(
+                    TOOLNAME="calculate_expression",
+                    DESCRIPTION="Evaluate arithmetic expression with ^ (power) and ! (factorial).",
+                    MODULE_PATH="tools.defs.calculator",
+                    FUNCTION_NAME="calculate_expression"
+                ),
+                Tool(
+                    TOOLNAME="generate_image",
+                    DESCRIPTION="Generate an image from a text prompt using Gemini and save it to a file.",
+                    MODULE_PATH="tools.defs.image_generator",
+                    FUNCTION_NAME="generate_image"
+                )
+            ]
+            db.add_all(tools_to_add)
+            logging.info("Added default tools.")
 
         db.commit()
         logging.info("Database seeding completed successfully.")
