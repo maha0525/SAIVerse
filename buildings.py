@@ -13,7 +13,7 @@ class Building:
         description: str = "", # Added this to accept description from DB
         run_entry_llm: bool = True,
         run_auto_llm: bool = True,
-        auto_interval_sec: int = 0,
+        auto_interval_sec: int = 10,
     ):
         self.building_id = building_id
         self.name = name

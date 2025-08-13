@@ -51,6 +51,7 @@ class Building(Base):
     ENTRY_PROMPT = Column(String(4096), default="", nullable=False)
     AUTO_PROMPT = Column(String(4096), default="", nullable=False)
     DESCRIPTION = Column(String(1024), default="", nullable=False)
+    AUTO_INTERVAL_SEC = Column(Integer, default=10, nullable=False)
     __table_args__ = (UniqueConstraint('CITYID', 'BUILDINGNAME', name='uq_city_building_name'),)
 
 class City(Base):

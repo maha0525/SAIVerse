@@ -6,12 +6,13 @@ import requests
 import logging
 from pathlib import Path
 import mimetypes
-from typing import Dict, List, Optional, Tuple, Iterator, Union
+from typing import Dict, List, Optional, Tuple, Iterator, Union, Any
 from datetime import datetime, timedelta
 import pandas as pd
 import tempfile
 import shutil
 import importlib
+import tools.defs
 import os
 
 from google.genai import errors
@@ -161,7 +162,12 @@ class SAIVerseManager:
         for b_id in self.building_map.keys(): # building_map is already filtered by city
             # user_roomはユーザー操作起点なので自律会話は不要
             if not b_id.startswith("user_room"):
-                manager = ConversationManager(building_id=b_id, saiverse_manager=self)
+                building = self.building_map[b_id]
+                manager = ConversationManager(
+                    building_id=b_id,
+                    saiverse_manager=self,
+                    interval=building.auto_interval_sec
+                )
                 self.conversation_managers[b_id] = manager
         logging.info(f"Initialized {len(self.conversation_managers)} conversation managers.")
 
@@ -493,7 +499,8 @@ class SAIVerseManager:
                     system_instruction=db_b.SYSTEM_INSTRUCTION or "",
                     entry_prompt=db_b.ENTRY_PROMPT or "",
                     auto_prompt=db_b.AUTO_PROMPT or "",
-                    description=db_b.DESCRIPTION or "" # 探索結果で説明を表示するために追加
+                    description=db_b.DESCRIPTION or "", # 探索結果で説明を表示するために追加
+                    auto_interval_sec=db_b.AUTO_INTERVAL_SEC if hasattr(db_b, 'AUTO_INTERVAL_SEC') else 10
                 )
                 buildings.append(building)
             logging.info(f"Loaded and created {len(buildings)} buildings from database.")
@@ -1165,31 +1172,32 @@ class SAIVerseManager:
             yield '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'
             return
 
-        # Get a list of local, non-dispatched personas in the current room
         responding_personas = [
-            self.personas[pid] 
-            for pid in self.occupants.get(self.user_current_building_id, []) 
+            self.personas[pid]
+            for pid in self.occupants.get(self.user_current_building_id, [])
             if pid in self.personas and not self.personas[pid].is_dispatched
         ]
 
-        # If no one is available to respond, just log the user's message.
-        if not responding_personas:
-            self.building_histories.setdefault(self.user_current_building_id, []).append({
-                "role": "user",
-                "content": message,
-                "timestamp": datetime.now().isoformat()
-            })
-            self._save_building_histories()
-            yield from () # Return an empty generator
-            return
-
-        # If there are personas, let them handle the input.
-        # They are responsible for logging the user's message.
+        # 1. 通常のユーザー発話処理
         for persona in responding_personas:
             for token in persona.handle_user_input_stream(message):
                 yield token
-        
-        # After all streams are done, save everything.
+
+        # 2. Interaction_Mode='user'のペルソナにrun_pulseを実行
+        for persona in responding_personas:
+            if persona.interaction_mode == "user":
+                occupants = self.occupants.get(self.user_current_building_id, [])
+                pulse_replies = persona.run_pulse(occupants=occupants, user_online=True)
+                for reply in pulse_replies:
+                    # 履歴に追加
+                    self.building_histories.setdefault(self.user_current_building_id, []).append({
+                        "role": "assistant",
+                        "persona_id": persona.persona_id,
+                        "content": reply
+                    })
+                    yield reply
+
+        # 履歴保存
         self._save_building_histories()
         for persona in self.personas.values():
             persona._save_session_metadata()
@@ -1206,6 +1214,23 @@ class SAIVerseManager:
             if pid not in current_occupants and not persona.is_dispatched:
                 summonable.append(persona.persona_name)
         return sorted(summonable)
+
+    def get_conversing_personas(self) -> List[Tuple[str, str]]:
+        """
+        Returns a list of (name, id) tuples for local personas currently in the user_room.
+        This is used for the 'End Conversation' dropdown.
+        """
+        if not self.user_current_building_id or self.user_current_building_id != self.user_room_id:
+            return []
+        
+        conversing_ids = self.occupants.get(self.user_room_id, [])
+        
+        personas_in_room = [
+            (p.persona_name, p.persona_id)
+            for pid, p in self.personas.items()
+            if pid in conversing_ids
+        ]
+        return sorted(personas_in_room)
 
     def summon_persona(self, persona_id: str) -> Tuple[bool, Optional[str]]:
         if persona_id not in self.personas:
@@ -1263,7 +1288,10 @@ class SAIVerseManager:
         success, reason = self._move_persona(persona_id, from_id, to_id)
 
         if success:
-            persona.run_auto_conversation(initial=True)
+            # メモリ上のペルソナの現在地を更新
+            persona.current_building_id = to_id
+            logging.info(f"Updated {persona_id}'s internal location to {to_id} after summon.")
+            # ユーザーの部屋に召喚した場合、自律会話は開始しない
             self._save_building_histories()
             return True, None
         else:
@@ -1277,18 +1305,17 @@ class SAIVerseManager:
 
         db = self.SessionLocal()
         try:
-            # 1. Get the AI record to access its properties
             ai_record = db.query(AIModel).filter(AIModel.AIID == persona_id).first()
             if not ai_record:
                 logging.error(f"AI record not found for {persona_id} in end_conversation.")
                 return
 
-            # 2. Find the previous building for the persona
+            # 1. Find the previous building for the persona
             logs = db.query(BuildingOccupancyLog).filter(
                 BuildingOccupancyLog.AIID == persona_id
             ).order_by(BuildingOccupancyLog.ENTRY_TIMESTAMP.desc()).limit(2).all()
 
-            # Determine destination, using PRIVATE_ROOM_ID as a robust fallback
+            # 2. Determine destination, using PRIVATE_ROOM_ID as a robust fallback
             private_room_id = ai_record.PRIVATE_ROOM_ID
             destination_id = private_room_id # Default to private room
 
@@ -1297,61 +1324,48 @@ class SAIVerseManager:
             elif len(logs) < 2:
                 logging.info(f"{persona_id} has no previous location. Sending to private room '{private_room_id}'.")
             else:
-                # The second-to-last entry is the previous location.
                 destination_id = logs[1].BUILDINGID
 
-            # Ensure destination is valid
             if destination_id not in self.building_map:
                 logging.error(f"Invalid destination building '{destination_id}' found for {persona_id}. Falling back to private room '{private_room_id}'.")
                 destination_id = private_room_id
                 if destination_id not in self.building_map:
-                    # This is a critical failure, the persona has no valid place to go.
                     logging.error(f"Private room '{destination_id}' not found. Cannot move persona.")
                     msg = f"{self.id_to_name_map.get(persona_id, persona_id)}の帰る場所が見つかりませんでした。"
-                    self.building_histories[self.user_room_id].append(
+                    self.building_histories.setdefault(self.user_room_id, []).append(
                         {"role": "host", "content": f"<div class=\"note-box\">{msg}</div>"}
                     )
                     self._save_building_histories()
                     return
 
-            # 3. Restore interaction mode from PREVIOUS_INTERACTION_MODE
+            # 3. Move the persona and update memory state immediately
+            # This now handles DB, memory (occupants), and logging in one go.
+            success, reason = self.occupancy_manager.move_entity(persona_id, 'ai', self.user_room_id, destination_id, db_session=db)
+
+            if not success:
+                msg = f"{self.id_to_name_map.get(persona_id, persona_id)}を移動できませんでした: {reason}"
+                self.building_histories.setdefault(self.user_room_id, []).append(
+                    {"role": "host", "content": f'<div class="note-box">{msg}</div>'}
+                )
+                self._save_building_histories()
+                db.rollback()
+                return
+
+            # 4. Restore interaction mode from PREVIOUS_INTERACTION_MODE
             previous_mode = ai_record.PREVIOUS_INTERACTION_MODE
             ai_record.INTERACTION_MODE = previous_mode
             logging.info(f"Restoring INTERACTION_MODE to '{previous_mode}' for {persona_id}.")
 
-            # 4. Move the persona (pass the session)
-            success, reason = self._move_persona(persona_id, self.user_room_id, destination_id, db_session=db)
-
-            if success:
-                persona = self.personas.get(persona_id)
-                if persona:
-                    persona.current_building_id = destination_id
-                    persona.interaction_mode = previous_mode
-                    dest_name = self.building_map[destination_id].name
-                    msg = f"{self.id_to_name_map.get(persona_id, persona_id)}が{dest_name}に向かいました。"
-                    self.building_histories[self.user_room_id].append(
-                        {
-                            "role": "assistant",
-                            "persona_id": persona_id,
-                            "content": f'<div class="note-box">🏢 Building:<br><b>{msg}</b></div>'
-                        }
-                    )
-                    self._save_building_histories()
-                    logging.info(f"Updated {persona_id}'s internal location to {destination_id} and restored mode to '{previous_mode}'.")
-                else:
-                    logging.error(f"Could not find PersonaCore instance for {persona_id} to update location.")
-            else:
-                msg = f"{self.id_to_name_map.get(persona_id, persona_id)}を移動できませんでした: {reason}"
-                self.building_histories["user_room"].append(
-                    {"role": "host", "content": f'<div class="note-box">{msg}</div>'}
-                )
-                self._save_building_histories()
-                db.rollback() 
-                return
+            # 5. Update in-memory PersonaCore state
+            persona = self.personas.get(persona_id)
+            if persona:
+                persona.current_building_id = destination_id
+                persona.interaction_mode = previous_mode
+                logging.info(f"Updated {persona_id}'s internal location to {destination_id} and restored mode to '{previous_mode}'.")
 
             # 5. Commit all DB changes at once
             db.commit()
-            logging.info(f"Successfully ended conversation with {persona_id}.")
+            self._save_building_histories() # Save logs after successful commit
 
         except Exception as e:
             db.rollback()
@@ -1416,51 +1430,62 @@ class SAIVerseManager:
                 persona._save_session_metadata()
         return replies
 
-    def execute_tool(self, tool_id: int, persona_id: str) -> str:
+    def execute_tool(self, tool_id: int, persona_id: str, arguments: Dict[str, Any]) -> str:
         """
-        Dynamically loads and executes a tool from a .py file based on its module path.
+        Dynamically loads and executes a tool function with given arguments.
+        Checks for persona's location and tool availability in that building.
         """
         db = self.SessionLocal()
         try:
             # 1. Get persona and their current location
             persona = self.personas.get(persona_id)
             if not persona:
-                return f"Error: Persona '{persona_id}' not found."
+                return f"Error: ペルソナ '{persona_id}' が見つかりません。"
             
             current_building_id = persona.current_building_id
             building = self.building_map.get(current_building_id)
             if not building:
-                 return f"Error: Persona '{persona_id}' is not in a valid building."
+                 return f"Error: ペルソナ '{persona_id}' は有効な建物にいません。"
 
             # 2. Check if the tool is available in the current building
             link = db.query(BuildingToolLink).filter_by(BUILDINGID=current_building_id, TOOLID=tool_id).first()
             if not link:
-                return f"Error: Tool ID {tool_id} is not available in '{building.name}'."
+                return f"Error: ツールID {tool_id} は '{building.name}' で利用できません。"
 
-            # 3. Get tool's module path from DB
+            # 3. Get tool's module path and function name from DB
             tool_record = db.query(ToolModel).filter_by(TOOLID=tool_id).first()
             if not tool_record:
-                return f"Error: Tool with ID {tool_id} not found in the database."
+                return f"Error: ツールID {tool_id} がデータベースに見つかりません。"
             
             module_path = tool_record.MODULE_PATH
-            
+            function_name = tool_record.FUNCTION_NAME
+
             try:
+                # 4. Dynamically import the module and get the function
                 tool_module = importlib.import_module(module_path)
-                if not hasattr(tool_module, 'execute'):
-                    return f"Error: Tool module '{module_path}' does not have an 'execute' function."
-                
-                context = { "manager": self, "db_session": db, "persona": persona, "building": building, }
-                
-                logging.info(f"Executing tool '{tool_record.TOOLNAME}' for persona '{persona.persona_name}' in '{building.name}'.")
-                result = tool_module.execute(context)
-                return str(result)
+                tool_function = getattr(tool_module, function_name)
+
+                # 5. Execute the function with the provided arguments
+                logging.info(f"Executing tool '{tool_record.TOOLNAME}' for persona '{persona.persona_name}' with args {arguments}.")
+                result = tool_function(**arguments) # 引数をアンパックして渡す
+
+                # 6. Process and return the result
+                content, _, _ = tools.defs.parse_tool_result(result)
+                return str(content)
 
             except ImportError:
                 logging.error(f"Failed to import tool module: {module_path}", exc_info=True)
-                return f"Error: Could not find the tool file at '{module_path}'. Please check the path."
+                return f"Error: ツールファイル '{module_path}' が見つかりませんでした。パスを確認してください。"
+            except AttributeError:
+                logging.error(f"Function '{function_name}' not found in module '{module_path}'.", exc_info=True)
+                return f"Error: ツール関数 '{function_name}' が '{module_path}' に見つかりませんでした。"
+            except TypeError as e:
+                # 引数が合わない場合
+                logging.error(f"Argument mismatch for tool '{function_name}': {e}", exc_info=True)
+                return f"Error: ツール '{tool_record.TOOLNAME}' に不正な引数が渡されました。詳細: {e}"
             except Exception as e:
                 logging.error(f"An error occurred while executing tool '{module_path}': {e}", exc_info=True)
-                return f"Error: An unexpected error occurred while running the tool: {e}"
+                return f"Error: ツールの実行中に予期せぬエラーが発生しました: {e}"
         finally:
             db.close()
 
@@ -1863,6 +1888,109 @@ class SAIVerseManager:
         finally:
             db.close()
 
+    def get_tools_df(self) -> pd.DataFrame:
+        """ワールドエディタ用にすべてのTool一覧をDataFrameとして取得する"""
+        db = self.SessionLocal()
+        try:
+            query = db.query(ToolModel)
+            df = pd.read_sql(query.statement, query.session.bind)
+            return df
+        finally:
+            db.close()
+
+    def get_tool_details(self, tool_id: int) -> Optional[Dict]:
+        """Get full details for a single tool for the edit form."""
+        db = self.SessionLocal()
+        try:
+            tool = db.query(ToolModel).filter(ToolModel.TOOLID == tool_id).first()
+            if not tool: return None
+            return {
+                "TOOLID": tool.TOOLID,
+                "TOOLNAME": tool.TOOLNAME,
+                "DESCRIPTION": tool.DESCRIPTION,
+                "MODULE_PATH": tool.MODULE_PATH,
+                "FUNCTION_NAME": tool.FUNCTION_NAME,
+            }
+        finally:
+            db.close()
+
+    def create_tool(self, name: str, description: str, module_path: str, function_name: str) -> str:
+        """ワールドエディタから新しいToolを作成する"""
+        db = self.SessionLocal()
+        try:
+            if db.query(ToolModel).filter_by(TOOLNAME=name).first():
+                return f"Error: A tool named '{name}' already exists."
+            if db.query(ToolModel).filter_by(MODULE_PATH=module_path, FUNCTION_NAME=function_name).first():
+                return f"Error: A tool with the same module and function name already exists."
+
+            new_tool = ToolModel(
+                TOOLNAME=name,
+                DESCRIPTION=description,
+                MODULE_PATH=module_path,
+                FUNCTION_NAME=function_name
+            )
+            db.add(new_tool)
+            db.commit()
+            logging.info(f"Created new tool '{name}'.")
+            return f"Tool '{name}' created successfully."
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to create tool '{name}': {e}", exc_info=True)
+            return f"Error: {e}"
+        finally:
+            db.close()
+
+    def update_tool(self, tool_id: int, name: str, description: str, module_path: str, function_name: str) -> str:
+        """ワールドエディタからToolの設定を更新する"""
+        db = self.SessionLocal()
+        try:
+            tool = db.query(ToolModel).filter_by(TOOLID=tool_id).first()
+            if not tool: return "Error: Tool not found."
+
+            tool.TOOLNAME = name
+            tool.DESCRIPTION = description
+            tool.MODULE_PATH = module_path
+            tool.FUNCTION_NAME = function_name
+            db.commit()
+            logging.info(f"Updated tool '{name}' (ID: {tool_id}).")
+            return f"Tool '{name}' updated successfully."
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to update tool ID {tool_id}: {e}", exc_info=True)
+            return f"Error: {e}"
+        finally:
+            db.close()
+
+    def delete_tool(self, tool_id: int) -> str:
+        """ワールドエディタからToolを削除する"""
+        db = self.SessionLocal()
+        try:
+            tool = db.query(ToolModel).filter_by(TOOLID=tool_id).first()
+            if not tool: return "Error: Tool not found."
+            if db.query(BuildingToolLink).filter_by(TOOLID=tool_id).first():
+                return f"Error: Cannot delete tool '{tool.TOOLNAME}' because it is linked to one or more buildings."
+            db.delete(tool)
+            db.commit()
+            logging.info(f"Deleted tool ID {tool_id}.")
+            return f"Tool '{tool.TOOLNAME}' deleted successfully."
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to delete tool ID {tool_id}: {e}", exc_info=True)
+            return f"Error: {e}"
+        finally:
+            db.close()
+
+    def get_linked_tool_ids(self, building_id: str) -> List[int]:
+        """Gets a list of tool IDs linked to a specific building."""
+        if not building_id: return []
+        db = self.SessionLocal()
+        try:
+            links = db.query(BuildingToolLink.TOOLID).filter_by(BUILDINGID=building_id).all()
+            # links will be a list of tuples, e.g., [(1,), (2,)]
+            return [link[0] for link in links]
+        finally:
+            db.close()
+
     # --- World Editor: Create/Delete Methods ---
 
     def _is_seeded_entity(self, entity_id: str) -> bool:
@@ -2039,11 +2167,11 @@ class SAIVerseManager:
         try:
             query = db.query(BuildingModel)
             df = pd.read_sql(query.statement, query.session.bind)
-            return df[['BUILDINGID', 'BUILDINGNAME', 'CAPACITY', 'DESCRIPTION', 'SYSTEM_INSTRUCTION', 'CITYID']]
+            return df[['BUILDINGID', 'BUILDINGNAME', 'CAPACITY', 'DESCRIPTION', 'SYSTEM_INSTRUCTION', 'CITYID', 'AUTO_INTERVAL_SEC']]
         finally:
             db.close()
 
-    def update_building(self, building_id: str, name: str, capacity: int, description: str, system_instruction: str, city_id: int) -> str:
+    def update_building(self, building_id: str, name: str, capacity: int, description: str, system_instruction: str, city_id: int, tool_ids: List[int], interval: int) -> str:
         """ワールドエディタからBuildingの設定を更新する"""
         db = self.SessionLocal()
         try:
@@ -2064,11 +2192,23 @@ class SAIVerseManager:
             building.CAPACITY = capacity
             building.DESCRIPTION = description
             building.SYSTEM_INSTRUCTION = system_instruction
+            building.AUTO_INTERVAL_SEC = interval
             building.CITYID = city_id
+
+            # --- Update Tool Links ---
+            # 1. Delete existing links for this building
+            db.query(BuildingToolLink).filter_by(BUILDINGID=building_id).delete(synchronize_session=False)
+            
+            # 2. Add new links
+            if tool_ids:
+                for tool_id in tool_ids:
+                    new_link = BuildingToolLink(BUILDINGID=building_id, TOOLID=int(tool_id))
+                    db.add(new_link)
+
             db.commit()
             
-            logging.info(f"Updated building '{name}' ({building_id}). A restart is required for changes to apply.")
-            return f"Building '{name}' updated successfully. A restart is required for the changes to take full effect."
+            logging.info(f"Updated building '{name}' ({building_id}) and its tool links. A restart is required for changes to apply.")
+            return f"Building '{name}' and its tool links updated successfully. A restart is required for the changes to take full effect."
         except Exception as e:
             db.rollback()
             logging.error(f"Failed to update building '{building_id}': {e}", exc_info=True)
