@@ -604,7 +604,17 @@ class PersonaCore:
 
     def handle_user_input_stream(self, message: str) -> Iterator[str]:
         logging.info("User input: %s", message)
-        gen = self._generate_stream(message)
+
+        # ユーザーのメッセージを先に履歴に追加
+        self.history_manager.add_message(
+            {"role": "user", "content": message},
+            self.current_building_id
+        )
+
+        # _generate_stream には user_message=None を渡す
+        # これにより、_build_messages は履歴の最後のメッセージ（今追加したユーザーメッセージ）を文脈として使う
+        # また、_process_generation_result でユーザーメッセージが二重に記録されるのを防ぐ
+        gen = self._generate_stream(user_message=None, log_user_message=False)
 
         try:
             while True:
