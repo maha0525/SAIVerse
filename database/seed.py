@@ -51,7 +51,8 @@ def seed_database():
                 CITYNAME=city_name,
                 DESCRIPTION=f"{city_name}の街です。",
                 UI_PORT=config["ui_port"],
-                API_PORT=config["api_port"]
+                API_PORT=config["api_port"],
+                START_IN_ONLINE_MODE=(city_name == "city_a") # city_aのみTrue
             )
             db.add(
                 new_city
@@ -132,7 +133,7 @@ def seed_database():
             for ai in ais_to_add:
                 if ai.AINAME == "ジェネシス": continue # Genesis doesn't get a private room
                 
-                private_room_id = f"{ai.AINAME}_{city_name}_room"
+                private_room_id = f"{ai.AINAME.lower()}_{city_name}_room"
                 buildings_to_add.append(
                     Building(
                         CITYID=city_id, 
@@ -155,7 +156,7 @@ def seed_database():
                 if ai.AINAME == "ジェネシス":
                     home_room_id = f"altar_of_creation_{city_name}"
                 else:
-                    home_room_id = f"{ai.AINAME}_{city_name}_room"
+                    home_room_id = ai.PRIVATE_ROOM_ID
 
                 occupancy_log = BuildingOccupancyLog(
                     CITYID=city_id,

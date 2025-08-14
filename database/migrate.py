@@ -2,7 +2,10 @@ import os
 import sys
 import argparse
 import logging
+import shutil
+from datetime import datetime
 from sqlalchemy import create_engine, inspect
+import pandas as pd
 
 # プロジェクトのルートディレクトリをPythonのパスに追加し、
 # 他のモジュール（例: database.models）をインポートできるようにします。
@@ -13,39 +16,96 @@ from database.models import Base
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def migrate_database(db_path: str):
+def migrate_database_in_place(db_path: str):
     """
-    データベースのスキーマを現在のモデル定義と比較し、不足しているテーブルを作成します。
+    指定されたデータベースファイルをその場でマイグレーションします。
+    1. 既存DBをタイムスタンプ付きのバックアップファイルにリネームします。
+    2. 新しいスキーマで空のDBを元の名前で作成します。
+    3. バックアップから新DBへデータを移行します。カラムの追加・削除に自動で対応します。
+    4. 成功すればバックアップはそのまま残し、失敗すればロールバックを試みます。
     """
+    # --- 1. Validate paths and create backup ---
     if not os.path.exists(db_path):
         logging.error(f"データベースファイルが見つかりません: {db_path}")
+        logging.info("データベースファイルが存在しないため、マイグレーションは不要です。")
         return
 
-    logging.info(f"データベーススキーマをチェック中: {db_path}")
-    DATABASE_URL = f"sqlite:///{db_path}"
-    engine = create_engine(DATABASE_URL)
+    db_dir = os.path.dirname(db_path)
+    db_name = os.path.basename(db_path)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = os.path.join(db_dir, f"{db_name}_{timestamp}.bak")
+    
+    logging.info(f"マイグレーションを開始します: {db_path}")
+    
+    try:
+        # 元のファイルをバックアップパスに移動
+        shutil.move(db_path, backup_path)
+        logging.info(f"データベースをバックアップしました: {backup_path}")
+    except Exception as e:
+        logging.error(f"バックアップの作成に失敗しました: {e}")
+        return
+
+    # --- 2. Setup engines and create new schema ---
+    source_engine = create_engine(f"sqlite:///{backup_path}")
+    target_engine = create_engine(f"sqlite:///{db_path}")
 
     try:
-        inspector = inspect(engine)
-        existing_tables = inspector.get_table_names()
-        logging.info(f"既存のテーブル: {existing_tables}")
+        Base.metadata.create_all(target_engine)
+        logging.info(f"新しいスキーマでデータベースを作成しました: {db_path}")
 
-        tables_to_create = [table for table in Base.metadata.sorted_tables if table.name not in existing_tables]
+        # --- 3. Migrate data ---
+        source_inspector = inspect(source_engine)
+        target_inspector = inspect(target_engine)
+        
+        # Base.metadata.sorted_tables は外部キーの依存関係に基づいてソートされている
+        for table in Base.metadata.sorted_tables:
+            table_name = table.name
+            logging.info(f"テーブル '{table_name}' のデータ移行を開始...")
 
-        if not tables_to_create:
-            logging.info("データベーススキーマは最新です。マイグレーションは不要です。")
-            return
+            if not source_inspector.has_table(table_name):
+                logging.warning(f"  - ソースにテーブル '{table_name}' が存在しないため、スキップします。")
+                continue
 
-        logging.warning(f"不足しているテーブルが見つかりました。次のテーブルを作成します: {[t.name for t in tables_to_create]}")
-        Base.metadata.create_all(bind=engine, tables=tables_to_create)
-        logging.info("マイグレーションが完了しました。")
+            try:
+                df = pd.read_sql_table(table_name, source_engine)
+                if df.empty:
+                    logging.info(f"  - テーブル '{table_name}' は空なので、スキップします。")
+                    continue
+                
+                # ターゲットテーブルに存在するカラムのみを移行対象とする
+                target_columns = [c['name'] for c in target_inspector.get_columns(table_name)]
+                df_to_load = df[[col for col in df.columns if col in target_columns]]
 
+                # データを新しいテーブルに書き込む
+                df_to_load.to_sql(table_name, target_engine, if_exists='append', index=False)
+                logging.info(f"  - {len(df_to_load)} 件のレコードを '{table_name}' に移行しました。")
+
+            except Exception as e:
+                logging.error(f"テーブル '{table_name}' の移行中にエラーが発生しました: {e}", exc_info=True)
+                # このテーブルでエラーが発生しても、他のテーブルの移行を試みる場合はここにロジックを追加できます。
+                # 今回は、いずれかのテーブルで失敗したら全体をロールバックします。
+                raise # エラーを再送出して、外側のtry-exceptブロックでキャッチさせる
+
+        logging.info("すべてのテーブルのデータ移行が正常に完了しました。")
+        
     except Exception as e:
         logging.error(f"マイグレーション中にエラーが発生しました: {e}", exc_info=True)
+        logging.info("ロールバックを試みます...")
+        # DB接続を一度閉じてからファイル操作を行う
+        source_engine.dispose()
+        target_engine.dispose()
+        try:
+            if os.path.exists(backup_path):
+                if os.path.exists(db_path):
+                    os.remove(db_path)
+                shutil.move(backup_path, db_path)
+                logging.info("ロールバックが完了しました。元のデータベースが復元されました。")
+        except Exception as rb_e:
+            logging.error(f"ロールバックに失敗しました: {rb_e}", exc_info=True)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SAIVerse データベース マイグレーションツール")
     parser.add_argument("--db", required=True, help="SQLiteデータベースへのパス (例: database/city_A.db)")
     args = parser.parse_args()
     
-    migrate_database(args.db)
+    migrate_database_in_place(args.db)
