@@ -70,7 +70,7 @@ class Tool(Base):
     TOOLID = Column(Integer, primary_key=True)
     TOOLNAME = Column(String(32), nullable=False, unique=True)
     MODULE_PATH = Column(String(255), nullable=False, unique=True)
-    FUNCTION_NAME = Column(String(255), nullable=False)
+    FUNCTION_NAME = Column(String(255), nullable=False, default="")
     DESCRIPTION = Column(String(1024), default="", nullable=False)
 
 class UserAiLink(Base):

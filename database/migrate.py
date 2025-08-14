@@ -71,9 +71,26 @@ def migrate_database_in_place(db_path: str):
                 if df.empty:
                     logging.info(f"  - テーブル '{table_name}' は空なので、スキップします。")
                     continue
-                
+
+                source_columns = df.columns.tolist()
+                target_columns_info = target_inspector.get_columns(table_name)
+                target_columns = [c['name'] for c in target_columns_info]
+
+                # ターゲットにしか存在しない新しいカラムを見つける
+                new_columns = set(target_columns) - set(source_columns)
+                model_table = Base.metadata.tables[table_name]
+
+                for col_name in new_columns:
+                    column = model_table.columns.get(col_name)
+                    # デフォルト値が設定されているNOT NULLカラムにデフォルト値を設定
+                    if column is not None and column.default is not None and not column.nullable:
+                        default_value = column.default.arg
+                        logging.info(f"  - 新しいNOT NULLカラム '{col_name}' にデフォルト値 '{default_value}' を設定します。")
+                        df[col_name] = default_value
+                    elif column is not None and not column.nullable:
+                        logging.warning(f"  - 警告: 新しいNOT NULLカラム '{col_name}' にデフォルト値がありません。移行に失敗する可能性があります。")
+
                 # ターゲットテーブルに存在するカラムのみを移行対象とする
-                target_columns = [c['name'] for c in target_inspector.get_columns(table_name)]
                 df_to_load = df[[col for col in df.columns if col in target_columns]]
 
                 # データを新しいテーブルに書き込む
