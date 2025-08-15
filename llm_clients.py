@@ -2,6 +2,7 @@ import logging
 import os
 import json
 from typing import Dict, List, Iterator, Tuple, Optional
+import os
 
 import requests
 from openai import OpenAI
@@ -366,7 +367,14 @@ class GeminiClient(LLMClient):
     @staticmethod
     def _is_rate_limit_error(err: Exception) -> bool:
         msg = str(err).lower()
-        return "rate" in msg or "429" in msg or "quota" in msg
+        return (
+            "rate" in msg
+            or "429" in msg
+            or "quota" in msg
+            or "503" in msg
+            or "unavailable" in msg
+            or "overload" in msg
+        )
 
     @staticmethod
     def _convert_messages(msgs: List[Dict[str, str] | types.Content]
@@ -440,12 +448,12 @@ class GeminiClient(LLMClient):
         tool_cfg = types.ToolConfig(functionCallingConfig=fc_cfg)
         snippets: List[str] = history_snippets
 
-        def _call(client):
+        def _call(client, model_id: str):
             for _ in range(10):
                 sys_msg, contents = self._convert_messages(messages)
                 tool_list = _merge_tools_for_gemini(tools)
                 resp = client.models.generate_content(
-                    model=self.model,
+                    model=model_id,
                     contents=contents,
                     config=types.GenerateContentConfig(
                         system_instruction=sys_msg,
@@ -511,19 +519,31 @@ class GeminiClient(LLMClient):
             return "ツール呼び出しが 10 回を超えました。"
 
         active_client = self.client
-        try:
-            return _call(active_client)
-        except Exception as e:
-            if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(e):
-                logging.info("Retrying with paid Gemini API key due to rate limit")
-                active_client = self.paid_client
-                try:
-                    return _call(active_client)
-                except Exception:
-                    logging.exception("Gemini call failed")
-                    return "エラーが発生しました。"
-            logging.exception("Gemini call failed")
-            return "エラーが発生しました。"
+        # Try current model, then a couple of alternates on 503/overload issues
+        model_candidates = []
+        for m in [self.model, "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]:
+            if m and m not in model_candidates:
+                model_candidates.append(m)
+
+        last_err: Optional[Exception] = None
+        for mid in model_candidates:
+            try:
+                return _call(active_client, mid)
+            except Exception as e:
+                last_err = e
+                if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(e):
+                    logging.info("Retrying with paid Gemini API key due to backend limit/overload")
+                    active_client = self.paid_client
+                    try:
+                        return _call(active_client, mid)
+                    except Exception as e2:
+                        last_err = e2
+                        logging.warning("Paid Gemini also failed for %s: %s", mid, e2)
+                else:
+                    logging.warning("Gemini model %s failed: %s; trying next candidate", mid, e)
+                    continue
+        logging.exception("Gemini call failed after candidates: %s", model_candidates, exc_info=last_err)
+        return "エラーが発生しました。"
 
     def generate_stream(
         self,
@@ -706,31 +726,120 @@ class OllamaClient(LLMClient):
     """Client for Ollama API."""
     def __init__(self, model: str, context_length: int):
         self.model = model
-        self.url = "http://localhost:11434/v1/chat/completions"
         self.context_length = context_length
+        self.fallback_client: Optional[LLMClient] = None
+        # Prefer explicit OLLAMA_BASE_URL, else probe common bases quickly
+        base_env = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST")
+        probed = self._probe_base(base_env)
+        if probed is None:
+            # No reachable Ollama → try Gemini 1.5 Flash fallback
+            try:
+                logging.info("No reachable Ollama; falling back to Gemini 1.5 Flash")
+                self.fallback_client = GeminiClient("gemini-1.5-flash")
+                self.base = ""
+                self.url = ""
+            except Exception as e:
+                logging.warning("Gemini fallback unavailable: %s", e)
+                # Last-resort: still set a localhost base to avoid attribute errors
+                self.base = "http://127.0.0.1:11434"
+                self.url = f"{self.base}/v1/chat/completions"
+        else:
+            self.base = probed
+            # OpenAI 互換 API（推奨）。利用不可なら generate() で /api/chat に自動フォールバック
+            self.url = f"{self.base}/v1/chat/completions"
+
+    def _probe_base(self, preferred: Optional[str]) -> Optional[str]:
+        """Pick a reachable Ollama base URL with quick connect timeouts.
+        Tries: preferred, 127.0.0.1, localhost, host.docker.internal, common docker bridge.
+        """
+        candidates: list[str] = []
+        if preferred:
+            # Accept single or comma-separated list
+            for part in str(preferred).split(","):
+                part = part.strip()
+                if part:
+                    candidates.append(part)
+        candidates += [
+            "http://127.0.0.1:11434",
+            "http://localhost:11434",
+            "http://host.docker.internal:11434",
+            "http://172.17.0.1:11434",   # common docker bridge
+        ]
+        seen = set()
+        for base in candidates:
+            if base in seen:
+                continue
+            seen.add(base)
+            try:
+                # Try v1 then legacy version endpoint with very short connect timeout
+                # Use HEAD first; if not supported fall back to GET
+                url_v1 = f"{base}/v1/models"
+                r = requests.get(url_v1, timeout=(2, 2))
+                if r.ok:
+                    logging.info("Using Ollama base: %s (v1)", base)
+                    return base
+            except Exception:
+                pass
+            try:
+                url_legacy = f"{base}/api/version"
+                r2 = requests.get(url_legacy, timeout=(2, 2))
+                if r2.ok:
+                    logging.info("Using Ollama base: %s (legacy)", base)
+                    return base
+            except Exception:
+                continue
+        # No responsive endpoint detected
+        logging.warning("No responsive Ollama endpoint detected during probe")
+        return None
 
     def generate(self, messages: List[Dict[str, str]], tools: Optional[list] | None = None) -> str:
+        payload_v1 = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {"num_ctx": self.context_length},
+            # JSON応答を強制（対応バージョンのみ）
+            "response_format": {"type": "json_object"},
+        }
+        # If Ollama is unavailable and Gemini fallback exists, use it
+        if self.fallback_client is not None:
+            return self.fallback_client.generate(messages, tools)
         try:
-            resp = requests.post(
-                self.url,
-                json={
-                    "model": self.model,
-                    "messages": messages,
-                    "stream": False,
-                    "options": {"num_ctx": self.context_length}
-                },
-                timeout=300,
-            )
+            # Fast connect timeout, generous read timeout
+            resp = requests.post(self.url, json=payload_v1, timeout=(3, 300))
             resp.raise_for_status()
             data = resp.json()
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            logging.debug("Raw ollama response: %s", content)
+            logging.debug("Raw ollama v1 response: %s", content)
             return content
-        except Exception as e:
-            logging.exception("Ollama call failed")
-            return "エラーが発生しました。"
+        except Exception:
+            logging.exception("Ollama v1 endpoint failed; trying legacy /api/chat")
+            # Fallback to legacy /api/chat
+            try:
+                resp = requests.post(
+                    f"{self.base}/api/chat",
+                    json={
+                        "model": self.model,
+                        "messages": messages,
+                        "stream": False,
+                        "options": {"num_ctx": self.context_length},
+                    },
+                    timeout=(3, 300),
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                content = data.get("message", {}).get("content", "")
+                logging.debug("Raw ollama /api/chat response: %s", content)
+                return content
+            except Exception:
+                logging.exception("Ollama legacy /api/chat failed")
+                return "エラーが発生しました。"
 
     def generate_stream(self, messages: List[Dict[str, str]], tools: Optional[list] | None = None) -> Iterator[str]:
+        # If Ollama is unavailable and Gemini fallback exists, stream via Gemini
+        if self.fallback_client is not None:
+            yield from self.fallback_client.generate_stream(messages, tools)
+            return
         try:
             resp = requests.post(
                 self.url,
@@ -740,7 +849,7 @@ class OllamaClient(LLMClient):
                     "stream": True,
                     "options": {"num_ctx": self.context_length}
                 },
-                timeout=300,
+                timeout=(3, 300),
                 stream=True,
             )
             resp.raise_for_status()

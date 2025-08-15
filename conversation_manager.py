@@ -69,6 +69,16 @@ class ConversationManager:
             pid for pid in all_occupants
             if pid in self.saiverse_manager.all_personas
         ]
+        try:
+            meta = [
+                (self.saiverse_manager.all_personas[pid].__dict__.get('persona_name', pid),
+                 getattr(self.saiverse_manager.all_personas[pid], 'interaction_mode', 'auto') or 'auto',
+                 getattr(self.saiverse_manager.all_personas[pid], 'is_proxy', False))
+                for pid in ai_occupants
+            ]
+            logging.debug(f"[ConvManager] Occupants in {self.building_id}: {meta}")
+        except Exception:
+            pass
 
         # 誰もいなければ何もしない
         if not ai_occupants:
@@ -91,9 +101,10 @@ class ConversationManager:
         
         # 'user' or 'sleep'モードのペルソナは自律会話を行わない
         # is_proxyチェックで、このロジックがローカルのPersonaCoreインスタンスにのみ適用されるようにする
+        mode = getattr(speaker_persona, 'interaction_mode', 'auto') or 'auto'
         if not getattr(speaker_persona, 'is_proxy', False):
-            if speaker_persona.interaction_mode != 'auto':
-                logging.debug(f"[ConvManager] Persona '{speaker_persona.persona_name}' is in '{speaker_persona.interaction_mode}' mode. Skipping turn.")
+            if mode != 'auto':
+                logging.debug(f"[ConvManager] Persona '{speaker_persona.persona_name}' is in '{mode}' mode. Skipping turn.")
                 self._current_speaker_index = (self._current_speaker_index + 1) % len(ai_occupants)
                 return
 
@@ -105,7 +116,7 @@ class ConversationManager:
 
         # PersonaCoreのrun_pulseを呼び出す
         # これにより、ペルソナは自ら状況を判断して発話するかどうかを決める
-        logging.info(f"[ConvManager] Triggering pulse for '{speaker_persona.persona_name}' in '{self.building_id}'.")
+        logging.info(f"[ConvManager] Triggering pulse for '{speaker_persona.persona_name}' (mode={mode}, proxy={getattr(speaker_persona,'is_proxy',False)}) in '{self.building_id}'.")
         # AIが周囲を認識できるよう、run_pulseにはユーザーを含む全員のリストを渡す
         replies = speaker_persona.run_pulse(occupants=all_occupants, user_online=self.saiverse_manager.user_is_online)
 

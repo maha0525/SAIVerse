@@ -13,6 +13,7 @@ from google.genai import types
 from dotenv import load_dotenv
 
 from buildings import Building
+from memory_core import MemoryCore  # Memory system integration
 from llm_clients import get_llm_client, LLMClient
 import llm_clients
 from action_handler import ActionHandler
@@ -103,6 +104,15 @@ class PersonaCore:
             initial_building_histories=building_histories
         )
 
+        # Perception windows: track where we entered each building so we only
+        # ingest messages that happened after the latest entry.
+        self.entry_indices: Dict[str, int] = {}
+        try:
+            init_hist = self.history_manager.building_histories.get(self.current_building_id, [])
+            self.entry_indices[self.current_building_id] = len(init_hist)
+        except Exception:
+            pass
+
         # Initialize remaining attributes
         self.move_callback = move_callback
         self.dispatch_callback = dispatch_callback
@@ -112,6 +122,42 @@ class PersonaCore:
         self.context_length = context_length
         self.llm_client = get_llm_client(model, provider, self.context_length)
         self.emotion_module = EmotionControlModule()
+
+        # Initialize MemoryCore for episodic memory (lightweight, in-memory)
+        try:
+            self.memory_core = MemoryCore.create_default(with_dummy_llm=True)
+        except Exception:
+            self.memory_core = None
+
+    def _memory_conv_id(self) -> str:
+        """Conversation id for MemoryCore; scoped by persona + building."""
+        return f"{self.persona_id}:{self.current_building_id}"
+
+    def _format_recall_info(self, recall: dict, max_chars: int = 800) -> str:
+        """Format recall bundle into a compact info string for prompts."""
+        if not recall:
+            return ""
+        texts = recall.get("texts") or []
+        topics = recall.get("topics") or []
+        lines: list[str] = ["[Memory Recall]"]
+        for t in texts[:5]:
+            t = (t or "").strip().replace("\n", " ")
+            if len(t) > 200:
+                t = t[:200] + "…"
+            lines.append(f"- {t}")
+        if topics:
+            titles = []
+            for tp in topics[:5]:
+                try:
+                    titles.append((tp.title or "").strip())
+                except Exception:
+                    continue
+            if titles:
+                lines.append("Topics: " + ", ".join(titles))
+        out = "\n".join(lines)
+        if len(out) > max_chars:
+            out = out[: max_chars - 1] + "…"
+        return out
 
     def _load_action_priority(self, path: Path) -> Dict[str, int]:
         if path.exists():
@@ -257,7 +303,7 @@ class PersonaCore:
 
         history_limit = max(0, self.context_length - base_chars)
         history_msgs = self.history_manager.get_recent_history(history_limit)
-        
+
         sanitized_history = [
             {"role": m.get("role", ""), "content": m.get("content", "")}
             for m in history_msgs
@@ -353,7 +399,32 @@ class PersonaCore:
                 actual_user_message = "意識モジュールが発話することを意思決定しました。自由に発言してください"
                 logging.debug("Injected user message for context")
 
-        msgs = self._build_messages(actual_user_message, system_prompt_extra, info_text)
+        # Memory: remember user utterance and prepare recall context
+        combined_info = info_text or ""
+        if self.memory_core is not None:
+            try:
+                if user_message is not None and (user_message or "").strip():
+                    self.memory_core.remember(user_message, conv_id=self._memory_conv_id(), speaker="user")
+                # Determine a recall source:
+                # 1) explicit user_message, else 2) last user message from persona history
+                recall_source = user_message if (user_message and user_message.strip()) else None
+                if recall_source is None:
+                    for m in reversed(self.history_manager.messages):
+                        if m.get("role") == "user":
+                            txt = (m.get("content") or "").strip()
+                            if txt:
+                                recall_source = txt
+                                break
+                if recall_source:
+                    bundle = self.memory_core.recall(recall_source, k=5)
+                    snippet = self._format_recall_info(bundle)
+                    if snippet:
+                        combined_info = (combined_info + "\n" + snippet).strip() if combined_info else snippet
+                        logging.debug("[memory] recall snippet included for prompt (%d chars)", len(snippet))
+            except Exception as e:
+                logging.warning(f"MemoryCore recall failed: {e}")
+
+        msgs = self._build_messages(actual_user_message, system_prompt_extra, combined_info or None)
         logging.debug("Messages sent to API: %s", msgs)
 
         content = self.llm_client.generate(msgs)
@@ -367,6 +438,13 @@ class PersonaCore:
             attempt += 1
 
         logging.info("AI Response :\n%s", content)
+        # Memory: remember assistant response
+        if self.memory_core is not None:
+            try:
+                if (content or "").strip():
+                    self.memory_core.remember(content, conv_id=self._memory_conv_id(), speaker="ai")
+            except Exception as e:
+                logging.warning(f"MemoryCore remember(ai) failed: {e}")
         return self._process_generation_result(
             content,
             user_message if log_user_message else None,
@@ -391,7 +469,22 @@ class PersonaCore:
                 actual_user_message = "意識モジュールが発話することを意思決定しました。自由に発言してください"
                 logging.debug("Injected user message for context")
 
-        msgs = self._build_messages(actual_user_message, system_prompt_extra, info_text)
+        # Memory: remember user utterance and prepare recall context
+        combined_info = info_text or ""
+        if self.memory_core is not None:
+            try:
+                if user_message is not None and (user_message or "").strip():
+                    self.memory_core.remember(user_message, conv_id=self._memory_conv_id(), speaker="user")
+                recall_source = user_message if user_message else None
+                if recall_source:
+                    bundle = self.memory_core.recall(recall_source, k=5)
+                    snippet = self._format_recall_info(bundle)
+                    if snippet:
+                        combined_info = (combined_info + "\n" + snippet).strip() if combined_info else snippet
+            except Exception as e:
+                logging.warning(f"MemoryCore recall failed: {e}")
+
+        msgs = self._build_messages(actual_user_message, system_prompt_extra, combined_info or None)
         logging.debug("Messages sent to API: %s", msgs)
 
         attempt = 1
@@ -414,6 +507,13 @@ class PersonaCore:
             time.sleep(10)
 
         logging.info("AI Response :\n%s", content_accumulator)
+        # Memory: remember assistant response
+        if self.memory_core is not None:
+            try:
+                if (content_accumulator or "").strip():
+                    self.memory_core.remember(content_accumulator, conv_id=self._memory_conv_id(), speaker="ai")
+            except Exception as e:
+                logging.warning(f"MemoryCore remember(ai) failed: {e}")
         say, move_target, changed = self._process_generation_result(
             content_accumulator,
             user_message if log_user_message else None,
@@ -463,6 +563,8 @@ class PersonaCore:
             if allowed:
                 logging.info("Moving to building: %s", target_building_id)
                 self.current_building_id = target_building_id
+                # Mark entry point for perception windowing
+                self._mark_entry(self.current_building_id)
                 moved = True
             else:
                 logging.info("Move blocked to building: %s", target_building_id)
@@ -651,6 +753,8 @@ class PersonaCore:
             return []
         self.current_building_id = self.user_room_id
         self.auto_count = 0
+        # Mark entry into user room after switching
+        self._mark_entry(self.current_building_id)
         self.history_manager.add_to_building_only(
             self.user_room_id,
             {
@@ -724,16 +828,62 @@ class PersonaCore:
         }
         self.conscious_log_path.write_text(json.dumps(data_to_save, ensure_ascii=False), encoding="utf-8")
 
+    def _mark_entry(self, building_id: str) -> None:
+        """Mark the index of building history at the moment of entry.
+        First pulse after entry will read from this index.
+        """
+        try:
+            hist = self.history_manager.building_histories.get(building_id, [])
+            idx = len(hist)
+            self.entry_indices[building_id] = idx
+            # Reset pulse index to entry point so we never ingest pre-entry messages
+            self.pulse_indices[building_id] = idx
+            logging.debug("[entry] entry index set: %s -> %d", building_id, idx)
+        except Exception:
+            pass
+
     def run_pulse(self, occupants: List[str], user_online: bool = True, decision_model: Optional[str] = None) -> List[str]:
         """Execute one autonomous pulse cycle."""
         building_id = self.current_building_id
         logging.info("[pulse] %s starting pulse in %s", self.persona_id, building_id)
 
         hist = self.history_manager.building_histories.get(building_id, [])
-        idx = self.pulse_indices.get(building_id, len(hist))
+        # Use last pulse position, or if first pulse since entering, use the entry index
+        entry_idx = self.entry_indices.get(building_id, len(hist))
+        idx = self.pulse_indices.get(building_id, entry_idx)
         new_msgs = hist[idx:]
         self.pulse_indices[building_id] = len(hist)
         logging.debug("[pulse] new messages since last pulse: %s", new_msgs)
+
+        # Perception: ingest fresh utterances into this persona's own history
+        perceived = 0
+        for m in new_msgs:
+            try:
+                role = m.get("role")
+                pid = m.get("persona_id")
+                content = m.get("content", "")
+                # Skip empty and system-like summary notes
+                if not content or ("note-box" in content and role == "assistant"):
+                    continue
+                # Convert other assistants' speech into a user-line
+                if role == "assistant" and pid and pid != self.persona_id:
+                    speaker = self.id_to_name_map.get(pid, pid)
+                    self.history_manager.add_to_persona_only({
+                        "role": "user",
+                        "content": f"{speaker}: {content}"
+                    })
+                    perceived += 1
+                # Ingest human/user messages directly
+                elif role == "user" and (pid is None or pid != self.persona_id):
+                    self.history_manager.add_to_persona_only({
+                        "role": "user",
+                        "content": content
+                    })
+                    perceived += 1
+            except Exception:
+                continue
+        if perceived:
+            logging.debug("[pulse] perceived %d new utterance(s) from others into persona history", perceived)
 
         # 引数で渡された最新のoccupantsリストを使用
         occupants_str = ",".join(occupants)

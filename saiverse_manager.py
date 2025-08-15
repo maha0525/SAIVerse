@@ -568,7 +568,7 @@ class SAIVerseManager:
                     context_length=persona_context_length,
                     user_room_id=self.user_room_id,
                     provider=self.provider,
-                    interaction_mode=db_ai.INTERACTION_MODE,
+                    interaction_mode=(db_ai.INTERACTION_MODE or "auto"),
                     is_dispatched=db_ai.IS_DISPATCHED,
                 )
 
@@ -978,6 +978,13 @@ class SAIVerseManager:
         
         # 訪問者はメモリから完全に削除する
         del self.visiting_personas[persona_id]
+        # Remove visitor's name from persona_map if present
+        name = None
+        for n, pid in list(self.persona_map.items()):
+            if pid == persona_id:
+                name = n
+                del self.persona_map[n]
+                break
         if persona_id in self.id_to_name_map:
             del self.id_to_name_map[persona_id]
         if persona_id in self.avatar_map:
@@ -1083,6 +1090,8 @@ class SAIVerseManager:
             self.occupants.setdefault(target_bid, []).append(pid)
             self.id_to_name_map[pid] = pname
             self.avatar_map[pid] = avatar
+            # Expose name->id mapping for UI dropdowns
+            self.persona_map[pname] = pid
 
             # 5. Log the arrival
             arrival_message = f'<div class="note-box">🏢 City Transfer:<br><b>{pname}が別のCityからやってきました</b></div>'
@@ -1156,10 +1165,32 @@ class SAIVerseManager:
         if not self.user_current_building_id:
             return ['<div class="note-box">エラー: ユーザーの現在地が不明です。</div>']
 
+        building_id = self.user_current_building_id
+        responding_personas = [
+            self.personas[pid]
+            for pid in self.occupants.get(building_id, [])
+            if pid in self.personas and not self.personas[pid].is_dispatched
+        ]
+
+        # Always inject the user's message into building history once for perception
+        if responding_personas:
+            try:
+                responding_personas[0].history_manager.add_to_building_only(
+                    building_id, {"role": "user", "content": message}
+                )
+            except Exception:
+                self.building_histories.setdefault(building_id, []).append({
+                    "role": "user", "content": message
+                })
+
         replies: List[str] = []
-        for pid in list(self.occupants.get(self.user_current_building_id, [])):
-            if pid in self.personas:
-                replies.extend(self.personas[pid].handle_user_input(message))
+        for persona in responding_personas:
+            if persona.interaction_mode == 'manual':
+                # Immediate response path
+                replies.extend(persona.handle_user_input(message))
+            else:
+                # pulse-driven for 'user' and 'auto'
+                replies.extend(persona.run_pulse(occupants=self.occupants.get(building_id, []), user_online=True))
 
         self._save_building_histories()
         for persona in self.personas.values():
@@ -1172,29 +1203,31 @@ class SAIVerseManager:
             yield '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'
             return
 
+        building_id = self.user_current_building_id
         responding_personas = [
             self.personas[pid]
-            for pid in self.occupants.get(self.user_current_building_id, [])
+            for pid in self.occupants.get(building_id, [])
             if pid in self.personas and not self.personas[pid].is_dispatched
         ]
 
-        # 1. 通常のユーザー発話処理
-        for persona in responding_personas:
-            for token in persona.handle_user_input_stream(message):
-                yield token
+        # Inject once into building history for perception
+        if responding_personas:
+            try:
+                responding_personas[0].history_manager.add_to_building_only(
+                    building_id, {"role": "user", "content": message}
+                )
+            except Exception:
+                self.building_histories.setdefault(building_id, []).append({
+                    "role": "user", "content": message
+                })
 
-        # 2. Interaction_Mode='user'のペルソナにrun_pulseを実行
         for persona in responding_personas:
-            if persona.interaction_mode == "user":
-                occupants = self.occupants.get(self.user_current_building_id, [])
-                pulse_replies = persona.run_pulse(occupants=occupants, user_online=True)
-                for reply in pulse_replies:
-                    # 履歴に追加
-                    self.building_histories.setdefault(self.user_current_building_id, []).append({
-                        "role": "assistant",
-                        "persona_id": persona.persona_id,
-                        "content": reply
-                    })
+            if persona.interaction_mode == 'manual':
+                for token in persona.handle_user_input_stream(message):
+                    yield token
+            else:
+                occupants = self.occupants.get(building_id, [])
+                for reply in persona.run_pulse(occupants=occupants, user_online=True):
                     yield reply
 
         # 履歴保存
@@ -1207,12 +1240,13 @@ class SAIVerseManager:
         if not self.user_current_building_id:
             return []
 
-        current_occupants = self.occupants.get(self.user_current_building_id, [])
-        summonable = []
-        for pid, persona in self.personas.items():
-            # ユーザーのいる場所にいなくて、派遣中でもないペルソナ
-            if pid not in current_occupants and not persona.is_dispatched:
-                summonable.append(persona.persona_name)
+        here = self.user_current_building_id
+        # 判定は occupants ではなく、各Personaの current_building_id を信頼する
+        summonable = [
+            p.persona_name
+            for p in self.personas.values()
+            if not p.is_dispatched and p.current_building_id != here
+        ]
         return sorted(summonable)
 
     def get_conversing_personas(self) -> List[Tuple[str, str]]:
@@ -1352,7 +1386,7 @@ class SAIVerseManager:
                 return
 
             # 4. Restore interaction mode from PREVIOUS_INTERACTION_MODE
-            previous_mode = ai_record.PREVIOUS_INTERACTION_MODE
+            previous_mode = ai_record.PREVIOUS_INTERACTION_MODE or "auto"
             ai_record.INTERACTION_MODE = previous_mode
             logging.info(f"Restoring INTERACTION_MODE to '{previous_mode}' for {persona_id}.")
 
@@ -1360,7 +1394,7 @@ class SAIVerseManager:
             persona = self.personas.get(persona_id)
             if persona:
                 persona.current_building_id = destination_id
-                persona.interaction_mode = previous_mode
+                persona.interaction_mode = previous_mode or "auto"
                 logging.info(f"Updated {persona_id}'s internal location to {destination_id} and restored mode to '{previous_mode}'.")
 
             # 5. Commit all DB changes at once
@@ -1423,7 +1457,9 @@ class SAIVerseManager:
         """Run scheduled prompts for all personas."""
         replies: List[str] = []
         for persona in self.personas.values():
-            replies.extend(persona.run_scheduled_prompt())
+            # Only auto mode should run periodic prompts
+            if getattr(persona, 'interaction_mode', 'auto') == 'auto':
+                replies.extend(persona.run_scheduled_prompt())
         if replies:
             self._save_building_histories()
             for persona in self.personas.values():
