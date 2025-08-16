@@ -1,104 +1,16 @@
 import gradio as gr
 import pandas as pd
-from sqlalchemy import (
-    create_engine,
-    Column,
-    Integer,
-    String,
-    DateTime,
-    ForeignKey,
-    PrimaryKeyConstraint,
-    inspect,
-)
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy import inspect, DateTime, Integer, Boolean
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import IntegrityError
-from fastapi import Request
-from fastapi.responses import JSONResponse
-import os
+from datetime import datetime
 
-# --- 1. データベース設定 ---
-
-# スクリプトファイルがあるディレクトリを基準にDBファイルの絶対パスを生成
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE_PATH = os.path.join(SCRIPT_DIR, "saiverse_main.db")
-DATABASE_URL = f"sqlite:///{DB_FILE_PATH}"
-
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-
-# --- 2. テーブルモデル定義 ---
-
-class User(Base):
-    __tablename__ = "user"
-    USERID = Column(Integer, primary_key=True)
-    PASSWORD = Column(String(32))
-    USERNAME = Column(String(32))
-    MAILADDRESS = Column(String(64))
-
-class AI(Base):
-    __tablename__ = "ai"
-    AIID = Column(Integer, primary_key=True)
-    AINAME = Column(String(32))
-    SYSTEMPROMPT = Column(String(1024))
-    DESCRIPTION = Column(String(1024))
-
-class Building(Base):
-    __tablename__ = "building"
-    BUILDINGID = Column(Integer, primary_key=True)
-    BUILDINGNAME = Column(String(32))
-    ASSISTANTPROMPT = Column(String(1024))
-    DESCRIPTION = Column(String(1024))
-
-class City(Base):
-    __tablename__ = "city"
-    CITYID = Column(Integer, primary_key=True)
-    CITYNAME = Column(String(32))
-    DESCRIPTION = Column(String(1024))
-
-class Tool(Base):
-    __tablename__ = "tool"
-    TOOLID = Column(Integer, primary_key=True)
-    TOOLNAME = Column(String(32))
-    DESCRIPTION = Column(String(1024))
-
-class UserAiLink(Base):
-    __tablename__ = "user_ai_link"
-    USERID = Column(Integer, ForeignKey("user.USERID"), primary_key=True)
-    AIID = Column(Integer, ForeignKey("ai.AIID"), primary_key=True)
-
-class AiToolLink(Base):
-    __tablename__ = "ai_tool_link"
-    AIID = Column(Integer, ForeignKey("ai.AIID"), primary_key=True)
-    TOOLID = Column(Integer, ForeignKey("tool.TOOLID"), primary_key=True)
-
-class BuildingToolLink(Base):
-    __tablename__ = "building_tool_link"
-    BUILDINGID = Column(Integer, ForeignKey("building.BUILDINGID"), primary_key=True)
-    TOOLID = Column(Integer, ForeignKey("tool.TOOLID"), primary_key=True)
-
-class CityBuildingLink(Base):
-    __tablename__ = "city_building_link"
-    CITYID = Column(Integer, ForeignKey("city.CITYID"), primary_key=True)
-    BUILDINGID = Column(Integer, ForeignKey("building.BUILDINGID"), primary_key=True)
-
-class BuildingAiLink(Base):
-    __tablename__ = "building_ai_link"
-    BUILDINGID = Column(Integer, ForeignKey("building.BUILDINGID"), primary_key=True)
-    AIID = Column(Integer, ForeignKey("ai.AIID"), primary_key=True)
-    ENTERDT = Column(DateTime)
-    EXITDT = Column(DateTime)
-
-
-def init_db():
-    """データベースファイルが存在しない場合にテーブルを作成する"""
-    if not os.path.exists(DB_FILE_PATH):
-        print(f"Database file '{DB_FILE_PATH}' not found. Creating tables...")
-        Base.metadata.create_all(bind=engine)
-        print("Tables created successfully.")
-    else:
-        print(f"Database file '{DB_FILE_PATH}' already exists.")
+from .models import (
+    User, AI, Building, City, Tool, Blueprint,
+    UserAiLink, AiToolLink, BuildingToolLink, BuildingOccupancyLog,
+    ThinkingRequest, VisitingAI
+)
+from model_configs import get_model_choices
 
 
 # テーブル名とモデルクラスのマッピング
@@ -111,22 +23,23 @@ TABLE_MODEL_MAP = {
     "user_ai_link": UserAiLink,
     "ai_tool_link": AiToolLink,
     "building_tool_link": BuildingToolLink,
-    "city_building_link": CityBuildingLink,
-    "building_ai_link": BuildingAiLink,
+    "building_occupancy_log": BuildingOccupancyLog,
+    "thinking_request": ThinkingRequest,
+    "visiting_ai": VisitingAI
 }
 
 # --- 3. CRUD (Create, Read, Update, Delete) 操作関数 ---
 
-def get_dataframe(model_class):
+def get_dataframe(model_class, session_factory: sessionmaker):
     """テーブルからデータをPandas DataFrameとして取得"""
-    db = SessionLocal()
+    db = session_factory()
     try:
         query = db.query(model_class)
         return pd.read_sql(query.statement, db.bind)
     finally:
         db.close()
 
-def add_or_update_record(model_class, data_dict):
+def add_or_update_record(model_class, data_dict, session_factory: sessionmaker):
     """レコードを追加または更新"""
     mapper = inspect(model_class)
     pk_cols = [c.name for c in mapper.primary_key]
@@ -151,12 +64,30 @@ def add_or_update_record(model_class, data_dict):
         if is_all_empty and validation_targets:
             return "Error: To add a new record, at least one required field (other than DESCRIPTION or EXITDT) must be filled."
 
-    db = SessionLocal()
+    db = session_factory()
     try:
-        # 空の文字列をNoneに変換
+        # 空の文字列をNoneに変換 & 日付文字列をdatetimeオブジェクトに変換
         for key, value in data_dict.items():
             if value == "":
                 data_dict[key] = None
+                continue
+
+            column = mapper.columns.get(key)
+            if column is None:
+                continue
+
+            # --- Data Type Conversion ---
+            if isinstance(column.type, Boolean) and isinstance(value, str):
+                # Convert string 'True', '1', etc. to boolean True
+                data_dict[key] = value.lower() in ('true', '1', 't', 'yes')
+            elif isinstance(column.type, DateTime) and isinstance(value, str):
+                try:
+                    if '.' in value:
+                        data_dict[key] = datetime.strptime(value, '%Y-%m-%d %H:%M:%S.%f')
+                    else:
+                        data_dict[key] = datetime.strptime(value, '%Y-%m-%d %H:%M:%S')
+                except (ValueError, TypeError):
+                    return f"Error: Invalid datetime format for {key}. Please use YYYY-MM-DD HH:MM:SS."
 
         instance = model_class(**data_dict)
         db.merge(instance)
@@ -171,9 +102,9 @@ def add_or_update_record(model_class, data_dict):
     finally:
         db.close()
 
-def delete_record(model_class, pks_dict):
+def delete_record(model_class, pks_dict, session_factory: sessionmaker):
     """主キーに基づいてレコードを削除"""
-    db = SessionLocal()
+    db = session_factory()
     try:
         instance = db.get(model_class, pks_dict)
         if instance:
@@ -190,25 +121,82 @@ def delete_record(model_class, pks_dict):
 
 # --- 4. Gradio UI ---
 
-def create_management_tab(model_class):
+def create_management_tab(model_class, session_factory: sessionmaker):
     """指定されたモデルの管理用UIタブを生成する"""
     mapper = inspect(model_class)
     pk_cols = [c.name for c in mapper.primary_key]
+
+    # --- 外部キー用の選択肢を生成するヘルパー ---
+    def get_fk_choices(session_factory: sessionmaker):
+        fk_choices = {}
+        db = session_factory()
+        try:
+            for c in mapper.columns:
+                if c.foreign_keys:
+                    fk = next(iter(c.foreign_keys))
+                    target_model = TABLE_MODEL_MAP.get(fk.column.table.name)
+                    if target_model:
+                        # --- Find a user-friendly display column ---
+                        display_col = None
+                        # List of preferred column names for display
+                        preferred_names = ['USERNAME', 'AINAME', 'CITYNAME', 'BUILDINGNAME']
+                        for name in preferred_names:
+                            if hasattr(target_model, name):
+                                display_col = getattr(target_model, name)
+                                break
+                        
+                        # If no preferred name is found, fallback to the primary key of the target table
+                        if display_col is None:
+                            target_mapper = inspect(target_model)
+                            # Assuming single-column primary key for simplicity in display
+                            if target_mapper.primary_key:
+                                display_col = target_mapper.primary_key[0]
+
+                        # If we still don't have a column, we can't create a dropdown
+                        if display_col is None: continue
+
+                        value_col = fk.column
+                        choices = [(getattr(row, display_col.name), getattr(row, value_col.name)) for row in db.query(target_model).all()]
+                        fk_choices[c.name] = gr.Dropdown(choices=choices, label=c.name)
+        finally:
+            db.close()
+        return fk_choices
 
     with gr.Blocks() as tab_interface:
         with gr.Row():
             with gr.Column(scale=3):
                 dataframe = gr.DataFrame(
-                    value=lambda: get_dataframe(model_class),
+                    value=lambda: get_dataframe(model_class, session_factory),
                     label=f"{model_class.__tablename__} Table",
                     interactive=False,
                 )
             with gr.Column(scale=2):
                 gr.Markdown("### Add / Update / Delete Record")
                 inputs = {}
+                long_text_fields = {
+                    "SYSTEMPROMPT",
+                    "DESCRIPTION",
+                    "SYSTEM_INSTRUCTION",
+                    "ENTRY_PROMPT",
+                    "AUTO_PROMPT",
+                }
+                
+                fk_dropdowns = get_fk_choices(session_factory)
+                model_choices = get_model_choices()
+
                 for c in mapper.columns:
-                    if isinstance(c.type, (Integer,)):
-                        inputs[c.name] = gr.Number(label=c.name)
+                    if c.name in fk_dropdowns:
+                        inputs[c.name] = fk_dropdowns[c.name]
+                    elif isinstance(c.type, Boolean):
+                        inputs[c.name] = gr.Checkbox(label=c.name)
+                    elif isinstance(c.type, (Integer,)):
+                        inputs[c.name] = gr.Number(label=c.name, precision=0)
+                    elif c.name == 'DEFAULT_MODEL' and model_class is AI:
+                        inputs[c.name] = gr.Dropdown(choices=model_choices, label=c.name, allow_custom_value=True)
+                    elif c.name in long_text_fields:
+                        inputs[c.name] = gr.Textbox(
+                            label=c.name, lines=5, max_lines=20
+                        )
                     else:
                         inputs[c.name] = gr.Textbox(label=c.name)
 
@@ -221,22 +209,33 @@ def create_management_tab(model_class):
 
         # --- イベントハンドラ ---
 
-        def on_select(evt: gr.SelectData):
+        def on_select(df_data: pd.DataFrame, evt: gr.SelectData):
             """DataFrameで行が選択されたとき、フォームに値をセットする"""
-            row = evt.value
+            # evt.indexは(行, 列)のタプルなので、行インデックスを取得
+            row_index = evt.index[0]
+            selected_row = df_data.iloc[row_index]
+
             updates = []
             for c in mapper.columns:
-                # GradioのNumberはNoneを扱えないため、0にフォールバック
-                value = row.get(c.name)
-                if isinstance(c.type, (Integer,)) and value is None:
-                    value = 0
-                updates.append(inputs[c.name].update(value=value))
+                value = selected_row.get(c.name)
+                # pandasの欠損値(nan)をNoneに変換
+                if pd.isna(value):
+                    value = None
+                # --- 型変換の追加 ---
+                # DataFrameから取得した値がfloatになることがあるため、Integer型カラムはintに変換
+                elif isinstance(c.type, Integer) and value is not None:
+                    try:
+                        value = int(value)
+                    except (ValueError, TypeError):
+                        # 変換できない場合はそのまま（エラーはGradio側で発生するかもしれないが、ここでクラッシュするよりは良い）
+                        pass
+                updates.append(gr.update(value=value))
             return updates
 
         def on_add_update_click(*args):
             data_dict = {c.name: val for c, val in zip(mapper.columns, args)}
-            status = add_or_update_record(model_class, data_dict)
-            return status, get_dataframe(model_class)
+            status = add_or_update_record(model_class, data_dict, session_factory)
+            return status, get_dataframe(model_class, session_factory)
 
         def on_delete_click(*args):
             data_dict = {c.name: val for c, val in zip(mapper.columns, args)}
@@ -245,12 +244,12 @@ def create_management_tab(model_class):
             # 複合主キーでない場合は辞書ではなく値を渡す
             pks_to_pass = pks_dict if len(pks_dict) > 1 else list(pks_dict.values())[0]
             
-            status = delete_record(model_class, pks_to_pass)
-            return status, get_dataframe(model_class)
+            status = delete_record(model_class, pks_to_pass, session_factory)
+            return status, get_dataframe(model_class, session_factory)
 
         dataframe.select(
             fn=on_select,
-            inputs=None,
+            inputs=[dataframe],
             outputs=list(inputs.values()),
         )
         add_update_btn.click(
@@ -264,107 +263,40 @@ def create_management_tab(model_class):
             outputs=[status_output, dataframe],
         )
         refresh_btn.click(
-            fn=lambda: get_dataframe(model_class),
+            fn=lambda: get_dataframe(model_class, session_factory),
             inputs=None,
             outputs=dataframe,
         )
 
     return tab_interface
 
-
-def main():
-    # アプリケーション起動時にDBを初期化
-    init_db()
-
-    with gr.Blocks(title="SAIVerse DB Manager", theme=gr.themes.Soft()) as demo:
+def create_db_manager_ui(session_factory: sessionmaker):
+    """Creates the complete DB Manager UI component."""
+    with gr.Blocks(theme=gr.themes.Soft(), analytics_enabled=False) as db_manager_interface:
         gr.Markdown("# SAIVerse Database Manager")
         with gr.Tabs():
             with gr.TabItem("User"):
-                create_management_tab(User)
+                create_management_tab(User, session_factory)
             with gr.TabItem("AI"):
-                create_management_tab(AI)
+                create_management_tab(AI, session_factory)
             with gr.TabItem("Building"):
-                create_management_tab(Building)
+                create_management_tab(Building, session_factory)
             with gr.TabItem("City"):
-                create_management_tab(City)
+                create_management_tab(City, session_factory)
+            with gr.TabItem("Blueprint"):
+                create_management_tab(Blueprint, session_factory)
             with gr.TabItem("Tool"):
-                create_management_tab(Tool)
+                create_management_tab(Tool, session_factory)
             with gr.TabItem("User-AI Link"):
-                create_management_tab(UserAiLink)
+                create_management_tab(UserAiLink, session_factory)
             with gr.TabItem("AI-Tool Link"):
-                create_management_tab(AiToolLink)
+                create_management_tab(AiToolLink, session_factory)
             with gr.TabItem("Building-Tool Link"):
-                create_management_tab(BuildingToolLink)
-            with gr.TabItem("City-Building Link"):
-                create_management_tab(CityBuildingLink)
-            with gr.TabItem("Building-AI Link"):
-                create_management_tab(BuildingAiLink)
-
-        # --- API Endpoints ---
-        @demo.app.get("/db-api/{table_name}")
-        def api_get_table(table_name: str):
-            """テーブルの全データを取得するAPI"""
-            model_class = TABLE_MODEL_MAP.get(table_name.lower())
-            if not model_class:
-                return JSONResponse(status_code=404, content={"error": "Table not found"})
-            df = get_dataframe(model_class)
-            # DataFrameをJSONシリアライズ可能な形式に変換
-            result = df.to_dict(orient="records")
-            return JSONResponse(content=result)
-
-        @demo.app.post("/db-api/{table_name}")
-        async def api_add_or_update(table_name: str, request: Request):
-            """レコードを追加または更新するAPI"""
-            model_class = TABLE_MODEL_MAP.get(table_name.lower())
-            if not model_class:
-                return JSONResponse(status_code=404, content={"error": "Table not found"})
-            try:
-                data_dict = await request.json()
-                status = add_or_update_record(model_class, data_dict)
-                if "Error" in status:
-                    return JSONResponse(status_code=400, content={"error": status})
-                return JSONResponse(content={"status": status})
-            except Exception as e:
-                return JSONResponse(status_code=500, content={"error": str(e)})
-
-        @demo.app.delete("/db-api/{table_name}")
-        async def api_delete(table_name: str, request: Request):
-            """主キーに基づいてレコードを削除するAPI"""
-            model_class = TABLE_MODEL_MAP.get(table_name.lower())
-            if not model_class:
-                return JSONResponse(status_code=404, content={"error": "Table not found"})
-
-            mapper = inspect(model_class)
-            pk_cols = [c.name for c in mapper.primary_key]
-
-            # クエリパラメータから主キーを取得
-            pks_dict = {pk: request.query_params.get(pk) for pk in pk_cols}
-
-            if any(v is None for v in pks_dict.values()):
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": f"Primary key(s) required in query params: {', '.join(pk_cols)}"}
-                )
-
-            # 主キーの値を適切な型に変換
-            try:
-                for pk_col in mapper.primary_key:
-                    if isinstance(pk_col.type, Integer):
-                        pks_dict[pk_col.name] = int(pks_dict[pk_col.name])
-            except (ValueError, TypeError):
-                 return JSONResponse(status_code=400, content={"error": "Invalid primary key type"})
-
-            # delete_recordに渡す形式を調整
-            pks_to_pass = pks_dict if len(pks_dict) > 1 else list(pks_dict.values())[0]
-            status = delete_record(model_class, pks_to_pass)
-
-            if "Error" in status:
-                return JSONResponse(status_code=400, content={"error": status})
-            return JSONResponse(content={"status": status})
-
-
-    demo.launch(server_port=7960)
-
-
-if __name__ == "__main__":
-    main()
+                create_management_tab(BuildingToolLink, session_factory)
+            with gr.TabItem("building_occupancy_log"):
+                create_management_tab(BuildingOccupancyLog, session_factory)
+            with gr.TabItem("Thinking Request"):
+                create_management_tab(ThinkingRequest, session_factory)
+            with gr.TabItem("Visiting AI"):
+                create_management_tab(VisitingAI, session_factory)
+    return db_manager_interface

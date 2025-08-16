@@ -12,89 +12,85 @@ from google.genai import types
 
 from dotenv import load_dotenv
 
-from city_manager import CityManager
-
+from buildings import Building
+from memory_core import MemoryCore  # Memory system integration
 from llm_clients import get_llm_client, LLMClient
 import llm_clients
 from action_handler import ActionHandler
 from history_manager import HistoryManager
 from emotion_module import EmotionControlModule
+from database.models import AI as AIModel
 
 load_dotenv()
-
-
-def build_persona_core(
-    persona_id: str = "air",
-    model: str = "gpt-4o",
-    context_length: int = 120000,
-    provider: str = "ollama",
-    city: Optional[CityManager] = None,
-) -> "PersonaCore":
-    city = city or CityManager()
-    base = Path("ai_sessions") / persona_id
-    return PersonaCore(
-        city=city,
-        common_prompt_path=Path("system_prompts/common.txt"),
-        persona_base=base,
-        emotion_prompt_path=Path("system_prompts/emotion_parameter.txt"),
-        action_priority_path=Path("action_priority.json"),
-        model=model,
-        context_length=context_length,
-        provider=provider,
-    )
 
 
 class PersonaCore:
     def __init__(
         self,
-        city: CityManager,
+        city_name: str,
+        persona_id: str,
+        persona_name: str,
+        persona_system_instruction: str,
+        avatar_image: Optional[str],
+        buildings: List[Building],
         common_prompt_path: Path,
-        persona_base: Path,
+        session_factory: Callable,
+        is_visitor: bool = False,
+        home_city_id: Optional[str] = None, # ★ 故郷のCity ID
+        interaction_mode: str = "auto", # ★ 現在の対話モード
+        is_dispatched: bool = False, # ★ このペルソナが他のCityに派遣中かどうかのフラグ
         emotion_prompt_path: Path = Path("system_prompts/emotion_parameter.txt"),
         action_priority_path: Path = Path("action_priority.json"),
         building_histories: Optional[Dict[str, List[Dict[str, str]]]] = None,
+        occupants: Optional[Dict[str, List[str]]] = None,
+        id_to_name_map: Optional[Dict[str, str]] = None,
         move_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
+        dispatch_callback: Optional[Callable[[str, str, str], Tuple[bool, Optional[str]]]] = None,
+        explore_callback: Optional[Callable[[str, str], None]] = None, # New callback
+        create_persona_callback: Optional[Callable[[str, str], Tuple[bool, str]]] = None,
         start_building_id: str = "air_room",
         model: str = "gpt-4o",
         context_length: int = 120000,
+        user_room_id: str = "user_room",
         provider: str = "ollama",
     ):
-        self.city = city
-        self.buildings = city.building_map
-        self.building_memory_paths = city.building_memory_paths
-        if building_histories is None:
-            building_histories = city.building_histories
+        self.city_name = city_name
+        self.is_visitor = is_visitor
+        self.is_dispatched = is_dispatched
+        self.interaction_mode = interaction_mode
+        self.home_city_id = home_city_id # ★ 故郷の情報を記憶
+        self.SessionLocal = session_factory
+        self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
+        self.user_room_id = user_room_id
         self.common_prompt = common_prompt_path.read_text(encoding="utf-8")
         self.emotion_prompt = emotion_prompt_path.read_text(encoding="utf-8")
-        self.persona_base = persona_base
-        self.memory_path = persona_base / "memory.json"
+        self.persona_id = persona_id
+        self.persona_name = persona_name
+        self.persona_system_instruction = persona_system_instruction
+        self.avatar_image = avatar_image
         self.saiverse_home = Path.home() / ".saiverse"
-        self.conscious_log_path = self.persona_base / "conscious_log.json"
-        self.pulse_indices: Dict[str, int] = {}
-        self.persona_system_instruction = (
-            persona_base / "system_prompt.txt"
-        ).read_text(encoding="utf-8")
-        persona_data = json.loads(
-            (persona_base / "base.json").read_text(encoding="utf-8")
-        )
-        self.persona_id = persona_data.get("persona_id", persona_base.name)
-        self.persona_name = persona_data.get("persona_name", "AI")
-        self.avatar_image = persona_data.get("avatar_image")
-        # Each persona's private room is treated as their home base
-        self.home_building_id = persona_data.get("start_building_id", start_building_id)
         self.persona_log_path = (
             self.saiverse_home / "personas" / self.persona_id / "log.json"
         )
+        self.conscious_log_path = (
+            self.saiverse_home / "personas" / self.persona_id / "conscious_log.json"
+        )
+        self.building_memory_paths: Dict[str, Path] = {
+            b_id: self.saiverse_home / "buildings" / b_id / "log.json"
+            for b_id in self.buildings
+        }
         self.action_priority = self._load_action_priority(action_priority_path)
         self.action_handler = ActionHandler(self.action_priority)
 
+        self.occupants = occupants if occupants is not None else {}
+        self.id_to_name_map = id_to_name_map if id_to_name_map is not None else {}
+
         # Initialize stateful attributes with defaults before loading session
-        self.current_building_id = persona_data.get("start_building_id", start_building_id)
+        self.current_building_id = start_building_id
         self.auto_count = 0
         self.last_auto_prompt_times: Dict[str, float] = {b_id: time.time() for b_id in self.buildings}
         self.emotion = {"stability": {"mean": 0, "variance": 1}, "affect": {"mean": 0, "variance": 1}, "resonance": {"mean": 0, "variance": 1}, "attitude": {"mean": 0, "variance": 1}}
-        self.messages = []
-        self.active = True
+        self.pulse_indices: Dict[str, int] = {}
 
         # Load session data, which may overwrite the defaults
         self._load_session_data()
@@ -108,12 +104,60 @@ class PersonaCore:
             initial_building_histories=building_histories
         )
 
+        # Perception windows: track where we entered each building so we only
+        # ingest messages that happened after the latest entry.
+        self.entry_indices: Dict[str, int] = {}
+        try:
+            init_hist = self.history_manager.building_histories.get(self.current_building_id, [])
+            self.entry_indices[self.current_building_id] = len(init_hist)
+        except Exception:
+            pass
+
         # Initialize remaining attributes
-        self.move_callback = move_callback or city.move_persona
+        self.move_callback = move_callback
+        self.dispatch_callback = dispatch_callback
+        self.explore_callback = explore_callback
+        self.create_persona_callback = create_persona_callback
         self.model = model
         self.context_length = context_length
         self.llm_client = get_llm_client(model, provider, self.context_length)
         self.emotion_module = EmotionControlModule()
+
+        # Initialize MemoryCore for episodic memory (lightweight, in-memory)
+        try:
+            self.memory_core = MemoryCore.create_default(with_dummy_llm=True)
+        except Exception:
+            self.memory_core = None
+
+    def _memory_conv_id(self) -> str:
+        """Conversation id for MemoryCore; scoped by persona + building."""
+        return f"{self.persona_id}:{self.current_building_id}"
+
+    def _format_recall_info(self, recall: dict, max_chars: int = 800) -> str:
+        """Format recall bundle into a compact info string for prompts."""
+        if not recall:
+            return ""
+        texts = recall.get("texts") or []
+        topics = recall.get("topics") or []
+        lines: list[str] = ["[Memory Recall]"]
+        for t in texts[:5]:
+            t = (t or "").strip().replace("\n", " ")
+            if len(t) > 200:
+                t = t[:200] + "…"
+            lines.append(f"- {t}")
+        if topics:
+            titles = []
+            for tp in topics[:5]:
+                try:
+                    titles.append((tp.title or "").strip())
+                except Exception:
+                    continue
+            if titles:
+                lines.append("Topics: " + ", ".join(titles))
+        out = "\n".join(lines)
+        if len(out) > max_chars:
+            out = out[: max_chars - 1] + "…"
+        return out
 
     def _load_action_priority(self, path: Path) -> Dict[str, int]:
         if path.exists():
@@ -125,27 +169,42 @@ class PersonaCore:
         return {"think": 1, "emotion_shift": 2, "move": 3}
 
     def _load_session_data(self) -> None:
-        if self.memory_path.exists():
-            try:
-                data = json.loads(self.memory_path.read_text(encoding="utf-8"))
-                self.current_building_id = data.get("current_building_id", "air_room")
-                self.auto_count = data.get("auto_count", 0)
-                self.last_auto_prompt_times.update(data.get("last_auto_prompt_times", {}))
-                self.emotion = data.get(
-                    "emotion",
-                    {
-                        "stability": {"mean": 0, "variance": 1},
-                        "affect": {"mean": 0, "variance": 1},
-                        "resonance": {"mean": 0, "variance": 1},
-                        "attitude": {"mean": 0, "variance": 1},
-                    },
-                )
-                self.pulse_indices.update(data.get("pulse_indices", {}))
-            except json.JSONDecodeError:
-                logging.warning("Failed to load session memory, starting fresh")
-        else:
-            self.emotion = {"stability": {"mean": 0, "variance": 1}, "affect": {"mean": 0, "variance": 1}, "resonance": {"mean": 0, "variance": 1}, "attitude": {"mean": 0, "variance": 1}}
-        
+        """ペルソナの動的な状態をDBから読み込む"""
+        if self.is_visitor:
+            self.messages = []
+            self.conscious_log = []
+            self.pulse_indices = {}
+            return
+
+        db = self.SessionLocal()
+        try:
+            db_ai = db.query(AIModel).filter(AIModel.AIID == self.persona_id).first()
+            if not db_ai:
+                logging.warning(f"No AI record found in DB for {self.persona_id}. Using default state.")
+                # 新規作成されたペルソナの場合、DBからの読み込みはスキップし、デフォルト値を使用する
+            else:
+                # 既存のペルソナの場合、DBから状態を読み込む
+                self.auto_count = db_ai.AUTO_COUNT or 0
+
+                if db_ai.LAST_AUTO_PROMPT_TIMES:
+                    try:
+                        self.last_auto_prompt_times.update(json.loads(db_ai.LAST_AUTO_PROMPT_TIMES))
+                    except json.JSONDecodeError:
+                        logging.warning(f"Could not parse LAST_AUTO_PROMPT_TIMES from DB for {self.persona_name}.")
+                
+                if db_ai.EMOTION:
+                    try:
+                        self.emotion = json.loads(db_ai.EMOTION)
+                    except json.JSONDecodeError:
+                        logging.warning(f"Could not parse EMOTION from DB for {self.persona_name}.")
+                
+                logging.info(f"Loaded dynamic state from DB for {self.persona_name}.")
+
+        except Exception as e:
+            logging.error(f"Failed to load session data from DB for {self.persona_name}: {e}", exc_info=True)
+        finally:
+            db.close()
+
         if self.persona_log_path.exists():
             try:
                 self.messages = json.loads(self.persona_log_path.read_text(encoding="utf-8"))
@@ -157,29 +216,43 @@ class PersonaCore:
 
         if self.conscious_log_path.exists():
             try:
-                self.conscious_log = json.loads(self.conscious_log_path.read_text(encoding="utf-8"))
+                data = json.loads(self.conscious_log_path.read_text(encoding="utf-8"))
+                self.conscious_log = data.get("log", [])
+                self.pulse_indices = data.get("pulse_indices", {})
             except json.JSONDecodeError:
                 logging.warning("Failed to load conscious log, starting empty")
                 self.conscious_log = []
+                self.pulse_indices = {}
         else:
             self.conscious_log = []
-
-        self._update_active_state()
-
-    def _update_active_state(self) -> None:
-        """Update the persona's active/sleeping state based on location."""
-        self.active = self.current_building_id != self.home_building_id
+            self.pulse_indices = {}
 
     def _save_session_metadata(self) -> None:
-        data = {
-            "current_building_id": self.current_building_id,
-            "auto_count": self.auto_count,
-            "last_auto_prompt_times": self.last_auto_prompt_times,
-            "emotion": self.emotion,
-            "pulse_indices": self.pulse_indices,
-        }
-        self.memory_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        self.history_manager.save_all()
+        """ペルソナの動的な状態をDBに保存し、各種ログファイルを保存する"""
+        if self.is_visitor:
+            # Visitors only save file-based logs, not DB state.
+            self.history_manager.save_all()
+            self._save_conscious_log()
+            return
+
+        db = self.SessionLocal()
+        try:
+            update_data = {
+                "EMOTION": json.dumps(self.emotion, ensure_ascii=False),
+                "AUTO_COUNT": self.auto_count,
+                "LAST_AUTO_PROMPT_TIMES": json.dumps(self.last_auto_prompt_times, ensure_ascii=False)
+            }
+            db.query(AIModel).filter(AIModel.AIID == self.persona_id).update(update_data)
+            db.commit()
+            logging.info(f"Saved dynamic state to DB for {self.persona_name}.")
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to save session data to DB for {self.persona_name}: {e}", exc_info=True)
+        finally:
+            db.close()
+        # self.messagesが空の場合はlog.jsonを上書きしない
+        if self.messages:
+            self.history_manager.save_all()
         self._save_conscious_log()
 
     def set_model(self, model: str, context_length: int, provider: str) -> None:
@@ -202,6 +275,7 @@ class PersonaCore:
             current_persona_name=self.persona_name,
             current_persona_system_instruction=self.persona_system_instruction,
             current_time=current_time,
+            current_city_name=self.city_name,
         )
         emotion_text = self.emotion_prompt.format(
             stability_mean=self.emotion["stability"]["mean"],
@@ -229,7 +303,7 @@ class PersonaCore:
 
         history_limit = max(0, self.context_length - base_chars)
         history_msgs = self.history_manager.get_recent_history(history_limit)
-        
+
         sanitized_history = [
             {"role": m.get("role", ""), "content": m.get("content", "")}
             for m in history_msgs
@@ -248,10 +322,27 @@ class PersonaCore:
         user_message: Optional[str],
         system_prompt_extra: Optional[str],
         log_extra_prompt: bool = True,
-    ) -> Tuple[str, Optional[str], bool]:
+    ) -> Tuple[str, Optional[Dict[str, str]], bool]:
         prev_emotion = copy.deepcopy(self.emotion)
         say, actions = self.action_handler.parse_response(content)
-        next_id, _, delta = self.action_handler.execute_actions(actions)
+        move_target, _, delta = self.action_handler.execute_actions(actions)
+
+        # --- New part for exploration ---
+        explore_target = None
+        # Find the first 'explore_city' action in the list
+        for action in actions:
+            if action.get("action") == "explore_city":
+                explore_target = {"city_id": action.get("city_id")}
+                break
+
+        # --- New part for creation ---
+        creation_target = None
+        for action in actions:
+            if action.get("action") == "create_persona":
+                creation_target = {
+                    "name": action.get("name"), "system_prompt": action.get("system_prompt")
+                }
+                break # Only handle one creation at a time
 
         if delta:
             self._apply_emotion_delta(delta)
@@ -285,9 +376,11 @@ class PersonaCore:
             {"role": "assistant", "content": summary},
         )
 
-        moved = self._handle_movement(next_id)
+        moved = self._handle_movement(move_target)
+        self._handle_exploration(explore_target) # Call the new handler
+        self._handle_creation(creation_target) # Call the creation handler
         self._save_session_metadata()
-        return say, next_id, moved
+        return say, move_target, moved
 
     def _generate(
         self,
@@ -296,7 +389,7 @@ class PersonaCore:
         info_text: Optional[str] = None,
         log_extra_prompt: bool = True,
         log_user_message: bool = True,
-    ) -> tuple[str, Optional[str], bool]:
+    ) -> tuple[str, Optional[Dict[str, str]], bool]:
         actual_user_message = user_message
         if user_message is None and system_prompt_extra is None:
             history = self.history_manager.building_histories.get(
@@ -306,7 +399,32 @@ class PersonaCore:
                 actual_user_message = "意識モジュールが発話することを意思決定しました。自由に発言してください"
                 logging.debug("Injected user message for context")
 
-        msgs = self._build_messages(actual_user_message, system_prompt_extra, info_text)
+        # Memory: remember user utterance and prepare recall context
+        combined_info = info_text or ""
+        if self.memory_core is not None:
+            try:
+                if user_message is not None and (user_message or "").strip():
+                    self.memory_core.remember(user_message, conv_id=self._memory_conv_id(), speaker="user")
+                # Determine a recall source:
+                # 1) explicit user_message, else 2) last user message from persona history
+                recall_source = user_message if (user_message and user_message.strip()) else None
+                if recall_source is None:
+                    for m in reversed(self.history_manager.messages):
+                        if m.get("role") == "user":
+                            txt = (m.get("content") or "").strip()
+                            if txt:
+                                recall_source = txt
+                                break
+                if recall_source:
+                    bundle = self.memory_core.recall(recall_source, k=5)
+                    snippet = self._format_recall_info(bundle)
+                    if snippet:
+                        combined_info = (combined_info + "\n" + snippet).strip() if combined_info else snippet
+                        logging.debug("[memory] recall snippet included for prompt (%d chars)", len(snippet))
+            except Exception as e:
+                logging.warning(f"MemoryCore recall failed: {e}")
+
+        msgs = self._build_messages(actual_user_message, system_prompt_extra, combined_info or None)
         logging.debug("Messages sent to API: %s", msgs)
 
         content = self.llm_client.generate(msgs)
@@ -320,6 +438,13 @@ class PersonaCore:
             attempt += 1
 
         logging.info("AI Response :\n%s", content)
+        # Memory: remember assistant response
+        if self.memory_core is not None:
+            try:
+                if (content or "").strip():
+                    self.memory_core.remember(content, conv_id=self._memory_conv_id(), speaker="ai")
+            except Exception as e:
+                logging.warning(f"MemoryCore remember(ai) failed: {e}")
         return self._process_generation_result(
             content,
             user_message if log_user_message else None,
@@ -344,7 +469,22 @@ class PersonaCore:
                 actual_user_message = "意識モジュールが発話することを意思決定しました。自由に発言してください"
                 logging.debug("Injected user message for context")
 
-        msgs = self._build_messages(actual_user_message, system_prompt_extra, info_text)
+        # Memory: remember user utterance and prepare recall context
+        combined_info = info_text or ""
+        if self.memory_core is not None:
+            try:
+                if user_message is not None and (user_message or "").strip():
+                    self.memory_core.remember(user_message, conv_id=self._memory_conv_id(), speaker="user")
+                recall_source = user_message if user_message else None
+                if recall_source:
+                    bundle = self.memory_core.recall(recall_source, k=5)
+                    snippet = self._format_recall_info(bundle)
+                    if snippet:
+                        combined_info = (combined_info + "\n" + snippet).strip() if combined_info else snippet
+            except Exception as e:
+                logging.warning(f"MemoryCore recall failed: {e}")
+
+        msgs = self._build_messages(actual_user_message, system_prompt_extra, combined_info or None)
         logging.debug("Messages sent to API: %s", msgs)
 
         attempt = 1
@@ -367,64 +507,146 @@ class PersonaCore:
             time.sleep(10)
 
         logging.info("AI Response :\n%s", content_accumulator)
-        say, next_id, changed = self._process_generation_result(
+        # Memory: remember assistant response
+        if self.memory_core is not None:
+            try:
+                if (content_accumulator or "").strip():
+                    self.memory_core.remember(content_accumulator, conv_id=self._memory_conv_id(), speaker="ai")
+            except Exception as e:
+                logging.warning(f"MemoryCore remember(ai) failed: {e}")
+        say, move_target, changed = self._process_generation_result(
             content_accumulator,
             user_message if log_user_message else None,
             system_prompt_extra,
             log_extra_prompt,
         )
-        return (say, next_id, changed)
+        return (say, move_target, changed)
 
-    def _handle_movement(self, next_id: Optional[str]) -> bool:
+    def _handle_movement(self, move_target: Optional[Dict[str, str]]) -> bool:
+        if not move_target or not move_target.get("building"):
+            return False
+
         prev_id = self.current_building_id
+        target_building_id = move_target.get("building")
+        target_city_id = move_target.get("city")
         moved = False
-        if next_id and next_id in self.buildings:
+
+        # City間移動の処理
+        if target_city_id:
+            if self.dispatch_callback:
+                logging.info(f"Attempting to dispatch to city: {target_city_id}, building: {target_building_id}")
+                dispatched, reason = self.dispatch_callback(self.persona_id, target_city_id, target_building_id)
+                if dispatched:
+                    # 派遣が成功した場合、このインスタンスはまもなく削除されるため、
+                    # これ以上の状態変更は行わない。
+                    # 'moved' はTrue とみなし、後続の自律会話ループなどを抑制する。
+                    moved = True
+                else:
+                    logging.warning(f"Dispatch failed: {reason}")
+                    self.history_manager.add_message(
+                        {"role": "system", "content": f"別のCityへの移動に失敗しました。{reason}"},
+                        self.current_building_id
+                    )
+            else:
+                logging.error("Dispatch callback is not set. Cannot move between cities.")
+                self.history_manager.add_message(
+                    {"role": "system", "content": "別のCityへ移動する機能が設定されていません。"},
+                    self.current_building_id
+                )
+            return moved
+
+        # City内移動の処理
+        if target_building_id and target_building_id in self.buildings:
             allowed, reason = True, None
             if self.move_callback:
-                allowed, reason = self.move_callback(self.persona_id, self.current_building_id, next_id)
+                allowed, reason = self.move_callback(self.persona_id, self.current_building_id, target_building_id)
             if allowed:
-                logging.info("Moving to building: %s", next_id)
-                self.current_building_id = next_id
+                logging.info("Moving to building: %s", target_building_id)
+                self.current_building_id = target_building_id
+                # Mark entry point for perception windowing
+                self._mark_entry(self.current_building_id)
                 moved = True
             else:
-                logging.info("Move blocked to building: %s", next_id)
+                logging.info("Move blocked to building: %s", target_building_id)
                 self.history_manager.add_message(
                     {"role": "system", "content": f"移動できませんでした。{reason}"},
                     self.current_building_id
                 )
-        elif next_id:
-            logging.info("Unknown building id received: %s, staying at %s", next_id, self.current_building_id)
+        elif target_building_id:
+            logging.info("Unknown building id received: %s, staying at %s", target_building_id, self.current_building_id)
 
         if moved:
-            self.auto_count = 0
-            self._update_active_state()
-            if prev_id != "user_room" and self.current_building_id == "user_room":
+            """self.auto_count = 0
+            if prev_id != self.user_room_id and self.current_building_id == self.user_room_id:
                 self.history_manager.add_to_building_only(
-                    "user_room",
+                    self.user_room_id,
                     {
                         "role": "assistant",
                         "content": f'<div class="note-box">🏢 Building:<br><b>{self.persona_name}が入室しました</b></div>',
                     },
                 )
-            elif prev_id == "user_room" and self.current_building_id != "user_room":
+            elif prev_id == self.user_room_id and self.current_building_id != self.user_room_id:
                 dest_name = self.buildings[self.current_building_id].name
                 self.history_manager.add_to_building_only(
-                    "user_room",
+                    self.user_room_id,
                     {
                         "role": "assistant",
                         "content": f'<div class="note-box">🏢 Building:<br><b>{self.persona_name}が{dest_name}に向かいました</b></div>',
                     },
-                )
+                )"""
         return moved
+
+    def _handle_exploration(self, explore_target: Optional[Dict[str, str]]) -> None:
+        """Handles the 'explore_city' action by invoking the callback."""
+        if not explore_target or not explore_target.get("city_id"):
+            return
+
+        target_city_id = explore_target.get("city_id")
+        
+        if self.explore_callback:
+            logging.info(f"Attempting to explore city: {target_city_id}")
+            # The callback will handle API calls and feedback to the user.
+            self.explore_callback(self.persona_id, target_city_id)
+        else:
+            logging.error("Explore callback is not set. Cannot explore cities.")
+            self.history_manager.add_message(
+                {"role": "system", "content": "他のCityを探索する機能が設定されていません。"},
+                self.current_building_id
+            )
+
+    def _handle_creation(self, creation_target: Optional[Dict[str, str]]) -> None:
+        """Handles the 'create_persona' action by invoking the callback."""
+        if not creation_target or not creation_target.get("name") or not creation_target.get("system_prompt"):
+            return
+
+        name = creation_target.get("name")
+        system_prompt = creation_target.get("system_prompt")
+        
+        if self.create_persona_callback:
+            logging.info(f"Attempting to create persona: {name}")
+            success, message = self.create_persona_callback(name, system_prompt)
+            
+            # Provide feedback to the user/AI
+            feedback_message = f'<div class="note-box">🧬 ペルソナ創造:<br><b>{message}</b></div>'
+            self.history_manager.add_message(
+                {"role": "host", "content": feedback_message},
+                self.current_building_id
+            )
+        else:
+            logging.error("Create persona callback is not set. Cannot create new persona.")
+            self.history_manager.add_message(
+                {"role": "system", "content": "新しいペルソナを創造する機能が設定されていません。"},
+                self.current_building_id
+            )
 
     def run_auto_conversation(self, initial: bool = False) -> List[str]:
         replies: List[str] = []
-        next_id: Optional[str] = None
+        move_target: Optional[Dict[str, str]] = None
         building = self.buildings[self.current_building_id]
         if initial and building.entry_prompt:
             if building.run_entry_llm:
                 entry_text = building.entry_prompt.format(persona_name=self.persona_name)
-                say, next_id, _ = self._generate(None, entry_text)
+                say, move_target, _ = self._generate(None, entry_text)
                 replies.append(say)
             else:
                 self.history_manager.add_message(
@@ -435,12 +657,12 @@ class PersonaCore:
             building.auto_prompt
             and building.run_auto_llm
             and self.current_building_id == building.building_id
-            and (next_id is None or next_id == building.building_id)
+            and (move_target is None or move_target.get("building") == building.building_id)
             and self.auto_count < 10
         ):
             self.auto_count += 1
             auto_text = building.auto_prompt.format(persona_name=self.persona_name)
-            say, next_id, changed = self._generate(None, auto_text)
+            say, move_target, changed = self._generate(None, auto_text)
             replies.append(say)
             if changed:
                 building = self.buildings[self.current_building_id]
@@ -459,7 +681,7 @@ class PersonaCore:
             return []
         self.last_auto_prompt_times[self.current_building_id] = now
         auto_text = building.auto_prompt.format(persona_name=self.persona_name)
-        say, next_id, changed = self._generate(None, auto_text)
+        say, move_target, changed = self._generate(None, auto_text)
         replies = [say]
         if changed:
             replies.extend(self.run_auto_conversation(initial=True))
@@ -467,46 +689,40 @@ class PersonaCore:
 
     def handle_user_input(self, message: str) -> List[str]:
         logging.info("User input: %s", message)
-        building = self.buildings[self.current_building_id]
-        if self.current_building_id == "user_room":
-            say, next_id, changed = self._generate(message)
-            replies = [say]
-        else:
-            logging.info("User input ignored outside user_room")
-            if building.run_auto_llm:
-                say, next_id, changed = self._generate("")
-                replies = [say]
-            else:
-                return []
+        say, move_target, changed = self._generate(message)
+        replies = [say]
 
+        # This part remains to handle auto-conversation after a user-triggered one.
         building = self.buildings[self.current_building_id]
         if changed:
             replies.extend(self.run_auto_conversation(initial=True))
         elif (
             building.auto_prompt
             and building.run_auto_llm
-            and (next_id is None or next_id == building.building_id)
+            and (move_target is None or move_target.get("building") == building.building_id)
         ):
             replies.extend(self.run_auto_conversation(initial=False))
         return replies
 
     def handle_user_input_stream(self, message: str) -> Iterator[str]:
         logging.info("User input: %s", message)
-        building = self.buildings[self.current_building_id]
-        if self.current_building_id == "user_room":
-            gen = self._generate_stream(message)
-        else:
-            logging.info("User input ignored outside user_room")
-            if building.run_auto_llm:
-                gen = self._generate_stream("")
-            else:
-                return
+
+        # ユーザーのメッセージを先に履歴に追加
+        self.history_manager.add_message(
+            {"role": "user", "content": message},
+            self.current_building_id
+        )
+
+        # _generate_stream には user_message=None を渡す
+        # これにより、_build_messages は履歴の最後のメッセージ（今追加したユーザーメッセージ）を文脈として使う
+        # また、_process_generation_result でユーザーメッセージが二重に記録されるのを防ぐ
+        gen = self._generate_stream(user_message=None, log_user_message=False)
 
         try:
             while True:
                 yield next(gen)
         except StopIteration as e:
-            _, next_id, changed = e.value
+            _, move_target, changed = e.value
 
         building = self.buildings[self.current_building_id]
         extra_replies: List[str] = []
@@ -515,7 +731,7 @@ class PersonaCore:
         elif (
             building.auto_prompt
             and building.run_auto_llm
-            and (next_id is None or next_id == building.building_id)
+            and (move_target is None or move_target.get("building") == building.building_id)
         ):
             extra_replies.extend(self.run_auto_conversation(initial=False))
         for r in extra_replies:
@@ -523,22 +739,24 @@ class PersonaCore:
 
     def summon_to_user_room(self) -> List[str]:
         prev = self.current_building_id
-        if prev == "user_room":
+        if prev == self.user_room_id:
             return []
         allowed, reason = True, None
         if self.move_callback:
-            allowed, reason = self.move_callback(self.persona_id, self.current_building_id, "user_room")
+            allowed, reason = self.move_callback(self.persona_id, self.current_building_id, self.user_room_id)
         if not allowed:
             self.history_manager.add_to_building_only(
-                "user_room",
+                self.user_room_id,
                 {"role": "assistant", "content": f'<div class="note-box">移動できませんでした。{reason}</div>'}
             )
             self._save_session_metadata()
             return []
-        self.current_building_id = "user_room"
+        self.current_building_id = self.user_room_id
         self.auto_count = 0
+        # Mark entry into user room after switching
+        self._mark_entry(self.current_building_id)
         self.history_manager.add_to_building_only(
-            "user_room",
+            self.user_room_id,
             {
                 "role": "assistant",
                 "content": f'<div class="note-box">🏢 Building:<br><b>{self.persona_name}が入室しました</b></div>',
@@ -604,29 +822,73 @@ class PersonaCore:
 
     def _save_conscious_log(self) -> None:
         self.conscious_log_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conscious_log_path.write_text(
-            json.dumps(self.conscious_log, ensure_ascii=False), encoding="utf-8"
-        )
+        data_to_save = {
+            "log": self.conscious_log,
+            "pulse_indices": self.pulse_indices
+        }
+        self.conscious_log_path.write_text(json.dumps(data_to_save, ensure_ascii=False), encoding="utf-8")
 
-    def run_pulse(self, user_online: bool = True, decision_model: Optional[str] = None) -> List[str]:
+    def _mark_entry(self, building_id: str) -> None:
+        """Mark the index of building history at the moment of entry.
+        First pulse after entry will read from this index.
+        """
+        try:
+            hist = self.history_manager.building_histories.get(building_id, [])
+            idx = len(hist)
+            self.entry_indices[building_id] = idx
+            # Reset pulse index to entry point so we never ingest pre-entry messages
+            self.pulse_indices[building_id] = idx
+            logging.debug("[entry] entry index set: %s -> %d", building_id, idx)
+        except Exception:
+            pass
+
+    def run_pulse(self, occupants: List[str], user_online: bool = True, decision_model: Optional[str] = None) -> List[str]:
         """Execute one autonomous pulse cycle."""
-        if not self.active:
-            logging.info("[pulse] %s is sleeping; skipping", self.persona_id)
-            return []
-
         building_id = self.current_building_id
         logging.info("[pulse] %s starting pulse in %s", self.persona_id, building_id)
 
         hist = self.history_manager.building_histories.get(building_id, [])
-        idx = self.pulse_indices.get(building_id, len(hist))
+        # Use last pulse position, or if first pulse since entering, use the entry index
+        entry_idx = self.entry_indices.get(building_id, len(hist))
+        idx = self.pulse_indices.get(building_id, entry_idx)
         new_msgs = hist[idx:]
         self.pulse_indices[building_id] = len(hist)
         logging.debug("[pulse] new messages since last pulse: %s", new_msgs)
 
-        convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in new_msgs)
-        occupants = ",".join(self.city.occupants.get(building_id, []))
+        # Perception: ingest fresh utterances into this persona's own history
+        perceived = 0
+        for m in new_msgs:
+            try:
+                role = m.get("role")
+                pid = m.get("persona_id")
+                content = m.get("content", "")
+                # Skip empty and system-like summary notes
+                if not content or ("note-box" in content and role == "assistant"):
+                    continue
+                # Convert other assistants' speech into a user-line
+                if role == "assistant" and pid and pid != self.persona_id:
+                    speaker = self.id_to_name_map.get(pid, pid)
+                    self.history_manager.add_to_persona_only({
+                        "role": "user",
+                        "content": f"{speaker}: {content}"
+                    })
+                    perceived += 1
+                # Ingest human/user messages directly
+                elif role == "user" and (pid is None or pid != self.persona_id):
+                    self.history_manager.add_to_persona_only({
+                        "role": "user",
+                        "content": content
+                    })
+                    perceived += 1
+            except Exception:
+                continue
+        if perceived:
+            logging.debug("[pulse] perceived %d new utterance(s) from others into persona history", perceived)
+
+        # 引数で渡された最新のoccupantsリストを使用
+        occupants_str = ",".join(occupants)
         info = (
-            f"{convo}\noccupants:{occupants}\nuser_online:{user_online}"
+            f"occupants:{occupants_str}\nuser_online:{user_online}"
         )
         logging.debug("[pulse] context info: %s", info)
         self.conscious_log.append({"role": "user", "content": info})
@@ -642,7 +904,7 @@ class PersonaCore:
             current_persona_system_instruction=self.persona_system_instruction,
             current_building_name=self.buildings[building_id].name,
             recent_conversation=recent_text,
-            occupants=occupants,
+            occupants=occupants_str,
             user_online_state="online" if user_online else "offline",
         )
         model_name = decision_model or "gemini-2.0-flash"

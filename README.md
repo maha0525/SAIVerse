@@ -215,3 +215,71 @@ python -m unittest tests/test_module_name.py
 ### 🔧 開発時の注意
 
 システムプロンプトでは`str.format()`で変数展開を行うため、例示のJSONなどで波括弧`{}`をそのまま使うとエラーになります。表示用に記載する場合は`{{`と`}}`でエスケープしてください。
+
+---
+
+## 📌 Recent Additions (Utilities, Memory, Conversation)
+
+以下は直近で追加・改善された実装とその使い方です。
+
+### Conversation Modes & Behavior
+
+- Modes: `user` / `auto` / `manual`
+  - `user`: パルス駆動のみ。即応しない。定期パルスは実行しない。
+  - `auto`: パルス駆動。ConversationManager やスケジュールによる定期パルスも実行。
+  - `manual`: 即応（従来の handle_user_input/_stream）。パルスは実行しない。
+- Inter-AI Perception: Building 履歴に追加された新着メッセージを、各ペルソナのパルス実行時に「知覚」し、
+  自分の persona history に取り込みます（他AIの assistant は user 行に変換、ユーザーの発話は user 行で取り込み）。
+  これにより、各AIが互いの発話を文脈として利用できます。
+
+### LLM Fallbacks (Ollama → Gemini)
+
+- `llm_clients.OllamaClient` は起動時に `OLLAMA_BASE_URL`/`OLLAMA_HOST` と一般的な候補
+  (`127.0.0.1`, `localhost`, `host.docker.internal`, `172.17.0.1`) を素早くプローブし、
+  到達不能なら `Gemini 1.5 Flash` に自動フォールバックします。
+- Gemini 503/overload 等の際は `gemini-2.0-flash`/`gemini-1.5-flash(-8b)` などへ自動リトライ。
+- 必要な環境変数: `GEMINI_FREE_API_KEY` または `GEMINI_API_KEY`。
+
+### MemoryCore: Ingest, Recall, Topics
+
+- 想起（recall）強化: userモードでも直近のユーザー発話をもとに想起が走るように調整。
+- トピック名の健全化: 「新しい話題」や null を避けるようプロンプトと正規化を強化。
+  不適切なタイトル時は1回リトライし、それでもダメなら最近の発話から簡潔なタイトルを自動生成。
+
+#### Utilities
+
+- `scripts/ingest_persona_log.py`
+  - Persona の `~/.saiverse/personas/<id>/log.json` を per-persona の Qdrant DB へ取り込み。
+  - 例:
+    - `python scripts/ingest_persona_log.py eris --assign-llm dummy --limit 200`
+    - `python scripts/ingest_persona_log.py eris --location-base ~/.saiverse/qdrant --collection-prefix saiverse`
+
+- `scripts/recall_persona_memory.py`（新規）
+  - ingest 済みの per-persona DB に対して任意クエリで想起を確認。
+  - 例:
+    - `python scripts/recall_persona_memory.py eris "旅行 温泉" --topk 8`
+    - `python scripts/recall_persona_memory.py eris "旅行 温泉" --json`
+
+- `scripts/rename_generic_topics.py`（新規）
+  - 既存の空/汎用（例: 「新しい話題」/null）タイトルのトピックを一括リネーム。
+  - 例:
+    - プレビュー: `python scripts/rename_generic_topics.py eris --dry-run`
+    - 本適用: `python scripts/rename_generic_topics.py eris`
+    - オプション: `--location-base`, `--collection-prefix`, `--limit N`
+
+- `scripts/memory_topics_ui.py`（新規）
+  - ブラウザで per-persona メモリー内のトピック全体像を閲覧。
+  - 起動: `python scripts/memory_topics_ui.py`
+  - UI 項目:
+    - Persona ID（例: `eris`）
+    - Location Base（例: `~/.saiverse/qdrant`）
+    - Collection Prefix（例: `saiverse`）
+  - 機能:
+    - トピック一覧（id/title/summary/strength/entries/updated_at）
+    - トピック選択で詳細パネル（summary/entry一覧）
+
+#### Tests
+
+- `tests/test_memory_core.py`（追加）
+  - インメモリでの remember → recall が機能し、関連トピックが返ることを確認する簡易テスト。
+  - 実行: `python -m unittest tests/test_memory_core.py`

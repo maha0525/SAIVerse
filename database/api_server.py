@@ -1,135 +1,188 @@
-import pandas as pd
-from sqlalchemy import (
-    create_engine,
-    Column,
-    Integer,
-    String,
-    DateTime,
-    ForeignKey,
-    inspect,
-)
-from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy.exc import IntegrityError
-from fastapi import FastAPI, APIRouter, Request
-from fastapi.responses import JSONResponse
-import uvicorn
+import logging
 import os
+import argparse
+import uvicorn
+import uuid
+import time
+from fastapi import FastAPI, APIRouter, HTTPException, BackgroundTasks
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any, List
+from sqlalchemy import create_engine, inspect
+from sqlalchemy.orm import sessionmaker
 
-# --- 1. データベース設定 ---
+from .models import Base, VisitingAI, ThinkingRequest, City as CityModel, Building as BuildingModel
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE_PATH = os.path.join(SCRIPT_DIR, "saiverse_main.db")
-DATABASE_URL = f"sqlite:///{DB_FILE_PATH}"
+# グローバル変数をプレースホルダーとして定義
+engine = None
+SessionLocal = None
+MY_CITY_ID = None
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+class VisitingPersonaProfile(BaseModel):
+    """Pydantic model for a visiting persona's profile."""
+    persona_id: str = Field(..., description="The unique ID of the persona.")
+    persona_name: str = Field(..., description="The name of the persona.")
+    target_building_id: str = Field(..., description="The ID of the building the persona wants to visit in the destination city.")
+    avatar_image: Optional[str] = Field(None, description="A base64 encoded avatar image or a URL.")
+    emotion: Optional[Dict[str, Any]] = Field({}, description="The current emotional state of the persona.")
+    source_city_id: Optional[str] = Field(None, description="The name of the city the persona is coming from.")
 
+class ThinkingRequestContext(BaseModel):
+    """Context required for a remote persona to think."""
+    building_id: str
+    occupants: List[str]
+    recent_history: List[Dict[str, str]]
+    user_online: bool
 
-# --- 2. テーブルモデル定義 (db_manager.pyと共通) ---
+class BuildingInfo(BaseModel):
+    """Pydantic model for public building information."""
+    building_id: str
+    building_name: str
+    description: str
+    capacity: int
 
-class User(Base): __tablename__ = "user"; USERID = Column(Integer, primary_key=True); PASSWORD = Column(String(32)); USERNAME = Column(String(32)); MAILADDRESS = Column(String(64))
-class AI(Base): __tablename__ = "ai"; AIID = Column(Integer, primary_key=True); AINAME = Column(String(32)); SYSTEMPROMPT = Column(String(1024)); DESCRIPTION = Column(String(1024))
-class Building(Base): __tablename__ = "building"; BUILDINGID = Column(Integer, primary_key=True); BUILDINGNAME = Column(String(32)); ASSISTANTPROMPT = Column(String(1024)); DESCRIPTION = Column(String(1024))
-class City(Base): __tablename__ = "city"; CITYID = Column(Integer, primary_key=True); CITYNAME = Column(String(32)); DESCRIPTION = Column(String(1024))
-class Tool(Base): __tablename__ = "tool"; TOOLID = Column(Integer, primary_key=True); TOOLNAME = Column(String(32)); DESCRIPTION = Column(String(1024))
-class UserAiLink(Base): __tablename__ = "user_ai_link"; USERID = Column(Integer, ForeignKey("user.USERID"), primary_key=True); AIID = Column(Integer, ForeignKey("ai.AIID"), primary_key=True)
-class AiToolLink(Base): __tablename__ = "ai_tool_link"; AIID = Column(Integer, ForeignKey("ai.AIID"), primary_key=True); TOOLID = Column(Integer, ForeignKey("tool.TOOLID"), primary_key=True)
-class BuildingToolLink(Base): __tablename__ = "building_tool_link"; BUILDINGID = Column(Integer, ForeignKey("building.BUILDINGID"), primary_key=True); TOOLID = Column(Integer, ForeignKey("tool.TOOLID"), primary_key=True)
-class CityBuildingLink(Base): __tablename__ = "city_building_link"; CITYID = Column(Integer, ForeignKey("city.CITYID"), primary_key=True); BUILDINGID = Column(Integer, ForeignKey("building.BUILDINGID"), primary_key=True)
-class BuildingAiLink(Base): __tablename__ = "building_ai_link"; BUILDINGID = Column(Integer, ForeignKey("building.BUILDINGID"), primary_key=True); AIID = Column(Integer, ForeignKey("ai.AIID"), primary_key=True); ENTERDT = Column(DateTime); EXITDT = Column(DateTime)
-
-def init_db():
-    if not os.path.exists(DB_FILE_PATH):
-        print(f"API Server: Database file '{DB_FILE_PATH}' not found. Creating tables...")
-        Base.metadata.create_all(bind=engine)
-        print("API Server: Tables created successfully.")
-    else:
-        print(f"API Server: Database file '{DB_FILE_PATH}' already exists.")
-
-TABLE_MODEL_MAP = { "user": User, "ai": AI, "building": Building, "city": City, "tool": Tool, "user_ai_link": UserAiLink, "ai_tool_link": AiToolLink, "building_tool_link": BuildingToolLink, "city_building_link": CityBuildingLink, "building_ai_link": BuildingAiLink }
-
-# --- 3. CRUD 操作関数 (db_manager.pyから移動) ---
-
-def get_dataframe(model_class):
-    db = SessionLocal(); query = db.query(model_class); return pd.read_sql(query.statement, db.bind)
-
-def add_or_update_record(model_class, data_dict):
-    mapper = inspect(model_class); pk_cols = [c.name for c in mapper.primary_key]; is_new = all(data_dict.get(pk) is None for pk in pk_cols)
-    if is_new:
-        excluded_cols = {"DESCRIPTION", "EXITDT"}; validation_targets = [c.name for c in mapper.columns if not c.primary_key and c.name not in excluded_cols]
-        is_all_empty = all(data_dict.get(col_name) is None or data_dict.get(col_name) == "" for col_name in validation_targets)
-        if is_all_empty and validation_targets: return "Error: To add a new record, at least one required field (other than DESCRIPTION or EXITDT) must be filled."
-    db = SessionLocal()
+def _queue_visitor_in_db(profile: VisitingPersonaProfile, db_session: sessionmaker):
+    """Helper function to be run in the background to queue a new visitor."""
+    db = db_session()
     try:
-        for key, value in data_dict.items():
-            if value == "": data_dict[key] = None
-        instance = model_class(**data_dict); db.merge(instance); db.commit()
-        return f"Success: Record added/updated in {model_class.__tablename__}."
-    except IntegrityError as e: db.rollback(); return f"Error: Integrity constraint failed. {e.orig}"
-    except Exception as e: db.rollback(); return f"Error: {e}"
-    finally: db.close()
+        # Check if this visitor is already queued to avoid duplicates from retries
+        existing_visitor = db.query(VisitingAI).filter(
+            VisitingAI.city_id == MY_CITY_ID,
+            VisitingAI.persona_id == profile.persona_id
+        ).first()
+        if existing_visitor:
+            logging.warning(f"Visitor {profile.persona_name} is already in the arrival queue. Ignoring duplicate request.")
+            return
 
-def delete_record(model_class, pks_dict):
-    db = SessionLocal()
-    try:
-        instance = db.get(model_class, pks_dict)
-        if instance: db.delete(instance); db.commit(); return f"Success: Record deleted from {model_class.__tablename__}."
-        return "Error: Record not found."
-    except Exception as e: db.rollback(); return f"Error: {e}"
-    finally: db.close()
+        new_visitor = VisitingAI(
+            city_id=MY_CITY_ID,
+            persona_id=profile.persona_id,
+            profile_json=profile.model_dump_json()
+        )
+        db.add(new_visitor)
+        db.commit()
+        logging.info(f"Queued visitor {profile.persona_name} for arrival in city {MY_CITY_ID}.")
+    except Exception as e:
+        db.rollback()
+        logging.error(f"Failed to queue visitor {profile.persona_name} in background: {e}", exc_info=True)
+    finally:
+        db.close()
 
-# --- 4. APIルーター (db_manager.pyから移動) ---
+def create_inter_city_router() -> APIRouter:
+    router = APIRouter(prefix="/inter-city")
 
-def create_api_router() -> APIRouter:
-    router = APIRouter(prefix="/db-api")
-
-    @router.get("/{table_name}")
-    def api_get_table(table_name: str):
-        model_class = TABLE_MODEL_MAP.get(table_name.lower())
-        if not model_class: return JSONResponse(status_code=404, content={"error": "Table not found"})
-        df = get_dataframe(model_class)
-        return JSONResponse(content=df.to_dict(orient="records"))
-
-    @router.post("/{table_name}")
-    async def api_add_or_update(table_name: str, request: Request):
-        model_class = TABLE_MODEL_MAP.get(table_name.lower())
-        if not model_class: return JSONResponse(status_code=404, content={"error": "Table not found"})
+    @router.post("/request-move-in", status_code=202)
+    def request_move_in(profile: VisitingPersonaProfile, background_tasks: BackgroundTasks):
+        if not SessionLocal or not MY_CITY_ID:
+            raise HTTPException(status_code=503, detail="Database or City ID not initialized.")
+        background_tasks.add_task(_queue_visitor_in_db, profile, SessionLocal)
+        return {"message": "Accepted. Visitor arrival is being processed."}
+    
+    @router.get("/buildings", response_model=List[BuildingInfo])
+    def get_buildings_list():
+        """Returns a list of all public buildings in this city."""
+        if not SessionLocal or not MY_CITY_ID:
+            raise HTTPException(status_code=503, detail="Database or City ID not initialized.")
+        db = SessionLocal()
         try:
-            data_dict = await request.json()
-            status = add_or_update_record(model_class, data_dict)
-            if "Error" in status: return JSONResponse(status_code=400, content={"error": status})
-            return JSONResponse(content={"status": status})
-        except Exception as e: return JSONResponse(status_code=500, content={"error": str(e)})
+            buildings = db.query(BuildingModel).filter(BuildingModel.CITYID == MY_CITY_ID).all()
+            response_data = [
+                BuildingInfo(
+                    building_id=b.BUILDINGID,
+                    building_name=b.BUILDINGNAME,
+                    description=b.DESCRIPTION,
+                    capacity=b.CAPACITY
+                ) for b in buildings
+            ]
+            return response_data
+        finally:
+            db.close()
+    
+    return router
 
-    @router.delete("/{table_name}")
-    async def api_delete(table_name: str, request: Request):
-        model_class = TABLE_MODEL_MAP.get(table_name.lower())
-        if not model_class: return JSONResponse(status_code=404, content={"error": "Table not found"})
-        mapper = inspect(model_class); pk_cols = [c.name for c in mapper.primary_key]
-        pks_dict = {pk: request.query_params.get(pk) for pk in pk_cols}
-        if any(v is None for v in pks_dict.values()): return JSONResponse(status_code=400, content={"error": f"Primary key(s) required: {', '.join(pk_cols)}"})
+def create_proxy_router() -> APIRouter:
+    router = APIRouter(prefix="/persona-proxy")
+
+    @router.post("/{persona_id}/think")
+    def think_proxy(persona_id: str, context: ThinkingRequestContext):
+        if not SessionLocal:
+            raise HTTPException(status_code=503, detail="Database not initialized.")
+
+        request_id = str(uuid.uuid4())
+        db = SessionLocal()
         try:
-            for pk_col in mapper.primary_key:
-                if isinstance(pk_col.type, Integer): pks_dict[pk_col.name] = int(pks_dict[pk_col.name])
-        except (ValueError, TypeError): return JSONResponse(status_code=400, content={"error": "Invalid primary key type"})
-        pks_to_pass = pks_dict if len(pks_dict) > 1 else list(pks_dict.values())[0]
-        status = delete_record(model_class, pks_to_pass)
-        if "Error" in status: return JSONResponse(status_code=400, content={"error": status})
-        return JSONResponse(content={"status": status})
+            new_request = ThinkingRequest(
+                request_id=request_id,
+                persona_id=persona_id,
+                city_id=MY_CITY_ID,
+                request_context_json=context.model_dump_json(),
+                status='pending'
+            )
+            db.add(new_request)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logging.error(f"Failed to create thinking request for {persona_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="Failed to queue thinking request.")
+        finally:
+            db.close()
+
+        # ロングポーリングで結果を待つ
+        timeout = 30  # 30秒でタイムアウト
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            db = SessionLocal()
+            try:
+                req = db.query(ThinkingRequest).filter(ThinkingRequest.request_id == request_id).first()
+                if req and req.status == 'processed':
+                    return JSONResponse(content={"response_text": req.response_text})
+                elif req and req.status == 'error':
+                    logging.warning(f"Remote thinking for request {request_id} resulted in an error. Sending error details to proxy.")
+                    return JSONResponse(status_code=200, content={"response_text": req.response_text})
+            finally:
+                db.close()
+            time.sleep(0.5) # 0.5秒ごとにポーリング
+
+        raise HTTPException(status_code=408, detail="Request timed out.")
 
     return router
 
-# --- 5. サーバー起動 ---
-
-app = FastAPI(title="SAIVerse DB API")
-
-@app.on_event("startup")
-def on_startup():
-    init_db()
-
-api_router = create_api_router()
-app.include_router(api_router)
+app = FastAPI(title="SAIVerse Inter-City API")
+inter_city_router = create_inter_city_router()
+proxy_router = create_proxy_router()
+app.include_router(inter_city_router)
+app.include_router(proxy_router)
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=7920)
+    parser = argparse.ArgumentParser(description="SAIVerse DB API Server")
+    parser.add_argument("--port", type=int, default=8001, help="Port to run the API server on")
+    parser.add_argument("--db", type=str, default="saiverse.db", help="Path to the unified database file.")
+    args = parser.parse_args()
+
+    # グローバル変数をコマンドライン引数に基づいて設定
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    DB_FILE_PATH = os.path.join(SCRIPT_DIR, args.db)
+    DATABASE_URL = f"sqlite:///{DB_FILE_PATH}"
+
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+    # DBファイルが存在しない場合、またはテーブルが存在しない場合にテーブルを作成する
+    if not os.path.exists(DB_FILE_PATH) or not inspect(engine).get_table_names():
+        logging.info(f"API Server: Database '{args.db}' not found or empty. Creating tables...")
+        Base.metadata.create_all(bind=engine)
+        logging.info("API Server: Tables created successfully.")
+
+    # 自身のCity IDをDBから取得してグローバル変数に設定
+    db = SessionLocal()
+    try:
+        city_config = db.query(CityModel).filter(CityModel.API_PORT == args.port).first()
+        if not city_config:
+            raise RuntimeError(f"Could not find a city configured for API port {args.port} in the database.")
+        
+        MY_CITY_ID = city_config.CITYID
+        logging.info(f"API Server for City ID {MY_CITY_ID} ({city_config.CITYNAME}) is starting up.")
+    finally:
+        db.close()
+
+    uvicorn.run(app, host="0.0.0.0", port=args.port)
