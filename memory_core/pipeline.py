@@ -148,14 +148,31 @@ class MemoryCore:
         else:
             nt = decision.get("new_topic") or {}
             # Accept both dict and string from LLM output
+            title: Optional[str] = None
+            summary: Optional[str] = None
             if isinstance(nt, str):
                 title = (nt[:24] + "…") if len(nt) > 24 else nt
                 summary = nt[:160]
-                nt = {"title": title or "新しい話題", "summary": summary or None}
+            elif isinstance(nt, dict):
+                title = nt.get("title")
+                summary = nt.get("summary")
+            # Sanitize empty/generic titles
+            from .topic_assigner import _derive_fallback_title, _is_generic_title  # local import
+            if _is_generic_title(title):
+                title = _derive_fallback_title(recent_dialog)
+            if not summary and recent_dialog:
+                # brief summary from the latest user-like utterance
+                last_text = ""
+                for turn in reversed(recent_dialog):
+                    if turn.get("speaker") in ("user", "human"):
+                        last_text = (turn.get("text", "") or "").strip()
+                        if last_text:
+                            break
+                summary = last_text[:160] if last_text else None
             topic = Topic(
                 id=_gen_id("topic"),
-                title=(nt.get("title") if isinstance(nt, dict) else "新しい話題") or "新しい話題",
-                summary=(nt.get("summary") if isinstance(nt, dict) else None),
+                title=title or "会話トピック",
+                summary=summary,
                 created_at=ts,
                 updated_at=ts,
                 strength=0.1,
