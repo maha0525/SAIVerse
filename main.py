@@ -60,8 +60,8 @@ html[data-theme='dark'] {
 
 /* --- Flexboxレイアウト --- */
 .message-row { display: flex !important; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
-.message-row .avatar-container, .message-row .inline-avatar { width: 60px; height: 60px; min-width: 60px; border-radius: 20%; overflow: hidden; margin: 0 !important; }
-.message-row .avatar-container img, .message-row .inline-avatar img, .message-row .inline-avatar { width: 100%; height: 100%; object-fit: cover; }
+.message-row .avatar-container { width: 60px; height: 60px; min-width: 60px; border-radius: 12px !important; overflow: hidden; margin: 0 !important; display: inline-block; }
+.message-row .avatar-container img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit !important; display: block; }
 .message-row .message { flex-grow: 1; padding: 10px 14px; background-color: var(--msg-bg); color: var(--msg-fg) !important; border-radius: 12px; min-height: 60px; font-size: 1rem !important; overflow-wrap: break-word; }
 .user-message { flex-direction: row-reverse; }
 .user-message .message { background-color: var(--user-bg); color: var(--user-fg) !important; }
@@ -69,6 +69,11 @@ html[data-theme='dark'] {
 /* Notes */
 .note-box { background: var(--note-bg); color: var(--note-fg) !important; border-left: 4px solid #ffbf00; padding: 8px 12px; margin: 0; border-radius: 6px; font-size: .92rem; }
 .note-box b { color: var(--note-fg) !important; }
+
+/* Strongly scoped avatar rounding for Chatbot area */
+#my_chat .saiv-avatar { border-radius: 12px !important; overflow: hidden !important; display: inline-block; width: 60px; height: 60px; min-width: 60px; }
+#my_chat .saiv-avatar > img { border-radius: 12px !important; margin: 0 !important; width: 100% !important; height: 100% !important; object-fit: cover !important; display: block !important; clip-path: inset(0 round 12px) !important; }
+#my_chat .saiv-avatar > picture > img { border-radius: 12px !important; margin: 0 !important; clip-path: inset(0 round 12px) !important; }
 """
 
 def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -83,20 +88,44 @@ def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[s
             say = msg.get("content", "")
 
             if avatar:
-                html = f"<div class='message-row'><div class='avatar-container'><img src='{avatar}'></div><div class='message'>{say}</div></div>"
+                avatar_box = (
+                    "width:60px;height:60px;min-width:60px;"
+                    "border-radius:12px;overflow:hidden;display:inline-block;margin:0;"
+                )
+                avatar_img = (
+                    "width:100%;height:100%;object-fit:cover;display:block;"
+                    "margin:0;border-radius:inherit;clip-path: inset(0 round 12px);"
+                )
+                html = (
+                    f"<div class='message-row'>"
+                    f"<div class='avatar-container saiv-avatar' style=\"{avatar_box}\">"
+                    f"<img class='saiv-avatar-img' src='{avatar}' style=\"{avatar_img}\"></div>"
+                    f"<div class='message'>{say}</div></div>"
+                )
             else:
                 html = f"{say}"
             display.append({"role": "assistant", "content": html})
         elif role == "user":
-            # Wrap user message with the same HTML structure for consistent theming
-            say = msg.get("content", "")
-            user_avatar = "assets/icons/user.png"
-            html = f"<div class='message-row user-message'><div class='avatar-container'><img src='{user_avatar}'></div><div class='message'>{say}</div></div>"
-            display.append({"role": "assistant", "content": html})
+            # Let Gradio Chatbot handle user-side alignment and avatar rendering
+            # Keep the role as 'user' and pass through the plain content
+            display.append({"role": "user", "content": msg.get("content", "")})
         elif role == "host":
             say = msg.get("content", "")
             if manager.host_avatar:
-                html = f"<div class='message-row'><div class='avatar-container'><img src='{manager.host_avatar}'></div><div class='message'>{say}</div></div>"
+                avatar_box = (
+                    "width:60px;height:60px;min-width:60px;"
+                    "border-radius:12px;overflow:hidden;display:inline-block;margin:0;"
+                )
+                avatar_img = (
+                    "width:100%;height:100%;object-fit:cover;display:block;"
+                    "margin:0;border-radius:inherit;clip-path: inset(0 round 12px);"
+                )
+                html = (
+                    f"<div class='message-row'>"
+                    f"<div class='avatar-container saiv-avatar' style=\"{avatar_box}\">"
+                    f"<img class='saiv-avatar-img' src='{manager.host_avatar}' style=\"{avatar_img}\"></div>"
+                    f"<div class='message'>{say}</div></div>"
+                )
             else:
                 html = f"<b>[HOST]</b> {say}"
             display.append({"role": "assistant", "content": html})
