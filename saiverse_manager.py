@@ -2207,11 +2207,8 @@ class SAIVerseManager:
         if not ai_id or not target_building_id:
             return "Error: AI ID and Target Building ID are required."
 
-        # Use all_personas to handle both local and visiting personas if needed,
-        # but for mode changes, we focus on local personas.
         persona = self.personas.get(ai_id)
         if not persona:
-            # Maybe it's a visitor, which can't be mode-managed this way.
             if ai_id in self.visiting_personas:
                  return "Error: Cannot manage the interaction mode of a visiting persona from the editor."
             return f"Error: Persona with ID '{ai_id}' not found in memory."
@@ -2223,7 +2220,9 @@ class SAIVerseManager:
         if from_building_id == target_building_id:
             return f"{persona.persona_name} is already in that building."
 
-        # --- Refactored Logic ---
+        # Block moving a persona who is currently in the user's room.
+        if from_building_id == self.user_room_id:
+            return "Can't move, because this persona in user room. Please execute end conversation."
 
         # Case 1: Moving TO the user's room. This is equivalent to "summoning".
         if target_building_id == self.user_room_id:
@@ -2234,23 +2233,7 @@ class SAIVerseManager:
             else:
                 return f"Failed to summon '{persona.persona_name}': {reason}"
 
-        # Case 2: Moving FROM the user's room. This is equivalent to "ending conversation".
-        elif from_building_id == self.user_room_id:
-            logging.info(f"[EditorMove] Moving '{persona.persona_name}' from user room to '{self.building_map.get(target_building_id, 'Unknown').name}'.")
-            self.end_conversation(ai_id)
-            current_location_after_end = persona.current_building_id
-            if current_location_after_end == target_building_id:
-                return f"Successfully moved '{persona.persona_name}' from your room to '{self.building_map[target_building_id].name}'."
-            else:
-                logging.info(f"[EditorMove] Performing secondary move for '{persona.persona_name}' from '{self.building_map.get(current_location_after_end, 'Unknown').name}' to '{self.building_map.get(target_building_id, 'Unknown').name}'.")
-                success, reason = self._move_persona(ai_id, current_location_after_end, target_building_id)
-                if success:
-                    persona.current_building_id = target_building_id
-                    return f"Successfully moved '{persona.persona_name}' to '{self.building_map[target_building_id].name}'."
-                else:
-                    return f"Moved '{persona.persona_name}' out of your room, but failed the second move to the target location: {reason}"
-
-        # Case 3: Moving between two non-user rooms. This is a simple move with no mode change.
+        # Case 2: Moving between two non-user rooms. This is a simple move with no mode change.
         else:
             logging.info(f"[EditorMove] Moving '{persona.persona_name}' from '{self.building_map.get(from_building_id, 'Unknown').name}' to '{self.building_map.get(target_building_id, 'Unknown').name}'.")
             success, reason = self._move_persona(ai_id, from_building_id, target_building_id)
@@ -2259,7 +2242,7 @@ class SAIVerseManager:
                 return f"Successfully moved '{persona.persona_name}' to '{self.building_map[target_building_id].name}'."
             else:
                 return f"Failed to move: {reason}"
-            
+
     def get_buildings_df(self) -> pd.DataFrame:
         """ワールドエディタ用にすべてのBuilding一覧をDataFrameとして取得する"""
         db = self.SessionLocal()
