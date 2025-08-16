@@ -29,67 +29,46 @@ AUTONOMOUS_BUILDING_CHOICES = []
 AUTONOMOUS_BUILDING_MAP = {}
 
 NOTE_CSS = """
-/* --- Flexboxを使った新しいレイアウト --- */
-
-/* メッセージ一行全体をFlexboxコンテナにする */
-.message-row {
-    display: flex !important;
-    align-items: flex-start; /* アイコンとテキストを上揃えに */
-    gap: 12px; /* アイコンとテキストの間隔 */
-    margin-bottom: 12px;
+/* Color tokens tied to Gradio theme (auto switches with gradio light/dark) */
+html[data-theme='light'] {
+  --msg-bg: #f3f4f6;
+  --msg-fg: #111827;
+  --user-bg: #dbeafe;  /* light blue */
+  --user-fg: #111827;
+  --note-bg: #fff9db;
+  --note-fg: #1f2937;
+}
+html[data-theme='dark'] {
+  --msg-bg: #333333;
+  --msg-fg: #f9fafb;
+  --user-bg: #1f3b57; /* darker blue for contrast */
+  --user-fg: #e5e7eb;
+  --note-bg: #3b3a2a;
+  --note-fg: #f3f4f6;
+}
+/* Fallback to system preference if theme attr not present */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --msg-bg: #333333;
+    --msg-fg: #f9fafb;
+    --user-bg: #1f3b57;
+    --user-fg: #e5e7eb;
+    --note-bg: #3b3a2a;
+    --note-fg: #f3f4f6;
+  }
 }
 
-/* アイコンのスタイル */
-.message-row .avatar-container,
-.message-row .inline-avatar {
-    width: 60px;
-    height: 60px;
-    min-width: 60px; /* 縮まないように */
-    border-radius: 20%;
-    overflow: hidden;
-    margin: 0 !important; /* floatのmarginをリセット */
-}
+/* --- Flexboxレイアウト --- */
+.message-row { display: flex !important; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+.message-row .avatar-container, .message-row .inline-avatar { width: 60px; height: 60px; min-width: 60px; border-radius: 20%; overflow: hidden; margin: 0 !important; }
+.message-row .avatar-container img, .message-row .inline-avatar img, .message-row .inline-avatar { width: 100%; height: 100%; object-fit: cover; }
+.message-row .message { flex-grow: 1; padding: 10px 14px; background-color: var(--msg-bg); color: var(--msg-fg) !important; border-radius: 12px; min-height: 60px; font-size: 1rem !important; overflow-wrap: break-word; }
+.user-message { flex-direction: row-reverse; }
+.user-message .message { background-color: var(--user-bg); color: var(--user-fg) !important; }
 
-.message-row .avatar-container img,
-.message-row .inline-avatar img, /* Gradioが生成するimgタグにも適用 */
-.message-row .inline-avatar {
-    width: 100%;
-    height: 100%;
-    object-fit: cover; /* アスペクト比を保ったままコンテナを埋める */
-}
-
-/* メッセージテキスト部分のコンテナ */
-.message-row .message {
-    flex-grow: 1; /* 残りのスペースをすべて使う */
-    padding: 10px 14px;
-    background-color: #333333; /* 暗いグレーの背景色 */
-    color: #fff !important; /* ★文字色を白に固定 (重要度を上げる) */
-    border-radius: 12px;
-    min-height: 60px; /* アイコンの高さと合わせる */
-    font-size: 1rem !important;
-    overflow-wrap: break-word; /* 長い単語でも折り返す */
-}
-/* ユーザー側のメッセージを右寄せにする */
-.user-message {
-    flex-direction: row-reverse;
-}
-.user-message .message {
-    background-color: #d1e7ff; /* ユーザーのメッセージ色を変更 */
-    color: #fff !important; /* ★ユーザー側の文字色も白に固定 */
-}
-/* ホストやシステムノートのスタイル */
-.note-box {
-    background: #fff9db;
-    color: #222 !important; /* ★文字色をグレーに固定*/
-    border-left: 4px solid #ffbf00;
-    padding: 8px 12px;
-    margin: 0;
-    border-radius: 6px;
-    font-size: .92rem;
-}
-.note-box b{
-    color: #222 !important; /* ★文字色をグレーに固定*/
-}
+/* Notes */
+.note-box { background: var(--note-bg); color: var(--note-fg) !important; border-left: 4px solid #ffbf00; padding: 8px 12px; margin: 0; border-radius: 6px; font-size: .92rem; }
+.note-box b { color: var(--note-fg) !important; }
 """
 
 def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -109,7 +88,11 @@ def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[s
                 html = f"{say}"
             display.append({"role": "assistant", "content": html})
         elif role == "user":
-            display.append(msg)
+            # Wrap user message with the same HTML structure for consistent theming
+            say = msg.get("content", "")
+            user_avatar = "assets/icons/user.png"
+            html = f"<div class='message-row user-message'><div class='avatar-container'><img src='{user_avatar}'></div><div class='message'>{say}</div></div>"
+            display.append({"role": "assistant", "content": html})
         elif role == "host":
             say = msg.get("content", "")
             if manager.host_avatar:
