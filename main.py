@@ -317,13 +317,20 @@ def on_select_building(evt: gr.SelectData):
 
 def on_select_ai(evt: gr.SelectData):
     """Handler for when an AI is selected in the DataFrame."""
-    if evt.index is None: return "", "", "", "", None, "", False, "auto"
+    if evt.index is None: return "", "", "", "", None, "", False, "auto", ""
     row_index = evt.index[0]
     # We need the full DF to get the ID, not just the visible part
     df = manager.get_ais_df()
     ai_id = df.iloc[row_index]['AIID']
     details = manager.get_ai_details(ai_id)
-    if not details: return "", "", "", "", None, "", False, "auto"
+    if not details: return "", "", "", "", None, "", False, "auto", ""
+
+    # --- 現在地を取得 ---
+    current_location_name = "不明"
+    if ai_id in manager.personas:
+        current_building_id = manager.personas[ai_id].current_building_id
+        if current_building_id in manager.building_map:
+            current_location_name = manager.building_map[current_building_id].name
 
     return (
         details['AIID'],
@@ -333,7 +340,8 @@ def on_select_ai(evt: gr.SelectData):
         int(details['HOME_CITYID']),
         details['DEFAULT_MODEL'],
         details['IS_DISPATCHED'],
-        details['INTERACTION_MODE']
+        details['INTERACTION_MODE'],
+        current_location_name
     )
 
 def update_ai_ui(ai_id: str, name: str, desc: str, sys_prompt: str, home_city_id: int, model: str, interaction_mode: str):
@@ -345,6 +353,26 @@ def update_ai_ui(ai_id: str, name: str, desc: str, sys_prompt: str, home_city_id
     
     result = manager.update_ai(ai_id, name, desc, sys_prompt, home_city_id, model, interaction_mode)
     return result, manager.get_ais_df()
+
+def move_ai_ui(ai_id: str, target_building_name: str):
+    """UI handler to move an AI from the world editor."""
+    if not ai_id or not target_building_name:
+        return "Error: AIと移動先を選択してください。", gr.update()
+    
+    target_building_id = BUILDING_NAME_TO_ID_MAP.get(target_building_name)
+    if not target_building_id:
+        return f"Error: 建物 '{target_building_name}' のIDが見つかりません。", gr.update()
+        
+    result = manager.move_ai_from_editor(ai_id, target_building_id)
+    
+    # 移動後の現在地を再取得してUIに反映
+    new_location_name = "不明"
+    if ai_id in manager.personas:
+        current_building_id = manager.personas[ai_id].current_building_id
+        if current_building_id in manager.building_map:
+            new_location_name = manager.building_map[current_building_id].name
+            
+    return result, new_location_name
 
 def on_select_tool(evt: gr.SelectData):
     """Handler for when a tool is selected in the DataFrame."""
@@ -507,7 +535,7 @@ def create_world_editor_ui():
                     ai_name_text = gr.Textbox(label="AI Name")
                     ai_home_city_dropdown = gr.Dropdown(choices=city_choices, label="所属City", type="value")
                     ai_model_dropdown = gr.Dropdown(choices=MODEL_CHOICES, label="Default Model", allow_custom_value=True)
-                    ai_interaction_mode_dropdown = gr.Dropdown(choices=["auto", "sleep"], label="対話モード", value="auto")
+                    ai_interaction_mode_dropdown = gr.Dropdown(choices=["auto", "manual", "sleep"], label="対話モード", value="auto")
                 ai_desc_text = gr.Textbox(label="Description", lines=2)
                 ai_sys_prompt_text = gr.Textbox(label="System Prompt", lines=8)
                 with gr.Row():
@@ -517,11 +545,25 @@ def create_world_editor_ui():
                     delete_ai_btn = gr.Button("AIを削除", variant="stop", interactive=False, scale=1)
                 ai_status_display = gr.Textbox(label="Status", interactive=False)
 
+                gr.Markdown("---")
+                gr.Markdown("### AIを移動させる")
+                with gr.Row():
+                    ai_current_location_text = gr.Textbox(label="現在地", interactive=False, scale=2)
+                    ai_move_target_dropdown = gr.Dropdown(
+                        choices=BUILDING_CHOICES,
+                        label="移動先",
+                        scale=2
+                    )
+                    move_ai_btn = gr.Button("移動実行", scale=1)
+                move_ai_status_display = gr.Textbox(label="Status", interactive=False)
+
+
                 # --- AI Event Handlers (Update/Delete) ---
-                ai_df.select(fn=on_select_ai, inputs=None, outputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, is_dispatched_checkbox, ai_interaction_mode_dropdown])
+                ai_df.select(fn=on_select_ai, inputs=None, outputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, is_dispatched_checkbox, ai_interaction_mode_dropdown, ai_current_location_text])
                 save_ai_btn.click(fn=update_ai_ui, inputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, ai_interaction_mode_dropdown], outputs=[ai_status_display, ai_df])
                 delete_ai_confirm_check.change(fn=toggle_delete_button, inputs=delete_ai_confirm_check, outputs=delete_ai_btn)
                 delete_ai_btn.click(fn=delete_ai_ui, inputs=[ai_id_text, delete_ai_confirm_check], outputs=[ai_status_display, ai_df])
+                move_ai_btn.click(fn=move_ai_ui, inputs=[ai_id_text, ai_move_target_dropdown], outputs=[move_ai_status_display, ai_current_location_text])
 
             with gr.TabItem("新規作成"):
                 gr.Markdown("新しいAIを作成します。作成すると、そのAIの個室も自動で生成されます。")

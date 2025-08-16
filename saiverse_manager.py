@@ -2196,6 +2196,38 @@ class SAIVerseManager:
             return f"Error: {e}"
         finally:
             db.close()
+
+    def move_ai_from_editor(self, ai_id: str, target_building_id: str) -> str:
+        """
+        Moves an AI to a specified building, triggered from the World Editor.
+        This is a direct administrative action.
+        """
+        if not ai_id or not target_building_id:
+            return "Error: AI ID and Target Building ID are required."
+
+        persona = self.personas.get(ai_id)
+        if not persona:
+            return f"Error: Persona with ID '{ai_id}' not found in memory."
+
+        if target_building_id not in self.building_map:
+            return f"Error: Target building '{target_building_id}' not found."
+
+        from_building_id = persona.current_building_id
+        if from_building_id == target_building_id:
+            return f"{persona.persona_name} is already in that building."
+
+        # Use the centralized OccupancyManager to handle the move
+        success, reason = self.occupancy_manager.move_entity(
+            entity_id=ai_id, entity_type='ai', from_id=from_building_id, to_id=target_building_id
+        )
+
+        if success:
+            persona.current_building_id = target_building_id
+            logging.info(f"Editor move: Successfully moved '{persona.persona_name}' to '{self.building_map[target_building_id].name}'.")
+            return f"Successfully moved '{persona.persona_name}' to '{self.building_map[target_building_id].name}'."
+        else:
+            logging.error(f"Editor move failed for '{persona.persona_name}': {reason}")
+            return f"Failed to move: {reason}"
             
     def get_buildings_df(self) -> pd.DataFrame:
         """ワールドエディタ用にすべてのBuilding一覧をDataFrameとして取得する"""
@@ -2318,10 +2350,9 @@ class SAIVerseManager:
                             else:
                                 move_feedback = f" Note: Failed to move to private room: {reason}."
                                 logging.error(f"Failed to move AI '{name}' to private room: {reason}")
-                elif interaction_mode == "auto":
-                    ai.INTERACTION_MODE = "auto"
+                elif interaction_mode in ["auto", "manual"]:
+                    ai.INTERACTION_MODE = interaction_mode
                 else:
-                    # UI should prevent this, but as a safeguard, we don't change the mode.
                     logging.warning(f"Invalid interaction mode '{interaction_mode}' requested for AI '{name}'. No change made.")
 
             # --- Update other fields ---
