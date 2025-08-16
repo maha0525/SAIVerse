@@ -1409,16 +1409,34 @@ class SAIVerseManager:
 
     def set_model(self, model: str) -> None:
         """
-        Update LLM model for all personas temporarily.
-        This method updates the model for all currently active persona instances in memory.
-        This change is not persistent and will be reset to the DB-defined default upon city restart.
+        Update LLM model override for all active personas in memory.
+        - If model == "None": clear the override and reset each persona to its DB-defined default model.
+        - Otherwise: set the given model for all personas (temporary, not persisted).
         """
+        if model == "None":
+            logging.info("Clearing global model override; restoring each persona's DB default model.")
+            db = self.SessionLocal()
+            try:
+                from model_configs import get_context_length, get_model_provider
+                for pid, persona in self.personas.items():
+                    ai = db.query(AIModel).filter_by(AIID=pid).first()
+                    if not ai:
+                        continue
+                    m = ai.DEFAULT_MODEL or DEFAULT_MODEL
+                    persona.set_model(m, get_context_length(m), get_model_provider(m))
+                # Reflect no-override state in manager
+                self.model = "None"
+            except Exception as e:
+                logging.error(f"Failed to restore DB default models: {e}", exc_info=True)
+            finally:
+                db.close()
+            return
+
         logging.info(f"Temporarily setting model to '{model}' for all active personas.")
         self.model = model
         self.context_length = get_context_length(model)
         self.provider = get_model_provider(model)
         for persona in self.personas.values():
-            # This overrides any individual model settings from the DB for the current session.
             persona.set_model(model, self.context_length, self.provider)
 
     def start_autonomous_conversations(self):
