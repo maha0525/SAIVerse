@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO)
 manager: SAIVerseManager = None
 BUILDING_CHOICES = []
 BUILDING_NAME_TO_ID_MAP = {}
-MODEL_CHOICES = get_model_choices()
+MODEL_CHOICES = ["None"] + get_model_choices()
 AUTONOMOUS_BUILDING_CHOICES = []
 AUTONOMOUS_BUILDING_MAP = {}
 
@@ -170,7 +170,8 @@ def respond_stream(message: str):
 
 
 def select_model(model_name: str):
-    manager.set_model(model_name)
+    # "None" means clear override and use each persona's DB default
+    manager.set_model(model_name or "None")
     # Get history from current location
     current_building_id = manager.user_current_building_id
     if not current_building_id:
@@ -947,7 +948,7 @@ def main():
                 gr.Markdown("---")
 
                 with gr.Row():
-                    model_drop = gr.Dropdown(choices=MODEL_CHOICES, value=manager.model, label="システムデフォルトモデル (一時的な一括上書き)")
+                    model_drop = gr.Dropdown(choices=MODEL_CHOICES, value="None", label="システムデフォルトモデル (一時的な一括上書き)")
 
                 # --- Event Handlers ---
                 submit.click(respond_stream, txt, [chatbot, move_building_dropdown, summon_persona_dropdown, end_conv_persona_dropdown])
