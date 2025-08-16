@@ -2196,17 +2196,24 @@ class SAIVerseManager:
             return f"Error: {e}"
         finally:
             db.close()
-
+            
     def move_ai_from_editor(self, ai_id: str, target_building_id: str) -> str:
         """
         Moves an AI to a specified building, triggered from the World Editor.
         This is a direct administrative action.
+        This method is refactored to use summon_persona and end_conversation
+        to ensure interaction mode consistency.
         """
         if not ai_id or not target_building_id:
             return "Error: AI ID and Target Building ID are required."
 
+        # Use all_personas to handle both local and visiting personas if needed,
+        # but for mode changes, we focus on local personas.
         persona = self.personas.get(ai_id)
         if not persona:
+            # Maybe it's a visitor, which can't be mode-managed this way.
+            if ai_id in self.visiting_personas:
+                 return "Error: Cannot manage the interaction mode of a visiting persona from the editor."
             return f"Error: Persona with ID '{ai_id}' not found in memory."
 
         if target_building_id not in self.building_map:
@@ -2216,18 +2223,42 @@ class SAIVerseManager:
         if from_building_id == target_building_id:
             return f"{persona.persona_name} is already in that building."
 
-        # Use the centralized OccupancyManager to handle the move
-        success, reason = self.occupancy_manager.move_entity(
-            entity_id=ai_id, entity_type='ai', from_id=from_building_id, to_id=target_building_id
-        )
+        # --- Refactored Logic ---
 
-        if success:
-            persona.current_building_id = target_building_id
-            logging.info(f"Editor move: Successfully moved '{persona.persona_name}' to '{self.building_map[target_building_id].name}'.")
-            return f"Successfully moved '{persona.persona_name}' to '{self.building_map[target_building_id].name}'."
+        # Case 1: Moving TO the user's room. This is equivalent to "summoning".
+        if target_building_id == self.user_room_id:
+            logging.info(f"[EditorMove] Summoning '{persona.persona_name}' to user room.")
+            success, reason = self.summon_persona(ai_id)
+            if success:
+                return f"Successfully summoned '{persona.persona_name}' to your room."
+            else:
+                return f"Failed to summon '{persona.persona_name}': {reason}"
+
+        # Case 2: Moving FROM the user's room. This is equivalent to "ending conversation".
+        elif from_building_id == self.user_room_id:
+            logging.info(f"[EditorMove] Moving '{persona.persona_name}' from user room to '{self.building_map.get(target_building_id, 'Unknown').name}'.")
+            self.end_conversation(ai_id)
+            current_location_after_end = persona.current_building_id
+            if current_location_after_end == target_building_id:
+                return f"Successfully moved '{persona.persona_name}' from your room to '{self.building_map[target_building_id].name}'."
+            else:
+                logging.info(f"[EditorMove] Performing secondary move for '{persona.persona_name}' from '{self.building_map.get(current_location_after_end, 'Unknown').name}' to '{self.building_map.get(target_building_id, 'Unknown').name}'.")
+                success, reason = self._move_persona(ai_id, current_location_after_end, target_building_id)
+                if success:
+                    persona.current_building_id = target_building_id
+                    return f"Successfully moved '{persona.persona_name}' to '{self.building_map[target_building_id].name}'."
+                else:
+                    return f"Moved '{persona.persona_name}' out of your room, but failed the second move to the target location: {reason}"
+
+        # Case 3: Moving between two non-user rooms. This is a simple move with no mode change.
         else:
-            logging.error(f"Editor move failed for '{persona.persona_name}': {reason}")
-            return f"Failed to move: {reason}"
+            logging.info(f"[EditorMove] Moving '{persona.persona_name}' from '{self.building_map.get(from_building_id, 'Unknown').name}' to '{self.building_map.get(target_building_id, 'Unknown').name}'.")
+            success, reason = self._move_persona(ai_id, from_building_id, target_building_id)
+            if success:
+                persona.current_building_id = target_building_id
+                return f"Successfully moved '{persona.persona_name}' to '{self.building_map[target_building_id].name}'."
+            else:
+                return f"Failed to move: {reason}"
             
     def get_buildings_df(self) -> pd.DataFrame:
         """ワールドエディタ用にすべてのBuilding一覧をDataFrameとして取得する"""
