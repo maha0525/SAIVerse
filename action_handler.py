@@ -26,13 +26,13 @@ class ActionHandler:
 
     def execute_actions(
         self, actions: List[Dict[str, object]]
-    ) -> Tuple[Optional[str], Optional[str], Optional[List[Dict[str, int]]]]:
+    ) -> Tuple[Optional[Dict[str, str]], Optional[str], Optional[List[Dict[str, int]]]]:
         """Executes sorted actions and returns the results."""
         sorted_actions = sorted(
             actions,
             key=lambda a: self.action_priority.get(str(a.get("action", "")), 100),
         )
-        next_id, think, delta = None, None, None
+        move_target, think, delta = None, None, None
         for act in sorted_actions:
             action = act.get("action")
             if action == "think":
@@ -40,5 +40,8 @@ class ActionHandler:
             elif action == "emotion_shift":
                 delta = act.get("delta")
             elif action == "move":
-                next_id = act.get("target")
-        return next_id, think, delta
+                move_target = {
+                    "building": act.get("target"),
+                    "city": act.get("city") # Can be None
+                }
+        return move_target, think, delta

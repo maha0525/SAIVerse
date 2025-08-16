@@ -1,0 +1,12 @@
+{
+  "city_a": {
+    "db_file": "city_A.db",
+    "ui_port": 8000,
+    "api_port": 8001
+  },
+  "city_b": {
+    "db_file": "city_B.db",
+    "ui_port": 9000,
+    "api_port": 9001
+  }
+}
