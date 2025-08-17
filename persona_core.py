@@ -53,6 +53,7 @@ class PersonaCore:
         context_length: int = 120000,
         user_room_id: str = "user_room",
         provider: str = "ollama",
+        user_id: int = 1,
     ):
         self.city_name = city_name
         self.is_visitor = is_visitor
@@ -122,6 +123,9 @@ class PersonaCore:
         self.context_length = context_length
         self.llm_client = get_llm_client(model, provider, self.context_length)
         self.emotion_module = EmotionControlModule()
+        # Conversation tracking for MemoryCore
+        self.user_id = user_id
+        self._last_conv_id: Optional[str] = None
 
         # Initialize MemoryCore for episodic memory (lightweight, in-memory)
         try:
@@ -129,9 +133,20 @@ class PersonaCore:
         except Exception:
             self.memory_core = None
 
-    def _memory_conv_id(self) -> str:
-        """Conversation id for MemoryCore; scoped by persona + building."""
-        return f"{self.persona_id}:{self.current_building_id}"
+    def _memory_conv_id(self, user_message_present: bool = False) -> str:
+        """会話スレッドIDの決定ルール:
+        1) ユーザー発話がある場合: user:<user_id>
+        2) それ以外で直近のconv_idがあれば継承（自発発話など）
+        3) どれでもなければ: "self"
+        保存時に使用し、直近のconv_idは更新される。
+        """
+        if user_message_present:
+            cid = f"user:{self.user_id}"
+            self._last_conv_id = cid
+            return cid
+        if self._last_conv_id:
+            return self._last_conv_id
+        return "self"
 
     def _format_recall_info(self, recall: dict, max_chars: int = 800) -> str:
         """Format recall bundle into a compact info string for prompts."""
@@ -404,7 +419,7 @@ class PersonaCore:
         if self.memory_core is not None:
             try:
                 if user_message is not None and (user_message or "").strip():
-                    self.memory_core.remember(user_message, conv_id=self._memory_conv_id(), speaker="user")
+                    self.memory_core.remember(user_message, conv_id=self._memory_conv_id(user_message_present=True), speaker="user")
                 # Determine a recall source:
                 # 1) explicit user_message, else 2) last user message from persona history
                 recall_source = user_message if (user_message and user_message.strip()) else None
@@ -442,7 +457,7 @@ class PersonaCore:
         if self.memory_core is not None:
             try:
                 if (content or "").strip():
-                    self.memory_core.remember(content, conv_id=self._memory_conv_id(), speaker="ai")
+                    self.memory_core.remember(content, conv_id=self._memory_conv_id(user_message_present=False), speaker="ai")
             except Exception as e:
                 logging.warning(f"MemoryCore remember(ai) failed: {e}")
         return self._process_generation_result(
@@ -474,7 +489,7 @@ class PersonaCore:
         if self.memory_core is not None:
             try:
                 if user_message is not None and (user_message or "").strip():
-                    self.memory_core.remember(user_message, conv_id=self._memory_conv_id(), speaker="user")
+                    self.memory_core.remember(user_message, conv_id=self._memory_conv_id(user_message_present=True), speaker="user")
                 recall_source = user_message if user_message else None
                 if recall_source:
                     bundle = self.memory_core.recall(recall_source, k=5)
@@ -511,7 +526,7 @@ class PersonaCore:
         if self.memory_core is not None:
             try:
                 if (content_accumulator or "").strip():
-                    self.memory_core.remember(content_accumulator, conv_id=self._memory_conv_id(), speaker="ai")
+                    self.memory_core.remember(content_accumulator, conv_id=self._memory_conv_id(user_message_present=False), speaker="ai")
             except Exception as e:
                 logging.warning(f"MemoryCore remember(ai) failed: {e}")
         say, move_target, changed = self._process_generation_result(
@@ -689,6 +704,8 @@ class PersonaCore:
 
     def handle_user_input(self, message: str) -> List[str]:
         logging.info("User input: %s", message)
+        # ユーザーがトリガーのため、直近のconv_idをユーザーに設定
+        self._last_conv_id = f"user:{self.user_id}"
         say, move_target, changed = self._generate(message)
         replies = [say]
 
@@ -712,7 +729,16 @@ class PersonaCore:
             {"role": "user", "content": message},
             self.current_building_id
         )
+        # MemoryCore にもユーザー発話を保存（ストリーム経路では _generate_stream に渡さないため）
+        if self.memory_core is not None:
+            try:
+                if (message or "").strip():
+                    self.memory_core.remember(message, conv_id=self._memory_conv_id(user_message_present=True), speaker="user")
+            except Exception as e:
+                logging.warning(f"MemoryCore remember(user) failed: {e}")
 
+        # ユーザーがトリガーのため、直近のconv_idをユーザーに設定
+        self._last_conv_id = f"user:{self.user_id}"
         # _generate_stream には user_message=None を渡す
         # これにより、_build_messages は履歴の最後のメッセージ（今追加したユーザーメッセージ）を文脈として使う
         # また、_process_generation_result でユーザーメッセージが二重に記録されるのを防ぐ
@@ -872,6 +898,8 @@ class PersonaCore:
                         "role": "user",
                         "content": f"{speaker}: {content}"
                     })
+                    # 会話トリガを発話元のペルソナに切り替え
+                    self._last_conv_id = f"persona:{pid}"
                     perceived += 1
                 # Ingest human/user messages directly
                 elif role == "user" and (pid is None or pid != self.persona_id):
@@ -879,6 +907,8 @@ class PersonaCore:
                         "role": "user",
                         "content": content
                     })
+                    # 会話トリガをユーザーに切り替え
+                    self._last_conv_id = f"user:{self.user_id}"
                     perceived += 1
             except Exception:
                 continue

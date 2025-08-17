@@ -5,7 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 try:
     from dotenv import load_dotenv
@@ -23,8 +23,15 @@ from memory_core import MemoryCore
 from memory_core.config import Config
 
 
-def read_persona_log(persona_id: str) -> List[Dict]:
-    home = Path.home() / ".saiverse" / "personas" / persona_id / "log.json"
+def read_persona_log(persona_id: str, file_path: Optional[str] = None) -> List[Dict]:
+    """Read a persona log from default location or an explicit path.
+    If file_path is provided, it takes precedence. Otherwise, use
+    ~/.saiverse/personas/<persona_id>/log.json
+    """
+    if file_path:
+        home = Path(os.path.expanduser(os.path.expandvars(file_path)))
+    else:
+        home = Path.home() / ".saiverse" / "personas" / persona_id / "log.json"
     if not home.exists():
         raise FileNotFoundError(f"Persona log not found: {home}")
     try:
@@ -46,16 +53,22 @@ def main() -> None:
     ap.add_argument("--location-base", default=None, help="Base dir for per-persona DB (default: QDRANT_LOCATION or ~/.saiverse/qdrant)")
     ap.add_argument("--collection-prefix", default=None, help="Collection prefix (will be suffixed with persona id)")
     ap.add_argument("--conv-id", default=None, help="Conversation id (default: persona:<id>)")
+    ap.add_argument("--file", default=None, help="Explicit path to log.json to ingest (overrides default location)")
     ap.add_argument(
         "--assign-llm",
         default=None,
-        choices=["dummy", "ollama_http", "ollama_cli", "none"],
-        help="Topic assigner backend override; if omitted, use SAIVERSE_ASSIGN_LLM_BACKEND env or none",
+        choices=["dummy", "ollama_http", "ollama_cli", "gemini", "none"],
+        help=(
+            "Topic assigner backend override. Options: "
+            "dummy | ollama_http | ollama_cli | gemini | none. "
+            "If omitted, uses SAIVERSE_ASSIGN_LLM_BACKEND or disables (none)."
+        ),
     )
-    ap.add_argument("--limit", type=int, default=None, help="Limit number of messages to ingest (for quick tests)")
+    ap.add_argument("--limit", type=int, default=None, help="Max number of log items to process (slice size)")
+    ap.add_argument("--start", type=int, default=1, help="1-based start index in log (default: 1)")
     args = ap.parse_args()
 
-    messages = read_persona_log(args.persona_id)
+    messages = read_persona_log(args.persona_id, file_path=args.file)
     cfg = Config.from_env()
     # Per-persona DB location
     base = args.location_base or cfg.qdrant_location or str(Path.home() / ".saiverse" / "qdrant")
@@ -80,26 +93,43 @@ def main() -> None:
         print("Assign LLM: disabled (heuristic assignment)")
     else:
         cfg.assign_llm_backend = eff_backend  # type: ignore
-        if eff_model:
-            cfg.assign_llm_model = eff_model
+        if eff_backend == "gemini":
+            # Prefer Gemini-specific env var, fallback to generic/CLI
+            gem_model = os.getenv("SAIVERSE_ASSIGN_GEMINI_MODEL") or eff_model or cfg.assign_llm_model
+            if gem_model:
+                cfg.assign_gemini_model = gem_model  # type: ignore
+                cfg.assign_llm_model = gem_model
+        else:
+            if eff_model:
+                cfg.assign_llm_model = eff_model
         mc = MemoryCore.create_default(config=cfg, with_dummy_llm=True, llm_backend=eff_backend)
         # Surface connection details for Ollama
         if eff_backend.startswith("ollama"):
             print(
                 f"Assign LLM: {eff_backend} model={cfg.assign_llm_model or 'qwen2.5:3b'} base={os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')}"
             )
+        elif eff_backend == "gemini":
+            print(
+                f"Assign LLM: gemini model={getattr(cfg, 'assign_gemini_model', None) or cfg.assign_llm_model or 'gemini-2.0-flash'} key={'set' if (os.getenv('GEMINI_FREE_API_KEY') or os.getenv('GEMINI_API_KEY')) else 'missing'}"
+            )
     conv_id = args.conv_id or f"persona:{args.persona_id}"
 
     print(f"Per-persona DB: location={cfg.qdrant_location} prefix={cfg.qdrant_collection_prefix}")
     print(f"Backend: {type(mc.storage).__name__}, Embedder: {type(mc.embedder).__name__}")
 
+    # --- Slicing by --start / --limit (1-based start, inclusive) ---
+    start_idx = max(0, (args.start or 1) - 1)
+    end_idx = start_idx + args.limit if args.limit is not None else None
+    total_len = len(messages)
+    slice_len = (end_idx or total_len) - start_idx
+    print(f"Slice: start={args.start} (1-based), limit={args.limit or 'ALL'} -> processing indices [{start_idx}:{end_idx if end_idx is not None else total_len}] of total {total_len}")
+    messages = messages[start_idx:end_idx]
+
     turn = 0
     ingested = 0
     new_topics = 0
     matched = 0
-    for idx, msg in enumerate(messages):
-        if args.limit is not None and idx >= args.limit:
-            break
+    for idx, msg in enumerate(messages, start=start_idx):
         role = (msg.get("role") or "").lower()
         if role == "system":
             continue

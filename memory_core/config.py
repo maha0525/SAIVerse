@@ -47,8 +47,10 @@ class Config:
     qdrant_collection_prefix: str = "saiverse"
 
     # Topic assigner LLM backend
-    assign_llm_backend: Literal["dummy", "ollama_http", "ollama_cli"] = "dummy"
+    assign_llm_backend: Literal["dummy", "ollama_http", "ollama_cli", "gemini"] = "dummy"
     assign_llm_model: Optional[str] = None  # e.g. qwen2.5:3b
+    # Backend-specific override (e.g., for Gemini assigner)
+    assign_gemini_model: Optional[str] = None  # e.g. gemini-2.0-flash
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -81,9 +83,12 @@ class Config:
             cfg.qdrant_collection_prefix = pref
         # LLM backend for topic assignment
         llm_backend = os.getenv("SAIVERSE_ASSIGN_LLM_BACKEND")
-        if llm_backend in ("dummy", "ollama_http", "ollama_cli"):
+        if llm_backend in ("dummy", "ollama_http", "ollama_cli", "gemini"):
             cfg.assign_llm_backend = llm_backend  # type: ignore
         llm_model = os.getenv("SAIVERSE_ASSIGN_LLM_MODEL")
         if llm_model:
             cfg.assign_llm_model = llm_model
+        gem_model = os.getenv("SAIVERSE_ASSIGN_GEMINI_MODEL")
+        if gem_model:
+            cfg.assign_gemini_model = gem_model
         return cfg

@@ -570,6 +570,7 @@ class SAIVerseManager:
                     provider=self.provider,
                     interaction_mode=(db_ai.INTERACTION_MODE or "auto"),
                     is_dispatched=db_ai.IS_DISPATCHED,
+                    user_id=self.user_id,
                 )
 
                 self.personas[pid] = persona
@@ -893,7 +894,8 @@ class SAIVerseManager:
                 explore_callback=self._explore_city, create_persona_callback=self._create_persona,
                 session_factory=self.SessionLocal, start_building_id=new_building_id,
                 model=self.model, context_length=self.context_length,
-                user_room_id=self.user_room_id, provider=self.provider, is_dispatched=False
+                user_room_id=self.user_room_id, provider=self.provider, is_dispatched=False,
+                user_id=self.user_id
             )
             self.personas[new_ai_id] = new_persona_core
             self.avatar_map[new_ai_id] = self.default_avatar
@@ -1922,7 +1924,7 @@ class SAIVerseManager:
 
             # --- Update memory for the new AI ---
             if blueprint.CITYID == self.city_id:
-                new_persona_core = PersonaCore(city_name=self.city_name, persona_id=new_ai_id, persona_name=entity_name, persona_system_instruction=blueprint.BASE_SYSTEM_PROMPT, avatar_image=blueprint.BASE_AVATAR, buildings=self.buildings, common_prompt_path=Path("system_prompts/common.txt"), action_priority_path=Path("action_priority.json"), building_histories=self.building_histories, occupants=self.occupants, id_to_name_map=self.id_to_name_map, move_callback=self._move_persona, dispatch_callback=self.dispatch_persona, explore_callback=self._explore_city, create_persona_callback=self._create_persona, session_factory=self.SessionLocal, start_building_id=target_building_id, model=self.model, context_length=self.context_length, user_room_id=self.user_room_id, provider=self.provider, is_dispatched=False)
+                new_persona_core = PersonaCore(city_name=self.city_name, persona_id=new_ai_id, persona_name=entity_name, persona_system_instruction=blueprint.BASE_SYSTEM_PROMPT, avatar_image=blueprint.BASE_AVATAR, buildings=self.buildings, common_prompt_path=Path("system_prompts/common.txt"), action_priority_path=Path("action_priority.json"), building_histories=self.building_histories, occupants=self.occupants, id_to_name_map=self.id_to_name_map, move_callback=self._move_persona, dispatch_callback=self.dispatch_persona, explore_callback=self._explore_city, create_persona_callback=self._create_persona, session_factory=self.SessionLocal, start_building_id=target_building_id, model=self.model, context_length=self.context_length, user_room_id=self.user_room_id, provider=self.provider, is_dispatched=False, user_id=self.user_id)
                 self.personas[new_ai_id] = new_persona_core
                 self.avatar_map[new_ai_id] = self.default_avatar
                 self.id_to_name_map[new_ai_id] = entity_name

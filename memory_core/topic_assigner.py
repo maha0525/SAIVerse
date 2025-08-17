@@ -118,6 +118,7 @@ def assign_topic_llm(
     # Build prompt as spec-like
     lines = [
         "You are a topic assigner. Produce compact, meaningful Japanese titles.",
+        "Output language policy: All strings MUST be in Japanese (title, summary, reason).",
         "Constraints:",
         "- If NEW, title must be specific to the dialog (<= 24 chars).",
         "- Do not output generic titles like '新しい話題', 'New topic', 'null', 'topic', 'misc'.",
@@ -130,8 +131,10 @@ def assign_topic_llm(
     for turn in recent_dialog[-6:]:
         spk = "U" if turn.get("speaker") in ("user", "human") else "A"
         lines.append(f"- {spk}: {turn.get('text','')}")
+    # Ensure we never expose disabled topics to the LLM
+    active_topics = [t for t in candidate_topics if not getattr(t, "disabled", False)]
     lines.append("Existing topics:")
-    for t in candidate_topics:
+    for t in active_topics:
         summ = t.summary or ""
         title = t.title or "(untitled)"
         lines.append(f"- [id={t.id}] \"{title}\" — summary: {summ}")

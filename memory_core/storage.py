@@ -236,6 +236,7 @@ class QdrantStorage(StorageBackend):
             "summary": entry.summary,
             "emotion": entry.emotion.to_dict() if entry.emotion else None,
             "linked_topics": entry.linked_topics,
+            "previous_topics": getattr(entry, "previous_topics", []) or [],
             "linked_entries": entry.linked_entries,
             "meta": entry.meta,
             "raw_pointer": entry.raw_pointer,
@@ -284,6 +285,7 @@ class QdrantStorage(StorageBackend):
             embedding=p.vector if isinstance(p.vector, list) else None,  # type: ignore[attr-defined]
             emotion=ev,
             linked_topics=list(payload.get("linked_topics", []) or []),
+            previous_topics=list(payload.get("previous_topics", []) or []),
             linked_entries=list(payload.get("linked_entries", []) or []),
             meta=dict(payload.get("meta", {}) or {}),
             raw_pointer=payload.get("raw_pointer"),
@@ -361,6 +363,7 @@ class QdrantStorage(StorageBackend):
             "entry_ids": topic.entry_ids,
             "parents": topic.parents,
             "children": topic.children,
+            "disabled": getattr(topic, "disabled", False),
         }
         vec = topic.centroid_embedding or [0.0] * self.cfg.embedding_dim
         self.client.upsert(
@@ -395,6 +398,22 @@ class QdrantStorage(StorageBackend):
         ua = payload.get("updated_at")
         created_at = datetime.fromisoformat(ca) if isinstance(ca, str) else datetime.now(timezone.utc)
         updated_at = datetime.fromisoformat(ua) if isinstance(ua, str) else datetime.now(timezone.utc)
+        def _as_bool(v) -> bool:
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, (int, float)):
+                try:
+                    return bool(int(v))
+                except Exception:
+                    return bool(v)
+            if isinstance(v, str):
+                s = v.strip().lower()
+                if s in ("true", "1", "yes", "y", "on"): return True
+                if s in ("false", "0", "no", "n", "off", ""): return False
+                # Any other non-empty string should not flip to True by accident
+                return False
+            return False
+
         return Topic(
             id=str(payload.get("sid") or p.id),
             title=payload.get("title", ""),
@@ -407,6 +426,7 @@ class QdrantStorage(StorageBackend):
             entry_ids=list(payload.get("entry_ids", []) or []),
             parents=list(payload.get("parents", []) or []),
             children=list(payload.get("children", []) or []),
+            disabled=_as_bool(payload.get("disabled", False)),
         )
 
     def list_topics(self) -> List[Topic]:

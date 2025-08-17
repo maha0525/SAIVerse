@@ -34,6 +34,9 @@ class MemoryCore:
     embedder: EmbeddingProvider
     config: Config
     llm: Optional[LLMClient] = None
+    # Telemetry for assignment backend
+    assign_backend: str = "none"
+    assign_model: Optional[str] = None
 
     @classmethod
     def create_default(
@@ -75,26 +78,48 @@ class MemoryCore:
         if embedder is None:
             embedder = SimpleHashEmbedding(dim=cfg.embedding_dim, normalize=cfg.normalize_embeddings)
         # Select LLM backend (env-configurable)
-        from .llm import OllamaHTTPAssignLLM, OllamaLLM  # local imports
+        from .llm import OllamaHTTPAssignLLM, OllamaLLM, GeminiAssignLLM  # local imports
         llm: Optional[LLMClient]
         chosen = llm_backend or getattr(cfg, "assign_llm_backend", None) or ("dummy" if with_dummy_llm else None)
         if chosen == "ollama_http":
             try:
                 model = getattr(cfg, "assign_llm_model", None) or "qwen2.5:3b"
                 llm = OllamaHTTPAssignLLM(model=model)
+                assign_backend = "ollama_http"
+                assign_model = model
             except Exception as e:
                 print(f"Assign LLM notice: ollama_http unavailable ({e}); using DummyLLM")
                 llm = DummyLLM() if with_dummy_llm else None
+                assign_backend = "dummy"
+                assign_model = None
         elif chosen == "ollama_cli":
             try:
                 model = getattr(cfg, "assign_llm_model", None) or "qwen2.5:3b"
                 llm = OllamaLLM(model=model)
+                assign_backend = "ollama_cli"
+                assign_model = model
             except Exception as e:
                 print(f"Assign LLM notice: ollama_cli unavailable ({e}); using DummyLLM")
                 llm = DummyLLM() if with_dummy_llm else None
+                assign_backend = "dummy"
+                assign_model = None
+        elif chosen == "gemini":
+            try:
+                # Prefer backend-specific override, then generic, then default
+                model = getattr(cfg, "assign_gemini_model", None) or getattr(cfg, "assign_llm_model", None) or "gemini-2.0-flash"
+                llm = GeminiAssignLLM(model=model)
+                assign_backend = "gemini"
+                assign_model = model
+            except Exception as e:
+                print(f"Assign LLM notice: gemini unavailable ({e}); using DummyLLM")
+                llm = DummyLLM() if with_dummy_llm else None
+                assign_backend = "dummy"
+                assign_model = None
         else:
             llm = DummyLLM() if with_dummy_llm else None
-        return cls(storage=storage, embedder=embedder, config=cfg, llm=llm)
+            assign_backend = "dummy" if with_dummy_llm else "none"
+            assign_model = None
+        return cls(storage=storage, embedder=embedder, config=cfg, llm=llm, assign_backend=assign_backend, assign_model=assign_model)
 
     # -------------------- Pipeline --------------------
     def ingest_turn(
@@ -122,29 +147,42 @@ class MemoryCore:
             summary=_summarize(text),
             embedding=emb,
             emotion=emo,
-            meta=meta or {},
+            meta={
+                **(meta or {}),
+                "assign_llm": {
+                    "backend": self.assign_backend,
+                    "model": self.assign_model,
+                },
+            },
         )
         self.storage.upsert_entry(entry)
 
         # Topic assignment
         recent_dialog = self._collect_recent_dialog(conv_id, n=self.config.recent_dialog_turns)
+        # Filter out disabled topics from candidates
+        all_topics = self.storage.list_topics()
+        candidate_topics = [t for t in all_topics if not getattr(t, "disabled", False)]
         if self.llm is not None:
             decision = assign_topic_llm(
                 recent_dialog=recent_dialog,
-                candidate_topics=self.storage.list_topics(),
+                candidate_topics=candidate_topics,
                 llm=self.llm,
             )
         else:
             decision = assign_topic(
                 recent_dialog=recent_dialog,
-                candidate_topics=self.storage.list_topics(),
+                candidate_topics=candidate_topics,
                 embedder=self.embedder,
                 threshold=self.config.topic_match_threshold,
             )
         if decision.get("decision") == "BEST_MATCH" and decision.get("topic_id"):
             topic = self.storage.get_topic(decision["topic_id"])  # type: ignore
-            if topic:
+            # Guard: do not attach to disabled topics (may happen if an old id leaks)
+            if topic and not getattr(topic, "disabled", False):
                 self._attach_entry_to_topic(entry, topic)
+            else:
+                # Treat as NEW if target topic is disabled or missing
+                decision["decision"] = "NEW"
         else:
             nt = decision.get("new_topic") or {}
             # Accept both dict and string from LLM output
@@ -189,6 +227,13 @@ class MemoryCore:
             if prev_id:
                 self.storage.link_entries(entry.id, prev_id)
 
+        # Upsert updated entry (attach assigner call status if available)
+        if self.llm is not None:
+            try:
+                entry.meta["assign_llm_status"] = getattr(self.llm, "last_status", "ok")
+                entry.meta["assign_llm_retries"] = getattr(self.llm, "last_retries", 0)
+            except Exception:
+                pass
         # Upsert updated entry
         self.storage.upsert_entry(entry)
         return entry

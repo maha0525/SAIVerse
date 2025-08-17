@@ -119,49 +119,39 @@ GEMINI_FREE_API_KEY=AIza...
 
 ---
 
-### 🔖 ディレクトリ構成例
+### 🔖 現行ディレクトリ構成（抜粋）
 
 ```
-saiverse/
-├── main.py                   # メインループ
-├── router.py                 # AIの行動ルーティングとセッション管理
-├── llm_clients.py            # LLMとの通信を抽象化
-├── action_handler.py         # AIの行動（アクション）の解析と実行
-├── history_manager.py        # 会話履歴の管理と永続化
-├── buildings/
-│   ├── user_room/
-│   │   ├── __init__.py       # ユーザールーム定義
-│   │   ├── entry_prompt.txt  # 入室時プロンプト
-│   │   ├── system_prompt.txt # ユーザールーム用システムプロンプト
-│   │   └── memory.json       # ルーム共通の履歴
-│   ├── deep_think_room/
-│   │   ├── __init__.py       # 思索の部屋定義
-│   │   ├── auto_prompt.txt   # 自動プロンプト
-│   │   ├── system_prompt.txt # 思索の部屋用システムプロンプト
-│   │   └── memory.json       # ルーム共通の履歴
-│   └── air_room/
-│       ├── __init__.py       # エアの待機部屋定義
-│       ├── entry_prompt.txt  # 入室時プロンプト
-│       ├── system_prompt.txt # エアの部屋用システムプロンプト
-│       └── memory.json       # ルーム共通の履歴
+SAIVerse/
+├── main.py                    # Gradio UI 本体（ストリーミング表示）
+├── saiverse_manager.py        # セッション/ルーティングの統括
+├── conversation_manager.py    # 会話・モード制御（user/auto/manual）
+├── action_handler.py          # ::act の解析と実行
+├── history_manager.py         # 会話履歴の管理
+├── occupancy_manager.py       # 滞在/移動の管理
+├── llm_router.py              # ツール/モデルのルーティング
+├── llm_clients.py             # OpenAI/Gemini/Ollama クライアント
+├── sds_server.py              # ディレクトリサービス（FastAPI）
+├── database/
+│   ├── api_server.py          # 都市/建物/来訪AIのAPI（FastAPI）
+│   ├── models.py, migrate.py, seed.py, saiverse.db
+├── memory_core/               # 記憶コア（埋め込み/リトリーバ/ストレージ）
 ├── tools/
-│   ├── __init__.py
-│   ├── defs/
-│   │   └── calculator.py     # Function Calling 用計算ツール
-│   └── adapters/             # OpenAI/Gemini 形式への変換
+│   └── defs/
+│       ├── calculator.py      # 計算ツール
+│       └── image_generator.py # 画像生成ツール（Gemini）
 ├── system_prompts/
-│   └── common.txt            # 共通システムプロンプト
 ├── ai_sessions/
-│   └── air/
-│       ├── base.json
-│       ├── memory.json       # セッション情報保存用
-│       └── system_prompt.txt
-├── tests/                    # ユニットテスト
+├── tests/
 │   ├── test_llm_clients.py
 │   ├── test_history_manager.py
-│   └── test_calculator.py
-└── README.md                 # この仕様の要約
+│   ├── test_calculator.py
+│   ├── test_image_generator.py
+│   └── test_llm_router.py
+└── README.md
 ```
+
+補足: Building はファイル分割ではなくデータベース管理です（`database/`）。建物IDは都市に紐づき、例: `user_room_city_a`。
 
 ---
 
@@ -194,23 +184,30 @@ python -m unittest discover tests
 python -m unittest tests/test_module_name.py
 ```
 
-#### 現在テストが書かれているモジュール
+#### 現在テストが書かれているモジュール（抜粋）
 
-- `llm_clients.py`: LLMとの通信を抽象化するクライアントの動作を検証します。
-  - テストファイル: `tests/test_llm_clients.py`
-- `history_manager.py`: 会話履歴の管理と永続化のロジックを検証します。
-  - テストファイル: `tests/test_history_manager.py`
-- `tools.calculator`: 計算ツールの動作を検証します。
-  - テストファイル: `tests/test_calculator.py`
+- `llm_clients.py`: OpenAI/Gemini/Ollama の生成/ストリーム（`tests/test_llm_clients.py`）
+- `history_manager.py`: 履歴の永続化ロジック（`tests/test_history_manager.py`）
+- `tools.calculator`: 計算ツール（`tests/test_calculator.py`）
+- `tools.image_generator`: 画像生成ツール（`tests/test_image_generator.py`）
+- `llm_router.py`: ルーティング仕様（`tests/test_llm_router.py`）
 
 ---
 
-### 📤 Codexへの依頼指示
+### 📤 実装状況メモ（現状）
 
-> 上記仕様に基づき、`main.py` と `router.py` の雛形コードをまず作成してください。  
-> Buildingの定義はファイル分割できるよう設計してください。  
-> AIの発話はJSON・プレーンテキストの両方に対応してください。
-> 丁寧にロギングを行い、バグfixをしやすいように。
+- ルーティング/セッションは `saiverse_manager.py` と `llm_router.py` に実装済みです（`router.py` は不要）。
+- Building はデータベース管理（`database/`）。`seed.py` が初期データを投入し、`api_server.py` から参照します。
+- Gradio UI は `main.py` に実装。SDS は `sds_server.py`、都市APIは `database/api_server.py` で起動します。
+
+起動例:
+```
+pip install -r requirements.txt
+python database/seed.py
+python sds_server.py
+python database/api_server.py --port 8001
+python main.py
+```
 
 ### 🔧 開発時の注意
 

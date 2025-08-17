@@ -42,6 +42,8 @@ class MemoryEntry:
     embedding: Optional[List[float]] = None
     emotion: Optional[EmotionVector] = None
     linked_topics: List[str] = field(default_factory=list)
+    # Tracks previous topic memberships for reversible migrations
+    previous_topics: List[str] = field(default_factory=list)
     linked_entries: List[str] = field(default_factory=list)
     meta: Dict[str, str] = field(default_factory=dict)
     raw_pointer: Optional[str] = None
@@ -66,10 +68,11 @@ class Topic:
     entry_ids: List[str] = field(default_factory=list)
     parents: List[str] = field(default_factory=list)
     children: List[str] = field(default_factory=list)
+    # Disabled topics remain in data but are not used nor accept new entries
+    disabled: bool = False
 
     def to_dict(self) -> dict:
         d = asdict(self)
         if self.centroid_emotion is not None:
             d["centroid_emotion"] = self.centroid_emotion.to_dict()
         return d
-
