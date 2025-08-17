@@ -159,9 +159,24 @@ class MemoryCore:
 
         # Topic assignment
         recent_dialog = self._collect_recent_dialog(conv_id, n=self.config.recent_dialog_turns)
-        # Filter out disabled topics from candidates
+        # Filter out disabled topics from candidates and rank by similarity to current entry
         all_topics = self.storage.list_topics()
-        candidate_topics = [t for t in all_topics if not getattr(t, "disabled", False)]
+        active_topics = [t for t in all_topics if not getattr(t, "disabled", False)]
+        # Compute cosine similarity against topic centroids
+        def _cos(a: Optional[List[float]], b: Optional[List[float]]) -> float:
+            if not a or not b or len(a) != len(b):
+                return -1.0
+            import math
+            dot = sum(x * y for x, y in zip(a, b))
+            na = math.sqrt(sum(x * x for x in a))
+            nb = math.sqrt(sum(y * y for y in b))
+            if na == 0.0 or nb == 0.0:
+                return -1.0
+            return dot / (na * nb)
+        scored = [(_cos(entry.embedding, t.centroid_embedding), t) for t in active_topics]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top_k = max(1, int(getattr(self.config, "assign_llm_candidates_k", 8) or 8))
+        candidate_topics = [t for _, t in scored[:top_k]]
         if self.llm is not None:
             decision = assign_topic_llm(
                 recent_dialog=recent_dialog,
@@ -178,8 +193,20 @@ class MemoryCore:
         if decision.get("decision") == "BEST_MATCH" and decision.get("topic_id"):
             topic = self.storage.get_topic(decision["topic_id"])  # type: ignore
             # Guard: do not attach to disabled topics (may happen if an old id leaks)
+            # Also cross-check embedding similarity to prevent spurious matches
             if topic and not getattr(topic, "disabled", False):
-                self._attach_entry_to_topic(entry, topic)
+                sim_ok = True
+                try:
+                    sim = _cos(entry.embedding, getattr(topic, "centroid_embedding", None))
+                    if sim < float(self.config.topic_match_threshold):
+                        sim_ok = False
+                        print(f"Assign cross-check: similarity {sim:.3f} < threshold {self.config.topic_match_threshold:.3f}; creating NEW topic instead of attaching to {topic.id}")
+                except Exception:
+                    sim_ok = True
+                if sim_ok:
+                    self._attach_entry_to_topic(entry, topic)
+                else:
+                    decision["decision"] = "NEW"
             else:
                 # Treat as NEW if target topic is disabled or missing
                 decision["decision"] = "NEW"

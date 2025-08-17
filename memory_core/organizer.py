@@ -44,34 +44,108 @@ def _tokenize_ja_en(text: str) -> List[str]:
     return out
 
 
-def _pick_common_keyword(topics: List[Topic], block_threshold: int) -> Tuple[str, List[str]]:
-    """(keyword, candidate_topic_ids) を返す。対象は小規模トピック（< block_threshold）。
-    スコアは『出現頻度 × 長さクリップ(最大6)』で、読みやすい語を優先。
+def _extract_title_phrases(title: str) -> List[str]:
+    """タイトルから候補フレーズを抽出する軽量ロジック。
+    - 助詞や記号で分割し、長さ>=2（英数は>=3）を採用。
+    - 大文字小文字は維持（日本語主体のため）。
     """
-    small = [t for t in topics if len(t.entry_ids) < block_threshold and not getattr(t, "disabled", False)]
-    if not small:
-        return "", []
-    freq = Counter()
-    topic_map: Dict[str, List[str]] = {}
+    if not title:
+        return []
+    s = (title or "").strip()
+    # Split on common Japanese particles and punctuation
+    parts = re.split(r"[\s、。・,]|の|について|に関する|とは|と|や|など|を|は|が|へ|で|から|まで|より|に", s)
+    out: List[str] = []
+    for p in parts:
+        p = p.strip().strip('"\'')
+        if not p:
+            continue
+        # length threshold
+        if re.fullmatch(r"[A-Za-z0-9_-]+", p):
+            if len(p) >= 3:
+                out.append(p)
+        else:
+            if len(p) >= 2:
+                out.append(p)
+    return out
+
+
+def _score_anchor_phrases(topics: List[Topic], block_threshold: int) -> Tuple[Dict[str, float], Dict[str, List[str]]]:
+    """全トピック（disabled除く）のタイトルからフレーズを収集し、
+    スコアを算出する。候補ソース（< block_threshold）は別扱いで重み付け。
+    戻り値: (score_map, phrase_to_topic_ids_on_small)
+    """
+    active = [t for t in topics if not getattr(t, "disabled", False)]
+    small = [t for t in active if len(t.entry_ids or []) < block_threshold]
+    # Collect phrase occurrences
+    df_all: Counter = Counter()
+    df_small: Counter = Counter()
+    phrase_small_topics: Dict[str, List[str]] = {}
+    for t in active:
+        phrases = set(_extract_title_phrases(t.title or ""))
+        for ph in phrases:
+            df_all[ph] += 1
     for t in small:
-        src = (t.title or "") + "\n" + (t.summary or "")
-        toks = set(_tokenize_ja_en(src))
-        for tok in toks:
-            freq[tok] += 1
-            topic_map.setdefault(tok, []).append(t.id)
-    if not freq:
-        return "", []
-    # Score by freq * min(len, 6)
-    best_tok = ""
-    best_score = 0.0
-    for tok, c in freq.items():
-        score = float(c) * float(min(len(tok), 6))
-        if c >= 2 and score > best_score:
-            best_score = score
-            best_tok = tok
-    if not best_tok:
-        return "", []
-    return best_tok, topic_map.get(best_tok, [])
+        phrases = set(_extract_title_phrases(t.title or ""))
+        for ph in phrases:
+            df_small[ph] += 1
+            phrase_small_topics.setdefault(ph, []).append(t.id)
+    # IDFペナルティ（全体に普遍的な語ほど下げる）
+    N = max(1, len(active))
+    score: Dict[str, float] = {}
+    GENERIC = {"ソフィー", "人間性", "愛", "抱擁", "考察", "想像", "表現", "応答"}
+    for ph, c_small in df_small.items():
+        c_all = df_all.get(ph, 0)
+        # 基本は小規模>=2だが、大規模も含め全体>=2かつ小規模>=1なら許容（アンカーとして利用）
+        if not (c_small >= 2 or (c_small >= 1 and c_all >= 2)):
+            continue
+        if ph in GENERIC:
+            continue
+        # idf-like weight
+        import math
+        idf = math.log((N + 1) / (c_all + 1)) + 1.0  # 1~
+        length_bonus = min(len(ph), 12) / 6.0  # 〜2倍
+        # small優先 + 全体にもあると少しボーナス
+        s = (2.0 * c_small + 0.5 * max(0, c_all - c_small)) * idf * length_bonus
+        score[ph] = s
+    return score, phrase_small_topics
+
+
+def _pick_common_keyword(topics: List[Topic], block_threshold: int) -> Tuple[str, List[str]]:
+    """(keyword, candidate_topic_ids) を返す。
+    改良点:
+    - キーワード選択は全トピックのタイトルから抽出（disabled除外）。
+    - ソーストピックは小規模（< block_threshold）に限定。
+    - スコアは『小規模での出現頻度』+『全体DFによるIDFボーナス』+『長さボーナス』を考慮。
+    """
+    score, phrase_small_topics = _score_anchor_phrases(topics, block_threshold)
+    if not score:
+        # Fallback to previous token-based heuristic on small topics only
+        small = [t for t in topics if len(t.entry_ids or []) < block_threshold and not getattr(t, "disabled", False)]
+        if not small:
+            return "", []
+        freq = Counter()
+        topic_map: Dict[str, List[str]] = {}
+        for t in small:
+            src = (t.title or "") + "\n" + (t.summary or "")
+            toks = set(_tokenize_ja_en(src))
+            for tok in toks:
+                freq[tok] += 1
+                topic_map.setdefault(tok, []).append(t.id)
+        if not freq:
+            return "", []
+        best_tok = ""
+        best_score = 0.0
+        for tok, c in freq.items():
+            val = float(c) * float(min(len(tok), 6))
+            if c >= 2 and val > best_score:
+                best_score = val
+                best_tok = tok
+        if not best_tok:
+            return "", []
+        return best_tok, topic_map.get(best_tok, [])
+    # Select best phrase
+    best_phrase = max(score.items(), key=lambda x: x[1])[0]
+    return best_phrase, phrase_small_topics.get(best_phrase, [])
 
 
 def run_topic_merge(
@@ -134,9 +208,14 @@ def _run_topic_merge(
                 title = (t.title or "").replace("\n", " ")
                 summary = (t.summary or "").replace("\n", " ")
                 lines.append(f"- [id={t.id}] \"{title}\" — summary: {summary} (n_entries: {n})")
+            # 提案するアンカー候補（タイトルから抽出した上位フレーズ）
+            score_map, _ = _score_anchor_phrases(topics, block_source_threshold)
+            anchors = ", ".join([ph for ph, _ in sorted(score_map.items(), key=lambda x: x[1], reverse=True)[:6]])
             guide = (
                 "You are a topic merger for a memory system. Given a list of small topics, "
-                "propose a generalized theme that groups multiple topics, and select coherent source topics to merge.\n\n"
+                "propose a generalized theme that groups multiple topics, and select coherent source topics to merge.\n"
+                "Prefer the strongest shared phrase present in topic titles as an anchor, and avoid generic words.\n"
+                f"Preferred anchors (hints): {anchors}\n\n"
                 "Output language policy: All strings MUST be in Japanese (keyword, title, summary).\n"
                 "Return ONLY minified JSON with keys: keyword (string), sources (array of topic_id), "
                 "title (string), summary (string). Rules: - Use only topics with n_entries < "

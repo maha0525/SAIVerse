@@ -125,7 +125,6 @@ def main() -> None:
     print(f"Slice: start={args.start} (1-based), limit={args.limit or 'ALL'} -> processing indices [{start_idx}:{end_idx if end_idx is not None else total_len}] of total {total_len}")
     messages = messages[start_idx:end_idx]
 
-    turn = 0
     ingested = 0
     new_topics = 0
     matched = 0
@@ -138,8 +137,10 @@ def main() -> None:
             continue
         speaker = "user" if role == "user" else "ai"
         prev_topics = len(mc.storage.list_topics())  # type: ignore[attr-defined]
-        mc.ingest_turn(conv_id=conv_id, turn_index=turn, speaker=speaker, text=text, meta={"source":"persona_log"})
-        turn += 1
+        # Use MemoryCore.remember to append with a correct, monotonic turn_index
+        # This avoids resetting turn_index to 0 for existing conversations, which
+        # caused recent_dialog (last N turns) to always reference an older tail.
+        mc.remember(text=text, conv_id=conv_id, speaker=speaker, meta={"source": "persona_log"})
         ingested += 1
         after_topics = len(mc.storage.list_topics())  # type: ignore[attr-defined]
         if after_topics > prev_topics:
@@ -150,7 +151,8 @@ def main() -> None:
     print(f"Assignment summary: NEW topics={new_topics}, matched={matched}")
 
     # Summarize topics
-    topics = mc.storage.list_topics()  # type: ignore[attr-defined]
+    # Show only active topics by default
+    topics = [t for t in mc.storage.list_topics() if not getattr(t, "disabled", False)]  # type: ignore[attr-defined]
     topics.sort(key=lambda t: (-(t.strength or 0), t.title or ""))
     print(f"Topics: {len(topics)}")
     for i, t in enumerate(topics, 1):

@@ -118,13 +118,18 @@ def assign_topic_llm(
     # Build prompt as spec-like
     lines = [
         "You are a topic assigner. Produce compact, meaningful Japanese titles.",
-        "Output language policy: All strings MUST be in Japanese (title, summary, reason).",
+        "Output language policy: All strings MUST be in Japanese (title, summary, reason, context_summary).",
+        "Decision policy:",
+        "- First, derive a one-sentence context_summary (<=120 chars) summarizing the latest user (U) utterance.",
+        "- Base your judgment primarily on the latest user (U) utterance.",
+        "- If the match with any existing topic is weak or ambiguous, choose NEW.",
+        "- Avoid assigning general guidance/operational notes to specific content topics; prefer NEW in such cases.",
         "Constraints:",
         "- If NEW, title must be specific to the dialog (<= 24 chars).",
         "- Do not output generic titles like '新しい話題', 'New topic', 'null', 'topic', 'misc'.",
         "- 'summary' should be <=160 chars and informative.",
         "- If unsure, compose a concise label from key nouns/phrases in the latest user utterance.",
-        "- Output JSON ONLY with keys: decision, topic_id, new_topic, reason.",
+        "- Output JSON ONLY with keys (in this order): context_summary, decision, topic_id, new_topic, reason.",
         "",
         "Recent dialog (last N turns):",
     ]
@@ -139,7 +144,7 @@ def assign_topic_llm(
         title = t.title or "(untitled)"
         lines.append(f"- [id={t.id}] \"{title}\" — summary: {summ}")
     lines.append(
-        "Task:\n1) If matches an existing topic id -> decision='BEST_MATCH' + topic_id.\n2) Else -> decision='NEW' + new_topic={title,summary}.\nJSON only: {decision, topic_id, new_topic, reason}"
+        "Task:\n1) Provide context_summary first (<=120 chars) for the latest U utterance.\n2) If matches an existing topic id -> decision='BEST_MATCH' + topic_id.\n3) Else -> decision='NEW' + new_topic={title,summary}.\nJSON only (order): {context_summary, decision, topic_id, new_topic, reason}"
     )
     prompt = "\n".join(lines)
     res = llm.assign_topic(prompt)
@@ -154,6 +159,16 @@ def assign_topic_llm(
     def _normalize_and_validate(r: Dict, strict: bool = False) -> Tuple[Dict, bool]:
         """Normalize LLM output and validate title. Return (res, ok)."""
         try:
+            # Normalize optional context_summary (truncate to <=120)
+            cs = (r or {}).get("context_summary")
+            if cs is not None:
+                try:
+                    cs = str(cs)
+                except Exception:
+                    cs = None
+                if cs and len(cs) > 120:
+                    cs = cs[:120]
+                r["context_summary"] = cs
             decision = (r or {}).get("decision")
             if decision == "NEW":
                 nt = (r or {}).get("new_topic")
@@ -183,7 +198,19 @@ def assign_topic_llm(
                 return r, False
         except Exception:
             return {"decision": "NEW", "topic_id": None, "new_topic": {"title": None, "summary": None}, "reason": "normalization error"}, False
-        return r, True
+        # Reorder keys for logging readability: context_summary first
+        try:
+            from collections import OrderedDict
+            ordered = OrderedDict()
+            if "context_summary" in r:
+                ordered["context_summary"] = r.get("context_summary")
+            ordered["decision"] = r.get("decision")
+            ordered["topic_id"] = r.get("topic_id")
+            ordered["new_topic"] = r.get("new_topic")
+            ordered["reason"] = r.get("reason")
+            return ordered, True
+        except Exception:
+            return r, True
 
     res, ok = _normalize_and_validate(res)
     if not ok:
@@ -192,7 +219,7 @@ def assign_topic_llm(
             "Your previous title was invalid/generic.",
             "Produce a concise, specific Japanese title (<=24 chars) from key phrases.",
             "Do NOT use generic words like '新しい話題', 'topic', 'null'.",
-            "Output JSON ONLY with {decision, topic_id, new_topic, reason}.",
+            "Output JSON ONLY with keys (order): {context_summary, decision, topic_id, new_topic, reason}.",
             "",
             prompt,
         ]

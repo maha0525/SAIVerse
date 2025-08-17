@@ -47,8 +47,10 @@ except Exception:
     GeminiAssignLLM = None  # type: ignore
 
 
-def list_topics(core: MemoryCore, limit: int = 25) -> list[dict]:
+def list_topics(core: MemoryCore, limit: int = 25, include_disabled: bool = False) -> list[dict]:
     topics = core.storage.list_topics()
+    if not include_disabled:
+        topics = [t for t in topics if not getattr(t, "disabled", False)]
     topics.sort(key=lambda t: len(t.entry_ids), reverse=True)
     out = []
     for t in topics[:limit]:
@@ -109,8 +111,9 @@ def main() -> None:
         elif args.assign_llm == "dummy":
             llm = DummyLLM()
 
-    before = list_topics(core)
-    print(json.dumps({"before": before, "count": len(core.storage.list_topics())}, ensure_ascii=False))
+    # Show only active topics in 'before' to reflect what LLM will see
+    before = list_topics(core, include_disabled=False)
+    print(json.dumps({"before": before, "count": len(before)}, ensure_ascii=False))
 
     res = run_topic_merge(
         storage=core.storage,
@@ -122,8 +125,8 @@ def main() -> None:
     )
     print(json.dumps({"merge_result": res}, ensure_ascii=False))
 
-    after = list_topics(core)
-    print(json.dumps({"after": after, "count": len(core.storage.list_topics())}, ensure_ascii=False))
+    after = list_topics(core, include_disabled=False)
+    print(json.dumps({"after": after, "count": len(after)}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

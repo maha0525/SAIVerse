@@ -51,6 +51,8 @@ class Config:
     assign_llm_model: Optional[str] = None  # e.g. qwen2.5:3b
     # Backend-specific override (e.g., for Gemini assigner)
     assign_gemini_model: Optional[str] = None  # e.g. gemini-2.0-flash
+    # Number of candidate topics to show LLM (top-k by embedding similarity)
+    assign_llm_candidates_k: int = 8
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -91,4 +93,7 @@ class Config:
         gem_model = os.getenv("SAIVERSE_ASSIGN_GEMINI_MODEL")
         if gem_model:
             cfg.assign_gemini_model = gem_model
+        k = os.getenv("SAIVERSE_ASSIGN_LLM_K")
+        if k and k.isdigit():
+            cfg.assign_llm_candidates_k = int(k)
         return cfg
