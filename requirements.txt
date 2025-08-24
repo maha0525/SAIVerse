@@ -13,3 +13,6 @@ qdrant-client>=1.9.0
 transformers>=4.40.0
 sentence-transformers>=2.6.0
 torch
+
+# Knowledge graph memory (Cognee)
+cognee>=0.2.3

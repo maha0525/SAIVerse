@@ -133,13 +133,58 @@ def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[s
     return display
 
 
-def respond_stream(message: str):
+def _format_memory_info(debug: bool) -> str:
+    try:
+        b_id = manager.user_current_building_id
+        if not b_id:
+            return ""
+        hist = manager.get_building_history(b_id)
+        pid = None
+        for m in reversed(hist):
+            if m.get("role") == "assistant" and m.get("persona_id"):
+                pid = m.get("persona_id")
+                break
+        if not pid or pid not in manager.personas:
+            return ""
+        p = manager.personas[pid]
+        mem = getattr(p, "memory_core", None)
+        if not mem or not hasattr(mem, "get_debug"):
+            return ""
+        dbg = mem.get_debug() or {}
+        found = dbg.get("recall_found")
+        prov = dbg.get("provider")
+        model = dbg.get("model")
+        emb = dbg.get("embedding_model")
+        k = dbg.get("recall_k")
+        if not debug:
+            if found is None:
+                return ""
+            return f"<small>Memory Recall: {int(found)} item(s) matched</small>"
+        parts = []
+        if prov or model:
+            parts.append(f"LLM: {prov or '-'} | {model or '-'}")
+        if emb:
+            parts.append(f"Embed: {emb}")
+        if found is not None:
+            parts.append(f"Recall: k={int(k) if k else '-'} found={int(found)}")
+        detail = "<small>" + " | ".join(parts) + "</small>" if parts else ""
+        # Append top snippet previews if available
+        snips = dbg.get("snippets") or []
+        if snips:
+            bullets = "\n".join([f"- {s.replace('\n', ' ')}" for s in snips])
+            detail += "\n\n" + "Top snippets (preview):\n" + bullets
+        return detail
+    except Exception:
+        return ""
+
+
+def respond_stream(message: str, show_memory: bool = False, debug_memory: bool = False):
     """Stream AI response for chat and update UI components if needed."""
     # Get history from current location
     print(manager.occupants[manager.user_current_building_id])
     current_building_id = manager.user_current_building_id
     if not current_building_id:
-        yield [{"role": "assistant", "content": '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'}], gr.update(), gr.update(), gr.update()
+        yield [{"role": "assistant", "content": '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'}], gr.update(), gr.update(), gr.update(), gr.update()
         return
 
     raw_history = manager.get_building_history(current_building_id)
@@ -150,7 +195,7 @@ def respond_stream(message: str):
     for token in manager.handle_user_input_stream(message):
         ai_message += token
         # ストリーミング中はドロップダウンは更新しない
-        yield history + [{"role": "assistant", "content": ai_message}], gr.update(), gr.update(), gr.update()
+        yield history + [{"role": "assistant", "content": ai_message}], gr.update(), gr.update(), gr.update(), gr.update()
     # After streaming, get the final history again to include system messages etc.
     final_raw = manager.get_building_history(current_building_id)
     final_history_formatted = format_history_for_chatbot(final_raw)
@@ -164,9 +209,11 @@ def respond_stream(message: str):
         logging.info("Building list has changed. Updating dropdown.")
         BUILDING_CHOICES = new_building_names
         BUILDING_NAME_TO_ID_MAP = {b.name: b.building_id for b in manager.buildings}
-        yield final_history_formatted, gr.update(choices=BUILDING_CHOICES), gr.update(choices=summonable_personas, value=None), gr.update(choices=conversing_personas, value=None)
+        mem_text = _format_memory_info(debug_memory) if show_memory else ""
+        yield final_history_formatted, gr.update(choices=BUILDING_CHOICES), gr.update(choices=summonable_personas, value=None), gr.update(choices=conversing_personas, value=None), gr.update(value=mem_text)
     else:
-        yield final_history_formatted, gr.update(), gr.update(choices=summonable_personas, value=None), gr.update(choices=conversing_personas, value=None)
+        mem_text = _format_memory_info(debug_memory) if show_memory else ""
+        yield final_history_formatted, gr.update(), gr.update(choices=summonable_personas, value=None), gr.update(choices=conversing_personas, value=None), gr.update(value=mem_text)
 
 
 def select_model(model_name: str):
@@ -900,6 +947,10 @@ def main():
                         txt = gr.Textbox(placeholder="ここにメッセージを入力...", lines=4)
                     with gr.Column(scale=1):
                         submit = gr.Button("送信")
+                with gr.Row():
+                    show_mem_chk = gr.Checkbox(label="メモリ可視化", value=False)
+                    debug_mem_chk = gr.Checkbox(label="デバッグ詳細", value=False)
+                mem_info_box = gr.Markdown(value="")
                 
                 gr.Markdown("---")
                 with gr.Accordion("ペルソナを招待する", open=False):
@@ -951,8 +1002,8 @@ def main():
                     model_drop = gr.Dropdown(choices=MODEL_CHOICES, value="None", label="システムデフォルトモデル (一時的な一括上書き)")
 
                 # --- Event Handlers ---
-                submit.click(respond_stream, txt, [chatbot, move_building_dropdown, summon_persona_dropdown, end_conv_persona_dropdown])
-                txt.submit(respond_stream, txt, [chatbot, move_building_dropdown, summon_persona_dropdown, end_conv_persona_dropdown]) # Enter key submission
+                submit.click(respond_stream, [txt, show_mem_chk, debug_mem_chk], [chatbot, move_building_dropdown, summon_persona_dropdown, end_conv_persona_dropdown, mem_info_box])
+                txt.submit(respond_stream, [txt, show_mem_chk, debug_mem_chk], [chatbot, move_building_dropdown, summon_persona_dropdown, end_conv_persona_dropdown, mem_info_box]) # Enter key submission
                 move_btn.click(fn=move_user_ui, inputs=[move_building_dropdown], outputs=[chatbot, user_location_display, summon_persona_dropdown, end_conv_persona_dropdown])
                 summon_btn.click(fn=call_persona_ui, inputs=[summon_persona_dropdown], outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown])
                 login_btn.click(

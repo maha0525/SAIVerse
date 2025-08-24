@@ -13,7 +13,7 @@ from google.genai import types
 from dotenv import load_dotenv
 
 from buildings import Building
-from memory_core import MemoryCore  # Memory system integration
+from integrations.cognee_memory import CogneeMemory  # Cognee-based memory integration
 from llm_clients import get_llm_client, LLMClient
 import llm_clients
 from action_handler import ActionHandler
@@ -127,9 +127,9 @@ class PersonaCore:
         self.user_id = user_id
         self._last_conv_id: Optional[str] = None
 
-        # Initialize MemoryCore for episodic memory (lightweight, in-memory)
+        # Initialize Cognee-backed memory (per-persona dataset/graph)
         try:
-            self.memory_core = MemoryCore.create_default(with_dummy_llm=True)
+            self.memory_core = CogneeMemory(self.persona_id)
         except Exception:
             self.memory_core = None
 
@@ -148,7 +148,7 @@ class PersonaCore:
             return self._last_conv_id
         return "self"
 
-    def _format_recall_info(self, recall: dict, max_chars: int = 800) -> str:
+    def _format_recall_info(self, recall: dict, max_chars: int = 1000000) -> str:
         """Format recall bundle into a compact info string for prompts."""
         if not recall:
             return ""
@@ -157,8 +157,6 @@ class PersonaCore:
         lines: list[str] = ["[Memory Recall]"]
         for t in texts[:5]:
             t = (t or "").strip().replace("\n", " ")
-            if len(t) > 200:
-                t = t[:200] + "…"
             lines.append(f"- {t}")
         if topics:
             titles = []

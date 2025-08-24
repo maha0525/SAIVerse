@@ -219,6 +219,70 @@ python main.py
 
 以下は直近で追加・改善された実装とその使い方です。
 
+### ログ一括投入（Cogneeメモリ）
+
+過去の会話ログをペルソナ別の長期記憶（Cognee）にまとめて取り込むCLIを追加しました。
+
+- スクリプト: `scripts/ingest_past_logs.py`
+- 対応形式: JSON配列 / ラップ形式（`{"log": [...]}` / `{"messages": [...]}`）/ NDJSON / プレーンテキスト（1行=1発言）
+- ロール: `system`はスキップ、`user`/`assistant|ai`のみ記憶（プレーンテキストは`user`既定、`user:`/`assistant:`接頭辞を簡易判定）
+- 分割実行: `--start`（1始まり）と `--end`（含む）、または `--limit` で一部だけ投入可能
+- 保存先: `~/.saiverse/personas/<persona>/cognee_system`（ペルソナ単位）
+
+使用例:
+
+```bash
+# 基本（JSON/NDJSON/プレーンテキスト自動判定）
+python scripts/ingest_past_logs.py --persona-id alice --file /path/to/log.json
+
+# 範囲指定（101〜200件目を投入）
+python scripts/ingest_past_logs.py --persona-id alice --file ./chat.ndjson --start 101 --end 200
+
+# 件数制限（先頭から500件）
+python scripts/ingest_past_logs.py --persona-id alice --file ./chat.json --start 1 --limit 500
+
+# ドライラン（投入せず件数確認）
+python scripts/ingest_past_logs.py --persona-id alice --file ./chat.json --start 1 --limit 100 --dry-run
+
+# 会話タグ（conv_id）を明示
+python scripts/ingest_past_logs.py --persona-id alice --file ./chat.json --conv-id import:chat-2024-08
+```
+
+環境変数:
+
+- 推奨: Gemini を利用（`LLM_PROVIDER=gemini` と `GEMINI_FREE_API_KEY` もしくは `GEMINI_API_KEY`）。
+- 省略時: `LLM_PROVIDER` が未設定で Gemini キーがあれば自動で `gemini` を選択。
+- OpenAI も可（`OPENAI_API_KEY`）。
+
+注意:
+
+- 取り込み直後、Cognee の解析（cognify）はバックグラウンドで進行します。検索（recall）は CHUNKS 検索を優先するため、LLM不要で高速です。
+- 旧 `scripts/ingest_persona_log.py` は従来の MemoryCore 用です。本機能は Cognee ベースの長期記憶に対応します。
+
+### ナレッジグラフHTML出力（Cognee）
+
+ペルソナの Cognee データから Knowledge Graph を単体HTMLへ書き出すユーティリティを追加しました。
+
+- スクリプト: `scripts/export_persona_graph_html.py`
+- 動作: ペルソナの Cognee ディレクトリ（`~/.saiverse/personas/<id>/cognee_system`）を探索して `graph*.json` を優先利用。見つからない場合は Cognee API からの取得を試行します。
+- 出力: D3.js によるシンプルな力学レイアウト（日本語ヘッダ）。
+
+使用例:
+
+```bash
+# 既定名 ./alice_graph.html に出力
+python scripts/export_persona_graph_html.py --persona-id alice
+
+# 出力パスとタイトルを指定
+python scripts/export_persona_graph_html.py --persona-id alice --out ./graphs/alice.html --title "Aliceのナレッジグラフ"
+```
+
+備考:
+
+- 先に `cognify` が完了している必要があります（取り込み直後はバックグラウンドで進むため、少し時間を置いて再実行してください）。
+- HTMLはCDN上の D3.js に依存します。オフライン環境では別途スクリプトをローカル配置するか、HTML内の `<script>` を適宜差し替えてください。
+
+
 ### Conversation Modes & Behavior
 
 - Modes: `user` / `auto` / `manual`

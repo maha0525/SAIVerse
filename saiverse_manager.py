@@ -1419,7 +1419,6 @@ class SAIVerseManager:
             logging.info("Clearing global model override; restoring each persona's DB default model.")
             db = self.SessionLocal()
             try:
-                from model_configs import get_context_length, get_model_provider
                 for pid, persona in self.personas.items():
                     ai = db.query(AIModel).filter_by(AIID=pid).first()
                     if not ai:
