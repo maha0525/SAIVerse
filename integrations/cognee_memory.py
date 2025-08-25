@@ -126,6 +126,124 @@ def _patch_lancedb_connect_redirect(target_dir: Path) -> None:
         pass
 
 
+def _patch_kuzu_adapter_redirect(target_path: Path) -> None:
+    """Redirect KuzuAdapter to a persona-scoped graph database path.
+
+    Cognee's graph engine sometimes defaults to a package-level directory such as
+    <venv>/site-packages/cognee/.cognee_system/databases.  This patch ensures that
+    the `db_path` passed to KuzuAdapter is rewritten to ``target_path`` so that
+    each persona uses its own isolated graph database.
+    """
+    try:
+        import importlib
+        kuzu_adapter = importlib.import_module(
+            "cognee.infrastructure.databases.graph.kuzu.adapter"
+        )
+    except Exception:
+        return
+    try:
+        if getattr(kuzu_adapter.KuzuAdapter.__init__, "_saiverse_redirect", False):
+            return
+    except Exception:
+        pass
+
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    defaults: list[Path] = []
+    try:
+        mod = importlib.import_module("cognee")
+        pkg = Path(getattr(mod, "__file__", "")).resolve().parent
+        defaults.append(pkg / ".cognee_system" / "databases")
+    except Exception:
+        pass
+    defaults.append(Path.home() / ".cognee" / "databases")
+    defaults.append(Path.home() / ".saiverse" / "cognee" / "databases")
+    persona_root_str = str(target_path.parent)
+    default_strs = [str(p) for p in defaults]
+
+    def _should_redirect(path_str: str) -> bool:
+        p = path_str or ""
+        if persona_root_str and p.startswith(persona_root_str):
+            return False
+        for root in default_strs:
+            if p.startswith(root):
+                return True
+        if "cognee" in p.lower() or p.endswith("cognee_graph_kuzu"):
+            return True
+        return False
+
+    orig_init = kuzu_adapter.KuzuAdapter.__init__
+
+    def wrapped_init(self, db_path: str, *args, **kwargs):
+        try:
+            path_str = str(db_path or "")
+        except Exception:
+            path_str = ""
+        if _should_redirect(path_str):
+            db_path = str(target_path)
+        return orig_init(self, db_path, *args, **kwargs)
+
+    wrapped_init._saiverse_redirect = True  # type: ignore[attr-defined]
+    kuzu_adapter.KuzuAdapter.__init__ = wrapped_init  # type: ignore[assignment]
+
+
+def _patch_relational_engine_redirect(target_dir: Path) -> None:
+    """Redirect create_relational_engine to a persona-scoped SQLite path."""
+    try:
+        import importlib
+        rel_mod = importlib.import_module(
+            "cognee.infrastructure.databases.relational.create_relational_engine"
+        )
+    except Exception:
+        return
+    try:
+        if getattr(rel_mod.create_relational_engine, "_saiverse_redirect", False):
+            return
+    except Exception:
+        pass
+
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    defaults: list[Path] = []
+    try:
+        mod = importlib.import_module("cognee")
+        pkg = Path(getattr(mod, "__file__", "")).resolve().parent
+        defaults.append(pkg / ".cognee_system" / "databases")
+    except Exception:
+        pass
+    defaults.append(Path.home() / ".cognee" / "databases")
+    defaults.append(Path.home() / ".saiverse" / "cognee" / "databases")
+    persona_root_str = str(target_dir)
+    default_strs = [str(p) for p in defaults]
+
+    def _should_redirect(path_str: str) -> bool:
+        p = path_str or ""
+        if persona_root_str and p.startswith(persona_root_str):
+            return False
+        for root in default_strs:
+            if p.startswith(root):
+                return True
+        if "cognee" in p.lower() or p.endswith("cognee_db") or p.endswith(".sqlite"):
+            return True
+        return False
+
+    orig_create = rel_mod.create_relational_engine
+
+    def wrapped(db_path: str, db_name: str, db_host: str, db_port: str, db_username: str, db_password: str, db_provider: str):
+        if db_provider == "sqlite" and _should_redirect(str(db_path)):
+            db_path = str(target_dir)
+        return orig_create(db_path, db_name, db_host, db_port, db_username, db_password, db_provider)
+
+    wrapped._saiverse_redirect = True  # type: ignore[attr-defined]
+    rel_mod.create_relational_engine = wrapped  # type: ignore[assignment]
+
+
 class CogneeMemory:
     def __init__(self, persona_id: str) -> None:
         _tune_third_party_logging()
@@ -141,13 +259,22 @@ class CogneeMemory:
         # Prefer a readable dataset alias; can be switched to UUID later if needed
         self.dataset_name = persona_id
         # Ensure persona-scoped system/data directories are set early, even if no provider env
+        env_boot: Optional[dict] = None
         try:
             persona_root = Path.home() / ".saiverse" / "personas" / str(self.persona_id) / "cognee_system"
             persona_root.mkdir(parents=True, exist_ok=True)
             (persona_root / "databases").mkdir(parents=True, exist_ok=True)
-            os.environ.setdefault("SYSTEM_ROOT_DIRECTORY", str(persona_root))
-            os.environ.setdefault("DATA_ROOT_DIRECTORY", str(persona_root / "data"))
+            os.environ["SYSTEM_ROOT_DIRECTORY"] = str(persona_root)
+            os.environ["DATA_ROOT_DIRECTORY"] = str(persona_root / "data")
             _patch_lancedb_connect_redirect(persona_root / "databases" / "cognee.lancedb")
+            _patch_kuzu_adapter_redirect(
+                persona_root / "databases" / "cognee_graph_kuzu"
+            )
+            _patch_relational_engine_redirect(persona_root / "databases")
+            env_boot = {
+                "SYSTEM_ROOT_DIRECTORY": str(persona_root),
+                "DATA_ROOT_DIRECTORY": str(persona_root / "data"),
+            }
         except Exception:
             pass
         # Defer module init until we have provider env; attempt once using current env
@@ -161,7 +288,10 @@ class CogneeMemory:
         self._loop_thread: Optional[threading.Thread] = None
         self._loop_ready = threading.Event()
         try:
-            self._ensure_cognee(self._provider_env())
+            env = self._provider_env()
+            if env is None:
+                env = env_boot
+            self._ensure_cognee(env)
         except Exception as e:
             logger.warning("Cognee init deferred: %s", e)
 
