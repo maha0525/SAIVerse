@@ -135,6 +135,8 @@ class CogneeMemory:
         if (os.getenv("SAIVERSE_DISABLE_LANCEDB_FILTER") or "").strip().lower() not in ("1", "true", "yes"):
             _patch_lancedb_create_data_points_filter()
         _patch_text_loader_passthrough_for_txt()
+        _patch_skip_edge_index()
+        _patch_profiling_hooks()
         self.persona_id = persona_id
         # Prefer a readable dataset alias; can be switched to UUID later if needed
         self.dataset_name = persona_id
@@ -1254,4 +1256,89 @@ async def _prune_missing_files_for_dataset(dataset_name: str) -> None:
                 logger.info("Pruned %d stale data files for dataset '%s'", removed, dataset_name)
     except Exception:
         # best-effort
+        return
+
+
+def _patch_skip_edge_index() -> None:
+    """Optionally skip costly edge re-indexing during ingest.
+
+    If SAIVERSE_COGNEE_SKIP_EDGE_INDEX in (1,true,yes), monkey-patch
+    cognee.tasks.storage.index_graph_edges.index_graph_edges to a no-op.
+    """
+    try:
+        flag = (os.getenv("SAIVERSE_COGNEE_SKIP_EDGE_INDEX") or "").strip().lower()
+        if flag not in ("1", "true", "yes"):
+            return
+        import importlib
+        mod = importlib.import_module("cognee.tasks.storage.index_graph_edges")
+        orig = getattr(mod, "index_graph_edges", None)
+        if not callable(orig):
+            return
+        async def _noop(batch_size: int = 1024):  # type: ignore[no-redef]
+            return None
+        setattr(mod, "index_graph_edges", _noop)
+        logger.info("SAIVERSE_COGNEE_SKIP_EDGE_INDEX=on: index_graph_edges is disabled")
+    except Exception:
+        return
+
+
+def _patch_profiling_hooks() -> None:
+    """Install lightweight profiling hooks controlled by env flags.
+
+    - SAIVERSE_COGNEE_PROFILE_TASKS: time each pipeline task (start/end, seconds)
+    - SAIVERSE_COGNEE_PROFILE_LLM: time litellm acompletion/aembedding calls
+    """
+    try:
+        import importlib, time
+        # Task-level profiling
+        if (os.getenv("SAIVERSE_COGNEE_PROFILE_TASKS") or "").strip().lower() in ("1", "true", "yes"):
+            mod = importlib.import_module("cognee.modules.pipelines.operations.run_tasks_base")
+            orig = getattr(mod, "handle_task", None)
+            if callable(orig) and not getattr(orig, "_saiverse_profiled", False):
+                async def prof_handle_task(running_task, args, leftover_tasks, next_task_batch_size, user, context=None):  # type: ignore[no-redef]
+                    name = getattr(running_task.executable, "__name__", str(running_task))
+                    t0 = time.time()
+                    print(f"[PROFILE][task][start] {name}")
+                    try:
+                        async for result in orig(running_task, args, leftover_tasks, next_task_batch_size, user, context):
+                            yield result
+                    finally:
+                        dt = time.time() - t0
+                        print(f"[PROFILE][task][end] {name}: {dt:.2f}s")
+                setattr(prof_handle_task, "_saiverse_profiled", True)
+                setattr(mod, "handle_task", prof_handle_task)
+        # LLM-level profiling
+        if (os.getenv("SAIVERSE_COGNEE_PROFILE_LLM") or "").strip().lower() in ("1", "true", "yes"):
+            import litellm
+            # acompletion
+            acompl = getattr(litellm, "acompletion", None)
+            if callable(acompl) and not getattr(acompl, "_saiverse_profiled", False):
+                async def prof_acompletion(*args, **kwargs):  # type: ignore[no-redef]
+                    import time as _t
+                    model = kwargs.get("model") or (args[0] if args else "")
+                    t0 = _t.time()
+                    try:
+                        resp = await acompl(*args, **kwargs)
+                        return resp
+                    finally:
+                        dt = _t.time() - t0
+                        print(f"[PROFILE][llm][acompletion] model={model} {dt:.2f}s")
+                setattr(acompl, "_saiverse_profiled", True)
+                litellm.acompletion = prof_acompletion  # type: ignore
+            # aembedding
+            aemb = getattr(litellm, "aembedding", None)
+            if callable(aemb) and not getattr(aemb, "_saiverse_profiled", False):
+                async def prof_aembedding(*args, **kwargs):  # type: ignore[no-redef]
+                    import time as _t
+                    model = kwargs.get("model") or (args[0] if args else "")
+                    t0 = _t.time()
+                    try:
+                        resp = await aemb(*args, **kwargs)
+                        return resp
+                    finally:
+                        dt = _t.time() - t0
+                        print(f"[PROFILE][llm][aembedding] model={model} {dt:.2f}s")
+                setattr(aemb, "_saiverse_profiled", True)
+                litellm.aembedding = prof_aembedding  # type: ignore
+    except Exception:
         return
