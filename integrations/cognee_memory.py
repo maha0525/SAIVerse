@@ -447,6 +447,23 @@ class CogneeMemory:
                 "EMBEDDING_API_KEY": openai_key,
                 "HUGGINGFACE_TOKENIZER": os.getenv("HUGGINGFACE_TOKENIZER", "none"),
             }
+        hf_model = (os.getenv("SAIVERSE_COGNEE_HF_EMBED_MODEL") or "").strip()
+        if hf_model:
+            return {
+                # Persona-scoped storage roots for Cognee
+                "SYSTEM_ROOT_DIRECTORY": sys_root,
+                "DATA_ROOT_DIRECTORY": data_root,
+                # Embedding config for local Hugging Face model
+                "EMBEDDING_PROVIDER": "huggingface",
+                "EMBEDDING_MODEL": hf_model,
+                "EMBEDDING_DIMENSIONS": os.getenv("SAIVERSE_COGNEE_HF_EMBED_DIM", "768"),
+                "HUGGINGFACE_TOKENIZER": "none",
+                # Ensure no remote LLM provider is selected
+                "LLM_PROVIDER": None,
+                "LLM_API_KEY": None,
+                "OPENAI_API_KEY": None,
+                "GEMINI_API_KEY": None,
+            }
         return None
 
     def remember(self, text: str, conv_id: str = "default", speaker: str = "user", meta: Optional[Dict] = None):
