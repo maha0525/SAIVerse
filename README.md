@@ -37,6 +37,18 @@ GEMINI_FREE_API_KEY=AIza...
 ```
 `python-dotenv` により自動で読み込まれます。
 
+#### ローカル埋め込みモデル（Hugging Face）
+Cognee の長期記憶をローカル埋め込みモデルで利用する場合は、`.env` に Hugging Face のモデル名を指定します。
+
+例:
+```bash
+SAIVERSE_COGNEE_HF_EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
+# モデルのベクトル次元に合わせて変更（省略時は768）
+SAIVERSE_COGNEE_HF_EMBED_DIM=384
+```
+
+実行時に指定モデルが自動ダウンロードされ、OpenAI/Gemini なしで埋め込み検索のみを行えます。必要に応じて `pip install sentence-transformers` などでモデルを事前取得してください。
+
 ### ストリーミング表示
 `main.py` のGradioインタフェースでは、AIの応答を逐次表示します。OpenAI、Gemini、Ollama の各モデルで利用可能です。
 
