@@ -377,6 +377,18 @@ class CogneeMemory:
         gem_free = (os.getenv("GEMINI_FREE_API_KEY") or "").strip()
         gem_paid = (os.getenv("GEMINI_API_KEY") or "").strip()
         openai_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+        embed_provider = (
+            os.getenv("EMBEDDING_PROVIDER") or os.getenv("SAIVERSE_EMBED_PROVIDER") or ""
+        ).strip().lower()
+        hf_model = (os.getenv("SAIVERSE_COGNEE_HF_EMBED_MODEL") or "").strip()
+        hf_model_is_local = False
+        if hf_model:
+            hf_path = Path(hf_model).expanduser()
+            if hf_path.exists():
+                hf_model_is_local = True
+                hf_model = str(hf_path.resolve())
+            elif not hf_model.startswith("huggingface/"):
+                hf_model = f"huggingface/{hf_model}"
         # Persona-scoped Cognee system dir under ~/.saiverse/personas/<persona_id>/cognee_system
         persona_root = Path.home() / ".saiverse" / "personas" / str(self.persona_id) / "cognee_system"
         sys_root = str(persona_root)
@@ -401,7 +413,7 @@ class CogneeMemory:
             emb_model = (os.getenv("SAIVERSE_COGNEE_GEMINI_EMBED_MODEL") or "gemini/text-embedding-004").strip()
             if not emb_model.startswith("gemini/"):
                 emb_model = f"gemini/{emb_model}"
-            return {
+            env = {
                 "LLM_PROVIDER": "gemini",
                 "LLM_API_KEY": key,
                 "GEMINI_API_KEY": key,  # LiteLLM expects this
@@ -411,8 +423,12 @@ class CogneeMemory:
                 "SYSTEM_ROOT_DIRECTORY": sys_root,
                 "DATA_ROOT_DIRECTORY": data_root,
                 # Prompts override
-                "GRAPH_PROMPT_PATH": os.path.abspath(os.path.join(os.getcwd(), "integrations/cognee_prompts/generate_graph_prompt_ja.txt")),
-                "SAIVERSE_COGNEE_PROMPTS_DIR": os.path.abspath(os.path.join(os.getcwd(), "integrations/cognee_prompts")),
+                "GRAPH_PROMPT_PATH": os.path.abspath(
+                    os.path.join(os.getcwd(), "integrations/cognee_prompts/generate_graph_prompt_ja.txt")
+                ),
+                "SAIVERSE_COGNEE_PROMPTS_DIR": os.path.abspath(
+                    os.path.join(os.getcwd(), "integrations/cognee_prompts")
+                ),
                 # Embedding config
                 "EMBEDDING_PROVIDER": "gemini",
                 "EMBEDDING_MODEL": emb_model,
@@ -424,6 +440,26 @@ class CogneeMemory:
                 # Surface the decision for debugging if needed
                 "SAIVERSE_GEMINI_KEY_KIND": key_kind,
             }
+            if embed_provider == "huggingface" and hf_model:
+                env.update(
+                    {
+                        "EMBEDDING_PROVIDER": "huggingface",
+                        "EMBEDDING_MODEL": hf_model,
+                        "EMBEDDING_DIMENSIONS": os.getenv(
+                            "SAIVERSE_COGNEE_HF_EMBED_DIM", "768"
+                        ),
+                        "EMBEDDING_API_KEY": None
+                        if hf_model_is_local
+                        else os.getenv("HUGGINGFACE_API_KEY"),
+                        "HUGGINGFACE_API_KEY": None
+                        if hf_model_is_local
+                        else os.getenv("HUGGINGFACE_API_KEY"),
+                        "HUGGINGFACE_TOKENIZER": os.getenv(
+                            "HUGGINGFACE_TOKENIZER", "none"
+                        ),
+                    }
+                )
+            return env
         if openai_key:
             model = (os.getenv("SAIVERSE_COGNEE_OPENAI_MODEL") or "openai/gpt-4o-mini").strip()
             if not model.startswith("openai/"):
@@ -431,7 +467,7 @@ class CogneeMemory:
             emb_model = (os.getenv("SAIVERSE_COGNEE_OPENAI_EMBED_MODEL") or "openai/text-embedding-3-large").strip()
             if not emb_model.startswith("openai/"):
                 emb_model = f"openai/{emb_model}"
-            return {
+            env = {
                 "LLM_PROVIDER": "openai",
                 "LLM_API_KEY": openai_key,
                 "OPENAI_API_KEY": openai_key,
@@ -447,16 +483,41 @@ class CogneeMemory:
                 "EMBEDDING_API_KEY": openai_key,
                 "HUGGINGFACE_TOKENIZER": os.getenv("HUGGINGFACE_TOKENIZER", "none"),
             }
-        hf_model = (os.getenv("SAIVERSE_COGNEE_HF_EMBED_MODEL") or "").strip()
+            if embed_provider == "huggingface" and hf_model:
+                env.update(
+                    {
+                        "EMBEDDING_PROVIDER": "huggingface",
+                        "EMBEDDING_MODEL": hf_model,
+                        "EMBEDDING_DIMENSIONS": os.getenv(
+                            "SAIVERSE_COGNEE_HF_EMBED_DIM", "768"
+                        ),
+                        "EMBEDDING_API_KEY": None
+                        if hf_model_is_local
+                        else os.getenv("HUGGINGFACE_API_KEY"),
+                        "HUGGINGFACE_API_KEY": None
+                        if hf_model_is_local
+                        else os.getenv("HUGGINGFACE_API_KEY"),
+                        "HUGGINGFACE_TOKENIZER": os.getenv(
+                            "HUGGINGFACE_TOKENIZER", "none"
+                        ),
+                    }
+                )
+            return env
         if hf_model:
             return {
                 # Persona-scoped storage roots for Cognee
                 "SYSTEM_ROOT_DIRECTORY": sys_root,
                 "DATA_ROOT_DIRECTORY": data_root,
-                # Embedding config for local Hugging Face model
+                # Embedding config for Hugging Face model
                 "EMBEDDING_PROVIDER": "huggingface",
                 "EMBEDDING_MODEL": hf_model,
                 "EMBEDDING_DIMENSIONS": os.getenv("SAIVERSE_COGNEE_HF_EMBED_DIM", "768"),
+                "EMBEDDING_API_KEY": None
+                if hf_model_is_local
+                else os.getenv("HUGGINGFACE_API_KEY"),
+                "HUGGINGFACE_API_KEY": None
+                if hf_model_is_local
+                else os.getenv("HUGGINGFACE_API_KEY"),
                 "HUGGINGFACE_TOKENIZER": "none",
                 # Ensure no remote LLM provider is selected
                 "LLM_PROVIDER": None,
