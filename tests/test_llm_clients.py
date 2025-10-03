@@ -101,7 +101,10 @@ class TestLLMClients(unittest.TestCase):
         mock_genai.Client.return_value = mock_client_instance
         mock_resp = MagicMock()
         mock_candidate = MagicMock()
-        mock_candidate.content.parts = [MagicMock(text="Test Gemini response", function_call=None)]
+        mock_candidate.content.parts = [
+            MagicMock(text="Test ", function_call=None),
+            MagicMock(text="Gemini response", function_call=None),
+        ]
         mock_resp.candidates = [mock_candidate]
         mock_client_instance.models.generate_content.return_value = mock_resp
 
@@ -130,20 +133,27 @@ class TestLLMClients(unittest.TestCase):
         mock_chunk1 = MagicMock()
         cand1 = MagicMock()
         cand1.content = MagicMock()
-        cand1.content.parts = [MagicMock(text="Stream ", function_call=None)]
+        cand1.content.parts = [
+            MagicMock(text="Stream ", function_call=None),
+            MagicMock(text="test", function_call=None),
+        ]
+        cand1.index = 0
         mock_chunk1.candidates = [cand1]
+
         mock_chunk2 = MagicMock()
         cand2 = MagicMock()
         cand2.content = MagicMock()
-        cand2.content.parts = [MagicMock(text="test", function_call=None)]
+        cand2.content.parts = [MagicMock(text="Stream test!", function_call=None)]
+        cand2.index = 0
         mock_chunk2.candidates = [cand2]
+
         mock_client_instance.models.generate_content_stream.return_value = [mock_chunk1, mock_chunk2]
 
         client = GeminiClient("gemini-1.5-flash")
         messages = [{"role": "user", "content": "Hello"}]
         response_generator = client.generate_stream(messages)
 
-        self.assertEqual(list(response_generator), ["Stream ", "test"])
+        self.assertEqual(list(response_generator), ["Stream test", "!"])
         mock_genai.Client.return_value.models.generate_content_stream.assert_called_once()
         args, kwargs = mock_genai.Client.return_value.models.generate_content_stream.call_args
         self.assertEqual(kwargs['model'], "gemini-1.5-flash")
