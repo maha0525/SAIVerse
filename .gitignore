@@ -9,3 +9,4 @@ ai_sessions/eris/system_prompt.txt
 ai_sessions/air/system_prompt.txt
 generate_image/
 /bk
+sai_memory/__pycache__/
