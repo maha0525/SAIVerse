@@ -105,7 +105,28 @@ class HistoryManager:
 
     def get_recent_history(self, max_chars: int) -> List[Dict[str, str]]:
         """Retrieves recent messages from persona history up to a character limit."""
-        selected = []
+        if self.memory_adapter is not None:
+            if not self.memory_adapter.is_ready():
+                LOGGER.debug("SAIMemory adapter not ready for %s; falling back to in-memory", self.persona_id)
+            else:
+                LOGGER.debug(
+                    "Fetching recent persona history from SAIMemory for %s (max_chars=%d)",
+                    self.persona_id,
+                    max_chars,
+                )
+                msgs = self.memory_adapter.recent_persona_messages(max_chars)
+                LOGGER.debug(
+                    "SAIMemory returned %d persona messages for %s",
+                    len(msgs),
+                    self.persona_id,
+                )
+                for idx, msg in enumerate(msgs[:3]):
+                    LOGGER.debug("SAIMemory head[%d]=%s", idx, msg)
+                for idx, msg in enumerate(msgs[-3:]):
+                    LOGGER.debug("SAIMemory tail[%d]=%s", idx, msg)
+                return msgs
+
+        selected: List[Dict[str, str]] = []
         count = 0
         for msg in reversed(self.messages):
             count += len(msg.get("content", ""))
@@ -113,6 +134,27 @@ class HistoryManager:
                 break
             selected.append(msg)
         return list(reversed(selected))
+
+    def get_last_user_message(self) -> Optional[str]:
+        if self.memory_adapter is not None:
+            if not self.memory_adapter.is_ready():
+                LOGGER.debug("SAIMemory adapter not ready when retrieving last user message for %s", self.persona_id)
+            else:
+                LOGGER.debug("Fetching last user message from SAIMemory for %s", self.persona_id)
+                recent = self.memory_adapter.recent_persona_messages(self.memory_adapter.settings.summary_max_chars)
+                for msg in reversed(recent):
+                    if msg.get("role") == "user":
+                        text = msg.get("content", "")
+                        if text:
+                            LOGGER.debug("Last user message from SAIMemory for %s found", self.persona_id)
+                            return text
+                LOGGER.debug("No user message found in SAIMemory for %s", self.persona_id)
+        for msg in reversed(self.messages):
+            if msg.get("role") == "user":
+                text = (msg.get("content") or "").strip()
+                if text:
+                    return text
+        return None
 
     def get_building_recent_history(self, building_id: str, max_chars: int) -> List[Dict[str, str]]:
         """Retrieves recent messages from a specific building's history up to a character limit."""

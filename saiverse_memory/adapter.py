@@ -16,6 +16,7 @@ from sai_memory.memory.recall import (
 from sai_memory.memory.storage import (
     add_message,
     get_messages_last,
+    get_messages_paginated,
     get_or_create_thread,
     init_db,
     upsert_embedding,
@@ -103,6 +104,31 @@ class SAIMemoryAdapter:
             if consumed > max_chars:
                 break
             selected.insert(0, {"role": msg.role, "content": text, "created_at": msg.created_at})
+        return selected
+
+    def recent_persona_messages(self, max_chars: int) -> List[dict]:
+        if not self._ready:
+            return []
+        thread_id = self._thread_id(None)
+        try:
+            with self._db_lock:
+                all_rows = _fetch_all_messages(self.conn, thread_id)
+        except Exception as exc:
+            LOGGER.warning("Failed to fetch persona messages for %s: %s", thread_id, exc)
+            return []
+
+        selected: List[dict] = []
+        consumed = 0
+        for msg in reversed(all_rows):
+            text = msg.content or ""
+            consumed += len(text)
+            if consumed > max_chars:
+                break
+            selected.insert(0, {
+                "role": "assistant" if msg.role == "model" else msg.role,
+                "content": text,
+                "created_at": msg.created_at,
+            })
         return selected
 
     def recall_snippet(
@@ -245,3 +271,15 @@ class SAIMemoryAdapter:
             return int(dt.timestamp())
         except Exception:
             return int(time.time())
+
+
+def _fetch_all_messages(conn, thread_id: str, page_size: int = 200):
+    page = 0
+    rows = []
+    while True:
+        batch = get_messages_paginated(conn, thread_id, page=page, page_size=page_size)  # type: ignore[arg-type]
+        if not batch:
+            break
+        rows.extend(batch)
+        page += 1
+    return rows

@@ -20,7 +20,10 @@ from saiverse_manager import SAIVerseManager
 from model_configs import get_model_choices
 from database.db_manager import create_db_manager_ui
 
-logging.basicConfig(level=logging.INFO)
+level_name = os.getenv("SAIVERSE_LOG_LEVEL", "INFO").upper()
+if level_name not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+    level_name = "INFO"
+logging.basicConfig(level=getattr(logging, level_name))
 manager: SAIVerseManager = None
 BUILDING_CHOICES = []
 BUILDING_NAME_TO_ID_MAP = {}

@@ -284,6 +284,16 @@ class PersonaCore:
 
         history_limit = max(0, self.context_length - base_chars)
         history_msgs = self.history_manager.get_recent_history(history_limit)
+        logging.debug(
+            "history_limit=%s context=%s base=%s history_count=%s",
+            history_limit,
+            self.context_length,
+            base_chars,
+            len(history_msgs),
+        )
+        if history_msgs:
+            logging.debug("history_head=%s", history_msgs[0])
+            logging.debug("history_tail=%s", history_msgs[-1])
 
         sanitized_history = [
             {"role": m.get("role", ""), "content": m.get("content", "")}
@@ -386,15 +396,11 @@ class PersonaCore:
             try:
                 recall_source = user_message.strip() if (user_message and user_message.strip()) else None
                 if recall_source is None:
-                    for m in reversed(self.history_manager.messages):
-                        if m.get("role") == "user":
-                            txt = (m.get("content") or "").strip()
-                            if txt:
-                                recall_source = txt
-                                break
+                    recall_source = self.history_manager.get_last_user_message()
                 if recall_source:
                     snippet = self.sai_memory.recall_snippet(self.current_building_id, recall_source, max_chars=800)
                     if snippet:
+                        logging.debug("[memory] recall snippet content=%s", snippet[:400])
                         combined_info = (combined_info + "\n" + snippet).strip() if combined_info else snippet
                         logging.debug("[memory] SAIMemory recall snippet included (%d chars)", len(snippet))
             except Exception as exc:
@@ -443,6 +449,8 @@ class PersonaCore:
         if self.sai_memory is not None:
             try:
                 recall_source = user_message.strip() if (user_message and user_message.strip()) else None
+                if recall_source is None:
+                    recall_source = self.history_manager.get_last_user_message()
                 if recall_source:
                     snippet = self.sai_memory.recall_snippet(self.current_building_id, recall_source, max_chars=800)
                     if snippet:
@@ -857,6 +865,27 @@ class PersonaCore:
             f"{m.get('role')}: {m.get('content')}" for m in recent if m.get("role") != "system"
         )
 
+        recall_snippet = ""
+        if self.sai_memory is not None and self.sai_memory.is_ready():
+            recall_source = self.history_manager.get_last_user_message()
+            if recall_source is None:
+                for m in reversed(new_msgs):
+                    if m.get("role") == "user":
+                        txt = (m.get("content") or "").strip()
+                        if txt:
+                            recall_source = txt
+                            break
+            if recall_source:
+                try:
+                    recall_snippet = self.sai_memory.recall_snippet(
+                        building_id,
+                        recall_source,
+                        max_chars=800,
+                    )
+                except Exception as exc:
+                    logging.warning("[pulse] recall snippet failed: %s", exc)
+                    recall_snippet = ""
+
         pulse_prompt = Path("system_prompts/pulse.txt").read_text(encoding="utf-8")
         prompt = pulse_prompt.format(
             current_persona_name=self.persona_name,
@@ -865,6 +894,7 @@ class PersonaCore:
             recent_conversation=recent_text,
             occupants=occupants_str,
             user_online_state="online" if user_online else "offline",
+            recall_snippet=recall_snippet or "(なし)"
         )
         model_name = decision_model or "gemini-2.0-flash"
 
@@ -929,6 +959,13 @@ class PersonaCore:
             replies.append(say)
         else:
             logging.info("[pulse] decision: remain silent")
+
+        recall_out = data.get("recall")
+        if recall_out:
+            text = recall_out.strip()
+            if text:
+                logging.info("[pulse] recall note: %s", text)
+                replies.append(text)
 
         self._save_session_metadata()
         logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))

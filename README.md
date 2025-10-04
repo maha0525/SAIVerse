@@ -37,6 +37,43 @@ GEMINI_FREE_API_KEY=AIza...
 ```
 `python-dotenv` により自動で読み込まれます。
 
+#### SAIMemory（長期記憶）関連設定
+
+SAIVerse では各ペルソナの履歴を `~/.saiverse/personas/<persona>/memory.db`
+に保存します。`.env` には `SAIMEMORY_*` 系の環境変数を設定しておくと、
+既存の JSON ログを SQLite に移行した際も同じ構成で動きます。
+
+ログの取り込みは `scripts/import_persona_logs_to_saimemory.py` を使用します。
+
+```bash
+python scripts/import_persona_logs_to_saimemory.py \
+  --reset \
+  --include-archives \
+  --include-buildings \
+  --default-start 2025-07-25T12:24:41 \
+  --persona air_city_a
+```
+
+- `--reset` : 既存の `memory.db` を削除してから再構築します。
+- `--include-archives` : `old_log/*.json` も取り込み対象にします。
+- `--include-buildings` : 建物ログから該当ペルソナの発話（＋直前のユーザー発話）を取り込みます。
+- `--default-start` : タイムスタンプを持たないログが続く場合の起点となる日時です。
+- 複数ペルソナを移行する場合は `--persona` を増やして同一コマンドを実行してください。
+
+取り込み後に内容を確認したい場合は `scripts/export_saimemory_to_json.py` を利用できます。
+
+```bash
+python scripts/export_saimemory_to_json.py air_city_a \
+  --start 2025-07-01 --end 2025-10-05 \
+  --output air_memory.json
+```
+
+標準出力へ出したい場合は `--output -` を指定してください。
+
+開発時に SAIMemory のログを追跡したいときは `SAIVERSE_LOG_LEVEL=DEBUG`
+を指定して起動すると、取得した履歴の先頭／末尾などがログに出力されます。
+
+
 ### ストリーミング表示
 `main.py` のGradioインタフェースでは、AIの応答を逐次表示します。OpenAI、Gemini、Ollama の各モデルで利用可能です。
 
