@@ -9,6 +9,7 @@ from typing import List, Optional
 import threading
 
 from sai_memory.config import Settings, load_settings
+from sai_memory.memory.chunking import chunk_text
 from sai_memory.memory.recall import (
     Embedder,
     semantic_recall_groups,
@@ -19,7 +20,7 @@ from sai_memory.memory.storage import (
     get_messages_paginated,
     get_or_create_thread,
     init_db,
-    upsert_embedding,
+    replace_message_embeddings,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -137,7 +138,10 @@ class SAIMemoryAdapter:
         query_text: str,
         *,
         max_chars: int = 800,
-        exclude_created_at: Optional[int] = None,
+        exclude_created_at: Optional[int | List[int]] = None,
+        topk: Optional[int] = None,
+        range_before: Optional[int] = None,
+        range_after: Optional[int] = None,
     ) -> str:
         if not self._ready:
             return ""
@@ -147,31 +151,54 @@ class SAIMemoryAdapter:
         thread_id = self._thread_id(building_id)
         resource_id = self.settings.resource_id if self.settings.scope == "resource" else None
 
+        guard_ids: set[str] = set()
         try:
             with self._db_lock:
+                recall_topk = self.settings.topk if topk is None else max(1, int(topk))
+                before = self.settings.range_before if range_before is None else max(0, int(range_before))
+                after = self.settings.range_after if range_after is None else max(0, int(range_after))
+                guard_count = max(0, self.settings.last_messages)
+                if guard_count > 0:
+                    recent_msgs = get_messages_last(self.conn, thread_id, guard_count)
+                    guard_ids = {m.id for m in recent_msgs}
+                effective_topk = recall_topk + len(guard_ids)
                 groups = semantic_recall_groups(
                     self.conn,
                     self.embedder,
                     query_text,
                     thread_id=thread_id,
                     resource_id=resource_id,
-                    topk=self.settings.topk,
-                    range_before=self.settings.range_before,
-                    range_after=self.settings.range_after,
+                    topk=effective_topk,
+                    range_before=before,
+                    range_after=after,
                     scope=self.settings.scope,
+                    exclude_message_ids=guard_ids,
                 )
         except Exception as exc:
             LOGGER.warning("SAIMemory recall failed for %s: %s", thread_id, exc)
             return ""
 
         lines: List[str] = ["[Memory Recall]"]
+        exclude_created_values: set[int] = set()
+        if exclude_created_at is not None:
+            if isinstance(exclude_created_at, (list, tuple, set)):
+                candidates = exclude_created_at
+            else:
+                candidates = [exclude_created_at]
+            for value in candidates:
+                if value is None:
+                    continue
+                try:
+                    exclude_created_values.add(int(value))
+                except (TypeError, ValueError):
+                    continue
         seen: set[str] = set()
         for seed, bundle, score in groups:
             for msg in bundle:
-                if msg.id in seen:
+                if msg.id in seen or msg.id in guard_ids:
                     continue
                 seen.add(msg.id)
-                if exclude_created_at is not None and msg.created_at == exclude_created_at:
+                if exclude_created_values and msg.created_at in exclude_created_values:
                     continue
                 if msg.role == "system":
                     continue
@@ -253,8 +280,15 @@ class SAIMemoryAdapter:
                     created_at=created_at,
                 )
                 if content and content.strip() and self.embedder is not None:
-                    vector = self.embedder.embed([content])[0]
-                    upsert_embedding(self.conn, mid, vector)
+                    chunks = chunk_text(
+                        content,
+                        min_chars=self.settings.chunk_min_chars,
+                        max_chars=self.settings.chunk_max_chars,
+                    )
+                    payload = [c.strip() for c in chunks if c and c.strip()]
+                    if payload:
+                        vectors = self.embedder.embed(payload)
+                        replace_message_embeddings(self.conn, mid, vectors)
             LOGGER.debug(
                 "SAIMemory upserted message=%s thread=%s role=%s", mid, thread_id, role
             )

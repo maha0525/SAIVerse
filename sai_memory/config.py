@@ -57,6 +57,8 @@ class Settings:
     range_before: int
     range_after: int
     scope: str
+    chunk_min_chars: int
+    chunk_max_chars: int
 
     summary_enabled: bool
     summary_use_llm: bool
@@ -86,6 +88,14 @@ def load_settings() -> Settings:
     range_before = _get_int("SAIMEMORY_MEMORY_RANGE_BEFORE", 1)
     range_after = _get_int("SAIMEMORY_MEMORY_RANGE_AFTER", 1)
     scope = os.getenv("SAIMEMORY_MEMORY_SCOPE", "resource").strip().lower()
+    chunk_min_chars = _get_int("SAIMEMORY_MEMORY_CHUNK_MIN_CHARS", 120)
+    chunk_max_chars = _get_int("SAIMEMORY_MEMORY_CHUNK_MAX_CHARS", 480)
+    if chunk_min_chars < 0:
+        chunk_min_chars = 0
+    if chunk_max_chars <= 0:
+        chunk_max_chars = 1
+    if chunk_min_chars > chunk_max_chars:
+        chunk_min_chars = chunk_max_chars
 
     summary_enabled = _get_bool("SAIMEMORY_SUMMARY", True)
     summary_use_llm = _get_bool("SAIMEMORY_SUMMARY_USE_LLM", True)
@@ -110,6 +120,8 @@ def load_settings() -> Settings:
         range_before=range_before,
         range_after=range_after,
         scope=scope,
+        chunk_min_chars=chunk_min_chars,
+        chunk_max_chars=chunk_max_chars,
         summary_enabled=summary_enabled,
         summary_use_llm=summary_use_llm,
         summary_prerun=summary_prerun,

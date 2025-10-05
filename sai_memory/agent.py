@@ -4,12 +4,13 @@ from typing import List, Dict
 
 from sai_memory.config import Settings, load_settings, load_system_prompt
 from sai_memory.logging_utils import debug
+from sai_memory.memory.chunking import chunk_text
 from sai_memory.memory.recall import Embedder, build_context, build_context_payload
 from sai_memory.memory.storage import (
     init_db,
     get_or_create_thread,
     add_message,
-    upsert_embedding,
+    replace_message_embeddings,
     set_thread_overview,
     get_thread_overview,
 )
@@ -99,8 +100,15 @@ class Agent:
             aid = add_message(self.db, thread_id=thread_id, role="assistant", content=text, resource_id=rid)
             try:
                 for mid, txt in ((uid, user_input), (aid, text)):
-                    vec = self.embedder.embed([txt])[0]
-                    upsert_embedding(self.db, mid, vec)
+                    chunks = chunk_text(
+                        txt,
+                        min_chars=self.settings.chunk_min_chars,
+                        max_chars=self.settings.chunk_max_chars,
+                    )
+                    payload = [c.strip() for c in chunks if c and c.strip()]
+                    if payload:
+                        vectors = self.embedder.embed(payload)
+                        replace_message_embeddings(self.db, mid, vectors)
             except Exception:
                 pass
 

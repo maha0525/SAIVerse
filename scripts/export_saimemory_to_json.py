@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -42,9 +43,27 @@ def export_messages(persona: str, thread_suffix: str, start_ts: Optional[str], e
         start = iso_to_epoch(start_ts)
         end = iso_to_epoch(end_ts)
         thread_id = f"{persona}:{thread_suffix}"
-        query = [
-            "SELECT thread_id, role, content, resource_id, created_at FROM messages WHERE thread_id=?",
-        ]
+        has_message_embeddings = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='message_embeddings'"
+        ).fetchone()
+        if has_message_embeddings:
+            query = [
+                "SELECT m.id, m.thread_id, m.role, m.content, m.resource_id, m.created_at,",
+                "       COALESCE(e.embedding_count, 0) AS embedding_count",
+                "  FROM messages m",
+                "  LEFT JOIN (",
+                "      SELECT message_id, COUNT(*) AS embedding_count",
+                "      FROM message_embeddings",
+                "      GROUP BY message_id",
+                "  ) e ON m.id = e.message_id",
+                " WHERE m.thread_id=?",
+            ]
+        else:
+            query = [
+                "SELECT m.id, m.thread_id, m.role, m.content, m.resource_id, m.created_at, 0 AS embedding_count",
+                "  FROM messages m",
+                " WHERE m.thread_id=?",
+            ]
         params: list = [thread_id]
         if start is not None:
             query.append("AND created_at >= ?")
@@ -58,14 +77,16 @@ def export_messages(persona: str, thread_suffix: str, start_ts: Optional[str], e
         rows = conn.execute(sql, params).fetchall()
 
         out: list[dict] = []
-        for thread_id, role, content, resource_id, created_at in rows:
+        for mid, thread_id, role, content, resource_id, created_at, embed_count in rows:
             out.append(
                 {
+                    "message_id": mid,
                     "thread_id": thread_id,
                     "role": role,
                     "content": content,
                     "resource_id": resource_id,
                     "created_at": datetime.fromtimestamp(created_at, timezone.utc).isoformat(),
+                    "embedding_chunks": embed_count,
                 }
             )
         return out

@@ -50,6 +50,26 @@ def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS message_embeddings (
+          message_id TEXT,
+          chunk_index INTEGER,
+          vector TEXT,
+          PRIMARY KEY (message_id, chunk_index)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_message_embeddings_msg ON message_embeddings(message_id)"
+    )
+    # Backfill legacy embeddings table into message_embeddings as chunk 0 when needed.
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO message_embeddings(message_id, chunk_index, vector)
+        SELECT message_id, 0, vector FROM embeddings
+        """
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_thread_created ON messages(thread_id, created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_resource_created ON messages(resource_id, created_at)")
     conn.commit()
@@ -108,13 +128,26 @@ def add_message(
     return mid
 
 
-def upsert_embedding(conn: sqlite3.Connection, message_id: str, vector: Iterable[float]) -> None:
-    v = json.dumps(list(vector))
-    conn.execute(
-        "INSERT INTO embeddings(message_id, vector) VALUES(?, ?) ON CONFLICT(message_id) DO UPDATE SET vector=excluded.vector",
-        (message_id, v),
-    )
+def replace_message_embeddings(
+    conn: sqlite3.Connection,
+    message_id: str,
+    vectors: Iterable[Iterable[float]],
+) -> None:
+    conn.execute("DELETE FROM message_embeddings WHERE message_id=?", (message_id,))
+    payload: List[Tuple[str, int, str]] = []
+    for idx, vec in enumerate(vectors):
+        payload.append((message_id, idx, json.dumps(list(map(float, vec)))))
+    if payload:
+        conn.executemany(
+            "INSERT INTO message_embeddings(message_id, chunk_index, vector) VALUES(?, ?, ?)",
+            payload,
+        )
     conn.commit()
+
+
+def upsert_embedding(conn: sqlite3.Connection, message_id: str, vector: Iterable[float]) -> None:
+    """Legacy helper that stores a single embedding as chunk 0."""
+    replace_message_embeddings(conn, message_id, [vector])
 
 
 def get_message(conn: sqlite3.Connection, message_id: str) -> Optional[Message]:
@@ -158,58 +191,84 @@ def get_embeddings_for_scope(
     conn: sqlite3.Connection,
     thread_id: Optional[str] = None,
     resource_id: Optional[str] = None,
-) -> List[Tuple[Message, List[float]]]:
+) -> List[Tuple[Message, List[float], int]]:
     if thread_id:
         cur = conn.execute(
             """
-            SELECT m.id, m.thread_id, m.role, m.content, m.resource_id, m.created_at, e.vector
-            FROM messages m JOIN embeddings e ON m.id = e.message_id
+            SELECT m.id, m.thread_id, m.role, m.content, m.resource_id, m.created_at, e.vector, e.chunk_index
+            FROM messages m JOIN message_embeddings e ON m.id = e.message_id
             WHERE m.thread_id=?
-            ORDER BY m.created_at ASC
+            ORDER BY m.created_at ASC, e.chunk_index ASC
             """,
             (thread_id,),
         )
     elif resource_id:
         cur = conn.execute(
             """
-            SELECT m.id, m.thread_id, m.role, m.content, m.resource_id, m.created_at, e.vector
-            FROM messages m JOIN embeddings e ON m.id = e.message_id
+            SELECT m.id, m.thread_id, m.role, m.content, m.resource_id, m.created_at, e.vector, e.chunk_index
+            FROM messages m JOIN message_embeddings e ON m.id = e.message_id
             WHERE m.resource_id=?
-            ORDER BY m.created_at ASC
+            ORDER BY m.created_at ASC, e.chunk_index ASC
             """,
             (resource_id,),
         )
     else:
         cur = conn.execute(
             """
-            SELECT m.id, m.thread_id, m.role, m.content, m.resource_id, m.created_at, e.vector
-            FROM messages m JOIN embeddings e ON m.id = e.message_id
-            ORDER BY m.created_at ASC
+            SELECT m.id, m.thread_id, m.role, m.content, m.resource_id, m.created_at, e.vector, e.chunk_index
+            FROM messages m JOIN message_embeddings e ON m.id = e.message_id
+            ORDER BY m.created_at ASC, e.chunk_index ASC
             """
         )
 
     rows = cur.fetchall()
-    out: List[Tuple[Message, List[float]]] = []
+    out: List[Tuple[Message, List[float], int]] = []
     for row in rows:
         msg = Message(*row[:6])
-        vec = json.loads(row[6])
-        out.append((msg, vec))
+        vec_raw = json.loads(row[6])
+        if isinstance(vec_raw, list) and vec_raw and isinstance(vec_raw[0], list):
+            # Legacy multi-vector stored in legacy embeddings table.
+            for idx, entry in enumerate(vec_raw):
+                vec = [float(v) for v in entry]
+                out.append((msg, vec, idx))
+        else:
+            vec = [float(v) for v in vec_raw]
+            chunk_index = int(row[7]) if len(row) > 7 else 0
+            out.append((msg, vec, chunk_index))
     return out
 
 
 def get_messages_around(
-    conn: sqlite3.Connection, thread_id: str, created_at: int, before: int, after: int
+    conn: sqlite3.Connection, thread_id: str, message_id: str, before: int, after: int
 ) -> List[Message]:
+    if before <= 0 and after <= 0:
+        return []
+
     cur = conn.execute(
-        "SELECT id, thread_id, role, content, resource_id, created_at FROM messages WHERE thread_id=? AND created_at < ? ORDER BY created_at DESC LIMIT ?",
-        (thread_id, created_at, before),
+        "SELECT rowid FROM messages WHERE id=? AND thread_id=?",
+        (message_id, thread_id),
     )
-    before_rows = [Message(*row) for row in cur.fetchall()][::-1]
-    cur = conn.execute(
-        "SELECT id, thread_id, role, content, resource_id, created_at FROM messages WHERE thread_id=? AND created_at > ? ORDER BY created_at ASC LIMIT ?",
-        (thread_id, created_at, after),
-    )
-    after_rows = [Message(*row) for row in cur.fetchall()]
+    row = cur.fetchone()
+    if not row:
+        return []
+    anchor_rowid = int(row[0])
+
+    before_rows: List[Message] = []
+    if before > 0:
+        cur = conn.execute(
+            "SELECT id, thread_id, role, content, resource_id, created_at FROM messages WHERE thread_id=? AND rowid < ? ORDER BY rowid DESC LIMIT ?",
+            (thread_id, anchor_rowid, before),
+        )
+        before_rows = [Message(*r) for r in cur.fetchall()][::-1]
+
+    after_rows: List[Message] = []
+    if after > 0:
+        cur = conn.execute(
+            "SELECT id, thread_id, role, content, resource_id, created_at FROM messages WHERE thread_id=? AND rowid > ? ORDER BY rowid ASC LIMIT ?",
+            (thread_id, anchor_rowid, after),
+        )
+        after_rows = [Message(*r) for r in cur.fetchall()]
+
     return before_rows + after_rows
 
 
