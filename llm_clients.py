@@ -79,13 +79,39 @@ class LLMClient:
 
 # --- Concrete Clients ---
 class OpenAIClient(LLMClient):
-    """Client for OpenAI API."""
-    def __init__(self, model: str = "gpt-4.1"):
-        api_key = os.getenv("OPENAI_API_KEY")
+    """Client for OpenAI-compatible chat completions API."""
+
+    def __init__(
+        self,
+        model: str = "gpt-4.1",
+        *,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
+        api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
-        self.client = OpenAI(api_key=api_key)
+
+        client_kwargs: Dict[str, str] = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+
+        self.client = OpenAI(**client_kwargs)
         self.model = model
+
+
+class AnthropicClient(OpenAIClient):
+    """Anthropic Claude via OpenAI-compatible endpoint."""
+
+    def __init__(self, model: str = "claude-sonnet-4-5"):
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set.")
+
+        base_url = os.getenv("ANTHROPIC_OPENAI_BASE_URL", "https://api.anthropic.com/v1/")
+        if not base_url.endswith("/"):
+            base_url = base_url + "/"
+        super().__init__(model=model, api_key=api_key, base_url=base_url)
 
     def generate(
         self,
@@ -472,7 +498,16 @@ class GeminiClient(LLMClient):
                 fcall_part = next((p for p in cand.content.parts if p.function_call), None)
                 if fcall_part is None:                       # ★ ツール呼び出しなし
                     prefix = "".join(s + "\n" for s in snippets)
-                    return prefix + (cand.content.parts[0].text or "")
+                    text_segments: list[str] = []
+                    for part_idx, part in enumerate(cand.content.parts):
+                        text_val = getattr(part, "text", None) or ""
+                        if not text_val:
+                            continue
+                        raw_logger.debug(
+                            "Gemini text part[%s]: %s", part_idx, text_val
+                        )
+                        text_segments.append(text_val)
+                    return prefix + "".join(text_segments)
 
                 # ----- assistant/tool_calls -----
                 messages.append(
@@ -615,6 +650,7 @@ class GeminiClient(LLMClient):
 
         fcall: types.FunctionCall | None = None
         prefix_yielded = False
+        seen_stream_texts: Dict[int, str] = {}
         for chunk in stream:
             raw_logger.debug("Gemini stream chunk:\n%s", chunk)
             if not chunk.candidates:                    # keep-alive
@@ -623,16 +659,36 @@ class GeminiClient(LLMClient):
             raw_logger.debug("Gemini stream candidate:\n%s", cand)
             if not cand.content or not cand.content.parts:
                 continue
-            part = cand.content.parts[0]
-            if part.function_call:
-                raw_logger.debug("Gemini function_call: %s", part.function_call)
-                fcall = part.function_call             # 後で実行
-            elif part.text:
-                raw_logger.debug("Gemini text: %s", part.text)
-                if not prefix_yielded and history_snippets:
-                    yield "\n".join(history_snippets) + "\n"
-                    prefix_yielded = True
-                yield part.text                        # モデルが text を返した場合
+            cand_index = getattr(cand, "index", 0)
+            for part_idx, part in enumerate(cand.content.parts):
+                if getattr(part, "function_call", None) and fcall is None:
+                    raw_logger.debug(
+                        "Gemini function_call (part %s): %s", part_idx, part.function_call
+                    )
+                    fcall = part.function_call         # 後で実行
+
+            combined_text = "".join(
+                getattr(part, "text", None) or ""
+                for part in cand.content.parts
+                if getattr(part, "text", None)
+            )
+            if not combined_text:
+                continue
+
+            prev_text = seen_stream_texts.get(cand_index, "")
+            new_text = (
+                combined_text[len(prev_text):]
+                if combined_text.startswith(prev_text)
+                else combined_text
+            )
+            if not new_text:
+                continue
+            raw_logger.debug("Gemini text delta: %s", new_text)
+            if not prefix_yielded and history_snippets:
+                yield "\n".join(history_snippets) + "\n"
+                prefix_yielded = True
+            yield new_text
+            seen_stream_texts[cand_index] = combined_text
         # ---------- ③ ツール実行 ----------
         if fcall is None:
             return                                     # AUTO モードで text だけ返った
@@ -701,19 +757,39 @@ class GeminiClient(LLMClient):
 
         yielded = False
         prefix_yielded2 = False
+        seen_stream_texts2: Dict[int, str] = {}
         for chunk in stream2:
             raw_logger.debug("Gemini stream2 chunk:\n%s", chunk)
             if not chunk.candidates:
                 continue
             cand = chunk.candidates[0]
             raw_logger.debug("Gemini stream2 candidate:\n%s", cand)
-            if cand.content and cand.content.parts and cand.content.parts[0].text:
-                raw_logger.debug("Gemini text2: %s", cand.content.parts[0].text)
-                if not prefix_yielded2 and history_snippets:
-                    yield "\n".join(history_snippets) + "\n"
-                    prefix_yielded2 = True
-                yield cand.content.parts[0].text
-                yielded = True
+            if not cand.content or not cand.content.parts:
+                continue
+            cand_index = getattr(cand, "index", 0)
+            combined_text = "".join(
+                getattr(part, "text", None) or ""
+                for part in cand.content.parts
+                if getattr(part, "text", None)
+            )
+            if not combined_text:
+                continue
+
+            prev_text = seen_stream_texts2.get(cand_index, "")
+            new_text = (
+                combined_text[len(prev_text):]
+                if combined_text.startswith(prev_text)
+                else combined_text
+            )
+            if not new_text:
+                continue
+            raw_logger.debug("Gemini text2 delta: %s", new_text)
+            if not prefix_yielded2 and history_snippets:
+                yield "\n".join(history_snippets) + "\n"
+                prefix_yielded2 = True
+            yield new_text
+            seen_stream_texts2[cand_index] = combined_text
+            yielded = True
 
         # ---------- ⑤ 保険：モデルが無言の場合 ----------
         if not yielded:
@@ -876,6 +952,8 @@ def get_llm_client(model: str, provider: str, context_length: int) -> LLMClient:
     """Factory function to get the appropriate LLM client."""
     if provider == "openai":
         return OpenAIClient(model)
+    elif provider == "anthropic":
+        return AnthropicClient(model)
     elif provider == "gemini":
         return GeminiClient(model)
     else:

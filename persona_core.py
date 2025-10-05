@@ -13,7 +13,7 @@ from google.genai import types
 from dotenv import load_dotenv
 
 from buildings import Building
-from memory_core import MemoryCore  # Memory system integration
+from saiverse_memory import SAIMemoryAdapter
 from llm_clients import get_llm_client, LLMClient
 import llm_clients
 from action_handler import ActionHandler
@@ -22,6 +22,22 @@ from emotion_module import EmotionControlModule
 from database.models import AI as AIModel
 
 load_dotenv()
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+        return parsed if parsed >= 0 else default
+    except ValueError:
+        return default
+
+
+RECALL_SNIPPET_MAX_CHARS = _env_int("SAIVERSE_RECALL_SNIPPET_MAX_CHARS", 8000)
+RECALL_SNIPPET_STREAM_MAX_CHARS = _env_int("SAIVERSE_RECALL_SNIPPET_STREAM_MAX_CHARS", 800)
+RECALL_SNIPPET_PULSE_MAX_CHARS = _env_int("SAIVERSE_RECALL_SNIPPET_PULSE_MAX_CHARS", 1200)
 
 
 class PersonaCore:
@@ -95,13 +111,30 @@ class PersonaCore:
         # Load session data, which may overwrite the defaults
         self._load_session_data()
 
+        # Initialise SAIMemory bridge for long-term recall/summary
+        self.sai_memory: Optional[SAIMemoryAdapter]
+        try:
+            self.sai_memory = SAIMemoryAdapter(
+                persona_id=self.persona_id,
+                persona_dir=self.persona_log_path.parent,
+                resource_id=self.persona_id,
+            )
+            if self.sai_memory.is_ready():
+                logging.info("SAIMemory ready for persona %s", self.persona_id)
+            else:
+                logging.warning("SAIMemory adapter initialised but not ready for persona %s", self.persona_id)
+        except Exception as exc:
+            logging.warning("Failed to initialise SAIMemory for %s: %s", self.persona_id, exc)
+            self.sai_memory = None
+
         # Initialize managers that depend on loaded data
         self.history_manager = HistoryManager(
             persona_id=self.persona_id,
             persona_log_path=self.persona_log_path,
             building_memory_paths=self.building_memory_paths,
             initial_persona_history=self.messages,
-            initial_building_histories=building_histories
+            initial_building_histories=building_histories,
+            memory_adapter=self.sai_memory,
         )
 
         # Perception windows: track where we entered each building so we only
@@ -122,42 +155,6 @@ class PersonaCore:
         self.context_length = context_length
         self.llm_client = get_llm_client(model, provider, self.context_length)
         self.emotion_module = EmotionControlModule()
-
-        # Initialize MemoryCore for episodic memory (lightweight, in-memory)
-        try:
-            self.memory_core = MemoryCore.create_default(with_dummy_llm=True)
-        except Exception:
-            self.memory_core = None
-
-    def _memory_conv_id(self) -> str:
-        """Conversation id for MemoryCore; scoped by persona + building."""
-        return f"{self.persona_id}:{self.current_building_id}"
-
-    def _format_recall_info(self, recall: dict, max_chars: int = 800) -> str:
-        """Format recall bundle into a compact info string for prompts."""
-        if not recall:
-            return ""
-        texts = recall.get("texts") or []
-        topics = recall.get("topics") or []
-        lines: list[str] = ["[Memory Recall]"]
-        for t in texts[:5]:
-            t = (t or "").strip().replace("\n", " ")
-            if len(t) > 200:
-                t = t[:200] + "…"
-            lines.append(f"- {t}")
-        if topics:
-            titles = []
-            for tp in topics[:5]:
-                try:
-                    titles.append((tp.title or "").strip())
-                except Exception:
-                    continue
-            if titles:
-                lines.append("Topics: " + ", ".join(titles))
-        out = "\n".join(lines)
-        if len(out) > max_chars:
-            out = out[: max_chars - 1] + "…"
-        return out
 
     def _load_action_priority(self, path: Path) -> Dict[str, int]:
         if path.exists():
@@ -303,6 +300,16 @@ class PersonaCore:
 
         history_limit = max(0, self.context_length - base_chars)
         history_msgs = self.history_manager.get_recent_history(history_limit)
+        logging.debug(
+            "history_limit=%s context=%s base=%s history_count=%s",
+            history_limit,
+            self.context_length,
+            base_chars,
+            len(history_msgs),
+        )
+        if history_msgs:
+            logging.debug("history_head=%s", history_msgs[0])
+            logging.debug("history_tail=%s", history_msgs[-1])
 
         sanitized_history = [
             {"role": m.get("role", ""), "content": m.get("content", "")}
@@ -315,6 +322,31 @@ class PersonaCore:
         if user_message:
             msgs.append({"role": "user", "content": user_message})
         return msgs
+
+    def _collect_recent_memory_timestamps(self) -> List[int]:
+        recent = self.history_manager.get_recent_history(self.context_length)
+        values: List[int] = []
+        seen = set()
+        for msg in recent:
+            created_at = msg.get('created_at')
+            if created_at is not None:
+                try:
+                    value = int(created_at)
+                except (TypeError, ValueError):
+                    continue
+            else:
+                ts = msg.get('timestamp')
+                if not ts:
+                    continue
+                try:
+                    value = int(datetime.fromisoformat(ts).timestamp())
+                except ValueError:
+                    continue
+            if value in seen:
+                continue
+            seen.add(value)
+            values.append(value)
+        return values
 
     def _process_generation_result(
         self,
@@ -399,30 +431,27 @@ class PersonaCore:
                 actual_user_message = "意識モジュールが発話することを意思決定しました。自由に発言してください"
                 logging.debug("Injected user message for context")
 
-        # Memory: remember user utterance and prepare recall context
+        # Memory: prepare recall context from SAIMemory
         combined_info = info_text or ""
-        if self.memory_core is not None:
+        if self.sai_memory is not None:
             try:
-                if user_message is not None and (user_message or "").strip():
-                    self.memory_core.remember(user_message, conv_id=self._memory_conv_id(), speaker="user")
-                # Determine a recall source:
-                # 1) explicit user_message, else 2) last user message from persona history
-                recall_source = user_message if (user_message and user_message.strip()) else None
+                recall_source = user_message.strip() if (user_message and user_message.strip()) else None
                 if recall_source is None:
-                    for m in reversed(self.history_manager.messages):
-                        if m.get("role") == "user":
-                            txt = (m.get("content") or "").strip()
-                            if txt:
-                                recall_source = txt
-                                break
+                    recall_source = self.history_manager.get_last_user_message()
                 if recall_source:
-                    bundle = self.memory_core.recall(recall_source, k=5)
-                    snippet = self._format_recall_info(bundle)
+                    exclude_times = self._collect_recent_memory_timestamps()
+                    snippet = self.sai_memory.recall_snippet(
+                        self.current_building_id,
+                        recall_source,
+                        max_chars=RECALL_SNIPPET_MAX_CHARS,
+                        exclude_created_at=exclude_times,
+                    )
                     if snippet:
+                        logging.debug("[memory] recall snippet content=%s", snippet[:400])
                         combined_info = (combined_info + "\n" + snippet).strip() if combined_info else snippet
-                        logging.debug("[memory] recall snippet included for prompt (%d chars)", len(snippet))
-            except Exception as e:
-                logging.warning(f"MemoryCore recall failed: {e}")
+                        logging.debug("[memory] SAIMemory recall snippet included (%d chars)", len(snippet))
+            except Exception as exc:
+                logging.warning("SAIMemory recall failed: %s", exc)
 
         msgs = self._build_messages(actual_user_message, system_prompt_extra, combined_info or None)
         logging.debug("Messages sent to API: %s", msgs)
@@ -438,13 +467,6 @@ class PersonaCore:
             attempt += 1
 
         logging.info("AI Response :\n%s", content)
-        # Memory: remember assistant response
-        if self.memory_core is not None:
-            try:
-                if (content or "").strip():
-                    self.memory_core.remember(content, conv_id=self._memory_conv_id(), speaker="ai")
-            except Exception as e:
-                logging.warning(f"MemoryCore remember(ai) failed: {e}")
         return self._process_generation_result(
             content,
             user_message if log_user_message else None,
@@ -469,20 +491,25 @@ class PersonaCore:
                 actual_user_message = "意識モジュールが発話することを意思決定しました。自由に発言してください"
                 logging.debug("Injected user message for context")
 
-        # Memory: remember user utterance and prepare recall context
+        # Memory: prepare recall context from SAIMemory
         combined_info = info_text or ""
-        if self.memory_core is not None:
+        if self.sai_memory is not None:
             try:
-                if user_message is not None and (user_message or "").strip():
-                    self.memory_core.remember(user_message, conv_id=self._memory_conv_id(), speaker="user")
-                recall_source = user_message if user_message else None
+                recall_source = user_message.strip() if (user_message and user_message.strip()) else None
+                if recall_source is None:
+                    recall_source = self.history_manager.get_last_user_message()
                 if recall_source:
-                    bundle = self.memory_core.recall(recall_source, k=5)
-                    snippet = self._format_recall_info(bundle)
+                    exclude_times = self._collect_recent_memory_timestamps()
+                    snippet = self.sai_memory.recall_snippet(
+                        self.current_building_id,
+                        recall_source,
+                        max_chars=RECALL_SNIPPET_STREAM_MAX_CHARS,
+                        exclude_created_at=exclude_times,
+                    )
                     if snippet:
                         combined_info = (combined_info + "\n" + snippet).strip() if combined_info else snippet
-            except Exception as e:
-                logging.warning(f"MemoryCore recall failed: {e}")
+            except Exception as exc:
+                logging.warning("SAIMemory recall failed: %s", exc)
 
         msgs = self._build_messages(actual_user_message, system_prompt_extra, combined_info or None)
         logging.debug("Messages sent to API: %s", msgs)
@@ -507,13 +534,6 @@ class PersonaCore:
             time.sleep(10)
 
         logging.info("AI Response :\n%s", content_accumulator)
-        # Memory: remember assistant response
-        if self.memory_core is not None:
-            try:
-                if (content_accumulator or "").strip():
-                    self.memory_core.remember(content_accumulator, conv_id=self._memory_conv_id(), speaker="ai")
-            except Exception as e:
-                logging.warning(f"MemoryCore remember(ai) failed: {e}")
         say, move_target, changed = self._process_generation_result(
             content_accumulator,
             user_message if log_user_message else None,
@@ -898,6 +918,40 @@ class PersonaCore:
             f"{m.get('role')}: {m.get('content')}" for m in recent if m.get("role") != "system"
         )
 
+        recall_snippet = ""
+        current_user_created_at: Optional[int] = None
+        for m in reversed(new_msgs):
+            if m.get("role") == "user":
+                ts = m.get("timestamp") or m.get("created_at")
+                try:
+                    if isinstance(ts, str):
+                        current_user_created_at = int(datetime.fromisoformat(ts).timestamp())
+                    elif isinstance(ts, (int, float)):
+                        current_user_created_at = int(ts)
+                except Exception:
+                    current_user_created_at = None
+                break
+        if self.sai_memory is not None and self.sai_memory.is_ready():
+            recall_source = self.history_manager.get_last_user_message()
+            if recall_source is None:
+                for m in reversed(new_msgs):
+                    if m.get("role") == "user":
+                        txt = (m.get("content") or "").strip()
+                        if txt:
+                            recall_source = txt
+                            break
+            if recall_source:
+                try:
+                    recall_snippet = self.sai_memory.recall_snippet(
+                        building_id,
+                        recall_source,
+                        max_chars=RECALL_SNIPPET_PULSE_MAX_CHARS,
+                        exclude_created_at=current_user_created_at,
+                    )
+                except Exception as exc:
+                    logging.warning("[pulse] recall snippet failed: %s", exc)
+                    recall_snippet = ""
+
         pulse_prompt = Path("system_prompts/pulse.txt").read_text(encoding="utf-8")
         prompt = pulse_prompt.format(
             current_persona_name=self.persona_name,
@@ -906,6 +960,7 @@ class PersonaCore:
             recent_conversation=recent_text,
             occupants=occupants_str,
             user_online_state="online" if user_online else "offline",
+            recall_snippet=recall_snippet or "(なし)"
         )
         model_name = decision_model or "gemini-2.0-flash"
 
@@ -957,8 +1012,11 @@ class PersonaCore:
             return []
 
         replies: List[str] = []
+        recall_out = (data.get("recall") or "").strip()
         if data.get("speak"):
             info_text = data.get("info", "")
+            if recall_out:
+                info_text = (info_text + "\n\n[記憶想起]\n" + recall_out).strip()
             logging.info("[pulse] generating speech with extra info: %s", info_text)
             say, _, _ = self._generate(
                 None,
@@ -970,6 +1028,9 @@ class PersonaCore:
             replies.append(say)
         else:
             logging.info("[pulse] decision: remain silent")
+
+        if recall_out:
+            logging.info("[pulse] recall note: %s", recall_out)
 
         self._save_session_metadata()
         logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))
