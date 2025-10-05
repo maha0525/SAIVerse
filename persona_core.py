@@ -866,6 +866,18 @@ class PersonaCore:
         )
 
         recall_snippet = ""
+        current_user_created_at: Optional[int] = None
+        for m in reversed(new_msgs):
+            if m.get("role") == "user":
+                ts = m.get("timestamp") or m.get("created_at")
+                try:
+                    if isinstance(ts, str):
+                        current_user_created_at = int(datetime.fromisoformat(ts).timestamp())
+                    elif isinstance(ts, (int, float)):
+                        current_user_created_at = int(ts)
+                except Exception:
+                    current_user_created_at = None
+                break
         if self.sai_memory is not None and self.sai_memory.is_ready():
             recall_source = self.history_manager.get_last_user_message()
             if recall_source is None:
@@ -880,7 +892,8 @@ class PersonaCore:
                     recall_snippet = self.sai_memory.recall_snippet(
                         building_id,
                         recall_source,
-                        max_chars=800,
+                        max_chars=1200,
+                        exclude_created_at=current_user_created_at,
                     )
                 except Exception as exc:
                     logging.warning("[pulse] recall snippet failed: %s", exc)
@@ -946,8 +959,11 @@ class PersonaCore:
             return []
 
         replies: List[str] = []
+        recall_out = (data.get("recall") or "").strip()
         if data.get("speak"):
             info_text = data.get("info", "")
+            if recall_out:
+                info_text = (info_text + "\n\n[記憶想起]\n" + recall_out).strip()
             logging.info("[pulse] generating speech with extra info: %s", info_text)
             say, _, _ = self._generate(
                 None,
@@ -960,12 +976,8 @@ class PersonaCore:
         else:
             logging.info("[pulse] decision: remain silent")
 
-        recall_out = data.get("recall")
         if recall_out:
-            text = recall_out.strip()
-            if text:
-                logging.info("[pulse] recall note: %s", text)
-                replies.append(text)
+            logging.info("[pulse] recall note: %s", recall_out)
 
         self._save_session_metadata()
         logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))

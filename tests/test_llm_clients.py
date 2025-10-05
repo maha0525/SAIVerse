@@ -8,6 +8,7 @@ from typing import List, Dict, Iterator
 from llm_clients import (
     LLMClient,
     OpenAIClient,
+    AnthropicClient,
     GeminiClient,
     OllamaClient,
     get_llm_client,
@@ -20,12 +21,18 @@ class TestLLMClients(unittest.TestCase):
         os.environ['OPENAI_API_KEY'] = 'test_openai_key'
         os.environ['GEMINI_API_KEY'] = 'test_gemini_key'
         os.environ['GEMINI_FREE_API_KEY'] = 'test_free_key'
+        os.environ['ANTHROPIC_API_KEY'] = 'test_anthropic_key'
 
     def test_get_llm_client(self):
         # OpenAIClientのテスト
         client = get_llm_client("gpt-4.1-nano", "openai", 1000)
         self.assertIsInstance(client, OpenAIClient)
         self.assertEqual(client.model, "gpt-4.1-nano")
+
+        # AnthropicClientのテスト
+        client = get_llm_client("claude-sonnet-4-5", "anthropic", 1000)
+        self.assertIsInstance(client, AnthropicClient)
+        self.assertEqual(client.model, "claude-sonnet-4-5")
 
         # GeminiClientのテスト
         client = get_llm_client("gemini-1.5-flash", "gemini", 1000)

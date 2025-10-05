@@ -79,13 +79,39 @@ class LLMClient:
 
 # --- Concrete Clients ---
 class OpenAIClient(LLMClient):
-    """Client for OpenAI API."""
-    def __init__(self, model: str = "gpt-4.1"):
-        api_key = os.getenv("OPENAI_API_KEY")
+    """Client for OpenAI-compatible chat completions API."""
+
+    def __init__(
+        self,
+        model: str = "gpt-4.1",
+        *,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
+        api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
-        self.client = OpenAI(api_key=api_key)
+
+        client_kwargs: Dict[str, str] = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+
+        self.client = OpenAI(**client_kwargs)
         self.model = model
+
+
+class AnthropicClient(OpenAIClient):
+    """Anthropic Claude via OpenAI-compatible endpoint."""
+
+    def __init__(self, model: str = "claude-sonnet-4-5"):
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set.")
+
+        base_url = os.getenv("ANTHROPIC_OPENAI_BASE_URL", "https://api.anthropic.com/v1/")
+        if not base_url.endswith("/"):
+            base_url = base_url + "/"
+        super().__init__(model=model, api_key=api_key, base_url=base_url)
 
     def generate(
         self,
@@ -926,6 +952,8 @@ def get_llm_client(model: str, provider: str, context_length: int) -> LLMClient:
     """Factory function to get the appropriate LLM client."""
     if provider == "openai":
         return OpenAIClient(model)
+    elif provider == "anthropic":
+        return AnthropicClient(model)
     elif provider == "gemini":
         return GeminiClient(model)
     else:

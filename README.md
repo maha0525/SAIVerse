@@ -28,12 +28,16 @@ AIたちは「Building（施設）」と呼ばれる仮想空間を移動しな�
 ルートディレクトリに `.env` ファイルを作成し、`OPENAI_API_KEY` または
 `GEMINI_API_KEY` を設定します。Google Gemini には無料枠があるため、
 まず `GEMINI_FREE_API_KEY` を設定しておくと、レート制限内の利用は
-課金なしで行えます。
+課金なしで行えます。Anthropic Claude を OpenAI 互換エンドポイント経由で
+使う場合は `ANTHROPIC_API_KEY` を追加し、必要に応じて
+`ANTHROPIC_OPENAI_BASE_URL`（既定: `https://api.anthropic.com/v1/`）を上書きします。
 例:
 ```bash
 OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=AIza...
 GEMINI_FREE_API_KEY=AIza...
+ANTHROPIC_API_KEY=sk-ant-...
+# ANTHROPIC_OPENAI_BASE_URL=https://api.anthropic.com/v1/
 ```
 `python-dotenv` により自動で読み込まれます。
 

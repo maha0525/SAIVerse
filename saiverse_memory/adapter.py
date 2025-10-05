@@ -137,6 +137,7 @@ class SAIMemoryAdapter:
         query_text: str,
         *,
         max_chars: int = 800,
+        exclude_created_at: Optional[int] = None,
     ) -> str:
         if not self._ready:
             return ""
@@ -170,28 +171,26 @@ class SAIMemoryAdapter:
                 if msg.id in seen:
                     continue
                 seen.add(msg.id)
-                content = (msg.content or "").strip().replace("\n", " ")
+                if exclude_created_at is not None and msg.created_at == exclude_created_at:
+                    continue
+                if msg.role == "system":
+                    continue
+                content = (msg.content or "").strip()
                 if not content:
                     continue
-                if len(content) > 240:
-                    content = content[:240] + "…"
                 dt = datetime.fromtimestamp(msg.created_at)
                 ts = dt.strftime("%Y-%m-%d %H:%M")
                 role = msg.role
+                entry = f"- {role} @ {ts}: {content}"
                 if score is not None and msg.id == seed.id:
-                    lines.append(f"- {role} @ {ts} (score={score:.3f}): {content}")
-                else:
-                    lines.append(f"- {role} @ {ts}: {content}")
-                if len("\n".join(lines)) > max_chars:
-                    snippet = "\n".join(lines)
-                    return snippet[: max_chars - 1] + "…"
+                    entry = f"- {role} @ {ts} (score={score:.3f}): {content}"
+                candidate = lines + [entry]
+                combined = "\n".join(candidate)
+                if len(combined) > max_chars:
+                    return "\n".join(lines)
+                lines.append(entry)
 
-        if len(lines) == 1:
-            return ""
-        snippet = "\n".join(lines)
-        if len(snippet) > max_chars:
-            snippet = snippet[: max_chars - 1] + "…"
-        return snippet
+        return "" if len(lines) == 1 else "\n".join(lines)
 
     def update_overview(self, building_id: str, provider) -> Optional[str]:
         if not self._ready or provider is None:
