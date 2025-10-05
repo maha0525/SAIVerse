@@ -24,6 +24,22 @@ from database.models import AI as AIModel
 load_dotenv()
 
 
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+        return parsed if parsed >= 0 else default
+    except ValueError:
+        return default
+
+
+RECALL_SNIPPET_MAX_CHARS = _env_int("SAIVERSE_RECALL_SNIPPET_MAX_CHARS", 8000)
+RECALL_SNIPPET_STREAM_MAX_CHARS = _env_int("SAIVERSE_RECALL_SNIPPET_STREAM_MAX_CHARS", 800)
+RECALL_SNIPPET_PULSE_MAX_CHARS = _env_int("SAIVERSE_RECALL_SNIPPET_PULSE_MAX_CHARS", 1200)
+
+
 class PersonaCore:
     def __init__(
         self,
@@ -307,6 +323,31 @@ class PersonaCore:
             msgs.append({"role": "user", "content": user_message})
         return msgs
 
+    def _collect_recent_memory_timestamps(self) -> List[int]:
+        recent = self.history_manager.get_recent_history(self.context_length)
+        values: List[int] = []
+        seen = set()
+        for msg in recent:
+            created_at = msg.get('created_at')
+            if created_at is not None:
+                try:
+                    value = int(created_at)
+                except (TypeError, ValueError):
+                    continue
+            else:
+                ts = msg.get('timestamp')
+                if not ts:
+                    continue
+                try:
+                    value = int(datetime.fromisoformat(ts).timestamp())
+                except ValueError:
+                    continue
+            if value in seen:
+                continue
+            seen.add(value)
+            values.append(value)
+        return values
+
     def _process_generation_result(
         self,
         content: str,
@@ -398,7 +439,13 @@ class PersonaCore:
                 if recall_source is None:
                     recall_source = self.history_manager.get_last_user_message()
                 if recall_source:
-                    snippet = self.sai_memory.recall_snippet(self.current_building_id, recall_source, max_chars=800)
+                    exclude_times = self._collect_recent_memory_timestamps()
+                    snippet = self.sai_memory.recall_snippet(
+                        self.current_building_id,
+                        recall_source,
+                        max_chars=RECALL_SNIPPET_MAX_CHARS,
+                        exclude_created_at=exclude_times,
+                    )
                     if snippet:
                         logging.debug("[memory] recall snippet content=%s", snippet[:400])
                         combined_info = (combined_info + "\n" + snippet).strip() if combined_info else snippet
@@ -452,7 +499,13 @@ class PersonaCore:
                 if recall_source is None:
                     recall_source = self.history_manager.get_last_user_message()
                 if recall_source:
-                    snippet = self.sai_memory.recall_snippet(self.current_building_id, recall_source, max_chars=800)
+                    exclude_times = self._collect_recent_memory_timestamps()
+                    snippet = self.sai_memory.recall_snippet(
+                        self.current_building_id,
+                        recall_source,
+                        max_chars=RECALL_SNIPPET_STREAM_MAX_CHARS,
+                        exclude_created_at=exclude_times,
+                    )
                     if snippet:
                         combined_info = (combined_info + "\n" + snippet).strip() if combined_info else snippet
             except Exception as exc:
@@ -892,7 +945,7 @@ class PersonaCore:
                     recall_snippet = self.sai_memory.recall_snippet(
                         building_id,
                         recall_source,
-                        max_chars=1200,
+                        max_chars=RECALL_SNIPPET_PULSE_MAX_CHARS,
                         exclude_created_at=current_user_created_at,
                     )
                 except Exception as exc:

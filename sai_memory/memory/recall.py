@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable, List, Tuple
+from typing import List, Tuple
 
 import numpy as np
 from fastembed import TextEmbedding
@@ -42,6 +42,7 @@ def semantic_recall(
     range_before: int,
     range_after: int,
     scope: str,
+    exclude_message_ids: set[str] | None = None,
 ) -> List[Message]:
     vectors: List[List[float]] = embedder.embed([query_text])
     q = np.array(vectors[0], dtype=np.float32)
@@ -51,19 +52,24 @@ def semantic_recall(
     else:
         corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None)
 
-    scored: List[Tuple[Message, float]] = []
-    for msg, vec in corpus:
+    scored_map: dict[str, Tuple[Message, float, int]] = {}
+    for msg, vec, chunk_index in corpus:
+        if exclude_message_ids and msg.id in exclude_message_ids:
+            continue
         v = np.array(vec, dtype=np.float32)
         s = _cosine_sim(q, v)
-        scored.append((msg, s))
+        current = scored_map.get(msg.id)
+        if current is None or s > current[1]:
+            scored_map[msg.id] = (msg, s, chunk_index)
 
+    scored = list(scored_map.values())
     scored.sort(key=lambda x: x[1], reverse=True)
     picked = scored[: max(0, topk)]
 
     expanded: List[Message] = []
     seen = set()
-    for msg, score in picked:
-        around = get_messages_around(conn, msg.thread_id, msg.created_at, range_before, range_after)
+    for msg, score, chunk_index in picked:
+        around = get_messages_around(conn, msg.thread_id, msg.id, range_before, range_after)
         bundle = [*around[:range_before], msg, *around[range_before:]] if (range_before or range_after) else [msg]
         for m in bundle:
             if m.id in seen:
@@ -78,6 +84,7 @@ def semantic_recall(
                 resource_id=m.resource_id,
                 created_at=m.created_at,
                 score=(score if m.id == msg.id else None),
+                chunk_index=(chunk_index if m.id == msg.id else None),
                 preview=(m.content[:160] + "…" if len(m.content) > 160 else m.content),
             )
 
@@ -96,6 +103,7 @@ def semantic_recall_groups(
     range_before: int,
     range_after: int,
     scope: str,
+    exclude_message_ids: set[str] | None = None,
 ) -> List[Tuple[Message, List[Message], float]]:
     """Return top-k recall groups as (seed, group_messages_sorted, score).
 
@@ -111,18 +119,23 @@ def semantic_recall_groups(
     else:
         corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None)
 
-    scored: List[Tuple[Message, float]] = []
-    for msg, vec in corpus:
+    scored_map: dict[str, Tuple[Message, float, int]] = {}
+    for msg, vec, chunk_index in corpus:
+        if exclude_message_ids and msg.id in exclude_message_ids:
+            continue
         v = np.array(vec, dtype=np.float32)
         s = _cosine_sim(q, v)
-        scored.append((msg, s))
+        current = scored_map.get(msg.id)
+        if current is None or s > current[1]:
+            scored_map[msg.id] = (msg, s, chunk_index)
 
+    scored = list(scored_map.values())
     scored.sort(key=lambda x: x[1], reverse=True)
     picked = scored[: max(0, topk)]
 
     groups: List[Tuple[Message, List[Message], float]] = []
-    for seed, score in picked:
-        before_after = get_messages_around(conn, seed.thread_id, seed.created_at, range_before, range_after)
+    for seed, score, chunk_index in picked:
+        before_after = get_messages_around(conn, seed.thread_id, seed.id, range_before, range_after)
         # Stitch into ordered bundle
         bundle = [*before_after[:range_before], seed, *before_after[range_before:]] if (range_before or range_after) else [seed]
         # Ensure chronological
@@ -135,6 +148,7 @@ def semantic_recall_groups(
             seed_created_at=seed.created_at,
             size=len(bundle),
             score=score,
+            chunk_index=chunk_index,
         )
 
     return groups
