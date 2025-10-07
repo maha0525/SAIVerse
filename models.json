@@ -1,11 +1,15 @@
 {
-  "gpt-4.1": {
+  "gpt-5": {
     "provider": "openai",
     "context_length": 128000
   },
+  "gpt-4.1": {
+    "provider": "openai",
+    "context_length": 32000
+  },
   "gpt-4o": {
     "provider": "openai",
-    "context_length": 128000
+    "context_length": 32000
   },
   "o3": {
     "provider": "openai",
@@ -13,13 +17,25 @@
   },
   "chatgpt-4o-latest": {
     "provider": "openai",
-    "context_length": 128000
+    "context_length": 32000
+  },
+  "claude-sonnet-4-5": {
+    "provider": "anthropic",
+    "context_length": 32000
+  },
+  "claude-opus-4-20250514": {
+    "provider": "anthropic",
+    "context_length": 32000
   },
   "gemini-2.5-pro": {
     "provider": "gemini",
     "context_length": 128000
   },
   "gemini-2.5-flash": {
+    "provider": "gemini",
+    "context_length": 128000
+  },
+  "gemini-2.5-flash-preview-09-2025": {
     "provider": "gemini",
     "context_length": 128000
   },
@@ -55,15 +71,19 @@
     "provider": "ollama",
     "context_length": 32768
   },
-  "gpt-4.1-nano": {
-    "provider": "openai",
-    "context_length": 128000
-  },
   "gemini-1.5-flash": {
     "provider": "gemini",
     "context_length": 1000000
   },
   "hf.co/unsloth/gemma-3-1b-it-GGUF:BF16": {
+    "provider": "ollama",
+    "context_length": 32768
+  },
+  "gpt-oss:20b": {
+    "provider": "ollama",
+    "context_length": 32768
+  },
+  "gpt-oss:120b": {
     "provider": "ollama",
     "context_length": 32768
   }

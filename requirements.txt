@@ -1,5 +1,17 @@
-openai>=1.84.0
-gradio>=5.33.0
-python-dotenv>=1.0.0
-requests>=2.32.0
-google-genai>=1.21.0
+fastapi==0.116.1
+google-genai==1.26.0
+gradio==5.38.0
+openai==1.97.0
+pydantic==2.11.7
+python-dotenv==1.1.1
+requests==2.32.4
+SQLAlchemy==2.0.41
+uvicorn==0.35.0
+
+# Vector DB and embeddings stack
+qdrant-client>=1.9.0
+transformers>=4.40.0
+sentence-transformers>=2.6.0
+torch
+fastembed>=0.7.3
+numpy>=1.26.0

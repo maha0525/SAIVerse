@@ -28,14 +28,55 @@ AIたちは「Building（施設）」と呼ばれる仮想空間を移動しな�
 ルートディレクトリに `.env` ファイルを作成し、`OPENAI_API_KEY` または
 `GEMINI_API_KEY` を設定します。Google Gemini には無料枠があるため、
 まず `GEMINI_FREE_API_KEY` を設定しておくと、レート制限内の利用は
-課金なしで行えます。
+課金なしで行えます。Anthropic Claude を OpenAI 互換エンドポイント経由で
+使う場合は `ANTHROPIC_API_KEY` を追加し、必要に応じて
+`ANTHROPIC_OPENAI_BASE_URL`（既定: `https://api.anthropic.com/v1/`）を上書きします。
 例:
 ```bash
 OPENAI_API_KEY=sk-...
 GEMINI_API_KEY=AIza...
 GEMINI_FREE_API_KEY=AIza...
+ANTHROPIC_API_KEY=sk-ant-...
+# ANTHROPIC_OPENAI_BASE_URL=https://api.anthropic.com/v1/
 ```
 `python-dotenv` により自動で読み込まれます。
+
+#### SAIMemory（長期記憶）関連設定
+
+SAIVerse では各ペルソナの履歴を `~/.saiverse/personas/<persona>/memory.db`
+に保存します。`.env` には `SAIMEMORY_*` 系の環境変数を設定しておくと、
+既存の JSON ログを SQLite に移行した際も同じ構成で動きます。
+
+ログの取り込みは `scripts/import_persona_logs_to_saimemory.py` を使用します。
+
+```bash
+python scripts/import_persona_logs_to_saimemory.py \
+  --reset \
+  --include-archives \
+  --include-buildings \
+  --default-start 2025-07-25T12:24:41 \
+  --persona air_city_a
+```
+
+- `--reset` : 既存の `memory.db` を削除してから再構築します。
+- `--include-archives` : `old_log/*.json` も取り込み対象にします。
+- `--include-buildings` : 建物ログから該当ペルソナの発話（＋直前のユーザー発話）を取り込みます。
+- `--default-start` : タイムスタンプを持たないログが続く場合の起点となる日時です。
+- 複数ペルソナを移行する場合は `--persona` を増やして同一コマンドを実行してください。
+
+取り込み後に内容を確認したい場合は `scripts/export_saimemory_to_json.py` を利用できます。
+
+```bash
+python scripts/export_saimemory_to_json.py air_city_a \
+  --start 2025-07-01 --end 2025-10-05 \
+  --output air_memory.json
+```
+
+標準出力へ出したい場合は `--output -` を指定してください。
+
+開発時に SAIMemory のログを追跡したいときは `SAIVERSE_LOG_LEVEL=DEBUG`
+を指定して起動すると、取得した履歴の先頭／末尾などがログに出力されます。
+
 
 ### ストリーミング表示
 `main.py` のGradioインタフェースでは、AIの応答を逐次表示します。OpenAI、Gemini、Ollama の各モデルで利用可能です。
@@ -215,3 +256,71 @@ python -m unittest tests/test_module_name.py
 ### 🔧 開発時の注意
 
 システムプロンプトでは`str.format()`で変数展開を行うため、例示のJSONなどで波括弧`{}`をそのまま使うとエラーになります。表示用に記載する場合は`{{`と`}}`でエスケープしてください。
+
+---
+
+## 📌 Recent Additions (Utilities, Memory, Conversation)
+
+以下は直近で追加・改善された実装とその使い方です。
+
+### Conversation Modes & Behavior
+
+- Modes: `user` / `auto` / `manual`
+  - `user`: パルス駆動のみ。即応しない。定期パルスは実行しない。
+  - `auto`: パルス駆動。ConversationManager やスケジュールによる定期パルスも実行。
+  - `manual`: 即応（従来の handle_user_input/_stream）。パルスは実行しない。
+- Inter-AI Perception: Building 履歴に追加された新着メッセージを、各ペルソナのパルス実行時に「知覚」し、
+  自分の persona history に取り込みます（他AIの assistant は user 行に変換、ユーザーの発話は user 行で取り込み）。
+  これにより、各AIが互いの発話を文脈として利用できます。
+
+### LLM Fallbacks (Ollama → Gemini)
+
+- `llm_clients.OllamaClient` は起動時に `OLLAMA_BASE_URL`/`OLLAMA_HOST` と一般的な候補
+  (`127.0.0.1`, `localhost`, `host.docker.internal`, `172.17.0.1`) を素早くプローブし、
+  到達不能なら `Gemini 1.5 Flash` に自動フォールバックします。
+- Gemini 503/overload 等の際は `gemini-2.0-flash`/`gemini-1.5-flash(-8b)` などへ自動リトライ。
+- 必要な環境変数: `GEMINI_FREE_API_KEY` または `GEMINI_API_KEY`。
+
+### MemoryCore: Ingest, Recall, Topics
+
+- 想起（recall）強化: userモードでも直近のユーザー発話をもとに想起が走るように調整。
+- トピック名の健全化: 「新しい話題」や null を避けるようプロンプトと正規化を強化。
+  不適切なタイトル時は1回リトライし、それでもダメなら最近の発話から簡潔なタイトルを自動生成。
+
+#### Utilities
+
+- `scripts/ingest_persona_log.py`
+  - Persona の `~/.saiverse/personas/<id>/log.json` を per-persona の Qdrant DB へ取り込み。
+  - 例:
+    - `python scripts/ingest_persona_log.py eris --assign-llm dummy --limit 200`
+    - `python scripts/ingest_persona_log.py eris --location-base ~/.saiverse/qdrant --collection-prefix saiverse`
+
+- `scripts/recall_persona_memory.py`（新規）
+  - ingest 済みの per-persona DB に対して任意クエリで想起を確認。
+  - 例:
+    - `python scripts/recall_persona_memory.py eris "旅行 温泉" --topk 8`
+    - `python scripts/recall_persona_memory.py eris "旅行 温泉" --json`
+
+- `scripts/rename_generic_topics.py`（新規）
+  - 既存の空/汎用（例: 「新しい話題」/null）タイトルのトピックを一括リネーム。
+  - 例:
+    - プレビュー: `python scripts/rename_generic_topics.py eris --dry-run`
+    - 本適用: `python scripts/rename_generic_topics.py eris`
+    - オプション: `--location-base`, `--collection-prefix`, `--limit N`
+
+- `scripts/memory_topics_ui.py`（新規）
+  - ブラウザで per-persona メモリー内のトピック全体像を閲覧。
+  - 起動: `python scripts/memory_topics_ui.py`
+  - UI 項目:
+    - Persona ID（例: `eris`）
+    - Location Base（例: `~/.saiverse/qdrant`）
+    - Collection Prefix（例: `saiverse`）
+  - 機能:
+    - トピック一覧（id/title/summary/strength/entries/updated_at）
+    - トピック選択で詳細パネル（summary/entry一覧）
+
+#### Tests
+
+- `tests/test_memory_core.py`（追加）
+  - インメモリでの remember → recall が機能し、関連トピックが返ることを確認する簡易テスト。
+  - 実行: `python -m unittest tests/test_memory_core.py`
