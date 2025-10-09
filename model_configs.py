@@ -26,3 +26,7 @@ def get_context_length(model: str) -> int:
 
 def get_model_choices() -> list[str]:
     return list(MODEL_CONFIGS.keys())
+
+
+def get_model_config(model: str) -> Dict:
+    return MODEL_CONFIGS.get(model, {})

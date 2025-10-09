@@ -31,8 +31,55 @@ MODEL_CHOICES = ["None"] + get_model_choices()
 AUTONOMOUS_BUILDING_CHOICES = []
 AUTONOMOUS_BUILDING_MAP = {}
 
+VERSION = time.strftime("%Y%m%d%H%M%S")  # 例: 20251008121530
+
+HEAD_VIEWPORT = '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">'
+
+
 NOTE_CSS = """
-/* Color tokens tied to Gradio theme (auto switches with gradio light/dark) */
+/* === モバイルで Chatbot 親ブロックの左右パディングを完全に殺す === */
+@media (max-width: 680px) {
+  /* 親ブロック特定（:has はそのまま・@supports は外す） */
+  :is(.gr-block, .gr-column, .gr-row, .group, .tabitem):has(> #chat_wrap),
+  :is(.gr-block, .gr-column, .gr-row, .group, .tabitem):has(#my_chat) {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    max-width: 100% !important;
+    width: 100% !important;
+  }
+
+  /* フォールバック：親の内側余白を“子から”物理的に打ち消す */
+  #chat_wrap {
+    /* ビューポートいっぱいに拡げて親のpaddingを無効化 */
+    width: 100vw !important;
+    max-width: 100vw !important;
+    margin-left: calc(50% - 50vw) !important;
+    margin-right: calc(50% - 50vw) !important;
+  }
+
+  /* Chatbot 本体も全幅に */
+  #my_chat {
+    max-width: 100% !important;
+    width: 100% !important;
+  }
+
+  /* Markdown クランプ解除（保険） */
+  #my_chat .prose, #my_chat [class*="prose"] { max-width: none !important; }
+
+  /* 長文の折返し */
+  #my_chat pre { white-space: pre-wrap !important; word-break: break-word !important; }
+}
+
+/* iOS セーフエリア（必要なら併用可：viewport-fit=cover を head に入れている前提） */
+@supports (padding: env(safe-area-inset-left)) {
+  body {
+    padding-left: max(0px, env(safe-area-inset-left));
+    padding-right: max(0px, env(safe-area-inset-right));
+  }
+}
+
 html[data-theme='light'] {
   --msg-bg: #f3f4f6;
   --msg-fg: #111827;
@@ -72,6 +119,17 @@ html[data-theme='dark'] {
 /* Notes */
 .note-box { background: var(--note-bg); color: var(--note-fg) !important; border-left: 4px solid #ffbf00; padding: 8px 12px; margin: 0; border-radius: 6px; font-size: .92rem; }
 .note-box b { color: var(--note-fg) !important; }
+
+/* Reasoning (Thinking) blocks */
+details.saiv-thinking { margin-top: 10px; border: 1px solid rgba(128,128,128,0.25); border-radius: 8px; padding: 8px 12px; background: rgba(0,0,0,0.02); }
+html[data-theme='dark'] details.saiv-thinking { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.12); }
+details.saiv-thinking summary { cursor: pointer; font-weight: 600; outline: none; }
+details.saiv-thinking summary:focus { outline: none; }
+.saiv-thinking-body { margin-top: 6px; display: flex; flex-direction: column; gap: 8px; font-size: 0.96rem; color: inherit; }
+.saiv-thinking-item { border-top: 1px solid rgba(128,128,128,0.2); padding-top: 6px; }
+.saiv-thinking-item:first-child { border-top: none; padding-top: 0; }
+.saiv-thinking-title { font-weight: 600; margin-bottom: 4px; }
+.saiv-thinking-text { line-height: 1.45; word-break: break-word; }
 
 /* Strongly scoped avatar rounding for Chatbot area */
 #my_chat .saiv-avatar { border-radius: 12px !important; overflow: hidden !important; display: inline-block; width: 60px; height: 60px; min-width: 60px; }
@@ -862,7 +920,7 @@ def main():
 
     # --- FastAPIとGradioの統合 ---
     # 3. Gradio UIを作成
-    with gr.Blocks(css=NOTE_CSS, title=f"SAIVerse City: {args.city_name}", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(fill_width=True, head=HEAD_VIEWPORT, css=NOTE_CSS, title=f"SAIVerse City: {args.city_name}", theme=gr.themes.Soft()) as demo:
         with gr.Tabs():
             with gr.TabItem("ワールドビュー"):
                 with gr.Row():
@@ -885,24 +943,24 @@ def main():
 
                 # --- ここから下は既存のUI ---
                 gr.Markdown("### 現在地での対話")
-
-                chatbot = gr.Chatbot(
-                    type="messages",
-                    value=lambda: format_history_for_chatbot(manager.get_building_history(manager.user_current_building_id)) if manager.user_current_building_id else [],
-                    group_consecutive_messages=False,
-                    sanitize_html=False,
-                    elem_id="my_chat",
-                    avatar_images=(
-                        "assets/icons/user.png", # ← ユーザー
-                        None  # アシスタント側はメッセージ内に表示
-                    ),
-                    height=800
-                )
-                with gr.Row():
-                    with gr.Column(scale=4):
-                        txt = gr.Textbox(placeholder="ここにメッセージを入力...", lines=4)
-                    with gr.Column(scale=1):
-                        submit = gr.Button("送信")
+                with gr.Group(elem_id="chat_wrap"):
+                    chatbot = gr.Chatbot(
+                        type="messages",
+                        value=lambda: format_history_for_chatbot(manager.get_building_history(manager.user_current_building_id)) if manager.user_current_building_id else [],
+                        group_consecutive_messages=False,
+                        sanitize_html=False,
+                        elem_id="my_chat",
+                        avatar_images=(
+                            "assets/icons/user.png", # ← ユーザー
+                            None  # アシスタント側はメッセージ内に表示
+                        ),
+                        height=800
+                    )
+                    with gr.Row():
+                        with gr.Column(scale=4):
+                            txt = gr.Textbox(placeholder="ここにメッセージを入力...", lines=4)
+                        with gr.Column(scale=1):
+                            submit = gr.Button("送信")
                 
                 gr.Markdown("---")
                 with gr.Accordion("ペルソナを招待する", open=False):
@@ -1033,7 +1091,7 @@ def main():
         """
         demo.load(None, None, None, js=js_auto_refresh)
 
-    demo.launch(server_port=manager.ui_port, debug=True)
+    demo.launch(server_name="0.0.0.0", server_port=manager.ui_port, debug=True, share=False)
 
 
 if __name__ == "__main__":

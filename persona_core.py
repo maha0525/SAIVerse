@@ -3,6 +3,7 @@ import logging
 import time
 import copy
 import os
+import html
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Iterator
 from datetime import datetime
@@ -396,9 +397,15 @@ class PersonaCore:
                 {"role": "user", "content": user_message}, 
                 self.current_building_id
             )
-        self.history_manager.add_message(
-            {"role": "assistant", "content": content}, 
-            self.current_building_id
+
+        reasoning_entries = self.llm_client.consume_reasoning()
+        building_content = self._combine_with_reasoning(content, reasoning_entries)
+        self.history_manager.add_to_persona_only(
+            {"role": "assistant", "content": content}
+        )
+        self.history_manager.add_to_building_only(
+            self.current_building_id,
+            {"role": "assistant", "content": building_content}
         )
 
         summary = self._format_emotion_summary(prev_emotion)
@@ -836,6 +843,33 @@ class PersonaCore:
             lines.append(line)
         return '<div class="note-box">感情パラメータ変動<br>' + '<br>'.join(lines) + '</div>'
 
+    def _combine_with_reasoning(self, base_text: str, reasoning_entries: List[Dict[str, str]]) -> str:
+        if not reasoning_entries:
+            return base_text
+
+        blocks: List[str] = []
+        for idx, entry in enumerate(reasoning_entries, start=1):
+            text = (entry.get("text") or "").strip()
+            if not text:
+                continue
+            title = (entry.get("title") or "").strip() or f"Thought {idx}"
+            safe_title = html.escape(title)
+            safe_text = html.escape(text).replace("\n", "<br>")
+            blocks.append(
+                f"<div class='saiv-thinking-item'><div class='saiv-thinking-title'>{safe_title}</div>"
+                f"<div class='saiv-thinking-text'>{safe_text}</div></div>"
+            )
+
+        if not blocks:
+            return base_text
+
+        body = "".join(blocks)
+        details = (
+            "<details class='saiv-thinking'><summary>🧠 Thinking</summary>"
+            f"<div class='saiv-thinking-body'>{body}</div></details>"
+        )
+        return base_text + "\n" + details
+
     # ------------------------------------------------------------------
     # Pulse related utilities
     # ------------------------------------------------------------------
@@ -861,6 +895,13 @@ class PersonaCore:
             logging.debug("[entry] entry index set: %s -> %d", building_id, idx)
         except Exception:
             pass
+
+    def register_entry(self, building_id: str) -> None:
+        """
+        Public hook used when an external manager moves this persona into a building.
+        Resets the perception window so we only ingest messages that happen after arrival.
+        """
+        self._mark_entry(building_id)
 
     def run_pulse(self, occupants: List[str], user_online: bool = True, decision_model: Optional[str] = None) -> List[str]:
         """Execute one autonomous pulse cycle."""
