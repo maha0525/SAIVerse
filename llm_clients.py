@@ -366,14 +366,35 @@ class AnthropicClient(OpenAIClient):
         history_snippets: Optional[List[str]] | None = None,
     ) -> str:
         """ツールコールを解決しながら最終テキストを返す（最大 10 回ループ）"""
-        tools = tools or OPENAI_TOOLS_SPEC
+        tools_spec = OPENAI_TOOLS_SPEC if tools is None else tools
+        use_tools = bool(tools_spec)
         self._store_reasoning([])
+
+        if not use_tools:
+            try:
+                resp = self._create_completion(
+                    model=self.model,
+                    messages=messages,
+                    n=1,
+                    **self._request_kwargs,
+                )
+            except Exception:
+                logging.exception("OpenAI call failed")
+                return "エラーが発生しました。"
+
+            raw_logger.debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
+            choice = resp.choices[0]
+            text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
+            if not text_body:
+                text_body = choice.message.content or ""
+            self._store_reasoning(reasoning_entries)
+            return text_body
 
         # ── Router 判定（最後の user メッセージだけ渡す） ──
         user_msg = next((m["content"] for m in reversed(messages)
                          if m.get("role") == "user"), "")
-        decision = route(user_msg, tools)
-        
+        decision = route(user_msg, tools_spec)
+
         # ログ出力（JSON フォーマットで見やすく）
         snippets: List[str] = []
         try:
@@ -403,7 +424,7 @@ class AnthropicClient(OpenAIClient):
                 resp = self._create_completion(
                     model=self.model,
                     messages=messages,
-                    tools=tools,
+                    tools=tools_spec,
                     tool_choice=tool_choice,
                     n=1,
                     **self._request_kwargs,
@@ -474,17 +495,71 @@ class AnthropicClient(OpenAIClient):
         - force_tool_choice: 初回のみ {"type":"function","function":{"name":..}} か "auto"
         - 再帰呼び出し時はデフォルト None → 自動で "auto"
         """
-        tools = tools or OPENAI_TOOLS_SPEC
+        tools_spec = OPENAI_TOOLS_SPEC if tools is None else tools
+        use_tools = bool(tools_spec)
         history_snippets = history_snippets or []
         self._store_reasoning([])
         reasoning_chunks: List[str] = []
+
+        if not use_tools:
+            try:
+                sys_msg, contents = self._convert_messages(messages)
+                cfg_kwargs = dict(
+                    system_instruction=sys_msg,
+                    safety_settings=GEMINI_SAFETY_CONFIG,
+                )
+                if self._thinking_config is not None:
+                    cfg_kwargs["thinking_config"] = self._thinking_config
+                resp = self.client.models.generate_content(
+                    model=self.model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(**cfg_kwargs),
+                )
+            except Exception:
+                logging.exception("Gemini call failed")
+                yield "エラーが発生しました。"
+                return
+
+            if not resp.candidates:
+                yield "（Gemini から応答がありませんでした）"
+                return
+
+            cand = resp.candidates[0]
+            raw_logger.debug("Gemini candidate:\n%s", cand)
+            parts_list = list(getattr(getattr(cand, "content", None), "parts", []) or [])
+            text_body, reasoning_entries = _extract_gemini_parts(parts_list)
+            self._store_reasoning(reasoning_entries)
+            yield text_body
+            return
+
+        if not use_tools:
+            try:
+                resp = self._create_completion(
+                    model=self.model,
+                    messages=messages,
+                    n=1,
+                    **self._request_kwargs,
+                )
+            except openai.BadRequestError:
+                logging.exception("OpenAI call failed")
+                yield "エラーが発生しました。"
+                return
+
+            choice = resp.choices[0]
+            text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
+            if not text_body:
+                text_body = choice.message.content or ""
+            self._store_reasoning(reasoning_entries)
+            yield text_body
+            return
+
         # ----------------------------------------
         # 初回呼び出しなら router で強制指定を決定
         # ----------------------------------------
         if force_tool_choice is None:                       # 再帰呼び出し時はスキップ
             user_msg = next((m["content"] for m in reversed(messages)
                              if m.get("role") == "user"), "")
-            decision = route(user_msg, tools)
+            decision = route(user_msg, tools_spec)
             logging.info("Router decision:\n%s", json.dumps(decision, indent=2, ensure_ascii=False))
             if decision["call"] == "yes" and decision["tool"]:
                 force_tool_choice = {
@@ -501,7 +576,7 @@ class AnthropicClient(OpenAIClient):
             resp = self._create_completion(
                 model=self.model,
                 messages=messages,
-                tools=tools,
+                tools=tools_spec,
                 tool_choice=force_tool_choice,   # ← 初回のみ強制 / 再帰時は "auto"
                 stream=True,
                 **self._request_kwargs,
@@ -729,8 +804,9 @@ class GeminiClient(LLMClient):
         history_snippets: Optional[List[str]] | None = None,
     ) -> str:
         # ------------- 前処理 -------------
-        tools_spec = tools or GEMINI_TOOLS_SPEC
-        tool_list  = _merge_tools_for_gemini(tools_spec)
+        tools_spec = GEMINI_TOOLS_SPEC if tools is None else tools
+        use_tools = bool(tools_spec)
+        tool_list  = _merge_tools_for_gemini(tools_spec) if use_tools else []
         history_snippets = history_snippets or []
         self._store_reasoning([])
 
@@ -745,31 +821,38 @@ class GeminiClient(LLMClient):
             return ""
 
         # ---------- ① Router ----------
-        decision = route(_last_user(messages), tools_spec)
-        logging.info("Router decision:\n%s",
-                     json.dumps(decision, indent=2, ensure_ascii=False))
+        if use_tools:
+            decision = route(_last_user(messages), tools_spec)
+            logging.info("Router decision:\n%s",
+                         json.dumps(decision, indent=2, ensure_ascii=False))
 
-        if decision["call"] == "yes":
-            fc_cfg = types.FunctionCallingConfig(
-                mode="ANY",
-                allowedFunctionNames=[decision["tool"]],
-            )
+            tool_list = _merge_tools_for_gemini(tools_spec)
+
+            if decision["call"] == "yes":
+                fc_cfg = types.FunctionCallingConfig(
+                    mode="ANY",
+                    allowedFunctionNames=[decision["tool"]],
+                )
+            else:
+                fc_cfg = types.FunctionCallingConfig(mode="AUTO")
+
+            tool_cfg = types.ToolConfig(functionCallingConfig=fc_cfg)
         else:
-            fc_cfg = types.FunctionCallingConfig(mode="AUTO")
+            tool_cfg = None
+            tool_list = []
 
-        tool_cfg = types.ToolConfig(functionCallingConfig=fc_cfg)
         snippets: List[str] = history_snippets
 
         def _call(client, model_id: str):
             for _ in range(10):
                 sys_msg, contents = self._convert_messages(messages)
-                tool_list = _merge_tools_for_gemini(tools)
                 config_kwargs = dict(
                     system_instruction=sys_msg,
                     safety_settings=GEMINI_SAFETY_CONFIG,
-                    tools=tool_list,
-                    tool_config=tool_cfg,
                 )
+                if use_tools:
+                    config_kwargs["tools"] = _merge_tools_for_gemini(tools_spec)
+                    config_kwargs["tool_config"] = tool_cfg
                 if self._thinking_config is not None:
                     config_kwargs["thinking_config"] = self._thinking_config
                 resp = client.models.generate_content(
@@ -786,7 +869,7 @@ class GeminiClient(LLMClient):
                 # ----- どの part に function_call があるか探索 -----
                 parts_list = list(getattr(getattr(cand, "content", None), "parts", []) or [])
                 fcall_part = next((p for p in parts_list if getattr(p, "function_call", None)), None)
-                if fcall_part is None:                       # ★ ツール呼び出しなし
+                if fcall_part is None or not use_tools:                       # ★ ツール呼び出しなし
                     prefix = "".join(s + "\n" for s in snippets)
                     text_body, reasoning_entries = _extract_gemini_parts(parts_list)
                     self._store_reasoning(reasoning_entries)
@@ -877,8 +960,8 @@ class GeminiClient(LLMClient):
         5) mode=NONE で “自然文だけ” をストリームしユーザへ返す
         """
         # ------------- 前処理 -------------
-        tools_spec = tools or GEMINI_TOOLS_SPEC
-        tool_list  = _merge_tools_for_gemini(tools_spec)
+        tools_spec = GEMINI_TOOLS_SPEC if tools is None else tools
+        use_tools = bool(tools_spec)
         history_snippets = history_snippets or []
         self._store_reasoning([])
         reasoning_chunks: List[str] = []
@@ -894,28 +977,32 @@ class GeminiClient(LLMClient):
             return ""
 
         # ---------- ① Router ----------
-        decision = route(_last_user(messages), tools_spec)
-        logging.info("Router decision:\n%s",
-                     json.dumps(decision, indent=2, ensure_ascii=False))
+        if use_tools:
+            decision = route(_last_user(messages), tools_spec)
+            logging.info("Router decision:\n%s",
+                         json.dumps(decision, indent=2, ensure_ascii=False))
 
-        if decision["call"] == "yes":
-            fc_cfg = types.FunctionCallingConfig(
-                mode="ANY",
-                allowedFunctionNames=[decision["tool"]],
-            )
+            if decision["call"] == "yes":
+                fc_cfg = types.FunctionCallingConfig(
+                    mode="ANY",
+                    allowedFunctionNames=[decision["tool"]],
+                )
+            else:
+                fc_cfg = types.FunctionCallingConfig(mode="AUTO")
+
+            tool_cfg = types.ToolConfig(functionCallingConfig=fc_cfg)
         else:
-            fc_cfg = types.FunctionCallingConfig(mode="AUTO")
-
-        tool_cfg = types.ToolConfig(functionCallingConfig=fc_cfg)
+            tool_cfg = None
 
         def _stream(client):
             sys_msg, contents = self._convert_messages(messages)
             cfg_kwargs = dict(
                 system_instruction=sys_msg,
                 safety_settings=GEMINI_SAFETY_CONFIG,
-                tools=tool_list,
-                tool_config=tool_cfg,
             )
+            if use_tools:
+                cfg_kwargs["tools"] = _merge_tools_for_gemini(tools_spec)
+                cfg_kwargs["tool_config"] = tool_cfg
             if self._thinking_config is not None:
                 cfg_kwargs["thinking_config"] = self._thinking_config
             return client.models.generate_content_stream(
