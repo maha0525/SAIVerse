@@ -1324,6 +1324,7 @@ class SAIVerseManager:
         if success:
             # メモリ上のペルソナの現在地を更新
             persona.current_building_id = to_id
+            persona.register_entry(to_id)
             logging.info(f"Updated {persona_id}'s internal location to {to_id} after summon.")
             # ユーザーの部屋に召喚した場合、自律会話は開始しない
             self._save_building_histories()
@@ -1396,6 +1397,7 @@ class SAIVerseManager:
                 persona.current_building_id = destination_id
                 persona.interaction_mode = previous_mode or "auto"
                 logging.info(f"Updated {persona_id}'s internal location to {destination_id} and restored mode to '{previous_mode}'.")
+                persona.register_entry(destination_id)
 
             # 5. Commit all DB changes at once
             db.commit()
@@ -2256,6 +2258,7 @@ class SAIVerseManager:
             success, reason = self._move_persona(ai_id, from_building_id, target_building_id)
             if success:
                 persona.current_building_id = target_building_id
+                persona.register_entry(target_building_id)
                 return f"Successfully moved '{persona.persona_name}' to '{self.building_map[target_building_id].name}'."
             else:
                 return f"Failed to move: {reason}"

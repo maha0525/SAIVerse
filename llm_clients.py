@@ -1,10 +1,11 @@
 import logging
 import os
 import json
-from typing import Dict, List, Iterator, Tuple, Optional
+from typing import Any, Dict, List, Iterator, Tuple, Optional
 import os
 
 import requests
+import openai
 from openai import OpenAI
 from google import genai
 from google.genai import types
@@ -17,6 +18,7 @@ import base64
 from tools import TOOL_REGISTRY, OPENAI_TOOLS_SPEC, GEMINI_TOOLS_SPEC
 from tools.defs import parse_tool_result
 from llm_router import route
+from model_configs import get_model_config
 
 load_dotenv()
 
@@ -63,9 +65,145 @@ def _merge_tools_for_gemini(request_tools: list[types.Tool] | None) -> list[type
         return request_tools          # ← カスタム関数のみ
     return [GROUNDING_TOOL] + request_tools  # ← 検索だけ or 他ツールだけ
 
+
+def _obj_to_dict(obj: Any) -> Any:
+    """Best-effort conversion to plain dict for OpenAI/Gemini SDK objects."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "model_dump") and callable(getattr(obj, "model_dump")):
+        try:
+            return obj.model_dump()
+        except Exception:
+            pass
+    if hasattr(obj, "to_dict") and callable(getattr(obj, "to_dict")):
+        try:
+            return obj.to_dict()
+        except Exception:
+            pass
+    return obj
+
+
+def _extract_reasoning_from_openai_message(message: Any) -> Tuple[str, List[Dict[str, str]]]:
+    """Return (text, reasoning entries) from an OpenAI-style message."""
+    msg_dict = _obj_to_dict(message) or {}
+    content = msg_dict.get("content")
+    reasoning_entries: List[Dict[str, str]] = []
+    text_segments: List[str] = []
+
+    def _append_reasoning(text: str, title: Optional[str] = None) -> None:
+        text = (text or "").strip()
+        if not text:
+            return
+        reasoning_entries.append({
+            "title": title or "",
+            "text": text,
+        })
+
+    if isinstance(content, list):
+        for part in content:
+            part_dict = _obj_to_dict(part) or {}
+            ptype = part_dict.get("type")
+            text = part_dict.get("text") or part_dict.get("content") or ""
+            if ptype in {"reasoning", "thinking", "analysis"}:
+                _append_reasoning(text, part_dict.get("title"))
+            elif ptype in {"output_text", "text", None}:
+                text_segments.append(text)
+            # ignore other types (e.g. tool_use)
+    elif isinstance(content, str):
+        text_segments.append(content)
+
+    reasoning_content = msg_dict.get("reasoning_content")
+    if isinstance(reasoning_content, str):
+        _append_reasoning(reasoning_content)
+
+    if msg_dict.get("reasoning") and isinstance(msg_dict["reasoning"], dict):
+        rc = msg_dict["reasoning"].get("content")
+        if isinstance(rc, str):
+            _append_reasoning(rc)
+
+    final_text = "".join(text_segments)
+    return final_text, reasoning_entries
+
+
+def _merge_reasoning_strings(chunks: List[str]) -> List[Dict[str, str]]:
+    """Utility to convert raw reasoning text chunks into structured entries."""
+    if not chunks:
+        return []
+    text = "".join(chunks).strip()
+    if not text:
+        return []
+    return [{"title": "", "text": text}]
+
+
+def _process_openai_stream_content(content: Any) -> Tuple[str, List[str]]:
+    """Return (text_fragment, reasoning_chunks) from a streaming delta content."""
+    reasoning_chunks: List[str] = []
+    text_fragments: List[str] = []
+
+    if isinstance(content, list):
+        for part in content:
+            part_dict = _obj_to_dict(part) or {}
+            ptype = part_dict.get("type")
+            text = part_dict.get("text") or part_dict.get("content") or ""
+            if not text:
+                continue
+            if ptype in {"reasoning", "thinking", "analysis"}:
+                reasoning_chunks.append(text)
+            else:
+                text_fragments.append(text)
+    elif isinstance(content, str):
+        text_fragments.append(content)
+
+    return "".join(text_fragments), reasoning_chunks
+
+
+def _extract_reasoning_from_delta(delta: Any) -> List[str]:
+    reasoning_chunks: List[str] = []
+    delta_dict = _obj_to_dict(delta)
+    if not isinstance(delta_dict, dict):
+        return reasoning_chunks
+    raw_reasoning = delta_dict.get("reasoning")
+    if isinstance(raw_reasoning, list):
+        for item in raw_reasoning:
+            item_dict = _obj_to_dict(item) or {}
+            text = item_dict.get("text") or item_dict.get("content") or ""
+            if text:
+                reasoning_chunks.append(text)
+    elif isinstance(raw_reasoning, str):
+        reasoning_chunks.append(raw_reasoning)
+    return reasoning_chunks
+
+
+def _extract_gemini_parts(parts: List[Any]) -> Tuple[str, List[Dict[str, str]]]:
+    """Separate text and thought summaries from Gemini parts."""
+    reasoning_entries: List[Dict[str, str]] = []
+    text_segments: List[str] = []
+    counter = 1
+    for part in parts or []:
+        if part is None:
+            continue
+        thought = getattr(part, "thought", None)
+        text = getattr(part, "text", None)
+        if not text:
+            continue
+        if thought:
+            reasoning_entries.append({
+                "title": f"Thought {counter}",
+                "text": text.strip(),
+            })
+            counter += 1
+        else:
+            text_segments.append(text)
+    return "".join(text_segments), reasoning_entries
+
 # --- Base Client ---
 class LLMClient:
     """Base class for LLM clients."""
+
+    def __init__(self) -> None:
+        self._latest_reasoning: List[Dict[str, str]] = []
 
     def generate(
         self, messages: List[Dict[str, str]], tools: Optional[list] | None = None
@@ -76,6 +214,15 @@ class LLMClient:
         self, messages: List[Dict[str, str]], tools: Optional[list] | None = None
     ) -> Iterator[str]:
         raise NotImplementedError
+
+    # --- Reasoning capture helpers ---
+    def _store_reasoning(self, entries: List[Dict[str, str]] | None) -> None:
+        self._latest_reasoning = entries or []
+
+    def consume_reasoning(self) -> List[Dict[str, str]]:
+        entries = self._latest_reasoning
+        self._latest_reasoning = []
+        return entries
 
 # --- Concrete Clients ---
 class OpenAIClient(LLMClient):
@@ -88,6 +235,7 @@ class OpenAIClient(LLMClient):
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
     ):
+        super().__init__()
         api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
@@ -98,12 +246,13 @@ class OpenAIClient(LLMClient):
 
         self.client = OpenAI(**client_kwargs)
         self.model = model
+        self._request_kwargs: Dict[str, Any] = {}
 
 
 class AnthropicClient(OpenAIClient):
     """Anthropic Claude via OpenAI-compatible endpoint."""
 
-    def __init__(self, model: str = "claude-sonnet-4-5"):
+    def __init__(self, model: str = "claude-sonnet-4-5", config: Optional[Dict[str, Any]] | None = None):
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
             raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set.")
@@ -113,6 +262,103 @@ class AnthropicClient(OpenAIClient):
             base_url = base_url + "/"
         super().__init__(model=model, api_key=api_key, base_url=base_url)
 
+        cfg = config or {}
+
+        def _pick_str(*values: Optional[str]) -> Optional[str]:
+            for val in values:
+                if val is None:
+                    continue
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+                if not isinstance(val, str):
+                    return str(val)
+            return None
+
+        def _pick_int(*values: Optional[Any]) -> Optional[int]:
+            for val in values:
+                if val is None:
+                    continue
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        thinking_payload: Dict[str, Any] = {}
+        thinking_type = _pick_str(cfg.get("thinking_type"), os.getenv("ANTHROPIC_THINKING_TYPE"))
+        thinking_budget = _pick_int(cfg.get("thinking_budget"), os.getenv("ANTHROPIC_THINKING_BUDGET"))
+        thinking_effort = _pick_str(cfg.get("thinking_effort"), os.getenv("ANTHROPIC_THINKING_EFFORT"))
+
+        if thinking_budget is not None and thinking_budget <= 0:
+            logging.warning("Anthropic thinking_budget must be positive; ignoring value=%s", thinking_budget)
+            thinking_budget = None
+
+        if thinking_type:
+            thinking_payload["type"] = thinking_type
+        if thinking_budget is not None:
+            thinking_payload["budget_tokens"] = thinking_budget
+        if thinking_effort:
+            thinking_payload["effort"] = thinking_effort
+
+        if thinking_payload:
+            thinking_payload.setdefault("type", "enabled")
+            extra_body = self._request_kwargs.setdefault("extra_body", {})
+            extra_body["thinking"] = thinking_payload
+
+        max_output_tokens = _pick_int(cfg.get("max_output_tokens"), os.getenv("ANTHROPIC_MAX_OUTPUT_TOKENS"))
+        if max_output_tokens is not None and max_output_tokens > 0:
+            self._request_kwargs["max_output_tokens"] = max_output_tokens
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _disable_thinking_if_needed(self, err: Exception) -> bool:
+        """
+        Detect Anthropic's thinking-block requirement error and disable the thinking payload.
+        Returns True if a retry should be attempted.
+        """
+        trigger = "Expected `thinking` or `redacted_thinking`"
+        message = ""
+
+        if isinstance(err, openai.BadRequestError):
+            try:
+                response = getattr(err, "response", None)
+                if response is not None:
+                    data = response.json()
+                    message = data.get("error", {}).get("message", "") or ""
+            except Exception:
+                message = ""
+            finally:
+                if not message:
+                    message = str(err)
+        else:
+            message = str(err)
+
+        if trigger not in (message or ""):
+            return False
+
+        extra_body = self._request_kwargs.get("extra_body")
+        if not isinstance(extra_body, dict):
+            return False
+
+        if "thinking" not in extra_body:
+            return False
+
+        extra_body.pop("thinking", None)
+        if not extra_body:
+            self._request_kwargs.pop("extra_body", None)
+
+        logging.warning("Anthropic request rejected due to missing thinking blocks; disabling thinking payload and retrying without it.")
+        return True
+
+    def _create_completion(self, **kwargs):
+        try:
+            return self.client.chat.completions.create(**kwargs)
+        except openai.BadRequestError as err:
+            if self._disable_thinking_if_needed(err):
+                return self.client.chat.completions.create(**kwargs)
+            raise
+
     def generate(
         self,
         messages: List[Dict[str, str]],
@@ -120,13 +366,35 @@ class AnthropicClient(OpenAIClient):
         history_snippets: Optional[List[str]] | None = None,
     ) -> str:
         """ツールコールを解決しながら最終テキストを返す（最大 10 回ループ）"""
-        tools = tools or OPENAI_TOOLS_SPEC
+        tools_spec = OPENAI_TOOLS_SPEC if tools is None else tools
+        use_tools = bool(tools_spec)
+        self._store_reasoning([])
+
+        if not use_tools:
+            try:
+                resp = self._create_completion(
+                    model=self.model,
+                    messages=messages,
+                    n=1,
+                    **self._request_kwargs,
+                )
+            except Exception:
+                logging.exception("OpenAI call failed")
+                return "エラーが発生しました。"
+
+            raw_logger.debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
+            choice = resp.choices[0]
+            text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
+            if not text_body:
+                text_body = choice.message.content or ""
+            self._store_reasoning(reasoning_entries)
+            return text_body
 
         # ── Router 判定（最後の user メッセージだけ渡す） ──
         user_msg = next((m["content"] for m in reversed(messages)
                          if m.get("role") == "user"), "")
-        decision = route(user_msg, tools)
-        
+        decision = route(user_msg, tools_spec)
+
         # ログ出力（JSON フォーマットで見やすく）
         snippets: List[str] = []
         try:
@@ -153,12 +421,13 @@ class AnthropicClient(OpenAIClient):
             for i in range(10):
                 tool_choice = forced_tool_choice if i == 0 else "auto"
 
-                resp = self.client.chat.completions.create(
+                resp = self._create_completion(
                     model=self.model,
                     messages=messages,
-                    tools=tools,
+                    tools=tools_spec,
                     tool_choice=tool_choice,
                     n=1,
+                    **self._request_kwargs,
                 )
                 raw_logger.debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
 
@@ -170,8 +439,12 @@ class AnthropicClient(OpenAIClient):
 
                 # ---------- ツールが無い → 通常応答 ----------
                 if not isinstance(tool_calls, list) or len(tool_calls) == 0:
+                    text_body, reasoning_entries = _extract_reasoning_from_openai_message(target_choice.message)
+                    if not text_body:
+                        text_body = target_choice.message.content or ""
+                    self._store_reasoning(reasoning_entries)
                     prefix = "".join(s + "\n" for s in snippets)
-                    return prefix + (target_choice.message.content or "")
+                    return prefix + text_body
 
                 # ---------- ツール有り → 実行 ----------
                 messages.append(target_choice.message)
@@ -222,15 +495,71 @@ class AnthropicClient(OpenAIClient):
         - force_tool_choice: 初回のみ {"type":"function","function":{"name":..}} か "auto"
         - 再帰呼び出し時はデフォルト None → 自動で "auto"
         """
-        tools = tools or OPENAI_TOOLS_SPEC
+        tools_spec = OPENAI_TOOLS_SPEC if tools is None else tools
+        use_tools = bool(tools_spec)
         history_snippets = history_snippets or []
+        self._store_reasoning([])
+        reasoning_chunks: List[str] = []
+
+        if not use_tools:
+            try:
+                sys_msg, contents = self._convert_messages(messages)
+                cfg_kwargs = dict(
+                    system_instruction=sys_msg,
+                    safety_settings=GEMINI_SAFETY_CONFIG,
+                )
+                if self._thinking_config is not None:
+                    cfg_kwargs["thinking_config"] = self._thinking_config
+                resp = self.client.models.generate_content(
+                    model=self.model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(**cfg_kwargs),
+                )
+            except Exception:
+                logging.exception("Gemini call failed")
+                yield "エラーが発生しました。"
+                return
+
+            if not resp.candidates:
+                yield "（Gemini から応答がありませんでした）"
+                return
+
+            cand = resp.candidates[0]
+            raw_logger.debug("Gemini candidate:\n%s", cand)
+            parts_list = list(getattr(getattr(cand, "content", None), "parts", []) or [])
+            text_body, reasoning_entries = _extract_gemini_parts(parts_list)
+            self._store_reasoning(reasoning_entries)
+            yield text_body
+            return
+
+        if not use_tools:
+            try:
+                resp = self._create_completion(
+                    model=self.model,
+                    messages=messages,
+                    n=1,
+                    **self._request_kwargs,
+                )
+            except openai.BadRequestError:
+                logging.exception("OpenAI call failed")
+                yield "エラーが発生しました。"
+                return
+
+            choice = resp.choices[0]
+            text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
+            if not text_body:
+                text_body = choice.message.content or ""
+            self._store_reasoning(reasoning_entries)
+            yield text_body
+            return
+
         # ----------------------------------------
         # 初回呼び出しなら router で強制指定を決定
         # ----------------------------------------
         if force_tool_choice is None:                       # 再帰呼び出し時はスキップ
             user_msg = next((m["content"] for m in reversed(messages)
                              if m.get("role") == "user"), "")
-            decision = route(user_msg, tools)
+            decision = route(user_msg, tools_spec)
             logging.info("Router decision:\n%s", json.dumps(decision, indent=2, ensure_ascii=False))
             if decision["call"] == "yes" and decision["tool"]:
                 force_tool_choice = {
@@ -243,13 +572,19 @@ class AnthropicClient(OpenAIClient):
         # ----------------------------------------
         # OpenAI ストリーム呼び出し
         # ----------------------------------------
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            tools=tools,
-            tool_choice=force_tool_choice,   # ← 初回のみ強制 / 再帰時は "auto"
-            stream=True,
-        )
+        try:
+            resp = self._create_completion(
+                model=self.model,
+                messages=messages,
+                tools=tools_spec,
+                tool_choice=force_tool_choice,   # ← 初回のみ強制 / 再帰時は "auto"
+                stream=True,
+                **self._request_kwargs,
+            )
+        except openai.BadRequestError:
+            logging.exception("OpenAI call failed")
+            yield "エラーが発生しました。"
+            return
 
         call_buffer: dict[str, dict] = {}
         state = "TEXT"
@@ -288,14 +623,29 @@ class AnthropicClient(OpenAIClient):
 
                 # ----- 通常テキスト delta -----
                 if state == "TEXT" and delta.content:
+                    text_fragment, reasoning_piece = _process_openai_stream_content(delta.content)
+                    if reasoning_piece:
+                        reasoning_chunks.extend(reasoning_piece)
+                    extra_reasoning = _extract_reasoning_from_delta(delta)
+                    if extra_reasoning:
+                        reasoning_chunks.extend(extra_reasoning)
+                    if not text_fragment:
+                        continue
                     if not prefix_yielded and history_snippets:
                         yield "\n".join(history_snippets) + "\n"
                         prefix_yielded = True
-                    yield delta.content
+                    yield text_fragment
+                    continue
+
+                additional_reasoning = _extract_reasoning_from_delta(delta)
+                if additional_reasoning:
+                    reasoning_chunks.extend(additional_reasoning)
 
             # ----------------------------------------
             # ストリーム終端後にツールが溜まっていれば実行
             # ----------------------------------------
+            if not call_buffer:
+                self._store_reasoning(_merge_reasoning_strings(reasoning_chunks))
             if call_buffer:
                 logging.debug("call_buffer final: %s", json.dumps(call_buffer, indent=2, ensure_ascii=False))
                 # ① assistant/tool_calls メッセージを先に作る
@@ -369,6 +719,7 @@ class AnthropicClient(OpenAIClient):
                     force_tool_choice="auto",   # ← 2 回目以降は常に auto
                     history_snippets=history_snippets,
                 )
+                return
 
         except Exception:
             logging.exception("OpenAI stream call failed")
@@ -377,7 +728,8 @@ class AnthropicClient(OpenAIClient):
 class GeminiClient(LLMClient):
     """Client for Google Gemini API."""
 
-    def __init__(self, model: str):
+    def __init__(self, model: str, config: Optional[Dict[str, Any]] | None = None):
+        super().__init__()
         free_key = os.getenv("GEMINI_FREE_API_KEY")
         paid_key = os.getenv("GEMINI_API_KEY")
         if not free_key and not paid_key:
@@ -389,6 +741,14 @@ class GeminiClient(LLMClient):
         # デフォルトでは無料枠を使用
         self.client = self.free_client or self.paid_client
         self.model = model
+        cfg = config or {}
+        include_thoughts = cfg.get("include_thoughts")
+        if include_thoughts is None:
+            include_thoughts = "2.5" in (model or "").lower()
+        try:
+            self._thinking_config = types.ThinkingConfig(include_thoughts=True) if include_thoughts else None
+        except Exception:
+            self._thinking_config = None
 
     @staticmethod
     def _is_rate_limit_error(err: Exception) -> bool:
@@ -444,9 +804,11 @@ class GeminiClient(LLMClient):
         history_snippets: Optional[List[str]] | None = None,
     ) -> str:
         # ------------- 前処理 -------------
-        tools_spec = tools or GEMINI_TOOLS_SPEC
-        tool_list  = _merge_tools_for_gemini(tools_spec)
+        tools_spec = GEMINI_TOOLS_SPEC if tools is None else tools
+        use_tools = bool(tools_spec)
+        tool_list  = _merge_tools_for_gemini(tools_spec) if use_tools else []
         history_snippets = history_snippets or []
+        self._store_reasoning([])
 
         # 直近 user メッセージ抽出（dict と Content 混在対応）
         def _last_user(msgs) -> str:
@@ -459,34 +821,44 @@ class GeminiClient(LLMClient):
             return ""
 
         # ---------- ① Router ----------
-        decision = route(_last_user(messages), tools_spec)
-        logging.info("Router decision:\n%s",
-                     json.dumps(decision, indent=2, ensure_ascii=False))
+        if use_tools:
+            decision = route(_last_user(messages), tools_spec)
+            logging.info("Router decision:\n%s",
+                         json.dumps(decision, indent=2, ensure_ascii=False))
 
-        if decision["call"] == "yes":
-            fc_cfg = types.FunctionCallingConfig(
-                mode="ANY",
-                allowedFunctionNames=[decision["tool"]],
-            )
+            tool_list = _merge_tools_for_gemini(tools_spec)
+
+            if decision["call"] == "yes":
+                fc_cfg = types.FunctionCallingConfig(
+                    mode="ANY",
+                    allowedFunctionNames=[decision["tool"]],
+                )
+            else:
+                fc_cfg = types.FunctionCallingConfig(mode="AUTO")
+
+            tool_cfg = types.ToolConfig(functionCallingConfig=fc_cfg)
         else:
-            fc_cfg = types.FunctionCallingConfig(mode="AUTO")
+            tool_cfg = None
+            tool_list = []
 
-        tool_cfg = types.ToolConfig(functionCallingConfig=fc_cfg)
         snippets: List[str] = history_snippets
 
         def _call(client, model_id: str):
             for _ in range(10):
                 sys_msg, contents = self._convert_messages(messages)
-                tool_list = _merge_tools_for_gemini(tools)
+                config_kwargs = dict(
+                    system_instruction=sys_msg,
+                    safety_settings=GEMINI_SAFETY_CONFIG,
+                )
+                if use_tools:
+                    config_kwargs["tools"] = _merge_tools_for_gemini(tools_spec)
+                    config_kwargs["tool_config"] = tool_cfg
+                if self._thinking_config is not None:
+                    config_kwargs["thinking_config"] = self._thinking_config
                 resp = client.models.generate_content(
                     model=model_id,
                     contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=sys_msg,
-                        safety_settings=GEMINI_SAFETY_CONFIG,
-                        tools=tool_list,
-                        tool_config=tool_cfg,
-                    ),
+                    config=types.GenerateContentConfig(**config_kwargs),
                 )
                 raw_logger.debug("Gemini raw:\n%s", resp)
                 if not resp.candidates:
@@ -495,19 +867,13 @@ class GeminiClient(LLMClient):
                 raw_logger.debug("Gemini candidate:\n%s", cand)
 
                 # ----- どの part に function_call があるか探索 -----
-                fcall_part = next((p for p in cand.content.parts if p.function_call), None)
-                if fcall_part is None:                       # ★ ツール呼び出しなし
+                parts_list = list(getattr(getattr(cand, "content", None), "parts", []) or [])
+                fcall_part = next((p for p in parts_list if getattr(p, "function_call", None)), None)
+                if fcall_part is None or not use_tools:                       # ★ ツール呼び出しなし
                     prefix = "".join(s + "\n" for s in snippets)
-                    text_segments: list[str] = []
-                    for part_idx, part in enumerate(cand.content.parts):
-                        text_val = getattr(part, "text", None) or ""
-                        if not text_val:
-                            continue
-                        raw_logger.debug(
-                            "Gemini text part[%s]: %s", part_idx, text_val
-                        )
-                        text_segments.append(text_val)
-                    return prefix + "".join(text_segments)
+                    text_body, reasoning_entries = _extract_gemini_parts(parts_list)
+                    self._store_reasoning(reasoning_entries)
+                    return prefix + text_body
 
                 # ----- assistant/tool_calls -----
                 messages.append(
@@ -594,9 +960,11 @@ class GeminiClient(LLMClient):
         5) mode=NONE で “自然文だけ” をストリームしユーザへ返す
         """
         # ------------- 前処理 -------------
-        tools_spec = tools or GEMINI_TOOLS_SPEC
-        tool_list  = _merge_tools_for_gemini(tools_spec)
+        tools_spec = GEMINI_TOOLS_SPEC if tools is None else tools
+        use_tools = bool(tools_spec)
         history_snippets = history_snippets or []
+        self._store_reasoning([])
+        reasoning_chunks: List[str] = []
 
         # 直近 user メッセージ抽出（dict と Content 混在対応）
         def _last_user(msgs) -> str:
@@ -609,31 +977,38 @@ class GeminiClient(LLMClient):
             return ""
 
         # ---------- ① Router ----------
-        decision = route(_last_user(messages), tools_spec)
-        logging.info("Router decision:\n%s",
-                     json.dumps(decision, indent=2, ensure_ascii=False))
+        if use_tools:
+            decision = route(_last_user(messages), tools_spec)
+            logging.info("Router decision:\n%s",
+                         json.dumps(decision, indent=2, ensure_ascii=False))
 
-        if decision["call"] == "yes":
-            fc_cfg = types.FunctionCallingConfig(
-                mode="ANY",
-                allowedFunctionNames=[decision["tool"]],
-            )
+            if decision["call"] == "yes":
+                fc_cfg = types.FunctionCallingConfig(
+                    mode="ANY",
+                    allowedFunctionNames=[decision["tool"]],
+                )
+            else:
+                fc_cfg = types.FunctionCallingConfig(mode="AUTO")
+
+            tool_cfg = types.ToolConfig(functionCallingConfig=fc_cfg)
         else:
-            fc_cfg = types.FunctionCallingConfig(mode="AUTO")
-
-        tool_cfg = types.ToolConfig(functionCallingConfig=fc_cfg)
+            tool_cfg = None
 
         def _stream(client):
             sys_msg, contents = self._convert_messages(messages)
+            cfg_kwargs = dict(
+                system_instruction=sys_msg,
+                safety_settings=GEMINI_SAFETY_CONFIG,
+            )
+            if use_tools:
+                cfg_kwargs["tools"] = _merge_tools_for_gemini(tools_spec)
+                cfg_kwargs["tool_config"] = tool_cfg
+            if self._thinking_config is not None:
+                cfg_kwargs["thinking_config"] = self._thinking_config
             return client.models.generate_content_stream(
                 model=self.model,
                 contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=sys_msg,
-                    safety_settings=GEMINI_SAFETY_CONFIG,
-                    tools=tool_list,
-                    tool_config=tool_cfg,
-                ),
+                config=types.GenerateContentConfig(**cfg_kwargs),
             )
         active_client = self.client
         try:
@@ -651,6 +1026,7 @@ class GeminiClient(LLMClient):
         fcall: types.FunctionCall | None = None
         prefix_yielded = False
         seen_stream_texts: Dict[int, str] = {}
+        thought_seen: Dict[int, str] = {}
         for chunk in stream:
             raw_logger.debug("Gemini stream chunk:\n%s", chunk)
             if not chunk.candidates:                    # keep-alive
@@ -666,11 +1042,23 @@ class GeminiClient(LLMClient):
                         "Gemini function_call (part %s): %s", part_idx, part.function_call
                     )
                     fcall = part.function_call         # 後で実行
+                elif getattr(part, "thought", False):
+                    text_val = getattr(part, "text", None) or ""
+                    if text_val:
+                        prev_thought = thought_seen.get(cand_index, "")
+                        if text_val.startswith(prev_thought):
+                            delta = text_val[len(prev_thought):]
+                            if delta:
+                                reasoning_chunks.append(delta)
+                                thought_seen[cand_index] = prev_thought + delta
+                        else:
+                            reasoning_chunks.append(text_val)
+                            thought_seen[cand_index] = prev_thought + text_val
 
             combined_text = "".join(
                 getattr(part, "text", None) or ""
                 for part in cand.content.parts
-                if getattr(part, "text", None)
+                if getattr(part, "text", None) and not getattr(part, "thought", False)
             )
             if not combined_text:
                 continue
@@ -691,6 +1079,7 @@ class GeminiClient(LLMClient):
             seen_stream_texts[cand_index] = combined_text
         # ---------- ③ ツール実行 ----------
         if fcall is None:
+            self._store_reasoning(_merge_reasoning_strings(reasoning_chunks))
             return                                     # AUTO モードで text だけ返った
 
         fn = TOOL_REGISTRY.get(fcall.name)
@@ -744,20 +1133,24 @@ class GeminiClient(LLMClient):
         tool_cfg_none = types.ToolConfig(functionCallingConfig=fc_none)
 
         sys_msg2, contents2 = self._convert_messages(messages)
+        cfg_kwargs2 = dict(
+            system_instruction=sys_msg2,
+            safety_settings=GEMINI_SAFETY_CONFIG,
+            tools=tool_list,
+            tool_config=tool_cfg_none,
+        )
+        if self._thinking_config is not None:
+            cfg_kwargs2["thinking_config"] = self._thinking_config
         stream2 = active_client.models.generate_content_stream(
             model=self.model,
             contents=contents2,
-            config=types.GenerateContentConfig(
-                system_instruction=sys_msg2,
-                safety_settings=GEMINI_SAFETY_CONFIG,
-                tools=tool_list,               # 同じリストで OK
-                tool_config=tool_cfg_none,
-            ),
+            config=types.GenerateContentConfig(**cfg_kwargs2),
         )
 
         yielded = False
         prefix_yielded2 = False
         seen_stream_texts2: Dict[int, str] = {}
+        thought_seen2: Dict[int, str] = {}
         for chunk in stream2:
             raw_logger.debug("Gemini stream2 chunk:\n%s", chunk)
             if not chunk.candidates:
@@ -767,10 +1160,23 @@ class GeminiClient(LLMClient):
             if not cand.content or not cand.content.parts:
                 continue
             cand_index = getattr(cand, "index", 0)
+            for part in cand.content.parts:
+                if getattr(part, "thought", False):
+                    text_val = getattr(part, "text", None) or ""
+                    if text_val:
+                        prev = thought_seen2.get(cand_index, "")
+                        if text_val.startswith(prev):
+                            delta = text_val[len(prev):]
+                            if delta:
+                                reasoning_chunks.append(delta)
+                                thought_seen2[cand_index] = prev + delta
+                        else:
+                            reasoning_chunks.append(text_val)
+                            thought_seen2[cand_index] = prev + text_val
             combined_text = "".join(
                 getattr(part, "text", None) or ""
                 for part in cand.content.parts
-                if getattr(part, "text", None)
+                if getattr(part, "text", None) and not getattr(part, "thought", False)
             )
             if not combined_text:
                 continue
@@ -797,10 +1203,12 @@ class GeminiClient(LLMClient):
                 yield "\n".join(history_snippets) + "\n" + result
             else:
                 yield result
+        self._store_reasoning(_merge_reasoning_strings(reasoning_chunks))
 
 class OllamaClient(LLMClient):
     """Client for Ollama API."""
     def __init__(self, model: str, context_length: int):
+        super().__init__()
         self.model = model
         self.context_length = context_length
         self.fallback_client: Optional[LLMClient] = None
@@ -950,11 +1358,12 @@ class OllamaClient(LLMClient):
 # --- Factory ---
 def get_llm_client(model: str, provider: str, context_length: int) -> LLMClient:
     """Factory function to get the appropriate LLM client."""
+    config = get_model_config(model)
     if provider == "openai":
         return OpenAIClient(model)
     elif provider == "anthropic":
-        return AnthropicClient(model)
+        return AnthropicClient(model, config=config)
     elif provider == "gemini":
-        return GeminiClient(model)
+        return GeminiClient(model, config=config)
     else:
         return OllamaClient(model, context_length)
