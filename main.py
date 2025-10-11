@@ -169,6 +169,36 @@ details.saiv-thinking summary:focus { outline: none; }
   border-top-width: 3px !important;
   border-right-width: 3px !important;
 }
+
+#saiverse-sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+#saiverse-sidebar-nav .saiverse-nav-item {
+  cursor: pointer;
+  padding: 8px 12px;
+  border-radius: 8px;
+  color: inherit;
+  background: transparent;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+#saiverse-sidebar-nav .saiverse-nav-item:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+html[data-theme='dark'] #saiverse-sidebar-nav .saiverse-nav-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+#saiverse-sidebar-nav .saiverse-nav-item.active {
+  font-weight: 600;
+  background: rgba(64, 128, 255, 0.16);
+  color: inherit;
+}
+html[data-theme='dark'] #saiverse-sidebar-nav .saiverse-nav-item.active {
+  background: rgba(64, 128, 255, 0.28);
+}
+
 @media (max-width: 768px) {
   :global(.saiverse-sidebar.sidebar) {
     width: 80vw !important;
@@ -967,7 +997,15 @@ def main():
     # 3. Gradio UIを作成
     with gr.Blocks(fill_width=True, head=HEAD_VIEWPORT, css=NOTE_CSS, title=f"SAIVerse City: {args.city_name}", theme=gr.themes.Soft()) as demo:
         with gr.Sidebar(open=False, width=340, elem_id="sample_sidebar", elem_classes=["saiverse-sidebar"]):
-            gr.Markdown("サンプルのサイドバーです")
+            gr.Markdown("### ?????????")
+            gr.HTML("""
+                <div id="saiverse-sidebar-nav">
+                    <div class="saiverse-nav-item" data-tab-label="ワールドビュー">ワールドビュー</div>
+                    <div class="saiverse-nav-item" data-tab-label="自律会話ログ">自律会話ログ</div>
+                    <div class="saiverse-nav-item" data-tab-label="DB Manager">DB Manager</div>
+                    <div class="saiverse-nav-item" data-tab-label="ワールドエディタ">ワールドエディタ</div>
+                </div>
+                """)
         with gr.Tabs():
             with gr.TabItem("ワールドビュー"):
                 with gr.Row():
@@ -1128,6 +1166,51 @@ def main():
         # UIロード時にJavaScriptを実行し、5秒ごとの自動更新タイマーを設定する
         js_auto_refresh = """
         () => {
+            const updateActiveNav = () => {
+                const activeTab = document.querySelector('button[role="tab"][aria-selected="true"]');
+                if (!activeTab) {
+                    return;
+                }
+                const activeLabel = activeTab.textContent.trim();
+                document.querySelectorAll('#saiverse-sidebar-nav .saiverse-nav-item').forEach((item) => {
+                    item.classList.toggle('active', item.dataset.tabLabel === activeLabel);
+                });
+            };
+
+            const attachNavHandlers = () => {
+                const navItems = document.querySelectorAll('#saiverse-sidebar-nav .saiverse-nav-item');
+                if (!navItems.length) {
+                    return false;
+                }
+                navItems.forEach((item) => {
+                    if (item.dataset.listenerAttached === 'true') {
+                        return;
+                    }
+                    item.dataset.listenerAttached = 'true';
+                    item.addEventListener('click', () => {
+                        const label = item.dataset.tabLabel;
+                        const target = Array.from(document.querySelectorAll('button[role="tab"]')).find(
+                            (btn) => btn.textContent.trim() === label
+                        );
+                        if (target) {
+                            target.click();
+                            window.requestAnimationFrame(updateActiveNav);
+                        }
+                    });
+                });
+                document.querySelectorAll('button[role="tab"]').forEach((btn) => {
+                    if (btn.dataset.sidebarNavListener === 'true') {
+                        return;
+                    }
+                    btn.dataset.sidebarNavListener = 'true';
+                    btn.addEventListener('click', () => {
+                        window.requestAnimationFrame(updateActiveNav);
+                    });
+                });
+                updateActiveNav();
+                return true;
+            };
+
             const markSidebars = () => {
                 let found = false;
                 document.querySelectorAll('.sidebar').forEach((el) => {
@@ -1147,6 +1230,9 @@ def main():
                     }
                     found = true;
                 });
+                if (found) {
+                    attachNavHandlers();
+                }
                 return found;
             };
 
@@ -1154,10 +1240,14 @@ def main():
                 let attempts = 0;
                 const watcher = setInterval(() => {
                     attempts += 1;
-                    if (markSidebars() || attempts > 20) {
+                    if (markSidebars() || attachNavHandlers() || attempts > 20) {
                         clearInterval(watcher);
+                        updateActiveNav();
                     }
                 }, 250);
+            } else {
+                attachNavHandlers();
+                updateActiveNav();
             }
 
             setInterval(() => {
@@ -1166,6 +1256,8 @@ def main():
                     button.click();
                 }
                 markSidebars();
+                attachNavHandlers();
+                updateActiveNav();
             }, 5000);
         }
         """
