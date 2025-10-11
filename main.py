@@ -1000,15 +1000,15 @@ def main():
     # 3. Gradio UIを作成
     with gr.Blocks(fill_width=True, head=HEAD_VIEWPORT, css=NOTE_CSS, title=f"SAIVerse City: {args.city_name}", theme=gr.themes.Soft()) as demo:
         with gr.Sidebar(open=False, width=340, elem_id="sample_sidebar", elem_classes=["saiverse-sidebar"]):
-            gr.Markdown("### セクション切り替え")
-            gr.HTML("""
-                <div id="saiverse-sidebar-nav">
-                    <div class="saiverse-nav-item" data-tab-label="ワールドビュー">ワールドビュー</div>
-                    <div class="saiverse-nav-item" data-tab-label="自律会話ログ">自律会話ログ</div>
-                    <div class="saiverse-nav-item" data-tab-label="DB Manager">DB Manager</div>
-                    <div class="saiverse-nav-item" data-tab-label="ワールドエディタ">ワールドエディタ</div>
-                </div>
-                """)
+            with gr.Accordion("セクション切り替え", open=False):
+                gr.HTML("""
+                    <div id="saiverse-sidebar-nav">
+                        <div class="saiverse-nav-item" data-tab-label="ワールドビュー">ワールドビュー</div>
+                        <div class="saiverse-nav-item" data-tab-label="自律会話ログ">自律会話ログ</div>
+                        <div class="saiverse-nav-item" data-tab-label="DB Manager">DB Manager</div>
+                        <div class="saiverse-nav-item" data-tab-label="ワールドエディタ">ワールドエディタ</div>
+                    </div>
+                    """)
 
         with gr.Column(elem_id="section-worldview", elem_classes=['saiverse-section']):
             with gr.Row():
