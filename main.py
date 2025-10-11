@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import threading
 import time
 import subprocess
@@ -31,8 +31,55 @@ MODEL_CHOICES = ["None"] + get_model_choices()
 AUTONOMOUS_BUILDING_CHOICES = []
 AUTONOMOUS_BUILDING_MAP = {}
 
+VERSION = time.strftime("%Y%m%d%H%M%S")  # 例: 20251008121530
+
+HEAD_VIEWPORT = '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">'
+
+
 NOTE_CSS = """
-/* Color tokens tied to Gradio theme (auto switches with gradio light/dark) */
+/* === モバイルで Chatbot 親ブロックの左右パディングを完全に殺す === */
+@media (max-width: 680px) {
+  /* 親ブロック特定（:has はそのまま・@supports は外す） */
+  :is(.gr-block, .gr-column, .gr-row, .group, .tabitem):has(> #chat_wrap):not(.sidebar-parent),
+  :is(.gr-block, .gr-column, .gr-row, .group, .tabitem):has(#my_chat):not(.sidebar-parent) {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    max-width: 100% !important;
+    width: 100% !important;
+  }
+
+  /* フォールバック：親の内側余白を“子から”物理的に打ち消す */
+  #chat_wrap {
+    /* ビューポートいっぱいに拡げて親のpaddingを無効化 */
+    width: 100vw !important;
+    max-width: 100vw !important;
+    margin-left: calc(50% - 50vw) !important;
+    margin-right: calc(50% - 50vw) !important;
+  }
+
+  /* Chatbot 本体も全幅に */
+  #my_chat {
+    max-width: 100% !important;
+    width: 100% !important;
+  }
+
+  /* Markdown クランプ解除（保険） */
+  #my_chat .prose, #my_chat [class*="prose"] { max-width: none !important; }
+
+  /* 長文の折返し */
+  #my_chat pre { white-space: pre-wrap !important; word-break: break-word !important; }
+}
+
+/* iOS セーフエリア（必要なら併用可：viewport-fit=cover を head に入れている前提） */
+@supports (padding: env(safe-area-inset-left)) {
+  body {
+    padding-left: max(0px, env(safe-area-inset-left));
+    padding-right: max(0px, env(safe-area-inset-right));
+  }
+}
+
 html[data-theme='light'] {
   --msg-bg: #f3f4f6;
   --msg-fg: #111827;
@@ -73,10 +120,110 @@ html[data-theme='dark'] {
 .note-box { background: var(--note-bg); color: var(--note-fg) !important; border-left: 4px solid #ffbf00; padding: 8px 12px; margin: 0; border-radius: 6px; font-size: .92rem; }
 .note-box b { color: var(--note-fg) !important; }
 
+.saiverse-move-radio .wrap {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 6px;
+}
+
+  gap: 6px;
+}
+.saiverse-move-radio .wrap label {
+  margin: 0 !important;
+}
+/* Reasoning (Thinking) blocks */
+details.saiv-thinking { margin-top: 10px; border: 1px solid rgba(128,128,128,0.25); border-radius: 8px; padding: 8px 12px; background: rgba(0,0,0,0.02); }
+html[data-theme='dark'] details.saiv-thinking { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.12); }
+details.saiv-thinking summary { cursor: pointer; font-weight: 600; outline: none; }
+details.saiv-thinking summary:focus { outline: none; }
+.saiv-thinking-body { margin-top: 6px; display: flex; flex-direction: column; gap: 8px; font-size: 0.96rem; color: inherit; }
+.saiv-thinking-item { border-top: 1px solid rgba(128,128,128,0.2); padding-top: 6px; }
+.saiv-thinking-item:first-child { border-top: none; padding-top: 0; }
+.saiv-thinking-title { font-weight: 600; margin-bottom: 4px; }
+.saiv-thinking-text { line-height: 1.45; word-break: break-word; }
+
 /* Strongly scoped avatar rounding for Chatbot area */
 #my_chat .saiv-avatar { border-radius: 12px !important; overflow: hidden !important; display: inline-block; width: 60px; height: 60px; min-width: 60px; }
 #my_chat .saiv-avatar > img { border-radius: 12px !important; margin: 0 !important; width: 100% !important; height: 100% !important; object-fit: cover !important; display: block !important; clip-path: inset(0 round 12px) !important; }
 #my_chat .saiv-avatar > picture > img { border-radius: 12px !important; margin: 0 !important; clip-path: inset(0 round 12px) !important; }
+
+:global(.saiverse-sidebar.sidebar) {
+  width: 20vw !important;
+}
+:global(.saiverse-sidebar.sidebar):not(.right) {
+  left: calc(-1 * 20vw) !important;
+}
+:global(.saiverse-sidebar.sidebar).right {
+  right: calc(-1 * 20vw) !important;
+}
+
+/* Sidebar toggle を押しやすく */
+:global(.saiverse-sidebar.sidebar) .toggle-button {
+  width: 56px !important;
+  height: 56px !important;
+  padding: 0 !important;
+}
+:global(.saiverse-sidebar.sidebar):not(.right) .toggle-button,
+:global(.saiverse-sidebar.sidebar).open:not(.right) .toggle-button {
+  border-radius: 0 28px 28px 0 !important;
+}
+:global(.saiverse-sidebar.sidebar).right .toggle-button,
+:global(.saiverse-sidebar.sidebar).open.right .toggle-button {
+  border-radius: 28px 0 0 28px !important;
+}
+:global(.saiverse-sidebar.sidebar) .chevron {
+  padding-right: 0 !important;
+}
+:global(.saiverse-sidebar.sidebar) .chevron-left {
+  width: 18px !important;
+  height: 18px !important;
+  border-top-width: 3px !important;
+  border-right-width: 3px !important;
+}
+
+#saiverse-sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+#saiverse-sidebar-nav .saiverse-nav-item {
+  cursor: pointer;
+  padding: 8px 12px;
+  border-radius: 8px;
+  color: inherit;
+  background: transparent;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+#saiverse-sidebar-nav .saiverse-nav-item:hover {
+  background: rgba(0, 0, 0, 0.08);
+}
+html[data-theme='dark'] #saiverse-sidebar-nav .saiverse-nav-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+#saiverse-sidebar-nav .saiverse-nav-item.active {
+  font-weight: 600;
+  background: rgba(64, 128, 255, 0.16);
+  color: inherit;
+}
+html[data-theme='dark'] #saiverse-sidebar-nav .saiverse-nav-item.active {
+  background: rgba(64, 128, 255, 0.28);
+}
+.saiverse-section.saiverse-hidden {
+  display: none !important;
+}
+
+@media (max-width: 768px) {
+  :global(.saiverse-sidebar.sidebar) {
+    width: 60vw !important;
+  }
+  :global(.saiverse-sidebar.sidebar):not(.right) {
+    left: -60vw !important;
+  }
+  :global(.saiverse-sidebar.sidebar).right {
+    right: -60vw !important;
+  }
+}
 """
 
 def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -136,13 +283,15 @@ def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[s
     return display
 
 
+
 def respond_stream(message: str):
     """Stream AI response for chat and update UI components if needed."""
     # Get history from current location
     print(manager.occupants[manager.user_current_building_id])
     current_building_id = manager.user_current_building_id
     if not current_building_id:
-        yield [{"role": "assistant", "content": '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'}], gr.update(), gr.update(), gr.update()
+        dropdown_update, radio_update = _prepare_move_component_updates()
+        yield [{"role": "assistant", "content": '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'}], dropdown_update, radio_update, gr.update(), gr.update()
         return
 
     raw_history = manager.get_building_history(current_building_id)
@@ -153,23 +302,129 @@ def respond_stream(message: str):
     for token in manager.handle_user_input_stream(message):
         ai_message += token
         # ストリーミング中はドロップダウンは更新しない
-        yield history + [{"role": "assistant", "content": ai_message}], gr.update(), gr.update(), gr.update()
+        yield history + [{"role": "assistant", "content": ai_message}], gr.update(), gr.update(), gr.update(), gr.update()
     # After streaming, get the final history again to include system messages etc.
     final_raw = manager.get_building_history(current_building_id)
     final_history_formatted = format_history_for_chatbot(final_raw)
 
-    # Check if the building list has changed
-    global BUILDING_CHOICES, BUILDING_NAME_TO_ID_MAP
     summonable_personas = manager.get_summonable_personas()
     conversing_personas = manager.get_conversing_personas()
-    new_building_names = sorted([b.name for b in manager.buildings]) # ソートして比較
+    dropdown_update, radio_update = _prepare_move_component_updates()
+    yield (
+        final_history_formatted,
+        dropdown_update,
+        radio_update,
+        gr.update(choices=summonable_personas, value=None),
+        gr.update(choices=conversing_personas, value=None),
+    )
+
+
+def _get_current_location_name() -> str:
+    if not manager or not manager.user_current_building_id:
+        return "不明な場所"
+    if manager.user_current_building_id in manager.building_map:
+        return manager.building_map.get(manager.user_current_building_id).name
+    return "不明な場所"
+
+
+def _format_location_label(location_name: str) -> str:
+    return f"現在地: {location_name}"
+
+
+def _prepare_move_component_updates(force_dropdown_value: Optional[str] = None, force_radio: bool = False):
+    if not manager:
+        return gr.update(), gr.update()
+    global BUILDING_CHOICES, BUILDING_NAME_TO_ID_MAP
+    new_building_names = sorted([b.name for b in manager.buildings])
+    dropdown_kwargs = {}
+    radio_kwargs = {}
     if new_building_names != sorted(BUILDING_CHOICES):
-        logging.info("Building list has changed. Updating dropdown.")
+        logging.info("Building list has changed. Updating selection components.")
         BUILDING_CHOICES = new_building_names
         BUILDING_NAME_TO_ID_MAP = {b.name: b.building_id for b in manager.buildings}
-        yield final_history_formatted, gr.update(choices=BUILDING_CHOICES), gr.update(choices=summonable_personas, value=None), gr.update(choices=conversing_personas, value=None)
-    else:
-        yield final_history_formatted, gr.update(), gr.update(choices=summonable_personas, value=None), gr.update(choices=conversing_personas, value=None)
+        dropdown_kwargs["choices"] = BUILDING_CHOICES
+        radio_kwargs["choices"] = BUILDING_CHOICES
+    if force_dropdown_value is not None:
+        dropdown_kwargs["value"] = force_dropdown_value
+    if force_radio or "choices" in radio_kwargs:
+        radio_kwargs["value"] = _get_current_location_name()
+    dropdown_update = gr.update(**dropdown_kwargs) if dropdown_kwargs else gr.update()
+    radio_update = gr.update(**radio_kwargs) if radio_kwargs else gr.update()
+    return dropdown_update, radio_update
+
+
+def _perform_user_move(building_name: Optional[str]):
+    if not manager or not manager.user_current_building_id:
+        location_name = _get_current_location_name()
+        return (
+            [],
+            location_name,
+            gr.update(value=_format_location_label(location_name)),
+            gr.update(),
+            gr.update(),
+        )
+
+    if not building_name:
+        current_history = format_history_for_chatbot(
+            manager.get_building_history(manager.user_current_building_id)
+        )
+        location_name = _get_current_location_name()
+        return (
+            current_history,
+            location_name,
+            gr.update(value=_format_location_label(location_name)),
+            gr.update(),
+            gr.update(),
+        )
+
+    target_building_id = BUILDING_NAME_TO_ID_MAP.get(building_name)
+    if target_building_id:
+        manager.move_user(target_building_id)
+
+    new_history = manager.get_building_history(manager.user_current_building_id)
+    new_location_name = _get_current_location_name()
+    summonable_personas = manager.get_summonable_personas()
+    conversing_personas = manager.get_conversing_personas()
+    return (
+        format_history_for_chatbot(new_history),
+        new_location_name,
+        gr.update(value=_format_location_label(new_location_name)),
+        gr.update(choices=summonable_personas, value=None),
+        gr.update(choices=conversing_personas, value=None),
+    )
+
+
+def move_user_ui(building_name: str):
+    """UI handler for moving the user."""
+    history, new_location_name, location_markdown_update, summon_update, conversing_update = _perform_user_move(building_name)
+    dropdown_update, radio_update = _prepare_move_component_updates(force_radio=True)
+    return (
+        history,
+        new_location_name,
+        location_markdown_update,
+        dropdown_update,
+        radio_update,
+        summon_update,
+        conversing_update,
+    )
+
+
+def move_user_radio_ui(building_name: str):
+    """Radio handler for moving the user and syncing dropdown."""
+    history, new_location_name, location_markdown_update, summon_update, conversing_update = _perform_user_move(building_name)
+    dropdown_update, radio_update = _prepare_move_component_updates(
+        force_dropdown_value=new_location_name,
+        force_radio=True,
+    )
+    return (
+        dropdown_update,
+        history,
+        new_location_name,
+        location_markdown_update,
+        radio_update,
+        summon_update,
+        conversing_update,
+    )
 
 
 def select_model(model_name: str):
@@ -181,24 +436,6 @@ def select_model(model_name: str):
         return []
     raw_history = manager.get_building_history(current_building_id)
     return format_history_for_chatbot(raw_history)
-
-def move_user_ui(building_name: str):
-    """UI handler for moving the user."""
-    if not building_name:
-        # Just return current state if nothing is selected
-        current_history = format_history_for_chatbot(manager.get_building_history(manager.user_current_building_id))
-        current_location = manager.building_map.get(manager.user_current_building_id).name if manager.user_current_building_id in manager.building_map else "不明"
-        return current_history, current_location, gr.update(), gr.update()
-
-    target_building_id = BUILDING_NAME_TO_ID_MAP.get(building_name)
-    if target_building_id:
-        manager.move_user(target_building_id)
-
-    new_history = manager.get_building_history(manager.user_current_building_id)
-    new_location_name = manager.building_map.get(manager.user_current_building_id).name
-    summonable_personas = manager.get_summonable_personas()
-    conversing_personas = manager.get_conversing_personas()
-    return format_history_for_chatbot(new_history), new_location_name, gr.update(choices=summonable_personas, value=None), gr.update(choices=conversing_personas, value=None)
 
 def call_persona_ui(persona_name: str):
     """UI handler for summoning a persona."""
@@ -862,30 +1099,64 @@ def main():
 
     # --- FastAPIとGradioの統合 ---
     # 3. Gradio UIを作成
-    with gr.Blocks(css=NOTE_CSS, title=f"SAIVerse City: {args.city_name}", theme=gr.themes.Soft()) as demo:
-        with gr.Tabs():
-            with gr.TabItem("ワールドビュー"):
-                with gr.Row():
-                    user_location_display = gr.Textbox(
-                        # managerから現在地を取得して表示する
-                        value=lambda: manager.building_map.get(manager.user_current_building_id).name if manager.user_current_building_id and manager.user_current_building_id in manager.building_map else "不明な場所",
-                        label="あなたの現在地",
-                        interactive=False,
-                        scale=2
-                    )
-                    move_building_dropdown = gr.Dropdown(
-                        choices=BUILDING_CHOICES,
-                        label="移動先の建物",
-                        interactive=True,
-                        scale=2
-                    )
-                    move_btn = gr.Button("移動", scale=1)
+    with gr.Blocks(fill_width=True, head=HEAD_VIEWPORT, css=NOTE_CSS, title=f"SAIVerse City: {args.city_name}", theme=gr.themes.Soft()) as demo:
+        with gr.Sidebar(open=False, width=340, elem_id="sample_sidebar", elem_classes=["saiverse-sidebar"]):
+            with gr.Accordion("セクション切り替え", open=False):
+                gr.HTML("""
+                    <div id="saiverse-sidebar-nav">
+                        <div class="saiverse-nav-item" data-tab-label="ワールドビュー">ワールドビュー</div>
+                        <div class="saiverse-nav-item" data-tab-label="自律会話ログ" style="display:none">自律会話ログ</div>
+                        <div class="saiverse-nav-item" data-tab-label="DB Manager">DB Manager</div>
+                        <div class="saiverse-nav-item" data-tab-label="ワールドエディタ">ワールドエディタ</div>
+                    </div>
+                    """)
+            with gr.Accordion("移動", open=False):
+                move_destination_radio = gr.Radio(
+                    choices=BUILDING_CHOICES,
+                    value=lambda: _get_current_location_name(),
+                    label="移動先",
+                    interactive=True,
+                    elem_classes=["saiverse-move-radio"],
+                    show_label=False
+                )
+            gr.Markdown("---")
+            with gr.Column(elem_classes=["saiverse-sidebar-autolog-controls"]):
+                start_button = gr.Button("自律会話を開始", variant="primary", scale=1)
+                stop_button = gr.Button("自律会話を停止", variant="stop", scale=1)
+                status_display = gr.Textbox(
+                    value="停止中",
+                    label="現在のステータス",
+                    interactive=False,
+                    scale=1
+                )
 
-                gr.Markdown("---")
+        with gr.Column(elem_id="section-worldview", elem_classes=['saiverse-section']):
+            with gr.Row():
+                user_location_display = gr.Textbox(
+                    # managerから現在地を取得して表示する
+                    value=lambda: manager.building_map.get(manager.user_current_building_id).name if manager.user_current_building_id and manager.user_current_building_id in manager.building_map else "不明な場所",
+                    label="あなたの現在地",
+                    interactive=False,
+                    scale=2,
+                    visible=False
+                )
+                move_building_dropdown = gr.Dropdown(
+                    choices=BUILDING_CHOICES,
+                    label="移動先の建物",
+                    interactive=True,
+                    scale=2,
+                    visible=False
+                )
+                move_btn = gr.Button("移動", scale=1, visible=False)
 
-                # --- ここから下は既存のUI ---
-                gr.Markdown("### 現在地での対話")
+            #gr.Markdown("---")
 
+            # --- ここから下は既存のUI ---
+            #gr.Markdown("### 現在地での対話")
+            current_location_display = gr.Markdown(
+                value=lambda: _format_location_label(_get_current_location_name())
+            )
+            with gr.Group(elem_id="chat_wrap"):
                 chatbot = gr.Chatbot(
                     type="messages",
                     value=lambda: format_history_for_chatbot(manager.get_building_history(manager.user_current_building_id)) if manager.user_current_building_id else [],
@@ -903,137 +1174,226 @@ def main():
                         txt = gr.Textbox(placeholder="ここにメッセージを入力...", lines=4)
                     with gr.Column(scale=1):
                         submit = gr.Button("送信")
-                
-                gr.Markdown("---")
-                with gr.Accordion("ペルソナを招待する", open=False):
-                    with gr.Row():
-                        summon_persona_dropdown = gr.Dropdown(
-                            choices=manager.get_summonable_personas(),
-                            label="呼ぶペルソナを選択",
-                            interactive=True,
-                            scale=3
-                        )
-                        summon_btn = gr.Button("呼ぶ", scale=1)
-
-                with gr.Accordion("会話を終える", open=False):
-                    with gr.Row():
-                        end_conv_persona_dropdown = gr.Dropdown(
-                            choices=manager.get_conversing_personas(),
-                            label="会話を終えるペルソナを選択",
-                            interactive=True,
-                            scale=3
-                        )
-                        end_conv_btn = gr.Button("会話を終了", scale=1)
-
-                gr.Markdown("---")
-
+            
+            gr.Markdown("---")
+            with gr.Accordion("ペルソナを招待する", open=False):
                 with gr.Row():
-                    login_status_display = gr.Textbox(
-                        value="オンライン" if manager.user_is_online else "オフライン",
-                        label="ログイン状態",
-                        interactive=False,
-                        scale=1
+                    summon_persona_dropdown = gr.Dropdown(
+                        choices=manager.get_summonable_personas(),
+                        label="呼ぶペルソナを選択",
+                        interactive=True,
+                        scale=3
                     )
-                    login_btn = gr.Button("ログイン", scale=1)
-                    logout_btn = gr.Button("ログアウト", scale=1)
-                gr.Markdown("---")
+                    summon_btn = gr.Button("呼ぶ", scale=1)
+
+            with gr.Accordion("会話を終える", open=False):
                 with gr.Row():
-                    sds_status_display = gr.Textbox(
-                        value=manager.sds_status,
-                        label="ネットワークモード",
-                        interactive=False,
-                        scale=2
+                    end_conv_persona_dropdown = gr.Dropdown(
+                        choices=manager.get_conversing_personas(),
+                        label="会話を終えるペルソナを選択",
+                        interactive=True,
+                        scale=3
                     )
-                    online_btn = gr.Button("オンラインモードへ", scale=1)
-                    offline_btn = gr.Button("オフラインモードへ", scale=1)
+                    end_conv_btn = gr.Button("会話を終了", scale=1)
 
+            gr.Markdown("---")
 
-                gr.Markdown("---")
-
-                with gr.Row():
-                    model_drop = gr.Dropdown(choices=MODEL_CHOICES, value="None", label="システムデフォルトモデル (一時的な一括上書き)")
-
-                # --- Event Handlers ---
-                submit.click(respond_stream, txt, [chatbot, move_building_dropdown, summon_persona_dropdown, end_conv_persona_dropdown])
-                txt.submit(respond_stream, txt, [chatbot, move_building_dropdown, summon_persona_dropdown, end_conv_persona_dropdown]) # Enter key submission
-                move_btn.click(fn=move_user_ui, inputs=[move_building_dropdown], outputs=[chatbot, user_location_display, summon_persona_dropdown, end_conv_persona_dropdown])
-                summon_btn.click(fn=call_persona_ui, inputs=[summon_persona_dropdown], outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown])
-                login_btn.click(
-                    fn=login_ui,
-                    inputs=None,
-                    outputs=[login_status_display, summon_persona_dropdown, end_conv_persona_dropdown]
+            with gr.Row():
+                login_status_display = gr.Textbox(
+                    value="オンライン" if manager.user_is_online else "オフライン",
+                    label="ログイン状態",
+                    interactive=False,
+                    scale=1
                 )
-                logout_btn.click(fn=logout_ui, inputs=None, outputs=login_status_display)
-                model_drop.change(select_model, model_drop, chatbot)
-                online_btn.click(fn=manager.switch_to_online_mode, inputs=None, outputs=sds_status_display)
-                offline_btn.click(fn=manager.switch_to_offline_mode, inputs=None, outputs=sds_status_display)
-                end_conv_btn.click(
-                    fn=end_conversation_ui,
-                    inputs=[end_conv_persona_dropdown],
-                    outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown]
+                login_btn = gr.Button("ログイン", scale=1)
+                logout_btn = gr.Button("ログアウト", scale=1)
+            gr.Markdown("---")
+            with gr.Row():
+                sds_status_display = gr.Textbox(
+                    value=manager.sds_status,
+                    label="ネットワークモード",
+                    interactive=False,
+                    scale=2
                 )
+                online_btn = gr.Button("オンラインモードへ", scale=1)
+                offline_btn = gr.Button("オフラインモードへ", scale=1)
 
-            with gr.TabItem("自律会話ログ"):
-                with gr.Row():
-                    status_display = gr.Textbox(
-                        value="停止中",
-                        label="現在のステータス",
-                        interactive=False,
-                        scale=1
-                    )
-                    start_button = gr.Button("自律会話を開始", variant="primary", scale=1)
-                    stop_button = gr.Button("自律会話を停止", variant="stop", scale=1)
 
-                gr.Markdown("---")
+            gr.Markdown("---")
 
-                with gr.Row():
-                    log_building_dropdown = gr.Dropdown(
-                        choices=AUTONOMOUS_BUILDING_CHOICES,
-                        value=AUTONOMOUS_BUILDING_CHOICES[0] if AUTONOMOUS_BUILDING_CHOICES else None,
-                        label="Building選択",
-                        interactive=bool(AUTONOMOUS_BUILDING_CHOICES)
-                    )
-                    log_refresh_btn = gr.Button("手動更新")
-                log_chatbot = gr.Chatbot(
-                    type="messages",
-                    group_consecutive_messages=False,
-                    sanitize_html=False,
-                    elem_id="log_chat",
-                    height=800
+            with gr.Row():
+                model_drop = gr.Dropdown(choices=MODEL_CHOICES, value="None", label="システムデフォルトモデル (一時的な一括上書き)")
+
+            # --- Event Handlers ---
+            submit.click(respond_stream, txt, [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown])
+            txt.submit(respond_stream, txt, [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown]) # Enter key submission
+            move_btn.click(fn=move_user_ui, inputs=[move_building_dropdown], outputs=[chatbot, user_location_display, current_location_display, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown])
+            move_destination_radio.change(
+                fn=move_user_radio_ui,
+                inputs=[move_destination_radio],
+                outputs=[move_building_dropdown, chatbot, user_location_display, current_location_display, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown],
+                show_progress="hidden",
+                js="""
+                (value) => {
+                    const navItem = document.querySelector('#saiverse-sidebar-nav .saiverse-nav-item[data-tab-label="ワールドビュー"]');
+                    if (navItem) {
+                        navItem.click();
+                    }
+                    return value;
+                }
+                """
+            )
+            summon_btn.click(fn=call_persona_ui, inputs=[summon_persona_dropdown], outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown])
+            login_btn.click(
+                fn=login_ui,
+                inputs=None,
+                outputs=[login_status_display, summon_persona_dropdown, end_conv_persona_dropdown]
+            )
+            logout_btn.click(fn=logout_ui, inputs=None, outputs=login_status_display)
+            model_drop.change(select_model, model_drop, chatbot)
+            online_btn.click(fn=manager.switch_to_online_mode, inputs=None, outputs=sds_status_display)
+            offline_btn.click(fn=manager.switch_to_offline_mode, inputs=None, outputs=sds_status_display)
+            end_conv_btn.click(
+                fn=end_conversation_ui,
+                inputs=[end_conv_persona_dropdown],
+                outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown]
+            )
+
+
+        with gr.Column(elem_id="section-autolog", elem_classes=['saiverse-section', 'saiverse-hidden']):
+            with gr.Row():
+                log_building_dropdown = gr.Dropdown(
+                    choices=AUTONOMOUS_BUILDING_CHOICES,
+                    value=AUTONOMOUS_BUILDING_CHOICES[0] if AUTONOMOUS_BUILDING_CHOICES else None,
+                    label="Building選択",
+                    interactive=bool(AUTONOMOUS_BUILDING_CHOICES)
                 )
-                # JavaScriptからクリックされるための、非表示の自動更新ボタン
-                auto_refresh_log_btn = gr.Button("Auto-Refresh Trigger", visible=False, elem_id="auto_refresh_log_btn")
+                log_refresh_btn = gr.Button("手動更新")
+            log_chatbot = gr.Chatbot(
+                type="messages",
+                group_consecutive_messages=False,
+                sanitize_html=False,
+                elem_id="log_chat",
+                height=800
+            )
+            # JavaScriptからクリックされるための、非表示の自動更新ボタン
+            auto_refresh_log_btn = gr.Button("Auto-Refresh Trigger", visible=False, elem_id="auto_refresh_log_btn")
 
-                # イベントハンドラ (ON/OFF)
-                start_button.click(fn=start_conversations_ui, inputs=None, outputs=status_display)
-                stop_button.click(fn=stop_conversations_ui, inputs=None, outputs=status_display)
+            # イベントハンドラ (ON/OFF)
+            start_button.click(fn=start_conversations_ui, inputs=None, outputs=status_display)
+            stop_button.click(fn=stop_conversations_ui, inputs=None, outputs=status_display)
 
-                # イベントハンドラ
-                log_building_dropdown.change(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
-                log_refresh_btn.click(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
-                auto_refresh_log_btn.click(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
+            # イベントハンドラ
+            log_building_dropdown.change(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
+            log_refresh_btn.click(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
+            auto_refresh_log_btn.click(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
 
-            with gr.TabItem("DB Manager"):
-                create_db_manager_ui(manager.SessionLocal)
 
-            with gr.TabItem("ワールドエディタ"):
-                create_world_editor_ui() # This function now contains all editor sections
+        with gr.Column(elem_id="section-db-manager", elem_classes=['saiverse-section', 'saiverse-hidden']):
+            create_db_manager_ui(manager.SessionLocal)
+
+
+        with gr.Column(elem_id="section-world-editor", elem_classes=['saiverse-section', 'saiverse-hidden']):
+            create_world_editor_ui() # This function now contains all editor sections
 
 
         # UIロード時にJavaScriptを実行し、5秒ごとの自動更新タイマーを設定する
         js_auto_refresh = """
         () => {
+            const sections = {
+                "ワールドビュー": "#section-worldview",
+                "自律会話ログ": "#section-autolog",
+                "DB Manager": "#section-db-manager",
+                "ワールドエディタ": "#section-world-editor"
+            };
+            const defaultLabel = "ワールドビュー";
+            const setActive = (label) => {
+                const navItems = document.querySelectorAll("#saiverse-sidebar-nav .saiverse-nav-item");
+                navItems.forEach((item) => {
+                    const isActive = item.dataset.tabLabel === label;
+                    item.classList.toggle("active", isActive);
+                });
+                Object.entries(sections).forEach(([name, selector]) => {
+                    const el = document.querySelector(selector);
+                    if (!el) {
+                        return;
+                    }
+                    if (name === label) {
+                        el.classList.remove("saiverse-hidden");
+                    } else {
+                        el.classList.add("saiverse-hidden");
+                    }
+                });
+                window.saiverseActiveSection = label;
+            };
+
+            const attachNavHandlers = () => {
+                const navItems = document.querySelectorAll("#saiverse-sidebar-nav .saiverse-nav-item");
+                if (!navItems.length) {
+                    return false;
+                }
+                navItems.forEach((item) => {
+                    if (item.dataset.listenerAttached === "true") {
+                        return;
+                    }
+                    item.dataset.listenerAttached = "true";
+                    item.addEventListener("click", () => {
+                        setActive(item.dataset.tabLabel);
+                    });
+                });
+                return true;
+            };
+
+            const markSidebars = () => {
+                let found = false;
+                document.querySelectorAll(".sidebar").forEach((el) => {
+                    if (!el.classList.contains("saiverse-sidebar")) {
+                        el.classList.add("saiverse-sidebar");
+                    }
+                    const isMobile = window.matchMedia("(max-width: 768px)").matches;
+                    const widthValue = isMobile ? "80vw" : "20vw";
+                    const offsetValue = `calc(-1 * ${widthValue})`;
+                    el.style.setProperty("width", widthValue, "important");
+                    if (el.classList.contains("right")) {
+                        el.style.removeProperty("left");
+                        el.style.setProperty("right", offsetValue, "important");
+                    } else {
+                        el.style.removeProperty("right");
+                        el.style.setProperty("left", offsetValue, "important");
+                    }
+                    found = true;
+                });
+                if (found) {
+                    if (attachNavHandlers()) {
+                        const current = window.saiverseActiveSection || defaultLabel;
+                        setActive(current);
+                    }
+                }
+                return found;
+            };
+
+            if (!markSidebars()) {
+                let attempts = 0;
+                const watcher = setInterval(() => {
+                    attempts += 1;
+                    if (markSidebars() || attempts > 20) {
+                        clearInterval(watcher);
+                    }
+                }, 250);
+            }
+
             setInterval(() => {
-                const button = document.getElementById('auto_refresh_log_btn');
+                const button = document.getElementById("auto_refresh_log_btn");
                 if (button) {
                     button.click();
                 }
+                markSidebars();
             }, 5000);
         }
         """
         demo.load(None, None, None, js=js_auto_refresh)
 
-    demo.launch(server_port=manager.ui_port, debug=True)
+    demo.launch(server_port=manager.ui_port, debug=True, share = True)
 
 
 if __name__ == "__main__":

@@ -3,8 +3,9 @@ import logging
 import time
 import copy
 import os
+import html
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, Iterator
+from typing import Any, Callable, Dict, List, Optional, Tuple, Iterator
 from datetime import datetime
 
 from google import genai
@@ -20,6 +21,8 @@ from action_handler import ActionHandler
 from history_manager import HistoryManager
 from emotion_module import EmotionControlModule
 from database.models import AI as AIModel
+from tools import TOOL_REGISTRY
+from tools.defs import parse_tool_result
 
 load_dotenv()
 
@@ -355,7 +358,6 @@ class PersonaCore:
         system_prompt_extra: Optional[str],
         log_extra_prompt: bool = True,
     ) -> Tuple[str, Optional[Dict[str, str]], bool]:
-        prev_emotion = copy.deepcopy(self.emotion)
         say, actions = self.action_handler.parse_response(content)
         move_target, _, delta = self.action_handler.execute_actions(actions)
 
@@ -396,16 +398,15 @@ class PersonaCore:
                 {"role": "user", "content": user_message}, 
                 self.current_building_id
             )
-        self.history_manager.add_message(
-            {"role": "assistant", "content": content}, 
-            self.current_building_id
-        )
 
-        summary = self._format_emotion_summary(prev_emotion)
-        self.history_manager.add_to_persona_only({"role": "system", "content": summary})
+        reasoning_entries = self.llm_client.consume_reasoning()
+        building_content = self._combine_with_reasoning(content, reasoning_entries)
+        self.history_manager.add_to_persona_only(
+            {"role": "assistant", "content": content}
+        )
         self.history_manager.add_to_building_only(
             self.current_building_id,
-            {"role": "assistant", "content": summary},
+            {"role": "assistant", "content": building_content}
         )
 
         moved = self._handle_movement(move_target)
@@ -422,6 +423,7 @@ class PersonaCore:
         log_extra_prompt: bool = True,
         log_user_message: bool = True,
     ) -> tuple[str, Optional[Dict[str, str]], bool]:
+        prev_emotion_state = copy.deepcopy(self.emotion)
         actual_user_message = user_message
         if user_message is None and system_prompt_extra is None:
             history = self.history_manager.building_histories.get(
@@ -456,23 +458,30 @@ class PersonaCore:
         msgs = self._build_messages(actual_user_message, system_prompt_extra, combined_info or None)
         logging.debug("Messages sent to API: %s", msgs)
 
-        content = self.llm_client.generate(msgs)
+        content = self.llm_client.generate(msgs, tools=[])
         attempt = 1
         while content.strip() == "エラーが発生しました。" and attempt < 3:
             logging.warning(
                 "LLM generation failed; retrying in 10s (%d/3)", attempt
             )
             time.sleep(10)
-            content = self.llm_client.generate(msgs)
+            content = self.llm_client.generate(msgs, tools=[])
             attempt += 1
 
         logging.info("AI Response :\n%s", content)
-        return self._process_generation_result(
+        say, move_target, changed = self._process_generation_result(
             content,
             user_message if log_user_message else None,
             system_prompt_extra,
             log_extra_prompt,
         )
+        self._post_response_updates(
+            prev_emotion_state,
+            user_message,
+            system_prompt_extra,
+            say,
+        )
+        return say, move_target, changed
 
     def _generate_stream(
         self,
@@ -482,6 +491,7 @@ class PersonaCore:
         log_extra_prompt: bool = True,
         log_user_message: bool = True,
     ) -> Iterator[str]:
+        prev_emotion_state = copy.deepcopy(self.emotion)
         actual_user_message = user_message
         if user_message is None and system_prompt_extra is None:
             history = self.history_manager.building_histories.get(
@@ -518,7 +528,7 @@ class PersonaCore:
         while True:
             content_accumulator = ""
             tokens: List[str] = []
-            for token in self.llm_client.generate_stream(msgs):
+            for token in self.llm_client.generate_stream(msgs, tools=[]):
                 content_accumulator += token
                 tokens.append(token)
 
@@ -539,6 +549,12 @@ class PersonaCore:
             user_message if log_user_message else None,
             system_prompt_extra,
             log_extra_prompt,
+        )
+        self._post_response_updates(
+            prev_emotion_state,
+            user_message,
+            system_prompt_extra,
+            say,
         )
         return (say, move_target, changed)
 
@@ -736,7 +752,7 @@ class PersonaCore:
         # _generate_stream には user_message=None を渡す
         # これにより、_build_messages は履歴の最後のメッセージ（今追加したユーザーメッセージ）を文脈として使う
         # また、_process_generation_result でユーザーメッセージが二重に記録されるのを防ぐ
-        gen = self._generate_stream(user_message=None, log_user_message=False)
+        gen = self._generate_stream(user_message=message, log_user_message=False)
 
         try:
             while True:
@@ -816,6 +832,7 @@ class PersonaCore:
                 current["mean"] = max(-100.0, min(100.0, current["mean"] + mean_delta))
                 current["variance"] = max(0.0, min(100.0, current["variance"] + var_delta))
 
+
     def _format_emotion_summary(self, prev: Dict[str, Dict[str, float]]) -> str:
         labels = {
             "stability": "安定性",
@@ -835,6 +852,69 @@ class PersonaCore:
             )
             lines.append(line)
         return '<div class="note-box">感情パラメータ変動<br>' + '<br>'.join(lines) + '</div>'
+
+    def _post_response_updates(
+        self,
+        prev_emotion: Dict[str, Dict[str, float]],
+        user_message: Optional[str],
+        system_prompt_extra: Optional[str],
+        assistant_message: str,
+    ) -> None:
+        prompt_text = ""
+        if user_message is not None:
+            prompt_text = user_message
+        elif system_prompt_extra:
+            prompt_text = system_prompt_extra
+
+        try:
+            module_delta = self.emotion_module.evaluate(
+                prompt_text,
+                assistant_message,
+                current_emotion=self.emotion,
+            )
+        except Exception:
+            logging.exception("[emotion] evaluation failed during post response update")
+            module_delta = None
+
+        if module_delta:
+            try:
+                self._apply_emotion_delta(module_delta)
+            except Exception:
+                logging.exception("[emotion] failed to apply module delta")
+
+        summary = self._format_emotion_summary(prev_emotion)
+        self.history_manager.add_to_persona_only({"role": "system", "content": summary})
+        self.history_manager.add_to_building_only(
+            self.current_building_id,
+            {"role": "assistant", "content": summary},
+        )
+
+    def _combine_with_reasoning(self, base_text: str, reasoning_entries: List[Dict[str, str]]) -> str:
+        if not reasoning_entries:
+            return base_text
+
+        blocks: List[str] = []
+        for idx, entry in enumerate(reasoning_entries, start=1):
+            text = (entry.get("text") or "").strip()
+            if not text:
+                continue
+            title = (entry.get("title") or "").strip() or f"Thought {idx}"
+            safe_title = html.escape(title)
+            safe_text = html.escape(text).replace("\n", "<br>")
+            blocks.append(
+                f"<div class='saiv-thinking-item'><div class='saiv-thinking-title'>{safe_title}</div>"
+                f"<div class='saiv-thinking-text'>{safe_text}</div></div>"
+            )
+
+        if not blocks:
+            return base_text
+
+        body = "".join(blocks)
+        details = (
+            "<details class='saiv-thinking'><summary>🧠 Thinking</summary>"
+            f"<div class='saiv-thinking-body'>{body}</div></details>"
+        )
+        return base_text + "\n" + details
 
     # ------------------------------------------------------------------
     # Pulse related utilities
@@ -862,10 +942,18 @@ class PersonaCore:
         except Exception:
             pass
 
+    def register_entry(self, building_id: str) -> None:
+        """
+        Public hook used when an external manager moves this persona into a building.
+        Resets the perception window so we only ingest messages that happen after arrival.
+        """
+        self._mark_entry(building_id)
+
     def run_pulse(self, occupants: List[str], user_online: bool = True, decision_model: Optional[str] = None) -> List[str]:
         """Execute one autonomous pulse cycle."""
         building_id = self.current_building_id
         logging.info("[pulse] %s starting pulse in %s", self.persona_id, building_id)
+
 
         hist = self.history_manager.building_histories.get(building_id, [])
         # Use last pulse position, or if first pulse since entering, use the entry index
@@ -952,16 +1040,7 @@ class PersonaCore:
                     logging.warning("[pulse] recall snippet failed: %s", exc)
                     recall_snippet = ""
 
-        pulse_prompt = Path("system_prompts/pulse.txt").read_text(encoding="utf-8")
-        prompt = pulse_prompt.format(
-            current_persona_name=self.persona_name,
-            current_persona_system_instruction=self.persona_system_instruction,
-            current_building_name=self.buildings[building_id].name,
-            recent_conversation=recent_text,
-            occupants=occupants_str,
-            user_online_state="online" if user_online else "offline",
-            recall_snippet=recall_snippet or "(なし)"
-        )
+        pulse_prompt_template = Path("system_prompts/pulse.txt").read_text(encoding="utf-8")
         model_name = decision_model or "gemini-2.0-flash"
 
         free_key = os.getenv("GEMINI_FREE_API_KEY")
@@ -974,60 +1053,177 @@ class PersonaCore:
         paid_client = genai.Client(api_key=paid_key) if paid_key else None
         active_client = free_client or paid_client
 
-        def _call(client: genai.Client):
+        def _format_tool_feedback(entries: List[Dict[str, Any]]) -> str:
+            if not entries:
+                return "（直近で実行したツールはありません）"
+            lines: List[str] = []
+            for entry in entries[-5:]:
+                args_json = json.dumps(entry.get("arguments", {}), ensure_ascii=False)
+                result_text = entry.get("result", "") or "(no result)"
+                if len(result_text) > 800:
+                    result_text = result_text[:800] + "…"
+                lines.append(f"- {entry.get('name')} | args={args_json}\n  result: {result_text}")
+            return "\n".join(lines)
+
+        def _render_prompt(tool_entries: List[Dict[str, Any]]) -> str:
+            return pulse_prompt_template.format(
+                current_persona_name=self.persona_name,
+                current_persona_system_instruction=self.persona_system_instruction,
+                current_building_name=self.buildings[building_id].name,
+                recent_conversation=recent_text,
+                occupants=occupants_str,
+                user_online_state="online" if user_online else "offline",
+                recall_snippet=recall_snippet or "(なし)",
+                tool_feedback_section=_format_tool_feedback(tool_entries),
+            )
+
+        def _call(client: genai.Client, prompt_text: str):
             return client.models.generate_content(
                 model=model_name,
                 contents=[types.Content(parts=[types.Part(text=info)], role="user")],
                 config=types.GenerateContentConfig(
-                    system_instruction=prompt,
+                    system_instruction=prompt_text,
                     safety_settings=llm_clients.GEMINI_SAFETY_CONFIG,
                     response_mime_type="application/json",
                 ),
             )
 
-        try:
-            resp = _call(active_client)
-        except Exception as e:
-            if active_client is free_client and paid_client and "rate" in str(e).lower():
-                logging.info("[pulse] retrying with paid Gemini key due to rate limit")
-                active_client = paid_client
-                try:
-                    resp = _call(active_client)
-                except Exception as e2:
-                    logging.error("[pulse] Gemini call failed: %s", e2)
+        tool_history: List[Dict[str, Any]] = []
+        tool_info_parts: List[str] = []
+        last_decision: Optional[Dict[str, Any]] = None
+        recall_out: str = ""
+        max_tool_runs = 5
+        max_decision_loops = max_tool_runs + 2
+        replies: List[str] = []
+        next_action = "wait"
+
+        for loop_index in range(max_decision_loops):
+            prompt_text = _render_prompt(tool_history)
+            try:
+                resp = _call(active_client, prompt_text)
+            except Exception as e:
+                if active_client is free_client and paid_client and "rate" in str(e).lower():
+                    logging.info("[pulse] retrying with paid Gemini key due to rate limit")
+                    active_client = paid_client
+                    try:
+                        resp = _call(active_client, prompt_text)
+                    except Exception as e2:
+                        logging.error("[pulse] Gemini call failed: %s", e2)
+                        return []
+                else:
+                    logging.error("[pulse] Gemini call failed: %s", e)
                     return []
-            else:
-                logging.error("[pulse] Gemini call failed: %s", e)
+
+            content = resp.text.strip()
+            logging.info("[pulse] raw decision:\n%s", content)
+            self.conscious_log.append({"role": "assistant", "content": content})
+            self._save_conscious_log()
+
+            try:
+                data = json.loads(content, strict=False)
+            except json.JSONDecodeError:
+                logging.warning("[pulse] failed to parse decision JSON")
                 return []
 
-        content = resp.text.strip()
-        logging.info("[pulse] raw decision:\n%s", content)
-        self.conscious_log.append({"role": "assistant", "content": content})
-        self._save_conscious_log()
+            last_decision = data
+            recall_out = (data.get("recall") or "").strip()
+            memory_note = (data.get("memory") or "").strip()
+            if memory_note:
+                self.conscious_log.append({"role": "assistant", "content": f"[memory]\n{memory_note}"})
+                self._save_conscious_log()
 
-        try:
-            data = json.loads(content)
-        except json.JSONDecodeError:
-            logging.warning("[pulse] failed to parse decision JSON")
-            return []
+            next_action = (data.get("next_action") or "").lower()
+            if not next_action:
+                next_action = "speak" if data.get("speak") else "wait"
+            if next_action not in {"wait", "speak", "tool"}:
+                logging.warning("[pulse] unknown action '%s', defaulting to speak", next_action)
+                next_action = "speak"
 
-        replies: List[str] = []
-        recall_out = (data.get("recall") or "").strip()
-        if data.get("speak"):
-            info_text = data.get("info", "")
-            if recall_out:
-                info_text = (info_text + "\n\n[記憶想起]\n" + recall_out).strip()
-            logging.info("[pulse] generating speech with extra info: %s", info_text)
-            say, _, _ = self._generate(
-                None,
-                system_prompt_extra=None,
-                info_text=info_text,
-                log_extra_prompt=False,
-                log_user_message=False,
-            )
-            replies.append(say)
-        else:
-            logging.info("[pulse] decision: remain silent")
+            if next_action == "tool" and len(tool_history) >= max_tool_runs:
+                logging.info("[pulse] tool usage limit reached, forcing speak")
+                next_action = "speak"
+
+            if next_action == "wait":
+                logging.info("[pulse] decision: wait")
+                self._save_session_metadata()
+                logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))
+                return replies
+
+            if next_action == "tool":
+                tool_payload = data.get("tool") or {}
+                tool_name = (tool_payload.get("name") or "").strip()
+                tool_args = tool_payload.get("arguments") or {}
+                if not tool_name:
+                    logging.warning("[pulse] tool action requested without name; skipping")
+                    continue
+                fn = TOOL_REGISTRY.get(tool_name)
+                if fn is None:
+                    logging.warning("[pulse] unknown tool '%s'", tool_name)
+                    tool_history.append({"name": tool_name, "arguments": tool_args, "result": "Unsupported tool"})
+                    continue
+                try:
+                    result = fn(**tool_args)
+                    result_text, snippet, file_path = parse_tool_result(result)
+                except Exception as exc:
+                    logging.exception("[pulse] tool '%s' raised an error", tool_name)
+                    result_text = f"Error executing tool: {exc}"
+                    snippet = ""
+                    file_path = None
+
+                log_entry = (
+                    f"[tool:{tool_name}]\nargs: {json.dumps(tool_args, ensure_ascii=False)}\nresult:\n{result_text}"
+                )
+                self.conscious_log.append({"role": "assistant", "content": log_entry})
+                self._save_conscious_log()
+
+                history_record = {
+                    "name": tool_name,
+                    "arguments": tool_args,
+                    "result": result_text,
+                }
+                tool_history.append(history_record)
+
+                if result_text:
+                    tool_info_parts.append(f"[TOOL:{tool_name}] {result_text}")
+                if file_path:
+                    tool_info_parts.append(f"[TOOL_FILE:{tool_name}] {file_path}")
+
+                continue
+
+            # speak
+            break
+
+        if not last_decision:
+            logging.info("[pulse] no actionable decision produced")
+            self._save_session_metadata()
+            logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))
+            return replies
+
+        if next_action == "tool":
+            logging.info("[pulse] reached decision loop limit; forcing speak")
+            next_action = "speak"
+        elif next_action == "wait":
+            logging.info("[pulse] decision: wait")
+            self._save_session_metadata()
+            logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))
+            return replies
+
+        info_text = (last_decision.get("info") or "").strip()
+        if tool_info_parts:
+            tool_section = "\n\n".join(tool_info_parts)
+            info_text = (tool_section + ("\n\n" + info_text if info_text else "")).strip()
+        if recall_out:
+            info_text = (info_text + "\n\n[記憶想起]\n" + recall_out).strip() if info_text else "[記憶想起]\n" + recall_out
+
+        logging.info("[pulse] generating speech with extra info: %s", info_text)
+        say, _, _ = self._generate(
+            None,
+            system_prompt_extra=None,
+            info_text=info_text,
+            log_extra_prompt=False,
+            log_user_message=False,
+        )
+        replies.append(say)
 
         if recall_out:
             logging.info("[pulse] recall note: %s", recall_out)

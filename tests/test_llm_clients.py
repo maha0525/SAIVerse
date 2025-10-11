@@ -33,6 +33,9 @@ class TestLLMClients(unittest.TestCase):
         client = get_llm_client("claude-sonnet-4-5", "anthropic", 1000)
         self.assertIsInstance(client, AnthropicClient)
         self.assertEqual(client.model, "claude-sonnet-4-5")
+        thinking_cfg = client._request_kwargs.get("extra_body", {}).get("thinking")
+        self.assertIsNotNone(thinking_cfg)
+        self.assertEqual(thinking_cfg.get("type"), "enabled")
 
         # GeminiClientのテスト
         client = get_llm_client("gemini-1.5-flash", "gemini", 1000)
@@ -169,6 +172,16 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(len(kwargs['contents']), 1)
         self.assertEqual(kwargs['contents'][0].role, "user")
         self.assertEqual(kwargs['contents'][0].parts[0].text, "Hello")
+
+    def test_anthropic_thinking_override(self):
+        client = AnthropicClient(
+            "claude-sonnet-4-5",
+            config={"thinking_budget": 2048, "thinking_type": "enabled", "thinking_effort": "medium"}
+        )
+        thinking_cfg = client._request_kwargs.get("extra_body", {}).get("thinking")
+        self.assertEqual(thinking_cfg.get("budget_tokens"), 2048)
+        self.assertEqual(thinking_cfg.get("type"), "enabled")
+        self.assertEqual(thinking_cfg.get("effort"), "medium")
 
     @patch('llm_router.client')
     @patch('llm_clients.genai')

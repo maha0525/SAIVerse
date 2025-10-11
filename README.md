@@ -38,8 +38,17 @@ GEMINI_API_KEY=AIza...
 GEMINI_FREE_API_KEY=AIza...
 ANTHROPIC_API_KEY=sk-ant-...
 # ANTHROPIC_OPENAI_BASE_URL=https://api.anthropic.com/v1/
+# Claude Extended Thinkingを有効化したい場合は以下も設定可能
+# ANTHROPIC_THINKING_TYPE=enabled
+# ANTHROPIC_THINKING_BUDGET=4096
+# ANTHROPIC_THINKING_EFFORT=medium
+# ANTHROPIC_MAX_OUTPUT_TOKENS=2048
 ```
 `python-dotenv` により自動で読み込まれます。
+
+`models.json` に `thinking_type` や `thinking_budget` を追加すると、モデルごとに
+Claude Extended Thinking の設定を自動適用できます（デフォルトでは Claude
+モデルに有効化済み）。
 
 #### SAIMemory（長期記憶）関連設定
 
