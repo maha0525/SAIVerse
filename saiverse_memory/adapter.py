@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
+import threading
 import time
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
-import threading
 
 from sai_memory.config import Settings, load_settings
 from sai_memory.memory.chunking import chunk_text
@@ -30,6 +31,7 @@ class SAIMemoryAdapter:
     """Thin integration layer that lets SAIVerse talk to SAIMemory storage."""
 
     _PERSONA_THREAD_SUFFIX = "__persona__"
+    _ACTIVE_STATE_FILENAME = "active_state.json"
 
     def __init__(
         self,
@@ -274,8 +276,41 @@ class SAIMemoryAdapter:
         if thread_suffix:
             suffix = thread_suffix
         else:
-            suffix = building_id if building_id is not None else self._PERSONA_THREAD_SUFFIX
+            if building_id is not None:
+                suffix = building_id
+            else:
+                suffix = self._active_persona_suffix() or self._PERSONA_THREAD_SUFFIX
         return f"{self.persona_id}:{suffix}"
+
+    def _active_persona_suffix(self) -> Optional[str]:
+        path = self.persona_dir / self._ACTIVE_STATE_FILENAME
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            LOGGER.debug("Failed to read active state for %s: %s", self.persona_id, exc)
+            return None
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            LOGGER.warning("Invalid JSON in %s: %s", path, exc)
+            return None
+
+        candidate: Optional[str] = None
+        if isinstance(data, dict):
+            for key in ("active_thread_id", "thread_id", "active_thread"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    candidate = value.strip()
+                    break
+        elif isinstance(data, str) and data.strip():
+            candidate = data.strip()
+
+        if candidate:
+            return candidate
+        return None
 
     def _append_message(
         self,
