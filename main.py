@@ -198,6 +198,9 @@ html[data-theme='dark'] #saiverse-sidebar-nav .saiverse-nav-item:hover {
 html[data-theme='dark'] #saiverse-sidebar-nav .saiverse-nav-item.active {
   background: rgba(64, 128, 255, 0.28);
 }
+.saiverse-section.saiverse-hidden {
+  display: none !important;
+}
 
 @media (max-width: 768px) {
   :global(.saiverse-sidebar.sidebar) {
@@ -997,7 +1000,7 @@ def main():
     # 3. Gradio UIを作成
     with gr.Blocks(fill_width=True, head=HEAD_VIEWPORT, css=NOTE_CSS, title=f"SAIVerse City: {args.city_name}", theme=gr.themes.Soft()) as demo:
         with gr.Sidebar(open=False, width=340, elem_id="sample_sidebar", elem_classes=["saiverse-sidebar"]):
-            gr.Markdown("### ?????????")
+            gr.Markdown("### セクション切り替え")
             gr.HTML("""
                 <div id="saiverse-sidebar-nav">
                     <div class="saiverse-nav-item" data-tab-label="ワールドビュー">ワールドビュー</div>
@@ -1006,232 +1009,237 @@ def main():
                     <div class="saiverse-nav-item" data-tab-label="ワールドエディタ">ワールドエディタ</div>
                 </div>
                 """)
-        with gr.Tabs():
-            with gr.TabItem("ワールドビュー"):
-                with gr.Row():
-                    user_location_display = gr.Textbox(
-                        # managerから現在地を取得して表示する
-                        value=lambda: manager.building_map.get(manager.user_current_building_id).name if manager.user_current_building_id and manager.user_current_building_id in manager.building_map else "不明な場所",
-                        label="あなたの現在地",
-                        interactive=False,
-                        scale=2
-                    )
-                    move_building_dropdown = gr.Dropdown(
-                        choices=BUILDING_CHOICES,
-                        label="移動先の建物",
-                        interactive=True,
-                        scale=2
-                    )
-                    move_btn = gr.Button("移動", scale=1)
 
-                gr.Markdown("---")
-
-                # --- ここから下は既存のUI ---
-                gr.Markdown("### 現在地での対話")
-                with gr.Group(elem_id="chat_wrap"):
-                    chatbot = gr.Chatbot(
-                        type="messages",
-                        value=lambda: format_history_for_chatbot(manager.get_building_history(manager.user_current_building_id)) if manager.user_current_building_id else [],
-                        group_consecutive_messages=False,
-                        sanitize_html=False,
-                        elem_id="my_chat",
-                        avatar_images=(
-                            "assets/icons/user.png", # ← ユーザー
-                            None  # アシスタント側はメッセージ内に表示
-                        ),
-                        height=800
-                    )
-                    with gr.Row():
-                        with gr.Column(scale=4):
-                            txt = gr.Textbox(placeholder="ここにメッセージを入力...", lines=4)
-                        with gr.Column(scale=1):
-                            submit = gr.Button("送信")
-                
-                gr.Markdown("---")
-                with gr.Accordion("ペルソナを招待する", open=False):
-                    with gr.Row():
-                        summon_persona_dropdown = gr.Dropdown(
-                            choices=manager.get_summonable_personas(),
-                            label="呼ぶペルソナを選択",
-                            interactive=True,
-                            scale=3
-                        )
-                        summon_btn = gr.Button("呼ぶ", scale=1)
-
-                with gr.Accordion("会話を終える", open=False):
-                    with gr.Row():
-                        end_conv_persona_dropdown = gr.Dropdown(
-                            choices=manager.get_conversing_personas(),
-                            label="会話を終えるペルソナを選択",
-                            interactive=True,
-                            scale=3
-                        )
-                        end_conv_btn = gr.Button("会話を終了", scale=1)
-
-                gr.Markdown("---")
-
-                with gr.Row():
-                    login_status_display = gr.Textbox(
-                        value="オンライン" if manager.user_is_online else "オフライン",
-                        label="ログイン状態",
-                        interactive=False,
-                        scale=1
-                    )
-                    login_btn = gr.Button("ログイン", scale=1)
-                    logout_btn = gr.Button("ログアウト", scale=1)
-                gr.Markdown("---")
-                with gr.Row():
-                    sds_status_display = gr.Textbox(
-                        value=manager.sds_status,
-                        label="ネットワークモード",
-                        interactive=False,
-                        scale=2
-                    )
-                    online_btn = gr.Button("オンラインモードへ", scale=1)
-                    offline_btn = gr.Button("オフラインモードへ", scale=1)
-
-
-                gr.Markdown("---")
-
-                with gr.Row():
-                    model_drop = gr.Dropdown(choices=MODEL_CHOICES, value="None", label="システムデフォルトモデル (一時的な一括上書き)")
-
-                # --- Event Handlers ---
-                submit.click(respond_stream, txt, [chatbot, move_building_dropdown, summon_persona_dropdown, end_conv_persona_dropdown])
-                txt.submit(respond_stream, txt, [chatbot, move_building_dropdown, summon_persona_dropdown, end_conv_persona_dropdown]) # Enter key submission
-                move_btn.click(fn=move_user_ui, inputs=[move_building_dropdown], outputs=[chatbot, user_location_display, summon_persona_dropdown, end_conv_persona_dropdown])
-                summon_btn.click(fn=call_persona_ui, inputs=[summon_persona_dropdown], outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown])
-                login_btn.click(
-                    fn=login_ui,
-                    inputs=None,
-                    outputs=[login_status_display, summon_persona_dropdown, end_conv_persona_dropdown]
+        with gr.Column(elem_id="section-worldview", elem_classes=['saiverse-section']):
+            with gr.Row():
+                user_location_display = gr.Textbox(
+                    # managerから現在地を取得して表示する
+                    value=lambda: manager.building_map.get(manager.user_current_building_id).name if manager.user_current_building_id and manager.user_current_building_id in manager.building_map else "不明な場所",
+                    label="あなたの現在地",
+                    interactive=False,
+                    scale=2
                 )
-                logout_btn.click(fn=logout_ui, inputs=None, outputs=login_status_display)
-                model_drop.change(select_model, model_drop, chatbot)
-                online_btn.click(fn=manager.switch_to_online_mode, inputs=None, outputs=sds_status_display)
-                offline_btn.click(fn=manager.switch_to_offline_mode, inputs=None, outputs=sds_status_display)
-                end_conv_btn.click(
-                    fn=end_conversation_ui,
-                    inputs=[end_conv_persona_dropdown],
-                    outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown]
+                move_building_dropdown = gr.Dropdown(
+                    choices=BUILDING_CHOICES,
+                    label="移動先の建物",
+                    interactive=True,
+                    scale=2
                 )
+                move_btn = gr.Button("移動", scale=1)
 
-            with gr.TabItem("自律会話ログ"):
-                with gr.Row():
-                    status_display = gr.Textbox(
-                        value="停止中",
-                        label="現在のステータス",
-                        interactive=False,
-                        scale=1
-                    )
-                    start_button = gr.Button("自律会話を開始", variant="primary", scale=1)
-                    stop_button = gr.Button("自律会話を停止", variant="stop", scale=1)
+            gr.Markdown("---")
 
-                gr.Markdown("---")
-
-                with gr.Row():
-                    log_building_dropdown = gr.Dropdown(
-                        choices=AUTONOMOUS_BUILDING_CHOICES,
-                        value=AUTONOMOUS_BUILDING_CHOICES[0] if AUTONOMOUS_BUILDING_CHOICES else None,
-                        label="Building選択",
-                        interactive=bool(AUTONOMOUS_BUILDING_CHOICES)
-                    )
-                    log_refresh_btn = gr.Button("手動更新")
-                log_chatbot = gr.Chatbot(
+            # --- ここから下は既存のUI ---
+            gr.Markdown("### 現在地での対話")
+            with gr.Group(elem_id="chat_wrap"):
+                chatbot = gr.Chatbot(
                     type="messages",
+                    value=lambda: format_history_for_chatbot(manager.get_building_history(manager.user_current_building_id)) if manager.user_current_building_id else [],
                     group_consecutive_messages=False,
                     sanitize_html=False,
-                    elem_id="log_chat",
+                    elem_id="my_chat",
+                    avatar_images=(
+                        "assets/icons/user.png", # ← ユーザー
+                        None  # アシスタント側はメッセージ内に表示
+                    ),
                     height=800
                 )
-                # JavaScriptからクリックされるための、非表示の自動更新ボタン
-                auto_refresh_log_btn = gr.Button("Auto-Refresh Trigger", visible=False, elem_id="auto_refresh_log_btn")
+                with gr.Row():
+                    with gr.Column(scale=4):
+                        txt = gr.Textbox(placeholder="ここにメッセージを入力...", lines=4)
+                    with gr.Column(scale=1):
+                        submit = gr.Button("送信")
+            
+            gr.Markdown("---")
+            with gr.Accordion("ペルソナを招待する", open=False):
+                with gr.Row():
+                    summon_persona_dropdown = gr.Dropdown(
+                        choices=manager.get_summonable_personas(),
+                        label="呼ぶペルソナを選択",
+                        interactive=True,
+                        scale=3
+                    )
+                    summon_btn = gr.Button("呼ぶ", scale=1)
 
-                # イベントハンドラ (ON/OFF)
-                start_button.click(fn=start_conversations_ui, inputs=None, outputs=status_display)
-                stop_button.click(fn=stop_conversations_ui, inputs=None, outputs=status_display)
+            with gr.Accordion("会話を終える", open=False):
+                with gr.Row():
+                    end_conv_persona_dropdown = gr.Dropdown(
+                        choices=manager.get_conversing_personas(),
+                        label="会話を終えるペルソナを選択",
+                        interactive=True,
+                        scale=3
+                    )
+                    end_conv_btn = gr.Button("会話を終了", scale=1)
 
-                # イベントハンドラ
-                log_building_dropdown.change(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
-                log_refresh_btn.click(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
-                auto_refresh_log_btn.click(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
+            gr.Markdown("---")
 
-            with gr.TabItem("DB Manager"):
-                create_db_manager_ui(manager.SessionLocal)
+            with gr.Row():
+                login_status_display = gr.Textbox(
+                    value="オンライン" if manager.user_is_online else "オフライン",
+                    label="ログイン状態",
+                    interactive=False,
+                    scale=1
+                )
+                login_btn = gr.Button("ログイン", scale=1)
+                logout_btn = gr.Button("ログアウト", scale=1)
+            gr.Markdown("---")
+            with gr.Row():
+                sds_status_display = gr.Textbox(
+                    value=manager.sds_status,
+                    label="ネットワークモード",
+                    interactive=False,
+                    scale=2
+                )
+                online_btn = gr.Button("オンラインモードへ", scale=1)
+                offline_btn = gr.Button("オフラインモードへ", scale=1)
 
-            with gr.TabItem("ワールドエディタ"):
-                create_world_editor_ui() # This function now contains all editor sections
+
+            gr.Markdown("---")
+
+            with gr.Row():
+                model_drop = gr.Dropdown(choices=MODEL_CHOICES, value="None", label="システムデフォルトモデル (一時的な一括上書き)")
+
+            # --- Event Handlers ---
+            submit.click(respond_stream, txt, [chatbot, move_building_dropdown, summon_persona_dropdown, end_conv_persona_dropdown])
+            txt.submit(respond_stream, txt, [chatbot, move_building_dropdown, summon_persona_dropdown, end_conv_persona_dropdown]) # Enter key submission
+            move_btn.click(fn=move_user_ui, inputs=[move_building_dropdown], outputs=[chatbot, user_location_display, summon_persona_dropdown, end_conv_persona_dropdown])
+            summon_btn.click(fn=call_persona_ui, inputs=[summon_persona_dropdown], outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown])
+            login_btn.click(
+                fn=login_ui,
+                inputs=None,
+                outputs=[login_status_display, summon_persona_dropdown, end_conv_persona_dropdown]
+            )
+            logout_btn.click(fn=logout_ui, inputs=None, outputs=login_status_display)
+            model_drop.change(select_model, model_drop, chatbot)
+            online_btn.click(fn=manager.switch_to_online_mode, inputs=None, outputs=sds_status_display)
+            offline_btn.click(fn=manager.switch_to_offline_mode, inputs=None, outputs=sds_status_display)
+            end_conv_btn.click(
+                fn=end_conversation_ui,
+                inputs=[end_conv_persona_dropdown],
+                outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown]
+            )
+
+
+        with gr.Column(elem_id="section-autolog", elem_classes=['saiverse-section', 'saiverse-hidden']):
+            with gr.Row():
+                status_display = gr.Textbox(
+                    value="停止中",
+                    label="現在のステータス",
+                    interactive=False,
+                    scale=1
+                )
+                start_button = gr.Button("自律会話を開始", variant="primary", scale=1)
+                stop_button = gr.Button("自律会話を停止", variant="stop", scale=1)
+
+            gr.Markdown("---")
+
+            with gr.Row():
+                log_building_dropdown = gr.Dropdown(
+                    choices=AUTONOMOUS_BUILDING_CHOICES,
+                    value=AUTONOMOUS_BUILDING_CHOICES[0] if AUTONOMOUS_BUILDING_CHOICES else None,
+                    label="Building選択",
+                    interactive=bool(AUTONOMOUS_BUILDING_CHOICES)
+                )
+                log_refresh_btn = gr.Button("手動更新")
+            log_chatbot = gr.Chatbot(
+                type="messages",
+                group_consecutive_messages=False,
+                sanitize_html=False,
+                elem_id="log_chat",
+                height=800
+            )
+            # JavaScriptからクリックされるための、非表示の自動更新ボタン
+            auto_refresh_log_btn = gr.Button("Auto-Refresh Trigger", visible=False, elem_id="auto_refresh_log_btn")
+
+            # イベントハンドラ (ON/OFF)
+            start_button.click(fn=start_conversations_ui, inputs=None, outputs=status_display)
+            stop_button.click(fn=stop_conversations_ui, inputs=None, outputs=status_display)
+
+            # イベントハンドラ
+            log_building_dropdown.change(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
+            log_refresh_btn.click(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
+            auto_refresh_log_btn.click(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
+
+
+        with gr.Column(elem_id="section-db-manager", elem_classes=['saiverse-section', 'saiverse-hidden']):
+            create_db_manager_ui(manager.SessionLocal)
+
+
+        with gr.Column(elem_id="section-world-editor", elem_classes=['saiverse-section', 'saiverse-hidden']):
+            create_world_editor_ui() # This function now contains all editor sections
 
 
         # UIロード時にJavaScriptを実行し、5秒ごとの自動更新タイマーを設定する
         js_auto_refresh = """
         () => {
-            const updateActiveNav = () => {
-                const activeTab = document.querySelector('button[role="tab"][aria-selected="true"]');
-                if (!activeTab) {
-                    return;
-                }
-                const activeLabel = activeTab.textContent.trim();
-                document.querySelectorAll('#saiverse-sidebar-nav .saiverse-nav-item').forEach((item) => {
-                    item.classList.toggle('active', item.dataset.tabLabel === activeLabel);
+            const sections = {
+                "ワールドビュー": "#section-worldview",
+                "自律会話ログ": "#section-autolog",
+                "DB Manager": "#section-db-manager",
+                "ワールドエディタ": "#section-world-editor"
+            };
+            const defaultLabel = "ワールドビュー";
+            const setActive = (label) => {
+                const navItems = document.querySelectorAll("#saiverse-sidebar-nav .saiverse-nav-item");
+                navItems.forEach((item) => {
+                    const isActive = item.dataset.tabLabel === label;
+                    item.classList.toggle("active", isActive);
                 });
+                Object.entries(sections).forEach(([name, selector]) => {
+                    const el = document.querySelector(selector);
+                    if (!el) {
+                        return;
+                    }
+                    if (name === label) {
+                        el.classList.remove("saiverse-hidden");
+                    } else {
+                        el.classList.add("saiverse-hidden");
+                    }
+                });
+                window.saiverseActiveSection = label;
             };
 
             const attachNavHandlers = () => {
-                const navItems = document.querySelectorAll('#saiverse-sidebar-nav .saiverse-nav-item');
+                const navItems = document.querySelectorAll("#saiverse-sidebar-nav .saiverse-nav-item");
                 if (!navItems.length) {
                     return false;
                 }
                 navItems.forEach((item) => {
-                    if (item.dataset.listenerAttached === 'true') {
+                    if (item.dataset.listenerAttached === "true") {
                         return;
                     }
-                    item.dataset.listenerAttached = 'true';
-                    item.addEventListener('click', () => {
-                        const label = item.dataset.tabLabel;
-                        const target = Array.from(document.querySelectorAll('button[role="tab"]')).find(
-                            (btn) => btn.textContent.trim() === label
-                        );
-                        if (target) {
-                            target.click();
-                            window.requestAnimationFrame(updateActiveNav);
-                        }
+                    item.dataset.listenerAttached = "true";
+                    item.addEventListener("click", () => {
+                        setActive(item.dataset.tabLabel);
                     });
                 });
-                document.querySelectorAll('button[role="tab"]').forEach((btn) => {
-                    if (btn.dataset.sidebarNavListener === 'true') {
-                        return;
-                    }
-                    btn.dataset.sidebarNavListener = 'true';
-                    btn.addEventListener('click', () => {
-                        window.requestAnimationFrame(updateActiveNav);
-                    });
-                });
-                updateActiveNav();
                 return true;
             };
 
             const markSidebars = () => {
                 let found = false;
-                document.querySelectorAll('.sidebar').forEach((el) => {
-                    if (!el.classList.contains('saiverse-sidebar')) {
-                        el.classList.add('saiverse-sidebar');
+                document.querySelectorAll(".sidebar").forEach((el) => {
+                    if (!el.classList.contains("saiverse-sidebar")) {
+                        el.classList.add("saiverse-sidebar");
                     }
-                    const isMobile = window.matchMedia('(max-width: 768px)').matches;
-                    const widthValue = isMobile ? '80vw' : '20vw';
+                    const isMobile = window.matchMedia("(max-width: 768px)").matches;
+                    const widthValue = isMobile ? "80vw" : "20vw";
                     const offsetValue = `calc(-1 * ${widthValue})`;
-                    el.style.setProperty('width', widthValue, 'important');
-                    if (el.classList.contains('right')) {
-                        el.style.removeProperty('left');
-                        el.style.setProperty('right', offsetValue, 'important');
+                    el.style.setProperty("width", widthValue, "important");
+                    if (el.classList.contains("right")) {
+                        el.style.removeProperty("left");
+                        el.style.setProperty("right", offsetValue, "important");
                     } else {
-                        el.style.removeProperty('right');
-                        el.style.setProperty('left', offsetValue, 'important');
+                        el.style.removeProperty("right");
+                        el.style.setProperty("left", offsetValue, "important");
                     }
                     found = true;
                 });
                 if (found) {
-                    attachNavHandlers();
+                    if (attachNavHandlers()) {
+                        const current = window.saiverseActiveSection || defaultLabel;
+                        setActive(current);
+                    }
                 }
                 return found;
             };
@@ -1240,24 +1248,18 @@ def main():
                 let attempts = 0;
                 const watcher = setInterval(() => {
                     attempts += 1;
-                    if (markSidebars() || attachNavHandlers() || attempts > 20) {
+                    if (markSidebars() || attempts > 20) {
                         clearInterval(watcher);
-                        updateActiveNav();
                     }
                 }, 250);
-            } else {
-                attachNavHandlers();
-                updateActiveNav();
             }
 
             setInterval(() => {
-                const button = document.getElementById('auto_refresh_log_btn');
+                const button = document.getElementById("auto_refresh_log_btn");
                 if (button) {
                     button.click();
                 }
                 markSidebars();
-                attachNavHandlers();
-                updateActiveNav();
             }, 5000);
         }
         """
