@@ -80,11 +80,22 @@ class SAIMemoryAdapter:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    def append_building_message(self, building_id: str, message: dict) -> None:
-        self._append_message(building_id=building_id, message=message)
+    def append_building_message(
+        self,
+        building_id: str,
+        message: dict,
+        *,
+        thread_suffix: Optional[str] = None,
+    ) -> None:
+        self._append_message(building_id=building_id, message=message, thread_suffix=thread_suffix)
 
-    def append_persona_message(self, message: dict) -> None:
-        self._append_message(building_id=None, message=message)
+    def append_persona_message(
+        self,
+        message: dict,
+        *,
+        thread_suffix: Optional[str] = None,
+    ) -> None:
+        self._append_message(building_id=None, message=message, thread_suffix=thread_suffix)
 
     def recent_messages(self, building_id: str, max_chars: int) -> List[dict]:
         if not self._ready:
@@ -254,11 +265,25 @@ class SAIMemoryAdapter:
     def _ready(self) -> bool:
         return self.is_ready()
 
-    def _thread_id(self, building_id: Optional[str]) -> str:
-        suffix = building_id if building_id is not None else self._PERSONA_THREAD_SUFFIX
+    def _thread_id(
+        self,
+        building_id: Optional[str] = None,
+        *,
+        thread_suffix: Optional[str] = None,
+    ) -> str:
+        if thread_suffix:
+            suffix = thread_suffix
+        else:
+            suffix = building_id if building_id is not None else self._PERSONA_THREAD_SUFFIX
         return f"{self.persona_id}:{suffix}"
 
-    def _append_message(self, *, building_id: Optional[str], message: dict) -> None:
+    def _append_message(
+        self,
+        *,
+        building_id: Optional[str],
+        message: dict,
+        thread_suffix: Optional[str] = None,
+    ) -> None:
         if not self._ready:
             return
         try:
@@ -266,7 +291,7 @@ class SAIMemoryAdapter:
             content = message.get("content", "")
             timestamp = message.get("timestamp")
             created_at = self._timestamp_to_epoch(timestamp)
-            thread_id = self._thread_id(building_id)
+            thread_id = self._thread_id(building_id, thread_suffix=thread_suffix)
             resource_id = building_id or self.settings.resource_id
 
             with self._db_lock:
