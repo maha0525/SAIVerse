@@ -40,8 +40,8 @@ NOTE_CSS = """
 /* === モバイルで Chatbot 親ブロックの左右パディングを完全に殺す === */
 @media (max-width: 680px) {
   /* 親ブロック特定（:has はそのまま・@supports は外す） */
-  :is(.gr-block, .gr-column, .gr-row, .group, .tabitem):has(> #chat_wrap),
-  :is(.gr-block, .gr-column, .gr-row, .group, .tabitem):has(#my_chat) {
+  :is(.gr-block, .gr-column, .gr-row, .group, .tabitem):has(> #chat_wrap):not(.sidebar-parent),
+  :is(.gr-block, .gr-column, .gr-row, .group, .tabitem):has(#my_chat):not(.sidebar-parent) {
     padding-left: 0 !important;
     padding-right: 0 !important;
     margin-left: 0 !important;
@@ -135,6 +135,41 @@ details.saiv-thinking summary:focus { outline: none; }
 #my_chat .saiv-avatar { border-radius: 12px !important; overflow: hidden !important; display: inline-block; width: 60px; height: 60px; min-width: 60px; }
 #my_chat .saiv-avatar > img { border-radius: 12px !important; margin: 0 !important; width: 100% !important; height: 100% !important; object-fit: cover !important; display: block !important; clip-path: inset(0 round 12px) !important; }
 #my_chat .saiv-avatar > picture > img { border-radius: 12px !important; margin: 0 !important; clip-path: inset(0 round 12px) !important; }
+
+/* Sidebar toggle を押しやすく */
+#sample_sidebar.sidebar .toggle-button {
+  width: 56px !important;
+  height: 56px !important;
+  padding: 0 !important;
+}
+#sample_sidebar.sidebar:not(.right) .toggle-button,
+#sample_sidebar.sidebar.open:not(.right) .toggle-button {
+  border-radius: 0 28px 28px 0 !important;
+}
+#sample_sidebar.sidebar.right .toggle-button,
+#sample_sidebar.sidebar.open.right .toggle-button {
+  border-radius: 28px 0 0 28px !important;
+}
+#sample_sidebar.sidebar .chevron {
+  padding-right: 0 !important;
+}
+#sample_sidebar.sidebar .chevron-left {
+  width: 18px !important;
+  height: 18px !important;
+  border-top-width: 3px !important;
+  border-right-width: 3px !important;
+}
+@media (max-width: 768px) {
+  #sample_sidebar.sidebar {
+    width: min(480px, 100vw) !important;
+  }
+  #sample_sidebar.sidebar:not(.right) {
+    left: calc(-1 * min(480px, 100vw)) !important;
+  }
+  #sample_sidebar.sidebar.right {
+    right: calc(-1 * min(480px, 100vw)) !important;
+  }
+}
 """
 
 def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[str, str]]:
@@ -921,6 +956,8 @@ def main():
     # --- FastAPIとGradioの統合 ---
     # 3. Gradio UIを作成
     with gr.Blocks(fill_width=True, head=HEAD_VIEWPORT, css=NOTE_CSS, title=f"SAIVerse City: {args.city_name}", theme=gr.themes.Soft()) as demo:
+        with gr.Sidebar(open=False, width=340, elem_id="sample_sidebar"):
+            gr.Markdown("サンプルのサイドバーです")
         with gr.Tabs():
             with gr.TabItem("ワールドビュー"):
                 with gr.Row():
@@ -1091,7 +1128,7 @@ def main():
         """
         demo.load(None, None, None, js=js_auto_refresh)
 
-    demo.launch(server_name="0.0.0.0", server_port=manager.ui_port, debug=True, share=False)
+    demo.launch(server_port=manager.ui_port, debug=True, share = True)
 
 
 if __name__ == "__main__":
