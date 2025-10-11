@@ -136,38 +136,48 @@ details.saiv-thinking summary:focus { outline: none; }
 #my_chat .saiv-avatar > img { border-radius: 12px !important; margin: 0 !important; width: 100% !important; height: 100% !important; object-fit: cover !important; display: block !important; clip-path: inset(0 round 12px) !important; }
 #my_chat .saiv-avatar > picture > img { border-radius: 12px !important; margin: 0 !important; clip-path: inset(0 round 12px) !important; }
 
+:global(.saiverse-sidebar.sidebar) {
+  width: 20vw !important;
+}
+:global(.saiverse-sidebar.sidebar):not(.right) {
+  left: calc(-1 * 20vw) !important;
+}
+:global(.saiverse-sidebar.sidebar).right {
+  right: calc(-1 * 20vw) !important;
+}
+
 /* Sidebar toggle を押しやすく */
-#sample_sidebar.sidebar .toggle-button {
+:global(.saiverse-sidebar.sidebar) .toggle-button {
   width: 56px !important;
   height: 56px !important;
   padding: 0 !important;
 }
-#sample_sidebar.sidebar:not(.right) .toggle-button,
-#sample_sidebar.sidebar.open:not(.right) .toggle-button {
+:global(.saiverse-sidebar.sidebar):not(.right) .toggle-button,
+:global(.saiverse-sidebar.sidebar).open:not(.right) .toggle-button {
   border-radius: 0 28px 28px 0 !important;
 }
-#sample_sidebar.sidebar.right .toggle-button,
-#sample_sidebar.sidebar.open.right .toggle-button {
+:global(.saiverse-sidebar.sidebar).right .toggle-button,
+:global(.saiverse-sidebar.sidebar).open.right .toggle-button {
   border-radius: 28px 0 0 28px !important;
 }
-#sample_sidebar.sidebar .chevron {
+:global(.saiverse-sidebar.sidebar) .chevron {
   padding-right: 0 !important;
 }
-#sample_sidebar.sidebar .chevron-left {
+:global(.saiverse-sidebar.sidebar) .chevron-left {
   width: 18px !important;
   height: 18px !important;
   border-top-width: 3px !important;
   border-right-width: 3px !important;
 }
 @media (max-width: 768px) {
-  #sample_sidebar.sidebar {
-    width: min(480px, 100vw) !important;
+  :global(.saiverse-sidebar.sidebar) {
+    width: 80vw !important;
   }
-  #sample_sidebar.sidebar:not(.right) {
-    left: calc(-1 * min(480px, 100vw)) !important;
+  :global(.saiverse-sidebar.sidebar):not(.right) {
+    left: -80vw !important;
   }
-  #sample_sidebar.sidebar.right {
-    right: calc(-1 * min(480px, 100vw)) !important;
+  :global(.saiverse-sidebar.sidebar).right {
+    right: -80vw !important;
   }
 }
 """
@@ -956,7 +966,7 @@ def main():
     # --- FastAPIとGradioの統合 ---
     # 3. Gradio UIを作成
     with gr.Blocks(fill_width=True, head=HEAD_VIEWPORT, css=NOTE_CSS, title=f"SAIVerse City: {args.city_name}", theme=gr.themes.Soft()) as demo:
-        with gr.Sidebar(open=False, width=340, elem_id="sample_sidebar"):
+        with gr.Sidebar(open=False, width=340, elem_id="sample_sidebar", elem_classes=["saiverse-sidebar"]):
             gr.Markdown("サンプルのサイドバーです")
         with gr.Tabs():
             with gr.TabItem("ワールドビュー"):
@@ -1118,11 +1128,44 @@ def main():
         # UIロード時にJavaScriptを実行し、5秒ごとの自動更新タイマーを設定する
         js_auto_refresh = """
         () => {
+            const markSidebars = () => {
+                let found = false;
+                document.querySelectorAll('.sidebar').forEach((el) => {
+                    if (!el.classList.contains('saiverse-sidebar')) {
+                        el.classList.add('saiverse-sidebar');
+                    }
+                    const isMobile = window.matchMedia('(max-width: 768px)').matches;
+                    const widthValue = isMobile ? '80vw' : '20vw';
+                    const offsetValue = `calc(-1 * ${widthValue})`;
+                    el.style.setProperty('width', widthValue, 'important');
+                    if (el.classList.contains('right')) {
+                        el.style.removeProperty('left');
+                        el.style.setProperty('right', offsetValue, 'important');
+                    } else {
+                        el.style.removeProperty('right');
+                        el.style.setProperty('left', offsetValue, 'important');
+                    }
+                    found = true;
+                });
+                return found;
+            };
+
+            if (!markSidebars()) {
+                let attempts = 0;
+                const watcher = setInterval(() => {
+                    attempts += 1;
+                    if (markSidebars() || attempts > 20) {
+                        clearInterval(watcher);
+                    }
+                }, 250);
+            }
+
             setInterval(() => {
                 const button = document.getElementById('auto_refresh_log_btn');
                 if (button) {
                     button.click();
                 }
+                markSidebars();
             }, 5000);
         }
         """

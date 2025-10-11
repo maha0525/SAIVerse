@@ -10,7 +10,11 @@ ai_sessions/air/system_prompt.txt
 generate_image/
 /bk
 sai_memory/__pycache__/
+.gradio/*.pem
 
 #開発用フォルダ
 tests/Nature/*
 tests/tools/*
+
+#開発用ファイル
+__*.*
