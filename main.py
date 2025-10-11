@@ -126,10 +126,11 @@ html[data-theme='dark'] {
   gap: 6px;
 }
 
+  gap: 6px;
+}
 .saiverse-move-radio .wrap label {
   margin: 0 !important;
 }
-
 /* Reasoning (Thinking) blocks */
 details.saiv-thinking { margin-top: 10px; border: 1px solid rgba(128,128,128,0.25); border-radius: 8px; padding: 8px 12px; background: rgba(0,0,0,0.02); }
 html[data-theme='dark'] details.saiv-thinking { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.12); }
@@ -214,13 +215,13 @@ html[data-theme='dark'] #saiverse-sidebar-nav .saiverse-nav-item.active {
 
 @media (max-width: 768px) {
   :global(.saiverse-sidebar.sidebar) {
-    width: 80vw !important;
+    width: 60vw !important;
   }
   :global(.saiverse-sidebar.sidebar):not(.right) {
-    left: -80vw !important;
+    left: -60vw !important;
   }
   :global(.saiverse-sidebar.sidebar).right {
-    right: -80vw !important;
+    right: -60vw !important;
   }
 }
 """
@@ -1104,7 +1105,7 @@ def main():
                 gr.HTML("""
                     <div id="saiverse-sidebar-nav">
                         <div class="saiverse-nav-item" data-tab-label="ワールドビュー">ワールドビュー</div>
-                        <div class="saiverse-nav-item" data-tab-label="自律会話ログ">自律会話ログ</div>
+                        <div class="saiverse-nav-item" data-tab-label="自律会話ログ" style="display:none">自律会話ログ</div>
                         <div class="saiverse-nav-item" data-tab-label="DB Manager">DB Manager</div>
                         <div class="saiverse-nav-item" data-tab-label="ワールドエディタ">ワールドエディタ</div>
                     </div>
@@ -1117,6 +1118,16 @@ def main():
                     interactive=True,
                     elem_classes=["saiverse-move-radio"],
                     show_label=False
+                )
+            gr.Markdown("---")
+            with gr.Column(elem_classes=["saiverse-sidebar-autolog-controls"]):
+                start_button = gr.Button("自律会話を開始", variant="primary", scale=1)
+                stop_button = gr.Button("自律会話を停止", variant="stop", scale=1)
+                status_display = gr.Textbox(
+                    value="停止中",
+                    label="現在のステータス",
+                    interactive=False,
+                    scale=1
                 )
 
         with gr.Column(elem_id="section-worldview", elem_classes=['saiverse-section']):
@@ -1138,7 +1149,7 @@ def main():
                 )
                 move_btn = gr.Button("移動", scale=1, visible=False)
 
-            gr.Markdown("---")
+            #gr.Markdown("---")
 
             # --- ここから下は既存のUI ---
             #gr.Markdown("### 現在地での対話")
@@ -1221,7 +1232,16 @@ def main():
                 fn=move_user_radio_ui,
                 inputs=[move_destination_radio],
                 outputs=[move_building_dropdown, chatbot, user_location_display, current_location_display, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown],
-                show_progress="hidden"
+                show_progress="hidden",
+                js="""
+                (value) => {
+                    const navItem = document.querySelector('#saiverse-sidebar-nav .saiverse-nav-item[data-tab-label="ワールドビュー"]');
+                    if (navItem) {
+                        navItem.click();
+                    }
+                    return value;
+                }
+                """
             )
             summon_btn.click(fn=call_persona_ui, inputs=[summon_persona_dropdown], outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown])
             login_btn.click(
@@ -1241,18 +1261,6 @@ def main():
 
 
         with gr.Column(elem_id="section-autolog", elem_classes=['saiverse-section', 'saiverse-hidden']):
-            with gr.Row():
-                status_display = gr.Textbox(
-                    value="停止中",
-                    label="現在のステータス",
-                    interactive=False,
-                    scale=1
-                )
-                start_button = gr.Button("自律会話を開始", variant="primary", scale=1)
-                stop_button = gr.Button("自律会話を停止", variant="stop", scale=1)
-
-            gr.Markdown("---")
-
             with gr.Row():
                 log_building_dropdown = gr.Dropdown(
                     choices=AUTONOMOUS_BUILDING_CHOICES,
