@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import threading
 import time
 import subprocess
@@ -119,6 +119,16 @@ html[data-theme='dark'] {
 /* Notes */
 .note-box { background: var(--note-bg); color: var(--note-fg) !important; border-left: 4px solid #ffbf00; padding: 8px 12px; margin: 0; border-radius: 6px; font-size: .92rem; }
 .note-box b { color: var(--note-fg) !important; }
+
+.saiverse-move-radio .wrap {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 6px;
+}
+
+.saiverse-move-radio .wrap label {
+  margin: 0 !important;
+}
 
 /* Reasoning (Thinking) blocks */
 details.saiv-thinking { margin-top: 10px; border: 1px solid rgba(128,128,128,0.25); border-radius: 8px; padding: 8px 12px; background: rgba(0,0,0,0.02); }
@@ -272,13 +282,15 @@ def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[s
     return display
 
 
+
 def respond_stream(message: str):
     """Stream AI response for chat and update UI components if needed."""
     # Get history from current location
     print(manager.occupants[manager.user_current_building_id])
     current_building_id = manager.user_current_building_id
     if not current_building_id:
-        yield [{"role": "assistant", "content": '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'}], gr.update(), gr.update(), gr.update()
+        dropdown_update, radio_update = _prepare_move_component_updates()
+        yield [{"role": "assistant", "content": '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'}], dropdown_update, radio_update, gr.update(), gr.update()
         return
 
     raw_history = manager.get_building_history(current_building_id)
@@ -289,23 +301,129 @@ def respond_stream(message: str):
     for token in manager.handle_user_input_stream(message):
         ai_message += token
         # ストリーミング中はドロップダウンは更新しない
-        yield history + [{"role": "assistant", "content": ai_message}], gr.update(), gr.update(), gr.update()
+        yield history + [{"role": "assistant", "content": ai_message}], gr.update(), gr.update(), gr.update(), gr.update()
     # After streaming, get the final history again to include system messages etc.
     final_raw = manager.get_building_history(current_building_id)
     final_history_formatted = format_history_for_chatbot(final_raw)
 
-    # Check if the building list has changed
-    global BUILDING_CHOICES, BUILDING_NAME_TO_ID_MAP
     summonable_personas = manager.get_summonable_personas()
     conversing_personas = manager.get_conversing_personas()
-    new_building_names = sorted([b.name for b in manager.buildings]) # ソートして比較
+    dropdown_update, radio_update = _prepare_move_component_updates()
+    yield (
+        final_history_formatted,
+        dropdown_update,
+        radio_update,
+        gr.update(choices=summonable_personas, value=None),
+        gr.update(choices=conversing_personas, value=None),
+    )
+
+
+def _get_current_location_name() -> str:
+    if not manager or not manager.user_current_building_id:
+        return "不明な場所"
+    if manager.user_current_building_id in manager.building_map:
+        return manager.building_map.get(manager.user_current_building_id).name
+    return "不明な場所"
+
+
+def _format_location_label(location_name: str) -> str:
+    return f"現在地: {location_name}"
+
+
+def _prepare_move_component_updates(force_dropdown_value: Optional[str] = None, force_radio: bool = False):
+    if not manager:
+        return gr.update(), gr.update()
+    global BUILDING_CHOICES, BUILDING_NAME_TO_ID_MAP
+    new_building_names = sorted([b.name for b in manager.buildings])
+    dropdown_kwargs = {}
+    radio_kwargs = {}
     if new_building_names != sorted(BUILDING_CHOICES):
-        logging.info("Building list has changed. Updating dropdown.")
+        logging.info("Building list has changed. Updating selection components.")
         BUILDING_CHOICES = new_building_names
         BUILDING_NAME_TO_ID_MAP = {b.name: b.building_id for b in manager.buildings}
-        yield final_history_formatted, gr.update(choices=BUILDING_CHOICES), gr.update(choices=summonable_personas, value=None), gr.update(choices=conversing_personas, value=None)
-    else:
-        yield final_history_formatted, gr.update(), gr.update(choices=summonable_personas, value=None), gr.update(choices=conversing_personas, value=None)
+        dropdown_kwargs["choices"] = BUILDING_CHOICES
+        radio_kwargs["choices"] = BUILDING_CHOICES
+    if force_dropdown_value is not None:
+        dropdown_kwargs["value"] = force_dropdown_value
+    if force_radio or "choices" in radio_kwargs:
+        radio_kwargs["value"] = _get_current_location_name()
+    dropdown_update = gr.update(**dropdown_kwargs) if dropdown_kwargs else gr.update()
+    radio_update = gr.update(**radio_kwargs) if radio_kwargs else gr.update()
+    return dropdown_update, radio_update
+
+
+def _perform_user_move(building_name: Optional[str]):
+    if not manager or not manager.user_current_building_id:
+        location_name = _get_current_location_name()
+        return (
+            [],
+            location_name,
+            gr.update(value=_format_location_label(location_name)),
+            gr.update(),
+            gr.update(),
+        )
+
+    if not building_name:
+        current_history = format_history_for_chatbot(
+            manager.get_building_history(manager.user_current_building_id)
+        )
+        location_name = _get_current_location_name()
+        return (
+            current_history,
+            location_name,
+            gr.update(value=_format_location_label(location_name)),
+            gr.update(),
+            gr.update(),
+        )
+
+    target_building_id = BUILDING_NAME_TO_ID_MAP.get(building_name)
+    if target_building_id:
+        manager.move_user(target_building_id)
+
+    new_history = manager.get_building_history(manager.user_current_building_id)
+    new_location_name = _get_current_location_name()
+    summonable_personas = manager.get_summonable_personas()
+    conversing_personas = manager.get_conversing_personas()
+    return (
+        format_history_for_chatbot(new_history),
+        new_location_name,
+        gr.update(value=_format_location_label(new_location_name)),
+        gr.update(choices=summonable_personas, value=None),
+        gr.update(choices=conversing_personas, value=None),
+    )
+
+
+def move_user_ui(building_name: str):
+    """UI handler for moving the user."""
+    history, new_location_name, location_markdown_update, summon_update, conversing_update = _perform_user_move(building_name)
+    dropdown_update, radio_update = _prepare_move_component_updates(force_radio=True)
+    return (
+        history,
+        new_location_name,
+        location_markdown_update,
+        dropdown_update,
+        radio_update,
+        summon_update,
+        conversing_update,
+    )
+
+
+def move_user_radio_ui(building_name: str):
+    """Radio handler for moving the user and syncing dropdown."""
+    history, new_location_name, location_markdown_update, summon_update, conversing_update = _perform_user_move(building_name)
+    dropdown_update, radio_update = _prepare_move_component_updates(
+        force_dropdown_value=new_location_name,
+        force_radio=True,
+    )
+    return (
+        dropdown_update,
+        history,
+        new_location_name,
+        location_markdown_update,
+        radio_update,
+        summon_update,
+        conversing_update,
+    )
 
 
 def select_model(model_name: str):
@@ -317,24 +435,6 @@ def select_model(model_name: str):
         return []
     raw_history = manager.get_building_history(current_building_id)
     return format_history_for_chatbot(raw_history)
-
-def move_user_ui(building_name: str):
-    """UI handler for moving the user."""
-    if not building_name:
-        # Just return current state if nothing is selected
-        current_history = format_history_for_chatbot(manager.get_building_history(manager.user_current_building_id))
-        current_location = manager.building_map.get(manager.user_current_building_id).name if manager.user_current_building_id in manager.building_map else "不明"
-        return current_history, current_location, gr.update(), gr.update()
-
-    target_building_id = BUILDING_NAME_TO_ID_MAP.get(building_name)
-    if target_building_id:
-        manager.move_user(target_building_id)
-
-    new_history = manager.get_building_history(manager.user_current_building_id)
-    new_location_name = manager.building_map.get(manager.user_current_building_id).name
-    summonable_personas = manager.get_summonable_personas()
-    conversing_personas = manager.get_conversing_personas()
-    return format_history_for_chatbot(new_history), new_location_name, gr.update(choices=summonable_personas, value=None), gr.update(choices=conversing_personas, value=None)
 
 def call_persona_ui(persona_name: str):
     """UI handler for summoning a persona."""
@@ -1009,6 +1109,15 @@ def main():
                         <div class="saiverse-nav-item" data-tab-label="ワールドエディタ">ワールドエディタ</div>
                     </div>
                     """)
+            with gr.Accordion("移動", open=False):
+                move_destination_radio = gr.Radio(
+                    choices=BUILDING_CHOICES,
+                    value=lambda: _get_current_location_name(),
+                    label="移動先",
+                    interactive=True,
+                    elem_classes=["saiverse-move-radio"],
+                    show_label=False
+                )
 
         with gr.Column(elem_id="section-worldview", elem_classes=['saiverse-section']):
             with gr.Row():
@@ -1017,20 +1126,25 @@ def main():
                     value=lambda: manager.building_map.get(manager.user_current_building_id).name if manager.user_current_building_id and manager.user_current_building_id in manager.building_map else "不明な場所",
                     label="あなたの現在地",
                     interactive=False,
-                    scale=2
+                    scale=2,
+                    visible=False
                 )
                 move_building_dropdown = gr.Dropdown(
                     choices=BUILDING_CHOICES,
                     label="移動先の建物",
                     interactive=True,
-                    scale=2
+                    scale=2,
+                    visible=False
                 )
-                move_btn = gr.Button("移動", scale=1)
+                move_btn = gr.Button("移動", scale=1, visible=False)
 
             gr.Markdown("---")
 
             # --- ここから下は既存のUI ---
-            gr.Markdown("### 現在地での対話")
+            #gr.Markdown("### 現在地での対話")
+            current_location_display = gr.Markdown(
+                value=lambda: _format_location_label(_get_current_location_name())
+            )
             with gr.Group(elem_id="chat_wrap"):
                 chatbot = gr.Chatbot(
                     type="messages",
@@ -1100,9 +1214,15 @@ def main():
                 model_drop = gr.Dropdown(choices=MODEL_CHOICES, value="None", label="システムデフォルトモデル (一時的な一括上書き)")
 
             # --- Event Handlers ---
-            submit.click(respond_stream, txt, [chatbot, move_building_dropdown, summon_persona_dropdown, end_conv_persona_dropdown])
-            txt.submit(respond_stream, txt, [chatbot, move_building_dropdown, summon_persona_dropdown, end_conv_persona_dropdown]) # Enter key submission
-            move_btn.click(fn=move_user_ui, inputs=[move_building_dropdown], outputs=[chatbot, user_location_display, summon_persona_dropdown, end_conv_persona_dropdown])
+            submit.click(respond_stream, txt, [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown])
+            txt.submit(respond_stream, txt, [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown]) # Enter key submission
+            move_btn.click(fn=move_user_ui, inputs=[move_building_dropdown], outputs=[chatbot, user_location_display, current_location_display, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown])
+            move_destination_radio.change(
+                fn=move_user_radio_ui,
+                inputs=[move_destination_radio],
+                outputs=[move_building_dropdown, chatbot, user_location_display, current_location_display, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown],
+                show_progress="hidden"
+            )
             summon_btn.click(fn=call_persona_ui, inputs=[summon_persona_dropdown], outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown])
             login_btn.click(
                 fn=login_ui,
