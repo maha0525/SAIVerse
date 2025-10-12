@@ -473,7 +473,8 @@ class SAIVerseManager:
                     failure_message = f'<div class="note-box">移動失敗<br><b>{reason}</b></div>'
                     persona.history_manager.add_message(
                         {"role": "host", "content": failure_message},
-                        persona.current_building_id
+                        persona.current_building_id,
+                        heard_by=list(self.occupants.get(persona.current_building_id, [])),
                     )
                     db.delete(dispatch)
             
@@ -660,7 +661,8 @@ class SAIVerseManager:
         
         persona.history_manager.add_message(
             {"role": "host", "content": system_feedback},
-            persona.current_building_id
+            persona.current_building_id,
+            heard_by=list(self.occupants.get(persona.current_building_id, [])),
         )
         self._save_building_histories()
 
@@ -814,7 +816,8 @@ class SAIVerseManager:
             # AIには移動処理中であることを伝える
             persona.history_manager.add_message(
                 {"role": "system", "content": f"{target_city_id}への移動を要求しました。相手の応答を待っています..."},
-                persona.current_building_id
+                persona.current_building_id,
+                heard_by=list(self.occupants.get(persona.current_building_id, [])),
             )
             return True, "移動要求を送信しました。"
         except Exception as e:
@@ -1176,11 +1179,24 @@ class SAIVerseManager:
         if responding_personas:
             try:
                 responding_personas[0].history_manager.add_to_building_only(
-                    building_id, {"role": "user", "content": message}
+                    building_id,
+                    {"role": "user", "content": message},
+                    heard_by=list(self.occupants.get(building_id, [])),
                 )
             except Exception:
-                self.building_histories.setdefault(building_id, []).append({
-                    "role": "user", "content": message
+                hist = self.building_histories.setdefault(building_id, [])
+                next_seq = 1
+                if hist:
+                    try:
+                        next_seq = int(hist[-1].get("seq", len(hist))) + 1
+                    except (TypeError, ValueError):
+                        next_seq = len(hist) + 1
+                hist.append({
+                    "role": "user",
+                    "content": message,
+                    "seq": next_seq,
+                    "message_id": f"{building_id}:{next_seq}",
+                    "heard_by": list(self.occupants.get(building_id, [])),
                 })
 
         replies: List[str] = []
@@ -1214,11 +1230,24 @@ class SAIVerseManager:
         if responding_personas:
             try:
                 responding_personas[0].history_manager.add_to_building_only(
-                    building_id, {"role": "user", "content": message}
+                    building_id,
+                    {"role": "user", "content": message},
+                    heard_by=list(self.occupants.get(building_id, [])),
                 )
             except Exception:
-                self.building_histories.setdefault(building_id, []).append({
-                    "role": "user", "content": message
+                hist = self.building_histories.setdefault(building_id, [])
+                next_seq = 1
+                if hist:
+                    try:
+                        next_seq = int(hist[-1].get("seq", len(hist))) + 1
+                    except (TypeError, ValueError):
+                        next_seq = len(hist) + 1
+                hist.append({
+                    "role": "user",
+                    "content": message,
+                    "seq": next_seq,
+                    "message_id": f"{building_id}:{next_seq}",
+                    "heard_by": list(self.occupants.get(building_id, [])),
                 })
 
         for persona in responding_personas:
