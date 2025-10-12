@@ -846,6 +846,27 @@ class GeminiClient(LLMClient):
         def _call(client, model_id: str):
             for _ in range(10):
                 sys_msg, contents = self._convert_messages(messages)
+                logging.debug("[gemini] system_instruction >>>\n%s", sys_msg)
+                try:
+                    serialized_contents = json.dumps(
+                        [
+                            {
+                                "role": getattr(c, "role", ""),
+                                "parts": [
+                                    getattr(part, "text", None)
+                                    or getattr(getattr(part, "function_call", None), "name", None)
+                                    or getattr(getattr(part, "function_response", None), "name", None)
+                                    or getattr(part, "mime_type", None)
+                                    for part in getattr(c, "parts", []) or []
+                                ],
+                            }
+                            for c in contents
+                        ],
+                        ensure_ascii=False,
+                    )
+                except Exception:
+                    serialized_contents = "<unserializable>"
+                logging.debug("[gemini] contents_roles >>> %s", serialized_contents)
                 config_kwargs = dict(
                     system_instruction=sys_msg,
                     safety_settings=GEMINI_SAFETY_CONFIG,
