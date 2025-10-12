@@ -21,8 +21,9 @@ from action_handler import ActionHandler
 from history_manager import HistoryManager
 from emotion_module import EmotionControlModule
 from database.models import AI as AIModel
-from tools import TOOL_REGISTRY
+from tools import TOOL_REGISTRY, TOOL_SCHEMAS
 from tools.defs import parse_tool_result
+from tools.context import persona_context
 
 load_dotenv()
 
@@ -109,7 +110,10 @@ class PersonaCore:
         self.auto_count = 0
         self.last_auto_prompt_times: Dict[str, float] = {b_id: time.time() for b_id in self.buildings}
         self.emotion = {"stability": {"mean": 0, "variance": 1}, "affect": {"mean": 0, "variance": 1}, "resonance": {"mean": 0, "variance": 1}, "attitude": {"mean": 0, "variance": 1}}
-        self.pulse_indices: Dict[str, int] = {}
+        self.pulse_cursors: Dict[str, int] = {}
+        self.entry_markers: Dict[str, int] = {}
+        self._raw_pulse_cursor_data: Dict[str, Any] = {}
+        self._raw_pulse_cursor_format: str = "count"
 
         # Load session data, which may overwrite the defaults
         self._load_session_data()
@@ -140,14 +144,8 @@ class PersonaCore:
             memory_adapter=self.sai_memory,
         )
 
-        # Perception windows: track where we entered each building so we only
-        # ingest messages that happened after the latest entry.
-        self.entry_indices: Dict[str, int] = {}
-        try:
-            init_hist = self.history_manager.building_histories.get(self.current_building_id, [])
-            self.entry_indices[self.current_building_id] = len(init_hist)
-        except Exception:
-            pass
+        # Configure pulse tracking based on loaded histories
+        self._initialise_pulse_state()
 
         # Initialize remaining attributes
         self.move_callback = move_callback
@@ -173,7 +171,10 @@ class PersonaCore:
         if self.is_visitor:
             self.messages = []
             self.conscious_log = []
-            self.pulse_indices = {}
+            self.pulse_cursors = {}
+            self.entry_markers = {}
+            self._raw_pulse_cursor_data = {}
+            self._raw_pulse_cursor_format = "count"
             return
 
         db = self.SessionLocal()
@@ -218,14 +219,96 @@ class PersonaCore:
             try:
                 data = json.loads(self.conscious_log_path.read_text(encoding="utf-8"))
                 self.conscious_log = data.get("log", [])
-                self.pulse_indices = data.get("pulse_indices", {})
+                raw_cursors = data.get("pulse_cursors")
+                if raw_cursors is None:
+                    raw_cursors = data.get("pulse_indices", {})
+                if isinstance(raw_cursors, dict):
+                    self._raw_pulse_cursor_data = raw_cursors
+                else:
+                    self._raw_pulse_cursor_data = {}
+                fmt = data.get("pulse_cursor_format")
+                self._raw_pulse_cursor_format = fmt if isinstance(fmt, str) else "count"
             except json.JSONDecodeError:
                 logging.warning("Failed to load conscious log, starting empty")
                 self.conscious_log = []
-                self.pulse_indices = {}
+                self._raw_pulse_cursor_data = {}
+                self._raw_pulse_cursor_format = "count"
         else:
             self.conscious_log = []
-            self.pulse_indices = {}
+            self._raw_pulse_cursor_data = {}
+            self._raw_pulse_cursor_format = "count"
+
+    def _initialise_pulse_state(self) -> None:
+        hist_map = self.history_manager.building_histories
+        computed_cursors: Dict[str, int] = {}
+        max_seq_map: Dict[str, int] = {}
+        for b_id, hist in hist_map.items():
+            max_seq = 0
+            for msg in hist:
+                try:
+                    seq_val = int(msg.get("seq", 0))
+                except (TypeError, ValueError):
+                    seq_val = 0
+                max_seq = max(max_seq, seq_val)
+            max_seq_map[b_id] = max_seq
+            raw_value = self._raw_pulse_cursor_data.get(b_id) if hasattr(self, "_raw_pulse_cursor_data") else None
+            cursor = max_seq
+            if raw_value is not None:
+                if self._raw_pulse_cursor_format == "seq":
+                    try:
+                        cursor = int(raw_value)
+                    except (TypeError, ValueError):
+                        cursor = max_seq
+                    cursor = max(0, min(cursor, max_seq))
+                else:
+                    try:
+                        count = int(raw_value)
+                    except (TypeError, ValueError):
+                        count = len(hist)
+                    if count <= 0:
+                        cursor = 0
+                    else:
+                        idx = min(count, len(hist))
+                        if idx == 0:
+                            cursor = 0
+                        else:
+                            ref = hist[idx - 1]
+                            try:
+                                cursor = int(ref.get("seq", idx))
+                            except (TypeError, ValueError):
+                                cursor = idx
+            computed_cursors[b_id] = max(0, cursor)
+
+        for b_id, hist in hist_map.items():
+            if b_id not in computed_cursors:
+                computed_cursors[b_id] = max_seq_map.get(b_id, 0)
+
+        self.pulse_cursors = computed_cursors
+
+        # Initialize entry markers to the latest known sequence in each building
+        for b_id, hist in hist_map.items():
+            if b_id not in self.entry_markers:
+                last_seq = max_seq_map.get(b_id, 0)
+                self.entry_markers[b_id] = last_seq
+
+        if self.current_building_id in hist_map:
+            self.entry_markers[self.current_building_id] = self.pulse_cursors.get(
+                self.current_building_id,
+                self.entry_markers.get(self.current_building_id, 0),
+            )
+
+    def _occupants_snapshot(self, building_id: str) -> List[str]:
+        occupants = self.occupants.get(building_id, []) or []
+        snapshot = []
+        for pid in occupants:
+            if not pid:
+                continue
+            pid_str = str(pid)
+            if pid_str not in snapshot:
+                snapshot.append(pid_str)
+        if building_id == self.current_building_id and self.persona_id not in snapshot:
+            snapshot.append(self.persona_id)
+        return snapshot
 
     def _save_session_metadata(self) -> None:
         """ペルソナの動的な状態をDBに保存し、各種ログファイルを保存する"""
@@ -265,6 +348,7 @@ class PersonaCore:
         user_message: Optional[str],
         extra_system_prompt: Optional[str] = None,
         info_text: Optional[str] = None,
+        guidance_text: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         building = self.buildings[self.current_building_id]
         current_time = datetime.now().strftime("%H:%M")
@@ -314,12 +398,18 @@ class PersonaCore:
             logging.debug("history_head=%s", history_msgs[0])
             logging.debug("history_tail=%s", history_msgs[-1])
 
-        sanitized_history = [
-            {"role": m.get("role", ""), "content": m.get("content", "")}
-            for m in history_msgs
-        ]
+        sanitized_history: List[Dict[str, str]] = []
+        for m in history_msgs:
+            role = m.get("role", "")
+            content = m.get("content", "")
+            if role == "system" and "### 意識モジュールからの情報提供" in content:
+                continue
+            sanitized_history.append({"role": role, "content": content})
 
         msgs = [{"role": "system", "content": system_text}] + sanitized_history
+        if guidance_text:
+            wrapped_guidance = f"<system>\n{guidance_text}\n</system>"
+            msgs.append({"role": "user", "content": wrapped_guidance})
         if extra_system_prompt:
             msgs.append({"role": "system", "content": extra_system_prompt})
         if user_message:
@@ -391,12 +481,14 @@ class PersonaCore:
         if system_prompt_extra and log_extra_prompt:
             self.history_manager.add_message(
                 {"role": "user", "content": system_prompt_extra},
-                self.current_building_id
+                self.current_building_id,
+                heard_by=self._occupants_snapshot(self.current_building_id),
             )
         if user_message:
             self.history_manager.add_message(
                 {"role": "user", "content": user_message}, 
-                self.current_building_id
+                self.current_building_id,
+                heard_by=self._occupants_snapshot(self.current_building_id),
             )
 
         reasoning_entries = self.llm_client.consume_reasoning()
@@ -406,7 +498,8 @@ class PersonaCore:
         )
         self.history_manager.add_to_building_only(
             self.current_building_id,
-            {"role": "assistant", "content": building_content}
+            {"role": "assistant", "content": building_content},
+            heard_by=self._occupants_snapshot(self.current_building_id),
         )
 
         moved = self._handle_movement(move_target)
@@ -420,6 +513,7 @@ class PersonaCore:
         user_message: Optional[str],
         system_prompt_extra: Optional[str] = None,
         info_text: Optional[str] = None,
+        guidance_text_override: Optional[str] = None,
         log_extra_prompt: bool = True,
         log_user_message: bool = True,
     ) -> tuple[str, Optional[Dict[str, str]], bool]:
@@ -455,7 +549,12 @@ class PersonaCore:
             except Exception as exc:
                 logging.warning("SAIMemory recall failed: %s", exc)
 
-        msgs = self._build_messages(actual_user_message, system_prompt_extra, combined_info or None)
+        msgs = self._build_messages(
+            actual_user_message,
+            extra_system_prompt=system_prompt_extra,
+            info_text=combined_info or None,
+            guidance_text=guidance_text_override,
+        )
         logging.debug("Messages sent to API: %s", msgs)
 
         content = self.llm_client.generate(msgs, tools=[])
@@ -488,6 +587,7 @@ class PersonaCore:
         user_message: Optional[str],
         system_prompt_extra: Optional[str] = None,
         info_text: Optional[str] = None,
+        guidance_text_override: Optional[str] = None,
         log_extra_prompt: bool = True,
         log_user_message: bool = True,
     ) -> Iterator[str]:
@@ -521,7 +621,12 @@ class PersonaCore:
             except Exception as exc:
                 logging.warning("SAIMemory recall failed: %s", exc)
 
-        msgs = self._build_messages(actual_user_message, system_prompt_extra, combined_info or None)
+        msgs = self._build_messages(
+            actual_user_message,
+            extra_system_prompt=system_prompt_extra,
+            info_text=combined_info or None,
+            guidance_text=guidance_text_override,
+        )
         logging.debug("Messages sent to API: %s", msgs)
 
         attempt = 1
@@ -581,13 +686,15 @@ class PersonaCore:
                     logging.warning(f"Dispatch failed: {reason}")
                     self.history_manager.add_message(
                         {"role": "system", "content": f"別のCityへの移動に失敗しました。{reason}"},
-                        self.current_building_id
+                        self.current_building_id,
+                        heard_by=self._occupants_snapshot(self.current_building_id),
                     )
             else:
                 logging.error("Dispatch callback is not set. Cannot move between cities.")
                 self.history_manager.add_message(
                     {"role": "system", "content": "別のCityへ移動する機能が設定されていません。"},
-                    self.current_building_id
+                    self.current_building_id,
+                    heard_by=self._occupants_snapshot(self.current_building_id),
                 )
             return moved
 
@@ -606,7 +713,8 @@ class PersonaCore:
                 logging.info("Move blocked to building: %s", target_building_id)
                 self.history_manager.add_message(
                     {"role": "system", "content": f"移動できませんでした。{reason}"},
-                    self.current_building_id
+                    self.current_building_id,
+                    heard_by=self._occupants_snapshot(self.current_building_id),
                 )
         elif target_building_id:
             logging.info("Unknown building id received: %s, staying at %s", target_building_id, self.current_building_id)
@@ -647,7 +755,8 @@ class PersonaCore:
             logging.error("Explore callback is not set. Cannot explore cities.")
             self.history_manager.add_message(
                 {"role": "system", "content": "他のCityを探索する機能が設定されていません。"},
-                self.current_building_id
+                self.current_building_id,
+                heard_by=self._occupants_snapshot(self.current_building_id),
             )
 
     def _handle_creation(self, creation_target: Optional[Dict[str, str]]) -> None:
@@ -666,13 +775,15 @@ class PersonaCore:
             feedback_message = f'<div class="note-box">🧬 ペルソナ創造:<br><b>{message}</b></div>'
             self.history_manager.add_message(
                 {"role": "host", "content": feedback_message},
-                self.current_building_id
+                self.current_building_id,
+                heard_by=self._occupants_snapshot(self.current_building_id),
             )
         else:
             logging.error("Create persona callback is not set. Cannot create new persona.")
             self.history_manager.add_message(
                 {"role": "system", "content": "新しいペルソナを創造する機能が設定されていません。"},
-                self.current_building_id
+                self.current_building_id,
+                heard_by=self._occupants_snapshot(self.current_building_id),
             )
 
     def run_auto_conversation(self, initial: bool = False) -> List[str]:
@@ -687,7 +798,8 @@ class PersonaCore:
             else:
                 self.history_manager.add_message(
                     {"role": "system", "content": building.entry_prompt},
-                    self.current_building_id
+                    self.current_building_id,
+                    heard_by=self._occupants_snapshot(self.current_building_id),
                 )
         while (
             building.auto_prompt
@@ -746,7 +858,8 @@ class PersonaCore:
         # ユーザーのメッセージを先に履歴に追加
         self.history_manager.add_message(
             {"role": "user", "content": message},
-            self.current_building_id
+            self.current_building_id,
+            heard_by=self._occupants_snapshot(self.current_building_id),
         )
 
         # _generate_stream には user_message=None を渡す
@@ -783,7 +896,8 @@ class PersonaCore:
         if not allowed:
             self.history_manager.add_to_building_only(
                 self.user_room_id,
-                {"role": "assistant", "content": f'<div class="note-box">移動できませんでした。{reason}</div>'}
+                {"role": "assistant", "content": f'<div class="note-box">移動できませんでした。{reason}</div>'},
+                heard_by=self._occupants_snapshot(self.user_room_id),
             )
             self._save_session_metadata()
             return []
@@ -797,6 +911,7 @@ class PersonaCore:
                 "role": "assistant",
                 "content": f'<div class="note-box">🏢 Building:<br><b>{self.persona_name}が入室しました</b></div>',
             },
+            heard_by=self._occupants_snapshot(self.user_room_id),
         )
         self._save_session_metadata()
         return self.run_auto_conversation(initial=True)
@@ -887,6 +1002,7 @@ class PersonaCore:
         self.history_manager.add_to_building_only(
             self.current_building_id,
             {"role": "assistant", "content": summary},
+            heard_by=self._occupants_snapshot(self.current_building_id),
         )
 
     def _combine_with_reasoning(self, base_text: str, reasoning_entries: List[Dict[str, str]]) -> str:
@@ -924,21 +1040,28 @@ class PersonaCore:
         self.conscious_log_path.parent.mkdir(parents=True, exist_ok=True)
         data_to_save = {
             "log": self.conscious_log,
-            "pulse_indices": self.pulse_indices
+            "pulse_cursors": self.pulse_cursors,
+            "pulse_cursor_format": "seq",
+            "pulse_indices": self.pulse_cursors,
         }
         self.conscious_log_path.write_text(json.dumps(data_to_save, ensure_ascii=False), encoding="utf-8")
 
     def _mark_entry(self, building_id: str) -> None:
-        """Mark the index of building history at the moment of entry.
-        First pulse after entry will read from this index.
+        """Mark the latest building message sequence at the moment of entry.
+        First pulse after entry will read only messages after this point.
         """
         try:
             hist = self.history_manager.building_histories.get(building_id, [])
-            idx = len(hist)
-            self.entry_indices[building_id] = idx
-            # Reset pulse index to entry point so we never ingest pre-entry messages
-            self.pulse_indices[building_id] = idx
-            logging.debug("[entry] entry index set: %s -> %d", building_id, idx)
+            last_seq = 0
+            if hist:
+                try:
+                    last_seq = int(hist[-1].get("seq", len(hist)))
+                except (TypeError, ValueError):
+                    last_seq = len(hist)
+            self.entry_markers[building_id] = last_seq
+            prior_cursor = self.pulse_cursors.get(building_id, 0)
+            self.pulse_cursors[building_id] = max(prior_cursor, last_seq)
+            logging.debug("[entry] entry marker set: %s -> %d (prev_cursor=%d)", building_id, last_seq, prior_cursor)
         except Exception:
             pass
 
@@ -956,12 +1079,36 @@ class PersonaCore:
 
 
         hist = self.history_manager.building_histories.get(building_id, [])
-        # Use last pulse position, or if first pulse since entering, use the entry index
-        entry_idx = self.entry_indices.get(building_id, len(hist))
-        idx = self.pulse_indices.get(building_id, entry_idx)
-        new_msgs = hist[idx:]
-        self.pulse_indices[building_id] = len(hist)
-        logging.debug("[pulse] new messages since last pulse: %s", new_msgs)
+        last_cursor = self.pulse_cursors.get(building_id, 0)
+        entry_limit = self.entry_markers.get(building_id, last_cursor)
+        new_msgs: List[Dict[str, Any]] = []
+        max_seen_seq = last_cursor
+        for msg in hist:
+            try:
+                seq = int(msg.get("seq", 0))
+            except (TypeError, ValueError):
+                seq = 0
+            if seq <= last_cursor:
+                max_seen_seq = max(max_seen_seq, seq)
+                continue
+            max_seen_seq = max(max_seen_seq, seq)
+            if seq <= entry_limit:
+                continue
+            heard_by = msg.get("heard_by") or []
+            if self.persona_id not in heard_by:
+                continue
+            new_msgs.append(msg)
+        self.pulse_cursors[building_id] = max_seen_seq
+        logging.debug(
+            "[pulse] history_size=%d last_cursor=%d entry_limit=%d processed_up_to=%d new_msgs=%d",
+            len(hist),
+            last_cursor,
+            entry_limit,
+            max_seen_seq,
+            len(new_msgs),
+        )
+        if new_msgs:
+            logging.debug("[pulse] new audible messages: %s", new_msgs)
 
         # Perception: ingest fresh utterances into this persona's own history
         perceived = 0
@@ -995,16 +1142,67 @@ class PersonaCore:
 
         # 引数で渡された最新のoccupantsリストを使用
         occupants_str = ",".join(occupants)
-        info = (
+        context_info = (
             f"occupants:{occupants_str}\nuser_online:{user_online}"
         )
-        logging.debug("[pulse] context info: %s", info)
-        self.conscious_log.append({"role": "user", "content": info})
+        logging.debug("[pulse] context info: %s", context_info)
+        self.conscious_log.append({"role": "user", "content": context_info})
 
-        recent = self.history_manager.building_histories.get(building_id, [])[-6:]
+        recent_candidates: List[Dict[str, Any]] = []
+        for msg in hist:
+            try:
+                seq = int(msg.get("seq", 0))
+            except (TypeError, ValueError):
+                seq = 0
+            if seq <= entry_limit:
+                continue
+            if msg.get("role") == "system":
+                continue
+            heard_by = msg.get("heard_by") or []
+            if self.persona_id not in heard_by:
+                continue
+            recent_candidates.append(msg)
+        recent = recent_candidates[-6:]
+        if recent:
+            first_seq = recent[0].get("seq")
+            last_seq = recent[-1].get("seq")
+            preview_parts = []
+            for msg in recent:
+                content = (msg.get("content") or "").strip()
+                if len(content) > 120:
+                    content = content[:117] + "..."
+                preview_parts.append(f"{msg.get('role')}: {content}")
+            logging.debug(
+                "[pulse] recent_window seq_range=%s-%s count=%d preview=%s",
+                first_seq,
+                last_seq,
+                len(recent),
+                " | ".join(preview_parts),
+            )
+        else:
+            logging.debug("[pulse] recent_window empty for persona %s in %s", self.persona_id, building_id)
         recent_text = "\n".join(
             f"{m.get('role')}: {m.get('content')}" for m in recent if m.get("role") != "system"
         )
+
+        new_message_details: List[str] = []
+        for msg in new_msgs:
+            try:
+                seq = msg.get("seq")
+                role = msg.get("role")
+                content = (msg.get("content") or "").strip()
+                if len(content) > 200:
+                    content = content[:197] + "..."
+                new_message_details.append(f"[seq={seq}] {role}: {content}")
+            except Exception:
+                continue
+        info_lines: List[str] = []
+        if new_message_details:
+            info_lines.append("## 今回新たに取得した発話")
+            info_lines.append("\n".join(new_message_details))
+        info_lines.append(f"occupants:{occupants_str}")
+        info_lines.append(f"user_online:{user_online}")
+        info = "\n".join(info_lines)
 
         recall_snippet = ""
         current_user_created_at: Optional[int] = None
@@ -1036,9 +1234,29 @@ class PersonaCore:
                         max_chars=RECALL_SNIPPET_PULSE_MAX_CHARS,
                         exclude_created_at=current_user_created_at,
                     )
+                    if recall_snippet:
+                        logging.debug("[pulse] recall_snippet content: %s", recall_snippet)
                 except Exception as exc:
                     logging.warning("[pulse] recall snippet failed: %s", exc)
                     recall_snippet = ""
+
+        thread_directory = "(SAIMemory未接続)"
+        if self.sai_memory is not None and self.sai_memory.is_ready():
+            try:
+                summaries = self.sai_memory.list_thread_summaries()
+                if summaries:
+                    lines: List[str] = []
+                    for item in summaries:
+                        marker = "★" if item.get("active") else "-"
+                        suffix = item.get("suffix") or item.get("thread_id") or "?"
+                        preview = item.get("preview") or "(まだ発話がありません)"
+                        lines.append(f"{marker} {suffix}: {preview}")
+                    thread_directory = "\n".join(lines)
+                else:
+                    thread_directory = "(スレッドがまだ作られていません)"
+            except Exception as exc:
+                logging.warning("[pulse] failed to list SAIMemory threads: %s", exc)
+                thread_directory = "(スレッド一覧の取得に失敗しました)"
 
         pulse_prompt_template = Path("system_prompts/pulse.txt").read_text(encoding="utf-8")
         model_name = decision_model or "gemini-2.0-flash"
@@ -1053,6 +1271,136 @@ class PersonaCore:
         paid_client = genai.Client(api_key=paid_key) if paid_key else None
         active_client = free_client or paid_client
 
+        def _type_from_json(token: Optional[str]) -> types.Type:
+            mapping = {
+                "string": types.Type.STRING,
+                "number": types.Type.NUMBER,
+                "integer": types.Type.INTEGER,
+                "boolean": types.Type.BOOLEAN,
+                "array": types.Type.ARRAY,
+                "object": types.Type.OBJECT,
+                "null": types.Type.NULL,
+            }
+            return mapping.get(token, types.Type.TYPE_UNSPECIFIED)
+
+        def _schema_from_json(js: Optional[Dict[str, Any]]) -> types.Schema:
+            if not isinstance(js, dict):
+                return types.Schema(type=types.Type.OBJECT)
+
+            kwargs: Dict[str, Any] = {}
+            value_type = js.get("type")
+            if isinstance(value_type, list):
+                if len(value_type) == 1:
+                    value_type = value_type[0]
+                else:
+                    kwargs["any_of"] = [_schema_from_json({**js, "type": t}) for t in value_type]
+                    value_type = None
+            if isinstance(value_type, str):
+                kwargs["type"] = _type_from_json(value_type)
+
+            if "description" in js:
+                kwargs["description"] = js["description"]
+            if "enum" in js and isinstance(js["enum"], list):
+                kwargs["enum"] = js["enum"]
+            if "const" in js:
+                kwargs["enum"] = [js["const"]]
+
+            if "properties" in js and isinstance(js["properties"], dict):
+                props = {k: _schema_from_json(v) for k, v in js["properties"].items()}
+                kwargs["properties"] = props
+                kwargs["property_ordering"] = list(js["properties"].keys())
+            if "required" in js and isinstance(js["required"], list):
+                kwargs["required"] = js["required"]
+
+            if "items" in js:
+                kwargs["items"] = _schema_from_json(js["items"])
+
+            if "anyOf" in js and isinstance(js["anyOf"], list):
+                kwargs["any_of"] = [_schema_from_json(sub) for sub in js["anyOf"]]
+
+            if "oneOf" in js and isinstance(js["oneOf"], list):
+                kwargs["any_of"] = [_schema_from_json(sub) for sub in js["oneOf"]]
+
+            return types.Schema(**kwargs)
+
+        tool_variants: List[types.Schema] = []
+        for tool_schema in TOOL_SCHEMAS:
+            arguments_schema = _schema_from_json(tool_schema.parameters)
+            tool_variants.append(
+                types.Schema(
+                    type=types.Type.OBJECT,
+                    required=["name", "arguments"],
+                    property_ordering=["name", "arguments"],
+                    properties={
+                        "name": types.Schema(
+                            type=types.Type.STRING,
+                            enum=[tool_schema.name],
+                            description=f"Invoke the '{tool_schema.name}' tool.",
+                        ),
+                        "arguments": arguments_schema,
+                    },
+                )
+            )
+
+        tool_variants.append(
+            types.Schema(
+                type=types.Type.OBJECT,
+                required=["name", "arguments"],
+                property_ordering=["name", "arguments"],
+                properties={
+                    "name": types.Schema(
+                        type=types.Type.STRING,
+                        enum=["none"],
+                        description="Use 'none' when no tool should be invoked.",
+                    ),
+                    "arguments": types.Schema(
+                        type=types.Type.NULL,
+                        description="Must be null when no tool is invoked.",
+                    ),
+                },
+            )
+        )
+
+        tool_schema = types.Schema(any_of=tool_variants)
+
+        decision_schema = types.Schema(
+            type=types.Type.OBJECT,
+            property_ordering=[
+                "action",
+                "conversation_guidance",
+                "memory_note",
+                "recall_note",
+                "tool",
+            ],
+            required=[
+                "action",
+                "conversation_guidance",
+                "memory_note",
+                "recall_note",
+                "tool",
+            ],
+            properties={
+                "action": types.Schema(
+                    type=types.Type.STRING,
+                    enum=["wait", "speak", "tool"],
+                    description="Select 'wait', 'speak', or 'tool'.",
+                ),
+                "conversation_guidance": types.Schema(
+                    type=types.Type.STRING,
+                    description="Plaintext guidance for the conversation module. Use an empty string when no guidance is needed.",
+                ),
+                "memory_note": types.Schema(
+                    type=types.Type.STRING,
+                    description="Content that should be recorded into long-term memory, or an empty string if none.",
+                ),
+                "recall_note": types.Schema(
+                    type=types.Type.STRING,
+                    description="Summaries or excerpts from recall that should be relayed to the conversation module, or empty string if none.",
+                ),
+                "tool": tool_schema,
+            },
+        )
+
         def _format_tool_feedback(entries: List[Dict[str, Any]]) -> str:
             if not entries:
                 return "（直近で実行したツールはありません）"
@@ -1066,6 +1414,12 @@ class PersonaCore:
             return "\n".join(lines)
 
         def _render_prompt(tool_entries: List[Dict[str, Any]]) -> str:
+            tool_catalog_lines = []
+            for schema in TOOL_SCHEMAS:
+                props = schema.parameters.get("properties", {}) if isinstance(schema.parameters, dict) else {}
+                arglist = ", ".join(props.keys()) if props else "(引数なし)"
+                tool_catalog_lines.append(f"- {schema.name}: {schema.description} | 引数: {arglist}")
+            tool_catalog = "\n".join(tool_catalog_lines) if tool_catalog_lines else "(利用可能なツールはありません)"
             return pulse_prompt_template.format(
                 current_persona_name=self.persona_name,
                 current_persona_system_instruction=self.persona_system_instruction,
@@ -1075,6 +1429,8 @@ class PersonaCore:
                 user_online_state="online" if user_online else "offline",
                 recall_snippet=recall_snippet or "(なし)",
                 tool_feedback_section=_format_tool_feedback(tool_entries),
+                tool_overview_section=tool_catalog,
+                thread_directory=thread_directory,
             )
 
         def _call(client: genai.Client, prompt_text: str):
@@ -1085,13 +1441,16 @@ class PersonaCore:
                     system_instruction=prompt_text,
                     safety_settings=llm_clients.GEMINI_SAFETY_CONFIG,
                     response_mime_type="application/json",
+                    response_schema=decision_schema,
                 ),
             )
 
         tool_history: List[Dict[str, Any]] = []
         tool_info_parts: List[str] = []
         last_decision: Optional[Dict[str, Any]] = None
-        recall_out: str = ""
+        conversation_guidance_parts: List[str] = []
+        recall_note = ""
+        force_speak = False
         max_tool_runs = 5
         max_decision_loops = max_tool_runs + 2
         replies: List[str] = []
@@ -1126,15 +1485,18 @@ class PersonaCore:
                 return []
 
             last_decision = data
-            recall_out = (data.get("recall") or "").strip()
-            memory_note = (data.get("memory") or "").strip()
+            guidance_chunk = (data.get("conversation_guidance") or "").strip()
+            if guidance_chunk:
+                conversation_guidance_parts.append(guidance_chunk)
+            memory_note = (data.get("memory_note") or "").strip()
+            recall_note = (data.get("recall_note") or "").strip()
             if memory_note:
                 self.conscious_log.append({"role": "assistant", "content": f"[memory]\n{memory_note}"})
                 self._save_conscious_log()
 
-            next_action = (data.get("next_action") or "").lower()
+            next_action = (data.get("action") or "").lower()
             if not next_action:
-                next_action = "speak" if data.get("speak") else "wait"
+                next_action = "speak"
             if next_action not in {"wait", "speak", "tool"}:
                 logging.warning("[pulse] unknown action '%s', defaulting to speak", next_action)
                 next_action = "speak"
@@ -1142,6 +1504,7 @@ class PersonaCore:
             if next_action == "tool" and len(tool_history) >= max_tool_runs:
                 logging.info("[pulse] tool usage limit reached, forcing speak")
                 next_action = "speak"
+                force_speak = True
 
             if next_action == "wait":
                 logging.info("[pulse] decision: wait")
@@ -1152,8 +1515,40 @@ class PersonaCore:
             if next_action == "tool":
                 tool_payload = data.get("tool") or {}
                 tool_name = (tool_payload.get("name") or "").strip()
-                tool_args = tool_payload.get("arguments") or {}
-                if not tool_name:
+                raw_args = tool_payload.get("arguments")
+                tool_args = raw_args if isinstance(raw_args, dict) else {}
+                if tool_name and tool_args:
+                    cached = next(
+                        (
+                            entry
+                            for entry in reversed(tool_history)
+                            if entry.get("name") == tool_name and entry.get("arguments") == tool_args and entry.get("result")
+                        ),
+                        None,
+                    )
+                else:
+                    cached = None
+                if cached is not None:
+                    cached_result = cached.get("result")
+                    logging.info("[pulse] duplicate tool request detected for '%s'; reusing cached result", tool_name)
+                    if isinstance(cached_result, str):
+                        summary_for_cache = cached_result
+                    else:
+                        summary_for_cache = json.dumps(cached_result, ensure_ascii=False)
+                    conversation_guidance_parts.append(
+                        f"計算結果: {summary_for_cache}\n"
+                        "この結果をそのままユーザーに伝えてください。ツールは再実行してはいけません。"
+                    )
+                    next_action = "speak"
+                    force_speak = True
+                    break
+                logging.info(
+                    "[pulse] tool decision received: name=%s args=%s (loop=%d)",
+                    tool_name or "(empty)",
+                    json.dumps(tool_args, ensure_ascii=False) if tool_args else "{}",
+                    loop_index,
+                )
+                if tool_name in {"", "none"}:
                     logging.warning("[pulse] tool action requested without name; skipping")
                     continue
                 fn = TOOL_REGISTRY.get(tool_name)
@@ -1162,8 +1557,30 @@ class PersonaCore:
                     tool_history.append({"name": tool_name, "arguments": tool_args, "result": "Unsupported tool"})
                     continue
                 try:
-                    result = fn(**tool_args)
+                    sanitized_args = dict(tool_args)
+                    for forbidden in (
+                        "persona_id",
+                        "persona_path",
+                        "origin_thread",
+                        "origin_message_id",
+                        "timestamp",
+                        "update_active_state",
+                        "range_after",
+                    ):
+                        sanitized_args.pop(forbidden, None)
+                    logging.debug(
+                        "[pulse] invoking tool '%s' with sanitized_args=%s",
+                        tool_name,
+                        json.dumps(sanitized_args, ensure_ascii=False) if sanitized_args else "{}",
+                    )
+                    with persona_context(self.persona_id, self.persona_log_path.parent):
+                        result = fn(**sanitized_args)
                     result_text, snippet, file_path = parse_tool_result(result)
+                    logging.info(
+                        "[pulse] tool '%s' completed. result_preview=%s",
+                        tool_name,
+                        (result_text[:160] + "…") if isinstance(result_text, str) and len(result_text) > 160 else result_text,
+                    )
                 except Exception as exc:
                     logging.exception("[pulse] tool '%s' raised an error", tool_name)
                     result_text = f"Error executing tool: {exc}"
@@ -1176,17 +1593,43 @@ class PersonaCore:
                 self.conscious_log.append({"role": "assistant", "content": log_entry})
                 self._save_conscious_log()
 
+                if isinstance(result_text, str):
+                    summary_text = result_text.strip()
+                else:
+                    summary_text = json.dumps(result_text, ensure_ascii=False)
+                expression_preview = ""
+                expr_value = tool_args.get("expression") if isinstance(tool_args, dict) else None
+                if isinstance(expr_value, str) and expr_value.strip():
+                    expression_preview = expr_value.strip()
+                if expression_preview:
+                    result_summary = f"{expression_preview} = {summary_text}"
+                else:
+                    result_summary = summary_text
+
                 history_record = {
                     "name": tool_name,
                     "arguments": tool_args,
-                    "result": result_text,
+                    "result": result_summary,
                 }
                 tool_history.append(history_record)
 
-                if result_text:
-                    tool_info_parts.append(f"[TOOL:{tool_name}] {result_text}")
+                tool_info_parts = [
+                    entry for entry in tool_info_parts if not entry.startswith(f"[TOOL:{tool_name}]")
+                ]
+                tool_info_parts.append(f"[TOOL:{tool_name}] {result_summary}")
                 if file_path:
+                    tool_info_parts = [
+                        entry for entry in tool_info_parts if not entry.startswith(f"[TOOL_FILE:{tool_name}]")
+                    ]
                     tool_info_parts.append(f"[TOOL_FILE:{tool_name}] {file_path}")
+
+                conversation_guidance_parts.append(
+                    f"計算結果: {result_summary}\n"
+                    "この結果をそのままユーザーに伝えてください。ツールは再実行してはいけません。"
+                )
+                next_action = "speak"
+                force_speak = True
+                break
 
                 continue
 
@@ -1202,31 +1645,59 @@ class PersonaCore:
         if next_action == "tool":
             logging.info("[pulse] reached decision loop limit; forcing speak")
             next_action = "speak"
+            force_speak = True
         elif next_action == "wait":
             logging.info("[pulse] decision: wait")
             self._save_session_metadata()
             logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))
             return replies
 
-        info_text = (last_decision.get("info") or "").strip()
+        # Collapse guidance parts while preserving order and removing duplicates
+        seen_guidance: set[str] = set()
+        collapsed_guidance_parts: List[str] = []
+        for part in conversation_guidance_parts:
+            if not part:
+                continue
+            if part in seen_guidance:
+                continue
+            seen_guidance.add(part)
+            collapsed_guidance_parts.append(part)
+
+        guidance_text = "\n\n".join(collapsed_guidance_parts)
         if tool_info_parts:
             tool_section = "\n\n".join(tool_info_parts)
-            info_text = (tool_section + ("\n\n" + info_text if info_text else "")).strip()
-        if recall_out:
-            info_text = (info_text + "\n\n[記憶想起]\n" + recall_out).strip() if info_text else "[記憶想起]\n" + recall_out
+            guidance_text = (tool_section + ("\n\n" + guidance_text if guidance_text else "")).strip()
+        if recall_note:
+            guidance_text = (
+                (guidance_text + "\n\n[記憶想起]\n" + recall_note).strip()
+                if guidance_text
+                else "[記憶想起]\n" + recall_note
+            )
 
-        logging.info("[pulse] generating speech with extra info: %s", info_text)
+        logging.info("[pulse] generating speech with extra info: %s", guidance_text)
+        guidance_message = None
+        if guidance_text:
+            guidance_message = (
+                "### 意識モジュールからの情報提供\n\n"
+                f"{guidance_text}\n\n"
+                "### 注意\n\n"
+                "この内容はユーザーに見えていないため、あなたの言葉でユーザーに説明してください。\n"
+                "- ツールは実行せず、会話だけで回答すること。\n"
+                "- 記載されている結果をそのまま伝え、再計算はしないこと。\n"
+                "- ユーザーが確認を求めたら、結果と経緯を文章でまとめて伝えること。"
+            )
         say, _, _ = self._generate(
             None,
             system_prompt_extra=None,
-            info_text=info_text,
+            info_text=None,
+            guidance_text_override=guidance_message,
             log_extra_prompt=False,
             log_user_message=False,
         )
         replies.append(say)
 
-        if recall_out:
-            logging.info("[pulse] recall note: %s", recall_out)
+        if recall_note:
+            logging.info("[pulse] recall note: %s", recall_note)
 
         self._save_session_metadata()
         logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))
