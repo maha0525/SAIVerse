@@ -1569,7 +1569,7 @@ class SAIVerseManager:
                 result = tool_function(**arguments) # 引数をアンパックして渡す
 
                 # 6. Process and return the result
-                content, _, _ = tools.defs.parse_tool_result(result)
+                content, _, _, _ = tools.defs.parse_tool_result(result)
                 return str(content)
 
             except ImportError:

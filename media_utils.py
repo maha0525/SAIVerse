@@ -1,10 +1,12 @@
 import base64
 import logging
 import mimetypes
+from datetime import datetime
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from uuid import uuid4
 
 try:
     from PIL import Image  # type: ignore
@@ -16,6 +18,12 @@ IMAGE_URI_PREFIX = "saiverse://image/"
 SUPPORTED_LLM_IMAGE_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 
 
+def _ensure_image_dir() -> Path:
+    dest_dir = Path.home() / ".saiverse" / "image"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    return dest_dir
+
+
 def resolve_media_uri(uri: str) -> Optional[Path]:
     """Resolve a SAIVerse media URI to a local filesystem path."""
     if not isinstance(uri, str):
@@ -25,7 +33,7 @@ def resolve_media_uri(uri: str) -> Optional[Path]:
     filename = uri[len(IMAGE_URI_PREFIX):].strip()
     if not filename:
         return None
-    return Path.home() / ".saiverse" / "image" / filename
+    return _ensure_image_dir() / filename
 
 
 def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:
@@ -59,6 +67,24 @@ def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:
             }
         )
     return results
+
+
+def store_image_bytes(data: bytes, mime_type: str, *, source: str = "generated") -> Tuple[Dict[str, str], Path]:
+    dest_dir = _ensure_image_dir()
+    mime_type = (mime_type or "image/png").lower()
+    ext = mimetypes.guess_extension(mime_type) or ".png"
+    if ext == ".jpe":
+        ext = ".jpg"
+    filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex}{ext}"
+    dest_path = dest_dir / filename
+    dest_path.write_bytes(data)
+    metadata = {
+        "type": "image",
+        "uri": f"{IMAGE_URI_PREFIX}{filename}",
+        "mime_type": mime_type,
+        "source": source,
+    }
+    return metadata, dest_path
 
 
 @lru_cache(maxsize=256)

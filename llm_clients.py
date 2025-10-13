@@ -264,6 +264,7 @@ class LLMClient:
 
     def __init__(self, supports_images: bool = False) -> None:
         self._latest_reasoning: List[Dict[str, str]] = []
+        self._latest_attachments: List[Dict[str, Any]] = []
         self.supports_images = supports_images
 
     def generate(
@@ -284,6 +285,16 @@ class LLMClient:
         entries = self._latest_reasoning
         self._latest_reasoning = []
         return entries
+
+    def _store_attachment(self, metadata: Dict[str, Any]) -> None:
+        if not metadata:
+            return
+        self._latest_attachments.append(metadata)
+
+    def consume_attachments(self) -> List[Dict[str, Any]]:
+        attachments = self._latest_attachments
+        self._latest_attachments = []
+        return attachments
 
 # --- Concrete Clients ---
 class OpenAIClient(LLMClient):
@@ -520,7 +531,7 @@ class AnthropicClient(OpenAIClient):
                     if fn is None:
                         raise RuntimeError(f"Unsupported tool: {tc.function.name}")
                     args = json.loads(tc.function.arguments)
-                    result_text, snippet, file_path = parse_tool_result(fn(**args))
+                    result_text, snippet, file_path, metadata = parse_tool_result(fn(**args))
                     if snippet:
                         snippets.append(snippet)
                     messages.append({
@@ -544,6 +555,8 @@ class AnthropicClient(OpenAIClient):
                             })
                         except Exception:
                             logging.exception("Failed to load file %s", file_path)
+                    if metadata:
+                        self._store_attachment(metadata)
                 continue    # -> 次ラウンドへ
             return "ツール呼び出しが 10 回を超えました。"
         except Exception:
@@ -739,7 +752,7 @@ class AnthropicClient(OpenAIClient):
                         continue
 
                     try:
-                        result_text, snippet, file_path = parse_tool_result(fn(**args))
+                        result_text, snippet, file_path, metadata = parse_tool_result(fn(**args))
                         logging.info("tool_call %s executed -> %s", tc["id"], result_text)
                         if snippet:
                             history_snippets.append(snippet)
@@ -775,6 +788,8 @@ class AnthropicClient(OpenAIClient):
                             })
                         except Exception:
                             logging.exception("Failed to load file %s", file_path)
+                    if metadata:
+                        self._store_attachment(metadata)
                 # ② assistant/tool_calls を tool 応答より前に挿入
                 insert_pos = len(messages) - len(call_buffer)  # 直前に挿入
                 messages.insert(insert_pos, assistant_call_msg)
@@ -1000,7 +1015,7 @@ class GeminiClient(LLMClient):
                 fn = TOOL_REGISTRY.get(fc.name)
                 if fn is None:
                     raise RuntimeError(f"Unsupported tool: {fc.name}")
-                result_text, snippet, file_path = parse_tool_result(fn(**fc.args))
+                result_text, snippet, file_path, metadata = parse_tool_result(fn(**fc.args))
                 if snippet:
                     snippets.append(snippet)
 
@@ -1030,6 +1045,8 @@ class GeminiClient(LLMClient):
                         parts=parts,
                     )
                 )
+                if metadata:
+                    self._store_attachment(metadata)
             return "ツール呼び出しが 10 回を超えました。"
 
         active_client = self.client
@@ -1201,7 +1218,7 @@ class GeminiClient(LLMClient):
             return
 
         try:
-            result_text, snippet, file_path = parse_tool_result(fn(**fcall.args))
+            result_text, snippet, file_path, metadata = parse_tool_result(fn(**fcall.args))
             if snippet:
                 history_snippets.append(snippet)
             result = result_text
@@ -1235,6 +1252,8 @@ class GeminiClient(LLMClient):
                     mime_type=mime,
                 )
             )
+        if metadata:
+            self._store_attachment(metadata)
 
         messages.extend([
             types.Content(role="model", parts=parts),
