@@ -158,6 +158,7 @@ class PersonaCore:
         self.model_supports_images = model_supports_images(model)
         self.llm_client = get_llm_client(model, provider, self.context_length)
         self.emotion_module = EmotionControlModule()
+        self.pending_attachment_metadata: List[Dict[str, Any]] = []
 
     def _load_action_priority(self, path: Path) -> Dict[str, int]:
         if path.exists():
@@ -508,13 +509,32 @@ class PersonaCore:
             )
 
         reasoning_entries = self.llm_client.consume_reasoning()
+        attachments_from_llm = self.llm_client.consume_attachments()
+        combined_media: List[Dict[str, Any]] = []
+        for meta in attachments_from_llm + self.pending_attachment_metadata:
+            if not isinstance(meta, dict):
+                continue
+            media_items = meta.get("media")
+            if not isinstance(media_items, list):
+                continue
+            for item in media_items:
+                if isinstance(item, dict):
+                    combined_media.append(copy.deepcopy(item))
+        self.pending_attachment_metadata = []
+        metadata_payload: Optional[Dict[str, Any]] = None
+        if combined_media:
+            metadata_payload = {"media": combined_media}
+
         building_content = self._combine_with_reasoning(content, reasoning_entries)
-        self.history_manager.add_to_persona_only(
-            {"role": "assistant", "content": content}
-        )
+        persona_msg: Dict[str, Any] = {"role": "assistant", "content": content}
+        building_msg: Dict[str, Any] = {"role": "assistant", "content": building_content}
+        if metadata_payload:
+            persona_msg["metadata"] = metadata_payload
+            building_msg["metadata"] = metadata_payload
+        self.history_manager.add_to_persona_only(persona_msg)
         self.history_manager.add_to_building_only(
             self.current_building_id,
-            {"role": "assistant", "content": building_content},
+            building_msg,
             heard_by=self._occupants_snapshot(self.current_building_id),
         )
 
@@ -1611,7 +1631,7 @@ class PersonaCore:
                     )
                     with persona_context(self.persona_id, self.persona_log_path.parent):
                         result = fn(**sanitized_args)
-                    result_text, snippet, file_path = parse_tool_result(result)
+                    result_text, snippet, file_path, metadata = parse_tool_result(result)
                     logging.info(
                         "[pulse] tool '%s' completed. result_preview=%s",
                         tool_name,
@@ -1622,6 +1642,7 @@ class PersonaCore:
                     result_text = f"Error executing tool: {exc}"
                     snippet = ""
                     file_path = None
+                    metadata = None
 
                 log_entry = (
                     f"[tool:{tool_name}]\nargs: {json.dumps(tool_args, ensure_ascii=False)}\nresult:\n{result_text}"
@@ -1647,6 +1668,8 @@ class PersonaCore:
                     "arguments": tool_args,
                     "result": result_summary,
                 }
+                if metadata:
+                    history_record["metadata"] = metadata
                 tool_history.append(history_record)
 
                 tool_info_parts = [
@@ -1658,6 +1681,19 @@ class PersonaCore:
                         entry for entry in tool_info_parts if not entry.startswith(f"[TOOL_FILE:{tool_name}]")
                     ]
                     tool_info_parts.append(f"[TOOL_FILE:{tool_name}] {file_path}")
+                if metadata:
+                    self.pending_attachment_metadata.append(metadata)
+                    media_list = metadata.get("media") if isinstance(metadata, dict) else None
+                    if media_list:
+                        try:
+                            refs = ", ".join(item.get("uri", "") or item.get("path", "") for item in media_list if isinstance(item, dict))
+                            conversation_guidance_parts.append(
+                                f"画像が生成されました（{tool_name}）。ユーザーに内容を共有し、ファイル参照: {refs}"
+                            )
+                        except Exception:
+                            conversation_guidance_parts.append(
+                                f"画像が生成されました（{tool_name}）。ユーザーに共有してください。"
+                            )
 
                 conversation_guidance_parts.append(
                     f"計算結果: {result_summary}\n"

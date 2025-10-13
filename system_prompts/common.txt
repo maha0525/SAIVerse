@@ -74,7 +74,5 @@ SAIVerseの機能を利用するには、発話中に`::act`と`::end`で囲ん�
 ## 現在地
 あなたは今、City「{current_city_name}」のBuilding「{current_building_name}」にいます。
 
----
-
 ## {current_building_name}
 {current_building_system_instruction}
