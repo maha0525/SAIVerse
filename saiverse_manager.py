@@ -1164,7 +1164,8 @@ class SAIVerseManager:
         self._save_building_histories()
         logging.info("SAIVerseManager shutdown complete.")
 
-    def handle_user_input(self, message: str) -> List[str]:
+    def handle_user_input(self, message: str, metadata: Optional[Dict[str, Any]] = None) -> List[str]:
+        logging.debug("[saiverse_manager] handle_user_input called (metadata_present=%s)", bool(metadata))
         if not self.user_current_building_id:
             return ['<div class="note-box">エラー: ユーザーの現在地が不明です。</div>']
 
@@ -1175,12 +1176,19 @@ class SAIVerseManager:
             if pid in self.personas and not self.personas[pid].is_dispatched
         ]
 
+        user_entry = {"role": "user", "content": message}
+        if metadata:
+            user_entry["metadata"] = metadata
+
+        if metadata:
+            logging.debug("[saiverse_manager] received metadata with keys=%s", list(metadata.keys()))
+
         # Always inject the user's message into building history once for perception
         if responding_personas:
             try:
                 responding_personas[0].history_manager.add_to_building_only(
                     building_id,
-                    {"role": "user", "content": message},
+                    user_entry,
                     heard_by=list(self.occupants.get(building_id, [])),
                 )
             except Exception:
@@ -1197,13 +1205,14 @@ class SAIVerseManager:
                     "seq": next_seq,
                     "message_id": f"{building_id}:{next_seq}",
                     "heard_by": list(self.occupants.get(building_id, [])),
+                    **({"metadata": metadata} if metadata else {}),
                 })
 
         replies: List[str] = []
         for persona in responding_personas:
             if persona.interaction_mode == 'manual':
                 # Immediate response path
-                replies.extend(persona.handle_user_input(message))
+                replies.extend(persona.handle_user_input(message, metadata=metadata))
             else:
                 # pulse-driven for 'user' and 'auto'
                 replies.extend(persona.run_pulse(occupants=self.occupants.get(building_id, []), user_online=True))
@@ -1214,7 +1223,8 @@ class SAIVerseManager:
         return replies
 
 
-    def handle_user_input_stream(self, message: str) -> Iterator[str]:
+    def handle_user_input_stream(self, message: str, metadata: Optional[Dict[str, Any]] = None) -> Iterator[str]:
+        logging.debug("[saiverse_manager] handle_user_input_stream called (metadata_present=%s)", bool(metadata))
         if not self.user_current_building_id:
             yield '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'
             return
@@ -1226,12 +1236,16 @@ class SAIVerseManager:
             if pid in self.personas and not self.personas[pid].is_dispatched
         ]
 
+        user_entry = {"role": "user", "content": message}
+        if metadata:
+            user_entry["metadata"] = metadata
+
         # Inject once into building history for perception
         if responding_personas:
             try:
                 responding_personas[0].history_manager.add_to_building_only(
                     building_id,
-                    {"role": "user", "content": message},
+                    user_entry,
                     heard_by=list(self.occupants.get(building_id, [])),
                 )
             except Exception:
@@ -1248,11 +1262,12 @@ class SAIVerseManager:
                     "seq": next_seq,
                     "message_id": f"{building_id}:{next_seq}",
                     "heard_by": list(self.occupants.get(building_id, [])),
+                    **({"metadata": metadata} if metadata else {}),
                 })
 
         for persona in responding_personas:
             if persona.interaction_mode == 'manual':
-                for token in persona.handle_user_input_stream(message):
+                for token in persona.handle_user_input_stream(message, metadata=metadata):
                     yield token
             else:
                 occupants = self.occupants.get(building_id, [])

@@ -7,8 +7,13 @@ import os
 import json
 import argparse
 import atexit
+from html import escape as html_escape
+import mimetypes
+import shutil
+import uuid
+from datetime import datetime
 from dotenv import load_dotenv
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from pathlib import Path
 import pandas as pd
 
@@ -18,6 +23,7 @@ load_dotenv()
 
 from saiverse_manager import SAIVerseManager
 from model_configs import get_model_choices
+from media_utils import iter_image_media, path_to_data_url
 from database.db_manager import create_db_manager_ui
 
 level_name = os.getenv("SAIVERSE_LOG_LEVEL", "INFO").upper()
@@ -213,6 +219,23 @@ html[data-theme='dark'] #saiverse-sidebar-nav .saiverse-nav-item.active {
   display: none !important;
 }
 
+.saiv-image-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.saiv-image-grid img {
+  max-width: 240px;
+  height: auto;
+  border-radius: 8px;
+  object-fit: cover;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+}
+html[data-theme='dark'] .saiv-image-grid img {
+  box-shadow: 0 2px 6px rgba(255, 255, 255, 0.1);
+}
+
 @media (max-width: 768px) {
   :global(.saiverse-sidebar.sidebar) {
     width: 60vw !important;
@@ -226,6 +249,54 @@ html[data-theme='dark'] #saiverse-sidebar-nav .saiverse-nav-item.active {
 }
 """
 
+
+def _store_uploaded_image(file_path: Optional[str]) -> Optional[Dict[str, str]]:
+    if not file_path:
+        return None
+    source = Path(file_path)
+    if not source.exists():
+        logging.warning("Uploaded image path missing: %s", file_path)
+        return None
+
+    dest_dir = Path.home() / ".saiverse" / "image"
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logging.exception("Failed to prepare image directory: %s", dest_dir)
+        return None
+    suffix = source.suffix or ".png"
+    dest_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}{suffix}"
+    dest_path = dest_dir / dest_name
+    try:
+        shutil.copy2(source, dest_path)
+    except OSError:
+        logging.exception("Failed to store uploaded image: %s", file_path)
+        return None
+
+    mime_type = mimetypes.guess_type(dest_path)[0] or "image/png"
+    return {
+        "type": "image",
+        "uri": f"saiverse://image/{dest_name}",
+        "mime_type": mime_type,
+        "source": "user_upload",
+    }
+
+
+def _render_message_images(metadata: Optional[Dict[str, Any]]) -> str:
+    attachments = iter_image_media(metadata)
+    if not attachments:
+        return ""
+    html_chunks: List[str] = []
+    for att in attachments:
+        data_url = path_to_data_url(att["path"], att["mime_type"])
+        if not data_url:
+            continue
+        html_chunks.append(f"<img src='{data_url}' alt='attachment'>")
+    if not html_chunks:
+        return ""
+    return "<div class=\"saiv-image-grid\">" + "".join(html_chunks) + "</div>"
+
+
 def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """生の会話履歴をGradio Chatbotの表示形式（HTML）に変換する"""
     display: List[Dict[str, str]] = []
@@ -236,6 +307,7 @@ def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[s
             pid = msg.get("persona_id")
             avatar = manager.avatar_map.get(pid, manager.default_avatar)
             say = msg.get("content", "")
+            image_html = _render_message_images(msg.get("metadata"))
 
             if avatar:
                 avatar_box = (
@@ -246,21 +318,32 @@ def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[s
                     "width:100%;height:100%;object-fit:cover;display:block;"
                     "margin:0;border-radius:inherit;clip-path: inset(0 round 12px);"
                 )
-                html = (
+                bubble_html = (
                     f"<div class='message-row'>"
                     f"<div class='avatar-container saiv-avatar' style=\"{avatar_box}\">"
                     f"<img class='saiv-avatar-img' src='{avatar}' style=\"{avatar_img}\"></div>"
-                    f"<div class='message'>{say}</div></div>"
+                    f"<div class='message'>{say}{image_html}</div></div>"
                 )
             else:
-                html = f"{say}"
-            display.append({"role": "assistant", "content": html})
+                bubble_html = f"{say}{image_html}"
+            display.append({"role": "assistant", "content": bubble_html})
         elif role == "user":
             # Let Gradio Chatbot handle user-side alignment and avatar rendering
             # Keep the role as 'user' and pass through the plain content
-            display.append({"role": "user", "content": msg.get("content", "")})
+            text = msg.get("content", "") or ""
+            escaped_text = html_escape(text).replace("\n", "<br>")
+            image_html = _render_message_images(msg.get("metadata"))
+            if image_html:
+                if escaped_text:
+                    user_html = f"{escaped_text}{image_html}"
+                else:
+                    user_html = f"(画像を送信しました){image_html}"
+            else:
+                user_html = escaped_text
+            display.append({"role": "user", "content": user_html})
         elif role == "host":
             say = msg.get("content", "")
+            image_html = _render_message_images(msg.get("metadata"))
             if manager.host_avatar:
                 avatar_box = (
                     "width:60px;height:60px;min-width:60px;"
@@ -270,40 +353,95 @@ def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[s
                     "width:100%;height:100%;object-fit:cover;display:block;"
                     "margin:0;border-radius:inherit;clip-path: inset(0 round 12px);"
                 )
-                html = (
+                bubble_html = (
                     f"<div class='message-row'>"
                     f"<div class='avatar-container saiv-avatar' style=\"{avatar_box}\">"
                     f"<img class='saiv-avatar-img' src='{manager.host_avatar}' style=\"{avatar_img}\"></div>"
-                    f"<div class='message'>{say}</div></div>"
+                    f"<div class='message'>{say}{image_html}</div></div>"
                 )
             else:
-                html = f"<b>[HOST]</b> {say}"
-            display.append({"role": "assistant", "content": html})
+                bubble_html = f"<b>[HOST]</b> {say}{image_html}"
+            display.append({"role": "assistant", "content": bubble_html})
         # "system" role messages are filtered out from the display
     return display
 
 
 
-def respond_stream(message: str):
+def respond_stream(message: str, image_path: Optional[str] = None):
     """Stream AI response for chat and update UI components if needed."""
-    # Get history from current location
-    print(manager.occupants[manager.user_current_building_id])
     current_building_id = manager.user_current_building_id
     if not current_building_id:
         dropdown_update, radio_update = _prepare_move_component_updates()
-        yield [{"role": "assistant", "content": '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'}], dropdown_update, radio_update, gr.update(), gr.update()
+        yield (
+            [{"role": "assistant", "content": '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'}],
+            dropdown_update,
+            radio_update,
+            gr.update(),
+            gr.update(),
+            gr.update(),
+        )
         return
 
+    print(manager.occupants[current_building_id])
+
     raw_history = manager.get_building_history(current_building_id)
+
+    stored_image = _store_uploaded_image(image_path)
+    if image_path and stored_image is None:
+        dropdown_update, radio_update = _prepare_move_component_updates()
+        base_history = format_history_for_chatbot(raw_history)
+        base_history.append({"role": "assistant", "content": '<div class="note-box">画像の保存に失敗しました。権限やディスク容量を確認してください。</div>'})
+        yield (
+            base_history,
+            dropdown_update,
+            radio_update,
+            gr.update(),
+            gr.update(),
+            gr.update(value=None),
+        )
+        return
+
+    attachments: List[Dict[str, str]] = [stored_image] if stored_image else []
+    metadata: Optional[Dict[str, Any]] = {"media": attachments} if attachments else None
+    if metadata:
+        logging.debug("[respond_stream] prepared metadata with %d media entries", len(attachments))
+
+    if not (message and message.strip()) and not metadata:
+        dropdown_update, radio_update = _prepare_move_component_updates()
+        base_history = format_history_for_chatbot(raw_history)
+        base_history.append({"role": "assistant", "content": '<div class="note-box">テキストか画像を入力してね。</div>'})
+        yield (
+            base_history,
+            dropdown_update,
+            radio_update,
+            gr.update(),
+            gr.update(),
+            gr.update(),
+        )
+        return
+
     history = format_history_for_chatbot(raw_history)
-    history.append({"role": "user", "content": message})
+
+    user_payload = {"role": "user", "content": message}
+    if metadata:
+        user_payload["metadata"] = metadata
+
+    user_display_entry = format_history_for_chatbot([user_payload])[0]
+    history.append(user_display_entry)
+
     ai_message = ""
-    # manager.handle_user_input_stream already uses the user's current location
-    for token in manager.handle_user_input_stream(message):
+    stream = manager.handle_user_input_stream(message, metadata=metadata)
+    for token in stream:
         ai_message += token
-        # ストリーミング中はドロップダウンは更新しない
-        yield history + [{"role": "assistant", "content": ai_message}], gr.update(), gr.update(), gr.update(), gr.update()
-    # After streaming, get the final history again to include system messages etc.
+        yield (
+            history + [{"role": "assistant", "content": ai_message}],
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+        )
+
     final_raw = manager.get_building_history(current_building_id)
     final_history_formatted = format_history_for_chatbot(final_raw)
 
@@ -316,6 +454,7 @@ def respond_stream(message: str):
         radio_update,
         gr.update(choices=summonable_personas, value=None),
         gr.update(choices=conversing_personas, value=None),
+        gr.update(value=None),
     )
 
 
@@ -1172,6 +1311,13 @@ def main():
                 with gr.Row():
                     with gr.Column(scale=4):
                         txt = gr.Textbox(placeholder="ここにメッセージを入力...", lines=4)
+                        image_input = gr.Image(
+                            type="filepath",
+                            label="画像を添付",
+                            height=200,
+                            sources=["upload"],
+                            interactive=True,
+                        )
                     with gr.Column(scale=1):
                         submit = gr.Button("送信")
             
@@ -1225,8 +1371,16 @@ def main():
                 model_drop = gr.Dropdown(choices=MODEL_CHOICES, value="None", label="システムデフォルトモデル (一時的な一括上書き)")
 
             # --- Event Handlers ---
-            submit.click(respond_stream, txt, [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown])
-            txt.submit(respond_stream, txt, [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown]) # Enter key submission
+            submit.click(
+                respond_stream,
+                [txt, image_input],
+                [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown, image_input],
+            )
+            txt.submit(
+                respond_stream,
+                [txt, image_input],
+                [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown, image_input],
+            )  # Enter key submission
             move_btn.click(fn=move_user_ui, inputs=[move_building_dropdown], outputs=[chatbot, user_location_display, current_location_display, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown])
             move_destination_radio.change(
                 fn=move_user_radio_ui,
@@ -1393,7 +1547,7 @@ def main():
         """
         demo.load(None, None, None, js=js_auto_refresh)
 
-    demo.launch(server_port=manager.ui_port, debug=True, share = True)
+    demo.launch(server_name="0.0.0.0",server_port=manager.ui_port, debug=True, share = False)
 
 
 if __name__ == "__main__":

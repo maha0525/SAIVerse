@@ -1,7 +1,8 @@
+import copy
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING, Any
 import re
 from datetime import datetime
 
@@ -56,13 +57,20 @@ class HistoryManager:
         data.extend(msgs)
         target.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
-    def _prepare_message(self, msg: Dict[str, str]) -> Dict[str, str]:
+    def _prepare_message(self, msg: Dict[str, Any]) -> Dict[str, Any]:
         """Ensures a message has a timestamp and persona_id if applicable."""
         new_msg = msg.copy()
         if "timestamp" not in new_msg:
             new_msg["timestamp"] = datetime.now().isoformat()
         if new_msg.get("role") == "assistant" and "persona_id" not in new_msg:
             new_msg["persona_id"] = self.persona_id
+        metadata = new_msg.get("metadata")
+        if metadata is not None:
+            if isinstance(metadata, dict):
+                new_msg["metadata"] = copy.deepcopy(metadata)
+            else:
+                LOGGER.warning("Discarding metadata with invalid type %s", type(metadata).__name__)
+                new_msg.pop("metadata", None)
         return new_msg
 
     def _normalise_building_histories(self) -> None:

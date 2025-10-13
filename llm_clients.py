@@ -15,6 +15,8 @@ from dotenv import load_dotenv
 import mimetypes
 import base64
 
+from media_utils import iter_image_media, load_image_bytes_for_llm
+
 from tools import TOOL_REGISTRY, OPENAI_TOOLS_SPEC, GEMINI_TOOLS_SPEC
 from tools.defs import parse_tool_result
 from llm_router import route
@@ -64,6 +66,64 @@ def _merge_tools_for_gemini(request_tools: list[types.Tool] | None) -> list[type
     if has_functions:
         return request_tools          # ← カスタム関数のみ
     return [GROUNDING_TOOL] + request_tools  # ← 検索だけ or 他ツールだけ
+
+
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts: List[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text") or part.get("content")
+            if text:
+                texts.append(str(text))
+        return "".join(texts)
+    return ""
+
+
+def _prepare_openai_messages(messages: List[Any], supports_images: bool) -> List[Any]:
+    prepared: List[Any] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            prepared.append(msg)
+            continue
+
+        metadata = msg.get("metadata")
+        attachments = iter_image_media(metadata)
+        if not attachments:
+            prepared.append(msg.copy())
+            continue
+
+        text = _content_to_text(msg.get("content"))
+        if supports_images:
+            parts: List[Dict[str, Any]] = []
+            if text:
+                parts.append({"type": "text", "text": text})
+            for att in attachments:
+                data, effective_mime = load_image_bytes_for_llm(att["path"], att["mime_type"])
+                if data and effective_mime:
+                    b64 = base64.b64encode(data).decode("ascii")
+                    parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{effective_mime};base64,{b64}"}
+                    })
+                else:
+                    parts.append({"type": "text", "text": f"[画像: {att['uri']}]"})
+            new_msg = msg.copy()
+            new_msg["content"] = parts if parts else text
+            prepared.append(new_msg)
+        else:
+            note_lines: List[str] = []
+            if text:
+                note_lines.append(text)
+            for att in attachments:
+                note_lines.append(f"[画像: {att['uri']}]")
+            new_msg = msg.copy()
+            new_msg["content"] = "\n".join(note_lines)
+            prepared.append(new_msg)
+    return prepared
 
 
 def _obj_to_dict(obj: Any) -> Any:
@@ -202,8 +262,9 @@ def _extract_gemini_parts(parts: List[Any]) -> Tuple[str, List[Dict[str, str]]]:
 class LLMClient:
     """Base class for LLM clients."""
 
-    def __init__(self) -> None:
+    def __init__(self, supports_images: bool = False) -> None:
         self._latest_reasoning: List[Dict[str, str]] = []
+        self.supports_images = supports_images
 
     def generate(
         self, messages: List[Dict[str, str]], tools: Optional[list] | None = None
@@ -232,10 +293,11 @@ class OpenAIClient(LLMClient):
         self,
         model: str = "gpt-4.1",
         *,
+        supports_images: bool = False,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
     ):
-        super().__init__()
+        super().__init__(supports_images=supports_images)
         api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
@@ -252,7 +314,12 @@ class OpenAIClient(LLMClient):
 class AnthropicClient(OpenAIClient):
     """Anthropic Claude via OpenAI-compatible endpoint."""
 
-    def __init__(self, model: str = "claude-sonnet-4-5", config: Optional[Dict[str, Any]] | None = None):
+    def __init__(
+        self,
+        model: str = "claude-sonnet-4-5",
+        config: Optional[Dict[str, Any]] | None = None,
+        supports_images: bool = False,
+    ):
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
             raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set.")
@@ -260,7 +327,7 @@ class AnthropicClient(OpenAIClient):
         base_url = os.getenv("ANTHROPIC_OPENAI_BASE_URL", "https://api.anthropic.com/v1/")
         if not base_url.endswith("/"):
             base_url = base_url + "/"
-        super().__init__(model=model, api_key=api_key, base_url=base_url)
+        super().__init__(model=model, supports_images=supports_images, api_key=api_key, base_url=base_url)
 
         cfg = config or {}
 
@@ -374,7 +441,7 @@ class AnthropicClient(OpenAIClient):
             try:
                 resp = self._create_completion(
                     model=self.model,
-                    messages=messages,
+                    messages=_prepare_openai_messages(messages, self.supports_images),
                     n=1,
                     **self._request_kwargs,
                 )
@@ -423,7 +490,7 @@ class AnthropicClient(OpenAIClient):
 
                 resp = self._create_completion(
                     model=self.model,
-                    messages=messages,
+                    messages=_prepare_openai_messages(messages, self.supports_images),
                     tools=tools_spec,
                     tool_choice=tool_choice,
                     n=1,
@@ -536,7 +603,7 @@ class AnthropicClient(OpenAIClient):
             try:
                 resp = self._create_completion(
                     model=self.model,
-                    messages=messages,
+                    messages=_prepare_openai_messages(messages, self.supports_images),
                     n=1,
                     **self._request_kwargs,
                 )
@@ -575,7 +642,7 @@ class AnthropicClient(OpenAIClient):
         try:
             resp = self._create_completion(
                 model=self.model,
-                messages=messages,
+                messages=_prepare_openai_messages(messages, self.supports_images),
                 tools=tools_spec,
                 tool_choice=force_tool_choice,   # ← 初回のみ強制 / 再帰時は "auto"
                 stream=True,
@@ -728,8 +795,13 @@ class AnthropicClient(OpenAIClient):
 class GeminiClient(LLMClient):
     """Client for Google Gemini API."""
 
-    def __init__(self, model: str, config: Optional[Dict[str, Any]] | None = None):
-        super().__init__()
+    def __init__(
+        self,
+        model: str,
+        config: Optional[Dict[str, Any]] | None = None,
+        supports_images: bool = True,
+    ):
+        super().__init__(supports_images=supports_images)
         free_key = os.getenv("GEMINI_FREE_API_KEY")
         paid_key = os.getenv("GEMINI_API_KEY")
         if not free_key and not paid_key:
@@ -762,8 +834,7 @@ class GeminiClient(LLMClient):
             or "overload" in msg
         )
 
-    @staticmethod
-    def _convert_messages(msgs: List[Dict[str, str] | types.Content]
+    def _convert_messages(self, msgs: List[Dict[str, str] | types.Content]
                       ) -> Tuple[str, List[types.Content]]:
         system_lines: list[str] = []
         contents: list[types.Content] = []
@@ -791,9 +862,30 @@ class GeminiClient(LLMClient):
                 continue
 
             # 通常テキスト
-            text = m.get("content", "") or ""
+            text = _content_to_text(m.get("content", "")) or ""
             g_role = "user" if role == "user" else "model"
-            contents.append(types.Content(parts=[types.Part(text=text)], role=g_role))
+            attachments = iter_image_media(m.get("metadata"))
+            if attachments and self.supports_images:
+                logging.debug("[gemini] embedding %d image attachment(s) for role=%s", len(attachments), role)
+                parts: List[types.Part] = []
+                if text:
+                    parts.append(types.Part(text=text))
+                for att in attachments:
+                    data, effective_mime = load_image_bytes_for_llm(att["path"], att["mime_type"])
+                    if not data or not effective_mime:
+                        logging.warning("Failed to load image for Gemini payload: %s", att["uri"])
+                        continue
+                    parts.append(types.Part.from_bytes(data=data, mime_type=effective_mime))
+                if not parts:
+                    parts.append(types.Part(text=""))
+                contents.append(types.Content(parts=parts, role=g_role))
+            else:
+                if attachments:
+                    logging.debug("[gemini] image attachments present but not embedded (supports_images=%s)", self.supports_images)
+                    for att in attachments:
+                        note = f"[画像: {att['uri']}]"
+                        text = f"{text}\n{note}" if text else note
+                contents.append(types.Content(parts=[types.Part(text=text)], role=g_role))
 
         return "\n".join(system_lines), contents
 
@@ -814,7 +906,7 @@ class GeminiClient(LLMClient):
         def _last_user(msgs) -> str:
             for m in reversed(msgs):
                 if isinstance(m, dict) and m.get("role") == "user":
-                    return m.get("content", "") or ""
+                    return _content_to_text(m.get("content", ""))
                 if isinstance(m, types.Content) and m.role == "user":
                     if m.parts and m.parts[0].text:
                         return m.parts[0].text
@@ -1228,8 +1320,8 @@ class GeminiClient(LLMClient):
 
 class OllamaClient(LLMClient):
     """Client for Ollama API."""
-    def __init__(self, model: str, context_length: int):
-        super().__init__()
+    def __init__(self, model: str, context_length: int, supports_images: bool = False):
+        super().__init__(supports_images=supports_images)
         self.model = model
         self.context_length = context_length
         self.fallback_client: Optional[LLMClient] = None
@@ -1380,11 +1472,16 @@ class OllamaClient(LLMClient):
 def get_llm_client(model: str, provider: str, context_length: int) -> LLMClient:
     """Factory function to get the appropriate LLM client."""
     config = get_model_config(model)
-    if provider == "openai":
-        return OpenAIClient(model)
-    elif provider == "anthropic":
-        return AnthropicClient(model, config=config)
-    elif provider == "gemini":
-        return GeminiClient(model, config=config)
+    supports_images_cfg = config.get("supports_images") if isinstance(config, dict) else None
+    if supports_images_cfg is None:
+        supports_images = provider == "gemini"
     else:
-        return OllamaClient(model, context_length)
+        supports_images = bool(supports_images_cfg)
+    if provider == "openai":
+        return OpenAIClient(model, supports_images=supports_images)
+    elif provider == "anthropic":
+        return AnthropicClient(model, config=config, supports_images=supports_images)
+    elif provider == "gemini":
+        return GeminiClient(model, config=config, supports_images=supports_images)
+    else:
+        return OllamaClient(model, context_length, supports_images=supports_images)

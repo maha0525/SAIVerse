@@ -17,6 +17,7 @@ from buildings import Building
 from saiverse_memory import SAIMemoryAdapter
 from llm_clients import get_llm_client, LLMClient
 import llm_clients
+from model_configs import model_supports_images
 from action_handler import ActionHandler
 from history_manager import HistoryManager
 from emotion_module import EmotionControlModule
@@ -154,6 +155,7 @@ class PersonaCore:
         self.create_persona_callback = create_persona_callback
         self.model = model
         self.context_length = context_length
+        self.model_supports_images = model_supports_images(model)
         self.llm_client = get_llm_client(model, provider, self.context_length)
         self.emotion_module = EmotionControlModule()
 
@@ -341,6 +343,7 @@ class PersonaCore:
     def set_model(self, model: str, context_length: int, provider: str) -> None:
         self.model = model
         self.context_length = context_length
+        self.model_supports_images = model_supports_images(model)
         self.llm_client = get_llm_client(model, provider, context_length)
 
     def _build_messages(
@@ -349,7 +352,8 @@ class PersonaCore:
         extra_system_prompt: Optional[str] = None,
         info_text: Optional[str] = None,
         guidance_text: Optional[str] = None,
-    ) -> List[Dict[str, str]]:
+        user_metadata: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         building = self.buildings[self.current_building_id]
         current_time = datetime.now().strftime("%H:%M")
         system_text = self.common_prompt.format(
@@ -398,13 +402,17 @@ class PersonaCore:
             logging.debug("history_head=%s", history_msgs[0])
             logging.debug("history_tail=%s", history_msgs[-1])
 
-        sanitized_history: List[Dict[str, str]] = []
+        sanitized_history: List[Dict[str, Any]] = []
         for m in history_msgs:
             role = m.get("role", "")
             content = m.get("content", "")
             if role == "system" and "### 意識モジュールからの情報提供" in content:
                 continue
-            sanitized_history.append({"role": role, "content": content})
+            sanitized: Dict[str, Any] = {"role": role, "content": content}
+            metadata = m.get("metadata")
+            if isinstance(metadata, dict):
+                sanitized["metadata"] = copy.deepcopy(metadata)
+            sanitized_history.append(sanitized)
 
         msgs = [{"role": "system", "content": system_text}] + sanitized_history
         if guidance_text:
@@ -413,7 +421,11 @@ class PersonaCore:
         if extra_system_prompt:
             msgs.append({"role": "system", "content": extra_system_prompt})
         if user_message:
-            msgs.append({"role": "user", "content": user_message})
+            user_entry: Dict[str, Any] = {"role": "user", "content": user_message}
+            if isinstance(user_metadata, dict):
+                user_entry["metadata"] = copy.deepcopy(user_metadata)
+                logging.debug("[persona_core] user message metadata keys=%s", list(user_metadata.keys()))
+            msgs.append(user_entry)
         return msgs
 
     def _collect_recent_memory_timestamps(self) -> List[int]:
@@ -447,6 +459,7 @@ class PersonaCore:
         user_message: Optional[str],
         system_prompt_extra: Optional[str],
         log_extra_prompt: bool = True,
+        user_metadata: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, Optional[Dict[str, str]], bool]:
         say, actions = self.action_handler.parse_response(content)
         move_target, _, delta = self.action_handler.execute_actions(actions)
@@ -485,8 +498,11 @@ class PersonaCore:
                 heard_by=self._occupants_snapshot(self.current_building_id),
             )
         if user_message:
+            user_entry: Dict[str, Any] = {"role": "user", "content": user_message}
+            if isinstance(user_metadata, dict):
+                user_entry["metadata"] = copy.deepcopy(user_metadata)
             self.history_manager.add_message(
-                {"role": "user", "content": user_message}, 
+                user_entry,
                 self.current_building_id,
                 heard_by=self._occupants_snapshot(self.current_building_id),
             )
@@ -511,6 +527,7 @@ class PersonaCore:
     def _generate(
         self,
         user_message: Optional[str],
+        user_metadata: Optional[Dict[str, Any]] = None,
         system_prompt_extra: Optional[str] = None,
         info_text: Optional[str] = None,
         guidance_text_override: Optional[str] = None,
@@ -554,6 +571,7 @@ class PersonaCore:
             extra_system_prompt=system_prompt_extra,
             info_text=combined_info or None,
             guidance_text=guidance_text_override,
+            user_metadata=user_metadata if actual_user_message == user_message else None,
         )
         logging.debug("Messages sent to API: %s", msgs)
 
@@ -573,6 +591,7 @@ class PersonaCore:
             user_message if log_user_message else None,
             system_prompt_extra,
             log_extra_prompt,
+            user_metadata if log_user_message else None,
         )
         self._post_response_updates(
             prev_emotion_state,
@@ -585,6 +604,7 @@ class PersonaCore:
     def _generate_stream(
         self,
         user_message: Optional[str],
+        user_metadata: Optional[Dict[str, Any]] = None,
         system_prompt_extra: Optional[str] = None,
         info_text: Optional[str] = None,
         guidance_text_override: Optional[str] = None,
@@ -626,6 +646,7 @@ class PersonaCore:
             extra_system_prompt=system_prompt_extra,
             info_text=combined_info or None,
             guidance_text=guidance_text_override,
+            user_metadata=user_metadata if actual_user_message == user_message else None,
         )
         logging.debug("Messages sent to API: %s", msgs)
 
@@ -654,6 +675,7 @@ class PersonaCore:
             user_message if log_user_message else None,
             system_prompt_extra,
             log_extra_prompt,
+            user_metadata if log_user_message else None,
         )
         self._post_response_updates(
             prev_emotion_state,
@@ -793,7 +815,7 @@ class PersonaCore:
         if initial and building.entry_prompt:
             if building.run_entry_llm:
                 entry_text = building.entry_prompt.format(persona_name=self.persona_name)
-                say, move_target, _ = self._generate(None, entry_text)
+                say, move_target, _ = self._generate(None, system_prompt_extra=entry_text)
                 replies.append(say)
             else:
                 self.history_manager.add_message(
@@ -810,7 +832,7 @@ class PersonaCore:
         ):
             self.auto_count += 1
             auto_text = building.auto_prompt.format(persona_name=self.persona_name)
-            say, move_target, changed = self._generate(None, auto_text)
+            say, move_target, changed = self._generate(None, system_prompt_extra=auto_text)
             replies.append(say)
             if changed:
                 building = self.buildings[self.current_building_id]
@@ -829,15 +851,17 @@ class PersonaCore:
             return []
         self.last_auto_prompt_times[self.current_building_id] = now
         auto_text = building.auto_prompt.format(persona_name=self.persona_name)
-        say, move_target, changed = self._generate(None, auto_text)
+        say, move_target, changed = self._generate(None, system_prompt_extra=auto_text)
         replies = [say]
         if changed:
             replies.extend(self.run_auto_conversation(initial=True))
         return replies
 
-    def handle_user_input(self, message: str) -> List[str]:
+    def handle_user_input(self, message: str, metadata: Optional[Dict[str, Any]] = None) -> List[str]:
         logging.info("User input: %s", message)
-        say, move_target, changed = self._generate(message)
+        if metadata:
+            logging.debug("[persona_core] handle_user_input received metadata keys=%s", list(metadata.keys()))
+        say, move_target, changed = self._generate(message, user_metadata=metadata)
         replies = [say]
 
         # This part remains to handle auto-conversation after a user-triggered one.
@@ -852,12 +876,17 @@ class PersonaCore:
             replies.extend(self.run_auto_conversation(initial=False))
         return replies
 
-    def handle_user_input_stream(self, message: str) -> Iterator[str]:
+    def handle_user_input_stream(self, message: str, metadata: Optional[Dict[str, Any]] = None) -> Iterator[str]:
         logging.info("User input: %s", message)
+        if metadata:
+            logging.debug("[persona_core] handle_user_input_stream received metadata keys=%s", list(metadata.keys()))
 
         # ユーザーのメッセージを先に履歴に追加
+        user_entry: Dict[str, Any] = {"role": "user", "content": message}
+        if isinstance(metadata, dict):
+            user_entry["metadata"] = metadata
         self.history_manager.add_message(
-            {"role": "user", "content": message},
+            user_entry,
             self.current_building_id,
             heard_by=self._occupants_snapshot(self.current_building_id),
         )
@@ -865,7 +894,7 @@ class PersonaCore:
         # _generate_stream には user_message=None を渡す
         # これにより、_build_messages は履歴の最後のメッセージ（今追加したユーザーメッセージ）を文脈として使う
         # また、_process_generation_result でユーザーメッセージが二重に記録されるのを防ぐ
-        gen = self._generate_stream(user_message=message, log_user_message=False)
+        gen = self._generate_stream(user_message=message, user_metadata=metadata, log_user_message=False)
 
         try:
             while True:
@@ -1121,19 +1150,26 @@ class PersonaCore:
                 if not content or ("note-box" in content and role == "assistant"):
                     continue
                 # Convert other assistants' speech into a user-line
+                metadata = m.get("metadata") if isinstance(m, dict) else None
                 if role == "assistant" and pid and pid != self.persona_id:
                     speaker = self.id_to_name_map.get(pid, pid)
-                    self.history_manager.add_to_persona_only({
+                    entry = {
                         "role": "user",
                         "content": f"{speaker}: {content}"
-                    })
+                    }
+                    if isinstance(metadata, dict):
+                        entry["metadata"] = copy.deepcopy(metadata)
+                    self.history_manager.add_to_persona_only(entry)
                     perceived += 1
                 # Ingest human/user messages directly
                 elif role == "user" and (pid is None or pid != self.persona_id):
-                    self.history_manager.add_to_persona_only({
+                    entry = {
                         "role": "user",
                         "content": content
-                    })
+                    }
+                    if isinstance(metadata, dict):
+                        entry["metadata"] = copy.deepcopy(metadata)
+                    self.history_manager.add_to_persona_only(entry)
                     perceived += 1
             except Exception:
                 continue
