@@ -6,7 +6,8 @@ import os
 import html
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Iterator
-from datetime import datetime
+from datetime import datetime, timezone as dt_timezone, tzinfo, timedelta
+from zoneinfo import ZoneInfo
 
 from google import genai
 from google.genai import types
@@ -74,6 +75,8 @@ class PersonaCore:
         context_length: int = 120000,
         user_room_id: str = "user_room",
         provider: str = "ollama",
+        timezone_info: Optional[tzinfo] = dt_timezone.utc,
+        timezone_name: str = "UTC",
     ):
         self.city_name = city_name
         self.is_visitor = is_visitor
@@ -158,6 +161,23 @@ class PersonaCore:
         self.model_supports_images = model_supports_images(model)
         self.llm_client = get_llm_client(model, provider, self.context_length)
         self.emotion_module = EmotionControlModule()
+        tz_label = (timezone_name or "UTC").strip() or "UTC"
+        if isinstance(timezone_info, str):
+            candidate = timezone_info.strip() or tz_label
+            try:
+                tz_obj = ZoneInfo(candidate)
+                tz_label = candidate
+            except Exception:
+                logging.warning("PersonaCore received invalid timezone '%s'. Falling back to UTC.", candidate)
+                tz_obj = dt_timezone.utc
+                tz_label = "UTC"
+        elif timezone_info is None:
+            tz_obj = dt_timezone.utc
+        else:
+            tz_obj = timezone_info
+        self.timezone = tz_obj
+        self.timezone_name = tz_label
+        self._last_conscious_prompt_time_utc: Optional[datetime] = None
         self.pending_attachment_metadata: List[Dict[str, Any]] = []
 
     def _load_action_priority(self, path: Path) -> Dict[str, int]:
@@ -240,6 +260,63 @@ class PersonaCore:
             self.conscious_log = []
             self._raw_pulse_cursor_data = {}
             self._raw_pulse_cursor_format = "count"
+
+    def _parse_timestamp_to_utc(self, value: Any) -> Optional[datetime]:
+        """Convert various timestamp formats to aware UTC datetime."""
+        if value is None:
+            return None
+        try:
+            if isinstance(value, (int, float)):
+                return datetime.fromtimestamp(float(value), tz=dt_timezone.utc)
+            if isinstance(value, str):
+                raw = value.strip()
+                if not raw:
+                    return None
+                if raw.endswith("Z"):
+                    raw = raw[:-1] + "+00:00"
+                parsed = datetime.fromisoformat(raw)
+                if parsed.tzinfo is None:
+                    return parsed.replace(tzinfo=dt_timezone.utc)
+                return parsed.astimezone(dt_timezone.utc)
+        except Exception:
+            logging.debug("Failed to parse timestamp '%s' for persona %s", value, self.persona_id)
+            return None
+        return None
+
+    def _format_timezone_offset(self, dt_obj: datetime) -> str:
+        """Return a formatted UTC offset string."""
+        offset = dt_obj.utcoffset()
+        if offset is None:
+            return "UTC+00:00"
+        total_minutes = int(offset.total_seconds() // 60)
+        sign = "+" if total_minutes >= 0 else "-"
+        total_minutes = abs(total_minutes)
+        hours, minutes = divmod(total_minutes, 60)
+        return f"UTC{sign}{hours:02d}:{minutes:02d}"
+
+    def _format_local_timestamp(self, dt_obj: datetime) -> str:
+        """Format a localized timestamp string for recent history."""
+        offset_label = self._format_timezone_offset(dt_obj)
+        tz_label = dt_obj.tzname() or self.timezone_name
+        return f"{dt_obj.strftime('%Y-%m-%d %H:%M:%S')} {tz_label} ({offset_label})"
+
+    def _format_elapsed(self, delta: timedelta) -> str:
+        """Convert a timedelta into a human-friendly Japanese string."""
+        if delta.total_seconds() < 0:
+            delta = timedelta(0)
+        total_minutes = int(delta.total_seconds() // 60)
+        days, rem_minutes = divmod(total_minutes, 1440)
+        hours, minutes = divmod(rem_minutes, 60)
+        parts: List[str] = []
+        if days:
+            parts.append(f"{days}日")
+        if hours:
+            parts.append(f"{hours}時間")
+        if minutes:
+            parts.append(f"{minutes}分")
+        if not parts:
+            parts.append("0分")
+        return " ".join(parts)
 
     def _initialise_pulse_state(self) -> None:
         hist_map = self.history_manager.building_histories
@@ -356,7 +433,8 @@ class PersonaCore:
         user_metadata: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         building = self.buildings[self.current_building_id]
-        current_time = datetime.now().strftime("%H:%M")
+        now_local = datetime.now(self.timezone)
+        current_time = now_local.strftime("%H:%M")
         system_text = self.common_prompt.format(
             current_building_name=building.name,
             current_building_system_instruction=building.system_instruction.format(current_time=current_time),
@@ -1237,9 +1315,34 @@ class PersonaCore:
             )
         else:
             logging.debug("[pulse] recent_window empty for persona %s in %s", self.persona_id, building_id)
-        recent_text = "\n".join(
-            f"{m.get('role')}: {m.get('content')}" for m in recent if m.get("role") != "system"
-        )
+        now_utc = datetime.now(dt_timezone.utc)
+        now_local = now_utc.astimezone(self.timezone)
+        current_datetime_local_str = self._format_local_timestamp(now_local)
+        current_datetime_utc_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC+00:00")
+        timezone_display = f"{self.timezone_name} ({self._format_timezone_offset(now_local)})"
+
+        recent_lines: List[str] = []
+        for msg in recent:
+            if msg.get("role") == "system":
+                continue
+            content = (msg.get("content") or "").strip()
+            content_formatted = content.replace("\n", "\n  ") if content else "(内容なし)"
+            ts_raw = msg.get("timestamp") or msg.get("created_at")
+            ts_utc = self._parse_timestamp_to_utc(ts_raw)
+            if ts_utc:
+                ts_label = self._format_local_timestamp(ts_utc.astimezone(self.timezone))
+            else:
+                ts_label = "時刻不明"
+            recent_lines.append(f"- [{ts_label}] {msg.get('role')}: {content_formatted}")
+
+        recent_text = "\n".join(recent_lines) if recent_lines else "(最近のメッセージはありません)"
+
+        if self._last_conscious_prompt_time_utc is not None:
+            elapsed_prompt = now_utc - self._last_conscious_prompt_time_utc
+            elapsed_text = self._format_elapsed(elapsed_prompt)
+            time_since_last_prompt = f"前回の意識パルスから {elapsed_text}経過しています。"
+        else:
+            time_since_last_prompt = "今回が初めての意識パルス実行です。"
 
         new_message_details: List[str] = []
         for msg in new_msgs:
@@ -1326,6 +1429,11 @@ class PersonaCore:
         free_client = genai.Client(api_key=free_key) if free_key else None
         paid_client = genai.Client(api_key=paid_key) if paid_key else None
         active_client = free_client or paid_client
+        prompt_generated_at = now_utc
+
+        def _finalize_and_return(result: List[str]) -> List[str]:
+            self._last_conscious_prompt_time_utc = prompt_generated_at
+            return result
 
         def _type_from_json(token: Optional[str]) -> types.Type:
             mapping = {
@@ -1476,10 +1584,14 @@ class PersonaCore:
                 arglist = ", ".join(props.keys()) if props else "(引数なし)"
                 tool_catalog_lines.append(f"- {schema.name}: {schema.description} | 引数: {arglist}")
             tool_catalog = "\n".join(tool_catalog_lines) if tool_catalog_lines else "(利用可能なツールはありません)"
-            return pulse_prompt_template.format(
+            prompt = pulse_prompt_template.format(
                 current_persona_name=self.persona_name,
                 current_persona_system_instruction=self.persona_system_instruction,
                 current_building_name=self.buildings[building_id].name,
+                current_datetime_local=current_datetime_local_str,
+                current_datetime_utc=current_datetime_utc_str,
+                timezone_display=timezone_display,
+                time_since_last_prompt=time_since_last_prompt,
                 recent_conversation=recent_text,
                 occupants=occupants_str,
                 user_online_state="online" if user_online else "offline",
@@ -1488,6 +1600,13 @@ class PersonaCore:
                 tool_overview_section=tool_catalog,
                 thread_directory=thread_directory,
             )
+            logging.debug(
+                "[pulse] prompt preview for %s in %s:\n%s",
+                self.persona_id,
+                building_id,
+                prompt,
+            )
+            return prompt
 
         def _call(client: genai.Client, prompt_text: str):
             return client.models.generate_content(
@@ -1524,10 +1643,10 @@ class PersonaCore:
                         resp = _call(active_client, prompt_text)
                     except Exception as e2:
                         logging.error("[pulse] Gemini call failed: %s", e2)
-                        return []
+                        return _finalize_and_return([])
                 else:
                     logging.error("[pulse] Gemini call failed: %s", e)
-                    return []
+                    return _finalize_and_return([])
 
             content = resp.text.strip()
             logging.info("[pulse] raw decision:\n%s", content)
@@ -1538,7 +1657,7 @@ class PersonaCore:
                 data = json.loads(content, strict=False)
             except json.JSONDecodeError:
                 logging.warning("[pulse] failed to parse decision JSON")
-                return []
+                return _finalize_and_return([])
 
             last_decision = data
             guidance_chunk = (data.get("conversation_guidance") or "").strip()
@@ -1566,7 +1685,7 @@ class PersonaCore:
                 logging.info("[pulse] decision: wait")
                 self._save_session_metadata()
                 logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))
-                return replies
+                return _finalize_and_return(replies)
 
             if next_action == "tool":
                 tool_payload = data.get("tool") or {}
@@ -1712,7 +1831,7 @@ class PersonaCore:
             logging.info("[pulse] no actionable decision produced")
             self._save_session_metadata()
             logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))
-            return replies
+            return _finalize_and_return(replies)
 
         if next_action == "tool":
             logging.info("[pulse] reached decision loop limit; forcing speak")
@@ -1722,7 +1841,7 @@ class PersonaCore:
             logging.info("[pulse] decision: wait")
             self._save_session_metadata()
             logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))
-            return replies
+            return _finalize_and_return(replies)
 
         # Collapse guidance parts while preserving order and removing duplicates
         seen_guidance: set[str] = set()
@@ -1773,4 +1892,4 @@ class PersonaCore:
 
         self._save_session_metadata()
         logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))
-        return replies
+        return _finalize_and_return(replies)

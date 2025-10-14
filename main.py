@@ -644,7 +644,7 @@ def logout_ui():
 
 # --- World Editor UI Handlers ---
 
-def update_city_ui(city_id_str: str, name: str, desc: str, online_mode: bool, ui_port_str: str, api_port_str: str):
+def update_city_ui(city_id_str: str, name: str, desc: str, online_mode: bool, ui_port_str: str, api_port_str: str, timezone_name: str):
     """UI handler to update city settings."""
     if not city_id_str: return "Error: Select a city to update.", gr.update()
     try:
@@ -654,18 +654,19 @@ def update_city_ui(city_id_str: str, name: str, desc: str, online_mode: bool, ui
     except (ValueError, TypeError):
         return "Error: Port numbers must be valid integers.", gr.update()
     
-    result = manager.update_city(city_id, name, desc, online_mode, ui_port, api_port)
+    result = manager.update_city(city_id, name, desc, online_mode, ui_port, api_port, timezone_name)
     return result, manager.get_cities_df()
 
 def on_select_city(evt: gr.SelectData):
     """Handler for when a city is selected in the DataFrame."""
-    if evt.value is None: return "", "", "", False, "", ""
+    if evt.value is None: return "", "", "", False, "", "", "UTC"
     row_index = evt.index[0]
     df = manager.get_cities_df()
     selected_row = df.iloc[row_index]
     return (
         selected_row['CITYID'], selected_row['CITYNAME'], selected_row['DESCRIPTION'],
-        selected_row['START_IN_ONLINE_MODE'], selected_row['UI_PORT'], selected_row['API_PORT']
+        selected_row['START_IN_ONLINE_MODE'], selected_row['UI_PORT'], selected_row['API_PORT'],
+        selected_row.get('TIMEZONE', 'UTC')
     )
 
 def update_building_ui(b_id: str, name: str, capacity_str: str, desc: str, sys_inst: str, city_id: Optional[int], tool_ids: List[int], interval_str: str):
@@ -697,13 +698,15 @@ def on_select_building(evt: gr.SelectData):
 
 def on_select_ai(evt: gr.SelectData):
     """Handler for when an AI is selected in the DataFrame."""
-    if evt.index is None: return "", "", "", "", None, "", False, "auto", ""
+    if evt.index is None:
+        return "", "", "", "", None, "", False, "auto", "", "", gr.update(value=None)
     row_index = evt.index[0]
     # We need the full DF to get the ID, not just the visible part
     df = manager.get_ais_df()
     ai_id = df.iloc[row_index]['AIID']
     details = manager.get_ai_details(ai_id)
-    if not details: return "", "", "", "", None, "", False, "auto", ""
+    if not details:
+        return "", "", "", "", None, "", False, "auto", "", "", gr.update(value=None)
 
     # --- 現在地を取得 ---
     current_location_name = "不明"
@@ -721,17 +724,33 @@ def on_select_ai(evt: gr.SelectData):
         details['DEFAULT_MODEL'],
         details['IS_DISPATCHED'],
         details['INTERACTION_MODE'],
-        current_location_name
+        current_location_name,
+        details.get('AVATAR_IMAGE') or "",
+        gr.update(value=None)
     )
 
-def update_ai_ui(ai_id: str, name: str, desc: str, sys_prompt: str, home_city_id: int, model: str, interaction_mode: str):
+def update_ai_ui(ai_id: str, name: str, desc: str, sys_prompt: str, home_city_id, model: str, interaction_mode: str, avatar_path: str, avatar_file):
     """UI handler to update AI settings."""
     if not ai_id:
         return "Error: Select an AI to update.", gr.update()
-    if not home_city_id:
+    if home_city_id is None or home_city_id == "":
         return "Error: Home City must be selected.", gr.update()
-    
-    result = manager.update_ai(ai_id, name, desc, sys_prompt, home_city_id, model, interaction_mode)
+
+    if isinstance(home_city_id, str):
+        try:
+            home_city_id = int(home_city_id)
+        except ValueError:
+            return "Error: Home City must be an integer.", gr.update()
+
+    upload_path = None
+    if isinstance(avatar_file, list):
+        upload_path = avatar_file[0] if avatar_file else None
+    elif isinstance(avatar_file, dict):
+        upload_path = avatar_file.get("name") or avatar_file.get("path")
+    else:
+        upload_path = avatar_file
+
+    result = manager.update_ai(ai_id, name, desc, sys_prompt, home_city_id, model, interaction_mode, avatar_path, upload_path)
     return result, manager.get_ais_df()
 
 def move_ai_ui(ai_id: str, target_building_name: str):
@@ -782,9 +801,9 @@ def create_world_editor_ui():
         refresh_editor_btn = gr.Button("🔄 ワールドエディタ全体を更新", variant="secondary")
 
     # --- Handlers for Create/Delete ---
-    def create_city_ui(name, desc, ui_port, api_port):
-        if not all([name, ui_port, api_port]): return "Error: Name, UI Port, and API Port are required.", gr.update()
-        result = manager.create_city(name, desc, int(ui_port), int(api_port))
+    def create_city_ui(name, desc, ui_port, api_port, timezone_name):
+        if not all([name, ui_port, api_port, timezone_name]): return "Error: Name, UI Port, API Port, and Timezone are required.", gr.update()
+        result = manager.create_city(name, desc, int(ui_port), int(api_port), timezone_name)
         return result, manager.get_cities_df()
 
     def delete_city_ui(city_id_str, confirmed):
@@ -842,6 +861,7 @@ def create_world_editor_ui():
                     city_ui_port_num = gr.Number(label="UI Port", precision=0)
                     city_api_port_num = gr.Number(label="API Port", precision=0)
                 city_desc_textbox = gr.Textbox(label="Description", lines=3)
+                city_timezone_textbox = gr.Textbox(label="Timezone (IANA形式)", value=lambda: manager.timezone_name, placeholder="例: Asia/Tokyo")
                 online_mode_checkbox = gr.Checkbox(label="次回起動時にオンラインモードで起動する")
                 with gr.Row():
                     save_city_btn = gr.Button("City設定を保存")
@@ -855,6 +875,7 @@ def create_world_editor_ui():
                 with gr.Row():
                     new_city_ui_port = gr.Number(label="UI Port", precision=0)
                     new_city_api_port = gr.Number(label="API Port", precision=0)
+                new_city_timezone_text = gr.Textbox(label="Timezone (IANA形式)", value="UTC", placeholder="例: Asia/Tokyo")
                 create_city_btn = gr.Button("新規Cityを作成", variant="primary")
                 create_city_status = gr.Textbox(label="Status", interactive=False)
 
@@ -881,11 +902,11 @@ def create_world_editor_ui():
                 def toggle_delete_button(is_checked):
                     return gr.update(interactive=is_checked)
 
-                city_df.select(fn=on_select_city, inputs=None, outputs=[city_id_text, city_name_textbox, city_desc_textbox, online_mode_checkbox, city_ui_port_num, city_api_port_num])
-                save_city_btn.click(fn=update_city_ui, inputs=[city_id_text, city_name_textbox, city_desc_textbox, online_mode_checkbox, city_ui_port_num, city_api_port_num], outputs=[city_status_display, city_df])
+                city_df.select(fn=on_select_city, inputs=None, outputs=[city_id_text, city_name_textbox, city_desc_textbox, online_mode_checkbox, city_ui_port_num, city_api_port_num, city_timezone_textbox])
+                save_city_btn.click(fn=update_city_ui, inputs=[city_id_text, city_name_textbox, city_desc_textbox, online_mode_checkbox, city_ui_port_num, city_api_port_num, city_timezone_textbox], outputs=[city_status_display, city_df])
                 delete_city_confirm_check.change(fn=toggle_delete_button, inputs=delete_city_confirm_check, outputs=delete_city_btn)
                 delete_city_btn.click(fn=delete_city_ui, inputs=[city_id_text, delete_city_confirm_check], outputs=[city_status_display, city_df])
-                create_city_btn.click(fn=create_city_ui, inputs=[new_city_name_text, new_city_desc_text, new_city_ui_port, new_city_api_port], outputs=[create_city_status, city_df])
+                create_city_btn.click(fn=create_city_ui, inputs=[new_city_name_text, new_city_desc_text, new_city_ui_port, new_city_api_port, new_city_timezone_text], outputs=[create_city_status, city_df])
 
                 # --- Building Event Handlers ---
                 building_df.select(fn=on_select_building, inputs=None, outputs=[building_id_text, building_name_text, building_capacity_num, building_desc_text, building_sys_inst_text, building_city_dropdown, building_tools_checkbox, building_interval_num])
@@ -919,6 +940,9 @@ def create_world_editor_ui():
                 ai_desc_text = gr.Textbox(label="Description", lines=2)
                 ai_sys_prompt_text = gr.Textbox(label="System Prompt", lines=8)
                 with gr.Row():
+                    ai_avatar_path_text = gr.Textbox(label="Avatar Image Path/URL", placeholder="例: assets/avatars/air.png")
+                    ai_avatar_upload = gr.File(label="Upload New Avatar", file_types=["image"], type="filepath")
+                with gr.Row():
                     is_dispatched_checkbox = gr.Checkbox(label="派遣中 (編集不可)", interactive=False)
                     save_ai_btn = gr.Button("AI設定を保存")
                     delete_ai_confirm_check = gr.Checkbox(label="削除を確認", value=False, scale=1)
@@ -939,8 +963,8 @@ def create_world_editor_ui():
 
 
                 # --- AI Event Handlers (Update/Delete) ---
-                ai_df.select(fn=on_select_ai, inputs=None, outputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, is_dispatched_checkbox, ai_interaction_mode_dropdown, ai_current_location_text])
-                save_ai_btn.click(fn=update_ai_ui, inputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, ai_interaction_mode_dropdown], outputs=[ai_status_display, ai_df])
+                ai_df.select(fn=on_select_ai, inputs=None, outputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, is_dispatched_checkbox, ai_interaction_mode_dropdown, ai_current_location_text, ai_avatar_path_text, ai_avatar_upload])
+                save_ai_btn.click(fn=update_ai_ui, inputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, ai_interaction_mode_dropdown, ai_avatar_path_text, ai_avatar_upload], outputs=[ai_status_display, ai_df])
                 delete_ai_confirm_check.change(fn=toggle_delete_button, inputs=delete_ai_confirm_check, outputs=delete_ai_btn)
                 delete_ai_btn.click(fn=delete_ai_ui, inputs=[ai_id_text, delete_ai_confirm_check], outputs=[ai_status_display, ai_df])
                 move_ai_btn.click(fn=move_ai_ui, inputs=[ai_id_text, ai_move_target_dropdown], outputs=[move_ai_status_display, ai_current_location_text])
