@@ -25,6 +25,7 @@ from saiverse_manager import SAIVerseManager
 from model_configs import get_model_choices
 from media_utils import iter_image_media, path_to_data_url
 from database.db_manager import create_db_manager_ui
+from tools.memory_settings_ui import create_memory_settings_ui
 
 level_name = os.getenv("SAIVERSE_LOG_LEVEL", "INFO").upper()
 if level_name not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
@@ -1382,6 +1383,7 @@ def main():
                         <div class="saiverse-nav-item" data-tab-label="ワールドビュー">ワールドビュー</div>
                         <div class="saiverse-nav-item" data-tab-label="自律会話ログ" style="display:none">自律会話ログ</div>
                         <div class="saiverse-nav-item" data-tab-label="DB Manager">DB Manager</div>
+                        <div class="saiverse-nav-item" data-tab-label="メモリー設定">メモリー設定</div>
                         <div class="saiverse-nav-item" data-tab-label="ワールドエディタ">ワールドエディタ</div>
                     </div>
                     """)
@@ -1579,6 +1581,9 @@ def main():
         with gr.Column(elem_id="section-db-manager", elem_classes=['saiverse-section', 'saiverse-hidden']):
             create_db_manager_ui(manager.SessionLocal)
 
+        with gr.Column(elem_id="section-memory-settings", elem_classes=['saiverse-section', 'saiverse-hidden']):
+            create_memory_settings_ui(manager)
+
 
         with gr.Column(elem_id="section-world-editor", elem_classes=['saiverse-section', 'saiverse-hidden']):
             create_world_editor_ui() # This function now contains all editor sections
@@ -1591,6 +1596,7 @@ def main():
                 "ワールドビュー": "#section-worldview",
                 "自律会話ログ": "#section-autolog",
                 "DB Manager": "#section-db-manager",
+                "メモリー設定": "#section-memory-settings",
                 "ワールドエディタ": "#section-world-editor"
             };
             const defaultLabel = "ワールドビュー";
