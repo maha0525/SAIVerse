@@ -93,6 +93,7 @@ html[data-theme='light'] {
   --user-fg: #111827;
   --note-bg: #fff9db;
   --note-fg: #1f2937;
+  --timestamp-fg: #6b7280;
 }
 html[data-theme='dark'] {
   --msg-bg: #333333;
@@ -101,6 +102,7 @@ html[data-theme='dark'] {
   --user-fg: #e5e7eb;
   --note-bg: #3b3a2a;
   --note-fg: #f3f4f6;
+  --timestamp-fg: #9ca3af;
 }
 /* Fallback to system preference if theme attr not present */
 @media (prefers-color-scheme: dark) {
@@ -111,16 +113,44 @@ html[data-theme='dark'] {
     --user-fg: #e5e7eb;
     --note-bg: #3b3a2a;
     --note-fg: #f3f4f6;
+    --timestamp-fg: #9ca3af;
   }
 }
 
-/* --- Flexboxレイアウト --- */
-.message-row { display: flex !important; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
-.message-row .avatar-container { width: 60px; height: 60px; min-width: 60px; border-radius: 12px !important; overflow: hidden; margin: 0 !important; display: inline-block; }
-.message-row .avatar-container img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit !important; display: block; }
-.message-row .message { flex-grow: 1; padding: 10px 14px; background-color: var(--msg-bg); color: var(--msg-fg) !important; border-radius: 12px; min-height: 60px; font-size: 1rem !important; overflow-wrap: break-word; }
-.user-message { flex-direction: row-reverse; }
-.user-message .message { background-color: var(--user-bg); color: var(--user-fg) !important; }
+/* --- 縦積みレイアウト --- */
+.message-block { display: flex !important; flex-direction: column; align-items: flex-start; gap: 8px; margin-bottom: 16px; }
+.message-block .avatar-top { width: 60px; height: 60px; min-width: 60px; border-radius: 12px !important; overflow: hidden; margin: 0 !important; display: inline-block; }
+.message-block .avatar-top img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit !important; display: block; }
+.message-header { display: flex !important; align-items: center; gap: 12px; width: 100%; }
+.message-header .speaker-name { font-weight: 600; font-size: 0.95rem; color: var(--msg-fg); }
+.message-block.user .message-header .speaker-name { color: var(--user-fg); }
+.message-block .bubble { padding: 12px 16px; background-color: var(--msg-bg); color: var(--msg-fg) !important; border-radius: 12px; font-size: 1rem !important; overflow-wrap: break-word; max-width: min(640px, 90vw); box-shadow: 0 2px 6px rgba(0,0,0,0.08); display: flex; flex-direction: column; gap: 8px; }
+.message-block.user .bubble { background-color: var(--user-bg); color: var(--user-fg) !important; }
+.message-block .bubble .bubble-content { line-height: 1.6; }
+.message-block .bubble .bubble-meta { font-size: 0.75rem; color: var(--timestamp-fg); align-self: flex-end; white-space: nowrap; }
+.message-block.user { align-items: flex-start; text-align: left; }
+.message-block.user .avatar-top { align-self: flex-start; }
+.message-block.host { align-items: flex-start; }
+.message-block.host .avatar-top { align-self: flex-start; }
+
+#my_chat .message,
+#my_chat .message.user,
+#my_chat .message.assistant {
+  justify-content: flex-start !important;
+  text-align: left !important;
+}
+#my_chat .message .avatar,
+#my_chat .message .message-avatar,
+#my_chat .message .chatbot-avatar,
+#my_chat .message svg {
+  display: none !important;
+}
+#my_chat .message .chatbot-message,
+#my_chat .message .message-content {
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+}
 
 /* Notes */
 .note-box { background: var(--note-bg); color: var(--note-fg) !important; border-left: 4px solid #ffbf00; padding: 8px 12px; margin: 0; border-radius: 6px; font-size: .92rem; }
@@ -297,72 +327,154 @@ def _render_message_images(metadata: Optional[Dict[str, Any]]) -> str:
     return "<div class=\"saiv-image-grid\">" + "".join(html_chunks) + "</div>"
 
 
+USER_AVATAR_ICON_PATH = Path("assets/icons/user.png")
+_USER_AVATAR_DATA_URL: Optional[str] = None
+
+
+def _get_user_avatar_data_url() -> str:
+    global _USER_AVATAR_DATA_URL
+    if _USER_AVATAR_DATA_URL is None:
+        if USER_AVATAR_ICON_PATH.exists():
+            mime = mimetypes.guess_type(USER_AVATAR_ICON_PATH)[0] or "image/png"
+            data_url = path_to_data_url(USER_AVATAR_ICON_PATH, mime)
+            _USER_AVATAR_DATA_URL = data_url or ""
+        else:
+            _USER_AVATAR_DATA_URL = ""
+    return _USER_AVATAR_DATA_URL or ""
+
+
 def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """生の会話履歴をGradio Chatbotの表示形式（HTML）に変換する"""
     display: List[Dict[str, str]] = []
 
+    avatar_box = (
+        "width:60px;height:60px;min-width:60px;"
+        "border-radius:12px;overflow:hidden;display:inline-block;margin:0;"
+    )
+    avatar_img = (
+        "width:100%;height:100%;object-fit:cover;display:block;"
+        "margin:0;border-radius:inherit;clip-path: inset(0 round 12px);"
+    )
+
+    def render_block(role_class: str, avatar_src: Optional[str], speaker_name: str, body_html: str, timestamp_text: str) -> str:
+        avatar_html = ""
+        if avatar_src:
+            avatar_html = (
+                f"<div class='avatar-top saiv-avatar' style=\"{avatar_box}\">"
+                f"<img class='saiv-avatar-img' src='{avatar_src}' style=\"{avatar_img}\"></div>"
+            )
+        name_html = f"<span class='speaker-name'>{html_escape(speaker_name)}</span>" if speaker_name else ""
+        header_inner = ""
+        if avatar_html or name_html:
+            header_inner = f"<div class='message-header'>{avatar_html}{name_html}</div>"
+        timestamp_html = f"<div class='bubble-meta'>{html_escape(timestamp_text)}</div>" if timestamp_text else ""
+        return (
+            f"<div class='message-block {role_class}'>"
+            f"{header_inner}"
+            f"<div class='bubble'><div class='bubble-content'>{body_html}</div>{timestamp_html}</div>"
+            "</div>"
+        )
+
+    user_avatar_src = _get_user_avatar_data_url() or (manager.default_avatar if manager else "")
+
+    def _format_timestamp(ts_raw: Optional[str]) -> str:
+        if not ts_raw:
+            return ""
+        ts_value = str(ts_raw).strip()
+        if not ts_value:
+            return ""
+        if ts_value.endswith("Z"):
+            ts_value = ts_value[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(ts_value)
+        except ValueError:
+            return ""
+        tz = getattr(manager, "timezone_info", None) if manager else None
+        if tz:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=tz)
+            else:
+                dt = dt.astimezone(tz)
+        return dt.strftime("%Y-%m-%d %H:%M")
+
+    def _resolve_speaker_name(role: str, msg: Dict[str, Any]) -> str:
+        explicit = msg.get("speaker_name") or msg.get("speaker")
+        if explicit:
+            return str(explicit)
+        if role == "assistant":
+            persona_id = msg.get("persona_id") or msg.get("id") or ""
+            name = ""
+            if manager:
+                if persona_id:
+                    name = manager.id_to_name_map.get(persona_id, "")
+                    if not name:
+                        persona_core = manager.personas.get(persona_id)
+                        if persona_core:
+                            name = getattr(persona_core, "persona_name", "") or ""
+                if not name:
+                    heard = msg.get("heard_by") or []
+                    if isinstance(heard, list):
+                        for pid in heard:
+                            candidate = manager.id_to_name_map.get(str(pid), "")
+                            if candidate:
+                                name = candidate
+                                break
+            return name or "AI"
+        if role == "user":
+            if manager:
+                return getattr(manager, "user_display_name", "ユーザー") or "ユーザー"
+            return "ユーザー"
+        if role == "host":
+            if manager:
+                return manager.id_to_name_map.get("host", "ホスト") or "ホスト"
+            return "ホスト"
+        return role or "system"
+
     for msg in raw_history:
         role = msg.get("role")
+        timestamp_text = _format_timestamp(msg.get("timestamp"))
         if role == "assistant":
             pid = msg.get("persona_id")
-            avatar = manager.avatar_map.get(pid, manager.default_avatar)
+            if manager:
+                avatar = manager.avatar_map.get(pid, manager.default_avatar) or manager.default_avatar
+            else:
+                avatar = ""
             say = msg.get("content", "")
             image_html = _render_message_images(msg.get("metadata"))
-
-            if avatar:
-                avatar_box = (
-                    "width:60px;height:60px;min-width:60px;"
-                    "border-radius:12px;overflow:hidden;display:inline-block;margin:0;"
-                )
-                avatar_img = (
-                    "width:100%;height:100%;object-fit:cover;display:block;"
-                    "margin:0;border-radius:inherit;clip-path: inset(0 round 12px);"
-                )
-                bubble_html = (
-                    f"<div class='message-row'>"
-                    f"<div class='avatar-container saiv-avatar' style=\"{avatar_box}\">"
-                    f"<img class='saiv-avatar-img' src='{avatar}' style=\"{avatar_img}\"></div>"
-                    f"<div class='message'>{say}{image_html}</div></div>"
-                )
-            else:
-                bubble_html = f"{say}{image_html}"
+            speaker_name = _resolve_speaker_name("assistant", msg)
+            bubble_html = render_block("assistant", avatar, speaker_name, f"{say}{image_html}", timestamp_text)
             display.append({"role": "assistant", "content": bubble_html})
         elif role == "user":
-            # Let Gradio Chatbot handle user-side alignment and avatar rendering
-            # Keep the role as 'user' and pass through the plain content
             text = msg.get("content", "") or ""
             escaped_text = html_escape(text).replace("\n", "<br>")
             image_html = _render_message_images(msg.get("metadata"))
+            body_parts: List[str] = []
+            if escaped_text:
+                body_parts.append(escaped_text)
             if image_html:
-                if escaped_text:
-                    user_html = f"{escaped_text}{image_html}"
-                else:
-                    user_html = f"(画像を送信しました){image_html}"
-            else:
-                user_html = escaped_text
-            display.append({"role": "user", "content": user_html})
+                body_parts.append(image_html if escaped_text else f"(画像を送信しました){image_html}")
+            body_html = "".join(body_parts)
+            speaker_name = _resolve_speaker_name("user", msg)
+            bubble_html = render_block("user", user_avatar_src, speaker_name, body_html, timestamp_text)
+            display.append({"role": "user", "content": bubble_html})
         elif role == "host":
             say = msg.get("content", "")
             image_html = _render_message_images(msg.get("metadata"))
-            if manager.host_avatar:
-                avatar_box = (
-                    "width:60px;height:60px;min-width:60px;"
-                    "border-radius:12px;overflow:hidden;display:inline-block;margin:0;"
-                )
-                avatar_img = (
-                    "width:100%;height:100%;object-fit:cover;display:block;"
-                    "margin:0;border-radius:inherit;clip-path: inset(0 round 12px);"
-                )
-                bubble_html = (
-                    f"<div class='message-row'>"
-                    f"<div class='avatar-container saiv-avatar' style=\"{avatar_box}\">"
-                    f"<img class='saiv-avatar-img' src='{manager.host_avatar}' style=\"{avatar_img}\"></div>"
-                    f"<div class='message'>{say}{image_html}</div></div>"
-                )
+            if manager:
+                host_avatar = manager.host_avatar or manager.default_avatar
             else:
-                bubble_html = f"<b>[HOST]</b> {say}{image_html}"
+                host_avatar = ""
+            speaker_name = _resolve_speaker_name("host", msg)
+            bubble_html = render_block("host", host_avatar, speaker_name, f"{say}{image_html}", timestamp_text)
             display.append({"role": "assistant", "content": bubble_html})
-        # "system" role messages are filtered out from the display
+        else:
+            say = msg.get("content", "")
+            image_html = _render_message_images(msg.get("metadata"))
+            speaker_name = _resolve_speaker_name(role or "assistant", msg)
+            default_avatar = manager.default_avatar if manager else ""
+            bubble_html = render_block("assistant", default_avatar, speaker_name, f"{say}{image_html}", timestamp_text)
+            display.append({"role": "assistant", "content": bubble_html})
+
     return display
 
 
@@ -1326,10 +1438,7 @@ def main():
                     group_consecutive_messages=False,
                     sanitize_html=False,
                     elem_id="my_chat",
-                    avatar_images=(
-                        "assets/icons/user.png", # ← ユーザー
-                        None  # アシスタント側はメッセージ内に表示
-                    ),
+                    avatar_images=(None, None),
                     height=800
                 )
                 with gr.Row():

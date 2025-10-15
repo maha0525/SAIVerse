@@ -134,6 +134,7 @@ class SAIVerseManager:
         self.occupants: Dict[str, List[str]] = {b.building_id: [] for b in self.buildings}
         self.id_to_name_map: Dict[str, str] = {}
         self.user_id: int = 1  # Hardcode user ID for now
+        self.user_display_name: str = "ユーザー"
         self.user_is_online: bool = False
         self.user_current_building_id: Optional[str] = None
         self.user_current_city_id: Optional[int] = None
@@ -723,16 +724,22 @@ class SAIVerseManager:
                 self.user_is_online = user.LOGGED_IN
                 self.user_current_city_id = user.CURRENT_CITYID
                 self.user_current_building_id = user.CURRENT_BUILDINGID
+                self.user_display_name = (user.USERNAME or "ユーザー").strip() or "ユーザー"
+                self.id_to_name_map[str(self.user_id)] = self.user_display_name
                 logging.info(f"Loaded user state: {'Online' if self.user_is_online else 'Offline'} at {self.user_current_building_id}")
             else:
                 logging.warning("User with USERID=1 not found. Defaulting to Offline.")
                 self.user_is_online = False
                 self.user_current_building_id = None
                 self.user_current_city_id = None
+                self.user_display_name = "ユーザー"
+                self.id_to_name_map[str(self.user_id)] = self.user_display_name
         except Exception as e:
             logging.error(f"Failed to load user status from DB: {e}", exc_info=True)
             self.user_is_online = False
             self.user_current_building_id = None
+            self.user_display_name = "ユーザー"
+            self.id_to_name_map[str(self.user_id)] = self.user_display_name
         finally:
             db.close()
 
@@ -748,6 +755,8 @@ class SAIVerseManager:
                 user.LOGGED_IN = status
                 db.commit()
                 self.user_is_online = status
+                self.user_display_name = (user.USERNAME or "ユーザー").strip() or "ユーザー"
+                self.id_to_name_map[str(self.user_id)] = self.user_display_name
                 status_text = "オンライン" if status else "オフライン"
                 logging.info(f"User {user_id} login status set to: {status_text}")
 
