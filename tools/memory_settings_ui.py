@@ -72,15 +72,31 @@ def _extract_selected_indices(table_data: Any) -> List[int]:
     if table_data is None:
         return []
     if isinstance(table_data, pd.DataFrame):
-        df = table_data
+        df = table_data.copy()
     else:
         try:
             df = pd.DataFrame(table_data)
         except Exception:
             return []
+
+    # Normalize column names when Gradio sends without headers
+    if "Import" not in df.columns and df.shape[1] >= 2:
+        df.columns = ["Import", "Idx"] + [f"col_{i}" for i in range(2, df.shape[1])]
+
     if "Import" not in df.columns or "Idx" not in df.columns:
         return []
-    selected = df[df["Import"] == True]  # noqa: E712
+
+    def _as_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        text = str(value).strip().lower()
+        return text in {"true", "1", "yes", "y", "on"}
+
+    df["Import"] = df["Import"].map(_as_bool)
+
+    selected = df[df["Import"]]
     indices: List[int] = []
     for raw in selected["Idx"].tolist():
         try:
@@ -628,6 +644,14 @@ def _import_chatgpt_conversations(
 
     utc_now = datetime.now(timezone.utc)
     results: List[str] = []
+    LOGGER.debug(
+        "Import request: persona=%s selected=%s select_all=%s roles=%s dry_run=%s",
+        persona_id,
+        [rec.identifier for rec in selected_records],
+        select_all,
+        include_roles,
+        dry_run,
+    )
     try:
         for record in selected_records:
             payloads = list(record.iter_memory_payloads(include_roles=include_roles))
