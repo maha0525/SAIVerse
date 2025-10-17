@@ -1,19 +1,21 @@
 import base64
 import json
-from sqlalchemy import create_engine, inspect, func
+from sqlalchemy import create_engine, inspect, func, text
 import threading
 import requests
 import logging
 from pathlib import Path
 import mimetypes
 from typing import Dict, List, Optional, Tuple, Iterator, Union, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
+from zoneinfo import ZoneInfo
 import pandas as pd
 import tempfile
 import shutil
 import importlib
 import tools.defs
 import os
+import time
 
 from google.genai import errors
 from buildings import Building
@@ -44,6 +46,7 @@ class SAIVerseManager:
         self.db_path = db_path
         DATABASE_URL = f"sqlite:///{db_path}"
         engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+        self._ensure_city_timezone_column(engine)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         
         # --- Step 1: Load City Configuration from DB ---
@@ -59,13 +62,15 @@ class SAIVerseManager:
             self.ui_port = my_city_config.UI_PORT
             self.api_port = my_city_config.API_PORT
             self.start_in_online_mode = my_city_config.START_IN_ONLINE_MODE
+            self._update_timezone_cache(getattr(my_city_config, "TIMEZONE", "UTC"))
             
             # Load other cities' configs for inter-city communication
             other_cities = db.query(CityModel).filter(CityModel.CITYID != self.city_id).all()
             self.cities_config = {
                 city.CITYNAME: {
                     "city_id": city.CITYID,
-                    "api_base_url": f"http://127.0.0.1:{city.API_PORT}"
+                    "api_base_url": f"http://127.0.0.1:{city.API_PORT}",
+                    "timezone": getattr(city, "TIMEZONE", "UTC") or "UTC",
                 } for city in other_cities
             }
             logging.info(f"Loaded config for '{self.city_name}' (ID: {self.city_id}). Found {len(self.cities_config)} other cities.")
@@ -129,6 +134,7 @@ class SAIVerseManager:
         self.occupants: Dict[str, List[str]] = {b.building_id: [] for b in self.buildings}
         self.id_to_name_map: Dict[str, str] = {}
         self.user_id: int = 1  # Hardcode user ID for now
+        self.user_display_name: str = "ユーザー"
         self.user_is_online: bool = False
         self.user_current_building_id: Optional[str] = None
         self.user_current_city_id: Optional[int] = None
@@ -196,6 +202,37 @@ class SAIVerseManager:
         self.db_polling_thread = threading.Thread(target=self._db_polling_loop, daemon=True)
         self.db_polling_thread.start()
 
+    @staticmethod
+    def _ensure_city_timezone_column(engine) -> None:
+        """Ensure the city table has a TIMEZONE column."""
+        try:
+            inspector = inspect(engine)
+            columns = {col["name"] for col in inspector.get_columns("city")}
+        except Exception as exc:
+            logging.warning("Failed to inspect city table for timezone column: %s", exc)
+            return
+        if "TIMEZONE" in columns:
+            return
+        logging.info("Adding TIMEZONE column to city table.")
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE city ADD COLUMN TIMEZONE TEXT DEFAULT 'UTC' NOT NULL"))
+                conn.execute(text("UPDATE city SET TIMEZONE = 'UTC' WHERE TIMEZONE IS NULL"))
+        except Exception as exc:
+            logging.error("Failed to add TIMEZONE column to city table: %s", exc)
+
+    def _update_timezone_cache(self, tz_name: Optional[str]) -> None:
+        """Update cached timezone information for this manager."""
+        name = (tz_name or "UTC").strip() or "UTC"
+        try:
+            tz = ZoneInfo(name)
+        except Exception:
+            logging.warning("Invalid timezone '%s'. Falling back to UTC.", name)
+            name = "UTC"
+            tz = ZoneInfo("UTC")
+        self.timezone_name = name
+        self.timezone_info = tz
+
     def _sds_background_loop(self):
         """Periodically sends heartbeats and updates the city list from SDS."""
         while not self.sds_stop_event.wait(30): # every 30 seconds
@@ -262,7 +299,8 @@ class SAIVerseManager:
             self.cities_config = {
                 city.CITYNAME: {
                     "city_id": city.CITYID,
-                    "api_base_url": f"http://127.0.0.1:{city.API_PORT}"
+                    "api_base_url": f"http://127.0.0.1:{city.API_PORT}",
+                    "timezone": getattr(city, "TIMEZONE", "UTC") or "UTC",
                 } for city in other_cities
             }
             logging.info(f"Loaded/reloaded city config from local DB. Found {len(self.cities_config)} other cities.")
@@ -512,6 +550,30 @@ class SAIVerseManager:
         finally:
             db.close()
 
+    def _set_persona_avatar(self, ai_id: str, avatar_value: Optional[str]) -> None:
+        """Update in-memory avatar cache and persona reference."""
+        display_value = self.default_avatar
+        if avatar_value:
+            try:
+                avatar_path = Path(avatar_value)
+                if avatar_path.exists():
+                    mime = mimetypes.guess_type(avatar_path.name)[0] or "image/png"
+                    data_b = avatar_path.read_bytes()
+                    b64 = base64.b64encode(data_b).decode("ascii")
+                    display_value = f"data:{mime};base64,{b64}"
+                else:
+                    # Could be a URL or base64 string already
+                    display_value = avatar_value
+            except Exception as exc:
+                logging.error(f"Failed to process avatar for {ai_id}: {exc}")
+                display_value = self.default_avatar
+        else:
+            avatar_value = None
+
+        self.avatar_map[ai_id] = display_value
+        if ai_id in self.personas:
+            self.personas[ai_id].avatar_image = avatar_value
+
     def _load_personas_from_db(self):
         """DBからペルソナ情報を読み込み、PersonaCoreインスタンスを生成する"""
         db = self.SessionLocal()
@@ -523,23 +585,7 @@ class SAIVerseManager:
                 start_id = f"{pid}_room"
 
                 # アバター画像処理 (DBのパスを優先)
-                avatar_source = db_ai.AVATAR_IMAGE
-                if avatar_source:
-                    try:
-                        avatar_path = Path(avatar_source)
-                        if avatar_path.exists():
-                            mime = mimetypes.guess_type(avatar_path.name)[0] or "image/png"
-                            data_b = avatar_path.read_bytes()
-                            b64 = base64.b64encode(data_b).decode("ascii")
-                            self.avatar_map[pid] = f"data:{mime};base64,{b64}"
-                        else:
-                            # URLやBase64文字列かもしれないのでそのままセット
-                            self.avatar_map[pid] = avatar_source
-                    except Exception as e:
-                        logging.error(f"Failed to process avatar for {pid}: {e}")
-                        self.avatar_map[pid] = self.default_avatar
-                else:
-                    self.avatar_map[pid] = self.default_avatar
+                self._set_persona_avatar(pid, db_ai.AVATAR_IMAGE)
 
                 # モデル設定 (DBの個別設定を優先し、なければManagerのデフォルトを使用)
                 persona_model = db_ai.DEFAULT_MODEL or self.model
@@ -571,6 +617,8 @@ class SAIVerseManager:
                     provider=self.provider,
                     interaction_mode=(db_ai.INTERACTION_MODE or "auto"),
                     is_dispatched=db_ai.IS_DISPATCHED,
+                    timezone_info=self.timezone_info,
+                    timezone_name=self.timezone_name,
                 )
 
                 self.personas[pid] = persona
@@ -676,16 +724,22 @@ class SAIVerseManager:
                 self.user_is_online = user.LOGGED_IN
                 self.user_current_city_id = user.CURRENT_CITYID
                 self.user_current_building_id = user.CURRENT_BUILDINGID
+                self.user_display_name = (user.USERNAME or "ユーザー").strip() or "ユーザー"
+                self.id_to_name_map[str(self.user_id)] = self.user_display_name
                 logging.info(f"Loaded user state: {'Online' if self.user_is_online else 'Offline'} at {self.user_current_building_id}")
             else:
                 logging.warning("User with USERID=1 not found. Defaulting to Offline.")
                 self.user_is_online = False
                 self.user_current_building_id = None
                 self.user_current_city_id = None
+                self.user_display_name = "ユーザー"
+                self.id_to_name_map[str(self.user_id)] = self.user_display_name
         except Exception as e:
             logging.error(f"Failed to load user status from DB: {e}", exc_info=True)
             self.user_is_online = False
             self.user_current_building_id = None
+            self.user_display_name = "ユーザー"
+            self.id_to_name_map[str(self.user_id)] = self.user_display_name
         finally:
             db.close()
 
@@ -701,6 +755,8 @@ class SAIVerseManager:
                 user.LOGGED_IN = status
                 db.commit()
                 self.user_is_online = status
+                self.user_display_name = (user.USERNAME or "ユーザー").strip() or "ユーザー"
+                self.id_to_name_map[str(self.user_id)] = self.user_display_name
                 status_text = "オンライン" if status else "オフライン"
                 logging.info(f"User {user_id} login status set to: {status_text}")
 
@@ -896,7 +952,8 @@ class SAIVerseManager:
                 explore_callback=self._explore_city, create_persona_callback=self._create_persona,
                 session_factory=self.SessionLocal, start_building_id=new_building_id,
                 model=self.model, context_length=self.context_length,
-                user_room_id=self.user_room_id, provider=self.provider, is_dispatched=False
+                user_room_id=self.user_room_id, provider=self.provider, is_dispatched=False,
+                timezone_info=self.timezone_info, timezone_name=self.timezone_name
             )
             self.personas[new_ai_id] = new_persona_core
             self.avatar_map[new_ai_id] = self.default_avatar
@@ -1626,23 +1683,41 @@ class SAIVerseManager:
             query = db.query(CityModel)
             df = pd.read_sql(query.statement, query.session.bind)
             # USERIDは現在固定なので表示しない
-            return df[['CITYID', 'CITYNAME', 'DESCRIPTION', 'START_IN_ONLINE_MODE', 'UI_PORT', 'API_PORT']]
+            cols = ['CITYID', 'CITYNAME', 'DESCRIPTION', 'TIMEZONE', 'START_IN_ONLINE_MODE', 'UI_PORT', 'API_PORT']
+            existing_cols = [c for c in cols if c in df.columns]
+            return df[existing_cols]
         finally:
             db.close()
 
-    def update_city(self, city_id: int, name: str, description: str, online_mode: bool, ui_port: int, api_port: int) -> str:
+    def update_city(
+        self,
+        city_id: int,
+        name: str,
+        description: str,
+        online_mode: bool,
+        ui_port: int,
+        api_port: int,
+        timezone_name: str,
+    ) -> str:
         """ワールドエディタからCityの設定を更新する"""
         db = self.SessionLocal()
         try:
             city = db.query(CityModel).filter(CityModel.CITYID == city_id).first()
             if not city:
                 return "Error: City not found."
+
+            tz_candidate = (timezone_name or "UTC").strip() or "UTC"
+            try:
+                ZoneInfo(tz_candidate)
+            except Exception:
+                return f"Error: Invalid timezone '{tz_candidate}'. Please provide an IANA timezone name (e.g., Asia/Tokyo)."
             
             city.CITYNAME = name
             city.DESCRIPTION = description
             city.START_IN_ONLINE_MODE = online_mode
             city.UI_PORT = ui_port
             city.API_PORT = api_port
+            city.TIMEZONE = tz_candidate
             db.commit()
 
             # If we are updating the current city, update some in-memory state
@@ -1651,6 +1726,11 @@ class SAIVerseManager:
                 self.city_name = name
                 self.ui_port = ui_port
                 self.api_port = api_port
+                self.user_room_id = f"user_room_{self.city_name}"
+                self._update_timezone_cache(tz_candidate)
+
+            # Refresh cached city config
+            self._load_cities_from_db()
             
             logging.info(f"Updated city settings for City ID {city_id}. A restart may be required.")
             return "City settings updated successfully. A restart is required for changes to apply."
@@ -1967,7 +2047,7 @@ class SAIVerseManager:
 
             # --- Update memory for the new AI ---
             if blueprint.CITYID == self.city_id:
-                new_persona_core = PersonaCore(city_name=self.city_name, persona_id=new_ai_id, persona_name=entity_name, persona_system_instruction=blueprint.BASE_SYSTEM_PROMPT, avatar_image=blueprint.BASE_AVATAR, buildings=self.buildings, common_prompt_path=Path("system_prompts/common.txt"), action_priority_path=Path("action_priority.json"), building_histories=self.building_histories, occupants=self.occupants, id_to_name_map=self.id_to_name_map, move_callback=self._move_persona, dispatch_callback=self.dispatch_persona, explore_callback=self._explore_city, create_persona_callback=self._create_persona, session_factory=self.SessionLocal, start_building_id=target_building_id, model=self.model, context_length=self.context_length, user_room_id=self.user_room_id, provider=self.provider, is_dispatched=False)
+                new_persona_core = PersonaCore(city_name=self.city_name, persona_id=new_ai_id, persona_name=entity_name, persona_system_instruction=blueprint.BASE_SYSTEM_PROMPT, avatar_image=blueprint.BASE_AVATAR, buildings=self.buildings, common_prompt_path=Path("system_prompts/common.txt"), action_priority_path=Path("action_priority.json"), building_histories=self.building_histories, occupants=self.occupants, id_to_name_map=self.id_to_name_map, move_callback=self._move_persona, dispatch_callback=self.dispatch_persona, explore_callback=self._explore_city, create_persona_callback=self._create_persona, session_factory=self.SessionLocal, start_building_id=target_building_id, model=self.model, context_length=self.context_length, user_room_id=self.user_room_id, provider=self.provider, is_dispatched=False, timezone_info=self.timezone_info, timezone_name=self.timezone_name)
                 self.personas[new_ai_id] = new_persona_core
                 self.avatar_map[new_ai_id] = self.default_avatar
                 self.id_to_name_map[new_ai_id] = entity_name
@@ -2109,7 +2189,7 @@ class SAIVerseManager:
         # as well as special buildings (e.g., "user_room_city_a").
         return any(entity_id.startswith(prefix) for prefix in seeded_prefixes)
 
-    def create_city(self, name: str, description: str, ui_port: int, api_port: int) -> str:
+    def create_city(self, name: str, description: str, ui_port: int, api_port: int, timezone_name: str) -> str:
         """Creates a new city."""
         db = self.SessionLocal()
         try:
@@ -2118,9 +2198,23 @@ class SAIVerseManager:
             if db.query(CityModel).filter((CityModel.UI_PORT == ui_port) | (CityModel.API_PORT == api_port)).first():
                 return f"Error: UI Port {ui_port} or API Port {api_port} is already in use."
 
-            new_city = CityModel(USERID=self.user_id, CITYNAME=name, DESCRIPTION=description, UI_PORT=ui_port, API_PORT=api_port)
+            tz_candidate = (timezone_name or "UTC").strip() or "UTC"
+            try:
+                ZoneInfo(tz_candidate)
+            except Exception:
+                return f"Error: Invalid timezone '{tz_candidate}'. Please provide an IANA timezone name (e.g., Asia/Tokyo)."
+
+            new_city = CityModel(
+                USERID=self.user_id,
+                CITYNAME=name,
+                DESCRIPTION=description,
+                UI_PORT=ui_port,
+                API_PORT=api_port,
+                TIMEZONE=tz_candidate,
+            )
             db.add(new_city)
             db.commit()
+            self._load_cities_from_db()
             logging.info(f"Created new city '{name}'.")
             return f"City '{name}' created successfully. Please restart the application to use it."
         except Exception as e:
@@ -2391,8 +2485,16 @@ class SAIVerseManager:
             db.close()
 
     def update_ai(
-        self, ai_id: str, name: str, description: str, system_prompt: str,
-        home_city_id: int, default_model: Optional[str], interaction_mode: str
+        self,
+        ai_id: str,
+        name: str,
+        description: str,
+        system_prompt: str,
+        home_city_id: int,
+        default_model: Optional[str],
+        interaction_mode: str,
+        avatar_path: Optional[str],
+        avatar_upload: Optional[str],
     ) -> str:
         """ワールドエディタからAIの設定を更新する"""
         db = self.SessionLocal()
@@ -2402,6 +2504,23 @@ class SAIVerseManager:
 
             if ai.HOME_CITYID != home_city_id:
                 if ai.IS_DISPATCHED: return f"Error: Cannot change the home city of a dispatched AI. Please return '{ai.AINAME}' to their home city first."
+
+            avatar_value: Optional[str]
+            avatar_value = (avatar_path or "").strip() or None
+            if avatar_upload:
+                try:
+                    avatars_dir = Path("assets") / "avatars"
+                    avatars_dir.mkdir(parents=True, exist_ok=True)
+                    upload_path = Path(avatar_upload)
+                    suffix = upload_path.suffix.lower() if upload_path.suffix else ".png"
+                    dest_name = f"{ai_id}_{int(time.time())}{suffix}"
+                    dest_path = avatars_dir / dest_name
+                    shutil.copy(upload_path, dest_path)
+                    avatar_value = str(dest_path)
+                    logging.info(f"Stored uploaded avatar for '{ai_id}' at {dest_path}")
+                except Exception as exc:
+                    logging.error(f"Failed to store avatar upload for {ai_id}: %s", exc, exc_info=True)
+                    return f"Error: Failed to process avatar upload: {exc}"
 
             # --- Interaction Mode Change Logic ---
             original_mode = ai.INTERACTION_MODE
@@ -2436,6 +2555,7 @@ class SAIVerseManager:
             # --- Update other fields ---
             ai.AINAME = name; ai.DESCRIPTION = description; ai.SYSTEMPROMPT = system_prompt; ai.HOME_CITYID = home_city_id
             ai.DEFAULT_MODEL = default_model if default_model else None
+            ai.AVATAR_IMAGE = avatar_value
             db.commit()
 
             # --- Update in-memory state ---
@@ -2444,7 +2564,8 @@ class SAIVerseManager:
                 persona.persona_name = name; persona.persona_system_instruction = system_prompt
                 persona.interaction_mode = ai.INTERACTION_MODE
                 logging.info(f"Updated in-memory persona '{name}' with new settings.")
-            
+            self._set_persona_avatar(ai_id, avatar_value)
+
             status_message = f"AI '{name}' updated successfully."
             if mode_changed: status_message += f" Mode changed from '{original_mode}' to '{interaction_mode}'."
             return status_message + move_feedback
