@@ -30,3 +30,8 @@ def get_model_choices() -> list[str]:
 
 def get_model_config(model: str) -> Dict:
     return MODEL_CONFIGS.get(model, {})
+
+
+def model_supports_images(model: str) -> bool:
+    config = get_model_config(model)
+    return bool(config.get("supports_images"))

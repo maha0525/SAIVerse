@@ -7,8 +7,13 @@ import os
 import json
 import argparse
 import atexit
+from html import escape as html_escape
+import mimetypes
+import shutil
+import uuid
+from datetime import datetime
 from dotenv import load_dotenv
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from pathlib import Path
 import pandas as pd
 
@@ -18,7 +23,9 @@ load_dotenv()
 
 from saiverse_manager import SAIVerseManager
 from model_configs import get_model_choices
+from media_utils import iter_image_media, path_to_data_url
 from database.db_manager import create_db_manager_ui
+from tools.memory_settings_ui import create_memory_settings_ui
 
 level_name = os.getenv("SAIVERSE_LOG_LEVEL", "INFO").upper()
 if level_name not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
@@ -87,6 +94,7 @@ html[data-theme='light'] {
   --user-fg: #111827;
   --note-bg: #fff9db;
   --note-fg: #1f2937;
+  --timestamp-fg: #6b7280;
 }
 html[data-theme='dark'] {
   --msg-bg: #333333;
@@ -95,6 +103,7 @@ html[data-theme='dark'] {
   --user-fg: #e5e7eb;
   --note-bg: #3b3a2a;
   --note-fg: #f3f4f6;
+  --timestamp-fg: #9ca3af;
 }
 /* Fallback to system preference if theme attr not present */
 @media (prefers-color-scheme: dark) {
@@ -105,16 +114,44 @@ html[data-theme='dark'] {
     --user-fg: #e5e7eb;
     --note-bg: #3b3a2a;
     --note-fg: #f3f4f6;
+    --timestamp-fg: #9ca3af;
   }
 }
 
-/* --- Flexboxレイアウト --- */
-.message-row { display: flex !important; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
-.message-row .avatar-container { width: 60px; height: 60px; min-width: 60px; border-radius: 12px !important; overflow: hidden; margin: 0 !important; display: inline-block; }
-.message-row .avatar-container img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit !important; display: block; }
-.message-row .message { flex-grow: 1; padding: 10px 14px; background-color: var(--msg-bg); color: var(--msg-fg) !important; border-radius: 12px; min-height: 60px; font-size: 1rem !important; overflow-wrap: break-word; }
-.user-message { flex-direction: row-reverse; }
-.user-message .message { background-color: var(--user-bg); color: var(--user-fg) !important; }
+/* --- 縦積みレイアウト --- */
+.message-block { display: flex !important; flex-direction: column; align-items: flex-start; gap: 8px; margin-bottom: 16px; }
+.message-block .avatar-top { width: 60px; height: 60px; min-width: 60px; border-radius: 12px !important; overflow: hidden; margin: 0 !important; display: inline-block; }
+.message-block .avatar-top img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit !important; display: block; }
+.message-header { display: flex !important; align-items: center; gap: 12px; width: 100%; }
+.message-header .speaker-name { font-weight: 600; font-size: 0.95rem; color: var(--msg-fg); }
+.message-block.user .message-header .speaker-name { color: var(--user-fg); }
+.message-block .bubble { padding: 12px 16px; background-color: var(--msg-bg); color: var(--msg-fg) !important; border-radius: 12px; font-size: 1rem !important; overflow-wrap: break-word; max-width: min(640px, 90vw); box-shadow: 0 2px 6px rgba(0,0,0,0.08); display: flex; flex-direction: column; gap: 8px; }
+.message-block.user .bubble { background-color: var(--user-bg); color: var(--user-fg) !important; }
+.message-block .bubble .bubble-content { line-height: 1.6; }
+.message-block .bubble .bubble-meta { font-size: 0.75rem; color: var(--timestamp-fg); align-self: flex-end; white-space: nowrap; }
+.message-block.user { align-items: flex-start; text-align: left; }
+.message-block.user .avatar-top { align-self: flex-start; }
+.message-block.host { align-items: flex-start; }
+.message-block.host .avatar-top { align-self: flex-start; }
+
+#my_chat .message,
+#my_chat .message.user,
+#my_chat .message.assistant {
+  justify-content: flex-start !important;
+  text-align: left !important;
+}
+#my_chat .message .avatar,
+#my_chat .message .message-avatar,
+#my_chat .message .chatbot-avatar,
+#my_chat .message svg {
+  display: none !important;
+}
+#my_chat .message .chatbot-message,
+#my_chat .message .message-content {
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+}
 
 /* Notes */
 .note-box { background: var(--note-bg); color: var(--note-fg) !important; border-left: 4px solid #ffbf00; padding: 8px 12px; margin: 0; border-radius: 6px; font-size: .92rem; }
@@ -213,6 +250,23 @@ html[data-theme='dark'] #saiverse-sidebar-nav .saiverse-nav-item.active {
   display: none !important;
 }
 
+.saiv-image-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.saiv-image-grid img {
+  max-width: 240px;
+  height: auto;
+  border-radius: 8px;
+  object-fit: cover;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+}
+html[data-theme='dark'] .saiv-image-grid img {
+  box-shadow: 0 2px 6px rgba(255, 255, 255, 0.1);
+}
+
 @media (max-width: 768px) {
   :global(.saiverse-sidebar.sidebar) {
     width: 60vw !important;
@@ -226,84 +280,281 @@ html[data-theme='dark'] #saiverse-sidebar-nav .saiverse-nav-item.active {
 }
 """
 
+
+def _store_uploaded_image(file_path: Optional[str]) -> Optional[Dict[str, str]]:
+    if not file_path:
+        return None
+    source = Path(file_path)
+    if not source.exists():
+        logging.warning("Uploaded image path missing: %s", file_path)
+        return None
+
+    dest_dir = Path.home() / ".saiverse" / "image"
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logging.exception("Failed to prepare image directory: %s", dest_dir)
+        return None
+    suffix = source.suffix or ".png"
+    dest_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}{suffix}"
+    dest_path = dest_dir / dest_name
+    try:
+        shutil.copy2(source, dest_path)
+    except OSError:
+        logging.exception("Failed to store uploaded image: %s", file_path)
+        return None
+
+    mime_type = mimetypes.guess_type(dest_path)[0] or "image/png"
+    return {
+        "type": "image",
+        "uri": f"saiverse://image/{dest_name}",
+        "mime_type": mime_type,
+        "source": "user_upload",
+    }
+
+
+def _render_message_images(metadata: Optional[Dict[str, Any]]) -> str:
+    attachments = iter_image_media(metadata)
+    if not attachments:
+        return ""
+    html_chunks: List[str] = []
+    for att in attachments:
+        data_url = path_to_data_url(att["path"], att["mime_type"])
+        if not data_url:
+            continue
+        html_chunks.append(f"<img src='{data_url}' alt='attachment'>")
+    if not html_chunks:
+        return ""
+    return "<div class=\"saiv-image-grid\">" + "".join(html_chunks) + "</div>"
+
+
+USER_AVATAR_ICON_PATH = Path("assets/icons/user.png")
+_USER_AVATAR_DATA_URL: Optional[str] = None
+
+
+def _get_user_avatar_data_url() -> str:
+    global _USER_AVATAR_DATA_URL
+    if _USER_AVATAR_DATA_URL is None:
+        if USER_AVATAR_ICON_PATH.exists():
+            mime = mimetypes.guess_type(USER_AVATAR_ICON_PATH)[0] or "image/png"
+            data_url = path_to_data_url(USER_AVATAR_ICON_PATH, mime)
+            _USER_AVATAR_DATA_URL = data_url or ""
+        else:
+            _USER_AVATAR_DATA_URL = ""
+    return _USER_AVATAR_DATA_URL or ""
+
+
 def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """生の会話履歴をGradio Chatbotの表示形式（HTML）に変換する"""
     display: List[Dict[str, str]] = []
 
+    avatar_box = (
+        "width:60px;height:60px;min-width:60px;"
+        "border-radius:12px;overflow:hidden;display:inline-block;margin:0;"
+    )
+    avatar_img = (
+        "width:100%;height:100%;object-fit:cover;display:block;"
+        "margin:0;border-radius:inherit;clip-path: inset(0 round 12px);"
+    )
+
+    def render_block(role_class: str, avatar_src: Optional[str], speaker_name: str, body_html: str, timestamp_text: str) -> str:
+        avatar_html = ""
+        if avatar_src:
+            avatar_html = (
+                f"<div class='avatar-top saiv-avatar' style=\"{avatar_box}\">"
+                f"<img class='saiv-avatar-img' src='{avatar_src}' style=\"{avatar_img}\"></div>"
+            )
+        name_html = f"<span class='speaker-name'>{html_escape(speaker_name)}</span>" if speaker_name else ""
+        header_inner = ""
+        if avatar_html or name_html:
+            header_inner = f"<div class='message-header'>{avatar_html}{name_html}</div>"
+        timestamp_html = f"<div class='bubble-meta'>{html_escape(timestamp_text)}</div>" if timestamp_text else ""
+        return (
+            f"<div class='message-block {role_class}'>"
+            f"{header_inner}"
+            f"<div class='bubble'><div class='bubble-content'>{body_html}</div>{timestamp_html}</div>"
+            "</div>"
+        )
+
+    user_avatar_src = _get_user_avatar_data_url() or (manager.default_avatar if manager else "")
+
+    def _format_timestamp(ts_raw: Optional[str]) -> str:
+        if not ts_raw:
+            return ""
+        ts_value = str(ts_raw).strip()
+        if not ts_value:
+            return ""
+        if ts_value.endswith("Z"):
+            ts_value = ts_value[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(ts_value)
+        except ValueError:
+            return ""
+        tz = getattr(manager, "timezone_info", None) if manager else None
+        if tz:
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=tz)
+            else:
+                dt = dt.astimezone(tz)
+        return dt.strftime("%Y-%m-%d %H:%M")
+
+    def _resolve_speaker_name(role: str, msg: Dict[str, Any]) -> str:
+        explicit = msg.get("speaker_name") or msg.get("speaker")
+        if explicit:
+            return str(explicit)
+        if role == "assistant":
+            persona_id = msg.get("persona_id") or msg.get("id") or ""
+            name = ""
+            if manager:
+                if persona_id:
+                    name = manager.id_to_name_map.get(persona_id, "")
+                    if not name:
+                        persona_core = manager.personas.get(persona_id)
+                        if persona_core:
+                            name = getattr(persona_core, "persona_name", "") or ""
+                if not name:
+                    heard = msg.get("heard_by") or []
+                    if isinstance(heard, list):
+                        for pid in heard:
+                            candidate = manager.id_to_name_map.get(str(pid), "")
+                            if candidate:
+                                name = candidate
+                                break
+            return name or "AI"
+        if role == "user":
+            if manager:
+                return getattr(manager, "user_display_name", "ユーザー") or "ユーザー"
+            return "ユーザー"
+        if role == "host":
+            if manager:
+                return manager.id_to_name_map.get("host", "ホスト") or "ホスト"
+            return "ホスト"
+        return role or "system"
+
     for msg in raw_history:
         role = msg.get("role")
+        timestamp_text = _format_timestamp(msg.get("timestamp"))
         if role == "assistant":
             pid = msg.get("persona_id")
-            avatar = manager.avatar_map.get(pid, manager.default_avatar)
-            say = msg.get("content", "")
-
-            if avatar:
-                avatar_box = (
-                    "width:60px;height:60px;min-width:60px;"
-                    "border-radius:12px;overflow:hidden;display:inline-block;margin:0;"
-                )
-                avatar_img = (
-                    "width:100%;height:100%;object-fit:cover;display:block;"
-                    "margin:0;border-radius:inherit;clip-path: inset(0 round 12px);"
-                )
-                html = (
-                    f"<div class='message-row'>"
-                    f"<div class='avatar-container saiv-avatar' style=\"{avatar_box}\">"
-                    f"<img class='saiv-avatar-img' src='{avatar}' style=\"{avatar_img}\"></div>"
-                    f"<div class='message'>{say}</div></div>"
-                )
+            if manager:
+                avatar = manager.avatar_map.get(pid, manager.default_avatar) or manager.default_avatar
             else:
-                html = f"{say}"
-            display.append({"role": "assistant", "content": html})
+                avatar = ""
+            say = msg.get("content", "")
+            image_html = _render_message_images(msg.get("metadata"))
+            speaker_name = _resolve_speaker_name("assistant", msg)
+            bubble_html = render_block("assistant", avatar, speaker_name, f"{say}{image_html}", timestamp_text)
+            display.append({"role": "assistant", "content": bubble_html})
         elif role == "user":
-            # Let Gradio Chatbot handle user-side alignment and avatar rendering
-            # Keep the role as 'user' and pass through the plain content
-            display.append({"role": "user", "content": msg.get("content", "")})
+            text = msg.get("content", "") or ""
+            escaped_text = html_escape(text).replace("\n", "<br>")
+            image_html = _render_message_images(msg.get("metadata"))
+            body_parts: List[str] = []
+            if escaped_text:
+                body_parts.append(escaped_text)
+            if image_html:
+                body_parts.append(image_html if escaped_text else f"(画像を送信しました){image_html}")
+            body_html = "".join(body_parts)
+            speaker_name = _resolve_speaker_name("user", msg)
+            bubble_html = render_block("user", user_avatar_src, speaker_name, body_html, timestamp_text)
+            display.append({"role": "user", "content": bubble_html})
         elif role == "host":
             say = msg.get("content", "")
-            if manager.host_avatar:
-                avatar_box = (
-                    "width:60px;height:60px;min-width:60px;"
-                    "border-radius:12px;overflow:hidden;display:inline-block;margin:0;"
-                )
-                avatar_img = (
-                    "width:100%;height:100%;object-fit:cover;display:block;"
-                    "margin:0;border-radius:inherit;clip-path: inset(0 round 12px);"
-                )
-                html = (
-                    f"<div class='message-row'>"
-                    f"<div class='avatar-container saiv-avatar' style=\"{avatar_box}\">"
-                    f"<img class='saiv-avatar-img' src='{manager.host_avatar}' style=\"{avatar_img}\"></div>"
-                    f"<div class='message'>{say}</div></div>"
-                )
+            image_html = _render_message_images(msg.get("metadata"))
+            if manager:
+                host_avatar = manager.host_avatar or manager.default_avatar
             else:
-                html = f"<b>[HOST]</b> {say}"
-            display.append({"role": "assistant", "content": html})
-        # "system" role messages are filtered out from the display
+                host_avatar = ""
+            speaker_name = _resolve_speaker_name("host", msg)
+            bubble_html = render_block("host", host_avatar, speaker_name, f"{say}{image_html}", timestamp_text)
+            display.append({"role": "assistant", "content": bubble_html})
+        else:
+            say = msg.get("content", "")
+            image_html = _render_message_images(msg.get("metadata"))
+            speaker_name = _resolve_speaker_name(role or "assistant", msg)
+            default_avatar = manager.default_avatar if manager else ""
+            bubble_html = render_block("assistant", default_avatar, speaker_name, f"{say}{image_html}", timestamp_text)
+            display.append({"role": "assistant", "content": bubble_html})
+
     return display
 
 
 
-def respond_stream(message: str):
+def respond_stream(message: str, image_path: Optional[str] = None):
     """Stream AI response for chat and update UI components if needed."""
-    # Get history from current location
-    print(manager.occupants[manager.user_current_building_id])
     current_building_id = manager.user_current_building_id
     if not current_building_id:
         dropdown_update, radio_update = _prepare_move_component_updates()
-        yield [{"role": "assistant", "content": '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'}], dropdown_update, radio_update, gr.update(), gr.update()
+        yield (
+            [{"role": "assistant", "content": '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'}],
+            dropdown_update,
+            radio_update,
+            gr.update(),
+            gr.update(),
+            gr.update(),
+        )
         return
 
+    print(manager.occupants[current_building_id])
+
     raw_history = manager.get_building_history(current_building_id)
+
+    stored_image = _store_uploaded_image(image_path)
+    if image_path and stored_image is None:
+        dropdown_update, radio_update = _prepare_move_component_updates()
+        base_history = format_history_for_chatbot(raw_history)
+        base_history.append({"role": "assistant", "content": '<div class="note-box">画像の保存に失敗しました。権限やディスク容量を確認してください。</div>'})
+        yield (
+            base_history,
+            dropdown_update,
+            radio_update,
+            gr.update(),
+            gr.update(),
+            gr.update(value=None),
+        )
+        return
+
+    attachments: List[Dict[str, str]] = [stored_image] if stored_image else []
+    metadata: Optional[Dict[str, Any]] = {"media": attachments} if attachments else None
+    if metadata:
+        logging.debug("[respond_stream] prepared metadata with %d media entries", len(attachments))
+
+    if not (message and message.strip()) and not metadata:
+        dropdown_update, radio_update = _prepare_move_component_updates()
+        base_history = format_history_for_chatbot(raw_history)
+        base_history.append({"role": "assistant", "content": '<div class="note-box">テキストか画像を入力してね。</div>'})
+        yield (
+            base_history,
+            dropdown_update,
+            radio_update,
+            gr.update(),
+            gr.update(),
+            gr.update(),
+        )
+        return
+
     history = format_history_for_chatbot(raw_history)
-    history.append({"role": "user", "content": message})
+
+    user_payload = {"role": "user", "content": message}
+    if metadata:
+        user_payload["metadata"] = metadata
+
+    user_display_entry = format_history_for_chatbot([user_payload])[0]
+    history.append(user_display_entry)
+
     ai_message = ""
-    # manager.handle_user_input_stream already uses the user's current location
-    for token in manager.handle_user_input_stream(message):
+    stream = manager.handle_user_input_stream(message, metadata=metadata)
+    for token in stream:
         ai_message += token
-        # ストリーミング中はドロップダウンは更新しない
-        yield history + [{"role": "assistant", "content": ai_message}], gr.update(), gr.update(), gr.update(), gr.update()
-    # After streaming, get the final history again to include system messages etc.
+        yield (
+            history + [{"role": "assistant", "content": ai_message}],
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+            gr.update(),
+        )
+
     final_raw = manager.get_building_history(current_building_id)
     final_history_formatted = format_history_for_chatbot(final_raw)
 
@@ -316,6 +567,7 @@ def respond_stream(message: str):
         radio_update,
         gr.update(choices=summonable_personas, value=None),
         gr.update(choices=conversing_personas, value=None),
+        gr.update(value=None),
     )
 
 
@@ -505,7 +757,7 @@ def logout_ui():
 
 # --- World Editor UI Handlers ---
 
-def update_city_ui(city_id_str: str, name: str, desc: str, online_mode: bool, ui_port_str: str, api_port_str: str):
+def update_city_ui(city_id_str: str, name: str, desc: str, online_mode: bool, ui_port_str: str, api_port_str: str, timezone_name: str):
     """UI handler to update city settings."""
     if not city_id_str: return "Error: Select a city to update.", gr.update()
     try:
@@ -515,18 +767,19 @@ def update_city_ui(city_id_str: str, name: str, desc: str, online_mode: bool, ui
     except (ValueError, TypeError):
         return "Error: Port numbers must be valid integers.", gr.update()
     
-    result = manager.update_city(city_id, name, desc, online_mode, ui_port, api_port)
+    result = manager.update_city(city_id, name, desc, online_mode, ui_port, api_port, timezone_name)
     return result, manager.get_cities_df()
 
 def on_select_city(evt: gr.SelectData):
     """Handler for when a city is selected in the DataFrame."""
-    if evt.value is None: return "", "", "", False, "", ""
+    if evt.value is None: return "", "", "", False, "", "", "UTC"
     row_index = evt.index[0]
     df = manager.get_cities_df()
     selected_row = df.iloc[row_index]
     return (
         selected_row['CITYID'], selected_row['CITYNAME'], selected_row['DESCRIPTION'],
-        selected_row['START_IN_ONLINE_MODE'], selected_row['UI_PORT'], selected_row['API_PORT']
+        selected_row['START_IN_ONLINE_MODE'], selected_row['UI_PORT'], selected_row['API_PORT'],
+        selected_row.get('TIMEZONE', 'UTC')
     )
 
 def update_building_ui(b_id: str, name: str, capacity_str: str, desc: str, sys_inst: str, city_id: Optional[int], tool_ids: List[int], interval_str: str):
@@ -558,13 +811,15 @@ def on_select_building(evt: gr.SelectData):
 
 def on_select_ai(evt: gr.SelectData):
     """Handler for when an AI is selected in the DataFrame."""
-    if evt.index is None: return "", "", "", "", None, "", False, "auto", ""
+    if evt.index is None:
+        return "", "", "", "", None, "", False, "auto", "", "", gr.update(value=None)
     row_index = evt.index[0]
     # We need the full DF to get the ID, not just the visible part
     df = manager.get_ais_df()
     ai_id = df.iloc[row_index]['AIID']
     details = manager.get_ai_details(ai_id)
-    if not details: return "", "", "", "", None, "", False, "auto", ""
+    if not details:
+        return "", "", "", "", None, "", False, "auto", "", "", gr.update(value=None)
 
     # --- 現在地を取得 ---
     current_location_name = "不明"
@@ -582,17 +837,33 @@ def on_select_ai(evt: gr.SelectData):
         details['DEFAULT_MODEL'],
         details['IS_DISPATCHED'],
         details['INTERACTION_MODE'],
-        current_location_name
+        current_location_name,
+        details.get('AVATAR_IMAGE') or "",
+        gr.update(value=None)
     )
 
-def update_ai_ui(ai_id: str, name: str, desc: str, sys_prompt: str, home_city_id: int, model: str, interaction_mode: str):
+def update_ai_ui(ai_id: str, name: str, desc: str, sys_prompt: str, home_city_id, model: str, interaction_mode: str, avatar_path: str, avatar_file):
     """UI handler to update AI settings."""
     if not ai_id:
         return "Error: Select an AI to update.", gr.update()
-    if not home_city_id:
+    if home_city_id is None or home_city_id == "":
         return "Error: Home City must be selected.", gr.update()
-    
-    result = manager.update_ai(ai_id, name, desc, sys_prompt, home_city_id, model, interaction_mode)
+
+    if isinstance(home_city_id, str):
+        try:
+            home_city_id = int(home_city_id)
+        except ValueError:
+            return "Error: Home City must be an integer.", gr.update()
+
+    upload_path = None
+    if isinstance(avatar_file, list):
+        upload_path = avatar_file[0] if avatar_file else None
+    elif isinstance(avatar_file, dict):
+        upload_path = avatar_file.get("name") or avatar_file.get("path")
+    else:
+        upload_path = avatar_file
+
+    result = manager.update_ai(ai_id, name, desc, sys_prompt, home_city_id, model, interaction_mode, avatar_path, upload_path)
     return result, manager.get_ais_df()
 
 def move_ai_ui(ai_id: str, target_building_name: str):
@@ -643,9 +914,9 @@ def create_world_editor_ui():
         refresh_editor_btn = gr.Button("🔄 ワールドエディタ全体を更新", variant="secondary")
 
     # --- Handlers for Create/Delete ---
-    def create_city_ui(name, desc, ui_port, api_port):
-        if not all([name, ui_port, api_port]): return "Error: Name, UI Port, and API Port are required.", gr.update()
-        result = manager.create_city(name, desc, int(ui_port), int(api_port))
+    def create_city_ui(name, desc, ui_port, api_port, timezone_name):
+        if not all([name, ui_port, api_port, timezone_name]): return "Error: Name, UI Port, API Port, and Timezone are required.", gr.update()
+        result = manager.create_city(name, desc, int(ui_port), int(api_port), timezone_name)
         return result, manager.get_cities_df()
 
     def delete_city_ui(city_id_str, confirmed):
@@ -703,6 +974,7 @@ def create_world_editor_ui():
                     city_ui_port_num = gr.Number(label="UI Port", precision=0)
                     city_api_port_num = gr.Number(label="API Port", precision=0)
                 city_desc_textbox = gr.Textbox(label="Description", lines=3)
+                city_timezone_textbox = gr.Textbox(label="Timezone (IANA形式)", value=lambda: manager.timezone_name, placeholder="例: Asia/Tokyo")
                 online_mode_checkbox = gr.Checkbox(label="次回起動時にオンラインモードで起動する")
                 with gr.Row():
                     save_city_btn = gr.Button("City設定を保存")
@@ -716,6 +988,7 @@ def create_world_editor_ui():
                 with gr.Row():
                     new_city_ui_port = gr.Number(label="UI Port", precision=0)
                     new_city_api_port = gr.Number(label="API Port", precision=0)
+                new_city_timezone_text = gr.Textbox(label="Timezone (IANA形式)", value="UTC", placeholder="例: Asia/Tokyo")
                 create_city_btn = gr.Button("新規Cityを作成", variant="primary")
                 create_city_status = gr.Textbox(label="Status", interactive=False)
 
@@ -742,11 +1015,11 @@ def create_world_editor_ui():
                 def toggle_delete_button(is_checked):
                     return gr.update(interactive=is_checked)
 
-                city_df.select(fn=on_select_city, inputs=None, outputs=[city_id_text, city_name_textbox, city_desc_textbox, online_mode_checkbox, city_ui_port_num, city_api_port_num])
-                save_city_btn.click(fn=update_city_ui, inputs=[city_id_text, city_name_textbox, city_desc_textbox, online_mode_checkbox, city_ui_port_num, city_api_port_num], outputs=[city_status_display, city_df])
+                city_df.select(fn=on_select_city, inputs=None, outputs=[city_id_text, city_name_textbox, city_desc_textbox, online_mode_checkbox, city_ui_port_num, city_api_port_num, city_timezone_textbox])
+                save_city_btn.click(fn=update_city_ui, inputs=[city_id_text, city_name_textbox, city_desc_textbox, online_mode_checkbox, city_ui_port_num, city_api_port_num, city_timezone_textbox], outputs=[city_status_display, city_df])
                 delete_city_confirm_check.change(fn=toggle_delete_button, inputs=delete_city_confirm_check, outputs=delete_city_btn)
                 delete_city_btn.click(fn=delete_city_ui, inputs=[city_id_text, delete_city_confirm_check], outputs=[city_status_display, city_df])
-                create_city_btn.click(fn=create_city_ui, inputs=[new_city_name_text, new_city_desc_text, new_city_ui_port, new_city_api_port], outputs=[create_city_status, city_df])
+                create_city_btn.click(fn=create_city_ui, inputs=[new_city_name_text, new_city_desc_text, new_city_ui_port, new_city_api_port, new_city_timezone_text], outputs=[create_city_status, city_df])
 
                 # --- Building Event Handlers ---
                 building_df.select(fn=on_select_building, inputs=None, outputs=[building_id_text, building_name_text, building_capacity_num, building_desc_text, building_sys_inst_text, building_city_dropdown, building_tools_checkbox, building_interval_num])
@@ -780,6 +1053,9 @@ def create_world_editor_ui():
                 ai_desc_text = gr.Textbox(label="Description", lines=2)
                 ai_sys_prompt_text = gr.Textbox(label="System Prompt", lines=8)
                 with gr.Row():
+                    ai_avatar_path_text = gr.Textbox(label="Avatar Image Path/URL", placeholder="例: assets/avatars/air.png")
+                    ai_avatar_upload = gr.File(label="Upload New Avatar", file_types=["image"], type="filepath")
+                with gr.Row():
                     is_dispatched_checkbox = gr.Checkbox(label="派遣中 (編集不可)", interactive=False)
                     save_ai_btn = gr.Button("AI設定を保存")
                     delete_ai_confirm_check = gr.Checkbox(label="削除を確認", value=False, scale=1)
@@ -800,8 +1076,8 @@ def create_world_editor_ui():
 
 
                 # --- AI Event Handlers (Update/Delete) ---
-                ai_df.select(fn=on_select_ai, inputs=None, outputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, is_dispatched_checkbox, ai_interaction_mode_dropdown, ai_current_location_text])
-                save_ai_btn.click(fn=update_ai_ui, inputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, ai_interaction_mode_dropdown], outputs=[ai_status_display, ai_df])
+                ai_df.select(fn=on_select_ai, inputs=None, outputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, is_dispatched_checkbox, ai_interaction_mode_dropdown, ai_current_location_text, ai_avatar_path_text, ai_avatar_upload])
+                save_ai_btn.click(fn=update_ai_ui, inputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, ai_interaction_mode_dropdown, ai_avatar_path_text, ai_avatar_upload], outputs=[ai_status_display, ai_df])
                 delete_ai_confirm_check.change(fn=toggle_delete_button, inputs=delete_ai_confirm_check, outputs=delete_ai_btn)
                 delete_ai_btn.click(fn=delete_ai_ui, inputs=[ai_id_text, delete_ai_confirm_check], outputs=[ai_status_display, ai_df])
                 move_ai_btn.click(fn=move_ai_ui, inputs=[ai_id_text, ai_move_target_dropdown], outputs=[move_ai_status_display, ai_current_location_text])
@@ -1107,6 +1383,7 @@ def main():
                         <div class="saiverse-nav-item" data-tab-label="ワールドビュー">ワールドビュー</div>
                         <div class="saiverse-nav-item" data-tab-label="自律会話ログ" style="display:none">自律会話ログ</div>
                         <div class="saiverse-nav-item" data-tab-label="DB Manager">DB Manager</div>
+                        <div class="saiverse-nav-item" data-tab-label="メモリー設定">メモリー設定</div>
                         <div class="saiverse-nav-item" data-tab-label="ワールドエディタ">ワールドエディタ</div>
                     </div>
                     """)
@@ -1163,15 +1440,19 @@ def main():
                     group_consecutive_messages=False,
                     sanitize_html=False,
                     elem_id="my_chat",
-                    avatar_images=(
-                        "assets/icons/user.png", # ← ユーザー
-                        None  # アシスタント側はメッセージ内に表示
-                    ),
+                    avatar_images=(None, None),
                     height=800
                 )
                 with gr.Row():
                     with gr.Column(scale=4):
                         txt = gr.Textbox(placeholder="ここにメッセージを入力...", lines=4)
+                        image_input = gr.Image(
+                            type="filepath",
+                            label="画像を添付",
+                            height=200,
+                            sources=["upload"],
+                            interactive=True,
+                        )
                     with gr.Column(scale=1):
                         submit = gr.Button("送信")
             
@@ -1225,8 +1506,16 @@ def main():
                 model_drop = gr.Dropdown(choices=MODEL_CHOICES, value="None", label="システムデフォルトモデル (一時的な一括上書き)")
 
             # --- Event Handlers ---
-            submit.click(respond_stream, txt, [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown])
-            txt.submit(respond_stream, txt, [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown]) # Enter key submission
+            submit.click(
+                respond_stream,
+                [txt, image_input],
+                [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown, image_input],
+            )
+            txt.submit(
+                respond_stream,
+                [txt, image_input],
+                [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown, image_input],
+            )  # Enter key submission
             move_btn.click(fn=move_user_ui, inputs=[move_building_dropdown], outputs=[chatbot, user_location_display, current_location_display, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown])
             move_destination_radio.change(
                 fn=move_user_radio_ui,
@@ -1292,6 +1581,9 @@ def main():
         with gr.Column(elem_id="section-db-manager", elem_classes=['saiverse-section', 'saiverse-hidden']):
             create_db_manager_ui(manager.SessionLocal)
 
+        with gr.Column(elem_id="section-memory-settings", elem_classes=['saiverse-section', 'saiverse-hidden']):
+            create_memory_settings_ui(manager)
+
 
         with gr.Column(elem_id="section-world-editor", elem_classes=['saiverse-section', 'saiverse-hidden']):
             create_world_editor_ui() # This function now contains all editor sections
@@ -1304,6 +1596,7 @@ def main():
                 "ワールドビュー": "#section-worldview",
                 "自律会話ログ": "#section-autolog",
                 "DB Manager": "#section-db-manager",
+                "メモリー設定": "#section-memory-settings",
                 "ワールドエディタ": "#section-world-editor"
             };
             const defaultLabel = "ワールドビュー";
@@ -1393,7 +1686,7 @@ def main():
         """
         demo.load(None, None, None, js=js_auto_refresh)
 
-    demo.launch(server_port=manager.ui_port, debug=True, share = True)
+    demo.launch(server_name="0.0.0.0",server_port=manager.ui_port, debug=True, share = False)
 
 
 if __name__ == "__main__":

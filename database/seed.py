@@ -46,13 +46,15 @@ def seed_database():
 
         city_map = {} # "city_a": 1
         for city_name, config in cities_config.items():
+            timezone_name = config.get("timezone", "UTC")
             new_city = City(
                 USERID=1,
                 CITYNAME=city_name,
                 DESCRIPTION=f"{city_name}の街です。",
                 UI_PORT=config["ui_port"],
                 API_PORT=config["api_port"],
-                START_IN_ONLINE_MODE=(city_name == "city_a") # city_aのみTrue
+                START_IN_ONLINE_MODE=(city_name == "city_a"), # city_aのみTrue
+                TIMEZONE=timezone_name
             )
             db.add(
                 new_city

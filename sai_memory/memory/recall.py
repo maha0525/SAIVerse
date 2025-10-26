@@ -8,6 +8,7 @@ from fastembed import TextEmbedding
 from sai_memory.logging_utils import debug
 from sai_memory.memory.storage import (
     Message,
+    compose_message_content,
     get_embeddings_for_scope,
     get_messages_around,
     get_messages_last,
@@ -197,14 +198,14 @@ def build_context_payload(
             for m in bundle:
                 role = ("assistant" if m.role == "model" else m.role)
                 lines.append(f"- {role} @ {m.created_at}:")
-                lines.append(m.content)
+                lines.append(compose_message_content(conn, m))
             content = "\n".join(lines)
             payload.append({"role": "system", "content": content})
 
     # 3) append recent in chronological order
     for m in recent:
         role = ("assistant" if m.role == "model" else m.role)
-        payload.append({"role": role, "content": m.content})
+        payload.append({"role": role, "content": compose_message_content(conn, m)})
 
     return payload
 
