@@ -1,0 +1,36 @@
+﻿name: Discord Gateway CI
+
+on:
+  push:
+    paths:
+      - "discord_gateway/**"
+      - "requirements.txt"
+      - "discord_gateway/requirements-dev.txt"
+      - ".github/workflows/discord_gateway.yml"
+      - "discord_gateway/pyproject.toml"
+  pull_request:
+    paths:
+      - "discord_gateway/**"
+      - "requirements.txt"
+      - "discord_gateway/requirements-dev.txt"
+      - "discord_gateway/pyproject.toml"
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r discord_gateway/requirements-dev.txt
+      - name: Run ruff
+        run: ruff check discord_gateway --config discord_gateway/pyproject.toml
+      - name: Run black
+        run: black --config discord_gateway/pyproject.toml --check discord_gateway
+      - name: Run pytest
+        run: pytest discord_gateway/tests -q
