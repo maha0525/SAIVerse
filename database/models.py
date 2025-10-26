@@ -60,6 +60,7 @@ class City(Base):
     CITYID = Column(Integer, primary_key=True, autoincrement=True)
     CITYNAME = Column(String(32), nullable=False)
     DESCRIPTION = Column(String(1024), default="", nullable=False)
+    TIMEZONE = Column(String(64), default="UTC", nullable=False)
     UI_PORT = Column(Integer, nullable=False)
     API_PORT = Column(Integer, nullable=False)
     START_IN_ONLINE_MODE = Column(Boolean, default=False, nullable=False)

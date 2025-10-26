@@ -63,13 +63,23 @@ class TestHistoryManager(unittest.TestCase):
         msg1 = {"role": "user", "content": "Hello"}
         msg2 = {"role": "assistant", "content": "Hi there", "persona_id": "test_persona"}
 
-        self.history_manager.add_message(msg1, "user_room")
-        self.assertEqual(self.history_manager.messages, [msg1])
-        self.assertEqual(self.history_manager.building_histories["user_room"], [msg1])
+        self.history_manager.add_message(msg1, "user_room", heard_by=["user"])
+        self.assertEqual(len(self.history_manager.messages), 1)
+        self.assertEqual(self.history_manager.messages[0]["content"], "Hello")
+        building_entry_1 = self.history_manager.building_histories["user_room"][0]
+        self.assertEqual(building_entry_1["content"], "Hello")
+        self.assertIn("message_id", building_entry_1)
+        self.assertIn("seq", building_entry_1)
+        self.assertEqual(building_entry_1["heard_by"], ["user"])
 
-        self.history_manager.add_message(msg2, "user_room")
-        self.assertEqual(self.history_manager.messages, [msg1, msg2])
-        self.assertEqual(self.history_manager.building_histories["user_room"], [msg1, msg2])
+        self.history_manager.add_message(msg2, "user_room", heard_by=["user", "assistant"])
+        self.assertEqual(len(self.history_manager.messages), 2)
+        self.assertEqual(self.history_manager.messages[1]["content"], "Hi there")
+        building_entry_2 = self.history_manager.building_histories["user_room"][1]
+        self.assertEqual(building_entry_2["content"], "Hi there")
+        self.assertGreater(building_entry_2["seq"], building_entry_1["seq"])
+        self.assertIn("message_id", building_entry_2)
+        self.assertEqual(building_entry_2["heard_by"], ["assistant", "user"])
 
         # persona_idが自動で付与されるか確認
         msg3 = {"role": "assistant", "content": "Auto ID"}
@@ -106,8 +116,13 @@ class TestHistoryManager(unittest.TestCase):
 
     def test_add_to_building_only(self):
         msg = {"role": "system", "content": "Building specific"}
-        self.history_manager.add_to_building_only("user_room", msg)
-        self.assertEqual(self.history_manager.building_histories["user_room"], [msg])
+        self.history_manager.add_to_building_only("user_room", msg, heard_by=["observer"])
+        self.assertEqual(len(self.history_manager.building_histories["user_room"]), 1)
+        entry = self.history_manager.building_histories["user_room"][0]
+        self.assertEqual(entry["content"], "Building specific")
+        self.assertEqual(entry["heard_by"], ["observer"])
+        self.assertIn("message_id", entry)
+        self.assertIn("seq", entry)
         self.assertEqual(self.history_manager.messages, []) # persona history should be unchanged
 
     def test_add_to_persona_only(self):

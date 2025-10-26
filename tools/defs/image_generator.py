@@ -1,17 +1,16 @@
 import os
-from datetime import datetime
-from pathlib import Path
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 
 from tools.defs import ToolSchema, ToolResult
+from media_utils import store_image_bytes
 
 load_dotenv()
 
 
-def generate_image(prompt: str) -> tuple[str, ToolResult, str | None]:
-    """Generate an image and return (prompt, snippet, file path)."""
+def generate_image(prompt: str) -> tuple[str, ToolResult, str | None, dict | None]:
+    """Generate an image and return (prompt, snippet, file path, metadata)."""
     free_key = os.getenv("GEMINI_FREE_API_KEY")
     paid_key = os.getenv("GEMINI_API_KEY")
     if not free_key and not paid_key:
@@ -27,23 +26,19 @@ def generate_image(prompt: str) -> tuple[str, ToolResult, str | None]:
         )
     )
     if not resp.candidates:
-        return prompt, ToolResult(None), None
+        return prompt, ToolResult(None), None, None
     cand = resp.candidates[0]
     for part in cand.content.parts:
         if part.inline_data is not None:
             data = part.inline_data.data
             mime = part.inline_data.mime_type or "image/png"
-            img_dir = Path("generate_image")
-            img_dir.mkdir(exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            ext = mime.split("/")[-1]
-            file_path = img_dir / f"{timestamp}.{ext}"
-            file_path.write_bytes(data)
-            snippet = f"![画像が生成されました]({file_path.as_posix()})"
+            metadata_entry, stored_path = store_image_bytes(data, mime, source="tool:generate_image")
+            snippet = f"![画像が生成されました]({stored_path.as_posix()})"
             text = f"やっほー！お絵描き妖精だよ！画像ができたから使ってね！\n\n使ったプロンプトはこれだよ：\n{prompt}\n\nそれじゃ、また呼んでね！"
-            return text, ToolResult(snippet), file_path.as_posix()
+            metadata = {"media": [metadata_entry]}
+            return text, ToolResult(snippet), stored_path.as_posix(), metadata
     text = "こんにちは、お絵描き妖精だよ！ごめん、失敗しちゃった……。\n\n使ったプロンプトはこれだよ：\n{prompt}\n\n次は頑張るから、また呼んでね！"
-    return text, ToolResult(None), None
+    return text, ToolResult(None), None, None
 
 
 def schema() -> ToolSchema:
