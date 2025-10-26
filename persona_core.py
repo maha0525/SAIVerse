@@ -318,6 +318,38 @@ class PersonaCore:
             parts.append("0分")
         return " ".join(parts)
 
+    def _timestamp_to_epoch(self, primary: Any, secondary: Any = None) -> Optional[int]:
+        """
+        Convert timestamp-like values into epoch seconds.
+        `primary` is preferred (typically created_at), while `secondary` is used as fallback (typically timestamp).
+        """
+        result: Optional[int] = None
+        for candidate in (primary, secondary):
+            if candidate is None:
+                continue
+            if isinstance(candidate, (int, float)):
+                result = int(candidate)
+                break
+            if isinstance(candidate, str):
+                raw = candidate.strip()
+                if not raw:
+                    continue
+                try:
+                    result = int(float(raw))
+                    break
+                except ValueError:
+                    dt_obj = self._parse_timestamp_to_utc(raw)
+                    if dt_obj is not None:
+                        result = int(dt_obj.timestamp())
+                        break
+        logging.debug(
+            "[recall] normalised timestamp primary=%s secondary=%s -> %s",
+            primary,
+            secondary,
+            result,
+        )
+        return result
+
     def _initialise_pulse_state(self) -> None:
         hist_map = self.history_manager.building_histories
         computed_cursors: Dict[str, int] = {}
@@ -512,24 +544,18 @@ class PersonaCore:
         values: List[int] = []
         seen = set()
         for msg in recent:
-            created_at = msg.get('created_at')
-            if created_at is not None:
-                try:
-                    value = int(created_at)
-                except (TypeError, ValueError):
-                    continue
-            else:
-                ts = msg.get('timestamp')
-                if not ts:
-                    continue
-                try:
-                    value = int(datetime.fromisoformat(ts).timestamp())
-                except ValueError:
-                    continue
+            value = self._timestamp_to_epoch(msg.get("created_at"), msg.get("timestamp"))
+            if value is None:
+                continue
             if value in seen:
                 continue
             seen.add(value)
             values.append(value)
+        logging.debug(
+            "[recall] collected recent timestamps count=%d values=%s",
+            len(values),
+            values,
+        )
         return values
 
     def _process_generation_result(
@@ -651,6 +677,12 @@ class PersonaCore:
                     recall_source = self.history_manager.get_last_user_message()
                 if recall_source:
                     exclude_times = self._collect_recent_memory_timestamps()
+                    logging.debug(
+                        "[recall] invoking recall_snippet building=%s source_preview=%s exclude_times=%s",
+                        self.current_building_id,
+                        recall_source[:120],
+                        exclude_times,
+                    )
                     snippet = self.sai_memory.recall_snippet(
                         self.current_building_id,
                         recall_source,
@@ -728,6 +760,12 @@ class PersonaCore:
                     recall_source = self.history_manager.get_last_user_message()
                 if recall_source:
                     exclude_times = self._collect_recent_memory_timestamps()
+                    logging.debug(
+                        "[recall] invoking recall_snippet(stream) building=%s source_preview=%s exclude_times=%s",
+                        self.current_building_id,
+                        recall_source[:120],
+                        exclude_times,
+                    )
                     snippet = self.sai_memory.recall_snippet(
                         self.current_building_id,
                         recall_source,
@@ -1257,6 +1295,12 @@ class PersonaCore:
                     }
                     if isinstance(metadata, dict):
                         entry["metadata"] = copy.deepcopy(metadata)
+                    ts_value = m.get("timestamp")
+                    if isinstance(ts_value, str):
+                        entry["timestamp"] = ts_value
+                    created_value = self._timestamp_to_epoch(m.get("created_at"), ts_value)
+                    if created_value is not None:
+                        entry["created_at"] = created_value
                     self.history_manager.add_to_persona_only(entry)
                     perceived += 1
                 # Ingest human/user messages directly
@@ -1267,6 +1311,12 @@ class PersonaCore:
                     }
                     if isinstance(metadata, dict):
                         entry["metadata"] = copy.deepcopy(metadata)
+                    ts_value = m.get("timestamp")
+                    if isinstance(ts_value, str):
+                        entry["timestamp"] = ts_value
+                    created_value = self._timestamp_to_epoch(m.get("created_at"), ts_value)
+                    if created_value is not None:
+                        entry["created_at"] = created_value
                     self.history_manager.add_to_persona_only(entry)
                     perceived += 1
             except Exception:
@@ -1367,17 +1417,16 @@ class PersonaCore:
         current_user_created_at: Optional[int] = None
         for m in reversed(new_msgs):
             if m.get("role") == "user":
-                ts = m.get("timestamp") or m.get("created_at")
-                try:
-                    if isinstance(ts, str):
-                        current_user_created_at = int(datetime.fromisoformat(ts).timestamp())
-                    elif isinstance(ts, (int, float)):
-                        current_user_created_at = int(ts)
-                except Exception:
-                    current_user_created_at = None
+                current_user_created_at = self._timestamp_to_epoch(m.get("created_at"), m.get("timestamp"))
                 break
         if self.sai_memory is not None and self.sai_memory.is_ready():
             recall_source = self.history_manager.get_last_user_message()
+            logging.debug(
+                "[pulse] recall prep new_msgs=%d last_user_message_preview=%s exclude_created_at=%s",
+                len(new_msgs),
+                (recall_source or "")[:120] if recall_source else None,
+                current_user_created_at,
+            )
             if recall_source is None:
                 for m in reversed(new_msgs):
                     if m.get("role") == "user":
@@ -1395,6 +1444,8 @@ class PersonaCore:
                     )
                     if recall_snippet:
                         logging.debug("[pulse] recall_snippet content: %s", recall_snippet)
+                    else:
+                        logging.debug("[pulse] recall_snippet returned empty")
                 except Exception as exc:
                     logging.warning("[pulse] recall snippet failed: %s", exc)
                     recall_snippet = ""
