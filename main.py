@@ -608,6 +608,13 @@ def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[s
     return display
 
 
+def get_current_building_history() -> List[Dict[str, str]]:
+    """Return the formatted chat history for the user's current building."""
+    current_building_id = getattr(manager, "user_current_building_id", None)
+    if not current_building_id:
+        return []
+    return format_history_for_chatbot(manager.get_building_history(current_building_id))
+
 
 def respond_stream(message: str, image_value: Optional[Any] = None):
     """Stream AI response for chat and update UI components if needed."""
@@ -747,9 +754,7 @@ def _perform_user_move(building_name: Optional[str]):
         )
 
     if not building_name:
-        current_history = format_history_for_chatbot(
-            manager.get_building_history(manager.user_current_building_id)
-        )
+        current_history = get_current_building_history()
         location_name = _get_current_location_name()
         return (
             current_history,
@@ -763,12 +768,12 @@ def _perform_user_move(building_name: Optional[str]):
     if target_building_id:
         manager.move_user(target_building_id)
 
-    new_history = manager.get_building_history(manager.user_current_building_id)
+    new_history = get_current_building_history()
     new_location_name = _get_current_location_name()
     summonable_personas = manager.get_summonable_personas()
     conversing_personas = manager.get_conversing_personas()
     return (
-        format_history_for_chatbot(new_history),
+        new_history,
         new_location_name,
         gr.update(value=_format_location_label(new_location_name)),
         gr.update(choices=summonable_personas, value=None),
@@ -1608,6 +1613,7 @@ def main():
                         )
                 with gr.Accordion("オプション", open=False):
                     model_drop = gr.Dropdown(choices=MODEL_CHOICES, value="None",label="モデル選択")
+                    refresh_chat_btn = gr.Button("履歴を再読み込み", variant="secondary")
                     with gr.Row():
                         with gr.Column():
                             summon_persona_dropdown = gr.Dropdown(
@@ -1654,6 +1660,12 @@ def main():
                 """
             )
             summon_btn.click(fn=call_persona_ui, inputs=[summon_persona_dropdown], outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown])
+            refresh_chat_btn.click(
+                fn=get_current_building_history,
+                inputs=None,
+                outputs=chatbot,
+                show_progress="hidden",
+            )
             login_btn.click(
                 fn=login_ui,
                 inputs=None,
@@ -1893,6 +1905,7 @@ def main():
             }, 5000);
         }
         """
+        demo.load(fn=get_current_building_history, inputs=None, outputs=[chatbot])
         demo.load(None, None, None, js=js_auto_refresh)
 
     demo.launch(server_name="0.0.0.0",server_port=manager.ui_port, debug=True, share = False)
