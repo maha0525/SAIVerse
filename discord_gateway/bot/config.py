@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import timedelta
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, Optional
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,6 +19,13 @@ class BotSettings(BaseSettings):
     websocket_path: str = Field("/ws", alias="SAIVERSE_WS_PATH")
     websocket_heartbeat_seconds: int = Field(30, alias="SAIVERSE_WS_HEARTBEAT_SECONDS")
     websocket_max_payload_kb: int = Field(256, alias="SAIVERSE_WS_MAX_PAYLOAD_KB")
+    websocket_tls_enabled: bool = Field(False, alias="SAIVERSE_WS_TLS_ENABLED")
+    websocket_tls_certfile: str | None = Field(None, alias="SAIVERSE_WS_TLS_CERTFILE")
+    websocket_tls_keyfile: str | None = Field(None, alias="SAIVERSE_WS_TLS_KEYFILE")
+    websocket_tls_ca_file: str | None = Field(None, alias="SAIVERSE_WS_TLS_CA_FILE")
+    websocket_tls_client_auth: Literal["none", "optional", "required"] = Field(
+        "none", alias="SAIVERSE_WS_TLS_CLIENT_AUTH"
+    )
 
     database_url: str = Field(
         "sqlite:///./saiverse_bot.db", alias="SAIVERSE_BOT_DATABASE_URL"
@@ -94,6 +101,34 @@ class BotSettings(BaseSettings):
         if value <= 0:
             raise ValueError("Replay configuration values must be positive")
         return value
+
+    @field_validator(
+        "websocket_tls_certfile",
+        "websocket_tls_keyfile",
+        "websocket_tls_ca_file",
+        mode="before",
+    )
+    @classmethod
+    def _empty_string_to_none(cls, value: Optional[str]) -> Optional[str]:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @model_validator(mode="after")
+    def _validate_tls(self) -> "BotSettings":
+        if self.websocket_tls_enabled:
+            if not self.websocket_tls_certfile or not self.websocket_tls_keyfile:
+                raise ValueError(
+                    "SAIVERSE_WS_TLS_CERTFILE and SAIVERSE_WS_TLS_KEYFILE must be set when TLS is enabled"
+                )
+            if (
+                self.websocket_tls_client_auth != "none"
+                and not self.websocket_tls_ca_file
+            ):
+                raise ValueError(
+                    "SAIVERSE_WS_TLS_CA_FILE is required when client authentication is enabled"
+                )
+        return self
 
 
 @lru_cache

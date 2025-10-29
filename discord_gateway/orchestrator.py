@@ -5,6 +5,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 
 from .gateway_service import DiscordGatewayService
 from .mapping import ChannelContext, ChannelMapping
@@ -13,6 +14,20 @@ from .translator import GatewayCommand, GatewayEvent
 from .visitors import VisitorProfile, VisitorRegistry
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class MemorySyncHandshakeResult:
+    accepted: bool
+    reason: str | None = None
+    commands: Sequence[GatewayCommand] | None = None
+
+
+@dataclass(slots=True)
+class MemorySyncCompletionResult:
+    success: bool
+    reason: str | None = None
+    commands: Sequence[GatewayCommand] | None = None
 
 
 class GatewayHostAdapter(ABC):
@@ -40,6 +55,12 @@ class GatewayHostAdapter(ABC):
     ) -> Sequence[GatewayCommand] | None:
         """訪問者ペルソナのメッセージを処理する。"""
 
+    async def handle_memory_sync_initiate(
+        self, visitor: VisitorProfile, payload: dict
+    ) -> MemorySyncHandshakeResult:
+        """記憶同期転送の事前ハンドシェイクを処理する。"""
+        return MemorySyncHandshakeResult(accepted=True)
+
     async def handle_memory_sync_chunk(
         self, visitor: VisitorProfile, payload: dict
     ) -> Sequence[GatewayCommand] | None:
@@ -48,9 +69,9 @@ class GatewayHostAdapter(ABC):
 
     async def handle_memory_sync_complete(
         self, visitor: VisitorProfile, payload: dict
-    ) -> Sequence[GatewayCommand] | None:
+    ) -> MemorySyncCompletionResult:
         """記憶同期完了時の処理。"""
-        return None
+        return MemorySyncCompletionResult(success=True)
 
 
 class DiscordGatewayOrchestrator:
@@ -113,6 +134,7 @@ class DiscordGatewayOrchestrator:
             "discord_message": self._handle_discord_message,
             "visitor_state": self._handle_visitor_state,
             "invite_state": self._handle_invite_state,
+            "memory_sync_initiate": self._handle_memory_initiate,
             "memory_sync_chunk": self._handle_memory_chunk,
             "memory_sync_complete": self._handle_memory_complete,
             "resync_required": self._handle_resync_required,
@@ -263,6 +285,37 @@ class DiscordGatewayOrchestrator:
             "Gateway state sync acknowledged: %s", event.payload or {"status": "ok"}
         )
 
+    async def _handle_memory_initiate(self, event: GatewayEvent) -> None:
+        visitor = self._visitor_from_event(event)
+        if not visitor:
+            return
+
+        transfer_id = event.payload.get("transfer_id")
+        if not transfer_id:
+            logger.warning("Memory sync initiate missing transfer_id: %s", event.payload)
+            return
+
+        try:
+            result = await self.host.handle_memory_sync_initiate(visitor, event.payload)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Host failed during memory sync initiate.")
+            result = MemorySyncHandshakeResult(accepted=False, reason="host_error")
+
+        await self._dispatch_commands(getattr(result, "commands", None))
+
+        status_payload = {"transfer_id": transfer_id}
+        if getattr(result, "accepted", False):
+            status_payload["status"] = "ok"
+        else:
+            status_payload["status"] = "error"
+            reason = getattr(result, "reason", None)
+            if reason:
+                status_payload["reason"] = reason
+
+        await self.service.outgoing_queue.put(
+            GatewayCommand(type="memory_sync_ack", payload=status_payload)
+        )
+
     async def _handle_memory_chunk(self, event: GatewayEvent) -> None:
         visitor = self._visitor_from_event(event)
         if not visitor:
@@ -274,8 +327,34 @@ class DiscordGatewayOrchestrator:
         visitor = self._visitor_from_event(event)
         if not visitor:
             return
-        commands = await self.host.handle_memory_sync_complete(visitor, event.payload)
-        await self._dispatch_commands(commands)
+
+        transfer_id = event.payload.get("transfer_id")
+        if not transfer_id:
+            logger.warning(
+                "Memory sync complete missing transfer_id: %s", event.payload
+            )
+            return
+
+        try:
+            result = await self.host.handle_memory_sync_complete(visitor, event.payload)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Host failed to finalize memory sync transfer.")
+            result = MemorySyncCompletionResult(success=False, reason="host_error")
+
+        await self._dispatch_commands(getattr(result, "commands", None))
+
+        status_payload = {"transfer_id": transfer_id}
+        if getattr(result, "success", False):
+            status_payload["status"] = "ok"
+        else:
+            status_payload["status"] = "error"
+            reason = getattr(result, "reason", None)
+            if reason:
+                status_payload["reason"] = reason
+
+        await self.service.outgoing_queue.put(
+            GatewayCommand(type="memory_sync_complete", payload=status_payload)
+        )
 
     def _visitor_from_event(self, event: GatewayEvent) -> VisitorProfile | None:
         visitor_data = event.payload.get("visitor")

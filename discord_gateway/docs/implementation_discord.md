@@ -125,6 +125,7 @@ Discord標準の「サーバ招待」機能をそのまま利用します。
 #### 3.4.2. 自前で実装・考慮すべきセキュリティ
 *   **Bot-ローカル間の通信保護:** `wss://` (Secure WebSocket) を必須とし、通信を暗号化します。`ローカルアプリケーション`の接続時には、一意の認証トークンを検証します。
 *   **Botトークンの厳重な管理:** Discord BotのAPIトークンは、環境変数やシークレット管理サービスで厳重に管理します。
+*   **TLS設定:** SAIVERSE_WS_TLS_ENABLED を 1 に設定すると、SAIVERSE_WS_TLS_CERTFILE と SAIVERSE_WS_TLS_KEYFILE で指定した証明書・秘密鍵を読み込み、Bot-ローカル間を wss:// で暗号化する。クライアント証明書を利用する場合は SAIVERSE_WS_TLS_CLIENT_AUTH と SAIVERSE_WS_TLS_CA_FILE を併用する。
 *   **入力値の検証:** `SAIVerse Bot`がDiscordから受け取った全ての入力データは、`ローカルアプリケーション`で処理する前に必ず検証・サニタイズします。
 *   **クライアント側のセキュリティ責務:**
     *   **認証トークンの安全な保管:** `ローカルアプリケーション`がBotとの接続に使う認証トークンは、ユーザーのPC上で安全に保管される必要があります。OSの資格情報マネージャー（macOSのKeychain, WindowsのCredential Managerなど）の利用を推奨します。
@@ -250,6 +251,9 @@ ole=persona_remote として通知し、RemotePersonaProxy経由で応答を取�
 
 *   `incoming_queue`: `DiscordGateway`がBotから受信したイベントを翻訳し、このキューに入れます。SAIVerse本体はここからイベントを取得して処理します。
 *   `outgoing_queue`: SAIVerse本体がAIの発言などのアクションを希望する際、指示オブジェクトをこのキューに入れます。`DiscordGateway`はこれを取り出してBotへコマンドを送信します。
+    *   代表的なコマンドは `post_message` で、`channel_id` / `content` / 任意の `persona_id`・`building_id`・`city_id` を含みます。Bot側では接続中オーナーを検証し、最大文字数（`SAIVERSE_MAX_MESSAGE_LENGTH`）超過分は自動トリムした上でDiscordへ投稿します。権限不足や未登録チャンネルへの送信は拒否され、警告ログを残します。
+    *   記憶同期ハンドシェイクでは、memory_sync_ack コマンドの payload に transfer_id と status(ok/error)、失敗時は reason を含めて返信し、受信可否を明示する。
+    *   記憶同期完了後は、memory_sync_complete コマンドの payload に transfer_id と status(ok/error) を載せ、失敗時は reason を添えて検証結果を共有する。
 
 実装では `discord_gateway.ensure_gateway_runtime(manager)` を呼び出すことで、`GatewayRuntime` を初期化しつつ `incoming_queue` / `outgoing_queue` をブリッジする `GatewayBridge` が生成されます（`manager.gateway_bridge` 経由で参照可能）。`SAIVERSE_GATEWAY_ENABLED=1` が設定されていない場合は自動的に無効化されるため、本番／開発環境で容易に切り替えられます。
 
