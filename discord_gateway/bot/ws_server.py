@@ -156,9 +156,7 @@ class GatewayWebSocketServer:
                     if single:
                         event_ids = [single]
                 if event_ids:
-                    await self._connections.process_ack(
-                        client.session.discord_user_id, event_ids
-                    )
+                    await self._connections.process_ack(client.session.discord_user_id, event_ids)
             elif event_type == "state_sync_request":
                 await self._connections.handle_state_sync_request(client)
                 await websocket.send(
@@ -200,9 +198,7 @@ class GatewayWebSocketServer:
         certfile = self._settings.websocket_tls_certfile
         keyfile = self._settings.websocket_tls_keyfile
         if not certfile or not keyfile:
-            raise RuntimeError(
-                "TLS is enabled but certificate/key paths are not configured."
-            )
+            raise RuntimeError("TLS is enabled but certificate/key paths are not configured.")
 
         cert_path = Path(certfile).expanduser()
         key_path = Path(keyfile).expanduser()

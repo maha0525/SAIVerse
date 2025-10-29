@@ -36,9 +36,7 @@ class GatewayRuntime:
                     logger.debug("Failed to stop orchestrator cleanly.", exc_info=True)
                 loop.close()
 
-        self._thread = threading.Thread(
-            target=runner, daemon=True, name="DiscordGatewayRuntime"
-        )
+        self._thread = threading.Thread(target=runner, daemon=True, name="DiscordGatewayRuntime")
         self._thread.start()
 
     def stop(self) -> None:

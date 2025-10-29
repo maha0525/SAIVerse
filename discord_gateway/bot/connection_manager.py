@@ -40,9 +40,7 @@ class ConnectionManager:
         self._connections: dict[str, ConnectedClient] = {}
         self._lock = asyncio.Lock()
 
-        self._pending_events: defaultdict[str, OrderedDict[str, dict]] = defaultdict(
-            OrderedDict
-        )
+        self._pending_events: defaultdict[str, OrderedDict[str, dict]] = defaultdict(OrderedDict)
         self._channel_sequences: defaultdict[str, int] = defaultdict(int)
         self._resync_needed: set[str] = set()
         self._resync_sent: set[str] = set()
@@ -58,9 +56,7 @@ class ConnectionManager:
         async with self._lock:
             previous = self._connections.get(session.discord_user_id)
             if previous:
-                await previous.websocket.close(
-                    code=4001, reason="Replaced by new session"
-                )
+                await previous.websocket.close(code=4001, reason="Replaced by new session")
             self._connections[session.discord_user_id] = client
         logger.info(
             "Registered local app connection user_id=%s session_id=%s",
@@ -94,9 +90,7 @@ class ConnectionManager:
             await self._maybe_emit_resync(owner_discord_id, client)
             return True
         except Exception:
-            logger.exception(
-                "Failed to dispatch payload to owner_discord_id=%s", owner_discord_id
-            )
+            logger.exception("Failed to dispatch payload to owner_discord_id=%s", owner_discord_id)
             return False
 
     async def _enqueue_event(
@@ -128,14 +122,9 @@ class ConnectionManager:
         self._channel_sequences[channel_id] += 1
         return self._channel_sequences[channel_id]
 
-    async def _maybe_emit_resync(
-        self, owner_discord_id: str, client: ConnectedClient
-    ) -> None:
+    async def _maybe_emit_resync(self, owner_discord_id: str, client: ConnectedClient) -> None:
         async with self._lock:
-            if (
-                owner_discord_id not in self._resync_needed
-                or owner_discord_id in self._resync_sent
-            ):
+            if owner_discord_id not in self._resync_needed or owner_discord_id in self._resync_sent:
                 return
             event_id = str(uuid.uuid4())
             event = {
@@ -182,9 +171,7 @@ class ConnectionManager:
                 self._resync_needed.discard(owner_discord_id)
                 self._resync_sent.discard(owner_discord_id)
 
-    async def replay_pending(
-        self, client: ConnectedClient, *, full: bool = False
-    ) -> int:
+    async def replay_pending(self, client: ConnectedClient, *, full: bool = False) -> int:
         owner_id = client.session.discord_user_id
         async with self._lock:
             events = list(self._pending_events.get(owner_id, {}).values())

@@ -20,9 +20,7 @@ async def test_gateway_service_message_flow():
         assert hello["type"] == "hello"
         assert hello["token"] == "test-token"
         await websocket.send(json.dumps({"type": "hello_ack", "status": "ok"}))
-        await websocket.send(
-            json.dumps({"type": "discord_event", "payload": {"content": "hello"}})
-        )
+        await websocket.send(json.dumps({"type": "discord_event", "payload": {"content": "hello"}}))
         event_sent.set()
         command_raw = await websocket.recv()
         await received_commands.put(command_raw)
@@ -48,9 +46,7 @@ async def test_gateway_service_message_flow():
     assert event.type == "discord_event"
     assert event.payload["content"] == "hello"
 
-    await service.outgoing_queue.put(
-        GatewayCommand(type="send_message", payload={"text": "hi"})
-    )
+    await service.outgoing_queue.put(GatewayCommand(type="send_message", payload={"text": "hi"}))
     sent_payload = await asyncio.wait_for(received_commands.get(), timeout=5)
     assert json.loads(sent_payload) == {
         "type": "send_message",

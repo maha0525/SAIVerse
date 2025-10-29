@@ -11,8 +11,7 @@ logger = logging.getLogger(__name__)
 class CommandRouter(Protocol):
     """Interface contract for routing outbound commands to Discord."""
 
-    def get_owner_id(self, channel_id: int | str) -> str | None:
-        ...
+    def get_owner_id(self, channel_id: int | str) -> str | None: ...
 
     async def send_post_message(
         self,
@@ -21,8 +20,7 @@ class CommandRouter(Protocol):
         content: str,
         persona_id: str | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> None:
-        ...
+    ) -> None: ...
 
 
 class CommandProcessor:
@@ -80,9 +78,7 @@ class CommandProcessor:
             )
             return
 
-        sanitized = sanitize_message_content(
-            str(content), max_length=self._max_message_length
-        )
+        sanitized = sanitize_message_content(str(content), max_length=self._max_message_length)
         if not sanitized:
             logger.warning(
                 "post_message command produced empty content after sanitization for channel %s",
@@ -98,6 +94,4 @@ class CommandProcessor:
                 metadata={k: v for k, v in metadata.items() if v is not None},
             )
         except Exception:  # pragma: no cover - defensive logging
-            logger.exception(
-                "Failed to deliver post_message command to channel %s", channel_id
-            )
+            logger.exception("Failed to deliver post_message command to channel %s", channel_id)

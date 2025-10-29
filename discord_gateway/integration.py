@@ -58,12 +58,8 @@ def ensure_gateway_runtime(
     Returns a GatewayBridge when enabled, otherwise None.
     """
 
-    existing_runtime: GatewayRuntime | None = getattr(
-        manager, "gateway_runtime", None
-    )
-    existing_mapping: ChannelMapping | None = getattr(
-        manager, "gateway_mapping", None
-    )
+    existing_runtime: GatewayRuntime | None = getattr(manager, "gateway_runtime", None)
+    existing_mapping: ChannelMapping | None = getattr(manager, "gateway_mapping", None)
     existing_bridge: GatewayBridge | None = getattr(manager, "gateway_bridge", None)
 
     if existing_runtime and existing_bridge:
@@ -92,9 +88,7 @@ def ensure_gateway_runtime(
     service = DiscordGatewayService(settings=settings)
     host = GatewayHost(manager)
     adapter = SAIVerseGatewayAdapter(host)
-    orchestrator = DiscordGatewayOrchestrator(
-        service, mapping=mapping, host_adapter=adapter
-    )
+    orchestrator = DiscordGatewayOrchestrator(service, mapping=mapping, host_adapter=adapter)
     runtime = GatewayRuntime(orchestrator)
     runtime.start()
 

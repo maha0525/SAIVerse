@@ -13,9 +13,7 @@ class GatewaySettings(BaseSettings):
     bot_ws_url: str = Field(..., alias="SAIVERSE_GATEWAY_WS_URL")
     handshake_token: SecretStr = Field(..., alias="SAIVERSE_GATEWAY_TOKEN")
 
-    reconnect_initial_delay: float = Field(
-        1.0, alias="SAIVERSE_GATEWAY_RECONNECT_INITIAL"
-    )
+    reconnect_initial_delay: float = Field(1.0, alias="SAIVERSE_GATEWAY_RECONNECT_INITIAL")
     reconnect_max_delay: float = Field(30.0, alias="SAIVERSE_GATEWAY_RECONNECT_MAX")
     reconnect_jitter: float = Field(0.3, alias="SAIVERSE_GATEWAY_RECONNECT_JITTER")
 

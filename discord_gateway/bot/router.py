@@ -140,24 +140,16 @@ class MessageRouter:
                 )
                 return
             except discord.HTTPException as exc:
-                logger.warning(
-                    "HTTP error while fetching channel %s: %s", channel_id, exc
-                )
+                logger.warning("HTTP error while fetching channel %s: %s", channel_id, exc)
                 return
 
         if not hasattr(channel, "send"):
-            logger.warning(
-                "Channel %s does not support sending messages.", channel_id
-            )
+            logger.warning("Channel %s does not support sending messages.", channel_id)
             return
 
         try:
             await channel.send(content)
         except discord.Forbidden:
-            logger.warning(
-                "Forbidden to send message to channel %s.", channel_id
-            )
+            logger.warning("Forbidden to send message to channel %s.", channel_id)
         except discord.HTTPException as exc:
-            logger.warning(
-                "Failed to send message to channel %s: %s", channel_id, exc
-            )
+            logger.warning("Failed to send message to channel %s: %s", channel_id, exc)

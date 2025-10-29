@@ -92,5 +92,3 @@ class PermissionPolicy:
 
         collect(source)
         return tokens
-
-

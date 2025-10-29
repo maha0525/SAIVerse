@@ -43,9 +43,7 @@ class SAIVerseDiscordClient(commands.Bot):
     @commands.group(name="saiverse", invoke_without_command=True)
     async def saiverse(self, ctx: commands.Context) -> None:
         if ctx.invoked_subcommand is None:
-            await ctx.send(
-                "Available subcommands: invite grant, invite revoke, invite clear."
-            )
+            await ctx.send("Available subcommands: invite grant, invite revoke, invite clear.")
 
     @saiverse.group(name="invite", invoke_without_command=True)
     async def saiverse_invite(self, ctx: commands.Context) -> None:
@@ -125,13 +123,9 @@ class SAIVerseDiscordClient(commands.Bot):
             return
 
         if action == "grant" and member:
-            await ctx.send(
-                f"Granted invite for {member.mention} in {target_channel.mention}."
-            )
+            await ctx.send(f"Granted invite for {member.mention} in {target_channel.mention}.")
         elif action == "revoke" and member:
-            await ctx.send(
-                f"Revoked invite for {member.mention} in {target_channel.mention}."
-            )
+            await ctx.send(f"Revoked invite for {member.mention} in {target_channel.mention}.")
         elif action == "clear":
             await ctx.send(f"Cleared all invites for {target_channel.mention}.")
         else:

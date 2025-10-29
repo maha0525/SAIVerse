@@ -163,9 +163,7 @@ class DiscordGatewayOrchestrator:
 
         author_info = event.payload.get("author") or {}
         discord_user_id = str(author_info.get("discord_user_id", ""))
-        visitor = (
-            self.visitors.get_by_discord(discord_user_id) if discord_user_id else None
-        )
+        visitor = self.visitors.get_by_discord(discord_user_id) if discord_user_id else None
 
         roles = self._normalize_roles(author_info.get("roles"))
         if not visitor and discord_user_id:
@@ -195,9 +193,7 @@ class DiscordGatewayOrchestrator:
                 return
 
         if visitor:
-            commands = await self.host.handle_remote_persona_message(
-                context, event, visitor
-            )
+            commands = await self.host.handle_remote_persona_message(context, event, visitor)
         else:
             commands = await self.host.handle_human_message(context, event)
 
@@ -251,9 +247,7 @@ class DiscordGatewayOrchestrator:
                 if not discord_user_id_raw:
                     logger.warning("Invite grant missing discord_user_id: %s", payload)
                     return
-                self.permissions.register_invite(
-                    channel_id, str(discord_user_id_raw)
-                )
+                self.permissions.register_invite(channel_id, str(discord_user_id_raw))
             case "revoke":
                 if not discord_user_id_raw:
                     logger.warning("Invite revoke missing discord_user_id: %s", payload)
@@ -281,9 +275,7 @@ class DiscordGatewayOrchestrator:
         )
 
     async def _handle_state_sync_ack(self, event: GatewayEvent) -> None:
-        logger.info(
-            "Gateway state sync acknowledged: %s", event.payload or {"status": "ok"}
-        )
+        logger.info("Gateway state sync acknowledged: %s", event.payload or {"status": "ok"})
 
     async def _handle_memory_initiate(self, event: GatewayEvent) -> None:
         visitor = self._visitor_from_event(event)
@@ -330,9 +322,7 @@ class DiscordGatewayOrchestrator:
 
         transfer_id = event.payload.get("transfer_id")
         if not transfer_id:
-            logger.warning(
-                "Memory sync complete missing transfer_id: %s", event.payload
-            )
+            logger.warning("Memory sync complete missing transfer_id: %s", event.payload)
             return
 
         try:
@@ -379,9 +369,7 @@ class DiscordGatewayOrchestrator:
         channel_seq = payload.get("channel_seq")
         if channel_seq is not None:
             ack_payload["channel_seq"] = channel_seq
-        await self.service.outgoing_queue.put(
-            GatewayCommand(type="ack", payload=ack_payload)
-        )
+        await self.service.outgoing_queue.put(GatewayCommand(type="ack", payload=ack_payload))
 
     def _remember_event(self, event_id: str) -> None:
         if event_id in self._recent_event_set:
@@ -395,9 +383,7 @@ class DiscordGatewayOrchestrator:
     def _is_duplicate(self, event_id: str) -> bool:
         return event_id in self._recent_event_set
 
-    async def _dispatch_commands(
-        self, commands: Iterable[GatewayCommand] | None
-    ) -> None:
+    async def _dispatch_commands(self, commands: Iterable[GatewayCommand] | None) -> None:
         if not commands:
             return
         for command in commands:
