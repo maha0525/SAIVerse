@@ -19,3 +19,4 @@ tests/tools/*
 #開発用ファイル
 __*.*
 tasks.md
+*.patch

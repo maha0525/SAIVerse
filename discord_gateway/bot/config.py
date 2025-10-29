@@ -20,7 +20,9 @@ class BotSettings(BaseSettings):
     websocket_heartbeat_seconds: int = Field(30, alias="SAIVERSE_WS_HEARTBEAT_SECONDS")
     websocket_max_payload_kb: int = Field(256, alias="SAIVERSE_WS_MAX_PAYLOAD_KB")
 
-    database_url: str = Field("sqlite:///./saiverse_bot.db", alias="SAIVERSE_BOT_DATABASE_URL")
+    database_url: str = Field(
+        "sqlite:///./saiverse_bot.db", alias="SAIVERSE_BOT_DATABASE_URL"
+    )
 
     oauth_client_id: str = Field(..., alias="DISCORD_OAUTH_CLIENT_ID")
     oauth_client_secret: SecretStr = Field(..., alias="DISCORD_OAUTH_CLIENT_SECRET")
@@ -31,9 +33,15 @@ class BotSettings(BaseSettings):
     oauth_state_ttl_seconds: int = Field(600, alias="SAIVERSE_OAUTH_STATE_TTL")
 
     session_token_length: int = Field(48, alias="SAIVERSE_SESSION_TOKEN_LENGTH")
-    session_token_ttl_hours: int = Field(24 * 30, alias="SAIVERSE_SESSION_TOKEN_TTL_HOURS")
+    session_token_ttl_hours: int = Field(
+        24 * 30, alias="SAIVERSE_SESSION_TOKEN_TTL_HOURS"
+    )
 
     max_message_length: int = Field(1800, alias="SAIVERSE_MAX_MESSAGE_LENGTH")
+    pending_replay_limit: int = Field(
+        250, alias="SAIVERSE_PENDING_REPLAY_LIMIT", ge=1
+    )
+    replay_batch_size: int = Field(50, alias="SAIVERSE_REPLAY_BATCH_SIZE", ge=1)
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
         "INFO", alias="SAIVERSE_BOT_LOG_LEVEL"
@@ -78,6 +86,13 @@ class BotSettings(BaseSettings):
     def _ensure_positive(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("SAIVERSE_MAX_MESSAGE_LENGTH must be positive")
+        return value
+
+    @field_validator("pending_replay_limit", "replay_batch_size")
+    @classmethod
+    def _ensure_positive_int(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Replay configuration values must be positive")
         return value
 
 

@@ -1,9 +1,15 @@
+import json
 from datetime import timedelta
 
 import pytest
 
 from discord_gateway.bot.connection_manager import ConnectionManager
-from discord_gateway.bot.database import BotDatabase, LocalAppSession, hash_token, utcnow
+from discord_gateway.bot.database import (
+    BotDatabase,
+    LocalAppSession,
+    hash_token,
+    utcnow,
+)
 
 
 class DummyWebSocket:
@@ -91,34 +97,6 @@ async def test_second_connection_replaces_first(connection_manager, bot_database
 
 
 @pytest.mark.asyncio
-async def test_send_to_owner_dispatches_payload(connection_manager, bot_database):
-    token = "secret"
-    digest = hash_token(token)
-    with bot_database.session() as session:
-        session.add(
-            LocalAppSession(
-                discord_user_id="user-1",
-                token_hash=digest,
-                expires_at=utcnow() + timedelta(hours=1),
-            )
-        )
-
-    websocket = DummyWebSocket()
-    await connection_manager.authenticate(token, websocket)
-
-    dispatched = await connection_manager.send_to_owner("user-1", {"type": "ping"})
-
-    assert dispatched is True
-    assert websocket.sent  # payload recorded
-
-
-@pytest.mark.asyncio
-async def test_send_to_owner_without_connection(connection_manager):
-    dispatched = await connection_manager.send_to_owner("missing", {"type": "ping"})
-    assert dispatched is False
-
-
-@pytest.mark.asyncio
 async def test_authenticate_rejects_expired_token(connection_manager, bot_database):
     token = "expired"
     digest = hash_token(token)
@@ -153,3 +131,69 @@ async def test_authenticate_rejects_revoked_token(connection_manager, bot_databa
     websocket = DummyWebSocket()
     client = await connection_manager.authenticate(token, websocket)
     assert client is None
+
+
+@pytest.mark.asyncio
+async def test_send_to_owner_dispatches_payload(connection_manager, bot_database):
+    token = "secret"
+    digest = hash_token(token)
+    with bot_database.session() as session:
+        session.add(
+            LocalAppSession(
+                discord_user_id="user-1",
+                token_hash=digest,
+                expires_at=utcnow() + timedelta(hours=1),
+            )
+        )
+
+    websocket = DummyWebSocket()
+    client = await connection_manager.authenticate(token, websocket)
+    assert client is not None
+
+    dispatched = await connection_manager.send_to_owner(
+        "user-1", {"type": "ping", "payload": {"channel_id": "room-1"}}
+    )
+
+    assert dispatched is True
+    assert websocket.sent
+    message = json.loads(websocket.sent[-1])
+    assert message["type"] == "ping"
+    assert "event_id" in message["payload"]
+
+    await connection_manager.process_ack("user-1", [message["payload"]["event_id"]])
+    assert await connection_manager.pending_count("user-1") == 0
+
+
+@pytest.mark.asyncio
+async def test_send_to_owner_without_connection(connection_manager):
+    dispatched = await connection_manager.send_to_owner("missing", {"type": "ping"})
+    assert dispatched is False
+
+
+@pytest.mark.asyncio
+async def test_pending_replayed_after_authentication(connection_manager, bot_database):
+    token = "secret"
+    digest = hash_token(token)
+    with bot_database.session() as session:
+        session.add(
+            LocalAppSession(
+                discord_user_id="user-1",
+                token_hash=digest,
+                expires_at=utcnow() + timedelta(hours=1),
+            )
+        )
+
+    dispatched = await connection_manager.send_to_owner(
+        "user-1", {"type": "ping", "payload": {"channel_id": "room-1"}}
+    )
+    assert dispatched is False
+    assert await connection_manager.pending_count("user-1") == 1
+
+    websocket = DummyWebSocket()
+    client = await connection_manager.authenticate(token, websocket)
+    assert client is not None
+
+    await connection_manager.replay_pending(client, full=True)
+    assert websocket.sent
+    message = json.loads(websocket.sent[-1])
+    assert message["type"] == "ping"
