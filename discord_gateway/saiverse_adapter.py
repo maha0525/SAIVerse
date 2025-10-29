@@ -10,7 +10,11 @@ if TYPE_CHECKING:
     from saiverse_manager import SAIVerseManager
 
 from discord_gateway.mapping import ChannelContext
-from discord_gateway.orchestrator import GatewayHostAdapter
+from discord_gateway.orchestrator import (
+    GatewayHostAdapter,
+    MemorySyncCompletionResult,
+    MemorySyncHandshakeResult,
+)
 from discord_gateway.translator import GatewayCommand, GatewayEvent
 from discord_gateway.visitors import VisitorProfile
 
@@ -53,6 +57,11 @@ class SAIVerseGatewayAdapter(GatewayHostAdapter):
         )
         return await self.host.handle_remote_persona_message(message)
 
+    async def handle_memory_sync_initiate(
+        self, visitor: VisitorProfile, payload: dict
+    ) -> MemorySyncHandshakeResult:
+        return await self.host.handle_memory_sync_initiate(visitor, payload)
+
     async def handle_memory_sync_chunk(
         self, visitor: VisitorProfile, payload: dict
     ) -> Sequence[GatewayCommand] | None:
@@ -60,7 +69,7 @@ class SAIVerseGatewayAdapter(GatewayHostAdapter):
 
     async def handle_memory_sync_complete(
         self, visitor: VisitorProfile, payload: dict
-    ) -> Sequence[GatewayCommand] | None:
+    ) -> MemorySyncCompletionResult:
         return await self.host.handle_memory_sync_complete(visitor, payload)
 
     def _build_message(
@@ -114,6 +123,13 @@ class GatewayHost:
             self.manager.gateway_handle_remote_persona_message, message
         )
 
+    async def handle_memory_sync_initiate(
+        self, visitor: VisitorProfile, payload: dict
+    ) -> MemorySyncHandshakeResult:
+        return await self._run_blocking(
+            self.manager.gateway_handle_memory_sync_initiate, visitor, payload
+        )
+
     async def handle_memory_sync_chunk(
         self, visitor: VisitorProfile, payload: dict
     ) -> Sequence[GatewayCommand] | None:
@@ -123,7 +139,7 @@ class GatewayHost:
 
     async def handle_memory_sync_complete(
         self, visitor: VisitorProfile, payload: dict
-    ) -> Sequence[GatewayCommand] | None:
+    ) -> MemorySyncCompletionResult:
         return await self._run_blocking(
             self.manager.gateway_handle_memory_sync_complete, visitor, payload
         )

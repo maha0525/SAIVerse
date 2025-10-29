@@ -23,6 +23,7 @@ class SAIVerseDiscordClient(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         self.settings = settings
         self.router = router
+        self.router.attach_discord_client(self)
         self.add_command(self.saiverse)
 
     async def setup_hook(self) -> None:

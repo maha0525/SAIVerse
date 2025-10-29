@@ -1,4 +1,5 @@
-﻿from discord_gateway.mapping import ChannelContext
+from discord_gateway import MemorySyncCompletionResult, MemorySyncHandshakeResult
+from discord_gateway.mapping import ChannelContext
 from discord_gateway.saiverse_adapter import (
     DiscordMessage,
     GatewayHost,
@@ -26,13 +27,17 @@ class DummyManager:
         self.calls.append(("remote", message.visitor.persona_id))
         return None
 
+    def gateway_handle_memory_sync_initiate(self, visitor, payload):
+        self.calls.append(("init", payload.get("transfer_id")))
+        return MemorySyncHandshakeResult(accepted=True)
+
     def gateway_handle_memory_sync_chunk(self, visitor, payload):
         self.calls.append(("chunk", payload.get("seq")))
         return None
 
     def gateway_handle_memory_sync_complete(self, visitor, payload):
         self.calls.append(("complete", payload.get("transfer_id")))
-        return None
+        return MemorySyncCompletionResult(success=True)
 
 
 async def test_adapter_dispatch(monkeypatch):
@@ -68,13 +73,15 @@ async def test_adapter_dispatch(monkeypatch):
         visitor,
     )
 
-    await adapter.handle_memory_sync_chunk(visitor, {"seq": 1})
+    await adapter.handle_memory_sync_initiate(visitor, {"transfer_id": "abc"})
+    await adapter.handle_memory_sync_chunk(visitor, {"transfer_id": "abc", "seq": 1})
     await adapter.handle_memory_sync_complete(visitor, {"transfer_id": "abc"})
     await adapter.on_visitor_departed(visitor)
 
     assert ("register", "persona-1", "123") in manager.calls
     assert ("human", "hi") in manager.calls
     assert ("remote", "persona-1") in manager.calls
+    assert ("init", "abc") in manager.calls
     assert ("chunk", 1) in manager.calls
     assert ("complete", "abc") in manager.calls
     assert ("depart", "persona-1") in manager.calls

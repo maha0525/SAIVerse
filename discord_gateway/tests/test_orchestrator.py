@@ -6,6 +6,8 @@ from discord_gateway.mapping import ChannelMapping
 from discord_gateway.orchestrator import (
     DiscordGatewayOrchestrator,
     GatewayHostAdapter,
+    MemorySyncCompletionResult,
+    MemorySyncHandshakeResult,
 )
 from discord_gateway.translator import GatewayCommand, GatewayEvent
 from discord_gateway.visitors import VisitorProfile, VisitorRegistry
@@ -30,6 +32,7 @@ class RecordingAdapter(GatewayHostAdapter):
         self.chunk_events: list[int] = []
         self.complete_events: list[str] = []
         self.resync_payloads: list[dict] = []
+        self.handshake_transfers: list[str] = []
 
     async def on_visitor_registered(self, visitor, context):
         return None
@@ -45,13 +48,19 @@ class RecordingAdapter(GatewayHostAdapter):
         self.visitor_messages.append(visitor.persona_id)
         return None
 
+    async def handle_memory_sync_initiate(self, visitor, payload):
+        transfer_id = payload.get("transfer_id")
+        if transfer_id:
+            self.handshake_transfers.append(transfer_id)
+        return MemorySyncHandshakeResult(accepted=True)
+
     async def handle_memory_sync_chunk(self, visitor, payload):
         self.chunk_events.append(payload.get("index"))
         return None
 
     async def handle_memory_sync_complete(self, visitor, payload):
         self.complete_events.append(payload.get("transfer_id"))
-        return None
+        return MemorySyncCompletionResult(success=True)
 
     async def handle_resync_required(self, payload):
         self.resync_payloads.append(payload)
@@ -285,3 +294,62 @@ async def test_memory_sync_duplicate_chunk_ack_without_duplicate_processing():
             ack_ids.append(command.payload.get("event_id"))
 
     assert ack_ids.count("chunk-dup") == 2
+
+
+@pytest.mark.asyncio
+async def test_memory_sync_initiate_ack():
+    service = DummyService()
+    mapping = ChannelMapping([])
+    visitors = VisitorRegistry(
+        [
+            VisitorProfile(
+                discord_user_id="user-init",
+                persona_id="persona-init",
+                owner_user_id="user-init",
+                current_city_id="CityI",
+                current_building_id="RoomI",
+            )
+        ]
+    )
+
+    adapter = RecordingAdapter()
+    orchestrator = DiscordGatewayOrchestrator(
+        service, mapping=mapping, visitors=visitors, host_adapter=adapter
+    )
+
+    await orchestrator.start()
+    await service.incoming_queue.put(
+        GatewayEvent(
+            type="memory_sync_initiate",
+            payload={
+                "event_id": "init-evt",
+                "transfer_id": "transfer-init",
+                "visitor": {
+                    "discord_user_id": "user-init",
+                    "persona_id": "persona-init",
+                    "owner_user_id": "user-init",
+                },
+                "total_size": 0,
+                "total_chunks": 0,
+                "checksum": "noop",
+            },
+        )
+    )
+    await asyncio.sleep(0.05)
+    await orchestrator.stop()
+
+    assert "transfer-init" in adapter.handshake_transfers
+
+    ack_commands = []
+    while not service.outgoing_queue.empty():
+        ack_commands.append(await service.outgoing_queue.get())
+
+    assert any(
+        cmd.type == "ack" and cmd.payload.get("event_id") == "init-evt"
+        for cmd in ack_commands
+    )
+    handshake_ack = next(
+        cmd for cmd in ack_commands if cmd.type == "memory_sync_ack"
+    )
+    assert handshake_ack.payload["transfer_id"] == "transfer-init"
+    assert handshake_ack.payload["status"] == "ok"

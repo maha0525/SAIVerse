@@ -6,9 +6,18 @@ import pytest
 import websockets
 from websockets.legacy import server as legacy_server
 
+from discord_gateway.bot.command_processor import CommandProcessor
 from discord_gateway.bot.connection_manager import ConnectionManager
 from discord_gateway.bot.database import BotDatabase, utcnow
 from discord_gateway.bot.ws_server import GatewayWebSocketServer
+
+
+class NoopRouter:
+    def get_owner_id(self, channel_id):
+        return None
+
+    async def send_post_message(self, *args, **kwargs):
+        return None
 
 
 @pytest.mark.asyncio
@@ -31,7 +40,8 @@ async def test_ws_server_handles_backlog_and_resync(make_settings, tmp_path, mon
     )
 
     manager = ConnectionManager(settings, db)
-    server = GatewayWebSocketServer(settings, manager)
+    processor = CommandProcessor(router=NoopRouter(), max_message_length=settings.max_message_length)
+    server = GatewayWebSocketServer(settings, manager, command_processor=processor)
     monkeypatch.setattr(
         "discord_gateway.bot.ws_server.websockets.serve", legacy_server.serve
     )
@@ -103,3 +113,23 @@ async def test_ws_server_handles_backlog_and_resync(make_settings, tmp_path, mon
         assert sync_ack["payload"]["pending_events"] >= 0
 
     await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_ws_server_requires_cert_when_tls_enabled(make_settings, tmp_path):
+    settings = make_settings(
+        websocket_tls_enabled=True,
+        websocket_tls_certfile=str(tmp_path / "missing.crt"),
+        websocket_tls_keyfile=str(tmp_path / "missing.key"),
+    )
+    db = BotDatabase("sqlite:///:memory:")
+    manager = ConnectionManager(settings, db)
+    processor = CommandProcessor(router=NoopRouter(), max_message_length=settings.max_message_length)
+    server = GatewayWebSocketServer(
+        settings,
+        manager,
+        command_processor=processor,
+    )
+
+    with pytest.raises(RuntimeError):
+        await server.start()

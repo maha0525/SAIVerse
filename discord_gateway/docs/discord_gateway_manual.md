@@ -44,6 +44,12 @@ SAIVERSE_WS_PATH=/ws
 SAIVERSE_PENDING_REPLAY_LIMIT=250
 SAIVERSE_REPLAY_BATCH_SIZE=50
 SAIVERSE_MAX_MESSAGE_LENGTH=1800
+SAIVERSE_WS_TLS_ENABLED=1
+SAIVERSE_WS_TLS_CERTFILE=/etc/ssl/certs/saiverse_gateway.crt
+SAIVERSE_WS_TLS_KEYFILE=/etc/ssl/private/saiverse_gateway.key
+# Optional client auth
+# SAIVERSE_WS_TLS_CLIENT_AUTH=required
+# SAIVERSE_WS_TLS_CA_FILE=/etc/ssl/certs/saiverse_client_ca.pem
 ```
 
 ### 2.2 Local gateway (`discord_gateway/config.py` or environment)
@@ -78,6 +84,7 @@ Supply via environment variable `SAIVERSE_GATEWAY_CHANNEL_MAP` or a JSON file:
 pip install -r discord_gateway/requirements-dev.txt
 python -m discord_gateway.bot.app
 ```
+Ensure the bot host has a valid TLS certificate and key at the paths referenced by the environment variables above; the WebSocket server refuses to start without them when `SAIVERSE_WS_TLS_ENABLED=1`.
 A successful launch prints `Gateway WebSocket server listening on ...`.
 
 ### 3.2 Local application

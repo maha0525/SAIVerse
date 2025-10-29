@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import discord
+from typing import TYPE_CHECKING
 
 from .config import BotSettings
 from .connection_manager import ConnectionManager
 from .database import BotDatabase
 from .security import sanitize_message_content
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .discord_client import SAIVerseDiscordClient
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +24,9 @@ class MessageRouter:
     database: BotDatabase
     connections: ConnectionManager
     settings: BotSettings
+    discord_client: "SAIVerseDiscordClient | None" = field(
+        default=None, repr=False
+    )
 
     async def handle_message(self, message: discord.Message) -> None:
         if message.author.bot:
@@ -64,6 +71,9 @@ class MessageRouter:
     def get_owner_id(self, channel_id: int | str) -> str | None:
         return self.database.find_city_owner(channel_id)
 
+    def attach_discord_client(self, client: "SAIVerseDiscordClient") -> None:
+        self.discord_client = client
+
     async def emit_invite_event(
         self,
         *,
@@ -102,3 +112,54 @@ class MessageRouter:
             "ids": sorted(role_ids),
             "names": sorted(role_names),
         }
+
+    async def send_post_message(
+        self,
+        channel_id: int | str,
+        *,
+        content: str,
+        persona_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        if not self.discord_client:
+            raise RuntimeError("Discord client is not attached to MessageRouter.")
+
+        channel_id_int = int(channel_id)
+        channel = self.discord_client.get_channel(channel_id_int)
+        if channel is None:
+            try:
+                channel = await self.discord_client.fetch_channel(channel_id_int)
+            except discord.NotFound:
+                logger.warning(
+                    "Channel %s not found when attempting to post message.",
+                    channel_id,
+                )
+                return
+            except discord.Forbidden:
+                logger.warning(
+                    "Missing permissions to access channel %s when posting message.",
+                    channel_id,
+                )
+                return
+            except discord.HTTPException as exc:
+                logger.warning(
+                    "HTTP error while fetching channel %s: %s", channel_id, exc
+                )
+                return
+
+        if not hasattr(channel, "send"):
+            logger.warning(
+                "Channel %s does not support sending messages.", channel_id
+            )
+            return
+
+        try:
+            await channel.send(content)
+        except discord.Forbidden:
+            logger.warning(
+                "Forbidden to send message to channel %s.", channel_id
+            )
+        except discord.HTTPException as exc:
+            logger.warning(
+                "Failed to send message to channel %s: %s", channel_id, exc
+            )

@@ -25,6 +25,8 @@ from discord_gateway import (
     GatewayHost,
     get_gateway_settings,
     GatewayCommand,
+    MemorySyncCompletionResult,
+    MemorySyncHandshakeResult,
     VisitorProfile,
     ensure_gateway_runtime,
 )
@@ -218,7 +220,8 @@ class SAIVerseManager:
         self.db_polling_thread.start()
         self.gateway_runtime = None
         self.gateway_mapping = ChannelMapping([])
-        self._gateway_memory_buffers = {}
+        self._gateway_memory_transfers: Dict[str, Dict[str, Any]] = {}
+        self._gateway_memory_active_persona: Dict[str, str] = {}
         gateway_enabled = os.getenv("SAIVERSE_GATEWAY_ENABLED", "0").lower() in {
             "1",
             "true",
@@ -1306,37 +1309,174 @@ class SAIVerseManager:
             conv.trigger_next_turn()
         return []
 
+    def gateway_handle_memory_sync_initiate(
+        self, visitor: VisitorProfile, payload: dict
+    ) -> MemorySyncHandshakeResult:
+        transfer_id = str(payload.get("transfer_id") or "").strip()
+        if not transfer_id:
+            logging.warning("Memory sync initiate missing transfer_id for %s", visitor.persona_id)
+            return MemorySyncHandshakeResult(accepted=False, reason="missing_transfer_id")
+
+        if transfer_id in self._gateway_memory_transfers:
+            logging.warning("Duplicate memory transfer_id '%s' received; rejecting.", transfer_id)
+            return MemorySyncHandshakeResult(accepted=False, reason="duplicate_transfer")
+
+        if visitor.persona_id in self._gateway_memory_active_persona:
+            logging.warning(
+                "Persona %s already has an active memory transfer.", visitor.persona_id
+            )
+            return MemorySyncHandshakeResult(accepted=False, reason="transfer_in_progress")
+
+        try:
+            total_size = int(payload.get("total_size"))
+            total_chunks = int(payload.get("total_chunks"))
+        except (TypeError, ValueError):
+            logging.warning("Invalid memory transfer metadata received: %s", payload)
+            return MemorySyncHandshakeResult(accepted=False, reason="invalid_metadata")
+
+        checksum = str(payload.get("checksum") or "").strip()
+        if not checksum:
+            return MemorySyncHandshakeResult(accepted=False, reason="missing_checksum")
+
+        if total_size < 0 or total_chunks <= 0:
+            return MemorySyncHandshakeResult(accepted=False, reason="invalid_metadata")
+
+        state = {
+            "persona_id": visitor.persona_id,
+            "owner_user_id": visitor.owner_user_id,
+            "expected_size": total_size,
+            "expected_chunks": total_chunks,
+            "checksum": checksum,
+            "bytes_received": 0,
+            "chunks_received": 0,
+            "buffer": bytearray(),
+            "building_id": payload.get("building_id"),
+            "city_id": payload.get("city_id"),
+        }
+        self._gateway_memory_transfers[transfer_id] = state
+        self._gateway_memory_active_persona[visitor.persona_id] = transfer_id
+        return MemorySyncHandshakeResult(accepted=True)
+
     def gateway_handle_memory_sync_chunk(
         self, visitor: VisitorProfile, payload: dict
     ) -> Sequence[GatewayCommand] | None:
-        buffer = self._gateway_memory_buffers.setdefault(
-            visitor.persona_id, bytearray()
-        )
-        data = payload.get("data")
-        if data:
-            try:
-                buffer.extend(base64.b64decode(data))
-            except Exception as exc:
-                logging.warning(
-                    "Failed to decode memory chunk for %s: %s", visitor.persona_id, exc
+        transfer_id = payload.get("transfer_id")
+        if not transfer_id:
+            logging.warning("Memory chunk missing transfer_id for %s", visitor.persona_id)
+            return []
+
+        state = self._gateway_memory_transfers.get(transfer_id)
+        if not state:
+            logging.warning("Unknown memory transfer '%s' for persona %s", transfer_id, visitor.persona_id)
+            return [
+                GatewayCommand(
+                    type="memory_sync_complete",
+                    payload={
+                        "transfer_id": transfer_id,
+                        "status": "error",
+                        "reason": "unknown_transfer",
+                    },
                 )
+            ]
+
+        data = payload.get("data")
+        if not data:
+            logging.warning("Memory chunk without data for transfer '%s'", transfer_id)
+            return []
+
+        try:
+            chunk = base64.b64decode(data)
+        except Exception as exc:
+            logging.warning("Failed to decode memory chunk for %s: %s", visitor.persona_id, exc)
+            self._pop_memory_transfer(transfer_id)
+            return [
+                GatewayCommand(
+                    type="memory_sync_complete",
+                    payload={
+                        "transfer_id": transfer_id,
+                        "status": "error",
+                        "reason": "decode_error",
+                    },
+                )
+            ]
+
+        state["buffer"].extend(chunk)
+        state["bytes_received"] += len(chunk)
+        state["chunks_received"] += 1
+
+        if state["bytes_received"] > state["expected_size"] or state["chunks_received"] > state["expected_chunks"]:
+            logging.warning(
+                "Memory transfer %s exceeded expected bounds (bytes=%s/%s, chunks=%s/%s)",
+                transfer_id,
+                state["bytes_received"],
+                state["expected_size"],
+                state["chunks_received"],
+                state["expected_chunks"],
+            )
+            self._pop_memory_transfer(transfer_id)
+            return [
+                GatewayCommand(
+                    type="memory_sync_complete",
+                    payload={
+                        "transfer_id": transfer_id,
+                        "status": "error",
+                        "reason": "overflow",
+                    },
+                )
+            ]
+
         return []
 
     def gateway_handle_memory_sync_complete(
         self, visitor: VisitorProfile, payload: dict
-    ) -> Sequence[GatewayCommand] | None:
-        buffer = self._gateway_memory_buffers.pop(visitor.persona_id, None)
-        if not buffer:
-            return []
+    ) -> MemorySyncCompletionResult:
+        transfer_id = payload.get("transfer_id")
+        if not transfer_id:
+            return MemorySyncCompletionResult(success=False, reason="missing_transfer_id")
+
+        state = self._gateway_memory_transfers.get(transfer_id)
+        if not state:
+            return MemorySyncCompletionResult(success=False, reason="unknown_transfer")
+
+        expected_size = state["expected_size"]
+        expected_chunks = state["expected_chunks"]
+        buffer = state["buffer"]
+
+        if state["bytes_received"] != expected_size:
+            self._pop_memory_transfer(transfer_id)
+            return MemorySyncCompletionResult(success=False, reason="size_mismatch")
+
+        if state["chunks_received"] != expected_chunks:
+            self._pop_memory_transfer(transfer_id)
+            return MemorySyncCompletionResult(success=False, reason="chunk_mismatch")
+
+        checksum = hashlib.sha256(buffer).hexdigest()
+        if checksum != state["checksum"]:
+            self._pop_memory_transfer(transfer_id)
+            return MemorySyncCompletionResult(success=False, reason="checksum_mismatch")
+
         target_dir = self.saiverse_home / "gateway_memory"
         target_dir.mkdir(parents=True, exist_ok=True)
-        filename = payload.get("transfer_id") or visitor.persona_id
+        filename = f"{state['persona_id']}-{transfer_id}"
         target_path = target_dir / f"{filename}.bin"
         target_path.write_bytes(buffer)
         logging.info(
-            "Stored gateway memory for %s at %s", visitor.persona_id, target_path
+            "Stored gateway memory for %s at %s (transfer=%s)",
+            state["persona_id"],
+            target_path,
+            transfer_id,
         )
-        return []
+        self._pop_memory_transfer(transfer_id)
+        return MemorySyncCompletionResult(success=True)
+
+    def _pop_memory_transfer(self, transfer_id: str) -> Dict[str, Any] | None:
+        state = self._gateway_memory_transfers.pop(transfer_id, None)
+        if not state:
+            return None
+        persona_id = state.get("persona_id")
+        if persona_id:
+            self._gateway_memory_active_persona.pop(persona_id, None)
+        return state
 
     def gateway_handle_ai_replies(
         self, building_id: str, persona, replies: Sequence[str]

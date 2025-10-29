@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+import ssl
+from pathlib import Path
+from typing import Any, Optional
 
 import websockets
 from pydantic import ValidationError
 from websockets.server import WebSocketServerProtocol
 
+from .command_processor import CommandProcessor
 from .config import BotSettings
 from .connection_manager import ConnectedClient, ConnectionManager
 from .security import HandshakePayload
@@ -19,15 +22,27 @@ logger = logging.getLogger(__name__)
 class GatewayWebSocketServer:
     """Secure WebSocket server that accepts connections from local apps."""
 
-    def __init__(self, settings: BotSettings, connections: ConnectionManager):
+    def __init__(
+        self,
+        settings: BotSettings,
+        connections: ConnectionManager,
+        *,
+        command_processor: CommandProcessor,
+        ssl_context: ssl.SSLContext | None = None,
+    ):
         self._settings = settings
         self._connections = connections
+        self._command_processor = command_processor
+        self._external_ssl_context = ssl_context
         self._server = None
         self._stop_event = asyncio.Event()
 
     async def start(self) -> None:
         if self._server is not None:
             raise RuntimeError("WebSocket server already started")
+
+        ssl_context = self._resolve_ssl_context()
+        scheme = "wss" if ssl_context else "ws"
 
         self._server = await websockets.serve(
             ws_handler=self._handle_client,
@@ -37,9 +52,19 @@ class GatewayWebSocketServer:
             ping_interval=self._settings.websocket_heartbeat_seconds,
             max_size=self._settings.websocket_max_size,
             process_request=self._process_request,
+            ssl=ssl_context,
         )
+        if ssl_context is None:
+            if self._settings.websocket_tls_enabled:
+                raise RuntimeError(
+                    "TLS is enabled but the SSL context could not be created. Check certificate configuration."
+                )
+            logger.info(
+                "Gateway WebSocket server is serving plain ws:// connections (TLS disabled)."
+            )
         logger.info(
-            "Gateway WebSocket server listening on %s:%s%s",
+            "Gateway WebSocket server listening on %s://%s:%s%s",
+            scheme,
             self._settings.websocket_host,
             self._settings.websocket_port,
             self._settings.websocket_path,
@@ -149,8 +174,63 @@ class GatewayWebSocketServer:
                     )
                 )
             else:
-                logger.debug(
-                    "Ignoring unhandled client message type=%s payload=%s",
-                    event_type,
-                    message,
+                try:
+                    handled = await self._command_processor.handle(client, message)
+                except Exception:
+                    logger.exception(
+                        "Unhandled exception while processing client command: %s",
+                        message,
+                    )
+                    continue
+                if not handled:
+                    logger.debug(
+                        "Ignoring unhandled client message type=%s payload=%s",
+                        event_type,
+                        message,
+                    )
+
+    def _resolve_ssl_context(self) -> Optional[ssl.SSLContext]:
+        if self._external_ssl_context is not None:
+            return self._external_ssl_context
+        if not self._settings.websocket_tls_enabled:
+            return None
+        return self._build_ssl_context()
+
+    def _build_ssl_context(self) -> ssl.SSLContext:
+        certfile = self._settings.websocket_tls_certfile
+        keyfile = self._settings.websocket_tls_keyfile
+        if not certfile or not keyfile:
+            raise RuntimeError(
+                "TLS is enabled but certificate/key paths are not configured."
+            )
+
+        cert_path = Path(certfile).expanduser()
+        key_path = Path(keyfile).expanduser()
+        if not cert_path.exists() or not key_path.exists():
+            raise RuntimeError(
+                f"TLS certificate ({cert_path}) or key ({key_path}) could not be found."
+            )
+
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
+
+        verify_mode = {
+            "none": ssl.CERT_NONE,
+            "optional": ssl.CERT_OPTIONAL,
+            "required": ssl.CERT_REQUIRED,
+        }[self._settings.websocket_tls_client_auth]
+
+        if verify_mode != ssl.CERT_NONE:
+            ca_file = self._settings.websocket_tls_ca_file
+            if not ca_file:
+                raise RuntimeError(
+                    "Client authentication requires SAIVERSE_WS_TLS_CA_FILE to be set."
                 )
+            ca_path = Path(ca_file).expanduser()
+            if not ca_path.exists():
+                raise RuntimeError(f"TLS CA file {ca_path} could not be found.")
+            context.load_verify_locations(cafile=str(ca_path))
+        context.verify_mode = verify_mode
+
+        return context
