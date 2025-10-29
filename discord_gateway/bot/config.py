@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from functools import lru_cache
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,9 +27,7 @@ class BotSettings(BaseSettings):
         "none", alias="SAIVERSE_WS_TLS_CLIENT_AUTH"
     )
 
-    database_url: str = Field(
-        "sqlite:///./saiverse_bot.db", alias="SAIVERSE_BOT_DATABASE_URL"
-    )
+    database_url: str = Field("sqlite:///./saiverse_bot.db", alias="SAIVERSE_BOT_DATABASE_URL")
 
     oauth_client_id: str = Field(..., alias="DISCORD_OAUTH_CLIENT_ID")
     oauth_client_secret: SecretStr = Field(..., alias="DISCORD_OAUTH_CLIENT_SECRET")
@@ -40,14 +38,10 @@ class BotSettings(BaseSettings):
     oauth_state_ttl_seconds: int = Field(600, alias="SAIVERSE_OAUTH_STATE_TTL")
 
     session_token_length: int = Field(48, alias="SAIVERSE_SESSION_TOKEN_LENGTH")
-    session_token_ttl_hours: int = Field(
-        24 * 30, alias="SAIVERSE_SESSION_TOKEN_TTL_HOURS"
-    )
+    session_token_ttl_hours: int = Field(24 * 30, alias="SAIVERSE_SESSION_TOKEN_TTL_HOURS")
 
     max_message_length: int = Field(1800, alias="SAIVERSE_MAX_MESSAGE_LENGTH")
-    pending_replay_limit: int = Field(
-        250, alias="SAIVERSE_PENDING_REPLAY_LIMIT", ge=1
-    )
+    pending_replay_limit: int = Field(250, alias="SAIVERSE_PENDING_REPLAY_LIMIT", ge=1)
     replay_batch_size: int = Field(50, alias="SAIVERSE_REPLAY_BATCH_SIZE", ge=1)
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
@@ -109,22 +103,19 @@ class BotSettings(BaseSettings):
         mode="before",
     )
     @classmethod
-    def _empty_string_to_none(cls, value: Optional[str]) -> Optional[str]:
+    def _empty_string_to_none(cls, value: str | None) -> str | None:
         if isinstance(value, str) and not value.strip():
             return None
         return value
 
     @model_validator(mode="after")
-    def _validate_tls(self) -> "BotSettings":
+    def _validate_tls(self) -> BotSettings:
         if self.websocket_tls_enabled:
             if not self.websocket_tls_certfile or not self.websocket_tls_keyfile:
                 raise ValueError(
                     "SAIVERSE_WS_TLS_CERTFILE and SAIVERSE_WS_TLS_KEYFILE must be set when TLS is enabled"
                 )
-            if (
-                self.websocket_tls_client_auth != "none"
-                and not self.websocket_tls_ca_file
-            ):
+            if self.websocket_tls_client_auth != "none" and not self.websocket_tls_ca_file:
                 raise ValueError(
                     "SAIVERSE_WS_TLS_CA_FILE is required when client authentication is enabled"
                 )

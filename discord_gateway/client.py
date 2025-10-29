@@ -69,9 +69,7 @@ class WebSocketGatewayClient:
         if self._ws is None:
             raise GatewayClientError("WebSocket is not connected")
 
-        raw = await asyncio.wait_for(
-            self._ws.recv(), timeout=self._settings.recv_timeout_seconds
-        )
+        raw = await asyncio.wait_for(self._ws.recv(), timeout=self._settings.recv_timeout_seconds)
         if isinstance(raw, bytes):
             raw = raw.decode("utf-8")
         return json.loads(raw)

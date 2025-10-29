@@ -1,5 +1,3 @@
-﻿import pytest
-
 from discord_gateway.mapping import ChannelContext, ChannelMapping
 from discord_gateway.permissions import InvitationRegistry, PermissionPolicy
 
@@ -54,4 +52,3 @@ def test_permission_accepts_role_dict():
         roles={"ids": [], "names": ["VIP"]},
     )
     assert decision.allowed
-

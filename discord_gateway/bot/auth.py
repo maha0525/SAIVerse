@@ -40,9 +40,7 @@ class AuthService:
     ):
         self._settings = settings
         self._database = database
-        self._http_client_factory = (
-            http_client_factory or self._default_http_client_factory
-        )
+        self._http_client_factory = http_client_factory or self._default_http_client_factory
 
     def begin_authorization(
         self,
@@ -52,13 +50,9 @@ class AuthService:
     ) -> AuthorizationSession:
         state = self._generate_state()
         redirect = redirect_uri or self._settings.oauth_redirect_uri
-        scope_values = (
-            list(scopes) if scopes is not None else list(self._settings.oauth_scopes)
-        )
+        scope_values = list(scopes) if scopes is not None else list(self._settings.oauth_scopes)
 
-        self._database.create_oauth_state(
-            state, redirect, self._settings.oauth_state_ttl
-        )
+        self._database.create_oauth_state(state, redirect, self._settings.oauth_state_ttl)
 
         query = urlencode(
             {
@@ -90,9 +84,7 @@ class AuthService:
             access_token, token_type = await self._exchange_code(
                 client, code, state_record.redirect_uri
             )
-            discord_user_id = await self._fetch_user_id(
-                client, access_token, token_type
-            )
+            discord_user_id = await self._fetch_user_id(client, access_token, token_type)
 
         raw_token = self._generate_session_token()
         expires_at = utcnow() + self._settings.session_token_ttl
@@ -134,9 +126,7 @@ class AuthService:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         if response.status_code != 200:
-            raise TokenExchangeError(
-                f"Discord token endpoint returned {response.status_code}"
-            )
+            raise TokenExchangeError(f"Discord token endpoint returned {response.status_code}")
 
         try:
             payload = response.json()
@@ -160,9 +150,7 @@ class AuthService:
             headers={"Authorization": f"{token_type} {access_token}"},
         )
         if response.status_code != 200:
-            raise TokenExchangeError(
-                f"Discord user endpoint returned {response.status_code}"
-            )
+            raise TokenExchangeError(f"Discord user endpoint returned {response.status_code}")
 
         try:
             payload = response.json()

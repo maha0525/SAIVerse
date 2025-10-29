@@ -27,9 +27,7 @@ class BotApplication:
         self._is_shutting_down = False
 
         self.connection_manager = ConnectionManager(self.settings, self.database)
-        self.router = MessageRouter(
-            self.database, self.connection_manager, self.settings
-        )
+        self.router = MessageRouter(self.database, self.connection_manager, self.settings)
         self.command_processor = CommandProcessor(
             router=self.router,
             max_message_length=self.settings.max_message_length,

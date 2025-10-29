@@ -52,9 +52,7 @@ class SAIVerseGatewayAdapter(GatewayHostAdapter):
     async def handle_remote_persona_message(
         self, context: ChannelContext, event: GatewayEvent, visitor: VisitorProfile
     ) -> Sequence[GatewayCommand] | None:
-        message = self._build_message(
-            context, event, role="persona_remote", visitor=visitor
-        )
+        message = self._build_message(context, event, role="persona_remote", visitor=visitor)
         return await self.host.handle_remote_persona_message(message)
 
     async def handle_memory_sync_initiate(
@@ -102,9 +100,7 @@ class GatewayHost:
         if not context:
             logger.debug("Visitor registered without channel context: %s", visitor)
             return
-        await self._run_blocking(
-            self.manager.gateway_on_visitor_registered, visitor, context
-        )
+        await self._run_blocking(self.manager.gateway_on_visitor_registered, visitor, context)
 
     async def handle_visitor_departed(self, visitor: VisitorProfile) -> None:
         await self._run_blocking(self.manager.gateway_on_visitor_departed, visitor)
@@ -112,16 +108,12 @@ class GatewayHost:
     async def handle_human_message(
         self, message: DiscordMessage
     ) -> Sequence[GatewayCommand] | None:
-        return await self._run_blocking(
-            self.manager.gateway_handle_human_message, message
-        )
+        return await self._run_blocking(self.manager.gateway_handle_human_message, message)
 
     async def handle_remote_persona_message(
         self, message: DiscordMessage
     ) -> Sequence[GatewayCommand] | None:
-        return await self._run_blocking(
-            self.manager.gateway_handle_remote_persona_message, message
-        )
+        return await self._run_blocking(self.manager.gateway_handle_remote_persona_message, message)
 
     async def handle_memory_sync_initiate(
         self, visitor: VisitorProfile, payload: dict

@@ -30,9 +30,7 @@ class VisitorRegistry:
         self._by_discord[profile.discord_user_id] = profile
         self._by_persona[profile.persona_id] = profile
 
-    def update_location(
-        self, persona_id: str, *, city_id: str, building_id: str
-    ) -> None:
+    def update_location(self, persona_id: str, *, city_id: str, building_id: str) -> None:
         profile = self._by_persona.get(persona_id)
         if not profile:
             raise KeyError(f"Persona '{persona_id}' is not registered as visitor.")
@@ -59,7 +57,5 @@ class VisitorRegistry:
 
     def list_in_city(self, city_id: str) -> Iterable[VisitorProfile]:
         return (
-            profile
-            for profile in self._by_persona.values()
-            if profile.current_city_id == city_id
+            profile for profile in self._by_persona.values() if profile.current_city_id == city_id
         )
