@@ -40,11 +40,11 @@ async def test_ws_server_handles_backlog_and_resync(make_settings, tmp_path, mon
     )
 
     manager = ConnectionManager(settings, db)
-    processor = CommandProcessor(router=NoopRouter(), max_message_length=settings.max_message_length)
-    server = GatewayWebSocketServer(settings, manager, command_processor=processor)
-    monkeypatch.setattr(
-        "discord_gateway.bot.ws_server.websockets.serve", legacy_server.serve
+    processor = CommandProcessor(
+        router=NoopRouter(), max_message_length=settings.max_message_length
     )
+    server = GatewayWebSocketServer(settings, manager, command_processor=processor)
+    monkeypatch.setattr("discord_gateway.bot.ws_server.websockets.serve", legacy_server.serve)
     await server.start()
 
     assert server._server is not None  # pragma: no cover - defensive
@@ -124,7 +124,9 @@ async def test_ws_server_requires_cert_when_tls_enabled(make_settings, tmp_path)
     )
     db = BotDatabase("sqlite:///:memory:")
     manager = ConnectionManager(settings, db)
-    processor = CommandProcessor(router=NoopRouter(), max_message_length=settings.max_message_length)
+    processor = CommandProcessor(
+        router=NoopRouter(), max_message_length=settings.max_message_length
+    )
     server = GatewayWebSocketServer(
         settings,
         manager,

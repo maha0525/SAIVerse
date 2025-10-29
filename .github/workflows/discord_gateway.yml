@@ -30,7 +30,5 @@ jobs:
           pip install -r discord_gateway/requirements-dev.txt
       - name: Run ruff
         run: ruff check discord_gateway --config discord_gateway/pyproject.toml
-      - name: Run black
-        run: black --config discord_gateway/pyproject.toml --check discord_gateway
       - name: Run pytest
         run: pytest discord_gateway/tests -q

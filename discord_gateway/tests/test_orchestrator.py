@@ -66,6 +66,7 @@ class RecordingAdapter(GatewayHostAdapter):
         self.resync_payloads.append(payload)
         return None
 
+
 @pytest.mark.asyncio
 async def test_orchestrator_routes_messages():
     service = DummyService()
@@ -129,9 +130,7 @@ async def test_orchestrator_routes_messages():
     assert adapter.human_messages == ["hello"]
     assert adapter.visitor_messages == ["persona-1"]
     commands = [await service.outgoing_queue.get() for _ in range(3)]
-    event_acks = [
-        cmd for cmd in commands if cmd.type == "ack" and "event_id" in cmd.payload
-    ]
+    event_acks = [cmd for cmd in commands if cmd.type == "ack" and "event_id" in cmd.payload]
     assert any(cmd.payload["event_id"] == "evt-1" for cmd in event_acks)
     assert any(cmd.payload["event_id"] == "evt-2" for cmd in event_acks)
 
@@ -141,9 +140,7 @@ async def test_orchestrator_requests_state_sync_on_resync():
     service = DummyService()
     mapping = ChannelMapping([])
     adapter = RecordingAdapter()
-    orchestrator = DiscordGatewayOrchestrator(
-        service, mapping=mapping, host_adapter=adapter
-    )
+    orchestrator = DiscordGatewayOrchestrator(service, mapping=mapping, host_adapter=adapter)
     await orchestrator.start()
     await service.incoming_queue.put(
         GatewayEvent(
@@ -161,8 +158,7 @@ async def test_orchestrator_requests_state_sync_on_resync():
 
     assert any(cmd.type == "state_sync_request" for cmd in commands)
     assert any(
-        cmd.type == "ack" and cmd.payload.get("event_id") == "evt-resync"
-        for cmd in commands
+        cmd.type == "ack" and cmd.payload.get("event_id") == "evt-resync" for cmd in commands
     )
 
 
@@ -345,11 +341,8 @@ async def test_memory_sync_initiate_ack():
         ack_commands.append(await service.outgoing_queue.get())
 
     assert any(
-        cmd.type == "ack" and cmd.payload.get("event_id") == "init-evt"
-        for cmd in ack_commands
+        cmd.type == "ack" and cmd.payload.get("event_id") == "init-evt" for cmd in ack_commands
     )
-    handshake_ack = next(
-        cmd for cmd in ack_commands if cmd.type == "memory_sync_ack"
-    )
+    handshake_ack = next(cmd for cmd in ack_commands if cmd.type == "memory_sync_ack")
     assert handshake_ack.payload["transfer_id"] == "transfer-init"
     assert handshake_ack.payload["status"] == "ok"

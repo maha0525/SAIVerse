@@ -1,12 +1,18 @@
 import base64
 import hashlib
+import importlib
+import os
 from pathlib import Path
 
-import pytest
-
-from discord_gateway import MemorySyncCompletionResult, MemorySyncHandshakeResult
+from discord_gateway.orchestrator import (
+    MemorySyncCompletionResult,
+    MemorySyncHandshakeResult,
+)
 from discord_gateway.visitors import VisitorProfile
-from saiverse_manager import SAIVerseManager
+
+os.environ.setdefault("GEMINI_FREE_API_KEY", "test-key")
+
+SAIVerseManager = importlib.import_module("saiverse_manager").SAIVerseManager
 
 
 def _create_manager(tmp_path: Path) -> SAIVerseManager:
@@ -59,9 +65,7 @@ def test_memory_sync_success(tmp_path: Path):
     assert isinstance(complete_result, MemorySyncCompletionResult)
     assert complete_result.success
 
-    stored_path = (
-        tmp_path / "gateway_memory" / f"{visitor.persona_id}-transfer-1.bin"
-    )
+    stored_path = tmp_path / "gateway_memory" / f"{visitor.persona_id}-transfer-1.bin"
     assert stored_path.read_bytes() == data
     assert manager._gateway_memory_transfers == {}
     assert manager._gateway_memory_active_persona == {}

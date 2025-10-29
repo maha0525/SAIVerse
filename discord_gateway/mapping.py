@@ -44,9 +44,7 @@ class ChannelMapping:
                         city_id=str(entry["city_id"]),
                         building_id=str(entry["building_id"]),
                         host_user_id=str(entry["host_user_id"]),
-                        allowed_roles=tuple(
-                            str(role) for role in entry.get("allowed_roles", [])
-                        ),
+                        allowed_roles=tuple(str(role) for role in entry.get("allowed_roles", [])),
                         invite_required=bool(entry.get("invite_required", False)),
                     )
                 )

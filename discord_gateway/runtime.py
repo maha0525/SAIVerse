@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from typing import Awaitable
+from collections.abc import Awaitable
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +36,7 @@ class GatewayRuntime:
                     logger.debug("Failed to stop orchestrator cleanly.", exc_info=True)
                 loop.close()
 
-        self._thread = threading.Thread(
-            target=runner, daemon=True, name="DiscordGatewayRuntime"
-        )
+        self._thread = threading.Thread(target=runner, daemon=True, name="DiscordGatewayRuntime")
         self._thread.start()
 
     def stop(self) -> None:

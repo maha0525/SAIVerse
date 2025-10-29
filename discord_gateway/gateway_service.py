@@ -30,9 +30,7 @@ class DiscordGatewayService:
     ):
         self.settings = settings or get_gateway_settings()
         self.translator = translator or GatewayTranslator()
-        self.token_provider = token_provider or StaticTokenProvider(
-            settings=self.settings
-        )
+        self.token_provider = token_provider or StaticTokenProvider(settings=self.settings)
         self._client_factory = client_factory
 
         self._incoming_queue: asyncio.Queue[GatewayEvent] | None = None
@@ -44,26 +42,20 @@ class DiscordGatewayService:
     @property
     def incoming_queue(self) -> asyncio.Queue[GatewayEvent]:
         if self._incoming_queue is None:
-            self._incoming_queue = asyncio.Queue(
-                maxsize=self.settings.incoming_queue_maxsize
-            )
+            self._incoming_queue = asyncio.Queue(maxsize=self.settings.incoming_queue_maxsize)
         return self._incoming_queue
 
     @property
     def outgoing_queue(self) -> asyncio.Queue[GatewayCommand]:
         if self._outgoing_queue is None:
-            self._outgoing_queue = asyncio.Queue(
-                maxsize=self.settings.outgoing_queue_maxsize
-            )
+            self._outgoing_queue = asyncio.Queue(maxsize=self.settings.outgoing_queue_maxsize)
         return self._outgoing_queue
 
     async def start(self) -> None:
         if self._worker_task and not self._worker_task.done():
             raise RuntimeError("Gateway service is already running")
         self._stop_event.clear()
-        self._worker_task = asyncio.create_task(
-            self._run(), name="discord-gateway-service"
-        )
+        self._worker_task = asyncio.create_task(self._run(), name="discord-gateway-service")
 
     async def stop(self) -> None:
         self._stop_event.set()
