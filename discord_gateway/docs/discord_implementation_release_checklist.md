@@ -45,19 +45,19 @@ Discordベースアーキテクチャの仕様（`docs/implementation_discord.md
 - 主要コンポーネントのカバレッジが目標値を満たし、Gateway専用CIが安定して緑化している
 
 ## フェーズ4: コア機能フロー実装
-- [ ] Public/Private City と Building へのイベントマッピング実装（`docs/implementation_discord.md:81-98`）
-- [ ] 会話進行ハンドリング（訪問Persona調停、次発言者決定、Bot中継）の実装（`docs/implementation_discord.md:93-99`）
-- [ ] 記憶持ち帰りプロトコル（ハンドシェイク・チャンク・検証・リトライ）の実装（`docs/implementation_discord.md:100-119`）
-- [ ] 招待制コミュニティとロールベース権限の整備（`docs/implementation_discord.md:89-92`, `docs/implementation_discord.md:123-131`）
-- [ ] Bot／ローカル双方で再接続・リプレイ・エラーハンドリングを備え、イベント欠落時の再同期仕様を確定する
+- [x] Public/Private City と Building へのイベントマッピング実装（`docs/implementation_discord.md:81-98`）
+- [x] 会話進行ハンドリング（訪問Persona調停、次発言者決定、Bot中継）の実装（`docs/implementation_discord.md:93-99`）
+- [x] 記憶持ち帰りプロトコル（ハンドシェイク・チャンク・検証・リトライ）の実装（`docs/implementation_discord.md:100-119`）
+- [x] 招待制コミュニティとロールベース権限の整備（`docs/implementation_discord.md:89-92`, `docs/implementation_discord.md:123-131`）
+- [x] Bot／ローカル双方で再接続・リプレイ・エラーハンドリングを備え、イベント欠落時の再同期仕様を確定する
 
 **Exit Criteria**
 - Persona訪問・会話・記憶同期など代表的なストーリーがエンドツーエンドで成功する
 - エラー／再送シナリオの仕様と実装がドキュメント化され、レビュー済みである
 
 ## フェーズ5: テスト & 品質保証
-- [ ] Gateway／Bot双方でユニット・統合・負荷テストを自動化（`docs/implementation_discord.md:209-216`）
-- [ ] 記憶同期プロトコルの大容量試験とエッジケース検証（チャンク欠損・リトライ等）を実施
+- [x] Gateway／Bot双方でユニット・統合・負荷テストを自動化（`docs/implementation_discord.md:209-216`）
+- [x] 記憶同期プロトコルの大容量試験とエッジケース検証（チャンク欠損・リトライ等）を実施
 - [ ] Discordレートリミット・接続上限を想定した負荷試験とチューニングを実施
 - [ ] セキュリティペネトレーションテスト／脆弱性スキャン／依存関係更新確認を実行（`docs/implementation_discord.md:125-132`）
 - [ ] ドキュメント・ユーザーフローの手動受け入れテストを実施し、フィードバックを反映
@@ -67,9 +67,9 @@ Discordベースアーキテクチャの仕様（`docs/implementation_discord.md
 - 既知の重大バグ／性能問題が解消され、受け入れサインオフを取得済み
 
 ## フェーズ6: 本体統合（リリース直前に実施）
-- [ ] SAIVerse本体（`main.py` 等）に Gateway 初期化と `asyncio.Queue` ブリッジを追加する（`docs/implementation_discord.md:202-207`）
-- [ ] 本体側設定ファイル／起動スクリプト／テレメトリ連携を更新し、Gateway依存を明示する
-- [ ] 本体側の統合テスト（最低限の回帰テストを含む）を最終リリースブランチで実行する
+- [x] SAIVerse本体（`main.py` 等）に Gateway 初期化と `asyncio.Queue` ブリッジを追加する（`docs/implementation_discord.md:202-207`）
+- [x] 本体側設定ファイル／起動スクリプト／テレメトリ連携を更新し、Gateway依存を明示する
+- [x] 本体側の統合テスト（最低限の回帰テストを含む）を最終リリースブランチで実行する
 
 **Exit Criteria**
 - 本体とGatewayの最新ブランチが衝突なくマージされ、統合テストが成功している
