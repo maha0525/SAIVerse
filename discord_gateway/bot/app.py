@@ -26,8 +26,12 @@ class BotApplication:
         self._is_shutting_down = False
 
         self.connection_manager = ConnectionManager(self.settings, self.database)
-        self.router = MessageRouter(self.database, self.connection_manager, self.settings)
-        self.websocket_server = GatewayWebSocketServer(self.settings, self.connection_manager)
+        self.router = MessageRouter(
+            self.database, self.connection_manager, self.settings
+        )
+        self.websocket_server = GatewayWebSocketServer(
+            self.settings, self.connection_manager
+        )
         self.discord_client = SAIVerseDiscordClient(self.settings, self.router)
 
     async def run(self) -> None:

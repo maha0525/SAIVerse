@@ -34,7 +34,9 @@ def utcnow() -> datetime:
 
 class CityBinding(Base):
     __tablename__ = "city_bindings"
-    __table_args__ = (UniqueConstraint("channel_id", name="uq_city_bindings_channel_id"),)
+    __table_args__ = (
+        UniqueConstraint("channel_id", name="uq_city_bindings_channel_id"),
+    )
 
     id: int = Column(Integer, primary_key=True)
     guild_id: str = Column(String(32), nullable=False)
@@ -79,7 +81,9 @@ class LocalAppSession(Base):
     last_seen_at: datetime | None = Column(DateTime, nullable=True)
     expires_at: datetime = Column(DateTime, nullable=False)
     revoked_at: datetime | None = Column(DateTime, nullable=True)
-    created_by_state_id: int | None = Column(Integer, ForeignKey("oauth_states.id"), nullable=True)
+    created_by_state_id: int | None = Column(
+        Integer, ForeignKey("oauth_states.id"), nullable=True
+    )
 
 
 def hash_token(raw_token: str) -> str:
@@ -122,7 +126,9 @@ class IssuedToken:
 class BotDatabase:
     """Thin wrapper around SQLAlchemy primitives tailored for the bot service."""
 
-    def __init__(self, database_url: str, *, engine_options: dict[str, Any] | None = None):
+    def __init__(
+        self, database_url: str, *, engine_options: dict[str, Any] | None = None
+    ):
         options: dict[str, Any] = {"future": True}
         if engine_options:
             options.update(engine_options)
@@ -154,14 +160,20 @@ class BotDatabase:
         channel_str = str(channel_id)
         with self.session() as session:
             binding = session.execute(
-                select(CityBinding.owner_user_id).where(CityBinding.channel_id == channel_str)
+                select(CityBinding.owner_user_id).where(
+                    CityBinding.channel_id == channel_str
+                )
             ).scalar_one_or_none()
         return binding
 
-    def create_oauth_state(self, state: str, redirect_uri: str, ttl: timedelta) -> OAuthStateRecord:
+    def create_oauth_state(
+        self, state: str, redirect_uri: str, ttl: timedelta
+    ) -> OAuthStateRecord:
         expires_at = utcnow() + ttl
         with self.session() as session:
-            record = OAuthState(state=state, redirect_uri=redirect_uri, expires_at=expires_at)
+            record = OAuthState(
+                state=state, redirect_uri=redirect_uri, expires_at=expires_at
+            )
             session.add(record)
             session.flush()
             return OAuthStateRecord(
@@ -194,7 +206,10 @@ class BotDatabase:
         stale_threshold = now - timedelta(days=7)
         condition = or_(
             OAuthState.expires_at < now,
-            and_(OAuthState.consumed_at.isnot(None), OAuthState.consumed_at < stale_threshold),
+            and_(
+                OAuthState.consumed_at.isnot(None),
+                OAuthState.consumed_at < stale_threshold,
+            ),
         )
         with self.session() as session:
             query = session.query(OAuthState).filter(condition)
@@ -216,7 +231,9 @@ class BotDatabase:
         now = utcnow()
         with self.session() as session:
             record = session.execute(
-                select(LocalAppSession).where(LocalAppSession.discord_user_id == discord_user_id)
+                select(LocalAppSession).where(
+                    LocalAppSession.discord_user_id == discord_user_id
+                )
             ).scalar_one_or_none()
             if record:
                 record.token_hash = digest
@@ -259,7 +276,9 @@ class BotDatabase:
     def revoke_tokens_for_user(self, discord_user_id: str) -> int:
         with self.session() as session:
             records = session.execute(
-                select(LocalAppSession).where(LocalAppSession.discord_user_id == discord_user_id)
+                select(LocalAppSession).where(
+                    LocalAppSession.discord_user_id == discord_user_id
+                )
             ).scalars()
             count = 0
             now = utcnow()
@@ -272,7 +291,9 @@ class BotDatabase:
     def prune_expired_sessions(self) -> int:
         now = utcnow()
         with self.session() as session:
-            query = session.query(LocalAppSession).filter(LocalAppSession.expires_at < now)
+            query = session.query(LocalAppSession).filter(
+                LocalAppSession.expires_at < now
+            )
             count = query.count()
             if count:
                 query.delete(synchronize_session=False)

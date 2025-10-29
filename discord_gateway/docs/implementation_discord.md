@@ -172,6 +172,36 @@ Discordベースアーキテクチャは、運用面においても大きなメ�
 
 ---
 
+### 3.6. エラー／再送シナリオと再同期仕様
+
+Discordベース連携では、Bot・ローカル双方が以下の機構を備え、イベント欠落や通信断が発生しても整合性を回復できるようにする。
+
+1. **イベントIDとACK**
+    * すべてのBot→ローカルイベントに `payload.event_id`（UUID）と `payload.channel_seq`（チャンネル単位の連番）を付与。
+    * ローカル側は処理完了後に `ack` コマンドを返信し、Botの `ConnectionManager` が未ACKキューを管理する。
+    * 環境変数 `SAIVERSE_PENDING_REPLAY_LIMIT`（既定250件）と `SAIVERSE_REPLAY_BATCH_SIZE`（既定50件）がキュー長制限と再送単位を制御する。
+
+2. **自動リプレイと重複防止**
+    * 再接続時、Botは未ACKイベントを即座に再送する。ローカル `DiscordGatewayOrchestrator` は `event_id` を記録し、重複イベントを検知した場合でも即ACKして無害化する。
+    * ローカルはハートビート維持および指数バックオフ再接続（`GatewaySettings`）を行い、成功後に未処理イベントを順に処理する。
+
+3. **バックログ閾値と再同期**
+    * Bot側未ACKキューが上限を超過すると `resync_required` イベントを送信。ローカルは `state_sync_request` を返し、Botが溜まっているイベントをフルリプレイする。
+    * `state_sync_ack` には残キュー件数が含まれ、ダッシュボード監視やオペレーション判断に利用する。
+    * `SAIVerseGatewayAdapter` は `gateway_handle_resync_required` を経由し、本体ロジックへ再同期要求を通知できる。
+
+4. **エラー通知とリトライ**
+    * ハートビート断・JSONパース失敗はログに記録し、安全側に倒して接続をクローズ。再接続後は未ACKキューから再送する。
+    * メモリ同期（`memory_sync_*`）が途中で失敗した場合は再送を試み、それでも復旧できない場合は再同期に切り替える。
+
+5. **テレメトリ**
+    * Bot：未ACK件数、`resync_required` 発生数、再送試行回数をメトリクス収集。
+    * ローカル：再接続試行回数、`state_sync_request` 所要時間、ハートビート断回数を記録し、フェーズ7以降の監視対象とする。
+
+実装は `discord_gateway/bot/connection_manager.py`、`discord_gateway/bot/ws_server.py`、`discord_gateway/orchestrator.py` を中心に提供し、`pytest discord_gateway/tests` に網羅テストを追加済みである（大容量／欠損シナリオは `test_orchestrator.py::test_memory_sync_large_transfer`、`test_orchestrator.py::test_memory_sync_duplicate_chunk_ack_without_duplicate_processing` を参照）。
+
+---
+
 ## 4. 実装方針: 疎結合アーキテクチャ
 
 SAIVerse本体の既存ロジックへの影響を最小限に抑え、他の開発者とのコンフリクトを避けつつ独立して開発を進めるため、**「ゲートウェイパターン」**を採用します。
@@ -190,6 +220,17 @@ Discordとの通信に関する全機能を、`discord_gateway`という独立�
     *   SAIVERSE_GATEWAY_RECONNECT_INITIAL / SAIVERSE_GATEWAY_RECONNECT_MAX — 再接続リトライの初期・最大ディレイ。
     *   SAIVERSE_GATEWAY_INCOMING_MAXSIZE / SAIVERSE_GATEWAY_OUTGOING_MAXSIZE — Gateway内部で使用するQueueの最大サイズ（0は無制限）。
     *   SAIVERSE_GATEWAY_MAX_PAYLOAD — WebSocketで受信可能な最大ペイロードサイズ（バイト）。
+*   **訪問ペルソナ管理:**
+*   **記憶持ち帰り:**
+    *   退室時に `memory_sync_initiate` → `memory_sync_chunk` → `memory_sync_complete` を順に送信し、転送サイズやSHA-256チェックサムを含むメタデータで検証できるようにする。
+    *   チャンクは環境変数 `SAIVERSE_GATEWAY_MEMORY_CHUNK_SIZE` でサイズを調整し、失敗時は再送（再度ハンドシェイク）で回復させる。
+    *   GatewayはBotから届けられる訪問者イベントを VisitorRegistry で保持し、DiscordユーザーIDからPersona/所有者を特定します。
+    *   イベント種別（join/update/remove）を通じてCity内での滞在先を同期し、会話や記憶同期処理の起点に利用します。
+    *   Gatewayは訪問者のメッセージを検出すると、本体アダプタへ 
+ole=persona_remote として通知し、RemotePersonaProxy経由で応答を取得します。
+*   **SAIVerseアダプタ:**
+    *   Gateway側では `DiscordGatewayOrchestrator` と `SAIVerseGatewayAdapter` が本体ロジックとの橋渡しを担い、`GatewayHost` が `SAIVerseManager` への呼び出しを集約します。
+    *   human / persona / memory 向けイベントは `GatewayHostAdapter` を通じて受け渡し、最小限の executor で同期コードへ委譲します。
 *   **ディレクトリ構成案:**
     ```
     SAIVerse/
@@ -210,6 +251,8 @@ Discordとの通信に関する全機能を、`discord_gateway`という独立�
 *   `incoming_queue`: `DiscordGateway`がBotから受信したイベントを翻訳し、このキューに入れます。SAIVerse本体はここからイベントを取得して処理します。
 *   `outgoing_queue`: SAIVerse本体がAIの発言などのアクションを希望する際、指示オブジェクトをこのキューに入れます。`DiscordGateway`はこれを取り出してBotへコマンドを送信します。
 
+実装では `discord_gateway.ensure_gateway_runtime(manager)` を呼び出すことで、`GatewayRuntime` を初期化しつつ `incoming_queue` / `outgoing_queue` をブリッジする `GatewayBridge` が生成されます（`manager.gateway_bridge` 経由で参照可能）。`SAIVERSE_GATEWAY_ENABLED=1` が設定されていない場合は自動的に無効化されるため、本番／開発環境で容易に切り替えられます。
+
 この設計により、SAIVerse本体が変更されるのは、主に`main.py`での`DiscordGateway`の初期化と、メインループでのキューの監視処理のみに限定されます。
 
 ### 4.3. テスト方針
@@ -218,6 +261,7 @@ Discordとの通信に関する全機能を、`discord_gateway`という独立�
 
 *   **単体テスト:** `translator.py`の翻訳ロジックや、`auth.py`のトークン管理機能は、独立してテストします。
 *   **結合テスト:** `gateway_service.py`のメインロジックは、WebSocketエンドポイントをモック化（偽のサーバを立てる）することでテストします。これにより、実際の`SAIVerse Bot`に接続することなく、「Botからのイベント受信 → キューへの投入」や「キューからの指示取得 → Botへのコマンド送信」といった一連のフローを自動テストできます。
+    *   実装済みの `scripts/run_discord_gateway_tests.py` を実行すると、CI と同じユニット／統合／負荷シナリオ（再送・再同期テストを含む）を一括で走らせることができます。
 
 SAIVerse本体側のテストは、この`DiscordGateway`のテストとは独立して、従来通りキューにダミーデータを入れることで実行できます。
 

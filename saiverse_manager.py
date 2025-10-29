@@ -6,7 +6,8 @@ import requests
 import logging
 from pathlib import Path
 import mimetypes
-from typing import Dict, List, Optional, Tuple, Iterator, Union, Any
+import hashlib
+from typing import Dict, List, Optional, Tuple, Iterator, Union, Any, Sequence
 from datetime import datetime, timedelta, timezone as dt_timezone
 from zoneinfo import ZoneInfo
 import pandas as pd
@@ -14,6 +15,20 @@ import tempfile
 import shutil
 import importlib
 import tools.defs
+from discord_gateway import (
+    ChannelContext,
+    ChannelMapping,
+    DiscordGatewayOrchestrator,
+    DiscordGatewayService,
+    GatewayRuntime,
+    SAIVerseGatewayAdapter,
+    GatewayHost,
+    get_gateway_settings,
+    GatewayCommand,
+    VisitorProfile,
+    ensure_gateway_runtime,
+)
+from discord_gateway.saiverse_adapter import DiscordMessage
 import os
 import time
 
@@ -201,6 +216,21 @@ class SAIVerseManager:
         self.db_polling_stop_event = threading.Event()
         self.db_polling_thread = threading.Thread(target=self._db_polling_loop, daemon=True)
         self.db_polling_thread.start()
+        self.gateway_runtime = None
+        self.gateway_mapping = ChannelMapping([])
+        self._gateway_memory_buffers = {}
+        gateway_enabled = os.getenv("SAIVERSE_GATEWAY_ENABLED", "0").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        if gateway_enabled:
+            try:
+                self._initialize_gateway_integration()
+            except Exception as exc:
+                logging.exception(
+                    "Failed to initialize Discord gateway integration: %s", exc
+                )
 
     @staticmethod
     def _ensure_city_timezone_column(engine) -> None:
@@ -1184,6 +1214,236 @@ class SAIVerseManager:
         finally:
             db.close()
 
+    def _initialize_gateway_integration(self) -> None:
+        bridge = ensure_gateway_runtime(self)
+        if bridge:
+            self.gateway_runtime = bridge.runtime
+            self.gateway_mapping = bridge.mapping
+
+    def gateway_on_visitor_registered(
+        self, visitor: VisitorProfile, context: ChannelContext | None
+    ) -> None:
+        metadata = visitor.metadata or {}
+        target_building = context.building_id if context else self.user_room_id
+        profile = {
+            "persona_id": visitor.persona_id,
+            "persona_name": metadata.get("persona_name", visitor.persona_id),
+            "target_building_id": target_building,
+            "avatar_image": metadata.get("avatar_image", self.default_avatar),
+            "emotion": metadata.get("emotion", {}),
+            "source_city_id": metadata.get("home_city_id")
+            or metadata.get("source_city_id")
+            or visitor.current_city_id,
+        }
+        success, reason = self.place_visiting_persona(profile)
+        if not success:
+            logging.warning(
+                "Failed to place visiting persona %s: %s", visitor.persona_id, reason
+            )
+
+    def gateway_on_visitor_departed(self, visitor: VisitorProfile) -> None:
+        metadata = visitor.metadata or {}
+        current_building = (
+            visitor.current_building_id
+            or metadata.get("current_building_id")
+            or self.user_room_id
+        )
+        self._gateway_initiate_memory_sync(visitor, current_building)
+        target_city = (
+            metadata.get("home_city_id")
+            or metadata.get("source_city_id")
+            or self.city_name
+        )
+        target_building = (
+            metadata.get("home_building_id")
+            or metadata.get("return_building_id")
+            or self.user_room_id
+        )
+        success, reason = self.return_visiting_persona(
+            visitor.persona_id, target_city, target_building
+        )
+        if not success:
+            logging.warning(
+                "Failed to return visitor %s: %s", visitor.persona_id, reason
+            )
+
+    def gateway_handle_human_message(
+        self, message: DiscordMessage
+    ) -> Sequence[GatewayCommand] | None:
+        entry = {
+            "role": "user",
+            "content": message.content,
+            "source": "discord",
+            "author_discord_id": message.author_discord_id,
+        }
+        self._append_gateway_history(message.context.building_id, entry)
+        conv = self.conversation_managers.get(message.context.building_id)
+        if conv:
+            conv.trigger_next_turn()
+        return []
+
+    def gateway_handle_remote_persona_message(
+        self, message: DiscordMessage
+    ) -> Sequence[GatewayCommand] | None:
+        visitor = message.visitor
+        if visitor:
+            occupants = self.occupants.setdefault(message.context.building_id, [])
+            if visitor.persona_id not in occupants:
+                occupants.append(visitor.persona_id)
+        entry = {
+            "role": "assistant",
+            "content": message.content,
+            "source": "discord",
+        }
+        if visitor:
+            entry["persona_id"] = visitor.persona_id
+        self._append_gateway_history(message.context.building_id, entry)
+        self._gateway_send_message(
+            message.context.building_id, message.content, entry.get("persona_id")
+        )
+        conv = self.conversation_managers.get(message.context.building_id)
+        if conv:
+            conv.trigger_next_turn()
+        return []
+
+    def gateway_handle_memory_sync_chunk(
+        self, visitor: VisitorProfile, payload: dict
+    ) -> Sequence[GatewayCommand] | None:
+        buffer = self._gateway_memory_buffers.setdefault(
+            visitor.persona_id, bytearray()
+        )
+        data = payload.get("data")
+        if data:
+            try:
+                buffer.extend(base64.b64decode(data))
+            except Exception as exc:
+                logging.warning(
+                    "Failed to decode memory chunk for %s: %s", visitor.persona_id, exc
+                )
+        return []
+
+    def gateway_handle_memory_sync_complete(
+        self, visitor: VisitorProfile, payload: dict
+    ) -> Sequence[GatewayCommand] | None:
+        buffer = self._gateway_memory_buffers.pop(visitor.persona_id, None)
+        if not buffer:
+            return []
+        target_dir = self.saiverse_home / "gateway_memory"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        filename = payload.get("transfer_id") or visitor.persona_id
+        target_path = target_dir / f"{filename}.bin"
+        target_path.write_bytes(buffer)
+        logging.info(
+            "Stored gateway memory for %s at %s", visitor.persona_id, target_path
+        )
+        return []
+
+    def gateway_handle_ai_replies(
+        self, building_id: str, persona, replies: Sequence[str]
+    ) -> None:
+        if not replies:
+            return
+        persona_id = getattr(persona, "persona_id", None)
+        for reply in replies:
+            self._gateway_send_message(building_id, reply, persona_id)
+
+    def _gateway_initiate_memory_sync(
+        self, visitor: VisitorProfile, building_id: str
+    ) -> None:
+        runtime = getattr(self, "gateway_runtime", None)
+        mapping = getattr(self, "gateway_mapping", None)
+        if not runtime or not mapping:
+            return
+        history = self.building_histories.get(building_id, [])
+        persona_history = [
+            entry for entry in history if entry.get("persona_id") == visitor.persona_id
+        ]
+        payload = {
+            "persona_id": visitor.persona_id,
+            "city_id": self.city_name,
+            "building_id": building_id,
+            "history": persona_history,
+        }
+        data_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if not data_bytes:
+            return
+        chunk_size = int(os.getenv("SAIVERSE_GATEWAY_MEMORY_CHUNK_SIZE", "65536"))
+        chunk_size = max(chunk_size, 1024)
+        transfer_id = f"{visitor.persona_id}-{int(time.time())}"
+        checksum = hashlib.sha256(data_bytes).hexdigest()
+        total_chunks = (len(data_bytes) + chunk_size - 1) // chunk_size
+        initiate = GatewayCommand(
+            type="memory_sync_initiate",
+            payload={
+                "target_discord_user_id": visitor.owner_user_id,
+                "transfer_id": transfer_id,
+                "persona_id": visitor.persona_id,
+                "city_id": self.city_name,
+                "building_id": building_id,
+                "total_size": len(data_bytes),
+                "total_chunks": total_chunks,
+                "checksum": checksum,
+            },
+        )
+        self._gateway_send_command(initiate)
+        for index in range(total_chunks):
+            chunk = data_bytes[index * chunk_size : (index + 1) * chunk_size]
+            command = GatewayCommand(
+                type="memory_sync_chunk",
+                payload={
+                    "target_discord_user_id": visitor.owner_user_id,
+                    "transfer_id": transfer_id,
+                    "chunk_index": index,
+                    "data": base64.b64encode(chunk).decode("ascii"),
+                },
+            )
+            self._gateway_send_command(command)
+        complete = GatewayCommand(
+            type="memory_sync_complete",
+            payload={
+                "target_discord_user_id": visitor.owner_user_id,
+                "transfer_id": transfer_id,
+                "checksum": checksum,
+            },
+        )
+        self._gateway_send_command(complete)
+
+    def _gateway_send_message(
+        self, building_id: str, content: str, persona_id: str | None
+    ) -> None:
+        mapping = getattr(self, "gateway_mapping", None)
+        if not mapping:
+            return
+        context = mapping.find_by_location(str(self.city_name), building_id)
+        if not context:
+            return
+        command = GatewayCommand(
+            type="post_message",
+            payload={
+                "channel_id": context.channel_id,
+                "content": content,
+                "persona_id": persona_id,
+                "building_id": building_id,
+                "city_id": context.city_id,
+            },
+        )
+        self._gateway_send_command(command)
+
+    def _gateway_send_command(self, command: GatewayCommand) -> None:
+        runtime = getattr(self, "gateway_runtime", None)
+        if not runtime:
+            return
+
+        async def enqueue() -> None:
+            await runtime.orchestrator.service.outgoing_queue.put(command)
+
+        runtime.submit(enqueue())
+
+    def _append_gateway_history(self, building_id: str, entry: Dict[str, Any]) -> None:
+        history = self.building_histories.setdefault(building_id, [])
+        history.append(entry)
+        self._save_building_histories()
+
     def _save_building_histories(self) -> None:
         for b_id, path in self.building_memory_paths.items():
             hist = self.building_histories.get(b_id, [])
@@ -1193,6 +1453,13 @@ class SAIVerseManager:
     def shutdown(self):
         """Safely shutdown all managers and save data."""
         logging.info("Shutting down SAIVerseManager...")
+
+        if getattr(self, "gateway_runtime", None):
+            try:
+                self.gateway_runtime.stop()
+            except Exception:
+                logging.debug("Failed to stop gateway runtime cleanly.", exc_info=True)
+            self.gateway_runtime = None
 
         # --- ★ アプリケーション終了時にユーザーをログアウトさせる ---
         if self.user_is_online:

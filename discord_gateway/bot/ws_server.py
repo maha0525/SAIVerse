@@ -83,9 +83,14 @@ class GatewayWebSocketServer:
 
             await websocket.send(
                 json.dumps(
-                    {"type": "hello_ack", "status": "ok", "session_id": client.session.session_id}
+                    {
+                        "type": "hello_ack",
+                        "status": "ok",
+                        "session_id": client.session.session_id,
+                    }
                 )
             )
+            await self._connections.replay_pending(client, full=True)
 
             await self._receive_loop(client)
         except TimeoutError:
@@ -116,6 +121,33 @@ class GatewayWebSocketServer:
             if event_type == "heartbeat":
                 await self._connections.heartbeat(client)
                 await websocket.send(json.dumps({"type": "heartbeat_ack"}))
+            elif event_type == "ack":
+                payload = message.get("payload") or {}
+                event_ids = payload.get("event_ids")
+                if isinstance(event_ids, str):
+                    event_ids = [event_ids]
+                if not event_ids:
+                    single = payload.get("event_id")
+                    if single:
+                        event_ids = [single]
+                if event_ids:
+                    await self._connections.process_ack(
+                        client.session.discord_user_id, event_ids
+                    )
+            elif event_type == "state_sync_request":
+                await self._connections.handle_state_sync_request(client)
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "state_sync_ack",
+                            "payload": {
+                                "pending_events": await self._connections.pending_count(
+                                    client.session.discord_user_id
+                                )
+                            },
+                        }
+                    )
+                )
             else:
                 logger.debug(
                     "Ignoring unhandled client message type=%s payload=%s",

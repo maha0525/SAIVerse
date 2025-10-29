@@ -5,7 +5,12 @@ from datetime import timedelta
 import pytest
 
 from discord_gateway.bot.auth import AuthService, OAuthStateError
-from discord_gateway.bot.database import BotDatabase, LocalAppSession, hash_token, utcnow
+from discord_gateway.bot.database import (
+    BotDatabase,
+    LocalAppSession,
+    hash_token,
+    utcnow,
+)
 
 
 class FakeResponse:
@@ -28,9 +33,13 @@ class FakeOAuthClient:
     async def __aexit__(self, exc_type, exc, tb) -> None:
         return None
 
-    async def post(self, url: str, data: dict, headers: dict | None = None) -> FakeResponse:
+    async def post(
+        self, url: str, data: dict, headers: dict | None = None
+    ) -> FakeResponse:
         self.calls.append(("post", url))
-        return FakeResponse(200, {"access_token": "access-token", "token_type": "Bearer"})
+        return FakeResponse(
+            200, {"access_token": "access-token", "token_type": "Bearer"}
+        )
 
     async def get(self, url: str, headers: dict | None = None) -> FakeResponse:
         self.calls.append(("get", url))
@@ -70,7 +79,9 @@ async def test_complete_authorization_returns_session_token(tmp_path, make_setti
     service, database, settings, clients = create_service(tmp_path, make_settings)
     authorization = service.begin_authorization()
 
-    issued = await service.complete_authorization("auth-code", authorization.state, label="desktop")
+    issued = await service.complete_authorization(
+        "auth-code", authorization.state, label="desktop"
+    )
 
     assert len(issued.token) == settings.session_token_length
     auth_session = database.authenticate_token(issued.token)
