@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -8,8 +9,9 @@ from pathlib import Path
 import os
 
 class TestImageGenerator(unittest.TestCase):
+    @patch('tools.defs.image_generator.store_image_bytes')
     @patch('tools.defs.image_generator.genai')
-    def test_generate_image(self, mock_genai):
+    def test_generate_image(self, mock_genai, mock_store):
         mock_client = MagicMock()
         mock_genai.Client.return_value = mock_client
         mock_resp = MagicMock()
@@ -21,15 +23,22 @@ class TestImageGenerator(unittest.TestCase):
         mock_candidate.content.parts = [part]
         mock_resp.candidates = [mock_candidate]
         mock_client.models.generate_content.return_value = mock_resp
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(b'imgdata')
+            temp_path = Path(tmp.name)
+        mock_store.return_value = ({"uri": "saiverse://image/test", "mime_type": "image/png"}, temp_path)
 
         with patch.dict(os.environ, {"GEMINI_FREE_API_KEY": "FREE", "GEMINI_API_KEY": ""}):
-            text, info, path = generate_image('a cat')
+            text, info, path, metadata = generate_image('a cat')
         self.assertIsInstance(info, ToolResult)
         self.assertIn('a cat', text)
         self.assertTrue(info.history_snippet)
-        self.assertTrue(Path(path).exists())
+        self.assertEqual(Path(path), temp_path)
+        self.assertIsInstance(metadata, dict)
+        self.assertIn("media", metadata)
         mock_genai.Client.assert_called_once_with(api_key='FREE')
         mock_client.models.generate_content.assert_called_once()
+        temp_path.unlink(missing_ok=True)
 
     @patch('tools.defs.image_generator.genai')
     def test_generate_image_fallback(self, mock_genai):

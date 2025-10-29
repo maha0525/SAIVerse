@@ -112,8 +112,8 @@ class TestLLMClients(unittest.TestCase):
         mock_resp = MagicMock()
         mock_candidate = MagicMock()
         mock_candidate.content.parts = [
-            MagicMock(text="Test ", function_call=None),
-            MagicMock(text="Gemini response", function_call=None),
+            MagicMock(text="Test ", function_call=None, thought=False),
+            MagicMock(text="Gemini response", function_call=None, thought=False),
         ]
         mock_resp.candidates = [mock_candidate]
         mock_client_instance.models.generate_content.return_value = mock_resp
@@ -144,8 +144,8 @@ class TestLLMClients(unittest.TestCase):
         cand1 = MagicMock()
         cand1.content = MagicMock()
         cand1.content.parts = [
-            MagicMock(text="Stream ", function_call=None),
-            MagicMock(text="test", function_call=None),
+            MagicMock(text="Stream ", function_call=None, thought=False),
+            MagicMock(text="test", function_call=None, thought=False),
         ]
         cand1.index = 0
         mock_chunk1.candidates = [cand1]
@@ -153,7 +153,7 @@ class TestLLMClients(unittest.TestCase):
         mock_chunk2 = MagicMock()
         cand2 = MagicMock()
         cand2.content = MagicMock()
-        cand2.content.parts = [MagicMock(text="Stream test!", function_call=None)]
+        cand2.content.parts = [MagicMock(text="Stream test!", function_call=None, thought=False)]
         cand2.index = 0
         mock_chunk2.candidates = [cand2]
 
@@ -192,7 +192,7 @@ class TestLLMClients(unittest.TestCase):
         mock_free.models.generate_content.side_effect = Exception("429")
         mock_paid_resp = MagicMock()
         cand = MagicMock()
-        cand.content.parts = [MagicMock(text="OK", function_call=None)]
+        cand.content.parts = [MagicMock(text="OK", function_call=None, thought=False)]
         mock_paid_resp.candidates = [cand]
         mock_paid.models.generate_content.return_value = mock_paid_resp
 
@@ -203,8 +203,9 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(response, "OK")
         mock_paid.models.generate_content.assert_called_once()
 
+    @patch('llm_clients.OllamaClient._probe_base', return_value='http://ollama.test')
     @patch('llm_clients.requests.post')
-    def test_ollama_client_generate(self, mock_post):
+    def test_ollama_client_generate(self, mock_post, mock_probe):
         mock_response = MagicMock()
         mock_response.raise_for_status.return_value = None
         mock_response.json.return_value = {
@@ -219,19 +220,20 @@ class TestLLMClients(unittest.TestCase):
         response = client.generate(messages)
 
         self.assertEqual(response, "Test Ollama response")
-        mock_post.assert_called_once_with(
-            client.url,
-            json={
-                "model": client.model,
-                "messages": messages,
-                "stream": False,
-                "options": {"num_ctx": client.context_length}
-            },
-            timeout=300,
-        )
+        mock_post.assert_called_once()
+        args, kwargs = mock_post.call_args
+        self.assertEqual(args[0], client.url)
+        payload = kwargs["json"]
+        self.assertEqual(payload["model"], client.model)
+        self.assertEqual(payload["messages"], messages)
+        self.assertEqual(payload["stream"], False)
+        self.assertEqual(payload["options"], {"num_ctx": client.context_length})
+        self.assertEqual(payload.get("response_format"), {"type": "json_object"})
+        self.assertEqual(kwargs["timeout"], (3, 300))
 
+    @patch('llm_clients.OllamaClient._probe_base', return_value='http://ollama.test')
     @patch('llm_clients.requests.post')
-    def test_ollama_client_generate_stream(self, mock_post):
+    def test_ollama_client_generate_stream(self, mock_post, mock_probe):
         mock_response = MagicMock()
         mock_response.raise_for_status.return_value = None
 
@@ -248,17 +250,16 @@ class TestLLMClients(unittest.TestCase):
         response_generator = client.generate_stream(messages)
 
         self.assertEqual(list(response_generator), ["Stream ", "test"])
-        mock_post.assert_called_once_with(
-            client.url,
-            json={
-                "model": client.model,
-                "messages": messages,
-                "stream": True,
-                "options": {"num_ctx": client.context_length}
-            },
-            timeout=300,
-            stream=True,
-        )
+        mock_post.assert_called_once()
+        args, kwargs = mock_post.call_args
+        self.assertEqual(args[0], client.url)
+        payload = kwargs["json"]
+        self.assertEqual(payload["model"], client.model)
+        self.assertEqual(payload["messages"], messages)
+        self.assertTrue(payload["stream"])
+        self.assertEqual(payload["options"], {"num_ctx": client.context_length})
+        self.assertEqual(kwargs["timeout"], (3, 300))
+        self.assertTrue(kwargs["stream"])
 
 if __name__ == '__main__':
     unittest.main()

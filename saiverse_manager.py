@@ -43,6 +43,8 @@ from occupancy_manager import OccupancyManager
 from conversation_manager import ConversationManager
 from sqlalchemy.orm import sessionmaker
 from remote_persona_proxy import RemotePersonaProxy
+from manager.sds import SDSMixin
+from manager.background import DatabasePollingMixin
 from database.models import Base, AI as AIModel, Building as BuildingModel, BuildingOccupancyLog, User as UserModel, City as CityModel, VisitingAI, ThinkingRequest, Blueprint, Tool as ToolModel, BuildingToolLink
 
 
@@ -50,7 +52,7 @@ from database.models import Base, AI as AIModel, Building as BuildingModel, Buil
 DEFAULT_MODEL = "gemini-2.0-flash"
 
 
-class SAIVerseManager:
+class SAIVerseManager(SDSMixin, DatabasePollingMixin):
     """Manage multiple personas and building occupancy."""
 
     def __init__(
@@ -62,6 +64,7 @@ class SAIVerseManager:
     ):
         # --- Step 0: Database and Configuration Setup ---
         self.db_path = db_path
+        self.city_model = CityModel
         DATABASE_URL = f"sqlite:///{db_path}"
         engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
         self._ensure_city_timezone_column(engine)
@@ -111,22 +114,23 @@ class SAIVerseManager:
             b.building_id: self.saiverse_home / "cities" / self.city_name / "buildings" / b.building_id / "log.json"
             for b in self.buildings
         }
-        default_avatar_path = Path("assets/icons/blank.png")
-        if default_avatar_path.exists():
-            mime = mimetypes.guess_type(default_avatar_path.name)[0] or "image/png"
-            data_b = default_avatar_path.read_bytes()
-            b64 = base64.b64encode(data_b).decode("ascii")
-            self.default_avatar = f"data:{mime};base64,{b64}"
-        else:
-            self.default_avatar = ""
-        host_avatar_path = Path("assets/icons/host.png")
-        if host_avatar_path.exists():
-            mime = mimetypes.guess_type(host_avatar_path.name)[0] or "image/png"
-            data_b = host_avatar_path.read_bytes()
-            b64 = base64.b64encode(data_b).decode("ascii")
-            self.host_avatar = f"data:{mime};base64,{b64}"
-        else:
-            self.host_avatar = self.default_avatar
+        # Load default avatars with graceful fallback
+        avatar_fallback_paths = [
+            Path("assets/icons/blank.png"),
+            Path("assets/icons/user.png"),
+            Path("assets/icons/host.png"),
+            Path("assets/icons/air.png"),
+        ]
+        default_avatar_data = ""
+        for avatar_path in avatar_fallback_paths:
+            data_url = self._load_avatar_data(avatar_path)
+            if data_url:
+                default_avatar_data = data_url
+                break
+        self.default_avatar = default_avatar_data
+
+        host_avatar_data = self._load_avatar_data(Path("assets/icons/host.png"))
+        self.host_avatar = host_avatar_data or self.default_avatar
 
         # --- Step 3: Load Conversation Histories ---
         # 各建物の会話履歴をファイルから読み込みます。
@@ -236,25 +240,6 @@ class SAIVerseManager:
                     "Failed to initialize Discord gateway integration: %s", exc
                 )
 
-    @staticmethod
-    def _ensure_city_timezone_column(engine) -> None:
-        """Ensure the city table has a TIMEZONE column."""
-        try:
-            inspector = inspect(engine)
-            columns = {col["name"] for col in inspector.get_columns("city")}
-        except Exception as exc:
-            logging.warning("Failed to inspect city table for timezone column: %s", exc)
-            return
-        if "TIMEZONE" in columns:
-            return
-        logging.info("Adding TIMEZONE column to city table.")
-        try:
-            with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE city ADD COLUMN TIMEZONE TEXT DEFAULT 'UTC' NOT NULL"))
-                conn.execute(text("UPDATE city SET TIMEZONE = 'UTC' WHERE TIMEZONE IS NULL"))
-        except Exception as exc:
-            logging.error("Failed to add TIMEZONE column to city table: %s", exc)
-
     def _update_timezone_cache(self, tz_name: Optional[str]) -> None:
         """Update cached timezone information for this manager."""
         name = (tz_name or "UTC").strip() or "UTC"
@@ -267,139 +252,19 @@ class SAIVerseManager:
         self.timezone_name = name
         self.timezone_info = tz
 
-    def _sds_background_loop(self):
-        """Periodically sends heartbeats and updates the city list from SDS."""
-        while not self.sds_stop_event.wait(30): # every 30 seconds
-            self._send_heartbeat()
-            self._update_cities_from_sds()
-
-    def _register_with_sds(self):
-        """Registers this city with the Directory Service on startup."""
-        register_url = f"{self.sds_url}/register"
-        payload = {
-            "city_name": self.city_name,
-            "city_id_pk": self.city_id,
-            "api_port": self.api_port
-        }
+    @staticmethod
+    def _load_avatar_data(path: Path) -> Optional[str]:
+        """Return a data URL for the given avatar path if it exists."""
         try:
-            response = self.sds_session.post(register_url, json=payload, timeout=5)
-            response.raise_for_status()
-            logging.info(f"Successfully registered with SDS at {self.sds_url}")
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Could not register with SDS: {e}. Will retry in the background.")
-
-    def _send_heartbeat(self):
-        """Sends a heartbeat to the Directory Service."""
-        heartbeat_url = f"{self.sds_url}/heartbeat"
-        payload = {"city_name": self.city_name}
-        try:
-            response = self.sds_session.post(heartbeat_url, json=payload, timeout=2)
-            response.raise_for_status()
-            logging.debug(f"Heartbeat sent to SDS for {self.city_name}")
-        except requests.exceptions.RequestException as e:
-            logging.warning(f"Could not send heartbeat to SDS: {e}")
-
-    def _update_cities_from_sds(self):
-        """Fetches the list of active cities from the Directory Service."""
-        cities_url = f"{self.sds_url}/cities"
-        try:
-            response = self.sds_session.get(cities_url, timeout=5)
-            response.raise_for_status()
-            cities_data = response.json()
-            if self.city_name in cities_data:
-                del cities_data[self.city_name]
-            
-            if self.cities_config != cities_data:
-                logging.info(f"Updated city directory from SDS: {list(cities_data.keys())}")
-                self.cities_config = cities_data
-            
-            if self.sds_status != "Online":
-                logging.info("Connection to SDS established.")
-            self.sds_status = "Online"
-
-        except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
-            if self.sds_status == "Online":
-                logging.warning(f"Lost connection to SDS: {e}. Falling back to local DB config.")
-                self._load_cities_from_db() # Revert to local config
-            else:
-                logging.debug(f"Could not update city list from SDS: {e}")
-            self.sds_status = "Offline (SDS Unreachable)"
-
-    def _load_cities_from_db(self):
-        """Loads the city configuration from the local database."""
-        db = self.SessionLocal()
-        try:
-            other_cities = db.query(CityModel).filter(CityModel.CITYID != self.city_id).all()
-            self.cities_config = {
-                city.CITYNAME: {
-                    "city_id": city.CITYID,
-                    "api_base_url": f"http://127.0.0.1:{city.API_PORT}",
-                    "timezone": getattr(city, "TIMEZONE", "UTC") or "UTC",
-                } for city in other_cities
-            }
-            logging.info(f"Loaded/reloaded city config from local DB. Found {len(self.cities_config)} other cities.")
-        finally:
-            db.close()
-
-    def switch_to_offline_mode(self):
-        """Forces the manager to use the local DB for city configuration."""
-        if self.sds_status == "Offline (Forced by User)":
-            logging.info("Already in forced offline mode.")
-            return self.sds_status
-
-        logging.info("User requested to switch to offline mode.")
-        # Stop the background thread if it's running
-        if self.sds_thread and self.sds_thread.is_alive():
-            self.sds_stop_event.set()
-            self.sds_thread.join(timeout=2)
-        
-        self._load_cities_from_db()
-        self.sds_status = "Offline (Forced by User)"
-        logging.info("Switched to offline mode. SDS communication is stopped.")
-        return self.sds_status
-
-    def switch_to_online_mode(self):
-        """Attempts to reconnect to SDS and resume online operations."""
-        logging.info("User requested to switch to online mode.")
-        
-        # If the thread is already running, just force an update and return.
-        if self.sds_thread and self.sds_thread.is_alive():
-            logging.info("SDS thread is already running. Forcing an update.")
-            self._update_cities_from_sds()
-            return self.sds_status
-        
-        # If the thread is not running, start it.
-        logging.info("SDS thread is not running. Attempting to start it.")
-        self.sds_status = "Online (Connecting...)"
-        self.sds_stop_event.clear() # Reset the stop event
-        
-        # Try to connect immediately
-        self._register_with_sds()
-        self._update_cities_from_sds() # This will set status to "Online" or "Offline (SDS Unreachable)"
-        
-        self.sds_thread = threading.Thread(target=self._sds_background_loop, daemon=True)
-        self.sds_thread.start()
-        logging.info("SDS background thread re-started.")
-        return self.sds_status
-
-    def _db_polling_loop(self):
-        """Periodically polls the database for inter-city communication tasks."""
-        # 3秒ごとにDBをチェックするループ
-        while not self.db_polling_stop_event.wait(3):
-            try:
-                # 1. 訪問依頼の確認 (訪問先Cityが実行)
-                self._check_for_visitors()
-                
-                # 2. 思考依頼の確認 (故郷Cityが実行)
-                self._process_thinking_requests()
-
-                # 3. 自身の派遣依頼のステータス確認 (出発元Cityが実行)
-                self._check_dispatch_status()
-
-                # 4. スケジュールされたプロンプトの実行
-                self.run_scheduled_prompts()
-            except Exception as e:
-                logging.error(f"Error in DB polling loop: {e}", exc_info=True)
+            if not path.exists():
+                return None
+            mime = mimetypes.guess_type(path.name)[0] or "image/png"
+            data_b = path.read_bytes()
+            b64 = base64.b64encode(data_b).decode("ascii")
+            return f"data:{mime};base64,{b64}"
+        except Exception:
+            logging.warning("Failed to load avatar asset %s", path, exc_info=True)
+            return None
 
     @property
     def all_personas(self) -> Dict[str, Union[PersonaCore, RemotePersonaProxy]]:
@@ -2309,6 +2174,19 @@ class SAIVerseManager:
                 "BASE_SYSTEM_PROMPT": blueprint.BASE_SYSTEM_PROMPT,
                 "ENTITY_TYPE": blueprint.ENTITY_TYPE,
             }
+        finally:
+            db.close()
+
+    def get_blueprint_choices(self) -> List[str]:
+        """Return blueprint IDs as string choices for UI dropdowns."""
+        db = self.SessionLocal()
+        try:
+            results = (
+                db.query(Blueprint.BLUEPRINT_ID)
+                .order_by(Blueprint.NAME.asc())
+                .all()
+            )
+            return [str(row.BLUEPRINT_ID) for row in results]
         finally:
             db.close()
 

@@ -8,6 +8,11 @@ from datetime import datetime
 from history_manager import HistoryManager
 
 class TestHistoryManager(unittest.TestCase):
+    def assertMessagesMatch(self, actual, expected):
+        self.assertEqual(
+            [(m.get("role"), m.get("content")) for m in actual],
+            [(m.get("role"), m.get("content")) for m in expected],
+        )
 
     def setUp(self):
         # 各テストメソッドの実行前に呼ばれるセットアップ
@@ -128,7 +133,11 @@ class TestHistoryManager(unittest.TestCase):
     def test_add_to_persona_only(self):
         msg = {"role": "system", "content": "Persona specific"}
         self.history_manager.add_to_persona_only(msg)
-        self.assertEqual(self.history_manager.messages, [msg])
+        self.assertEqual(len(self.history_manager.messages), 1)
+        stored = self.history_manager.messages[0]
+        self.assertEqual(stored["role"], msg["role"])
+        self.assertEqual(stored["content"], msg["content"])
+        self.assertIn("timestamp", stored)
         self.assertEqual(self.history_manager.building_histories["user_room"], []) # building history should be unchanged
 
     def test_get_recent_history(self):
@@ -143,23 +152,26 @@ class TestHistoryManager(unittest.TestCase):
 
         # 全て取得
         recent = self.history_manager.get_recent_history(100)
-        self.assertEqual(recent, msgs)
+        self.assertMessagesMatch(recent, msgs)
+        for item in recent:
+            self.assertIn("timestamp", item)
+        self.assertTrue(all(item.get("role") != "assistant" or item.get("persona_id") == self.persona_id for item in recent))
 
         # 制限付きで取得
         recent = self.history_manager.get_recent_history(7) # "333" + "4444" = 7文字
-        self.assertEqual(recent, [msgs[2], msgs[3]])
+        self.assertMessagesMatch(recent, [msgs[2], msgs[3]])
 
         recent = self.history_manager.get_recent_history(3)
         self.assertEqual(recent, []) # "4444" (4文字) が制限を超えるため、何も返されない
 
         recent = self.history_manager.get_recent_history(4) # "4444" = 4文字
-        self.assertEqual(recent, [msgs[3]])
+        self.assertMessagesMatch(recent, [msgs[3]])
 
         recent = self.history_manager.get_recent_history(6)
-        self.assertEqual(recent, [msgs[3]]) # "4444" (4文字) のみ
+        self.assertMessagesMatch(recent, [msgs[3]]) # "4444" (4文字) のみ
 
         recent = self.history_manager.get_recent_history(10) # "1" + "22" + "333" + "4444" = 10文字
-        self.assertEqual(recent, msgs)
+        self.assertMessagesMatch(recent, msgs)
 
         recent = self.history_manager.get_recent_history(0)
         self.assertEqual(recent, [])

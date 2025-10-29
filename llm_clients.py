@@ -236,6 +236,14 @@ def _extract_reasoning_from_delta(delta: Any) -> List[str]:
     return reasoning_chunks
 
 
+def _is_truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes"}
+    return False
+
+
 def _extract_gemini_parts(parts: List[Any]) -> Tuple[str, List[Dict[str, str]]]:
     """Separate text and thought summaries from Gemini parts."""
     reasoning_entries: List[Dict[str, str]] = []
@@ -244,11 +252,11 @@ def _extract_gemini_parts(parts: List[Any]) -> Tuple[str, List[Dict[str, str]]]:
     for part in parts or []:
         if part is None:
             continue
-        thought = getattr(part, "thought", None)
+        is_thought = _is_truthy_flag(getattr(part, "thought", None))
         text = getattr(part, "text", None)
         if not text:
             continue
-        if thought:
+        if is_thought:
             reasoning_entries.append({
                 "title": f"Thought {counter}",
                 "text": text.strip(),
@@ -321,6 +329,336 @@ class OpenAIClient(LLMClient):
         self.model = model
         self._request_kwargs: Dict[str, Any] = {}
 
+    def _create_completion(self, **kwargs):
+        return self.client.chat.completions.create(**kwargs)
+
+    def generate(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[list] | None = None,
+        history_snippets: Optional[List[str]] | None = None,
+    ) -> str:
+        """ツールコールを解決しながら最終テキストを返す（最大 10 回ループ）"""
+        tools_spec = OPENAI_TOOLS_SPEC if tools is None else tools
+        use_tools = bool(tools_spec)
+        snippets: List[str] = list(history_snippets or [])
+        self._store_reasoning([])
+
+        if not use_tools:
+            try:
+                resp = self._create_completion(
+                    model=self.model,
+                    messages=_prepare_openai_messages(messages, self.supports_images),
+                    n=1,
+                    **self._request_kwargs,
+                )
+            except Exception:
+                logging.exception("OpenAI call failed")
+                return "エラーが発生しました。"
+
+            raw_logger.debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
+            choice = resp.choices[0]
+            text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
+            if not text_body:
+                text_body = choice.message.content or ""
+            self._store_reasoning(reasoning_entries)
+            if snippets:
+                prefix = "\n".join(snippets)
+                return prefix + ("\n" if text_body and prefix else "") + text_body
+            return text_body
+
+        # ── Router 判定（最後の user メッセージだけ渡す） ──
+        user_msg = next((m["content"] for m in reversed(messages)
+                         if m.get("role") == "user"), "")
+        decision = route(user_msg, tools_spec)
+
+        # ログ出力（JSON フォーマットで見やすく）
+        try:
+            logging.info("Router decision:\n%s", json.dumps(decision, indent=2, ensure_ascii=False))
+        except Exception:
+            logging.warning("Router decision could not be serialized")
+
+        if decision["call"] == "yes" and decision["tool"]:
+            forced_tool_choice: Any = {
+                "type": "function",
+                "function": {"name": decision["tool"]}
+            }
+        else:
+            forced_tool_choice = "auto"
+
+        try:
+            if tools:
+                try:
+                    logging.info("tools JSON:\n%s", json.dumps(tools, indent=2, ensure_ascii=False))
+                except TypeError:
+                    logging.info("tools contain non-serializable values")
+
+            for i in range(10):
+                tool_choice = forced_tool_choice if i == 0 else "auto"
+
+                resp = self._create_completion(
+                    model=self.model,
+                    messages=_prepare_openai_messages(messages, self.supports_images),
+                    tools=tools_spec,
+                    tool_choice=tool_choice,
+                    n=1,
+                    **self._request_kwargs,
+                )
+                raw_logger.debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
+
+                target_choice = next(
+                    (c for c in resp.choices if getattr(c.message, "tool_calls", [])),
+                    resp.choices[0]
+                )
+                tool_calls = getattr(target_choice.message, "tool_calls", [])
+
+                if not isinstance(tool_calls, list) or len(tool_calls) == 0:
+                    text_body, reasoning_entries = _extract_reasoning_from_openai_message(target_choice.message)
+                    if not text_body:
+                        text_body = target_choice.message.content or ""
+                    self._store_reasoning(reasoning_entries)
+                    prefix = "".join(s + "\n" for s in snippets)
+                    return prefix + text_body
+
+                messages.append(target_choice.message)
+                for tc in tool_calls:
+                    fn = TOOL_REGISTRY.get(tc.function.name)
+                    if fn is None:
+                        raise RuntimeError(f"Unsupported tool: {tc.function.name}")
+                    args = json.loads(tc.function.arguments)
+                    result_text, snippet, file_path, metadata = parse_tool_result(fn(**args))
+                    if snippet:
+                        snippets.append(snippet)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "name": tc.function.name,
+                        "content": result_text,
+                    })
+                    if file_path:
+                        try:
+                            with open(file_path, "rb") as f:
+                                img_bytes = f.read()
+                            b64 = base64.b64encode(img_bytes).decode("ascii")
+                            mime = mimetypes.guess_type(file_path)[0] or "image/png"
+                            data_url = f"data:{mime};base64,{b64}"
+                            messages.append({
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "image_url", "image_url": {"url": data_url}}
+                                ],
+                            })
+                        except Exception:
+                            logging.exception("Failed to load file %s", file_path)
+                    if metadata:
+                        self._store_attachment(metadata)
+                continue
+            return "ツール呼び出しが 10 回を超えました。"
+        except Exception:
+            logging.exception("OpenAI call failed")
+            return "エラーが発生しました。"
+
+    def generate_stream(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[list] | None = None,
+        force_tool_choice: Optional[dict | str] = None,
+        history_snippets: Optional[List[str]] | None = None,
+    ) -> Iterator[str]:
+        """
+        ユーザ向けに逐次テキストを yield するストリーム版。
+        - force_tool_choice: 初回のみ {"type":"function","function":{"name":..}} か "auto"
+        - 再帰呼び出し時はデフォルト None → 自動で "auto"
+        """
+        tools_spec = OPENAI_TOOLS_SPEC if tools is None else tools
+        use_tools = bool(tools_spec)
+        history_snippets = list(history_snippets or [])
+        self._store_reasoning([])
+        reasoning_chunks: List[str] = []
+
+        if not use_tools:
+            try:
+                resp = self._create_completion(
+                    model=self.model,
+                    messages=_prepare_openai_messages(messages, self.supports_images),
+                    n=1,
+                    **self._request_kwargs,
+                )
+            except Exception:
+                logging.exception("OpenAI call failed")
+                yield "エラーが発生しました。"
+                return
+
+            choice = resp.choices[0]
+            text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
+            if not text_body:
+                text_body = choice.message.content or ""
+            self._store_reasoning(reasoning_entries)
+            prefix = "\n".join(history_snippets) + ("\n" if history_snippets and text_body else "")
+            if prefix:
+                yield prefix
+            if text_body:
+                yield text_body
+            return
+
+        if force_tool_choice is None:
+            user_msg = next((m["content"] for m in reversed(messages)
+                             if m.get("role") == "user"), "")
+            decision = route(user_msg, tools_spec)
+            logging.info("Router decision:\n%s", json.dumps(decision, indent=2, ensure_ascii=False))
+            if decision["call"] == "yes" and decision["tool"]:
+                force_tool_choice = {
+                    "type": "function",
+                    "function": {"name": decision["tool"]}
+                }
+            else:
+                force_tool_choice = "auto"
+
+        try:
+            resp = self._create_completion(
+                model=self.model,
+                messages=_prepare_openai_messages(messages, self.supports_images),
+                tools=tools_spec,
+                tool_choice=force_tool_choice,
+                stream=True,
+                **self._request_kwargs,
+            )
+        except Exception:
+            logging.exception("OpenAI call failed")
+            yield "エラーが発生しました。"
+            return
+
+        call_buffer: dict[str, dict] = {}
+        state = "TEXT"
+        prefix_yielded = False
+
+        try:
+            current_call_id = None
+
+            for chunk in resp:
+                delta = chunk.choices[0].delta
+
+                if delta.tool_calls:
+                    state = "TOOL_CALL"
+                    for call in delta.tool_calls:
+                        tc_id = call.id or current_call_id
+                        if tc_id is None:
+                            logging.warning("tool_chunk without id; skipping")
+                            continue
+                        current_call_id = tc_id
+
+                        buf = call_buffer.setdefault(tc_id, {
+                            "id": tc_id,
+                            "name": "",
+                            "arguments": "",
+                        })
+
+                        logging.debug("tool_chunk id=%s name=%s args_part=%s",
+                                      tc_id, call.function.name or "-", call.function.arguments or "-")
+
+                        if call.function.name:
+                            buf["name"] = call.function.name
+                        if call.function.arguments:
+                            buf["arguments"] += call.function.arguments
+                    continue
+
+                if state == "TEXT" and delta.content:
+                    text_fragment, reasoning_piece = _process_openai_stream_content(delta.content)
+                    if reasoning_piece:
+                        reasoning_chunks.extend(reasoning_piece)
+                    extra_reasoning = _extract_reasoning_from_delta(delta)
+                    if extra_reasoning:
+                        reasoning_chunks.extend(extra_reasoning)
+                    if not text_fragment:
+                        continue
+                    if not prefix_yielded and history_snippets:
+                        yield "\n".join(history_snippets) + "\n"
+                        prefix_yielded = True
+                    yield text_fragment
+                    continue
+
+                additional_reasoning = _extract_reasoning_from_delta(delta)
+                if additional_reasoning:
+                    reasoning_chunks.extend(additional_reasoning)
+
+            if not call_buffer:
+                self._store_reasoning(_merge_reasoning_strings(reasoning_chunks))
+            if call_buffer:
+                logging.debug("call_buffer final: %s", json.dumps(call_buffer, indent=2, ensure_ascii=False))
+                assistant_call_msg = {"role": "assistant", "content": None, "tool_calls": []}
+                for tc in call_buffer.values():
+                    name = tc["name"].strip()
+                    arg_str = tc["arguments"].strip()
+
+                    if not name:
+                        logging.warning("tool_call %s has empty name; skipping", tc["id"])
+                        continue
+                    if not arg_str:
+                        logging.warning("tool_call %s has empty arguments; skipping", tc["id"])
+                        continue
+                    try:
+                        args = json.loads(arg_str)
+                    except json.JSONDecodeError:
+                        logging.warning("tool_call %s arguments invalid JSON: %s", tc["id"], arg_str)
+                        continue
+
+                    fn = TOOL_REGISTRY.get(name)
+                    if fn is None:
+                        logging.warning("tool_call %s unknown tool '%s'; skipping", tc["id"], name)
+                        continue
+
+                    try:
+                        result_text, snippet, file_path, metadata = parse_tool_result(fn(**args))
+                        logging.info("tool_call %s executed -> %s", tc["id"], result_text)
+                        if snippet:
+                            history_snippets.append(snippet)
+                    except Exception:
+                        logging.exception("tool_call %s execution failed", tc["id"])
+                        continue
+
+                    assistant_call_msg["tool_calls"].append({
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {"name": name, "arguments": json.dumps(args)}
+                    })
+
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "name": name,
+                        "content": result_text,
+                    })
+                    if file_path:
+                        try:
+                            with open(file_path, "rb") as f:
+                                img_bytes = f.read()
+                            b64 = base64.b64encode(img_bytes).decode("ascii")
+                            mime = mimetypes.guess_type(file_path)[0] or "image/png"
+                            data_url = f"data:{mime};base64,{b64}"
+                            messages.append({
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "image_url", "image_url": {"url": data_url}}
+                                ],
+                            })
+                        except Exception:
+                            logging.exception("Failed to load file %s", file_path)
+                    if metadata:
+                        self._store_attachment(metadata)
+                insert_pos = len(messages) - len(call_buffer)
+                messages.insert(insert_pos, assistant_call_msg)
+
+                yield from self.generate_stream(
+                    messages,
+                    tools,
+                    force_tool_choice="auto",
+                    history_snippets=history_snippets,
+                )
+                return
+
+        except Exception:
+            logging.exception("OpenAI stream call failed")
+            yield "エラーが発生しました。"
 
 class AnthropicClient(OpenAIClient):
     """Anthropic Claude via OpenAI-compatible endpoint."""
@@ -437,375 +775,6 @@ class AnthropicClient(OpenAIClient):
                 return self.client.chat.completions.create(**kwargs)
             raise
 
-    def generate(
-        self,
-        messages: List[Dict[str, str]],
-        tools: Optional[list] | None = None,
-        history_snippets: Optional[List[str]] | None = None,
-    ) -> str:
-        """ツールコールを解決しながら最終テキストを返す（最大 10 回ループ）"""
-        tools_spec = OPENAI_TOOLS_SPEC if tools is None else tools
-        use_tools = bool(tools_spec)
-        self._store_reasoning([])
-
-        if not use_tools:
-            try:
-                resp = self._create_completion(
-                    model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images),
-                    n=1,
-                    **self._request_kwargs,
-                )
-            except Exception:
-                logging.exception("OpenAI call failed")
-                return "エラーが発生しました。"
-
-            raw_logger.debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
-            choice = resp.choices[0]
-            text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
-            if not text_body:
-                text_body = choice.message.content or ""
-            self._store_reasoning(reasoning_entries)
-            return text_body
-
-        # ── Router 判定（最後の user メッセージだけ渡す） ──
-        user_msg = next((m["content"] for m in reversed(messages)
-                         if m.get("role") == "user"), "")
-        decision = route(user_msg, tools_spec)
-
-        # ログ出力（JSON フォーマットで見やすく）
-        snippets: List[str] = []
-        try:
-            logging.info("Router decision:\n%s", json.dumps(decision, indent=2, ensure_ascii=False))
-        except Exception:
-            logging.warning("Router decision could not be serialized")
-
-        if decision["call"] == "yes" and decision["tool"]:
-            forced_tool_choice = {
-                "type": "function",
-                "function": {"name": decision["tool"]}
-            }
-        else:
-            forced_tool_choice = "auto"
-
-        try:
-            # --- ループ前: ツールJSONは1回だけログ ---
-            if tools:
-                try:
-                    logging.info("tools JSON:\n%s", json.dumps(tools, indent=2, ensure_ascii=False))
-                except TypeError:
-                    logging.info("tools contain non-serializable values")
-
-            for i in range(10):
-                tool_choice = forced_tool_choice if i == 0 else "auto"
-
-                resp = self._create_completion(
-                    model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images),
-                    tools=tools_spec,
-                    tool_choice=tool_choice,
-                    n=1,
-                    **self._request_kwargs,
-                )
-                raw_logger.debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
-
-                target_choice = next(
-                    (c for c in resp.choices if getattr(c.message, "tool_calls", [])),
-                    resp.choices[0]
-                )
-                tool_calls = getattr(target_choice.message, "tool_calls", [])
-
-                # ---------- ツールが無い → 通常応答 ----------
-                if not isinstance(tool_calls, list) or len(tool_calls) == 0:
-                    text_body, reasoning_entries = _extract_reasoning_from_openai_message(target_choice.message)
-                    if not text_body:
-                        text_body = target_choice.message.content or ""
-                    self._store_reasoning(reasoning_entries)
-                    prefix = "".join(s + "\n" for s in snippets)
-                    return prefix + text_body
-
-                # ---------- ツール有り → 実行 ----------
-                messages.append(target_choice.message)
-                for tc in tool_calls:
-                    fn = TOOL_REGISTRY.get(tc.function.name)
-                    if fn is None:
-                        raise RuntimeError(f"Unsupported tool: {tc.function.name}")
-                    args = json.loads(tc.function.arguments)
-                    result_text, snippet, file_path, metadata = parse_tool_result(fn(**args))
-                    if snippet:
-                        snippets.append(snippet)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "name": tc.function.name,
-                        "content": result_text,
-                    })
-                    if file_path:
-                        try:
-                            with open(file_path, "rb") as f:
-                                img_bytes = f.read()
-                            b64 = base64.b64encode(img_bytes).decode("ascii")
-                            mime = mimetypes.guess_type(file_path)[0] or "image/png"
-                            data_url = f"data:{mime};base64,{b64}"
-                            messages.append({
-                                "role": "assistant",
-                                "content": [
-                                    {"type": "image_url", "image_url": {"url": data_url}}
-                                ],
-                            })
-                        except Exception:
-                            logging.exception("Failed to load file %s", file_path)
-                    if metadata:
-                        self._store_attachment(metadata)
-                continue    # -> 次ラウンドへ
-            return "ツール呼び出しが 10 回を超えました。"
-        except Exception:
-            logging.exception("OpenAI call failed")
-            return "エラーが発生しました。"
-
-    def generate_stream(
-        self,
-        messages: List[Dict[str, str]],
-        tools: Optional[list] | None = None,
-        force_tool_choice: Optional[dict | str] = None,
-        history_snippets: Optional[List[str]] | None = None,
-    ) -> Iterator[str]:
-        """
-        ユーザ向けに逐次テキストを yield するストリーム版。
-        - force_tool_choice: 初回のみ {"type":"function","function":{"name":..}} か "auto"
-        - 再帰呼び出し時はデフォルト None → 自動で "auto"
-        """
-        tools_spec = OPENAI_TOOLS_SPEC if tools is None else tools
-        use_tools = bool(tools_spec)
-        history_snippets = history_snippets or []
-        self._store_reasoning([])
-        reasoning_chunks: List[str] = []
-
-        if not use_tools:
-            try:
-                sys_msg, contents = self._convert_messages(messages)
-                cfg_kwargs = dict(
-                    system_instruction=sys_msg,
-                    safety_settings=GEMINI_SAFETY_CONFIG,
-                )
-                if self._thinking_config is not None:
-                    cfg_kwargs["thinking_config"] = self._thinking_config
-                resp = self.client.models.generate_content(
-                    model=self.model,
-                    contents=contents,
-                    config=types.GenerateContentConfig(**cfg_kwargs),
-                )
-            except Exception:
-                logging.exception("Gemini call failed")
-                yield "エラーが発生しました。"
-                return
-
-            if not resp.candidates:
-                yield "（Gemini から応答がありませんでした）"
-                return
-
-            cand = resp.candidates[0]
-            raw_logger.debug("Gemini candidate:\n%s", cand)
-            parts_list = list(getattr(getattr(cand, "content", None), "parts", []) or [])
-            text_body, reasoning_entries = _extract_gemini_parts(parts_list)
-            self._store_reasoning(reasoning_entries)
-            yield text_body
-            return
-
-        if not use_tools:
-            try:
-                resp = self._create_completion(
-                    model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images),
-                    n=1,
-                    **self._request_kwargs,
-                )
-            except openai.BadRequestError:
-                logging.exception("OpenAI call failed")
-                yield "エラーが発生しました。"
-                return
-
-            choice = resp.choices[0]
-            text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
-            if not text_body:
-                text_body = choice.message.content or ""
-            self._store_reasoning(reasoning_entries)
-            yield text_body
-            return
-
-        # ----------------------------------------
-        # 初回呼び出しなら router で強制指定を決定
-        # ----------------------------------------
-        if force_tool_choice is None:                       # 再帰呼び出し時はスキップ
-            user_msg = next((m["content"] for m in reversed(messages)
-                             if m.get("role") == "user"), "")
-            decision = route(user_msg, tools_spec)
-            logging.info("Router decision:\n%s", json.dumps(decision, indent=2, ensure_ascii=False))
-            if decision["call"] == "yes" and decision["tool"]:
-                force_tool_choice = {
-                    "type": "function",
-                    "function": {"name": decision["tool"]}
-                }
-            else:
-                force_tool_choice = "auto"
-
-        # ----------------------------------------
-        # OpenAI ストリーム呼び出し
-        # ----------------------------------------
-        try:
-            resp = self._create_completion(
-                model=self.model,
-                messages=_prepare_openai_messages(messages, self.supports_images),
-                tools=tools_spec,
-                tool_choice=force_tool_choice,   # ← 初回のみ強制 / 再帰時は "auto"
-                stream=True,
-                **self._request_kwargs,
-            )
-        except openai.BadRequestError:
-            logging.exception("OpenAI call failed")
-            yield "エラーが発生しました。"
-            return
-
-        call_buffer: dict[str, dict] = {}
-        state = "TEXT"
-        prefix_yielded = False
-
-        try:
-            current_call_id = None           # 直近の有効 id を保持
-
-            for chunk in resp:
-                delta = chunk.choices[0].delta
-
-                # ----- ツールコール断片を収集（OpenAI の stream バグに対処） -----
-                if delta.tool_calls:
-                    state = "TOOL_CALL"
-                    for call in delta.tool_calls:
-                        tc_id = call.id or current_call_id
-                        if tc_id is None:
-                            logging.warning("tool_chunk without id; skipping")
-                            continue
-                        current_call_id = tc_id
-
-                        buf = call_buffer.setdefault(tc_id, {
-                            "id": tc_id,
-                            "name": "",
-                            "arguments": "",
-                        })
-
-                        logging.debug("tool_chunk id=%s name=%s args_part=%s",
-                                      tc_id, call.function.name or "-", call.function.arguments or "-")
-
-                        if call.function.name:
-                            buf["name"] = call.function.name
-                        if call.function.arguments:
-                            buf["arguments"] += call.function.arguments
-                    continue
-
-                # ----- 通常テキスト delta -----
-                if state == "TEXT" and delta.content:
-                    text_fragment, reasoning_piece = _process_openai_stream_content(delta.content)
-                    if reasoning_piece:
-                        reasoning_chunks.extend(reasoning_piece)
-                    extra_reasoning = _extract_reasoning_from_delta(delta)
-                    if extra_reasoning:
-                        reasoning_chunks.extend(extra_reasoning)
-                    if not text_fragment:
-                        continue
-                    if not prefix_yielded and history_snippets:
-                        yield "\n".join(history_snippets) + "\n"
-                        prefix_yielded = True
-                    yield text_fragment
-                    continue
-
-                additional_reasoning = _extract_reasoning_from_delta(delta)
-                if additional_reasoning:
-                    reasoning_chunks.extend(additional_reasoning)
-
-            # ----------------------------------------
-            # ストリーム終端後にツールが溜まっていれば実行
-            # ----------------------------------------
-            if not call_buffer:
-                self._store_reasoning(_merge_reasoning_strings(reasoning_chunks))
-            if call_buffer:
-                logging.debug("call_buffer final: %s", json.dumps(call_buffer, indent=2, ensure_ascii=False))
-                # ① assistant/tool_calls メッセージを先に作る
-                assistant_call_msg = {"role": "assistant", "content": None, "tool_calls": []}
-                for tc in call_buffer.values():
-                    name = tc["name"].strip()
-                    arg_str = tc["arguments"].strip()
-
-                    if not name:
-                        logging.warning("tool_call %s has empty name; skipping", tc["id"])
-                        continue
-                    if not arg_str:
-                        logging.warning("tool_call %s has empty arguments; skipping", tc["id"])
-                        continue
-                    try:
-                        args = json.loads(arg_str)
-                    except json.JSONDecodeError:
-                        logging.warning("tool_call %s arguments invalid JSON: %s", tc["id"], arg_str)
-                        continue
-
-                    fn = TOOL_REGISTRY.get(name)
-                    if fn is None:
-                        logging.warning("tool_call %s unknown tool '%s'; skipping", tc["id"], name)
-                        continue
-
-                    try:
-                        result_text, snippet, file_path, metadata = parse_tool_result(fn(**args))
-                        logging.info("tool_call %s executed -> %s", tc["id"], result_text)
-                        if snippet:
-                            history_snippets.append(snippet)
-                    except Exception:
-                        logging.exception("tool_call %s execution failed", tc["id"])
-                        continue
-
-                    # ①-1 tool_calls 配列に追記
-                    assistant_call_msg["tool_calls"].append({
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {"name": name, "arguments": json.dumps(args)}
-                    })
-
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "name": name,
-                        "content": result_text,
-                    })
-                    if file_path:
-                        try:
-                            with open(file_path, "rb") as f:
-                                img_bytes = f.read()
-                            b64 = base64.b64encode(img_bytes).decode("ascii")
-                            mime = mimetypes.guess_type(file_path)[0] or "image/png"
-                            data_url = f"data:{mime};base64,{b64}"
-                            messages.append({
-                                "role": "assistant",
-                                "content": [
-                                    {"type": "image_url", "image_url": {"url": data_url}}
-                                ],
-                            })
-                        except Exception:
-                            logging.exception("Failed to load file %s", file_path)
-                    if metadata:
-                        self._store_attachment(metadata)
-                # ② assistant/tool_calls を tool 応答より前に挿入
-                insert_pos = len(messages) - len(call_buffer)  # 直前に挿入
-                messages.insert(insert_pos, assistant_call_msg)
-
-                # ------ ツール応答を付けて再帰的にストリーム ------
-                yield from self.generate_stream(
-                    messages,
-                    tools,
-                    force_tool_choice="auto",   # ← 2 回目以降は常に auto
-                    history_snippets=history_snippets,
-                )
-                return
-
-        except Exception:
-            logging.exception("OpenAI stream call failed")
-            yield "エラーが発生しました。"
 
 class GeminiClient(LLMClient):
     """Client for Google Gemini API."""
@@ -1172,7 +1141,7 @@ class GeminiClient(LLMClient):
                         "Gemini function_call (part %s): %s", part_idx, part.function_call
                     )
                     fcall = part.function_call         # 後で実行
-                elif getattr(part, "thought", False):
+                elif _is_truthy_flag(getattr(part, "thought", None)):
                     text_val = getattr(part, "text", None) or ""
                     if text_val:
                         prev_thought = thought_seen.get(cand_index, "")
@@ -1188,7 +1157,7 @@ class GeminiClient(LLMClient):
             combined_text = "".join(
                 getattr(part, "text", None) or ""
                 for part in cand.content.parts
-                if getattr(part, "text", None) and not getattr(part, "thought", False)
+                if getattr(part, "text", None) and not _is_truthy_flag(getattr(part, "thought", None))
             )
             if not combined_text:
                 continue
@@ -1293,7 +1262,7 @@ class GeminiClient(LLMClient):
                 continue
             cand_index = getattr(cand, "index", 0)
             for part in cand.content.parts:
-                if getattr(part, "thought", False):
+                if _is_truthy_flag(getattr(part, "thought", None)):
                     text_val = getattr(part, "text", None) or ""
                     if text_val:
                         prev = thought_seen2.get(cand_index, "")
@@ -1308,7 +1277,7 @@ class GeminiClient(LLMClient):
             combined_text = "".join(
                 getattr(part, "text", None) or ""
                 for part in cand.content.parts
-                if getattr(part, "text", None) and not getattr(part, "thought", False)
+                if getattr(part, "text", None) and not _is_truthy_flag(getattr(part, "thought", None))
             )
             if not combined_text:
                 continue
