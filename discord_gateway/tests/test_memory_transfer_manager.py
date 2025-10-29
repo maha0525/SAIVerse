@@ -1,5 +1,7 @@
 import base64
 import hashlib
+import importlib
+import os
 from pathlib import Path
 
 from discord_gateway.orchestrator import (
@@ -7,7 +9,10 @@ from discord_gateway.orchestrator import (
     MemorySyncHandshakeResult,
 )
 from discord_gateway.visitors import VisitorProfile
-from saiverse_manager import SAIVerseManager
+
+os.environ.setdefault("GEMINI_FREE_API_KEY", "test-key")
+
+SAIVerseManager = importlib.import_module("saiverse_manager").SAIVerseManager
 
 
 def _create_manager(tmp_path: Path) -> SAIVerseManager:
