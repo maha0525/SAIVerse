@@ -37,6 +37,11 @@ BUILDING_NAME_TO_ID_MAP = {}
 MODEL_CHOICES = ["None"] + get_model_choices()
 AUTONOMOUS_BUILDING_CHOICES = []
 AUTONOMOUS_BUILDING_MAP = {}
+try:
+    _chat_limit_env = int(os.getenv("SAIVERSE_CHAT_HISTORY_LIMIT", "120"))
+except ValueError:
+    _chat_limit_env = 120
+CHAT_HISTORY_LIMIT = max(0, _chat_limit_env)
 
 VERSION = time.strftime("%Y%m%d%H%M%S")  # 例: 20251008121530
 
@@ -608,12 +613,20 @@ def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[s
     return display
 
 
+def _limit_history(raw_history: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Return only the tail of the history based on CHAT_HISTORY_LIMIT."""
+    if CHAT_HISTORY_LIMIT <= 0:
+        return list(raw_history)
+    return list(raw_history[-CHAT_HISTORY_LIMIT:])
+
+
 def get_current_building_history() -> List[Dict[str, str]]:
     """Return the formatted chat history for the user's current building."""
     current_building_id = getattr(manager, "user_current_building_id", None)
     if not current_building_id:
         return []
-    return format_history_for_chatbot(manager.get_building_history(current_building_id))
+    raw_history = manager.get_building_history(current_building_id)
+    return format_history_for_chatbot(_limit_history(raw_history))
 
 
 def respond_stream(message: str, image_value: Optional[Any] = None):
@@ -633,7 +646,7 @@ def respond_stream(message: str, image_value: Optional[Any] = None):
 
     print(manager.occupants[current_building_id])
 
-    raw_history = manager.get_building_history(current_building_id)
+    raw_history = _limit_history(manager.get_building_history(current_building_id))
 
     normalized_image_path = _extract_image_path(image_value)
     stored_image = _store_uploaded_image(normalized_image_path)
@@ -692,7 +705,7 @@ def respond_stream(message: str, image_value: Optional[Any] = None):
             gr.update(),
         )
 
-    final_raw = manager.get_building_history(current_building_id)
+    final_raw = _limit_history(manager.get_building_history(current_building_id))
     final_history_formatted = format_history_for_chatbot(final_raw)
 
     summonable_personas = manager.get_summonable_personas()
@@ -821,20 +834,20 @@ def select_model(model_name: str):
     current_building_id = manager.user_current_building_id
     if not current_building_id:
         return []
-    raw_history = manager.get_building_history(current_building_id)
+    raw_history = _limit_history(manager.get_building_history(current_building_id))
     return format_history_for_chatbot(raw_history)
 
 def call_persona_ui(persona_name: str):
     """UI handler for summoning a persona."""
     if not persona_name:
-        return format_history_for_chatbot(manager.get_building_history(manager.user_current_building_id)), gr.update(), gr.update()
+        return get_current_building_history(), gr.update(), gr.update()
 
     persona_id = manager.persona_map.get(persona_name)
     if persona_id:
         manager.summon_persona(persona_id)
         manager._load_occupancy_from_db()
 
-    new_history = format_history_for_chatbot(manager.get_building_history(manager.user_current_building_id))
+    new_history = get_current_building_history()
     summonable_personas = manager.get_summonable_personas()
     conversing_personas = manager.get_conversing_personas()
     return new_history, gr.update(choices=summonable_personas, value=None), gr.update(choices=conversing_personas, value=None)
@@ -843,7 +856,7 @@ def end_conversation_ui(persona_id: str):
     """UI handler to end a conversation with a persona."""
     if not persona_id:
         # This can happen on initial load, just return current state
-        current_history = format_history_for_chatbot(manager.get_building_history(manager.user_current_building_id))
+        current_history = get_current_building_history()
         conversing_personas = manager.get_conversing_personas()
         manager._load_occupancy_from_db()
         return current_history, gr.update(), gr.update(choices=conversing_personas, value=None)
@@ -851,7 +864,7 @@ def end_conversation_ui(persona_id: str):
     manager.end_conversation(persona_id)
     manager._load_occupancy_from_db()
 
-    new_history = format_history_for_chatbot(manager.get_building_history(manager.user_current_building_id))
+    new_history = get_current_building_history()
     summonable_personas = manager.get_summonable_personas()
     conversing_personas = manager.get_conversing_personas()
     return new_history, gr.update(choices=summonable_personas, value=None), gr.update(choices=conversing_personas, value=None)
@@ -861,7 +874,7 @@ def get_autonomous_log(building_name: str):
     """指定されたBuildingの会話ログを取得する"""
     building_id = AUTONOMOUS_BUILDING_MAP.get(building_name)
     if building_id:
-        raw_history = manager.get_building_history(building_id)
+        raw_history = _limit_history(manager.get_building_history(building_id))
         return format_history_for_chatbot(raw_history)
     return []
 
@@ -1102,7 +1115,7 @@ def create_world_editor_ui():
     with gr.Accordion("City管理", open=True):
         with gr.Tabs():
             with gr.TabItem("編集/削除"):
-                city_df = gr.DataFrame(value=manager.get_cities_df, interactive=False, label="Cities in this World")
+                city_df = gr.DataFrame(value=None, interactive=False, label="Cities in this World")
                 with gr.Row():
                     city_id_text = gr.Textbox(label="City ID", interactive=False)
                     city_name_textbox = gr.Textbox(label="City Name")
@@ -1130,7 +1143,7 @@ def create_world_editor_ui():
     with gr.Accordion("Building管理", open=False):
         with gr.Tabs():
             with gr.TabItem("編集/削除"):
-                building_df = gr.DataFrame(value=manager.get_buildings_df, interactive=False, label="Buildings in this World")
+                building_df = gr.DataFrame(value=None, interactive=False, label="Buildings in this World")
                 with gr.Row():
                     building_id_text = gr.Textbox(label="Building ID", interactive=False)
                     building_name_text = gr.Textbox(label="Building Name")
@@ -1178,7 +1191,7 @@ def create_world_editor_ui():
     with gr.Accordion("AI管理", open=False):
         with gr.Tabs():
             with gr.TabItem("編集/削除"):
-                ai_df = gr.DataFrame(value=manager.get_ais_df, interactive=False, label="AIs in this World")
+                ai_df = gr.DataFrame(value=None, interactive=False, label="AIs in this World")
                 with gr.Row():
                     ai_id_text = gr.Textbox(label="AI ID", interactive=False)
                     ai_name_text = gr.Textbox(label="AI Name")
@@ -1231,7 +1244,7 @@ def create_world_editor_ui():
         gr.Markdown("AIが利用可能なツールを定義します。")
         with gr.Tabs():
             with gr.TabItem("編集/削除"):
-                tool_df = gr.DataFrame(value=manager.get_tools_df, interactive=False, label="Available Tools")
+                tool_df = gr.DataFrame(value=None, interactive=False, label="Available Tools")
                 with gr.Row():
                     tool_id_text = gr.Textbox(label="Tool ID", interactive=False)
                     tool_name_text = gr.Textbox(label="Tool Name")
@@ -1258,7 +1271,7 @@ def create_world_editor_ui():
         gr.Markdown("エンティティの設計図を作成・管理し、ワールドに配置します。\n行を選択する際はBLUEPRINT_ID列をクリックしてください。")
         with gr.Tabs():
             with gr.TabItem("編集"):
-                blueprint_df = gr.DataFrame(value=manager.get_blueprints_df, interactive=False, label="Blueprints in this World")
+                blueprint_df = gr.DataFrame(value=None, interactive=False, label="Blueprints in this World")
                 with gr.Row():
                     bp_id_text = gr.Textbox(label="Blueprint ID", interactive=False)
                     bp_name_text = gr.Textbox(label="Blueprint Name")
@@ -1338,10 +1351,10 @@ def create_world_editor_ui():
     with gr.Accordion("バックアップ/リストア管理", open=False):
         gr.Markdown("現在のワールドの状態をバックアップしたり、過去のバックアップから復元します。**リストア後はアプリケーションの再起動が必須です。**")
         
-        backup_df = gr.DataFrame(value=manager.get_backups, interactive=False, label="利用可能なバックアップ")
+        backup_df = gr.DataFrame(value=None, interactive=False, label="利用可能なバックアップ")
         
         with gr.Row():
-            selected_backup_dropdown = gr.Dropdown(label="操作対象のバックアップ", choices=manager.get_backups()['Backup Name'].tolist() if not manager.get_backups().empty else [], scale=2)
+            selected_backup_dropdown = gr.Dropdown(label="操作対象のバックアップ", choices=[], scale=2)
             restore_confirm_check = gr.Checkbox(label="リストアを確認", value=False, scale=1)
             restore_btn = gr.Button("リストア実行", variant="primary", interactive=False, scale=1)
             delete_backup_confirm_check = gr.Checkbox(label="削除を確認", value=False, scale=1)
@@ -1585,7 +1598,7 @@ def main():
             with gr.Group(elem_id="chat_scroll_area"):
                 chatbot = gr.Chatbot(
                     type="messages",
-                    value=lambda: format_history_for_chatbot(manager.get_building_history(manager.user_current_building_id)) if manager.user_current_building_id else [],
+                    value=lambda: get_current_building_history(),
                     group_consecutive_messages=False,
                     sanitize_html=False,
                     elem_id="my_chat",
