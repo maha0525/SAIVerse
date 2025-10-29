@@ -15,22 +15,23 @@ import tempfile
 import shutil
 import importlib
 import tools.defs
-from discord_gateway import (
-    ChannelContext,
-    ChannelMapping,
+from discord_gateway.config import get_gateway_settings
+from discord_gateway.gateway_service import DiscordGatewayService
+from discord_gateway.integration import ensure_gateway_runtime
+from discord_gateway.mapping import ChannelContext, ChannelMapping
+from discord_gateway.orchestrator import (
     DiscordGatewayOrchestrator,
-    DiscordGatewayService,
-    GatewayRuntime,
-    SAIVerseGatewayAdapter,
-    GatewayHost,
-    get_gateway_settings,
-    GatewayCommand,
     MemorySyncCompletionResult,
     MemorySyncHandshakeResult,
-    VisitorProfile,
-    ensure_gateway_runtime,
 )
-from discord_gateway.saiverse_adapter import DiscordMessage
+from discord_gateway.runtime import GatewayRuntime
+from discord_gateway.saiverse_adapter import (
+    DiscordMessage,
+    GatewayHost,
+    SAIVerseGatewayAdapter,
+)
+from discord_gateway.translator import GatewayCommand
+from discord_gateway.visitors import VisitorProfile
 import os
 import time
 
