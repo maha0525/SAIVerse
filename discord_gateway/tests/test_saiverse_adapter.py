@@ -1,4 +1,7 @@
-from discord_gateway import MemorySyncCompletionResult, MemorySyncHandshakeResult
+from discord_gateway.orchestrator import (
+    MemorySyncCompletionResult,
+    MemorySyncHandshakeResult,
+)
 from discord_gateway.mapping import ChannelContext
 from discord_gateway.saiverse_adapter import (
     DiscordMessage,

@@ -1,36 +1,47 @@
 import asyncio
-import json
-
 import pytest
-import websockets
 
 from discord_gateway.config import GatewaySettings
 from discord_gateway.gateway_service import DiscordGatewayService
 from discord_gateway.translator import GatewayCommand
+from discord_gateway.auth import StaticTokenProvider
+
+
+class FakeGatewayClient:
+    def __init__(self, settings: GatewaySettings, inbound: asyncio.Queue, outbound: asyncio.Queue):
+        self.settings = settings
+        self._inbound = inbound
+        self._outbound = outbound
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def handshake(self, token: str):
+        assert token == "test-token"
+        assert self.settings.bot_ws_url.endswith("/ws")
+        return {"type": "hello_ack", "status": "ok"}
+
+    async def recv_json(self):
+        return await self._inbound.get()
+
+    async def send_json(self, payload: dict[str, object]):
+        await self._outbound.put(payload)
 
 
 @pytest.mark.asyncio
 async def test_gateway_service_message_flow():
-    received_commands: asyncio.Queue[str] = asyncio.Queue()
-    event_sent = asyncio.Event()
+    inbound_messages: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    outbound_messages: asyncio.Queue[dict[str, object]] = asyncio.Queue()
 
-    async def handler(websocket):
-        raw = await websocket.recv()
-        hello = json.loads(raw)
-        assert hello["type"] == "hello"
-        assert hello["token"] == "test-token"
-        await websocket.send(json.dumps({"type": "hello_ack", "status": "ok"}))
-        await websocket.send(json.dumps({"type": "discord_event", "payload": {"content": "hello"}}))
-        event_sent.set()
-        command_raw = await websocket.recv()
-        await received_commands.put(command_raw)
-        await asyncio.sleep(0.05)
-
-    server = await websockets.serve(handler, "127.0.0.1", 0)
-    port = server.sockets[0].getsockname()[1]
+    await inbound_messages.put(
+        {"type": "discord_event", "payload": {"content": "hello"}}
+    )
 
     settings = GatewaySettings(
-        bot_ws_url=f"ws://127.0.0.1:{port}/ws",
+        bot_ws_url="ws://test.local/ws",
         handshake_token="test-token",
         reconnect_initial_delay=0.1,
         reconnect_max_delay=0.2,
@@ -38,21 +49,22 @@ async def test_gateway_service_message_flow():
         outgoing_queue_maxsize=10,
     )
 
-    service = DiscordGatewayService(settings)
+    service = DiscordGatewayService(
+        settings,
+        client_factory=lambda s: FakeGatewayClient(s, inbound_messages, outbound_messages),
+        token_provider=StaticTokenProvider(token="test-token"),
+    )
     await service.start()
 
-    await asyncio.wait_for(event_sent.wait(), timeout=5)
     event = await asyncio.wait_for(service.incoming_queue.get(), timeout=5)
     assert event.type == "discord_event"
     assert event.payload["content"] == "hello"
 
     await service.outgoing_queue.put(GatewayCommand(type="send_message", payload={"text": "hi"}))
-    sent_payload = await asyncio.wait_for(received_commands.get(), timeout=5)
-    assert json.loads(sent_payload) == {
+    sent_payload = await asyncio.wait_for(outbound_messages.get(), timeout=5)
+    assert sent_payload == {
         "type": "send_message",
         "payload": {"text": "hi"},
     }
 
     await service.stop()
-    server.close()
-    await server.wait_closed()

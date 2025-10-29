@@ -2,7 +2,10 @@ import base64
 import hashlib
 from pathlib import Path
 
-from discord_gateway import MemorySyncCompletionResult, MemorySyncHandshakeResult
+from discord_gateway.orchestrator import (
+    MemorySyncCompletionResult,
+    MemorySyncHandshakeResult,
+)
 from discord_gateway.visitors import VisitorProfile
 from saiverse_manager import SAIVerseManager
 
