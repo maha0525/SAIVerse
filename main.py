@@ -48,6 +48,56 @@ HEAD_VIEWPORT = '<meta name="viewport" content="width=device-width, initial-scal
 
 
 NOTE_CSS = """
+/* Gradio 5.38.0 の main に付く構成をそのまま踏襲して勝ちに行く */
+.gradio-container-5-38-0 main.fillable.app.fill_width[class*="svelte-"] {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+/* ヘッダー */
+#chat_header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 1.5rem;
+  z-index: 100;
+  background: var(--body-background-fill);
+  border-bottom: 1px solid var(--border-color-primary);
+  width: 100vw;
+  margin-left: auto;
+  margin-right: auto;
+  margin-bottom: auto;
+  padding-left: 2rem;
+  padding-right: 2rem;
+}
+
+/* チャット欄をスクロール領域として分離 */
+:root { --composer-h: 5rem; }
+#chat_scroll_area {
+  height: calc(100dvh - var(--composer-h));
+  overflow-y: auto;
+  transition: height 0.1s;
+  padding-bottom: 5rem !important;
+  background: transparent;
+}
+
+/* 入力欄を画面下部に固定 */
+#composer_fixed {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  z-index: 100;
+  background: var(--body-background-fill);
+  border-top: 1px solid var(--border-color-primary);
+  box-shadow: 0 -2px 8px rgba(0,0,0,0.15);
+  max-width: 700px;
+  margin-left: auto;
+  margin-right: auto;
+}
+body { padding-bottom: 0 !important; }
+
+#my_chat {
+  height: 100% !important;
+}
+
 /* === モバイルで Chatbot 親ブロックの左右パディングを完全に殺す === */
 @media (max-width: 680px) {
   /* 親ブロック特定（:has はそのまま・@supports は外す） */
@@ -72,8 +122,9 @@ NOTE_CSS = """
 
   /* Chatbot 本体も全幅に */
   #my_chat {
-    max-width: 100% !important;
-    width: 100% !important;
+    max-width: 100vw !important;
+    width: 100vw !important;
+    padding-bottom: 0 !important;
   }
 
   /* Markdown クランプ解除（保険） */
@@ -123,7 +174,7 @@ html[data-theme='dark'] {
 }
 
 /* --- 縦積みレイアウト --- */
-.message-block { display: flex !important; flex-direction: column; align-items: flex-start; gap: 8px; margin-bottom: 16px; }
+.message-block { display: flex !important; flex-direction: column; align-items: flex-start; gap: 8px;}
 .message-block .avatar-top { width: 60px; height: 60px; min-width: 60px; border-radius: 12px !important; overflow: hidden; margin: 0 !important; display: inline-block; }
 .message-block .avatar-top img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit !important; display: block; }
 .message-header { display: flex !important; align-items: center; gap: 12px; width: 100%; }
@@ -137,6 +188,29 @@ html[data-theme='dark'] {
 .message-block.user .avatar-top { align-self: flex-start; }
 .message-block.host { align-items: flex-start; }
 .message-block.host .avatar-top { align-self: flex-start; }
+
+.message-wrap {
+  max-width: 700px;      /* 好きな値に調整 */
+  margin-left: auto;
+  margin-right: auto;
+  width: 100%;
+}
+
+/* ユーザー側（右寄せ、幅狭め） */
+.message-row.bubble.user-row {
+  max-width: 520px;      /* 例: 右は細め */
+  margin-left: auto;
+  margin-right: 0;
+  text-align: left;
+}
+
+/* アシスタント側（左寄せ、幅広め） */
+.message-row.bubble.bot-row {
+  max-width: 700px;      /* 例: 左は広め */
+  margin-left: 0;
+  margin-right: auto;
+  text-align: left;
+}
 
 #my_chat .message,
 #my_chat .message.user,
@@ -282,6 +356,37 @@ html[data-theme='dark'] .saiv-image-grid img {
     right: -60vw !important;
   }
 }
+
+#message_input_row {
+  align-items: flex-end;
+  gap: 8px;
+}
+#attachment_button {
+  width: auto !important;
+  min-width: 0 !important;
+}
+#attachment_button button {
+  width: 44px !important;
+  height: 44px !important;
+  border-radius: 50% !important;
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  padding: 0 !important;
+  font-size: 1.4rem !important;
+  line-height: 1 !important;
+}
+#attachment_button button .icon,
+#attachment_button button span {
+  pointer-events: none;
+}
+#chat_message_textbox textarea {
+  border-radius: 12px;
+}
+#chat_message_textbox textarea.drop-target-active {
+  border-color: #2563eb !important;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25);
+}
 """
 
 
@@ -315,6 +420,30 @@ def _store_uploaded_image(file_path: Optional[str]) -> Optional[Dict[str, str]]:
         "mime_type": mime_type,
         "source": "user_upload",
     }
+
+
+def _extract_image_path(value: Optional[Any]) -> Optional[str]:
+    """Normalize the upload component value to a filesystem path."""
+    if not value:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        candidate = value.get("name") or value.get("path")
+        return str(candidate) if candidate else None
+    if isinstance(value, list):
+        for item in value:
+            candidate = _extract_image_path(item)
+            if candidate:
+                return candidate
+        return None
+    name_attr = getattr(value, "name", None)
+    if name_attr:
+        return str(name_attr)
+    path_attr = getattr(value, "path", None)
+    if path_attr:
+        return str(path_attr)
+    return None
 
 
 def _render_message_images(metadata: Optional[Dict[str, Any]]) -> str:
@@ -483,8 +612,15 @@ def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[s
     return display
 
 
+def get_current_building_history() -> List[Dict[str, str]]:
+    """Return the formatted chat history for the user's current building."""
+    current_building_id = getattr(manager, "user_current_building_id", None)
+    if not current_building_id:
+        return []
+    return format_history_for_chatbot(manager.get_building_history(current_building_id))
 
-def respond_stream(message: str, image_path: Optional[str] = None):
+
+def respond_stream(message: str, image_value: Optional[Any] = None):
     """Stream AI response for chat and update UI components if needed."""
     current_building_id = manager.user_current_building_id
     if not current_building_id:
@@ -503,8 +639,9 @@ def respond_stream(message: str, image_path: Optional[str] = None):
 
     raw_history = manager.get_building_history(current_building_id)
 
-    stored_image = _store_uploaded_image(image_path)
-    if image_path and stored_image is None:
+    normalized_image_path = _extract_image_path(image_value)
+    stored_image = _store_uploaded_image(normalized_image_path)
+    if normalized_image_path and stored_image is None:
         dropdown_update, radio_update = _prepare_move_component_updates()
         base_history = format_history_for_chatbot(raw_history)
         base_history.append({"role": "assistant", "content": '<div class="note-box">画像の保存に失敗しました。権限やディスク容量を確認してください。</div>'})
@@ -621,9 +758,7 @@ def _perform_user_move(building_name: Optional[str]):
         )
 
     if not building_name:
-        current_history = format_history_for_chatbot(
-            manager.get_building_history(manager.user_current_building_id)
-        )
+        current_history = get_current_building_history()
         location_name = _get_current_location_name()
         return (
             current_history,
@@ -637,12 +772,12 @@ def _perform_user_move(building_name: Optional[str]):
     if target_building_id:
         manager.move_user(target_building_id)
 
-    new_history = manager.get_building_history(manager.user_current_building_id)
+    new_history = get_current_building_history()
     new_location_name = _get_current_location_name()
     summonable_personas = manager.get_summonable_personas()
     conversing_personas = manager.get_conversing_personas()
     return (
-        format_history_for_chatbot(new_history),
+        new_history,
         new_location_name,
         gr.update(value=_format_location_label(new_location_name)),
         gr.update(choices=summonable_personas, value=None),
@@ -1393,7 +1528,36 @@ def main():
                         <div class="saiverse-nav-item" data-tab-label="ワールドエディタ">ワールドエディタ</div>
                     </div>
                     """)
-            with gr.Accordion("移動", open=False):
+            with gr.Row():
+                login_status_display = gr.Textbox(
+                    value="オンライン" if manager.user_is_online else "オフライン",
+                    label="ログイン状態",
+                    interactive=False,
+                    scale=1
+                )
+                login_btn = gr.Button("ログイン", scale=1)
+                logout_btn = gr.Button("ログアウト", scale=1)
+            with gr.Accordion("自律会話管理", open=False):
+                with gr.Column(elem_classes=["saiverse-sidebar-autolog-controls"]):
+                    start_button = gr.Button("自律会話を開始", variant="primary", scale=1)
+                    stop_button = gr.Button("自律会話を停止", variant="stop", scale=1)
+                    status_display = gr.Textbox(
+                        value="停止中",
+                        label="現在のステータス",
+                        interactive=False,
+                        scale=1
+                    )
+            with gr.Accordion("ネットワークモード", open=False):
+                with gr.Row():
+                    sds_status_display = gr.Textbox(
+                        value=manager.sds_status,
+                        interactive=False,
+                        scale=2,
+                        show_label=False
+                    )
+                    online_btn = gr.Button("オンラインモードへ", scale=1)
+                    offline_btn = gr.Button("オフラインモードへ", scale=1)
+            with gr.Accordion("移動", open=True):
                 move_destination_radio = gr.Radio(
                     choices=BUILDING_CHOICES,
                     value=lambda: _get_current_location_name(),
@@ -1402,19 +1566,8 @@ def main():
                     elem_classes=["saiverse-move-radio"],
                     show_label=False
                 )
-            gr.Markdown("---")
-            with gr.Column(elem_classes=["saiverse-sidebar-autolog-controls"]):
-                start_button = gr.Button("自律会話を開始", variant="primary", scale=1)
-                stop_button = gr.Button("自律会話を停止", variant="stop", scale=1)
-                status_display = gr.Textbox(
-                    value="停止中",
-                    label="現在のステータス",
-                    interactive=False,
-                    scale=1
-                )
-
         with gr.Column(elem_id="section-worldview", elem_classes=['saiverse-section']):
-            with gr.Row():
+            with gr.Row(elem_id="chat_header"):
                 user_location_display = gr.Textbox(
                     # managerから現在地を取得して表示する
                     value=lambda: manager.building_map.get(manager.user_current_building_id).name if manager.user_current_building_id and manager.user_current_building_id in manager.building_map else "不明な場所",
@@ -1432,14 +1585,10 @@ def main():
                 )
                 move_btn = gr.Button("移動", scale=1, visible=False)
 
-            #gr.Markdown("---")
-
-            # --- ここから下は既存のUI ---
-            #gr.Markdown("### 現在地での対話")
-            current_location_display = gr.Markdown(
-                value=lambda: _format_location_label(_get_current_location_name())
-            )
-            with gr.Group(elem_id="chat_wrap"):
+                current_location_display = gr.Markdown(
+                    value=lambda: _format_location_label(_get_current_location_name())
+                )
+            with gr.Group(elem_id="chat_scroll_area"):
                 chatbot = gr.Chatbot(
                     type="messages",
                     value=lambda: format_history_for_chatbot(manager.get_building_history(manager.user_current_building_id)) if manager.user_current_building_id else [],
@@ -1447,69 +1596,47 @@ def main():
                     sanitize_html=False,
                     elem_id="my_chat",
                     avatar_images=(None, None),
-                    height=800
+                    autoscroll=True,
+                    show_label=False
                 )
+            with gr.Group(elem_id="composer_fixed"):
                 with gr.Row():
-                    with gr.Column(scale=4):
-                        txt = gr.Textbox(placeholder="ここにメッセージを入力...", lines=4)
-                        image_input = gr.Image(
-                            type="filepath",
-                            label="画像を添付",
-                            height=200,
-                            sources=["upload"],
-                            interactive=True,
+                    with gr.Column(scale=5):
+                        with gr.Row(elem_id="message_input_row", equal_height=True):
+                            txt = gr.Textbox(
+                                placeholder="ここにメッセージを入力...",
+                                lines=3,
+                                elem_id="chat_message_textbox",
+                                show_label=False
+                            )
+                    with gr.Column(scale=1, min_width=0):
+                        submit = gr.Button(value="↑",variant="primary")
+                        image_input = gr.UploadButton(
+                            "📎",
+                            file_types=["image"],
+                            file_count="single",
+                            elem_id="attachment_button"
                         )
-                    with gr.Column(scale=1):
-                        submit = gr.Button("送信")
-            
-            gr.Markdown("---")
-            with gr.Accordion("ペルソナを招待する", open=False):
-                with gr.Row():
-                    summon_persona_dropdown = gr.Dropdown(
-                        choices=manager.get_summonable_personas(),
-                        label="呼ぶペルソナを選択",
-                        interactive=True,
-                        scale=3
-                    )
-                    summon_btn = gr.Button("呼ぶ", scale=1)
-
-            with gr.Accordion("会話を終える", open=False):
-                with gr.Row():
-                    end_conv_persona_dropdown = gr.Dropdown(
-                        choices=manager.get_conversing_personas(),
-                        label="会話を終えるペルソナを選択",
-                        interactive=True,
-                        scale=3
-                    )
-                    end_conv_btn = gr.Button("会話を終了", scale=1)
-
-            gr.Markdown("---")
-
-            with gr.Row():
-                login_status_display = gr.Textbox(
-                    value="オンライン" if manager.user_is_online else "オフライン",
-                    label="ログイン状態",
-                    interactive=False,
-                    scale=1
-                )
-                login_btn = gr.Button("ログイン", scale=1)
-                logout_btn = gr.Button("ログアウト", scale=1)
-            gr.Markdown("---")
-            with gr.Row():
-                sds_status_display = gr.Textbox(
-                    value=manager.sds_status,
-                    label="ネットワークモード",
-                    interactive=False,
-                    scale=2
-                )
-                online_btn = gr.Button("オンラインモードへ", scale=1)
-                offline_btn = gr.Button("オフラインモードへ", scale=1)
-
-
-            gr.Markdown("---")
-
-            with gr.Row():
-                model_drop = gr.Dropdown(choices=MODEL_CHOICES, value="None", label="システムデフォルトモデル (一時的な一括上書き)")
+                with gr.Accordion("オプション", open=False):
+                    model_drop = gr.Dropdown(choices=MODEL_CHOICES, value="None",label="モデル選択")
+                    refresh_chat_btn = gr.Button("履歴を再読み込み", variant="secondary")
+                    with gr.Row():
+                        with gr.Column():
+                            summon_persona_dropdown = gr.Dropdown(
+                                choices=manager.get_summonable_personas(),
+                                label="呼ぶペルソナを選択",
+                                interactive=True,
+                                scale=3
+                            )
+                            summon_btn = gr.Button("呼ぶ", scale=1)
+                        with gr.Column():
+                            end_conv_persona_dropdown = gr.Dropdown(
+                                choices=manager.get_conversing_personas(),
+                                label="帰ってもらうペルソナを選択",
+                                interactive=True,
+                                scale=3
+                            )
+                            end_conv_btn = gr.Button("帰宅", scale=1)
 
             # --- Event Handlers ---
             submit.click(
@@ -1539,6 +1666,12 @@ def main():
                 """
             )
             summon_btn.click(fn=call_persona_ui, inputs=[summon_persona_dropdown], outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown])
+            refresh_chat_btn.click(
+                fn=get_current_building_history,
+                inputs=None,
+                outputs=chatbot,
+                show_progress="hidden",
+            )
             login_btn.click(
                 fn=login_ui,
                 inputs=None,
@@ -1626,6 +1759,86 @@ def main():
                 window.saiverseActiveSection = label;
             };
 
+            const setupAttachmentControls = () => {
+                const textarea = document.querySelector("#chat_message_textbox textarea");
+                const fileInput = document.querySelector("#attachment_button input[type='file']");
+                if (!textarea || !fileInput) {
+                    return false;
+                }
+                if (textarea.dataset.dropHandlerAttached === "true") {
+                    return true;
+                }
+                const highlightClass = "drop-target-active";
+                const hasImage = (items) => {
+                    if (!items) {
+                        return false;
+                    }
+                    const list = Array.from(items);
+                    if (!list.length) {
+                        return false;
+                    }
+                    return list.some((item) => {
+                        const type = item.type || "";
+                        if (type.startsWith("image/")) {
+                            return true;
+                        }
+                        const name = item.name || "";
+                        return /\\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name);
+                    });
+                };
+                const addHighlight = () => textarea.classList.add(highlightClass);
+                const removeHighlight = () => textarea.classList.remove(highlightClass);
+                ["dragenter", "dragover"].forEach((eventName) => {
+                    textarea.addEventListener(eventName, (event) => {
+                        if (hasImage(event.dataTransfer?.items || event.dataTransfer?.files)) {
+                            event.preventDefault();
+                            event.dataTransfer.dropEffect = "copy";
+                            addHighlight();
+                        }
+                    });
+                });
+                ["dragleave", "dragend"].forEach((eventName) => {
+                    textarea.addEventListener(eventName, () => {
+                        removeHighlight();
+                    });
+                });
+                textarea.addEventListener("drop", (event) => {
+                    const files = event.dataTransfer?.files;
+                    if (!files || !files.length) {
+                        removeHighlight();
+                        return;
+                    }
+                    const imageFiles = Array.from(files).filter((file) => {
+                        return file.type.startsWith("image/") || /\\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.name);
+                    });
+                    if (!imageFiles.length) {
+                        removeHighlight();
+                        return;
+                    }
+                    event.preventDefault();
+                    let assigned = false;
+                    try {
+                        const transfer = new DataTransfer();
+                        transfer.items.add(imageFiles[0]);
+                        fileInput.files = transfer.files;
+                        assigned = true;
+                    } catch (error) {
+                        try {
+                            fileInput.files = files;
+                            assigned = true;
+                        } catch (_) {
+                            assigned = false;
+                        }
+                    }
+                    if (assigned) {
+                        fileInput.dispatchEvent(new Event("change", { bubbles: true }));
+                    }
+                    removeHighlight();
+                });
+                textarea.dataset.dropHandlerAttached = "true";
+                return true;
+            };
+
             const attachNavHandlers = () => {
                 const navItems = document.querySelectorAll("#saiverse-sidebar-nav .saiverse-nav-item");
                 if (!navItems.length) {
@@ -1667,6 +1880,7 @@ def main():
                         const current = window.saiverseActiveSection || defaultLabel;
                         setActive(current);
                     }
+                    setupAttachmentControls();
                 }
                 return found;
             };
@@ -1680,6 +1894,12 @@ def main():
                     }
                 }, 250);
             }
+            const ensureAttachmentSetup = () => {
+                if (!setupAttachmentControls()) {
+                    requestAnimationFrame(ensureAttachmentSetup);
+                }
+            };
+            ensureAttachmentSetup();
 
             setInterval(() => {
                 const button = document.getElementById("auto_refresh_log_btn");
@@ -1687,9 +1907,11 @@ def main():
                     button.click();
                 }
                 markSidebars();
+                setupAttachmentControls();
             }, 5000);
         }
         """
+        demo.load(fn=get_current_building_history, inputs=None, outputs=[chatbot])
         demo.load(None, None, None, js=js_auto_refresh)
 
     demo.launch(server_name="0.0.0.0",server_port=manager.ui_port, debug=True, share = False)
