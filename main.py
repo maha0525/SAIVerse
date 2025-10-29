@@ -26,6 +26,10 @@ from model_configs import get_model_choices
 from media_utils import iter_image_media, path_to_data_url
 from database.db_manager import create_db_manager_ui
 from tools.memory_settings_ui import create_memory_settings_ui
+try:
+    from discord_gateway import ensure_gateway_runtime
+except ImportError:  # pragma: no cover - optional dependency
+    ensure_gateway_runtime = None
 
 level_name = os.getenv("SAIVERSE_LOG_LEVEL", "INFO").upper()
 if level_name not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
@@ -1509,6 +1513,8 @@ def main():
         db_path=str(db_path),
         sds_url=args.sds_url
     )
+    if ensure_gateway_runtime:
+        ensure_gateway_runtime(manager)
     
     # Populate new globals for the move dropdown
     BUILDING_CHOICES = [b.name for b in manager.buildings]

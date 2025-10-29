@@ -4,6 +4,7 @@ import asyncio
 import logging
 import signal
 
+from .command_processor import CommandProcessor
 from .config import BotSettings, get_settings
 from .connection_manager import ConnectionManager
 from .database import BotDatabase
@@ -26,8 +27,18 @@ class BotApplication:
         self._is_shutting_down = False
 
         self.connection_manager = ConnectionManager(self.settings, self.database)
-        self.router = MessageRouter(self.database, self.connection_manager, self.settings)
-        self.websocket_server = GatewayWebSocketServer(self.settings, self.connection_manager)
+        self.router = MessageRouter(
+            self.database, self.connection_manager, self.settings
+        )
+        self.command_processor = CommandProcessor(
+            router=self.router,
+            max_message_length=self.settings.max_message_length,
+        )
+        self.websocket_server = GatewayWebSocketServer(
+            self.settings,
+            self.connection_manager,
+            command_processor=self.command_processor,
+        )
         self.discord_client = SAIVerseDiscordClient(self.settings, self.router)
 
     async def run(self) -> None:
