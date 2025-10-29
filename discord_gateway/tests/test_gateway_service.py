@@ -1,10 +1,11 @@
 import asyncio
+
 import pytest
 
+from discord_gateway.auth import StaticTokenProvider
 from discord_gateway.config import GatewaySettings
 from discord_gateway.gateway_service import DiscordGatewayService
 from discord_gateway.translator import GatewayCommand
-from discord_gateway.auth import StaticTokenProvider
 
 
 class FakeGatewayClient:

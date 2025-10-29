@@ -1,13 +1,20 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-import pytest
 
-from discord_gateway.bot.config import BotSettings
+def _load_bot_settings():
+    from discord_gateway.bot.config import BotSettings
+
+    return BotSettings
+
+
+BotSettings = _load_bot_settings()
 
 
 @pytest.fixture
