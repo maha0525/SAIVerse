@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from typing import Awaitable
+from collections.abc import Awaitable
 
 logger = logging.getLogger(__name__)
 

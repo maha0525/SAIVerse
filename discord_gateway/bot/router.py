@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import discord
-from typing import TYPE_CHECKING
 
 from .config import BotSettings
 from .connection_manager import ConnectionManager
@@ -24,9 +24,7 @@ class MessageRouter:
     database: BotDatabase
     connections: ConnectionManager
     settings: BotSettings
-    discord_client: "SAIVerseDiscordClient | None" = field(
-        default=None, repr=False
-    )
+    discord_client: SAIVerseDiscordClient | None = field(default=None, repr=False)
 
     async def handle_message(self, message: discord.Message) -> None:
         if message.author.bot:
@@ -71,7 +69,7 @@ class MessageRouter:
     def get_owner_id(self, channel_id: int | str) -> str | None:
         return self.database.find_city_owner(channel_id)
 
-    def attach_discord_client(self, client: "SAIVerseDiscordClient") -> None:
+    def attach_discord_client(self, client: SAIVerseDiscordClient) -> None:
         self.discord_client = client
 
     async def emit_invite_event(

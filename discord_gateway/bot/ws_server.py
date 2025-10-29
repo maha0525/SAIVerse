@@ -5,7 +5,7 @@ import json
 import logging
 import ssl
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import websockets
 from pydantic import ValidationError
@@ -189,7 +189,7 @@ class GatewayWebSocketServer:
                         message,
                     )
 
-    def _resolve_ssl_context(self) -> Optional[ssl.SSLContext]:
+    def _resolve_ssl_context(self) -> ssl.SSLContext | None:
         if self._external_ssl_context is not None:
             return self._external_ssl_context
         if not self._settings.websocket_tls_enabled:

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import os
 import logging
+import os
 from dataclasses import dataclass
-from typing import Optional
 
 from .config import GatewaySettings, get_gateway_settings
 from .gateway_service import DiscordGatewayService
-from .mapping import ChannelContext, ChannelMapping
+from .mapping import ChannelMapping
 from .orchestrator import DiscordGatewayOrchestrator
 from .runtime import GatewayRuntime
 from .saiverse_adapter import GatewayHost, SAIVerseGatewayAdapter
@@ -50,24 +49,22 @@ def _gateway_enabled() -> bool:
 def ensure_gateway_runtime(
     manager,
     *,
-    settings: Optional[GatewaySettings] = None,
-    mapping: Optional[ChannelMapping] = None,
-) -> Optional[GatewayBridge]:
+    settings: GatewaySettings | None = None,
+    mapping: ChannelMapping | None = None,
+) -> GatewayBridge | None:
     """
     Ensure the Discord gateway runtime is running for the given SAIVerseManager.
 
     Returns a GatewayBridge when enabled, otherwise None.
     """
 
-    existing_runtime: Optional[GatewayRuntime] = getattr(
+    existing_runtime: GatewayRuntime | None = getattr(
         manager, "gateway_runtime", None
     )
-    existing_mapping: Optional[ChannelMapping] = getattr(
+    existing_mapping: ChannelMapping | None = getattr(
         manager, "gateway_mapping", None
     )
-    existing_bridge: Optional[GatewayBridge] = getattr(
-        manager, "gateway_bridge", None
-    )
+    existing_bridge: GatewayBridge | None = getattr(manager, "gateway_bridge", None)
 
     if existing_runtime and existing_bridge:
         logger.debug("Reusing existing gateway runtime.")
@@ -82,7 +79,7 @@ def ensure_gateway_runtime(
             orchestrator=orchestrator,
             mapping=existing_mapping or ChannelMapping([]),
         )
-        setattr(manager, "gateway_bridge", bridge)
+        manager.gateway_bridge = bridge
         logger.debug("Recovered gateway bridge from existing runtime.")
         return bridge
 
@@ -105,9 +102,9 @@ def ensure_gateway_runtime(
         runtime=runtime, service=service, orchestrator=orchestrator, mapping=mapping
     )
 
-    setattr(manager, "gateway_runtime", runtime)
-    setattr(manager, "gateway_mapping", mapping)
-    setattr(manager, "gateway_bridge", bridge)
+    manager.gateway_runtime = runtime
+    manager.gateway_mapping = mapping
+    manager.gateway_bridge = bridge
 
     logger.info(
         "Discord gateway runtime started (ws_url=%s).",

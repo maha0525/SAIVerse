@@ -6,9 +6,9 @@ import json
 import logging
 import uuid
 from collections import OrderedDict, defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterable
 
 from websockets.server import WebSocketServerProtocol
 

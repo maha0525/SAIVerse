@@ -413,7 +413,7 @@ class DiscordGatewayOrchestrator:
             if isinstance(value, dict):
                 for item in value.values():
                     collect(item)
-            elif isinstance(value, (list, tuple, set)):
+            elif isinstance(value, list | tuple | set):
                 for item in value:
                     collect(item)
             else:

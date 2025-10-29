@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from functools import lru_cache
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -109,13 +109,13 @@ class BotSettings(BaseSettings):
         mode="before",
     )
     @classmethod
-    def _empty_string_to_none(cls, value: Optional[str]) -> Optional[str]:
+    def _empty_string_to_none(cls, value: str | None) -> str | None:
         if isinstance(value, str) and not value.strip():
             return None
         return value
 
     @model_validator(mode="after")
-    def _validate_tls(self) -> "BotSettings":
+    def _validate_tls(self) -> BotSettings:
         if self.websocket_tls_enabled:
             if not self.websocket_tls_certfile or not self.websocket_tls_keyfile:
                 raise ValueError(
