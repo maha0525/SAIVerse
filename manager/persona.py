@@ -130,7 +130,9 @@ class PersonaMixin:
                 .all()
             )
 
-            self.occupants = {b.building_id: [] for b in self.buildings}
+            self.occupants.clear()
+            for building in self.buildings:
+                self.occupants[building.building_id] = []
 
             for log in current_occupancy:
                 pid = log.AIID
@@ -144,6 +146,8 @@ class PersonaMixin:
                         pid,
                         bid,
                     )
+            if hasattr(self, "state"):
+                self.state.occupants = self.occupants
             logging.info("Loaded current occupancy from database.")
         except Exception as exc:
             logging.error(
