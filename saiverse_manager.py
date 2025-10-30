@@ -178,7 +178,8 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
             capacities=self.capacities,
             building_map=self.building_map,
             building_histories=self.building_histories,
-            id_to_name_map=self.id_to_name_map
+            id_to_name_map=self.id_to_name_map,
+            user_id=self.state.user_id,
         )
         logging.info("Initialized OccupancyManager.")
 
@@ -528,10 +529,14 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
 
     def start_autonomous_conversations(self):
         """Start all autonomous conversation managers."""
+        if getattr(self, "runtime", None):
+            self.runtime.start_autonomous_conversations()
+            return
+
         if self.autonomous_conversation_running:
             logging.warning("Autonomous conversations are already running.")
             return
-        
+
         logging.info("Starting all autonomous conversation managers...")
         for manager in self.conversation_managers.values():
             manager.start()
@@ -540,6 +545,10 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
 
     def stop_autonomous_conversations(self):
         """Stop all autonomous conversation managers."""
+        if getattr(self, "runtime", None):
+            self.runtime.stop_autonomous_conversations()
+            return
+
         if not self.autonomous_conversation_running:
             logging.warning("Autonomous conversations are not running.")
             return
@@ -559,11 +568,13 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
         return f"{building_name}_{city_name}"
 
     def run_scheduled_prompts(self) -> List[str]:
-        """Run scheduled prompts for all personas."""
+        """Run scheduled prompts via runtime service (fallback to local logic if needed)."""
+        if getattr(self, "runtime", None):
+            return self.runtime.run_scheduled_prompts()
+
         replies: List[str] = []
         for persona in self.personas.values():
-            # Only auto mode should run periodic prompts
-            if getattr(persona, 'interaction_mode', 'auto') == 'auto':
+            if getattr(persona, "interaction_mode", "auto") == "auto":
                 replies.extend(persona.run_scheduled_prompt())
         if replies:
             self._save_building_histories()
@@ -572,61 +583,88 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
         return replies
 
     def execute_tool(self, tool_id: int, persona_id: str, arguments: Dict[str, Any]) -> str:
-        """
-        Dynamically loads and executes a tool function with given arguments.
-        Checks for persona's location and tool availability in that building.
-        """
+        if getattr(self, "runtime", None):
+            return self.runtime.execute_tool(tool_id, persona_id, arguments)
+
         db = self.SessionLocal()
         try:
-            # 1. Get persona and their current location
             persona = self.personas.get(persona_id)
             if not persona:
                 return f"Error: ペルソナ '{persona_id}' が見つかりません。"
-            
+
             current_building_id = persona.current_building_id
             building = self.building_map.get(current_building_id)
             if not building:
-                 return f"Error: ペルソナ '{persona_id}' は有効な建物にいません。"
+                return f"Error: ペルソナ '{persona_id}' は有効な建物にいません。"
 
-            # 2. Check if the tool is available in the current building
-            link = db.query(BuildingToolLink).filter_by(BUILDINGID=current_building_id, TOOLID=tool_id).first()
+            link = (
+                db.query(BuildingToolLink)
+                .filter_by(BUILDINGID=current_building_id, TOOLID=tool_id)
+                .first()
+            )
             if not link:
                 return f"Error: ツールID {tool_id} は '{building.name}' で利用できません。"
 
-            # 3. Get tool's module path and function name from DB
             tool_record = db.query(ToolModel).filter_by(TOOLID=tool_id).first()
             if not tool_record:
                 return f"Error: ツールID {tool_id} がデータベースに見つかりません。"
-            
+
             module_path = tool_record.MODULE_PATH
             function_name = tool_record.FUNCTION_NAME
 
             try:
-                # 4. Dynamically import the module and get the function
                 tool_module = importlib.import_module(module_path)
                 tool_function = getattr(tool_module, function_name)
-
-                # 5. Execute the function with the provided arguments
-                logging.info(f"Executing tool '{tool_record.TOOLNAME}' for persona '{persona.persona_name}' with args {arguments}.")
-                result = tool_function(**arguments) # 引数をアンパックして渡す
-
-                # 6. Process and return the result
+                logging.info(
+                    "Executing tool '%s' for persona '%s' with args %s.",
+                    tool_record.TOOLNAME,
+                    persona.persona_name,
+                    arguments,
+                )
+                result = tool_function(**arguments)
                 content, _, _, _ = tools.defs.parse_tool_result(result)
                 return str(content)
-
             except ImportError:
-                logging.error(f"Failed to import tool module: {module_path}", exc_info=True)
-                return f"Error: ツールファイル '{module_path}' が見つかりませんでした。パスを確認してください。"
+                logging.error(
+                    "Failed to import tool module: %s", module_path, exc_info=True
+                )
+                return (
+                    f"Error: ツールファイル '{module_path}' が見つかりませんでした。"
+                    "パスを確認してください。"
+                )
             except AttributeError:
-                logging.error(f"Function '{function_name}' not found in module '{module_path}'.", exc_info=True)
-                return f"Error: ツール関数 '{function_name}' が '{module_path}' に見つかりませんでした。"
-            except TypeError as e:
-                # 引数が合わない場合
-                logging.error(f"Argument mismatch for tool '{function_name}': {e}", exc_info=True)
-                return f"Error: ツール '{tool_record.TOOLNAME}' に不正な引数が渡されました。詳細: {e}"
-            except Exception as e:
-                logging.error(f"An error occurred while executing tool '{module_path}': {e}", exc_info=True)
-                return f"Error: ツールの実行中に予期せぬエラーが発生しました: {e}"
+                logging.error(
+                    "Function '%s' not found in module '%s'.",
+                    function_name,
+                    module_path,
+                    exc_info=True,
+                )
+                return (
+                    f"Error: ツール関数 '{function_name}' が '{module_path}' に"
+                    "見つかりませんでした。"
+                )
+            except TypeError as exc:
+                logging.error(
+                    "Argument mismatch for tool '%s': %s",
+                    function_name,
+                    exc,
+                    exc_info=True,
+                )
+                return (
+                    f"Error: ツール '{tool_record.TOOLNAME}' に不正な引数が渡されました。"
+                    f"詳細: {exc}"
+                )
+            except Exception as exc:
+                logging.error(
+                    "An error occurred while executing tool '%s': %s",
+                    module_path,
+                    exc,
+                    exc_info=True,
+                )
+                return (
+                    "Error: ツールの実行中に予期せぬエラーが発生しました: "
+                    f"{exc}"
+                )
         finally:
             db.close()
 

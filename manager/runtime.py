@@ -1,3 +1,4 @@
+import importlib
 import json
 import logging
 from datetime import datetime, timedelta
@@ -14,10 +15,13 @@ from manager.background import DatabasePollingMixin
 from manager.state import CoreState
 from database.models import (
     BuildingOccupancyLog,
+    BuildingToolLink,
+    Tool as ToolModel,
     VisitingAI,
     ThinkingRequest,
     User as UserModel,
 )
+import tools.defs
 
 
 class RuntimeService(
@@ -69,6 +73,9 @@ class RuntimeService(
         self._gateway_memory_active_persona = manager._gateway_memory_active_persona
         self.gateway_runtime = manager.gateway_runtime
         self.gateway_mapping = manager.gateway_mapping
+        self.autonomous_conversation_running = getattr(
+            manager, "autonomous_conversation_running", False
+        )
 
     # ----- Background loops -----
 
@@ -588,6 +595,133 @@ class RuntimeService(
         self._save_building_histories()
         for persona in self.personas.values():
             persona._save_session_metadata()
+
+    def run_scheduled_prompts(self) -> List[str]:
+        replies: List[str] = []
+        for persona in self.personas.values():
+            if getattr(persona, "interaction_mode", "auto") == "auto":
+                replies.extend(persona.run_scheduled_prompt())
+        if replies:
+            self._save_building_histories()
+            for persona in self.personas.values():
+                persona._save_session_metadata()
+        return replies
+
+    def start_autonomous_conversations(self) -> None:
+        if self.autonomous_conversation_running:
+            logging.warning("Autonomous conversations are already running.")
+            return
+
+        logging.info("Starting all autonomous conversation managers...")
+        for manager in self.conversation_managers.values():
+            manager.start()
+        self.autonomous_conversation_running = True
+        if hasattr(self.manager, "autonomous_conversation_running"):
+            self.manager.autonomous_conversation_running = True
+        logging.info("All autonomous conversation managers have been started.")
+
+    def stop_autonomous_conversations(self) -> None:
+        if not self.autonomous_conversation_running:
+            logging.warning("Autonomous conversations are not running.")
+            return
+
+        logging.info("Stopping all autonomous conversation managers...")
+        for manager in self.conversation_managers.values():
+            manager.stop()
+        self.autonomous_conversation_running = False
+        if hasattr(self.manager, "autonomous_conversation_running"):
+            self.manager.autonomous_conversation_running = False
+        logging.info("All autonomous conversation managers have been stopped.")
+
+    def execute_tool(
+        self, tool_id: int, persona_id: str, arguments: Dict[str, Any]
+    ) -> str:
+        db = self.SessionLocal()
+        try:
+            persona = self.personas.get(persona_id)
+            if not persona:
+                return f"Error: ペルソナ '{persona_id}' が見つかりません。"
+
+            current_building_id = persona.current_building_id
+            building = self.building_map.get(current_building_id)
+            if not building:
+                return f"Error: ペルソナ '{persona_id}' は有効な建物にいません。"
+
+            link = (
+                db.query(BuildingToolLink)
+                .filter_by(BUILDINGID=current_building_id, TOOLID=tool_id)
+                .first()
+            )
+            if not link:
+                return (
+                    f"Error: ツールID {tool_id} は '{building.name}' で利用できません。"
+                )
+
+            tool_record = db.query(ToolModel).filter_by(TOOLID=tool_id).first()
+            if not tool_record:
+                return f"Error: ツールID {tool_id} がデータベースに見つかりません。"
+
+            module_path = tool_record.MODULE_PATH
+            function_name = tool_record.FUNCTION_NAME
+
+            try:
+                tool_module = importlib.import_module(module_path)
+                tool_function = getattr(tool_module, function_name)
+
+                logging.info(
+                    "Executing tool '%s' for persona '%s' with args %s.",
+                    tool_record.TOOLNAME,
+                    persona.persona_name,
+                    arguments,
+                )
+                result = tool_function(**arguments)
+
+                content, _, _, _ = tools.defs.parse_tool_result(result)
+                return str(content)
+
+            except ImportError:
+                logging.error(
+                    "Failed to import tool module: %s", module_path, exc_info=True
+                )
+                return (
+                    f"Error: ツールファイル '{module_path}' が見つかりませんでした。"
+                    "パスを確認してください。"
+                )
+            except AttributeError:
+                logging.error(
+                    "Function '%s' not found in module '%s'.",
+                    function_name,
+                    module_path,
+                    exc_info=True,
+                )
+                return (
+                    f"Error: ツール関数 '{function_name}' が '{module_path}' に"
+                    "見つかりませんでした。"
+                )
+            except TypeError as exc:
+                logging.error(
+                    "Argument mismatch for tool '%s': %s",
+                    function_name,
+                    exc,
+                    exc_info=True,
+                )
+                return (
+                    f"Error: ツール '{tool_record.TOOLNAME}' に不正な引数が渡されました。"
+                    f"詳細: {exc}"
+                )
+            except Exception as exc:
+                logging.error(
+                    "An error occurred while executing tool '%s': %s",
+                    module_path,
+                    exc,
+                    exc_info=True,
+                )
+                return (
+                    "Error: ツールの実行中に予期せぬエラーが発生しました: "
+                    f"{exc}"
+                )
+        finally:
+            db.close()
 
     # ----- Exploration -----
 
