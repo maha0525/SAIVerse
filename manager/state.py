@@ -49,3 +49,4 @@ class CoreState:
     start_in_online_mode: bool = False
     ui_port: int = 0
     api_port: int = 0
+    autonomous_conversation_running: bool = False

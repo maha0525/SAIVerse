@@ -196,7 +196,6 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
 
         # --- Step 6: Prepare Background Task Managers ---
         # 自律会話を管理するConversationManagerを準備します（この時点ではまだ起動しません）。
-        self.autonomous_conversation_running: bool = False
         self.conversation_managers: Dict[str, ConversationManager] = {}
         for b_id in self.building_map.keys(): # building_map is already filtered by city
             # user_roomはユーザー操作起点なので自律会話は不要
@@ -230,10 +229,6 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
             logging.info("Starting in Offline Mode as per DB setting.")
             self.sds_status = "Offline (Startup Setting)"
             self._load_cities_from_db()
-        # Start background thread for DB polling
-        self.db_polling_stop_event = threading.Event()
-        self.db_polling_thread = threading.Thread(target=self._db_polling_loop, daemon=True)
-        self.db_polling_thread.start()
         self.gateway_runtime = None
         self.gateway_mapping = ChannelMapping([])
         self._gateway_memory_transfers: Dict[str, Dict[str, Any]] = {}
@@ -253,6 +248,13 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
 
         self.runtime = RuntimeService(self, self.state)
         self.admin = AdminService(self, self.runtime, self.state)
+
+        # Start background thread for DB polling (after runtime is ready)
+        self.db_polling_stop_event = threading.Event()
+        self.db_polling_thread = threading.Thread(
+            target=self._db_polling_loop, daemon=True
+        )
+        self.db_polling_thread.start()
 
     def _update_timezone_cache(self, tz_name: Optional[str]) -> None:
         """Update cached timezone information for this manager."""
@@ -533,14 +535,14 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
             self.runtime.start_autonomous_conversations()
             return
 
-        if self.autonomous_conversation_running:
+        if self.state.autonomous_conversation_running:
             logging.warning("Autonomous conversations are already running.")
             return
 
         logging.info("Starting all autonomous conversation managers...")
         for manager in self.conversation_managers.values():
             manager.start()
-        self.autonomous_conversation_running = True
+        self.state.autonomous_conversation_running = True
         logging.info("All autonomous conversation managers have been started.")
 
     def stop_autonomous_conversations(self):
@@ -549,14 +551,14 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
             self.runtime.stop_autonomous_conversations()
             return
 
-        if not self.autonomous_conversation_running:
+        if not self.state.autonomous_conversation_running:
             logging.warning("Autonomous conversations are not running.")
             return
 
         logging.info("Stopping all autonomous conversation managers...")
         for manager in self.conversation_managers.values():
             manager.stop()
-        self.autonomous_conversation_running = False
+        self.state.autonomous_conversation_running = False
         logging.info("All autonomous conversation managers have been stopped.")
 
     def get_building_history(self, building_id: str) -> List[Dict[str, str]]:

@@ -73,9 +73,6 @@ class RuntimeService(
         self._gateway_memory_active_persona = manager._gateway_memory_active_persona
         self.gateway_runtime = manager.gateway_runtime
         self.gateway_mapping = manager.gateway_mapping
-        self.autonomous_conversation_running = getattr(
-            manager, "autonomous_conversation_running", False
-        )
 
     # ----- Background loops -----
 
@@ -608,29 +605,25 @@ class RuntimeService(
         return replies
 
     def start_autonomous_conversations(self) -> None:
-        if self.autonomous_conversation_running:
+        if self.state.autonomous_conversation_running:
             logging.warning("Autonomous conversations are already running.")
             return
 
         logging.info("Starting all autonomous conversation managers...")
         for manager in self.conversation_managers.values():
             manager.start()
-        self.autonomous_conversation_running = True
-        if hasattr(self.manager, "autonomous_conversation_running"):
-            self.manager.autonomous_conversation_running = True
+        self.state.autonomous_conversation_running = True
         logging.info("All autonomous conversation managers have been started.")
 
     def stop_autonomous_conversations(self) -> None:
-        if not self.autonomous_conversation_running:
+        if not self.state.autonomous_conversation_running:
             logging.warning("Autonomous conversations are not running.")
             return
 
         logging.info("Stopping all autonomous conversation managers...")
         for manager in self.conversation_managers.values():
             manager.stop()
-        self.autonomous_conversation_running = False
-        if hasattr(self.manager, "autonomous_conversation_running"):
-            self.manager.autonomous_conversation_running = False
+        self.state.autonomous_conversation_running = False
         logging.info("All autonomous conversation managers have been stopped.")
 
     def execute_tool(
