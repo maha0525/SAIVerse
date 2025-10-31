@@ -20,7 +20,7 @@ graph TD
     end
 
     subgraph "Core Orchestration Layer"
-        Manager[saiverse_manager.py<br><b>SAIVerse Manager</b><br>Central orchestrator, state management, background tasks]
+        Manager[saiverse_manager/<br><b>SAIVerse Manager</b><br>Central orchestrator, state management, background tasks]
     end
 
     subgraph "Logic Components"
@@ -67,7 +67,7 @@ graph TD
   - Gradio UI（ワールドビュー、ワールドエディタ、DB Managerを含む）のメインループを管理し、ユーザーからの入力を`SAIVerseManager`に中継する。
   - `SAIVerseManager`のバックグラウンドタスク（SDS通信、DBポーリング）を定期的に実行するスレッドを開始する。
 
-### `saiverse_manager.py` (世界の管理者)
+### `saiverse_manager` パッケージ (世界の管理者)
 - **役割**: SAIVerse世界の「神」や「管理者」に相当する中央コンポーネント。
 - **責務**:
   - すべてのペルソナ (`PersonaCore`) とBuildingのインスタンスをメモリ上に保持・管理する。
@@ -77,6 +77,15 @@ graph TD
   - データベースから初期状態をロードし、終了時に状態を保存する。
   - **移動処理の委譲**: AIやユーザーの移動に関する処理は、`OccupancyManager`に委譲する。
   - ワールドエディタのバックエンド: UIからのCRUD要求（City/Building/AI/Blueprintの作成・更新・削除）を処理する。
+
+  リファクタ後は `saiverse_manager.services` 配下に以下の専用クラスを設け、`SAIVerseManager` 本体は依存性を注入して連携させるだけの役割に縮小した。
+
+  - `CityConfigService`: City設定とタイムゾーンの取得、他City一覧のロードを担当。
+  - `HistoryLoader`: Building定義・履歴ファイル・アバターの読み込みとディレクトリ整備を担当。
+  - `SDSClient`: SDS登録・ハートビート・Cityディレクトリ取得のHTTP通信を一元管理。
+  - `GatewayBootstrapper`: 環境変数を検査し、Discord Gateway連携を条件付きで起動。
+
+  これによりユニットテスト可能な境界が生まれ、個別の責務を独立して検証できるようになった。
 
 ### `persona_core.py` (AIの魂)
 - **役割**: 個々のAIペルソナの「魂」であり「脳」。
@@ -125,7 +134,18 @@ graph TD
 7. `SAIVerseManager`は、各`Building`（`user_room`を除く）に対して`ConversationManager`を生成します。この時点では自律会話はまだ開始されません。
 8. すべての準備が整うと、GradioのUIが起動し、ユーザーからの操作や「自律会話を開始」ボタンのクリックを待ち受けます。
 
-## 5. City間連携シーケンス (リモート・ペルソナ)
+## 5. サービス分割後のユースケース確認
+
+新しいサービス構成により、以下の主要ユースケースが個別に検証できるようになった。
+
+- **起動フローの安定化**: `CityConfigService` と `HistoryLoader` がデータベースとファイルシステムの依存関係を吸収し、`SAIVerseManager` は依存注入で初期化される。`tests/test_saiverse_services.py::test_city_config_service_loads_city_and_other_cities` および `::test_history_loader_handles_paths_and_histories` で起動時ロードの整合性を確認。
+- **都市設定の再読込**: `CityConfigService.load_other_cities` を介して `_load_cities_from_db` が再利用され、オンライン/オフライン切替時の再ロードが一貫して動作する。
+- **SDSオンライン/オフライン切替**: `SDSClient` が登録・ハートビート・ディレクトリ取得をカプセル化し、`tests/test_saiverse_services.py::test_sds_client_success_and_failure` で例外時の挙動を含めて検証。
+- **Discord Gateway 連携の条件起動**: `GatewayBootstrapper` が環境変数による起動制御を担い、`tests/test_saiverse_services.py::test_gateway_bootstrapper_controls_initialisation` で有効/無効双方の挙動を確認。
+
+これらのユニットテストを通じて、従来のモノリシックな初期化フローに依存せずに、主要ユースケースが新構成でも正常に動作することを担保している。
+
+## 6. City間連携シーケンス (リモート・ペルソナ)
 
 SAIVerseのCity間連携は、APIを直接呼び出す同期的なフローではなく、**データベースの`VisitingAI`テーブルを介した非同期的なトランザクション**によって実現されています。これにより、通信相手のCityが一時的にオフラインでも移動要求が失われず、堅牢な連携が可能になります。
 

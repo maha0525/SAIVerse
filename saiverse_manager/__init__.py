@@ -1,6 +1,6 @@
 import base64
 import json
-from sqlalchemy import create_engine, inspect, func, text
+from sqlalchemy import func
 import threading
 import requests
 import logging
@@ -41,13 +41,21 @@ from persona_core import PersonaCore
 from model_configs import get_model_provider, get_context_length
 from occupancy_manager import OccupancyManager
 from conversation_manager import ConversationManager
-from sqlalchemy.orm import sessionmaker
 from remote_persona_proxy import RemotePersonaProxy
 from database.models import Base, AI as AIModel, Building as BuildingModel, BuildingOccupancyLog, User as UserModel, City as CityModel, VisitingAI, ThinkingRequest, Blueprint, Tool as ToolModel, BuildingToolLink
+from .services import (
+    CityConfigService,
+    GatewayBootstrapper,
+    HistoryLoader,
+    SDSClient,
+    SDSClientError,
+)
 
 
 #DEFAULT_MODEL = "gpt-4o"
 DEFAULT_MODEL = "gemini-2.0-flash"
+
+__all__ = ["SAIVerseManager"]
 
 
 class SAIVerseManager:
@@ -59,87 +67,62 @@ class SAIVerseManager:
         db_path: str,
         model: str = DEFAULT_MODEL,
         sds_url: str = os.getenv("SDS_URL", "http://127.0.0.1:8080"),
+        city_config_service: Optional[CityConfigService] = None,
+        history_loader: Optional[HistoryLoader] = None,
+        sds_client: Optional[SDSClient] = None,
+        gateway_bootstrapper: Optional[GatewayBootstrapper] = None,
     ):
         # --- Step 0: Database and Configuration Setup ---
         self.db_path = db_path
-        DATABASE_URL = f"sqlite:///{db_path}"
-        engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-        self._ensure_city_timezone_column(engine)
-        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        
+        self.city_config_service = city_config_service or CityConfigService(
+            city_name=city_name,
+            db_path=db_path,
+        )
+        self.SessionLocal = self.city_config_service.session_factory
+
         # --- Step 1: Load City Configuration from DB ---
-        db = self.SessionLocal()
-        try:
-            my_city_config = db.query(CityModel).filter(CityModel.CITYNAME == city_name).first()
-            if not my_city_config:
-                raise ValueError(f"City '{city_name}' not found in the database. Please run 'python database/seed.py' first.")
-            
-            self.city_id = my_city_config.CITYID # This is the integer PK
-            self.city_name = my_city_config.CITYNAME # This is the string identifier
-            self.user_room_id = f"user_room_{self.city_name}"
-            self.ui_port = my_city_config.UI_PORT
-            self.api_port = my_city_config.API_PORT
-            self.start_in_online_mode = my_city_config.START_IN_ONLINE_MODE
-            self._update_timezone_cache(getattr(my_city_config, "TIMEZONE", "UTC"))
-            
-            # Load other cities' configs for inter-city communication
-            other_cities = db.query(CityModel).filter(CityModel.CITYID != self.city_id).all()
-            self.cities_config = {
-                city.CITYNAME: {
-                    "city_id": city.CITYID,
-                    "api_base_url": f"http://127.0.0.1:{city.API_PORT}",
-                    "timezone": getattr(city, "TIMEZONE", "UTC") or "UTC",
-                } for city in other_cities
-            }
-            logging.info(f"Loaded config for '{self.city_name}' (ID: {self.city_id}). Found {len(self.cities_config)} other cities.")
+        city_config, other_cities = self.city_config_service.load_city_configuration()
+        self.city_id = city_config.city_id
+        self.city_name = city_config.city_name
+        self.user_room_id = f"user_room_{self.city_name}"
+        self.ui_port = city_config.ui_port
+        self.api_port = city_config.api_port
+        self.start_in_online_mode = city_config.start_in_online_mode
+        self.timezone_name = city_config.timezone_name
+        self.timezone_info = city_config.timezone_info
+        self.cities_config = other_cities
+        logging.info(
+            "Loaded config for '%s' (ID: %s). Found %s other cities.",
+            self.city_name,
+            self.city_id,
+            len(self.cities_config),
+        )
 
-        finally:
-            db.close()
-
-        # --- Step 1: Load Static Assets from DB ---
+        # --- Step 2: Load Static Assets from DB ---
         # データベースから建物の静的な情報を読み込み、メモリ上にBuildingオブジェクトとして展開します。
-        self.buildings: List[Building] = self._load_and_create_buildings_from_db()
+        self.history_loader = history_loader or HistoryLoader(self.city_name)
+        session = self.city_config_service.create_session()
+        try:
+            self.buildings: List[Building] = self.history_loader.load_buildings(
+                session, self.city_id
+            )
+        finally:
+            session.close()
         self.building_map: Dict[str, Building] = {b.building_id: b for b in self.buildings}
         self.capacities: Dict[str, int] = {b.building_id: b.capacity for b in self.buildings}
 
-        # --- Step 2: Setup File Paths and Default Avatars ---
+        # --- Step 3: Setup File Paths, Avatars, and Histories ---
         # 各種ログファイルのパスや、デフォルトのアバター画像を設定します。
-        self.saiverse_home = Path.home() / ".saiverse"
-        self.backup_dir = self.saiverse_home / "backups"
-        self.backup_dir.mkdir(parents=True, exist_ok=True)
-        self.building_memory_paths: Dict[str, Path] = {
-            b.building_id: self.saiverse_home / "cities" / self.city_name / "buildings" / b.building_id / "log.json"
-            for b in self.buildings
-        }
-        default_avatar_path = Path("assets/icons/blank.png")
-        if default_avatar_path.exists():
-            mime = mimetypes.guess_type(default_avatar_path.name)[0] or "image/png"
-            data_b = default_avatar_path.read_bytes()
-            b64 = base64.b64encode(data_b).decode("ascii")
-            self.default_avatar = f"data:{mime};base64,{b64}"
-        else:
-            self.default_avatar = ""
-        host_avatar_path = Path("assets/icons/host.png")
-        if host_avatar_path.exists():
-            mime = mimetypes.guess_type(host_avatar_path.name)[0] or "image/png"
-            data_b = host_avatar_path.read_bytes()
-            b64 = base64.b64encode(data_b).decode("ascii")
-            self.host_avatar = f"data:{mime};base64,{b64}"
-        else:
-            self.host_avatar = self.default_avatar
-
-        # --- Step 3: Load Conversation Histories ---
-        # 各建物の会話履歴をファイルから読み込みます。
-        self.building_histories: Dict[str, List[Dict[str, str]]] = {}
-        for b_id, path in self.building_memory_paths.items():
-            if path.exists():
-                try:
-                    self.building_histories[b_id] = json.loads(path.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    logging.warning("Failed to load building history %s", b_id)
-                    self.building_histories[b_id] = []
-            else:
-                self.building_histories[b_id] = []
+        self.saiverse_home = self.history_loader.saiverse_home
+        self.backup_dir = self.history_loader.backup_dir
+        self.building_memory_paths = self.history_loader.build_memory_paths(self.buildings)
+        self.history_loader.ensure_history_directories(self.building_memory_paths.values())
+        avatar_assets = self.history_loader.load_avatar_assets()
+        self.default_avatar = avatar_assets.default_avatar
+        self.host_avatar = avatar_assets.host_avatar or self.default_avatar
+        self.building_histories = self.history_loader.load_histories(
+            self.building_memory_paths
+        )
 
         # --- Step 4: Initialize Core Components and State Containers ---
         # ペルソナや入室状況などを管理するためのコンテナを初期化します。
@@ -197,7 +180,13 @@ class SAIVerseManager:
 
         # --- Step 7: Register with SDS and start background tasks ---
         self.sds_url = sds_url
-        self.sds_session = requests.Session()
+        self.sds_client = sds_client or SDSClient(
+            city_name=self.city_name,
+            city_id=self.city_id,
+            api_port=self.api_port,
+            sds_url=sds_url,
+        )
+        self.sds_session = self.sds_client.session
         self.sds_status = "Offline (Connecting...)"
         self.sds_stop_event = threading.Event()
         self.sds_thread = None
@@ -223,37 +212,15 @@ class SAIVerseManager:
         self.gateway_mapping = ChannelMapping([])
         self._gateway_memory_transfers: Dict[str, Dict[str, Any]] = {}
         self._gateway_memory_active_persona: Dict[str, str] = {}
-        gateway_enabled = os.getenv("SAIVERSE_GATEWAY_ENABLED", "0").lower() in {
-            "1",
-            "true",
-            "yes",
-        }
-        if gateway_enabled:
-            try:
-                self._initialize_gateway_integration()
-            except Exception as exc:
-                logging.exception(
-                    "Failed to initialize Discord gateway integration: %s", exc
-                )
-
-    @staticmethod
-    def _ensure_city_timezone_column(engine) -> None:
-        """Ensure the city table has a TIMEZONE column."""
+        self.gateway_bootstrapper = gateway_bootstrapper or GatewayBootstrapper(
+            self._initialize_gateway_integration
+        )
         try:
-            inspector = inspect(engine)
-            columns = {col["name"] for col in inspector.get_columns("city")}
+            self.gateway_bootstrapper.start_if_enabled()
         except Exception as exc:
-            logging.warning("Failed to inspect city table for timezone column: %s", exc)
-            return
-        if "TIMEZONE" in columns:
-            return
-        logging.info("Adding TIMEZONE column to city table.")
-        try:
-            with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE city ADD COLUMN TIMEZONE TEXT DEFAULT 'UTC' NOT NULL"))
-                conn.execute(text("UPDATE city SET TIMEZONE = 'UTC' WHERE TIMEZONE IS NULL"))
-        except Exception as exc:
-            logging.error("Failed to add TIMEZONE column to city table: %s", exc)
+            logging.exception(
+                "Failed to initialize Discord gateway integration: %s", exc
+            )
 
     def _update_timezone_cache(self, tz_name: Optional[str]) -> None:
         """Update cached timezone information for this manager."""
@@ -275,49 +242,31 @@ class SAIVerseManager:
 
     def _register_with_sds(self):
         """Registers this city with the Directory Service on startup."""
-        register_url = f"{self.sds_url}/register"
-        payload = {
-            "city_name": self.city_name,
-            "city_id_pk": self.city_id,
-            "api_port": self.api_port
-        }
-        try:
-            response = self.sds_session.post(register_url, json=payload, timeout=5)
-            response.raise_for_status()
-            logging.info(f"Successfully registered with SDS at {self.sds_url}")
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Could not register with SDS: {e}. Will retry in the background.")
+        if not self.sds_client.register_city():
+            logging.error(
+                "Could not register with SDS at %s. Will retry in the background.",
+                self.sds_url,
+            )
 
     def _send_heartbeat(self):
         """Sends a heartbeat to the Directory Service."""
-        heartbeat_url = f"{self.sds_url}/heartbeat"
-        payload = {"city_name": self.city_name}
-        try:
-            response = self.sds_session.post(heartbeat_url, json=payload, timeout=2)
-            response.raise_for_status()
-            logging.debug(f"Heartbeat sent to SDS for {self.city_name}")
-        except requests.exceptions.RequestException as e:
-            logging.warning(f"Could not send heartbeat to SDS: {e}")
+        if not self.sds_client.send_heartbeat():
+            logging.warning("Could not send heartbeat to SDS at %s", self.sds_url)
 
     def _update_cities_from_sds(self):
         """Fetches the list of active cities from the Directory Service."""
-        cities_url = f"{self.sds_url}/cities"
         try:
-            response = self.sds_session.get(cities_url, timeout=5)
-            response.raise_for_status()
-            cities_data = response.json()
-            if self.city_name in cities_data:
-                del cities_data[self.city_name]
-            
+            cities_data = self.sds_client.fetch_city_directory()
+
             if self.cities_config != cities_data:
                 logging.info(f"Updated city directory from SDS: {list(cities_data.keys())}")
                 self.cities_config = cities_data
-            
+
             if self.sds_status != "Online":
                 logging.info("Connection to SDS established.")
             self.sds_status = "Online"
 
-        except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+        except SDSClientError as e:
             if self.sds_status == "Online":
                 logging.warning(f"Lost connection to SDS: {e}. Falling back to local DB config.")
                 self._load_cities_from_db() # Revert to local config
@@ -327,19 +276,11 @@ class SAIVerseManager:
 
     def _load_cities_from_db(self):
         """Loads the city configuration from the local database."""
-        db = self.SessionLocal()
-        try:
-            other_cities = db.query(CityModel).filter(CityModel.CITYID != self.city_id).all()
-            self.cities_config = {
-                city.CITYNAME: {
-                    "city_id": city.CITYID,
-                    "api_base_url": f"http://127.0.0.1:{city.API_PORT}",
-                    "timezone": getattr(city, "TIMEZONE", "UTC") or "UTC",
-                } for city in other_cities
-            }
-            logging.info(f"Loaded/reloaded city config from local DB. Found {len(self.cities_config)} other cities.")
-        finally:
-            db.close()
+        self.cities_config = self.city_config_service.load_other_cities(self.city_id)
+        logging.info(
+            "Loaded/reloaded city config from local DB. Found %s other cities.",
+            len(self.cities_config),
+        )
 
     def switch_to_offline_mode(self):
         """Forces the manager to use the local DB for city configuration."""
