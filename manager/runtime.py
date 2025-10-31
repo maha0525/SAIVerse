@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import requests
+from google.genai import errors
 
 from discord_gateway.translator import GatewayCommand
 from manager.persona import PersonaMixin
@@ -55,6 +56,8 @@ class RuntimeService(
         self.model = state.model
         self.provider = state.provider
         self.context_length = state.context_length
+        self.city_id = state.city_id
+        self.city_name = state.city_name
         self.default_avatar = state.default_avatar
         self.host_avatar = state.host_avatar
         self.saiverse_home = state.saiverse_home
@@ -78,200 +81,15 @@ class RuntimeService(
 
     def process_thinking_requests(self) -> None:
         """DBをポーリングして新しい思考依頼を処理する"""
-        db = self.SessionLocal()
-        try:
-            pending_requests = db.query(ThinkingRequest).filter(
-                ThinkingRequest.city_id == self.state.city_id,
-                ThinkingRequest.status == "pending",
-            ).all()
-            if not pending_requests:
-                return
-
-            logging.info(
-                "Found %d new thinking request(s).", len(pending_requests)
-            )
-
-            for req in pending_requests:
-                persona = self.personas.get(req.persona_id)
-                if not persona:
-                    logging.error(
-                        "Persona %s not found for thinking request %s.",
-                        req.persona_id,
-                        req.request_id,
-                    )
-                    req.status = "error"
-                    req.response_text = "Persona not found in this city."
-                    continue
-
-                try:
-                    context = json.loads(req.request_context_json)
-                    info_text_parts = [
-                        "You are currently in a remote city. Here is the context from there:",
-                        f"- Building: {context.get('building_id')}",
-                        f"- Occupants: {', '.join(context.get('occupants', []))}",
-                        f"- User is {'online' if context.get('user_online') else 'offline'}",
-                        "- Recent History:",
-                    ]
-                    for msg in context.get("recent_history", []):
-                        info_text_parts.append(
-                            f"  - {msg.get('role')}: {msg.get('content')}"
-                        )
-                    info_text = "\n".join(info_text_parts)
-
-                    response_text, _, _ = persona._generate(
-                        user_message=None,
-                        system_prompt_extra=None,
-                        info_text=info_text,
-                        log_extra_prompt=False,
-                        log_user_message=False,
-                    )
-
-                    req.response_text = response_text
-                    req.status = "processed"
-                    logging.info(
-                        "Processed thinking request %s for %s.",
-                        req.request_id,
-                        req.persona_id,
-                    )
-
-                except errors.ServerError as exc:
-                    logging.warning(
-                        "LLM Server Error on thinking request %s: %s. Marking as error.",
-                        req.request_id,
-                        exc,
-                    )
-                    req.status = "error"
-                    if "503" in str(exc):
-                        req.response_text = (
-                            "[SAIVERSE_ERROR] LLMモデルが一時的に利用できませんでした (503 Server Error)。"
-                            "時間をおいて再度試行してください。詳細: "
-                            f"{exc}"
-                        )
-                    else:
-                        req.response_text = (
-                            "[SAIVERSE_ERROR] LLMサーバーで予期せぬエラーが発生しました。詳細: "
-                            f"{exc}"
-                        )
-                except Exception as exc:
-                    logging.error(
-                        "Error processing thinking request %s: %s",
-                        req.request_id,
-                        exc,
-                        exc_info=True,
-                    )
-                    req.status = "error"
-                    req.response_text = (
-                        f"[SAIVERSE_ERROR] An internal error occurred during thinking: {exc}"
-                    )
-            db.commit()
-        except Exception as exc:
-            db.rollback()
-            logging.error(
-                "Error during thinking request check: %s", exc, exc_info=True
-            )
-        finally:
-            db.close()
+        self._process_thinking_requests()
 
     def check_for_visitors(self) -> None:
         """DBをポーリングして新しい訪問者を検知し、Cityに配置する"""
-        db = self.SessionLocal()
-        try:
-            visitors_to_process = db.query(VisitingAI).filter(
-                VisitingAI.city_id == self.state.city_id,
-                VisitingAI.status == "requested",
-            ).all()
-            if not visitors_to_process:
-                return
-
-            logging.info(
-                "Found %d new visitor request(s) in the database.",
-                len(visitors_to_process),
-            )
-
-            for visitor in visitors_to_process:
-                try:
-                    self._handle_visitor_arrival(visitor)
-                except Exception as exc:
-                    logging.error(
-                        "Unexpected error processing visitor ID %s: %s. "
-                        "Setting status to 'rejected'.",
-                        visitor.id,
-                        exc,
-                        exc_info=True,
-                    )
-                    error_db = self.SessionLocal()
-                    try:
-                        error_visitor = (
-                            error_db.query(VisitingAI)
-                            .filter_by(id=visitor.id)
-                            .first()
-                        )
-                        if error_visitor:
-                            error_visitor.status = "rejected"
-                            error_visitor.reason = (
-                                f"Internal server error during arrival: {exc}"
-                            )
-                            error_db.commit()
-                    finally:
-                        error_db.close()
-        except Exception as exc:
-            logging.error(
-                "Error during visitor check loop: %s", exc, exc_info=True
-            )
-        finally:
-            db.close()
+        self._check_for_visitors()
 
     def check_dispatch_status(self) -> None:
         """自身が要求した移動トランザクションの状態を監視し、プロセスを確定させる"""
-        db = self.SessionLocal()
-        try:
-            dispatches = db.query(VisitingAI).filter(
-                VisitingAI.profile_json.like(
-                    f'%"source_city_id": "{self.state.city_name}"%'
-                )
-            ).all()
-
-            for dispatch in dispatches:
-                persona_id = dispatch.persona_id
-                persona = self.personas.get(persona_id)
-                if not persona:
-                    continue
-
-                is_timed_out = (
-                    dispatch.status == "requested"
-                    and hasattr(dispatch, "created_at")
-                    and dispatch.created_at
-                    < datetime.now()
-                    - timedelta(seconds=self.dispatch_timeout_seconds)
-                )
-
-                if dispatch.status == "accepted":
-                    logging.info(
-                        "Dispatch for %s was accepted. Finalizing departure.",
-                        persona.persona_name,
-                    )
-                    self._finalize_dispatch(persona_id, db_session=db)
-                    db.delete(dispatch)
-
-                elif dispatch.status in {"rejected", "failed"} or is_timed_out:
-                    reason = dispatch.reason or "No reason provided."
-                    logging.warning(
-                        "Dispatch for %s failed or timed out: %s",
-                        persona.persona_name,
-                        reason,
-                    )
-                    persona.is_dispatched = False
-                    persona.interaction_mode = "auto"
-                    db.delete(dispatch)
-
-            db.commit()
-        except Exception as exc:
-            db.rollback()
-            logging.error(
-                "Error during dispatch status check: %s", exc, exc_info=True
-            )
-        finally:
-            db.close()
+        self._check_dispatch_status()
 
     # ----- User and persona movement -----
 
