@@ -10,7 +10,7 @@ Anthropic公式の互換レイヤーは最終回答のみを返す仕様とな�
    - `anthropic` Python SDK もしくはHTTPで `messages` エンドポイントを呼ぶ。
    - リクエストに `"thinking": {"type": "enabled", "budget_tokens": N}` を設定すると
      `content` に `{"type":"thinking","text":...}` が含まれる。
-   - 返却された `thinking` ブロックを `llm_clients` の正規化ロジックに通し、
+   - 返却された `thinking` ブロックを `llm_clients` パッケージの正規化ロジックに通し、
      建物ログ専用の折りたたみUIへ組み込む。
 
 2. **Proxied APIを使う**
@@ -21,10 +21,9 @@ Anthropic公式の互換レイヤーは最終回答のみを返す仕様とな�
 将来的にネイティブAPIへ切り替える場合:
 
 - `models.json` のClaudeエントリに `provider`: `anthropic_native` 等を追加し、
-  新しいクライアント実装を `llm_clients.py` に用意する。
+  新しいクライアント実装を `llm_clients/` 配下に用意する。
 - `saiverse_manager` や `persona_core` は既存のReasoning表示処理を流用可能。
 - 認証は `ANTHROPIC_API_KEY` をそのまま共有できるが、
   ヘッダーの `x-api-key` / `anthropic-version` に注意すること。
 
 参考: [Anthropic公式ドキュメント — Claude API OpenAI互換レイヤー](https://docs.claude.com/en/api/openai-sdk)
-

@@ -175,7 +175,7 @@ python scripts/export_saimemory_to_json.py air_city_a \
 saiverse/
 ├── main.py                   # メインループ
 ├── router.py                 # AIの行動ルーティングとセッション管理
-├── llm_clients.py            # LLMとの通信を抽象化
+├── llm_clients/              # LLMとの通信を抽象化するクライアント群
 ├── action_handler.py         # AIの行動（アクション）の解析と実行
 ├── history_manager.py        # 会話履歴の管理と永続化
 ├── buildings/
@@ -246,7 +246,7 @@ python -m unittest tests/test_module_name.py
 
 #### 現在テストが書かれているモジュール
 
-- `llm_clients.py`: LLMとの通信を抽象化するクライアントの動作を検証します。
+- `llm_clients/`: LLMとの通信を抽象化するクライアントの動作を検証します。
   - テストファイル: `tests/test_llm_clients.py`
 - `history_manager.py`: 会話履歴の管理と永続化のロジックを検証します。
   - テストファイル: `tests/test_history_manager.py`

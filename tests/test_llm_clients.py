@@ -49,7 +49,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(client.context_length, 1000)
 
     @patch('llm_router.client')
-    @patch('llm_clients.OpenAI')
+    @patch('llm_clients.openai.OpenAI')
     def test_openai_client_generate(self, mock_openai, mock_router_client):
         mock_client_instance = MagicMock()
         mock_openai.return_value = mock_client_instance
@@ -69,7 +69,7 @@ class TestLLMClients(unittest.TestCase):
         )
 
     @patch('llm_router.client')
-    @patch('llm_clients.OpenAI')
+    @patch('llm_clients.openai.OpenAI')
     def test_openai_client_generate_stream(self, mock_openai, mock_router_client):
         mock_client_instance = MagicMock()
         mock_openai.return_value = mock_client_instance
@@ -105,7 +105,7 @@ class TestLLMClients(unittest.TestCase):
         )
 
     @patch('llm_router.client')
-    @patch('llm_clients.genai')
+    @patch('llm_clients.gemini.genai')
     def test_gemini_client_generate(self, mock_genai, mock_router_client):
         mock_client_instance = MagicMock()
         mock_genai.Client.return_value = mock_client_instance
@@ -134,7 +134,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(kwargs['contents'][0].parts[0].text, "Hello")
 
     @patch('llm_router.client')
-    @patch('llm_clients.genai')
+    @patch('llm_clients.gemini.genai')
     def test_gemini_client_generate_stream(self, mock_genai, mock_router_client):
         mock_client_instance = MagicMock()
         mock_genai.Client.return_value = mock_client_instance
@@ -184,7 +184,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(thinking_cfg.get("effort"), "medium")
 
     @patch('llm_router.client')
-    @patch('llm_clients.genai')
+    @patch('llm_clients.gemini.genai')
     def test_gemini_client_free_key_fallback(self, mock_genai, mock_router_client):
         mock_free = MagicMock()
         mock_paid = MagicMock()
@@ -203,8 +203,8 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(response, "OK")
         mock_paid.models.generate_content.assert_called_once()
 
-    @patch('llm_clients.OllamaClient._probe_base', return_value='http://ollama.test')
-    @patch('llm_clients.requests.post')
+    @patch('llm_clients.ollama.OllamaClient._probe_base', return_value='http://ollama.test')
+    @patch('llm_clients.ollama.requests.post')
     def test_ollama_client_generate(self, mock_post, mock_probe):
         mock_response = MagicMock()
         mock_response.raise_for_status.return_value = None
@@ -231,8 +231,8 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(payload.get("response_format"), {"type": "json_object"})
         self.assertEqual(kwargs["timeout"], (3, 300))
 
-    @patch('llm_clients.OllamaClient._probe_base', return_value='http://ollama.test')
-    @patch('llm_clients.requests.post')
+    @patch('llm_clients.ollama.OllamaClient._probe_base', return_value='http://ollama.test')
+    @patch('llm_clients.ollama.requests.post')
     def test_ollama_client_generate_stream(self, mock_post, mock_probe):
         mock_response = MagicMock()
         mock_response.raise_for_status.return_value = None
