@@ -14,6 +14,7 @@ from pathlib import Path
 load_dotenv()
 
 from saiverse_manager import SAIVerseManager
+from database.paths import default_db_path
 from model_configs import get_model_choices
 from ui import state as ui_state
 from ui.app import build_app
@@ -109,12 +110,28 @@ def cleanup_and_start_server_with_args(port: int, script_path: Path, name: str, 
 def main():
     parser = argparse.ArgumentParser(description="Run a SAIVerse City instance.")
     parser.add_argument("city_name", type=str, nargs='?', default='city_a', help="The name of the city to run (defaults to city_a).")
-    parser.add_argument("--db-file", type=str, default="saiverse.db", help="Path to the unified database file.")
+    parser.add_argument(
+        "--db-file",
+        type=str,
+        default=None,
+        help="Path to the unified database file. Defaults to the managed database/data directory.",
+    )
     default_sds_url = os.getenv("SDS_URL", "http://127.0.0.1:8080")
     parser.add_argument("--sds-url", type=str, default=default_sds_url, help="URL of the SAIVerse Directory Service (or from .env).")
     args = parser.parse_args()
 
-    db_path = Path(__file__).parent / "database" / args.db_file
+    if args.db_file:
+        provided_path = Path(args.db_file)
+        if provided_path.is_absolute():
+            db_path = provided_path
+        else:
+            root_dir = Path(__file__).parent
+            if ("/" not in args.db_file and "\\" not in args.db_file):
+                db_path = (root_dir / "database" / provided_path).resolve()
+            else:
+                db_path = (root_dir / provided_path).resolve()
+    else:
+        db_path = default_db_path()
 
     global manager, AUTONOMOUS_BUILDING_CHOICES, AUTONOMOUS_BUILDING_MAP, BUILDING_CHOICES, BUILDING_NAME_TO_ID_MAP
     manager = SAIVerseManager(

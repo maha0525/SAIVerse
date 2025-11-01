@@ -15,7 +15,7 @@ Ensure you use a supported model and version for image generation:
 
 You can access both Gemini and Imagen 3 using the same libraries.
 
-**Note:** Image generation may not be available in all regions and countries, review our [Models](https://ai.google.dev/gemini-api/docs/models#gemini-2.0-flash-preview-image-generation) page for more information.
+**Note:** Image generation may not be available in all regions and countries, review our [Models](https://ai.google.dev/gemini-api/docs/models#gemini-2-5) page for more information.
 
 ## Generate images using Gemini
 
@@ -41,7 +41,7 @@ contents = ('Hi, can you create a 3d rendered image of a pig '
             'futuristic scifi city with lots of greenery?')
 
 response = client.models.generate_content(
-    model="gemini-2.0-flash-preview-image-generation",
+    model="gemini-2.5-flash-image",
     contents=contents,
     config=types.GenerateContentConfig(
       response_modalities=['TEXT', 'IMAGE']
@@ -79,7 +79,7 @@ text_input = ('Hi, This is a picture of me.'
             'Can you add a llama next to me?',)
 
 response = client.models.generate_content(
-    model="gemini-2.0-flash-preview-image-generation",
+    model="gemini-2.5-flash-image",
     contents=[text_input, image],
     config=types.GenerateContentConfig(
       response_modalities=['TEXT', 'IMAGE']

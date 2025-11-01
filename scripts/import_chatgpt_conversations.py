@@ -14,7 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from saiverse_memory import SAIMemoryAdapter
-from tools.chatgpt_importer import ChatGPTExport, ConversationRecord
+from tools.utilities.chatgpt_importer import ChatGPTExport, ConversationRecord
 
 UTC = timezone.utc
 

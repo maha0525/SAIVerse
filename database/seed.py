@@ -9,14 +9,19 @@ from sqlalchemy.orm import sessionmaker
 
 from models import Base, User, City, AI, Building, BuildingOccupancyLog, Blueprint, Tool
 
+try:  # pragma: no cover - supports running as script or module
+    from .paths import default_db_path, ensure_data_dir
+except ImportError:
+    from paths import default_db_path, ensure_data_dir  # type: ignore
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def seed_database():
     """
     Creates and seeds a new unified database from cities.json and initial data.
     """
-    DB_FILE = "saiverse.db"
-    DB_PATH = Path(__file__).parent / DB_FILE
+    DB_PATH = default_db_path()
+    ensure_data_dir()
 
     # --- 1. Delete old DB if it exists ---
     if DB_PATH.exists():

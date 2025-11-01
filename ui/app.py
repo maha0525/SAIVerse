@@ -3,7 +3,7 @@ from __future__ import annotations
 import gradio as gr
 
 from database.db_manager import create_db_manager_ui
-from tools.memory_settings_ui import create_memory_settings_ui
+from tools.utilities.memory_settings_ui import create_memory_settings_ui
 from ui import state as ui_state
 from ui.chat import (
     call_persona_ui,
