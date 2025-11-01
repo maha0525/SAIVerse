@@ -4,13 +4,13 @@ from __future__ import annotations
 import copy
 import json
 import logging
-import os
 import time
 from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from google import genai
+from llm_clients.gemini_utils import build_gemini_clients
 from google.genai import types
 
 import llm_clients
@@ -277,15 +277,11 @@ class PersonaPulseMixin:
         pulse_prompt_template = Path("system_prompts/pulse.txt").read_text(encoding="utf-8")
         model_name = decision_model or "gemini-2.0-flash"
 
-        free_key = os.getenv("GEMINI_FREE_API_KEY")
-        paid_key = os.getenv("GEMINI_API_KEY")
-        if not free_key and not paid_key:
+        try:
+            free_client, paid_client, active_client = build_gemini_clients()
+        except RuntimeError:
             logging.error("[pulse] Gemini API key not set")
             return []
-
-        free_client = genai.Client(api_key=free_key) if free_key else None
-        paid_client = genai.Client(api_key=paid_key) if paid_key else None
-        active_client = free_client or paid_client
         prompt_generated_at = now_utc
 
         def _finalize_and_return(result: List[str]) -> List[str]:

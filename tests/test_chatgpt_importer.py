@@ -13,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tools.chatgpt_importer import ChatGPTExport
+from tools.utilities.chatgpt_importer import ChatGPTExport
 from scripts.import_chatgpt_conversations import resolve_thread_suffix
 
 
