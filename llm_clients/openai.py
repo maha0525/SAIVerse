@@ -173,11 +173,35 @@ class OpenAIClient(LLMClient):
         messages: List[Dict[str, Any]],
         tools: Optional[list] | None = None,
         history_snippets: Optional[List[str]] | None = None,
+        response_schema: Optional[Dict[str, Any]] = None,
     ) -> str:
-        tools_spec = OPENAI_TOOLS_SPEC if tools is None else tools
+        default_tools = OPENAI_TOOLS_SPEC if tools is None else tools
+        if response_schema is not None and tools is None:
+            tools_spec: List[Dict[str, Any]] | list = []
+        else:
+            tools_spec = default_tools
         use_tools = bool(tools_spec)
         snippets: List[str] = list(history_snippets or [])
         self._store_reasoning([])
+
+        if response_schema and use_tools:
+            logging.warning("response_schema specified alongside tools; structured output is ignored for tool runs.")
+            response_schema = None
+
+        def _build_request_kwargs() -> Dict[str, Any]:
+            req = dict(self._request_kwargs)
+            if response_schema:
+                schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
+                req["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": schema_name or "saiverse_structured_output",
+                        "schema": response_schema,
+                        "strict": True,
+                    },
+                }
+                req.setdefault("temperature", 0)
+            return req
 
         if not use_tools:
             try:
@@ -185,7 +209,7 @@ class OpenAIClient(LLMClient):
                     model=self.model,
                     messages=_prepare_openai_messages(messages, self.supports_images),
                     n=1,
-                    **self._request_kwargs,
+                    **_build_request_kwargs(),
                 )
             except Exception:
                 logging.exception("OpenAI call failed")
@@ -231,7 +255,7 @@ class OpenAIClient(LLMClient):
                     tools=tools_spec,
                     tool_choice=tool_choice,
                     n=1,
-                    **self._request_kwargs,
+                    **_build_request_kwargs(),
                 )
                 raw_logger.debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
 
@@ -297,12 +321,15 @@ class OpenAIClient(LLMClient):
         tools: Optional[list] | None = None,
         force_tool_choice: Optional[dict | str] = None,
         history_snippets: Optional[List[str]] | None = None,
+        response_schema: Optional[Dict[str, Any]] = None,
     ) -> Iterator[str]:
         """
         ユーザ向けに逐次テキストを yield するストリーム版。
         - force_tool_choice: 初回のみ {"type":"function","function":{"name":..}} か "auto"
         - 再帰呼び出し時はデフォルト None → 自動で "auto"
         """
+        if response_schema is not None:
+            logging.warning("Structured streaming output is not supported for OpenAIClient; ignoring response_schema.")
         tools_spec = OPENAI_TOOLS_SPEC if tools is None else tools
         use_tools = bool(tools_spec)
         history_snippets = list(history_snippets or [])

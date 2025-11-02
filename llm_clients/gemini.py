@@ -73,6 +73,64 @@ class GeminiClient(LLMClient):
             self._thinking_config = None
 
     @staticmethod
+    def _schema_from_json(js: Optional[Dict[str, Any]]) -> Optional[types.Schema]:
+        if js is None:
+            return None
+
+        def _to_schema(node: Any) -> types.Schema:
+            if not isinstance(node, dict):
+                return types.Schema(type=types.Type.OBJECT)
+
+            kwargs: Dict[str, Any] = {}
+            value_type = node.get("type")
+            if isinstance(value_type, list):
+                if len(value_type) == 1:
+                    value_type = value_type[0]
+                else:
+                    kwargs["any_of"] = [_to_schema({**node, "type": t}) for t in value_type]
+                    value_type = None
+            if isinstance(value_type, str):
+                kwargs["type"] = {
+                    "string": types.Type.STRING,
+                    "number": types.Type.NUMBER,
+                    "integer": types.Type.INTEGER,
+                    "boolean": types.Type.BOOLEAN,
+                    "array": types.Type.ARRAY,
+                    "object": types.Type.OBJECT,
+                    "null": types.Type.NULL,
+                }.get(value_type, types.Type.TYPE_UNSPECIFIED)
+
+            if "description" in node:
+                kwargs["description"] = node["description"]
+            if "enum" in node and isinstance(node["enum"], list):
+                kwargs["enum"] = node["enum"]
+            if "const" in node:
+                kwargs["enum"] = [node["const"]]
+
+            if "properties" in node and isinstance(node["properties"], dict):
+                props = {k: _to_schema(v) for k, v in node["properties"].items()}
+                kwargs["properties"] = props
+                kwargs["property_ordering"] = list(node["properties"].keys())
+            if "required" in node and isinstance(node["required"], list):
+                kwargs["required"] = node["required"]
+
+            if "items" in node:
+                kwargs["items"] = _to_schema(node["items"])
+
+            if "anyOf" in node and isinstance(node["anyOf"], list):
+                kwargs["any_of"] = [_to_schema(sub) for sub in node["anyOf"]]
+
+            if "oneOf" in node and isinstance(node["oneOf"], list):
+                kwargs["any_of"] = [_to_schema(sub) for sub in node["oneOf"]]
+
+            if "allOf" in node and isinstance(node["allOf"], list):
+                kwargs["all_of"] = [_to_schema(sub) for sub in node["allOf"]]
+
+            return types.Schema(**kwargs)
+
+        return _to_schema(js)
+
+    @staticmethod
     def _is_rate_limit_error(err: Exception) -> bool:
         msg = str(err).lower()
         return (
@@ -183,8 +241,13 @@ class GeminiClient(LLMClient):
         messages: List[Dict[str, str]],
         tools: Optional[list] | None = None,
         history_snippets: Optional[List[str]] | None = None,
+        response_schema: Optional[Dict[str, Any]] = None,
     ) -> str:
-        tools_spec = GEMINI_TOOLS_SPEC if tools is None else tools
+        default_tools = GEMINI_TOOLS_SPEC if tools is None else tools
+        if response_schema is not None and tools is None:
+            tools_spec: List[Any] = []
+        else:
+            tools_spec = default_tools
         use_tools = bool(tools_spec)
         history_snippets = history_snippets or []
         self._store_reasoning([])
@@ -224,6 +287,11 @@ class GeminiClient(LLMClient):
                     cfg_kwargs["tool_config"] = tool_cfg
                 if self._thinking_config is not None:
                     cfg_kwargs["thinking_config"] = self._thinking_config
+                if response_schema:
+                    cfg_kwargs["response_mime_type"] = "application/json"
+                    schema_obj = self._schema_from_json(response_schema)
+                    if schema_obj is not None:
+                        cfg_kwargs["response_schema"] = schema_obj
 
                 resp = client.models.generate_content(
                     model=model_id,
@@ -333,11 +401,14 @@ class GeminiClient(LLMClient):
         messages: List[Dict[str, str]],
         tools: Optional[list] | None = None,
         history_snippets: Optional[List[str]] | None = None,
+        response_schema: Optional[Dict[str, Any]] = None,
     ) -> Iterator[str]:
         tools_spec = GEMINI_TOOLS_SPEC if tools is None else tools
         use_tools = bool(tools_spec)
         history_snippets = history_snippets or []
         self._store_reasoning([])
+        if response_schema:
+            logging.warning("Structured streaming output is not yet supported for GeminiClient; ignoring response_schema.")
         reasoning_chunks: List[str] = []
 
         if use_tools:

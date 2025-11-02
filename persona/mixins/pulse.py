@@ -4,17 +4,25 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from google import genai
-from llm_clients.gemini_utils import build_gemini_clients
-from google.genai import types
+try:
+    from google import genai  # type: ignore
+    from google.genai import types  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    genai = None  # type: ignore
+    types = None  # type: ignore
 
 import llm_clients
+from llm_clients import get_llm_client
+from llm_clients.gemini_utils import build_gemini_clients
+from model_configs import get_context_length, get_model_provider
 from persona.constants import RECALL_SNIPPET_PULSE_MAX_CHARS
+from persona.tasks import TaskRecord
 from tools import TOOL_REGISTRY, TOOL_SCHEMAS
 from tools.context import persona_context
 from tools.defs import parse_tool_result
@@ -47,6 +55,17 @@ class PersonaPulseMixin:
         """Execute one autonomous pulse cycle."""
         building_id = self.current_building_id
         logging.info("[pulse] %s starting pulse in %s", self.persona_id, building_id)
+        def _log_phase(label: str) -> None:
+            logging.debug(
+                "[pulse] phase=%s persona=%s model=%s",
+                label,
+                self.persona_id,
+                self.model,
+            )
+
+        phase = "start"
+        _log_phase(phase)
+        phase = "start"
 
 
         hist = self.history_manager.building_histories.get(building_id, [])
@@ -129,6 +148,9 @@ class PersonaPulseMixin:
                 continue
         if perceived:
             logging.debug("[pulse] perceived %d new utterance(s) from others into persona history", perceived)
+        phase = "perceived"
+        _log_phase(phase)
+        phase = "perceived"
 
         # 引数で渡された最新のoccupantsリストを使用
         occupants_str = ",".join(occupants)
@@ -217,9 +239,16 @@ class PersonaPulseMixin:
             info_lines.append("\n".join(new_message_details))
         info_lines.append(f"occupants:{occupants_str}")
         info_lines.append(f"user_online:{user_online}")
+        task_section = self._compose_task_summary()
+        if task_section:
+            info_lines.append("## タスク状況")
+            info_lines.append(task_section)
         info = "\n".join(info_lines)
 
         recall_snippet = ""
+        phase = "prompt_context"
+        _log_phase(phase)
+        phase = "prompt_context"
         current_user_created_at: Optional[int] = None
         for m in reversed(new_msgs):
             if m.get("role") == "user":
@@ -254,7 +283,7 @@ class PersonaPulseMixin:
                         logging.debug("[pulse] recall_snippet returned empty")
                 except Exception as exc:
                     logging.warning("[pulse] recall snippet failed: %s", exc)
-                    recall_snippet = ""
+        recall_snippet = ""
 
         thread_directory = "(SAIMemory未接続)"
         if self.sai_memory is not None and self.sai_memory.is_ready():
@@ -275,148 +304,157 @@ class PersonaPulseMixin:
                 thread_directory = "(スレッド一覧の取得に失敗しました)"
 
         pulse_prompt_template = Path("system_prompts/pulse.txt").read_text(encoding="utf-8")
-        model_name = decision_model or "gemini-2.0-flash"
+        env_model = (os.getenv("SAIVERSE_PULSE_MODEL") or "").strip()
+        model_name = decision_model or env_model or "gemini-2.0-flash"
+        provider = get_model_provider(model_name)
+        context_length = get_context_length(model_name)
+        using_gemini = provider == "gemini"
+        if decision_model is None and env_model:
+            logging.info("[pulse] using SAIVERSE_PULSE_MODEL override: %s", model_name)
 
-        try:
-            free_client, paid_client, active_client = build_gemini_clients()
-        except RuntimeError:
-            logging.error("[pulse] Gemini API key not set")
-            return []
+        free_client = None
+        paid_client = None
+        active_client = None
+        pulse_client = None
+
+        if using_gemini:
+            if genai is None or types is None:
+                logging.error("[pulse] Gemini SDK is not available but model '%s' requires it.", model_name)
+                phase = "init_gemini_sdk_missing"
+                logging.warning("[pulse] early exit (persona=%s phase=%s)", self.persona_id, phase)
+                return []
+            try:
+                free_client, paid_client, active_client = build_gemini_clients()
+            except RuntimeError:
+                logging.error("[pulse] Gemini API key not set")
+                phase = "init_gemini_key_missing"
+                logging.warning("[pulse] early exit (persona=%s phase=%s)", self.persona_id, phase)
+                return []
+            logging.info("[pulse] using Gemini decision model %s (context=%d)", model_name, context_length)
+        else:
+            if not hasattr(self, "_pulse_llm_clients"):
+                self._pulse_llm_clients: Dict[str, Any] = {}
+            pulse_cache: Dict[str, Any] = self._pulse_llm_clients
+            pulse_client = pulse_cache.get(model_name)
+            if pulse_client is None:
+                try:
+                    pulse_client = get_llm_client(model_name, provider, context_length)
+                except Exception as exc:
+                    logging.error("[pulse] failed to initialize %s client for %s: %s", provider, model_name, exc)
+                    phase = "init_model_client_failed"
+                    logging.warning(
+                        "[pulse] early exit (persona=%s phase=%s provider=%s model=%s)",
+                        self.persona_id,
+                        phase,
+                        provider,
+                        model_name,
+                    )
+                    return []
+                pulse_cache[model_name] = pulse_client
+            logging.info(
+                "[pulse] using %s decision model %s (context=%d)",
+                provider,
+                model_name,
+                context_length,
+            )
+        phase = "decision_ready"
+        _log_phase(phase)
+
         prompt_generated_at = now_utc
 
         def _finalize_and_return(result: List[str]) -> List[str]:
+            logging.debug(
+                "[pulse] finalize return (persona=%s phase=%s replies=%d)",
+                self.persona_id,
+                phase,
+                len(result) if isinstance(result, list) else -1,
+            )
             self._last_conscious_prompt_time_utc = prompt_generated_at
             return result
 
-        def _type_from_json(token: Optional[str]) -> types.Type:
-            mapping = {
-                "string": types.Type.STRING,
-                "number": types.Type.NUMBER,
-                "integer": types.Type.INTEGER,
-                "boolean": types.Type.BOOLEAN,
-                "array": types.Type.ARRAY,
-                "object": types.Type.OBJECT,
-                "null": types.Type.NULL,
-            }
-            return mapping.get(token, types.Type.TYPE_UNSPECIFIED)
-
-        def _schema_from_json(js: Optional[Dict[str, Any]]) -> types.Schema:
-            if not isinstance(js, dict):
-                return types.Schema(type=types.Type.OBJECT)
-
-            kwargs: Dict[str, Any] = {}
-            value_type = js.get("type")
-            if isinstance(value_type, list):
-                if len(value_type) == 1:
-                    value_type = value_type[0]
-                else:
-                    kwargs["any_of"] = [_schema_from_json({**js, "type": t}) for t in value_type]
-                    value_type = None
-            if isinstance(value_type, str):
-                kwargs["type"] = _type_from_json(value_type)
-
-            if "description" in js:
-                kwargs["description"] = js["description"]
-            if "enum" in js and isinstance(js["enum"], list):
-                kwargs["enum"] = js["enum"]
-            if "const" in js:
-                kwargs["enum"] = [js["const"]]
-
-            if "properties" in js and isinstance(js["properties"], dict):
-                props = {k: _schema_from_json(v) for k, v in js["properties"].items()}
-                kwargs["properties"] = props
-                kwargs["property_ordering"] = list(js["properties"].keys())
-            if "required" in js and isinstance(js["required"], list):
-                kwargs["required"] = js["required"]
-
-            if "items" in js:
-                kwargs["items"] = _schema_from_json(js["items"])
-
-            if "anyOf" in js and isinstance(js["anyOf"], list):
-                kwargs["any_of"] = [_schema_from_json(sub) for sub in js["anyOf"]]
-
-            if "oneOf" in js and isinstance(js["oneOf"], list):
-                kwargs["any_of"] = [_schema_from_json(sub) for sub in js["oneOf"]]
-
-            return types.Schema(**kwargs)
-
-        tool_variants: List[types.Schema] = []
+        tool_variants_json: List[Dict[str, Any]] = []
         for tool_schema in TOOL_SCHEMAS:
-            arguments_schema = _schema_from_json(tool_schema.parameters)
-            tool_variants.append(
-                types.Schema(
-                    type=types.Type.OBJECT,
-                    required=["name", "arguments"],
-                    property_ordering=["name", "arguments"],
-                    properties={
-                        "name": types.Schema(
-                            type=types.Type.STRING,
-                            enum=[tool_schema.name],
-                            description=f"Invoke the '{tool_schema.name}' tool.",
-                        ),
+            arguments_schema: Dict[str, Any]
+            if isinstance(tool_schema.parameters, dict):
+                arguments_schema = copy.deepcopy(tool_schema.parameters)
+                arguments_schema.setdefault("type", arguments_schema.get("type", "object"))
+            else:
+                arguments_schema = {"type": "object"}
+            tool_variants_json.append(
+                {
+                    "type": "object",
+                    "required": ["name", "arguments"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "enum": [tool_schema.name],
+                            "description": f"Invoke the '{tool_schema.name}' tool.",
+                        },
                         "arguments": arguments_schema,
                     },
-                )
+                }
             )
 
-        tool_variants.append(
-            types.Schema(
-                type=types.Type.OBJECT,
-                required=["name", "arguments"],
-                property_ordering=["name", "arguments"],
-                properties={
-                    "name": types.Schema(
-                        type=types.Type.STRING,
-                        enum=["none"],
-                        description="Use 'none' when no tool should be invoked.",
-                    ),
-                    "arguments": types.Schema(
-                        type=types.Type.NULL,
-                        description="Must be null when no tool is invoked.",
-                    ),
+        tool_variants_json.append(
+            {
+                "type": "object",
+                "required": ["name", "arguments"],
+                "additionalProperties": False,
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "enum": ["none"],
+                        "description": "Use 'none' when no tool should be invoked.",
+                    },
+                    "arguments": {
+                        "type": "null",
+                        "description": "Must be null when no tool is invoked.",
+                    },
                 },
-            )
+            }
         )
 
-        tool_schema = types.Schema(any_of=tool_variants)
-
-        decision_schema = types.Schema(
-            type=types.Type.OBJECT,
-            property_ordering=[
+        decision_schema_dict: Dict[str, Any] = {
+            "title": "PersonaPulseDecision",
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
                 "action",
                 "conversation_guidance",
                 "memory_note",
                 "recall_note",
                 "tool",
             ],
-            required=[
-                "action",
-                "conversation_guidance",
-                "memory_note",
-                "recall_note",
-                "tool",
-            ],
-            properties={
-                "action": types.Schema(
-                    type=types.Type.STRING,
-                    enum=["wait", "speak", "tool"],
-                    description="Select 'wait', 'speak', or 'tool'.",
-                ),
-                "conversation_guidance": types.Schema(
-                    type=types.Type.STRING,
-                    description="Plaintext guidance for the conversation module. Use an empty string when no guidance is needed.",
-                ),
-                "memory_note": types.Schema(
-                    type=types.Type.STRING,
-                    description="Content that should be recorded into long-term memory, or an empty string if none.",
-                ),
-                "recall_note": types.Schema(
-                    type=types.Type.STRING,
-                    description="Summaries or excerpts from recall that should be relayed to the conversation module, or empty string if none.",
-                ),
-                "tool": tool_schema,
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["wait", "speak", "tool"],
+                    "description": "Select 'wait', 'speak', or 'tool'.",
+                },
+                "conversation_guidance": {
+                    "type": "string",
+                    "description": "Plaintext guidance for the conversation module. Use an empty string when no guidance is needed.",
+                },
+                "memory_note": {
+                    "type": "string",
+                    "description": "Content that should be recorded into long-term memory, or an empty string if none.",
+                },
+                "recall_note": {
+                    "type": "string",
+                    "description": "Summaries or excerpts from recall that should be relayed to the conversation module, or empty string if none.",
+                },
+                "tool": {
+                    "anyOf": tool_variants_json,
+                },
             },
-        )
+        }
+
+        decision_schema = None
+        if using_gemini:
+            decision_schema = llm_clients.GeminiClient._schema_from_json(decision_schema_dict)  # type: ignore[attr-defined]
+
+        phase = "decision_loop_setup"
 
         def _format_tool_feedback(entries: List[Dict[str, Any]]) -> str:
             if not entries:
@@ -461,17 +499,44 @@ class PersonaPulseMixin:
             )
             return prompt
 
-        def _call(client: genai.Client, prompt_text: str):
-            return client.models.generate_content(
-                model=model_name,
-                contents=[types.Content(parts=[types.Part(text=info)], role="user")],
-                config=types.GenerateContentConfig(
-                    system_instruction=prompt_text,
-                    safety_settings=llm_clients.GEMINI_SAFETY_CONFIG,
-                    response_mime_type="application/json",
-                    response_schema=decision_schema,
-                ),
-            )
+        def _call(client: Any, prompt_text: str):
+            if using_gemini:
+                config_kwargs: Dict[str, Any] = {
+                    "system_instruction": prompt_text,
+                    "safety_settings": llm_clients.GEMINI_SAFETY_CONFIG,
+                    "response_mime_type": "application/json",
+                }
+                if decision_schema is not None:
+                    config_kwargs["response_schema"] = decision_schema
+                else:
+                    logging.warning("[pulse] Gemini decision schema conversion failed; proceeding without schema enforcement.")
+                return client.models.generate_content(
+                    model=model_name,
+                    contents=[types.Content(parts=[types.Part(text=info)], role="user")],
+                    config=types.GenerateContentConfig(**config_kwargs),
+                )
+            assert pulse_client is not None
+            messages = [
+                {"role": "system", "content": prompt_text},
+                {"role": "user", "content": info},
+            ]
+            return pulse_client.generate(messages, response_schema=decision_schema_dict)
+
+        def _extract_json_text(raw: str) -> str:
+            text = (raw or "").strip()
+            if text.startswith("```"):
+                segments = text.split("```")
+                for segment in segments:
+                    seg = segment.strip()
+                    if seg.startswith("{") and seg.endswith("}"):
+                        return seg
+            if text.startswith("{") and text.endswith("}"):
+                return text
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                return text[start : end + 1]
+            return text
 
         tool_history: List[Dict[str, Any]] = []
         tool_info_parts: List[str] = []
@@ -483,33 +548,53 @@ class PersonaPulseMixin:
         max_decision_loops = max_tool_runs + 2
         replies: List[str] = []
         next_action = "wait"
+        phase = "decision_loop"
+        _log_phase(phase)
 
         for loop_index in range(max_decision_loops):
             prompt_text = _render_prompt(tool_history)
-            try:
-                resp = _call(active_client, prompt_text)
-            except Exception as e:
-                if active_client is free_client and paid_client and "rate" in str(e).lower():
-                    logging.info("[pulse] retrying with paid Gemini key due to rate limit")
-                    active_client = paid_client
-                    try:
-                        resp = _call(active_client, prompt_text)
-                    except Exception as e2:
-                        logging.error("[pulse] Gemini call failed: %s", e2)
+            if using_gemini:
+                try:
+                    resp = _call(active_client, prompt_text)
+                except Exception as e:
+                    if active_client is free_client and paid_client and "rate" in str(e).lower():
+                        logging.info("[pulse] retrying with paid Gemini key due to rate limit")
+                        active_client = paid_client
+                        try:
+                            resp = _call(active_client, prompt_text)
+                        except Exception as e2:
+                            logging.error("[pulse] Gemini call failed: %s", e2)
+                            _log_phase("decision_model_exception_gemini_retry")
+                            return _finalize_and_return([])
+                    else:
+                        logging.error("[pulse] Gemini call failed: %s", e)
+                        _log_phase("decision_model_exception_gemini")
                         return _finalize_and_return([])
-                else:
-                    logging.error("[pulse] Gemini call failed: %s", e)
+                content_raw = resp.text if hasattr(resp, "text") else str(resp)
+            else:
+                try:
+                    raw_output = _call(None, prompt_text)
+                except Exception as e:
+                    logging.error("[pulse] decision model call failed: %s", e)
+                    phase = "decision_model_exception"
+                    _log_phase(phase)
                     return _finalize_and_return([])
+                if isinstance(raw_output, str):
+                    content_raw = raw_output
+                else:
+                    content_raw = json.dumps(raw_output, ensure_ascii=False)
 
-            content = resp.text.strip()
+            content = content_raw.strip()
             logging.info("[pulse] raw decision:\n%s", content)
             self.conscious_log.append({"role": "assistant", "content": content})
             self._save_conscious_log()
 
             try:
-                data = json.loads(content, strict=False)
+                data = json.loads(_extract_json_text(content), strict=False)
             except json.JSONDecodeError:
-                logging.warning("[pulse] failed to parse decision JSON")
+                logging.warning("[pulse] failed to parse decision JSON. raw=%s", content)
+                phase = "decision_json_parse_error"
+                _log_phase(phase)
                 return _finalize_and_return([])
 
             last_decision = data
@@ -538,6 +623,8 @@ class PersonaPulseMixin:
                 logging.info("[pulse] decision: wait")
                 self._save_session_metadata()
                 logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))
+                phase = "decision_wait"
+                _log_phase(phase)
                 return _finalize_and_return(replies)
 
             if next_action == "tool":
@@ -684,6 +771,8 @@ class PersonaPulseMixin:
             logging.info("[pulse] no actionable decision produced")
             self._save_session_metadata()
             logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))
+            phase = "no_decision"
+            _log_phase(phase)
             return _finalize_and_return(replies)
 
         if next_action == "tool":
@@ -694,6 +783,8 @@ class PersonaPulseMixin:
             logging.info("[pulse] decision: wait")
             self._save_session_metadata()
             logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))
+            phase = "decision_wait_final"
+            _log_phase(phase)
             return _finalize_and_return(replies)
 
         # Collapse guidance parts while preserving order and removing duplicates
@@ -742,10 +833,49 @@ class PersonaPulseMixin:
 
         if recall_note:
             logging.info("[pulse] recall note: %s", recall_note)
+        phase = "response_generated"
+        _log_phase(phase)
 
         self._save_session_metadata()
         logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))
+        phase = "completed"
+        _log_phase(phase)
         return _finalize_and_return(replies)
+
+    def _compose_task_summary(self) -> str:
+        storage = getattr(self, "task_storage", None)
+        if storage is None:
+            return ""
+        try:
+            records = storage.list_tasks(include_steps=True, limit=12)
+        except Exception as exc:
+            logging.warning("[pulse] failed to load task summary: %s", exc)
+            return ""
+        if not records:
+            return "(現在登録されているタスクはありません)"
+
+        lines: List[str] = []
+        active = next((task for task in records if task.status == "active"), None)
+        if active:
+            lines.append(f"### アクティブタスク: {active.title} [{active.status}]")
+            lines.extend(self._format_task_steps(active))
+        else:
+            lines.append("### アクティブタスク: (なし)")
+
+        pending = [task for task in records if task.status in {"pending", "paused"}]
+        if pending:
+            lines.append("### 待機中タスク")
+            for task in pending[:3]:
+                lines.append(f"- {task.title} [{task.status}]")
+        return "\n".join(lines)
+
+    def _format_task_steps(self, task: TaskRecord) -> List[str]:
+        lines: List[str] = []
+        for idx, step in enumerate(task.steps, start=1):
+            marker = "→" if task.active_step_id == step.id else "・"
+            title = step.title
+            lines.append(f"  {marker} Step{idx} [{step.status}] {title}")
+        return lines
 
 
 __all__ = ["PersonaPulseMixin"]

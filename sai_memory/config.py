@@ -1,5 +1,7 @@
+import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 
 def _get_bool(name: str, default: bool = False) -> bool:
@@ -49,6 +51,8 @@ class Settings:
     db_path: str
     resource_id: str
     embed_model: str
+    embed_model_path: str | None
+    embed_model_dim: int | None
 
     memory_enabled: bool
     last_messages: int
@@ -79,7 +83,39 @@ def load_settings() -> Settings:
     db_path = os.getenv("SAIMEMORY_DB_PATH", "memory.db")
     resource_id = os.getenv("SAIMEMORY_RESOURCE_ID", "default")
     # Embedding model (fastembed). Keep current default for compatibility.
-    embed_model = os.getenv("SAIMEMORY_EMBED_MODEL", "BAAI/bge-small-en-v1.5").strip()
+    embed_model_env = os.getenv("SAIMEMORY_EMBED_MODEL")
+    embed_model = embed_model_env.strip() if embed_model_env else "BAAI/bge-small-en-v1.5"
+    embed_model_path_env = os.getenv("SAIMEMORY_EMBED_MODEL_PATH")
+    embed_model_path = embed_model_path_env.strip() if embed_model_path_env else None
+    embed_model_dim_env = os.getenv("SAIMEMORY_EMBED_MODEL_DIM")
+    embed_model_dim = None
+    if embed_model_dim_env:
+        try:
+            embed_model_dim = int(embed_model_dim_env)
+        except Exception:
+            embed_model_dim = None
+
+    sbert_root = Path(__file__).resolve().parents[1] / "sbert"
+    model_suffix = embed_model.split("/")[-1]
+    preferred_dir = sbert_root / model_suffix
+
+    if not embed_model_path and preferred_dir.exists():
+        embed_model_path = str(preferred_dir)
+
+    if embed_model_env and not embed_model_path:
+        logging.getLogger(__name__).warning(
+            "SAIMemory embedding model '%s' requested but no local snapshot found at %s. "
+            "Set SAIMEMORY_EMBED_MODEL_PATH to the local model directory to avoid online downloads.",
+            embed_model,
+            preferred_dir,
+        )
+
+    if not embed_model_path and not embed_model_env:
+        repo_root = Path(__file__).resolve().parents[1]
+        default_dir = sbert_root / "multilingual-e5-base"
+        if default_dir.exists():
+            embed_model_path = str(default_dir)
+            embed_model = "intfloat/multilingual-e5-base"
 
     memory_enabled = _get_bool("SAIMEMORY_MEMORY", True)
     last_messages = _get_int("SAIMEMORY_MEMORY_LAST_MESSAGES", 8)
@@ -113,6 +149,8 @@ def load_settings() -> Settings:
         db_path=db_path,
         resource_id=resource_id,
         embed_model=embed_model,
+        embed_model_path=embed_model_path,
+        embed_model_dim=embed_model_dim,
         memory_enabled=memory_enabled,
         last_messages=last_messages,
         semantic_recall=semantic_recall,

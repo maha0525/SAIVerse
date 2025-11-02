@@ -28,13 +28,20 @@ class LLMClient:
         self._latest_attachments: List[Dict[str, Any]] = []
         self.supports_images = supports_images
 
-    def generate(self, messages: List[Dict[str, Any]], tools: List[Any] | None = None, **_: Any) -> str:
+    def generate(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Any] | None = None,
+        response_schema: Dict[str, Any] | None = None,
+        **_: Any,
+    ) -> str:
         raise NotImplementedError
 
     def generate_stream(
         self,
         messages: List[Dict[str, Any]],
         tools: List[Any] | None = None,
+        response_schema: Dict[str, Any] | None = None,
         **_: Any,
     ) -> Iterator[str]:
         raise NotImplementedError

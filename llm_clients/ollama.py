@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import requests
 
@@ -74,39 +74,99 @@ class OllamaClient(LLMClient):
         logging.warning("No responsive Ollama endpoint detected during probe")
         return None
 
-    def generate(self, messages: List[Dict[str, str]], tools: Optional[list] | None = None) -> str:
-        payload_v1 = {
+    def generate(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[list] | None = None,
+        response_schema: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        logging.info(
+            "OllamaClient.generate invoked (model=%s supports_schema=%s messages=%d)",
+            self.model,
+            bool(response_schema),
+            len(messages),
+        )
+        options: Dict[str, Any] = {"num_ctx": self.context_length}
+        payload_v1: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "options": {"num_ctx": self.context_length},
-            "response_format": {"type": "json_object"},
+            "options": options,
         }
+        if response_schema:
+            options["temperature"] = 0
+            payload_v1["format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": response_schema.get("title") or "saiverse_structured_output",
+                    "schema": response_schema,
+                    "strict": True,
+                },
+            }
+        else:
+            payload_v1["response_format"] = {"type": "json_object"}
         if self.fallback_client is not None:
-            return self.fallback_client.generate(messages, tools)
+            return self.fallback_client.generate(messages, tools, response_schema=response_schema)
         try:
             response = requests.post(self.url, json=payload_v1, timeout=(3, 300))
+            preview = response.text[:400] + "…" if response.text and len(response.text) > 400 else response.text
+            logging.debug(
+                "Ollama v1 response status=%s body_preview=%s",
+                response.status_code,
+                preview if preview is not None else "(None)",
+            )
             response.raise_for_status()
-            data = response.json()
+            try:
+                data = response.json()
+            except ValueError as exc:
+                logging.error("Ollama v1 JSON parse failed: %s", exc, exc_info=True)
+                raise
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if not content:
+                logging.warning(
+                    "Ollama v1 returned empty content. keys=%s raw=%s",
+                    list(data.keys()),
+                    preview if preview is not None else "(None)",
+                )
             logging.debug("Raw ollama v1 response: %s", content)
             return content
         except Exception:
             logging.exception("Ollama v1 endpoint failed; trying legacy /api/chat")
             try:
+                legacy_payload: Dict[str, Any] = {
+                    "model": self.model,
+                    "messages": messages,
+                    "stream": False,
+                    "options": options,
+                }
+                if response_schema and "format" in payload_v1:
+                    legacy_payload["format"] = payload_v1["format"]
+                elif not response_schema:
+                    legacy_payload["response_format"] = {"type": "json_object"}
                 response = requests.post(
                     f"{self.base}/api/chat",
-                    json={
-                        "model": self.model,
-                        "messages": messages,
-                        "stream": False,
-                        "options": {"num_ctx": self.context_length},
-                    },
+                    json=legacy_payload,
                     timeout=(3, 300),
                 )
+                legacy_preview = response.text[:400] + "…" if response.text and len(response.text) > 400 else response.text
+                logging.debug(
+                    "Ollama legacy response status=%s body_preview=%s",
+                    response.status_code,
+                    legacy_preview if legacy_preview is not None else "(None)",
+                )
                 response.raise_for_status()
-                data = response.json()
+                try:
+                    data = response.json()
+                except ValueError as exc:
+                    logging.error("Ollama legacy JSON parse failed: %s", exc, exc_info=True)
+                    raise
                 content = data.get("message", {}).get("content", "")
+                if not content:
+                    logging.warning(
+                        "Ollama legacy endpoint returned empty content. keys=%s raw=%s",
+                        list(data.keys()),
+                        legacy_preview if legacy_preview is not None else "(None)",
+                    )
                 logging.debug("Raw ollama /api/chat response: %s", content)
                 return content
             except Exception:
@@ -114,20 +174,38 @@ class OllamaClient(LLMClient):
                 return "エラーが発生しました。"
 
     def generate_stream(
-        self, messages: List[Dict[str, str]], tools: Optional[list] | None = None
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[list] | None = None,
+        response_schema: Optional[Dict[str, Any]] = None,
     ) -> Iterator[str]:
         if self.fallback_client is not None:
-            yield from self.fallback_client.generate_stream(messages, tools)
+            yield from self.fallback_client.generate_stream(messages, tools, response_schema=response_schema)
             return
         try:
+            stream_options: Dict[str, Any] = {"num_ctx": self.context_length}
+            stream_payload: Dict[str, Any] = {
+                "model": self.model,
+                "messages": messages,
+                "stream": True,
+                "options": stream_options,
+            }
+            if response_schema:
+                stream_options["temperature"] = 0
+                stream_payload["format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": response_schema.get("title") or "saiverse_structured_output",
+                        "schema": response_schema,
+                        "strict": True,
+                    },
+                }
+            else:
+                stream_payload["response_format"] = {"type": "json_object"}
+
             response = requests.post(
                 self.url,
-                json={
-                    "model": self.model,
-                    "messages": messages,
-                    "stream": True,
-                    "options": {"num_ctx": self.context_length},
-                },
+                json=stream_payload,
                 timeout=(3, 300),
                 stream=True,
             )

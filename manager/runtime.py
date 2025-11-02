@@ -404,7 +404,14 @@ class RuntimeService(
                     yield token
             else:
                 occupants = self.occupants.get(building_id, [])
-                for reply in persona.run_pulse(occupants=occupants, user_online=True):
+                pulse_responses = persona.run_pulse(occupants=occupants, user_online=True)
+                if pulse_responses is None:
+                    logging.warning(
+                        "[runtime] persona %s returned no responses from run_pulse; defaulting to empty list",
+                        getattr(persona, "persona_id", "unknown"),
+                    )
+                    pulse_responses = []
+                for reply in pulse_responses:
                     yield reply
 
         self._save_building_histories()

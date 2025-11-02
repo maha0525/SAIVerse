@@ -5,6 +5,7 @@ import json
 from typing import List, Dict, Iterator
 
 # テスト対象のモジュールをインポート
+import llm_clients
 from llm_clients import (
     LLMClient,
     OpenAIClient,
@@ -67,6 +68,33 @@ class TestLLMClients(unittest.TestCase):
             tool_choice="auto",
             n=1,
         )
+
+    @patch('llm_router.client')
+    @patch('llm_clients.openai.OpenAI')
+    def test_openai_client_generate_with_schema(self, mock_openai, mock_router_client):
+        mock_client_instance = MagicMock()
+        mock_openai.return_value = mock_client_instance
+        choice = MagicMock()
+        choice.message.content = "Structured response"
+        mock_client_instance.chat.completions.create.return_value.choices = [choice]
+
+        client = OpenAIClient("gpt-4.1-nano")
+        messages = [{"role": "user", "content": "Hello"}]
+        schema = {"title": "Decision", "type": "object", "properties": {}, "required": []}
+        response = client.generate(messages, tools=[], response_schema=schema)
+
+        self.assertEqual(response, "Structured response")
+        mock_client_instance.chat.completions.create.assert_called_once()
+        _, kwargs = mock_client_instance.chat.completions.create.call_args
+        self.assertNotIn("tools", kwargs)
+        self.assertNotIn("tool_choice", kwargs)
+        self.assertIn("response_format", kwargs)
+        rf = kwargs["response_format"]
+        self.assertEqual(rf["type"], "json_schema")
+        self.assertEqual(rf["json_schema"]["schema"], schema)
+        self.assertEqual(rf["json_schema"]["name"], "Decision")
+        self.assertTrue(rf["json_schema"]["strict"])
+        self.assertEqual(kwargs.get("temperature"), 0)
 
     @patch('llm_router.client')
     @patch('llm_clients.openai.OpenAI')
@@ -233,6 +261,28 @@ class TestLLMClients(unittest.TestCase):
 
     @patch('llm_clients.ollama.OllamaClient._probe_base', return_value='http://ollama.test')
     @patch('llm_clients.ollama.requests.post')
+    def test_ollama_client_generate_with_schema(self, mock_post, mock_probe):
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {
+            "choices": [{"message": {"content": "{}"}}]
+        }
+        mock_post.return_value = mock_response
+
+        client = OllamaClient("hf.co/unsloth/gemma-3-1b-it-GGUF:BF16", 1000)
+        messages = [{"role": "user", "content": "Hello"}]
+        schema = {"title": "Decision", "type": "object", "properties": {}, "required": []}
+        client.generate(messages, response_schema=schema)
+
+        mock_post.assert_called_once()
+        _, kwargs = mock_post.call_args
+        payload = kwargs["json"]
+        self.assertIn("format", payload)
+        self.assertEqual(payload["format"]["json_schema"]["schema"], schema)
+        self.assertEqual(payload["options"].get("temperature"), 0)
+
+    @patch('llm_clients.ollama.OllamaClient._probe_base', return_value='http://ollama.test')
+    @patch('llm_clients.ollama.requests.post')
     def test_ollama_client_generate_stream(self, mock_post, mock_probe):
         mock_response = MagicMock()
         mock_response.raise_for_status.return_value = None
@@ -258,8 +308,35 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(payload["messages"], messages)
         self.assertTrue(payload["stream"])
         self.assertEqual(payload["options"], {"num_ctx": client.context_length})
+        self.assertEqual(payload.get("response_format"), {"type": "json_object"})
         self.assertEqual(kwargs["timeout"], (3, 300))
         self.assertTrue(kwargs["stream"])
+
+    @patch('llm_clients.gemini.types.GenerateContentConfig')
+    @patch.object(llm_clients.GeminiClient, "_schema_from_json", return_value=MagicMock())
+    @patch('llm_clients.gemini.genai')
+    @patch('llm_router.client')
+    def test_gemini_client_generate_with_schema(self, mock_router_client, mock_genai, mock_schema_conv, mock_config_cls):
+        mock_client_instance = MagicMock()
+        mock_genai.Client.return_value = mock_client_instance
+        mock_candidate = MagicMock()
+        mock_candidate.content.parts = [MagicMock(text="Structured", function_call=None, thought=False)]
+        mock_resp = MagicMock()
+        mock_resp.candidates = [mock_candidate]
+        mock_client_instance.models.generate_content.return_value = mock_resp
+
+        client = llm_clients.GeminiClient("gemini-1.5-flash")
+        messages = [{"role": "user", "content": "Hello"}]
+        schema = {"title": "Decision", "type": "object", "properties": {}, "required": []}
+
+        response = client.generate(messages, tools=[], response_schema=schema)
+
+        self.assertEqual(response, "Structured")
+        mock_schema_conv.assert_called_once_with(schema)
+        mock_config_cls.assert_called()
+        config_kwargs = mock_config_cls.call_args.kwargs
+        self.assertEqual(config_kwargs.get("response_mime_type"), "application/json")
+        self.assertIn("response_schema", config_kwargs)
 
 if __name__ == '__main__':
     unittest.main()

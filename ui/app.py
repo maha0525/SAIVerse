@@ -22,6 +22,7 @@ from ui.chat import (
     stop_conversations_ui,
 )
 from ui.world_editor import create_world_editor_ui
+from ui.task_manager import create_task_manager_ui
 
 
 def _require_manager():
@@ -42,6 +43,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                         <div class="saiverse-nav-item" data-tab-label="ワールドビュー">ワールドビュー</div>
                         <div class="saiverse-nav-item" data-tab-label="自律会話ログ" style="display:none">自律会話ログ</div>
                         <div class="saiverse-nav-item" data-tab-label="DB Manager">DB Manager</div>
+                        <div class="saiverse-nav-item" data-tab-label="タスクマネージャー">タスクマネージャー</div>
                         <div class="saiverse-nav-item" data-tab-label="メモリー設定">メモリー設定</div>
                         <div class="saiverse-nav-item" data-tab-label="ワールドエディタ">ワールドエディタ</div>
                     </div>
@@ -238,6 +240,9 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
         with gr.Column(elem_id="section-db-manager", elem_classes=['saiverse-section', 'saiverse-hidden']):
             create_db_manager_ui(manager.SessionLocal)
 
+        with gr.Column(elem_id="section-task-manager", elem_classes=['saiverse-section', 'saiverse-hidden']):
+            create_task_manager_ui(manager)
+
         with gr.Column(elem_id="section-memory-settings", elem_classes=['saiverse-section', 'saiverse-hidden']):
             create_memory_settings_ui(manager)
 
@@ -253,6 +258,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                 "ワールドビュー": "#section-worldview",
                 "自律会話ログ": "#section-autolog",
                 "DB Manager": "#section-db-manager",
+                "タスクマネージャー": "#section-task-manager",
                 "メモリー設定": "#section-memory-settings",
                 "ワールドエディタ": "#section-world-editor"
             };

@@ -24,6 +24,7 @@ from persona.constants import (
     RECALL_SNIPPET_PULSE_MAX_CHARS,
 )
 from persona.history import initialise_pulse_state
+from persona.tasks import TaskStorage
 from persona.mixins import (
     PersonaGenerationMixin,
     PersonaHistoryMixin,
@@ -94,6 +95,7 @@ class PersonaCore(
         self.conscious_log_path = (
             self.saiverse_home / "personas" / self.persona_id / "conscious_log.json"
         )
+        self.task_storage = TaskStorage(self.persona_id, base_dir=self.saiverse_home)
         self.building_memory_paths: Dict[str, Path] = {
             b_id: self.saiverse_home / "buildings" / b_id / "log.json"
             for b_id in self.buildings
