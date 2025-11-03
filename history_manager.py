@@ -142,6 +142,11 @@ class HistoryManager:
         if (message.get("role") or "").lower() == "system":
             return
         try:
+            metadata = message.setdefault("metadata", {})
+            if isinstance(metadata, dict):
+                tags = metadata.setdefault("tags", [])
+                if isinstance(tags, list) and "conversation" not in tags:
+                    tags.append("conversation")
             if channel == "persona":
                 self.memory_adapter.append_persona_message(message)
                 LOGGER.debug("Synced persona message to SAIMemory for %s", self.persona_id)
@@ -193,7 +198,13 @@ class HistoryManager:
         self._ensure_size_limit(self.messages, self.persona_log_path)
         self._sync_to_memory(channel="persona", building_id=None, message=prepared_msg)
 
-    def get_recent_history(self, max_chars: int) -> List[Dict[str, str]]:
+    def get_recent_history(
+        self,
+        max_chars: int,
+        *,
+        required_tags: Optional[List[str]] = None,
+        pulse_id: Optional[str] = None,
+    ) -> List[Dict[str, str]]:
         """Retrieves recent messages from persona history up to a character limit."""
         if self.memory_adapter is not None:
             if not self.memory_adapter.is_ready():
@@ -204,7 +215,11 @@ class HistoryManager:
                     self.persona_id,
                     max_chars,
                 )
-                msgs = self.memory_adapter.recent_persona_messages(max_chars)
+                msgs = self.memory_adapter.recent_persona_messages(
+                    max_chars,
+                    required_tags=required_tags,
+                    pulse_id=pulse_id,
+                )
                 LOGGER.debug(
                     "SAIMemory returned %d persona messages for %s",
                     len(msgs),
