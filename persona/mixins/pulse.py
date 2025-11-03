@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -55,6 +56,9 @@ class PersonaPulseMixin:
         """Execute one autonomous pulse cycle."""
         building_id = self.current_building_id
         logging.info("[pulse] %s starting pulse in %s", self.persona_id, building_id)
+        pulse_id = uuid.uuid4().hex
+        previous_pulse_id = getattr(self, "_current_pulse_id", None)
+        self._current_pulse_id = pulse_id
         def _log_phase(label: str) -> None:
             logging.debug(
                 "[pulse] phase=%s persona=%s model=%s",
@@ -244,6 +248,7 @@ class PersonaPulseMixin:
             info_lines.append("## タスク状況")
             info_lines.append(task_section)
         info = "\n".join(info_lines)
+        self._record_perception_entry(info, pulse_id)
 
         recall_snippet = ""
         phase = "prompt_context"
@@ -283,8 +288,6 @@ class PersonaPulseMixin:
                         logging.debug("[pulse] recall_snippet returned empty")
                 except Exception as exc:
                     logging.warning("[pulse] recall snippet failed: %s", exc)
-        recall_snippet = ""
-
         thread_directory = "(SAIMemory未接続)"
         if self.sai_memory is not None and self.sai_memory.is_ready():
             try:
@@ -322,6 +325,7 @@ class PersonaPulseMixin:
                 logging.error("[pulse] Gemini SDK is not available but model '%s' requires it.", model_name)
                 phase = "init_gemini_sdk_missing"
                 logging.warning("[pulse] early exit (persona=%s phase=%s)", self.persona_id, phase)
+                self._current_pulse_id = previous_pulse_id
                 return []
             try:
                 free_client, paid_client, active_client = build_gemini_clients()
@@ -329,6 +333,7 @@ class PersonaPulseMixin:
                 logging.error("[pulse] Gemini API key not set")
                 phase = "init_gemini_key_missing"
                 logging.warning("[pulse] early exit (persona=%s phase=%s)", self.persona_id, phase)
+                self._current_pulse_id = previous_pulse_id
                 return []
             logging.info("[pulse] using Gemini decision model %s (context=%d)", model_name, context_length)
         else:
@@ -349,6 +354,7 @@ class PersonaPulseMixin:
                         provider,
                         model_name,
                     )
+                    self._current_pulse_id = previous_pulse_id
                     return []
                 pulse_cache[model_name] = pulse_client
             logging.info(
@@ -370,82 +376,42 @@ class PersonaPulseMixin:
                 len(result) if isinstance(result, list) else -1,
             )
             self._last_conscious_prompt_time_utc = prompt_generated_at
+            self._current_pulse_id = previous_pulse_id
             return result
-
-        tool_variants_json: List[Dict[str, Any]] = []
-        for tool_schema in TOOL_SCHEMAS:
-            arguments_schema: Dict[str, Any]
-            if isinstance(tool_schema.parameters, dict):
-                arguments_schema = copy.deepcopy(tool_schema.parameters)
-                arguments_schema.setdefault("type", arguments_schema.get("type", "object"))
-            else:
-                arguments_schema = {"type": "object"}
-            tool_variants_json.append(
-                {
-                    "type": "object",
-                    "required": ["name", "arguments"],
-                    "additionalProperties": False,
-                    "properties": {
-                        "name": {
-                            "type": "string",
-                            "enum": [tool_schema.name],
-                            "description": f"Invoke the '{tool_schema.name}' tool.",
-                        },
-                        "arguments": arguments_schema,
-                    },
-                }
-            )
-
-        tool_variants_json.append(
-            {
-                "type": "object",
-                "required": ["name", "arguments"],
-                "additionalProperties": False,
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "enum": ["none"],
-                        "description": "Use 'none' when no tool should be invoked.",
-                    },
-                    "arguments": {
-                        "type": "null",
-                        "description": "Must be null when no tool is invoked.",
-                    },
-                },
-            }
-        )
 
         decision_schema_dict: Dict[str, Any] = {
             "title": "PersonaPulseDecision",
             "type": "object",
             "additionalProperties": False,
-            "required": [
-                "action",
-                "conversation_guidance",
-                "memory_note",
-                "recall_note",
-                "tool",
-            ],
+            "required": ["perception", "todo", "decision"],
             "properties": {
-                "action": {
+                "perception": {
+                    "type": "string",
+                    "description": "Current self-observation and salient context.",
+                },
+                "todo": {
+                    "type": "string",
+                    "description": "Immediate plan. When speaking, write the actual utterance here.",
+                },
+                "decision": {
                     "type": "string",
                     "enum": ["wait", "speak", "tool"],
                     "description": "Select 'wait', 'speak', or 'tool'.",
                 },
-                "conversation_guidance": {
-                    "type": "string",
-                    "description": "Plaintext guidance for the conversation module. Use an empty string when no guidance is needed.",
-                },
-                "memory_note": {
-                    "type": "string",
-                    "description": "Content that should be recorded into long-term memory, or an empty string if none.",
-                },
-                "recall_note": {
-                    "type": "string",
-                    "description": "Summaries or excerpts from recall that should be relayed to the conversation module, or empty string if none.",
-                },
-                "tool": {
-                    "anyOf": tool_variants_json,
+                "action": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "tool": {
+                            "type": "string",
+                            "description": "Identifier of the tool to execute when decision is 'tool'.",
+                        },
+                        "arguments": {
+                            "type": "object",
+                            "description": "Arguments for the tool call.",
+                        },
+                    },
+                    "required": ["tool"],
                 },
             },
         }
@@ -541,8 +507,8 @@ class PersonaPulseMixin:
         tool_history: List[Dict[str, Any]] = []
         tool_info_parts: List[str] = []
         last_decision: Optional[Dict[str, Any]] = None
-        conversation_guidance_parts: List[str] = []
-        recall_note = ""
+        current_perception = ""
+        current_todo = ""
         force_speak = False
         max_tool_runs = 5
         max_decision_loops = max_tool_runs + 2
@@ -598,21 +564,17 @@ class PersonaPulseMixin:
                 return _finalize_and_return([])
 
             last_decision = data
-            guidance_chunk = (data.get("conversation_guidance") or "").strip()
-            if guidance_chunk:
-                conversation_guidance_parts.append(guidance_chunk)
-            memory_note = (data.get("memory_note") or "").strip()
-            recall_note = (data.get("recall_note") or "").strip()
-            if memory_note:
-                self.conscious_log.append({"role": "assistant", "content": f"[memory]\n{memory_note}"})
-                self._save_conscious_log()
+            current_perception = (data.get("perception") or "").strip()
+            current_todo = (data.get("todo") or "").strip()
 
-            next_action = (data.get("action") or "").lower()
+            next_action = (data.get("decision") or "").lower()
             if not next_action:
                 next_action = "speak"
             if next_action not in {"wait", "speak", "tool"}:
                 logging.warning("[pulse] unknown action '%s', defaulting to speak", next_action)
                 next_action = "speak"
+
+            action_payload = data.get("action") if isinstance(data.get("action"), dict) else {}
 
             if next_action == "tool" and len(tool_history) >= max_tool_runs:
                 logging.info("[pulse] tool usage limit reached, forcing speak")
@@ -628,8 +590,8 @@ class PersonaPulseMixin:
                 return _finalize_and_return(replies)
 
             if next_action == "tool":
-                tool_payload = data.get("tool") or {}
-                tool_name = (tool_payload.get("name") or "").strip()
+                tool_payload = action_payload or {}
+                tool_name = (tool_payload.get("tool") or tool_payload.get("name") or "").strip()
                 raw_args = tool_payload.get("arguments")
                 tool_args = raw_args if isinstance(raw_args, dict) else {}
                 if tool_name and tool_args:
@@ -650,10 +612,7 @@ class PersonaPulseMixin:
                         summary_for_cache = cached_result
                     else:
                         summary_for_cache = json.dumps(cached_result, ensure_ascii=False)
-                    conversation_guidance_parts.append(
-                        f"計算結果: {summary_for_cache}\n"
-                        "この結果をそのままユーザーに伝えてください。ツールは再実行してはいけません。"
-                    )
+                    current_todo = f"ツール {tool_name} の前回結果: {summary_for_cache}\n同じ結果をユーザーに共有してください。"
                     next_action = "speak"
                     force_speak = True
                     break
@@ -746,18 +705,9 @@ class PersonaPulseMixin:
                     if media_list:
                         try:
                             refs = ", ".join(item.get("uri", "") or item.get("path", "") for item in media_list if isinstance(item, dict))
-                            conversation_guidance_parts.append(
-                                f"画像が生成されました（{tool_name}）。ユーザーに内容を共有し、ファイル参照: {refs}"
-                            )
+                            tool_info_parts.append(f"[MEDIA:{tool_name}] {refs}")
                         except Exception:
-                            conversation_guidance_parts.append(
-                                f"画像が生成されました（{tool_name}）。ユーザーに共有してください。"
-                            )
-
-                conversation_guidance_parts.append(
-                    f"計算結果: {result_summary}\n"
-                    "この結果をそのままユーザーに伝えてください。ツールは再実行してはいけません。"
-                )
+                            tool_info_parts.append(f"[MEDIA:{tool_name}] 生成画像があります。ユーザーに共有してください。")
                 next_action = "speak"
                 force_speak = True
                 break
@@ -775,11 +725,22 @@ class PersonaPulseMixin:
             _log_phase(phase)
             return _finalize_and_return(replies)
 
+        initial_decision = next_action
+        if initial_decision == "tool":
+            self._record_decision_entry(
+                pulse_id,
+                current_perception,
+                current_todo,
+                "tool",
+                action_payload,
+            )
+
         if next_action == "tool":
             logging.info("[pulse] reached decision loop limit; forcing speak")
             next_action = "speak"
             force_speak = True
         elif next_action == "wait":
+            self._record_decision_entry(pulse_id, current_perception, current_todo, "wait", None)
             logging.info("[pulse] decision: wait")
             self._save_session_metadata()
             logging.info("[pulse] %s finished pulse with %d replies", self.persona_id, len(replies))
@@ -787,52 +748,44 @@ class PersonaPulseMixin:
             _log_phase(phase)
             return _finalize_and_return(replies)
 
-        # Collapse guidance parts while preserving order and removing duplicates
-        seen_guidance: set[str] = set()
-        collapsed_guidance_parts: List[str] = []
-        for part in conversation_guidance_parts:
-            if not part:
-                continue
-            if part in seen_guidance:
-                continue
-            seen_guidance.add(part)
-            collapsed_guidance_parts.append(part)
+        if next_action == "speak":
+            self._record_decision_entry(pulse_id, current_perception, current_todo, "speak", None)
 
-        guidance_text = "\n\n".join(collapsed_guidance_parts)
+        guidance_sections: List[str] = []
+        if current_perception:
+            guidance_sections.append(f"### 状況認識\n{current_perception}")
         if tool_info_parts:
-            tool_section = "\n\n".join(tool_info_parts)
-            guidance_text = (tool_section + ("\n\n" + guidance_text if guidance_text else "")).strip()
-        if recall_note:
-            guidance_text = (
-                (guidance_text + "\n\n[記憶想起]\n" + recall_note).strip()
-                if guidance_text
-                else "[記憶想起]\n" + recall_note
-            )
+            guidance_sections.append("### ツール結果\n" + "\n".join(tool_info_parts))
+        if current_todo:
+            guidance_sections.append(f"### TODO\n{current_todo}")
 
-        logging.info("[pulse] generating speech with extra info: %s", guidance_text)
         guidance_message = None
-        if guidance_text:
-            guidance_message = (
-                "### 意識モジュールからの情報提供\n\n"
-                f"{guidance_text}\n\n"
-                "### 注意\n\n"
-                "この内容はユーザーに見えていないため、あなたの言葉でユーザーに説明してください。\n"
-                "- ツールは実行せず、会話だけで回答すること。\n"
-                "- 記載されている結果をそのまま伝え、再計算はしないこと。\n"
-                "- ユーザーが確認を求めたら、結果と経緯を文章でまとめて伝えること。"
+        if guidance_sections:
+            guidance_sections.append(
+                "### 注意\n"
+                "- 上記TODOをそのまま反映し、あなたの言葉で丁寧に説明してください。\n"
+                "- ツールは実行せず、会話のみで応答してください。\n"
+                "- 必要であればユーザーに確認を取りながら進めてください。"
             )
-        say, _, _ = self._generate(
-            None,
-            system_prompt_extra=None,
-            info_text=None,
-            guidance_text_override=guidance_message,
-            log_extra_prompt=False,
-            log_user_message=False,
-        )
+            guidance_message = "\n\n".join(guidance_sections)
+        previous_pulse = getattr(self, "_current_pulse_id", None)
+        self._current_pulse_id = pulse_id
+        try:
+            say, _, _ = self._generate(
+                None,
+                system_prompt_extra=None,
+                info_text=None,
+                guidance_text_override=guidance_message,
+                log_extra_prompt=False,
+                log_user_message=False,
+            )
+        finally:
+            if previous_pulse is None:
+                self._current_pulse_id = None
+            else:
+                self._current_pulse_id = previous_pulse
         replies.append(say)
 
-        if recall_note:
-            logging.info("[pulse] recall note: %s", recall_note)
         phase = "response_generated"
         _log_phase(phase)
 
@@ -876,6 +829,128 @@ class PersonaPulseMixin:
             title = step.title
             lines.append(f"  {marker} Step{idx} [{step.status}] {title}")
         return lines
+
+    def _record_perception_entry(self, content: str, pulse_id: str) -> None:
+        if not content or not content.strip():
+            return
+        self._append_memory_entry(
+            pulse_id=pulse_id,
+            role="system",
+            content=content,
+            tags=["perception", f"pulse:{pulse_id}"],
+        )
+
+    def _record_decision_entry(
+        self,
+        pulse_id: str,
+        perception: Optional[str],
+        todo: Optional[str],
+        decision: str,
+        action_payload: Optional[Dict[str, Any]],
+    ) -> None:
+        payload: Dict[str, Any] = {
+            "decision": decision,
+        }
+        if perception and perception.strip():
+            payload["perception"] = perception.strip()
+        if todo and todo.strip():
+            payload["todo"] = todo.strip()
+        if decision == "tool" and action_payload:
+            payload["action"] = action_payload
+        try:
+            content = json.dumps(payload, ensure_ascii=False, indent=2)
+        except TypeError:
+            safe_payload = {
+                key: (value if isinstance(value, (str, int, float, list, dict, bool, type(None))) else str(value))
+                for key, value in payload.items()
+            }
+            content = json.dumps(safe_payload, ensure_ascii=False, indent=2)
+        tags = ["conscious", f"decision:{decision}", f"pulse:{pulse_id}"]
+        self._append_memory_entry(
+            pulse_id=pulse_id,
+            role="assistant",
+            content=content,
+            tags=tags,
+        )
+
+    def _record_tool_action(
+        self,
+        *,
+        pulse_id: str,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        result_summary: str,
+        metadata: Optional[Dict[str, Any]],
+        attachment_path: Optional[str],
+    ) -> None:
+        payload: Dict[str, Any] = {
+            "tool": tool_name,
+            "arguments": arguments,
+            "result": result_summary,
+        }
+        if metadata:
+            payload["metadata"] = metadata
+        if attachment_path:
+            payload["attachment"] = attachment_path
+        try:
+            content = json.dumps(payload, ensure_ascii=False, indent=2)
+        except TypeError:
+            safe_payload = {
+                key: (value if isinstance(value, (str, int, float, list, dict, bool, type(None))) else str(value))
+                for key, value in payload.items()
+            }
+            content = json.dumps(safe_payload, ensure_ascii=False, indent=2)
+        tags = ["action", "tool", f"tool:{tool_name}", f"pulse:{pulse_id}"]
+        self._append_memory_entry(
+            pulse_id=pulse_id,
+            role="assistant",
+            content=content,
+            tags=tags,
+        )
+
+    def _append_memory_entry(
+        self,
+        *,
+        pulse_id: str,
+        role: str,
+        content: str,
+        tags: List[str],
+    ) -> None:
+        if self.sai_memory is None or not getattr(self.sai_memory, "is_ready", lambda: False)():
+            return
+        entry_tags = list(dict.fromkeys(tag for tag in tags if tag))
+        active_task = self._active_task_id()
+        if active_task:
+            task_tag = f"task:{active_task}"
+            if task_tag not in entry_tags:
+                entry_tags.append(task_tag)
+        metadata = {
+            "tags": entry_tags,
+            "pulse_id": pulse_id,
+        }
+        if active_task:
+            metadata["task_id"] = active_task
+        message = {
+            "role": role,
+            "content": content,
+            "metadata": metadata,
+        }
+        try:
+            self.sai_memory.append_persona_message(message)
+        except Exception as exc:
+            logging.debug("[pulse] failed to append memory entry: %s", exc)
+
+    def _active_task_id(self) -> Optional[str]:
+        storage = getattr(self, "task_storage", None)
+        if storage is None:
+            return None
+        try:
+            tasks = storage.list_tasks(statuses=["active"], limit=1, include_steps=False)
+            if tasks:
+                return tasks[0].id
+        except Exception as exc:
+            logging.debug("[pulse] failed to resolve active task: %s", exc)
+        return None
 
 
 __all__ = ["PersonaPulseMixin"]

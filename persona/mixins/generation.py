@@ -86,7 +86,12 @@ class PersonaGenerationMixin:
             base_chars += len(user_message)
 
         history_limit = max(0, self.context_length - base_chars)
-        history_msgs = self.history_manager.get_recent_history(history_limit)
+        pulse_id = getattr(self, "_current_pulse_id", None)
+        history_msgs = self.history_manager.get_recent_history(
+            history_limit,
+            required_tags=["conversation"],
+            pulse_id=pulse_id,
+        )
         logging.debug(
             "history_limit=%s context=%s base=%s history_count=%s",
             history_limit,
@@ -287,6 +292,7 @@ class PersonaGenerationMixin:
                 logging.debug("Injected user message for context")
 
         combined_info = info_text or ""
+        recall_visible: List[str] = []
         if self.sai_memory is not None:
             try:
                 recall_source = (
@@ -312,22 +318,24 @@ class PersonaGenerationMixin:
                     )
                     if snippet:
                         logging.debug("[memory] recall snippet content=%s", snippet[:400])
-                        combined_info = (
-                            (combined_info + "\n" + snippet).strip()
-                            if combined_info
-                            else snippet
-                        )
-                        logging.debug(
-                            "[memory] SAIMemory recall snippet included (%d chars)",
-                            len(snippet),
-                        )
+                        recall_visible.append(snippet)
+                        # 注意: writing snippet to SAIMemory via append_persona_message disabled (would create loops)
             except Exception as exc:
                 logging.warning("SAIMemory recall failed: %s", exc)
+
+        info_payload = combined_info or None
+        if recall_visible:
+            recall_text = "\n".join(recall_visible)
+            info_payload = (
+                (combined_info + "\n" + recall_text).strip()
+                if combined_info
+                else recall_text
+            )
 
         messages = self._build_messages(
             actual_user_message,
             extra_system_prompt=system_prompt_extra,
-            info_text=combined_info or None,
+            info_text=info_payload,
             guidance_text=guidance_text_override,
             user_metadata=user_metadata if actual_user_message == user_message else None,
         )

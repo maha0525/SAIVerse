@@ -127,7 +127,13 @@ class SAIMemoryAdapter:
             selected.insert(0, payload)
         return selected
 
-    def recent_persona_messages(self, max_chars: int) -> List[dict]:
+    def recent_persona_messages(
+        self,
+        max_chars: int,
+        *,
+        required_tags: Optional[List[str]] = None,
+        pulse_id: Optional[str] = None,
+    ) -> List[dict]:
         if not self._ready:
             return []
         thread_id = self._thread_id(None)
@@ -141,7 +147,27 @@ class SAIMemoryAdapter:
 
         selected: List[dict] = []
         consumed = 0
+        required_tags = required_tags or []
+        pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
+
         for payload in reversed(payloads):
+            tags = []
+            metadata = payload.get("metadata")
+            if isinstance(metadata, dict):
+                raw_tags = metadata.get("tags")
+                if isinstance(raw_tags, list):
+                    tags = [str(tag) for tag in raw_tags if tag]
+
+            include = True
+            if required_tags:
+                include = any(tag in tags for tag in required_tags)
+            if pulse_tag and pulse_tag in tags:
+                include = True
+            if not tags and required_tags:
+                # fallback: include legacy entries without tags only if we expect conversation logs
+                include = not required_tags or "conversation" not in required_tags
+            if not include:
+                continue
             text = payload.get("content", "") or ""
             consumed += len(text)
             if consumed > max_chars:
