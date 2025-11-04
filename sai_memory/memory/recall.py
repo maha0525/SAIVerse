@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from threading import RLock
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -20,6 +21,8 @@ from sai_memory.memory.storage import (
 
 
 _REGISTERED_MODELS: set[tuple[str, str]] = set()
+_EMBEDDING_MODEL_CACHE: dict[tuple[str, str | None, int | None], TextEmbedding] = {}
+_EMBEDDING_MODEL_CACHE_LOCK = RLock()
 
 
 class Embedder:
@@ -31,24 +34,36 @@ class Embedder:
         model_dim: int | None = None,
     ):
         self.model_name = model
-        kwargs: Dict[str, Any] = {}
+        logger = logging.getLogger(__name__)
+        resolved_local_path: str | None = None
         if local_model_path:
-            kwargs = _build_local_model_kwargs(
-                model_name=self.model_name,
-                local_model_path=local_model_path,
-                explicit_dim=model_dim,
-            )
-            logging.getLogger(__name__).warning(
-                "Embedder using local path '%s' for model '%s'.",
-                local_model_path,
-                self.model_name,
-            )
-        else:
-            logging.getLogger(__name__).warning(
-                "Embedder using remote model '%s' without local override.",
-                self.model_name,
-            )
-        self.model = TextEmbedding(model_name=self.model_name, **kwargs)
+            resolved_local_path = str(Path(local_model_path).expanduser().resolve())
+
+        cache_key = (self.model_name.lower(), resolved_local_path, model_dim)
+
+        with _EMBEDDING_MODEL_CACHE_LOCK:
+            cached = _EMBEDDING_MODEL_CACHE.get(cache_key)
+            if cached is None:
+                kwargs: Dict[str, Any] = {}
+                if resolved_local_path:
+                    kwargs = _build_local_model_kwargs(
+                        model_name=self.model_name,
+                        local_model_path=resolved_local_path,
+                        explicit_dim=model_dim,
+                    )
+                    logger.warning(
+                        "Embedder using local path '%s' for model '%s'.",
+                        resolved_local_path,
+                        self.model_name,
+                    )
+                else:
+                    logger.warning(
+                        "Embedder using remote model '%s' without local override.",
+                        self.model_name,
+                    )
+                cached = TextEmbedding(model_name=self.model_name, **kwargs)
+                _EMBEDDING_MODEL_CACHE[cache_key] = cached
+            self.model = cached
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         vectors = list(self.model.embed(texts))

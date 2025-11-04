@@ -5,7 +5,7 @@ import json
 import logging
 import mimetypes
 import os
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
 from google import genai
 from google.genai import types
@@ -13,6 +13,7 @@ from google.genai import types
 from .gemini_utils import build_gemini_clients
 
 from media_utils import iter_image_media, load_image_bytes_for_llm
+from media_summary import ensure_image_summary
 from tools import GEMINI_TOOLS_SPEC, TOOL_REGISTRY
 from tools.defs import parse_tool_result
 from llm_router import route
@@ -148,8 +149,47 @@ class GeminiClient(LLMClient):
     ) -> Tuple[str, List[types.Content]]:
         system_lines: List[str] = []
         contents: List[types.Content] = []
+        attachment_limit_env = os.getenv("SAIVERSE_GEMINI_ATTACHMENT_LIMIT")
+        max_image_embeds: Optional[int] = None
+        if attachment_limit_env is not None:
+            try:
+                max_image_embeds = int(attachment_limit_env.strip())
+            except ValueError:
+                logging.warning(
+                    "Invalid SAIVERSE_GEMINI_ATTACHMENT_LIMIT=%s; ignoring",
+                    attachment_limit_env,
+                )
+                max_image_embeds = None
+            else:
+                if max_image_embeds < 0:
+                    max_image_embeds = 0
+        logging.debug(
+            "[gemini] attachment limit=%s",
+            "∞" if max_image_embeds is None else max_image_embeds,
+        )
 
-        for message in msgs:
+        attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
+        if self.supports_images:
+            for idx, message in enumerate(msgs):
+                if isinstance(message, dict):
+                    media_items = iter_image_media(message.get("metadata"))
+                    if media_items:
+                        attachment_cache[idx] = media_items
+        allowed_attachment_keys: Optional[Set[Tuple[int, int]]] = None
+        if max_image_embeds is not None and attachment_cache:
+            ordered: List[Tuple[int, int]] = []
+            for msg_idx in sorted(attachment_cache.keys(), reverse=True):
+                items = attachment_cache[msg_idx]
+                for att_idx in range(len(items)):
+                    ordered.append((msg_idx, att_idx))
+            if max_image_embeds == 0:
+                allowed_attachment_keys = set()
+            else:
+                allowed_attachment_keys = set(ordered[:max_image_embeds])
+        elif max_image_embeds is not None:
+            allowed_attachment_keys = set()
+
+        for idx, message in enumerate(msgs):
             if isinstance(message, types.Content):
                 contents.append(message)
                 continue
@@ -167,18 +207,39 @@ class GeminiClient(LLMClient):
                 continue
 
             text = content_to_text(message.get("content", "")) or ""
+            text_content = text
             g_role = "user" if role == "user" else "model"
-            attachments = iter_image_media(message.get("metadata"))
+            attachments = attachment_cache.get(idx, []) if self.supports_images else []
             if attachments and self.supports_images:
+                selected_attachments: List[Dict[str, Any]] = []
+                skipped_attachments: List[Dict[str, Any]] = []
+                attachment_records: List[Tuple[int, Dict[str, Any], Optional[str]]] = []
+                for att_idx, attachment in enumerate(attachments):
+                    summary_text = ensure_image_summary(attachment["path"], attachment["mime_type"])
+                    key = (idx, att_idx)
+                    if allowed_attachment_keys is not None and key not in allowed_attachment_keys:
+                        attachment_records.append((att_idx, attachment, summary_text))
+                        skipped_attachments.append(attachment)
+                        continue
+                    attachment_records.append((att_idx, attachment, summary_text))
+                    selected_attachments.append(attachment)
                 logging.debug(
-                    "[gemini] embedding %d image attachment(s) for role=%s",
-                    len(attachments),
+                    "[gemini] embedding %d image attachment(s) for role=%s (skipped=%d)",
+                    len(selected_attachments),
                     role,
+                    len(skipped_attachments),
                 )
                 parts: List[types.Part] = []
-                if text:
-                    parts.append(types.Part(text=text))
-                for attachment in attachments:
+                if skipped_attachments:
+                    for att_idx, attachment, summary_text in attachment_records:
+                        if attachment not in skipped_attachments:
+                            continue
+                        summary = summary_text or "(要約を取得できませんでした)"
+                        note = f"[画像参照のみ: {attachment['uri']}] {summary}"
+                        text_content = f"{text_content}\n{note}" if text_content else note
+                if text_content:
+                    parts.append(types.Part(text=text_content))
+                for attachment in selected_attachments:
                     data, effective_mime = load_image_bytes_for_llm(
                         attachment["path"], attachment["mime_type"]
                     )
@@ -198,9 +259,11 @@ class GeminiClient(LLMClient):
                         self.supports_images,
                     )
                     for attachment in attachments:
-                        note = f"[画像: {attachment['uri']}]"
-                        text = f"{text}\n{note}" if text else note
-                contents.append(types.Content(parts=[types.Part(text=text)], role=g_role))
+                        summary = ensure_image_summary(attachment["path"], attachment["mime_type"])
+                        summary_note = summary or "(要約を取得できませんでした)"
+                        note = f"[画像: {attachment['uri']}] {summary_note}"
+                        text_content = f"{text_content}\n{note}" if text_content else note
+                contents.append(types.Content(parts=[types.Part(text=text_content)], role=g_role))
 
         return "\n".join(system_lines), contents
 
@@ -242,6 +305,8 @@ class GeminiClient(LLMClient):
         tools: Optional[list] | None = None,
         history_snippets: Optional[List[str]] | None = None,
         response_schema: Optional[Dict[str, Any]] = None,
+        *,
+        temperature: float | None = None,
     ) -> str:
         default_tools = GEMINI_TOOLS_SPEC if tools is None else tools
         if response_schema is not None and tools is None:
@@ -282,6 +347,8 @@ class GeminiClient(LLMClient):
                     "system_instruction": sys_msg,
                     "safety_settings": GEMINI_SAFETY_CONFIG,
                 }
+                if temperature is not None:
+                    cfg_kwargs["temperature"] = temperature
                 if use_tools:
                     cfg_kwargs["tools"] = merge_tools_for_gemini(tools_spec)
                     cfg_kwargs["tool_config"] = tool_cfg
@@ -402,6 +469,8 @@ class GeminiClient(LLMClient):
         tools: Optional[list] | None = None,
         history_snippets: Optional[List[str]] | None = None,
         response_schema: Optional[Dict[str, Any]] = None,
+        *,
+        temperature: float | None = None,
     ) -> Iterator[str]:
         tools_spec = GEMINI_TOOLS_SPEC if tools is None else tools
         use_tools = bool(tools_spec)
@@ -432,12 +501,12 @@ class GeminiClient(LLMClient):
 
         active_client = self.client
         try:
-            stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools)
+            stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature)
         except Exception as exc:
             if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
                 logging.info("Retrying with paid Gemini API key due to rate limit")
                 active_client = self.paid_client
-                stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools)
+                stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature)
             else:
                 logging.exception("Gemini call failed")
                 yield "エラーが発生しました。"
@@ -547,6 +616,7 @@ class GeminiClient(LLMClient):
             history_snippets,
             reasoning_chunks,
             result,
+            temperature,
         )
 
     def _start_stream(
@@ -556,6 +626,7 @@ class GeminiClient(LLMClient):
         tools_spec: Optional[list],
         tool_cfg: Optional[types.ToolConfig],
         use_tools: bool,
+        temperature: float | None,
     ):
         sys_msg, contents = self._convert_messages(messages)
         cfg_kwargs: Dict[str, Any] = {
@@ -567,6 +638,8 @@ class GeminiClient(LLMClient):
             cfg_kwargs["tool_config"] = tool_cfg
         if self._thinking_config is not None:
             cfg_kwargs["thinking_config"] = self._thinking_config
+        if temperature is not None:
+            cfg_kwargs["temperature"] = temperature
         return client.models.generate_content_stream(
             model=self.model,
             contents=contents,
@@ -581,6 +654,7 @@ class GeminiClient(LLMClient):
         history_snippets: List[str],
         reasoning_chunks: List[str],
         fallback_result: str,
+        temperature: float | None,
     ) -> Iterator[str]:
         tool_cfg_none = types.ToolConfig(functionCallingConfig=types.FunctionCallingConfig(mode="NONE"))
         sys_msg, contents = self._convert_messages(messages)
@@ -592,6 +666,8 @@ class GeminiClient(LLMClient):
         }
         if self._thinking_config is not None:
             cfg_kwargs["thinking_config"] = self._thinking_config
+        if temperature is not None:
+            cfg_kwargs["temperature"] = temperature
         stream = client.models.generate_content_stream(
             model=self.model,
             contents=contents,

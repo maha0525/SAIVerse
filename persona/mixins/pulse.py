@@ -158,12 +158,7 @@ class PersonaPulseMixin:
 
         # 引数で渡された最新のoccupantsリストを使用
         occupants_str = ",".join(occupants)
-        context_info = (
-            f"occupants:{occupants_str}\nuser_online:{user_online}"
-        )
-        logging.debug("[pulse] context info: %s", context_info)
-        self.conscious_log.append({"role": "user", "content": context_info})
-
+        logging.debug("[pulse] occupants=%s user_online=%s", occupants_str, user_online)
         recent_candidates: List[Dict[str, Any]] = []
         for msg in hist:
             try:
@@ -200,55 +195,38 @@ class PersonaPulseMixin:
         now_utc = datetime.now(dt_timezone.utc)
         now_local = now_utc.astimezone(self.timezone)
         current_datetime_local_str = self._format_local_timestamp(now_local)
-        current_datetime_utc_str = now_utc.strftime("%Y-%m-%d %H:%M:%S UTC+00:00")
         timezone_display = f"{self.timezone_name} ({self._format_timezone_offset(now_local)})"
-
-        recent_lines: List[str] = []
-        for msg in recent:
-            if msg.get("role") == "system":
-                continue
-            content = (msg.get("content") or "").strip()
-            content_formatted = content.replace("\n", "\n  ") if content else "(内容なし)"
-            ts_raw = msg.get("timestamp") or msg.get("created_at")
-            ts_utc = self._parse_timestamp_to_utc(ts_raw)
-            if ts_utc:
-                ts_label = self._format_local_timestamp(ts_utc.astimezone(self.timezone))
-            else:
-                ts_label = "時刻不明"
-            recent_lines.append(f"- [{ts_label}] {msg.get('role')}: {content_formatted}")
-
-        recent_text = "\n".join(recent_lines) if recent_lines else "(最近のメッセージはありません)"
 
         if self._last_conscious_prompt_time_utc is not None:
             elapsed_prompt = now_utc - self._last_conscious_prompt_time_utc
             elapsed_text = self._format_elapsed(elapsed_prompt)
-            time_since_last_prompt = f"前回の意識パルスから {elapsed_text}経過しています。"
+            elapsed_label = elapsed_text
         else:
-            time_since_last_prompt = "今回が初めての意識パルス実行です。"
+            elapsed_label = "初回実行"
 
-        new_message_details: List[str] = []
-        for msg in new_msgs:
-            try:
-                seq = msg.get("seq")
-                role = msg.get("role")
-                content = (msg.get("content") or "").strip()
-                if len(content) > 200:
-                    content = content[:197] + "..."
-                new_message_details.append(f"[seq={seq}] {role}: {content}")
-            except Exception:
-                continue
-        info_lines: List[str] = []
-        if new_message_details:
-            info_lines.append("## 今回新たに取得した発話")
-            info_lines.append("\n".join(new_message_details))
-        info_lines.append(f"occupants:{occupants_str}")
-        info_lines.append(f"user_online:{user_online}")
         task_section = self._compose_task_summary()
+        building_name = self.buildings[building_id].name
+        occupants_display = occupants_str if occupants_str else "(なし)"
+        user_state = "online" if user_online else "offline"
+
+        perception_sections: List[str] = []
+        snapshot_lines = [
+            f"- 現地時刻: {current_datetime_local_str}",
+            f"- タイムゾーン: {timezone_display}",
+            f"- 前回の意識パルスからの経過: {elapsed_label}",
+            f"- 現在のBuilding: {building_name}",
+            f"- Building内のペルソナ: {occupants_display}",
+            f"- ユーザーオンライン状態: {user_state}",
+        ]
+        perception_sections.append("### 状況スナップショット")
+        perception_sections.append("\n".join(snapshot_lines))
         if task_section:
-            info_lines.append("## タスク状況")
-            info_lines.append(task_section)
-        info = "\n".join(info_lines)
-        self._record_perception_entry(info, pulse_id)
+            perception_sections.append("### タスク状況")
+            perception_sections.append(task_section)
+        perception_prompt_text = "\n\n".join(section for section in perception_sections if section)
+        logging.debug("[pulse] perception prompt prepared:\n%s", perception_prompt_text)
+        self.conscious_log.append({"role": "user", "content": perception_prompt_text})
+        self._record_perception_entry(perception_prompt_text, pulse_id)
 
         recall_snippet = ""
         phase = "prompt_context"
@@ -421,54 +399,91 @@ class PersonaPulseMixin:
             decision_schema = llm_clients.GeminiClient._schema_from_json(decision_schema_dict)  # type: ignore[attr-defined]
 
         phase = "decision_loop_setup"
+        structured_temperature: Optional[float] = 0.0
 
-        def _format_tool_feedback(entries: List[Dict[str, Any]]) -> str:
-            if not entries:
-                return "（直近で実行したツールはありません）"
-            lines: List[str] = []
-            for entry in entries[-5:]:
-                args_json = json.dumps(entry.get("arguments", {}), ensure_ascii=False)
-                result_text = entry.get("result", "") or "(no result)"
-                if len(result_text) > 800:
-                    result_text = result_text[:800] + "…"
-                lines.append(f"- {entry.get('name')} | args={args_json}\n  result: {result_text}")
-            return "\n".join(lines)
+        tool_catalog_lines = []
+        for schema in TOOL_SCHEMAS:
+            props = schema.parameters.get("properties", {}) if isinstance(schema.parameters, dict) else {}
+            arglist = ", ".join(props.keys()) if props else "(引数なし)"
+            tool_catalog_lines.append(f"- {schema.name}: {schema.description} | 引数: {arglist}")
+        tool_catalog = "\n".join(tool_catalog_lines) if tool_catalog_lines else "(利用可能なツールはありません)"
 
-        def _render_prompt(tool_entries: List[Dict[str, Any]]) -> str:
-            tool_catalog_lines = []
-            for schema in TOOL_SCHEMAS:
-                props = schema.parameters.get("properties", {}) if isinstance(schema.parameters, dict) else {}
-                arglist = ", ".join(props.keys()) if props else "(引数なし)"
-                tool_catalog_lines.append(f"- {schema.name}: {schema.description} | 引数: {arglist}")
-            tool_catalog = "\n".join(tool_catalog_lines) if tool_catalog_lines else "(利用可能なツールはありません)"
-            prompt = pulse_prompt_template.format(
-                current_persona_name=self.persona_name,
-                current_persona_system_instruction=self.persona_system_instruction,
-                current_building_name=self.buildings[building_id].name,
-                current_datetime_local=current_datetime_local_str,
-                current_datetime_utc=current_datetime_utc_str,
-                timezone_display=timezone_display,
-                time_since_last_prompt=time_since_last_prompt,
-                recent_conversation=recent_text,
-                occupants=occupants_str,
-                user_online_state="online" if user_online else "offline",
-                recall_snippet=recall_snippet or "(なし)",
-                tool_feedback_section=_format_tool_feedback(tool_entries),
-                tool_overview_section=tool_catalog,
-                thread_directory=thread_directory,
+        system_instruction_text = pulse_prompt_template.format(
+            current_persona_name=self.persona_name,
+            current_persona_system_instruction=self.persona_system_instruction,
+            tool_overview_section=tool_catalog,
+            thread_directory=thread_directory,
+        )
+        logging.debug(
+            "[pulse] system instruction prepared length=%d",
+            len(system_instruction_text),
+        )
+
+        recall_prompt_text = (recall_snippet or "").strip()
+        base_length = len(system_instruction_text) + len(perception_prompt_text)
+        if recall_prompt_text:
+            base_length += len(recall_prompt_text)
+        buffer_chars = 1024
+        if isinstance(context_length, int) and context_length > 0:
+            context_char_limit = max(0, context_length - base_length - buffer_chars)
+        else:
+            context_char_limit = 8000
+        if context_char_limit <= 0:
+            fallback = context_length // 2 if isinstance(context_length, int) and context_length > 0 else 2000
+            context_char_limit = max(2000, fallback)
+        logging.debug(
+            "[pulse] context_char_limit=%d (context_length=%s base_length=%d buffer=%d)",
+            context_char_limit,
+            context_length,
+            base_length,
+            buffer_chars,
+        )
+
+        def _build_context_messages(char_limit: int) -> List[Dict[str, Any]]:
+            try:
+                raw_messages = self.history_manager.get_recent_history(char_limit, pulse_id=pulse_id)
+            except Exception as exc:
+                logging.warning("[pulse] failed to fetch SAIMemory context: %s", exc)
+                return []
+            sanitized: List[Dict[str, Any]] = []
+            for entry in raw_messages:
+                role = entry.get("role") or "user"
+                content = (entry.get("content") or "").strip()
+                if not content:
+                    continue
+                metadata = entry.get("metadata")
+                tags: List[str] = []
+                if isinstance(metadata, dict):
+                    raw_tags = metadata.get("tags")
+                    if isinstance(raw_tags, list):
+                        tags = [str(tag) for tag in raw_tags if tag]
+                if tags and f"pulse:{pulse_id}" in tags and "perception" in tags:
+                    logging.debug("[pulse] skipping current pulse perception entry from context")
+                    continue
+                sanitized_entry: Dict[str, Any] = {"role": role, "content": content}
+                if isinstance(metadata, dict):
+                    sanitized_entry["metadata"] = copy.deepcopy(metadata)
+                sanitized.append(sanitized_entry)
+            return sanitized
+
+        def _compose_sequence(context_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            sequence: List[Dict[str, Any]] = []
+            if recall_prompt_text:
+                sequence.append({"role": "user", "content": recall_prompt_text})
+            sequence.extend(context_messages)
+            sequence.append(
+                {
+                    "role": "user",
+                    "content": perception_prompt_text,
+                    "metadata": {"tags": ["Perception"]},
+                }
             )
-            logging.debug(
-                "[pulse] prompt preview for %s in %s:\n%s",
-                self.persona_id,
-                building_id,
-                prompt,
-            )
-            return prompt
+            return sequence
 
-        def _call(client: Any, prompt_text: str):
+        def _call(client: Any, message_sequence: List[Dict[str, Any]]):
             if using_gemini:
                 config_kwargs: Dict[str, Any] = {
-                    "system_instruction": prompt_text,
+                    "system_instruction": system_instruction_text,
                     "safety_settings": llm_clients.GEMINI_SAFETY_CONFIG,
                     "response_mime_type": "application/json",
                 }
@@ -476,17 +491,30 @@ class PersonaPulseMixin:
                     config_kwargs["response_schema"] = decision_schema
                 else:
                     logging.warning("[pulse] Gemini decision schema conversion failed; proceeding without schema enforcement.")
+                if structured_temperature is not None:
+                    config_kwargs["temperature"] = structured_temperature
+                contents: List[types.Content] = []
+                for msg in message_sequence:
+                    text = (msg.get("content") or "").strip()
+                    if not text:
+                        continue
+                    role = msg.get("role", "user")
+                    gemini_role = "user" if role == "user" else "model"
+                    contents.append(types.Content(parts=[types.Part(text=text)], role=gemini_role))
+                if not contents:
+                    contents = [types.Content(parts=[types.Part(text="")], role="user")]
                 return client.models.generate_content(
                     model=model_name,
-                    contents=[types.Content(parts=[types.Part(text=info)], role="user")],
+                    contents=contents,
                     config=types.GenerateContentConfig(**config_kwargs),
                 )
             assert pulse_client is not None
-            messages = [
-                {"role": "system", "content": prompt_text},
-                {"role": "user", "content": info},
-            ]
-            return pulse_client.generate(messages, response_schema=decision_schema_dict)
+            messages = [{"role": "system", "content": system_instruction_text}] + message_sequence
+            return pulse_client.generate(
+                messages,
+                response_schema=decision_schema_dict,
+                temperature=structured_temperature,
+            )
 
         def _extract_json_text(raw: str) -> str:
             text = (raw or "").strip()
@@ -517,17 +545,34 @@ class PersonaPulseMixin:
         phase = "decision_loop"
         _log_phase(phase)
 
+        schema_retry_notice: Optional[str] = None
         for loop_index in range(max_decision_loops):
-            prompt_text = _render_prompt(tool_history)
+            context_messages = _build_context_messages(context_char_limit)
+            message_sequence = _compose_sequence(context_messages)
+            if schema_retry_notice:
+                message_sequence.append(
+                    {
+                        "role": "system",
+                        "content": schema_retry_notice,
+                    }
+                )
+            logging.debug(
+                "[pulse] decision loop %d message_sequence=%d (context=%d recall=%s perception_len=%d)",
+                loop_index,
+                len(message_sequence),
+                len(context_messages),
+                "yes" if recall_prompt_text else "no",
+                len(perception_prompt_text),
+            )
             if using_gemini:
                 try:
-                    resp = _call(active_client, prompt_text)
+                    resp = _call(active_client, message_sequence)
                 except Exception as e:
                     if active_client is free_client and paid_client and "rate" in str(e).lower():
                         logging.info("[pulse] retrying with paid Gemini key due to rate limit")
                         active_client = paid_client
                         try:
-                            resp = _call(active_client, prompt_text)
+                            resp = _call(active_client, message_sequence)
                         except Exception as e2:
                             logging.error("[pulse] Gemini call failed: %s", e2)
                             _log_phase("decision_model_exception_gemini_retry")
@@ -539,7 +584,7 @@ class PersonaPulseMixin:
                 content_raw = resp.text if hasattr(resp, "text") else str(resp)
             else:
                 try:
-                    raw_output = _call(None, prompt_text)
+                    raw_output = _call(None, message_sequence)
                 except Exception as e:
                     logging.error("[pulse] decision model call failed: %s", e)
                     phase = "decision_model_exception"
@@ -562,6 +607,35 @@ class PersonaPulseMixin:
                 phase = "decision_json_parse_error"
                 _log_phase(phase)
                 return _finalize_and_return([])
+
+            missing_fields = [
+                field
+                for field in ("perception", "todo", "decision")
+                if not isinstance(data.get(field), str) or not data.get(field).strip()
+            ]
+            if missing_fields:
+                logging.warning(
+                    "[pulse] structured decision missing fields=%s raw=%s",
+                    missing_fields,
+                    content,
+                )
+                if schema_retry_notice is None and loop_index < max_decision_loops - 1:
+                    schema_retry_notice = (
+                        "次の回答では必ず以下のJSONスキーマに完全一致する構造化出力を返してください。\n"
+                        "{\n"
+                        '  "perception": "<状況認識を自然文で記述>",\n'
+                        '  "todo": "<次の行動を自然文で記述>",\n'
+                        '  "decision": "wait" | "speak" | "tool"\n'
+                        "}\n"
+                        "文字列以外の値や追加の出力、コードブロック、マークアップは一切含めてはいけません。"
+                    )
+                    _log_phase("decision_schema_retry")
+                    continue
+                phase = "decision_missing_fields_abort"
+                _log_phase(phase)
+                return _finalize_and_return([])
+            else:
+                schema_retry_notice = None
 
             last_decision = data
             current_perception = (data.get("perception") or "").strip()

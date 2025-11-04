@@ -33,6 +33,8 @@ class LLMClient:
         messages: List[Dict[str, Any]],
         tools: List[Any] | None = None,
         response_schema: Dict[str, Any] | None = None,
+        *,
+        temperature: float | None = None,
         **_: Any,
     ) -> str:
         raise NotImplementedError
@@ -42,6 +44,8 @@ class LLMClient:
         messages: List[Dict[str, Any]],
         tools: List[Any] | None = None,
         response_schema: Dict[str, Any] | None = None,
+        *,
+        temperature: float | None = None,
         **_: Any,
     ) -> Iterator[str]:
         raise NotImplementedError

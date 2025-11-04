@@ -174,6 +174,8 @@ class OpenAIClient(LLMClient):
         tools: Optional[list] | None = None,
         history_snippets: Optional[List[str]] | None = None,
         response_schema: Optional[Dict[str, Any]] = None,
+        *,
+        temperature: float | None = None,
     ) -> str:
         default_tools = OPENAI_TOOLS_SPEC if tools is None else tools
         if response_schema is not None and tools is None:
@@ -190,6 +192,8 @@ class OpenAIClient(LLMClient):
 
         def _build_request_kwargs() -> Dict[str, Any]:
             req = dict(self._request_kwargs)
+            if temperature is not None:
+                req["temperature"] = temperature
             if response_schema:
                 schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
                 req["response_format"] = {
@@ -200,7 +204,6 @@ class OpenAIClient(LLMClient):
                         "strict": True,
                     },
                 }
-                req.setdefault("temperature", 0)
             return req
 
         if not use_tools:
@@ -322,6 +325,8 @@ class OpenAIClient(LLMClient):
         force_tool_choice: Optional[dict | str] = None,
         history_snippets: Optional[List[str]] | None = None,
         response_schema: Optional[Dict[str, Any]] = None,
+        *,
+        temperature: float | None = None,
     ) -> Iterator[str]:
         """
         ユーザ向けに逐次テキストを yield するストリーム版。
@@ -338,11 +343,14 @@ class OpenAIClient(LLMClient):
 
         if not use_tools:
             try:
+                req_kwargs = dict(self._request_kwargs)
+                if temperature is not None:
+                    req_kwargs["temperature"] = temperature
                 resp = self._create_completion(
                     model=self.model,
                     messages=_prepare_openai_messages(messages, self.supports_images),
                     n=1,
-                    **self._request_kwargs,
+                    **req_kwargs,
                 )
             except Exception:
                 logging.exception("OpenAI call failed")
@@ -513,6 +521,8 @@ class OpenAIClient(LLMClient):
                     tools,
                     force_tool_choice="auto",
                     history_snippets=history_snippets,
+                    response_schema=response_schema,
+                    temperature=temperature,
                 )
                 return
 
