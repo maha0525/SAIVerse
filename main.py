@@ -13,6 +13,9 @@ from pathlib import Path
 
 load_dotenv()
 
+os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "0")
+os.environ.setdefault("GRADIO_TELEMETRY_ENABLED", "0")
+
 from saiverse_manager import SAIVerseManager
 from database.paths import default_db_path
 from model_configs import get_model_choices
@@ -156,7 +159,12 @@ def main():
     # --- FastAPIとGradioの統合 ---
     # 3. Gradio UIを作成
     demo = build_app(args.city_name, NOTE_CSS, HEAD_VIEWPORT)
-    demo.launch(server_name="0.0.0.0",server_port=manager.ui_port, debug=True, share = False)
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=manager.ui_port,
+        debug=False,
+        share=False,
+    )
 
 
 if __name__ == "__main__":

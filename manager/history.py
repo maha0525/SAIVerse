@@ -5,7 +5,7 @@ import shutil
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, Iterable, List, Optional
 
 import pandas as pd
 
@@ -19,9 +19,15 @@ class HistoryMixin:
     saiverse_home: Path
     db_path: str
 
-    def _save_building_histories(self) -> None:
+    def _save_building_histories(self, building_ids: Optional[Iterable[str]] = None) -> None:
         """Persist in-memory building histories to disk."""
-        for b_id, path in self.building_memory_paths.items():
+        if building_ids is None:
+            items = self.building_memory_paths.items()
+        else:
+            unique_ids = {bid for bid in building_ids if bid in self.building_memory_paths}
+            items = ((bid, self.building_memory_paths[bid]) for bid in unique_ids)
+
+        for b_id, path in items:
             hist = self.building_histories.get(b_id, [])
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(hist, ensure_ascii=False), encoding="utf-8")

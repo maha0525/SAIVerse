@@ -304,6 +304,9 @@ class RuntimeService(
                 "[runtime] received metadata with keys=%s", list(metadata.keys())
             )
 
+        touched_personas: set[str] = set()
+        touched_buildings: set[str] = set()
+
         if responding_personas:
             try:
                 responding_personas[0].history_manager.add_to_building_only(
@@ -311,6 +314,7 @@ class RuntimeService(
                     user_entry,
                     heard_by=list(self.occupants.get(building_id, [])),
                 )
+                touched_buildings.add(building_id)
             except Exception:
                 hist = self.building_histories.setdefault(building_id, [])
                 next_seq = 1
@@ -329,9 +333,12 @@ class RuntimeService(
                         **({"metadata": metadata} if metadata else {}),
                     }
                 )
+                touched_buildings.add(building_id)
 
         replies: List[str] = []
         for persona in responding_personas:
+            touched_personas.add(persona.persona_id)
+            touched_buildings.add(persona.current_building_id)
             if persona.interaction_mode == "manual":
                 replies.extend(
                     persona.handle_user_input(message, metadata=metadata)
@@ -343,9 +350,12 @@ class RuntimeService(
                     )
                 )
 
-        self._save_building_histories()
-        for persona in self.personas.values():
-            persona._save_session_metadata()
+        if touched_buildings:
+            self._save_building_histories(touched_buildings)
+        for persona_id in touched_personas:
+            persona = self.personas.get(persona_id)
+            if persona is not None:
+                persona._save_session_metadata()
         return replies
 
     def handle_user_input_stream(
@@ -370,6 +380,9 @@ class RuntimeService(
         if metadata:
             user_entry["metadata"] = metadata
 
+        touched_personas: set[str] = set()
+        touched_buildings: set[str] = set()
+
         if responding_personas:
             try:
                 responding_personas[0].history_manager.add_to_building_only(
@@ -377,6 +390,7 @@ class RuntimeService(
                     user_entry,
                     heard_by=list(self.occupants.get(building_id, [])),
                 )
+                touched_buildings.add(building_id)
             except Exception:
                 hist = self.building_histories.setdefault(building_id, [])
                 next_seq = 1
@@ -395,8 +409,11 @@ class RuntimeService(
                         **({"metadata": metadata} if metadata else {}),
                     }
                 )
+                touched_buildings.add(building_id)
 
         for persona in responding_personas:
+            touched_personas.add(persona.persona_id)
+            touched_buildings.add(persona.current_building_id)
             if persona.interaction_mode == "manual":
                 for token in persona.handle_user_input_stream(
                     message, metadata=metadata
@@ -414,9 +431,12 @@ class RuntimeService(
                 for reply in pulse_responses:
                     yield reply
 
-        self._save_building_histories()
-        for persona in self.personas.values():
-            persona._save_session_metadata()
+        if touched_buildings:
+            self._save_building_histories(touched_buildings)
+        for persona_id in touched_personas:
+            persona = self.personas.get(persona_id)
+            if persona is not None:
+                persona._save_session_metadata()
 
     def run_scheduled_prompts(self) -> List[str]:
         replies: List[str] = []
