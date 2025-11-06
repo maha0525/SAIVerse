@@ -150,6 +150,11 @@ class RuntimeService(
             return False, "移動失敗: 現在地が不明です。"
         if from_building_id == target_building_id:
             return True, "同じ場所にいます。"
+        logging.debug(
+            "[runtime] move_user requested %s -> %s",
+            from_building_id,
+            target_building_id,
+        )
 
         success, message = self.occupancy_manager.move_entity(
             str(self.state.user_id),
@@ -159,6 +164,9 @@ class RuntimeService(
         )
         if success:
             self.state.user_current_building_id = target_building_id
+            logging.debug("[runtime] move_user success: now %s", target_building_id)
+        else:
+            logging.debug("[runtime] move_user failed: %s", message)
         return success, message
 
     def _move_persona(
@@ -289,11 +297,17 @@ class RuntimeService(
             return ['<div class="note-box">エラー: ユーザーの現在地が不明です。</div>']
 
         building_id = self.state.user_current_building_id
+        logging.debug("[runtime] handle_user_input building_id=%s", building_id)
         responding_personas = [
             self.personas[pid]
             for pid in self.occupants.get(building_id, [])
             if pid in self.personas and not self.personas[pid].is_dispatched
         ]
+        logging.debug(
+            "[runtime] handle_user_input responding_personas=%s occupants=%s",
+            [p.persona_id for p in responding_personas],
+            self.occupants.get(building_id, []),
+        )
 
         user_entry = {"role": "user", "content": message}
         if metadata:
@@ -304,9 +318,6 @@ class RuntimeService(
                 "[runtime] received metadata with keys=%s", list(metadata.keys())
             )
 
-        touched_personas: set[str] = set()
-        touched_buildings: set[str] = set()
-
         if responding_personas:
             try:
                 responding_personas[0].history_manager.add_to_building_only(
@@ -314,7 +325,6 @@ class RuntimeService(
                     user_entry,
                     heard_by=list(self.occupants.get(building_id, [])),
                 )
-                touched_buildings.add(building_id)
             except Exception:
                 hist = self.building_histories.setdefault(building_id, [])
                 next_seq = 1
@@ -333,12 +343,9 @@ class RuntimeService(
                         **({"metadata": metadata} if metadata else {}),
                     }
                 )
-                touched_buildings.add(building_id)
 
         replies: List[str] = []
         for persona in responding_personas:
-            touched_personas.add(persona.persona_id)
-            touched_buildings.add(persona.current_building_id)
             if persona.interaction_mode == "manual":
                 replies.extend(
                     persona.handle_user_input(message, metadata=metadata)
@@ -349,13 +356,11 @@ class RuntimeService(
                         occupants=self.occupants.get(building_id, []), user_online=True
                     )
                 )
+        logging.debug("[runtime] handle_user_input collected %d replies", len(replies))
 
-        if touched_buildings:
-            self._save_building_histories(touched_buildings)
-        for persona_id in touched_personas:
-            persona = self.personas.get(persona_id)
-            if persona is not None:
-                persona._save_session_metadata()
+        self._save_building_histories()
+        for persona in self.personas.values():
+            persona._save_session_metadata()
         return replies
 
     def handle_user_input_stream(
@@ -370,18 +375,21 @@ class RuntimeService(
             return
 
         building_id = self.state.user_current_building_id
+        logging.debug("[runtime] handle_user_input_stream building_id=%s", building_id)
         responding_personas = [
             self.personas[pid]
             for pid in self.occupants.get(building_id, [])
             if pid in self.personas and not self.personas[pid].is_dispatched
         ]
+        logging.debug(
+            "[runtime] handle_user_input_stream responding_personas=%s occupants=%s",
+            [p.persona_id for p in responding_personas],
+            self.occupants.get(building_id, []),
+        )
 
         user_entry = {"role": "user", "content": message}
         if metadata:
             user_entry["metadata"] = metadata
-
-        touched_personas: set[str] = set()
-        touched_buildings: set[str] = set()
 
         if responding_personas:
             try:
@@ -390,7 +398,6 @@ class RuntimeService(
                     user_entry,
                     heard_by=list(self.occupants.get(building_id, [])),
                 )
-                touched_buildings.add(building_id)
             except Exception:
                 hist = self.building_histories.setdefault(building_id, [])
                 next_seq = 1
@@ -409,11 +416,8 @@ class RuntimeService(
                         **({"metadata": metadata} if metadata else {}),
                     }
                 )
-                touched_buildings.add(building_id)
 
         for persona in responding_personas:
-            touched_personas.add(persona.persona_id)
-            touched_buildings.add(persona.current_building_id)
             if persona.interaction_mode == "manual":
                 for token in persona.handle_user_input_stream(
                     message, metadata=metadata
@@ -430,13 +434,11 @@ class RuntimeService(
                     pulse_responses = []
                 for reply in pulse_responses:
                     yield reply
+        logging.debug("[runtime] handle_user_input_stream completed")
 
-        if touched_buildings:
-            self._save_building_histories(touched_buildings)
-        for persona_id in touched_personas:
-            persona = self.personas.get(persona_id)
-            if persona is not None:
-                persona._save_session_metadata()
+        self._save_building_histories()
+        for persona in self.personas.values():
+            persona._save_session_metadata()
 
     def run_scheduled_prompts(self) -> List[str]:
         replies: List[str] = []

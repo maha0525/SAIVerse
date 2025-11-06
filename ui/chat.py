@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime
 from html import escape as html_escape
 from pathlib import Path
+import uuid
+
 from typing import Any, Dict, Iterable, List, Optional
 
 import gradio as gr
@@ -327,7 +329,20 @@ def _prepare_move_component_updates(force_dropdown_value: Optional[str] = None, 
     return dropdown_update, radio_update
 
 
-def _perform_user_move(building_name: Optional[str]):
+def _normalize_client_location_state(state: Optional[dict], current_location: str) -> dict:
+    if not isinstance(state, dict):
+        return {"initialized": False, "value": current_location, "session": None}
+    initialized = bool(state.get("initialized"))
+    value = state.get("value")
+    if not isinstance(value, str):
+        value = current_location
+    session = state.get("session")
+    if not isinstance(session, str) or not session.strip():
+        session = None
+    return {"initialized": initialized, "value": value, "session": session}
+
+
+def _perform_user_move(building_name: Optional[str], client_state: Optional[dict]):
     manager = ui_state.manager
     if not manager or not manager.user_current_building_id:
         location_name = get_current_location_name()
@@ -337,39 +352,84 @@ def _perform_user_move(building_name: Optional[str]):
             gr.update(value=format_location_label(location_name)),
             gr.update(),
             gr.update(),
+            _normalize_client_location_state(client_state, location_name),
         )
 
-    if not building_name:
-        current_history = get_current_building_history()
-        location_name = get_current_location_name()
-        return (
-            current_history,
-            location_name,
-            gr.update(value=format_location_label(location_name)),
-            gr.update(),
-            gr.update(),
-        )
+    import time
+    start_time = time.time()
 
-    target_building_id = ui_state.building_name_to_id.get(building_name)
-    if target_building_id:
-        manager.move_user(target_building_id)
+    server_location = get_current_location_name()
+    state = _normalize_client_location_state(client_state, server_location)
+    if state["session"] is None:
+        state["session"] = f"py-{uuid.uuid4().hex[:8]}"
+
+    logging.debug(
+        "[ui] move handler session=%s building_name=%s state_before=%s server_location=%s",
+        state["session"],
+        building_name,
+        state,
+        server_location,
+    )
+
+    target_name = building_name or server_location
+    if not state["initialized"]:
+        state["initialized"] = True
+        logging.debug("[ui] initial sync completed for session=%s", state["session"])
+
+    if target_name and target_name != server_location:
+        target_building_id = ui_state.building_name_to_id.get(target_name)
+        if target_building_id:
+            logging.debug(
+                "[ui] move request from %s to %s",
+                manager.user_current_building_id,
+                target_building_id,
+            )
+            manager.move_user(target_building_id)
+            logging.debug(
+                "[ui] move request completed in %.2fs",
+                time.time() - start_time,
+            )
+            server_location = get_current_location_name()
+        else:
+            logging.debug("[ui] move request ignored (unknown target %s)", target_name)
+    else:
+        logging.debug("[ui] move request synchronising to current location (%s)", server_location)
+
+    state["value"] = server_location
 
     new_history = get_current_building_history()
     new_location_name = get_current_location_name()
     summonable_personas = manager.get_summonable_personas()
     conversing_personas = manager.get_conversing_personas()
+    logging.debug(
+        "[ui] total move handler time %.2fs",
+        time.time() - start_time,
+    )
+    logging.debug(
+        "[ui] move handler session=%s state_after=%s",
+        state["session"],
+        state,
+    )
     return (
         new_history,
         new_location_name,
         gr.update(value=format_location_label(new_location_name)),
         gr.update(choices=summonable_personas, value=None),
         gr.update(choices=conversing_personas, value=None),
+        state,
     )
 
 
-def move_user_ui(building_name: str):
+def move_user_ui(building_name: str, client_state: Optional[dict]):
     """UI handler for moving the user."""
-    history, new_location_name, location_markdown_update, summon_update, conversing_update = _perform_user_move(building_name)
+    (
+        history,
+        new_location_name,
+        location_markdown_update,
+        summon_update,
+        conversing_update,
+        client_state,
+    ) = _perform_user_move(building_name, client_state)
     dropdown_update, radio_update = _prepare_move_component_updates(force_radio=True)
     return (
         history,
@@ -379,15 +439,23 @@ def move_user_ui(building_name: str):
         radio_update,
         summon_update,
         conversing_update,
+        client_state,
     )
 
 
-def move_user_radio_ui(building_name: str):
+def move_user_radio_ui(building_name: str, client_state: Optional[dict]):
     """Radio handler for moving the user and syncing dropdown."""
-    history, new_location_name, location_markdown_update, summon_update, conversing_update = _perform_user_move(building_name)
+    (
+        history,
+        new_location_name,
+        location_markdown_update,
+        summon_update,
+        conversing_update,
+        client_state,
+    ) = _perform_user_move(building_name, client_state)
     dropdown_update, radio_update = _prepare_move_component_updates(
         force_dropdown_value=new_location_name,
-        force_radio=True,
+        force_radio=False,
     )
     return (
         dropdown_update,
@@ -397,6 +465,7 @@ def move_user_radio_ui(building_name: str):
         radio_update,
         summon_update,
         conversing_update,
+        client_state,
     )
 
 

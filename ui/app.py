@@ -158,6 +158,8 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                             )
                             end_conv_btn = gr.Button("帰宅", scale=1)
 
+            client_location_state = gr.State()
+
             # --- Event Handlers ---
             submit.click(
                 respond_stream,
@@ -169,19 +171,53 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                 [txt, image_input],
                 [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown, image_input],
             )  # Enter key submission
-            move_btn.click(fn=move_user_ui, inputs=[move_building_dropdown], outputs=[chatbot, user_location_display, current_location_display, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown])
+            move_btn.click(
+                fn=move_user_ui,
+                inputs=[move_building_dropdown, client_location_state],
+                outputs=[
+                    chatbot,
+                    user_location_display,
+                    current_location_display,
+                    move_building_dropdown,
+                    move_destination_radio,
+                    summon_persona_dropdown,
+                    end_conv_persona_dropdown,
+                    client_location_state,
+                ],
+            )
             move_destination_radio.change(
                 fn=move_user_radio_ui,
-                inputs=[move_destination_radio],
-                outputs=[move_building_dropdown, chatbot, user_location_display, current_location_display, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown],
+                inputs=[move_destination_radio, client_location_state],
+                outputs=[
+                    move_building_dropdown,
+                    chatbot,
+                    user_location_display,
+                    current_location_display,
+                    move_destination_radio,
+                    summon_persona_dropdown,
+                    end_conv_persona_dropdown,
+                    client_location_state,
+                ],
                 show_progress="hidden",
                 js="""
                 (value) => {
+                    const ensureSession = () => {
+                        if (!window.saiverseSessionId) {
+                            try {
+                                window.saiverseSessionId = crypto.randomUUID();
+                            } catch (err) {
+                                window.saiverseSessionId = 'js-' + Math.random().toString(16).slice(2);
+                            }
+                        }
+                        return window.saiverseSessionId;
+                    };
+                    const session = ensureSession();
+                    console.debug('[ui-js] radio change value=%s session=%s', value, session);
                     const navItem = document.querySelector('#saiverse-sidebar-nav .saiverse-nav-item[data-tab-label="ワールドビュー"]');
                     if (navItem) {
                         navItem.click();
                     }
-                    return value;
+                    return [value, null, null, null, null, null, null, {session}];
                 }
                 """
             )

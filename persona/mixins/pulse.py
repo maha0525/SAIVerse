@@ -825,23 +825,6 @@ class PersonaPulseMixin:
         if next_action == "speak":
             self._record_decision_entry(pulse_id, current_perception, current_todo, "speak", None)
 
-        guidance_sections: List[str] = []
-        if current_perception:
-            guidance_sections.append(f"### 状況認識\n{current_perception}")
-        if tool_info_parts:
-            guidance_sections.append("### ツール結果\n" + "\n".join(tool_info_parts))
-        if current_todo:
-            guidance_sections.append(f"### TODO\n{current_todo}")
-
-        guidance_message = None
-        if guidance_sections:
-            guidance_sections.append(
-                "### 注意\n"
-                "- 上記TODOをそのまま反映し、あなたの言葉で丁寧に説明してください。\n"
-                "- ツールは実行せず、会話のみで応答してください。\n"
-                "- 必要であればユーザーに確認を取りながら進めてください。"
-            )
-            guidance_message = "\n\n".join(guidance_sections)
         previous_pulse = getattr(self, "_current_pulse_id", None)
         self._current_pulse_id = pulse_id
         try:
@@ -849,7 +832,7 @@ class PersonaPulseMixin:
                 None,
                 system_prompt_extra=None,
                 info_text=None,
-                guidance_text_override=guidance_message,
+                guidance_text_override=None,
                 log_extra_prompt=False,
                 log_user_message=False,
             )

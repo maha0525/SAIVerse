@@ -117,8 +117,7 @@ class PersonaGenerationMixin:
 
         messages = [{"role": "system", "content": system_text}] + sanitized_history
         if guidance_text:
-            wrapped_guidance = f"<system>\n{guidance_text}\n</system>"
-            messages.append({"role": "user", "content": wrapped_guidance})
+            messages.append({"role": "system", "content": guidance_text})
         if extra_system_prompt:
             messages.append({"role": "system", "content": extra_system_prompt})
         if user_message:
