@@ -280,16 +280,21 @@ class BlueprintMixin:
                     dispatch_callback=self.dispatch_persona,
                     explore_callback=self._explore_city,
                     create_persona_callback=self._create_persona,
-                    session_factory=self.SessionLocal,
-                    start_building_id=target_building_id,
-                    model=self.model,
-                    context_length=self.context_length,
-                    user_room_id=self.user_room_id,
-                    provider=self.provider,
-                    is_dispatched=False,
-                    timezone_info=self.timezone_info,
-                    timezone_name=self.timezone_name,
-                )
+                session_factory=self.SessionLocal,
+                start_building_id=target_building_id,
+                model=self.model,
+                context_length=self.context_length,
+                user_room_id=self.user_room_id,
+                provider=self.provider,
+                is_dispatched=False,
+                timezone_info=self.timezone_info,
+                timezone_name=self.timezone_name,
+                item_registry=self.items,
+                inventory_item_ids=self.items_by_persona.get(new_ai_id, []),
+                persona_event_fetcher=self.get_persona_pending_events,
+                persona_event_ack=self.archive_persona_events,
+                manager_ref=self,
+            )
                 self.personas[new_ai_id] = new_persona_core
                 self.avatar_map[new_ai_id] = self.default_avatar
                 self.id_to_name_map[new_ai_id] = entity_name
@@ -442,4 +447,3 @@ class BlueprintMixin:
             return [link[0] for link in links]
         finally:
             db.close()
-

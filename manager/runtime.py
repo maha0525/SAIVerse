@@ -261,10 +261,10 @@ class RuntimeService(
         if persona.current_building_id != self.user_room_id:
             return f"{persona.persona_name} is not in the user room."
 
-        private_room_id = getattr(persona, "private_room_id", None) or getattr(
-            persona, "home_building_id", None
-        )
-        if not private_room_id or private_room_id not in self.building_map:
+        private_room_id = getattr(persona, "private_room_id", None)
+        if not private_room_id:
+            return "Error: Private room not configured for this persona."
+        if private_room_id not in self.building_map:
             return "Error: Private room not found for this persona."
 
         success, reason = self._move_persona(

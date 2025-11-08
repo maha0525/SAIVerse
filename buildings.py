@@ -18,10 +18,12 @@ class Building:
         self.building_id = building_id
         self.name = name
         self.capacity = capacity
-        self.system_instruction = system_instruction
+        self.base_system_instruction = system_instruction or ""
+        self.system_instruction = self.base_system_instruction
         self.entry_prompt = entry_prompt
         self.auto_prompt = auto_prompt
         self.description = description # Added this to accept description from DB
         self.run_entry_llm = run_entry_llm
         self.run_auto_llm = run_auto_llm
         self.auto_interval_sec = auto_interval_sec
+        self.item_ids: list[str] = []

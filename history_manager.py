@@ -102,6 +102,11 @@ class HistoryManager:
                     if pid not in deduped:
                         deduped.append(pid)
                 msg["heard_by"] = sorted(deduped)
+                ingested_raw = msg.get("ingested_by")
+                if isinstance(ingested_raw, list):
+                    msg["ingested_by"] = sorted({str(pid) for pid in ingested_raw if pid})
+                else:
+                    msg["ingested_by"] = []
                 max_seq = max(max_seq, seq)
             self._building_seq_counter[b_id] = max_seq + 1
         for b_id in self.building_memory_paths.keys():
@@ -134,6 +139,12 @@ class HistoryManager:
             enriched["message_id"] = msg.get("id") or f"{building_id}:{seq}"
         heard_set = {str(pid) for pid in (heard_by or []) if pid}
         enriched["heard_by"] = sorted(heard_set)
+        ingested_raw = enriched.get("ingested_by")
+        if isinstance(ingested_raw, list):
+            ingested_set = {str(pid) for pid in ingested_raw if pid}
+            enriched["ingested_by"] = sorted(ingested_set)
+        else:
+            enriched["ingested_by"] = []
         return enriched
 
     def _sync_to_memory(self, *, channel: str, building_id: Optional[str], message: Dict[str, str]) -> None:

@@ -73,6 +73,11 @@ class PersonaCore(
         provider: str = "ollama",
         timezone_info: Optional[tzinfo] = dt_timezone.utc,
         timezone_name: str = "UTC",
+        item_registry: Optional[Dict[str, Dict[str, Any]]] = None,
+        inventory_item_ids: Optional[List[str]] = None,
+        persona_event_fetcher: Optional[Callable[[str], List[Dict[str, Any]]]] = None,
+        persona_event_ack: Optional[Callable[[str, List[int]], None]] = None,
+        manager_ref: Optional[Any] = None,
     ):
         self.city_name = city_name
         self.is_visitor = is_visitor
@@ -163,3 +168,41 @@ class PersonaCore(
         self.timezone_name = tz_label
         self._last_conscious_prompt_time_utc: Optional[datetime] = None
         self.pending_attachment_metadata: List[Dict[str, Any]] = []
+        self.item_registry = item_registry if item_registry is not None else {}
+        self.inventory_item_ids: List[str] = list(inventory_item_ids or [])
+        self._persona_event_fetcher = persona_event_fetcher
+        self._persona_event_ack = persona_event_ack
+        self.manager_ref = manager_ref
+
+    def set_inventory(self, item_ids: List[str]) -> None:
+        self.inventory_item_ids = list(item_ids)
+    def set_item_registry(self, registry: Dict[str, Dict[str, Any]]) -> None:
+        self.item_registry = registry
+
+    def _inventory_summary_lines(self) -> List[str]:
+        lines: List[str] = []
+        for item_id in self.inventory_item_ids:
+            data = self.item_registry.get(item_id)
+            if not data:
+                continue
+            description = (data.get("description") or "").strip() or "(説明なし)"
+            lines.append(f"- [{item_id}] {data.get('name', item_id)}: {description}")
+        return lines
+
+    def fetch_pending_events(self) -> List[Dict[str, Any]]:
+        if not self._persona_event_fetcher:
+            return []
+        try:
+            events = self._persona_event_fetcher(self.persona_id) or []
+        except Exception as exc:
+            logging.debug("Failed to fetch pending events for %s: %s", self.persona_id, exc)
+            return []
+        return events
+
+    def archive_events(self, event_ids: List[int]) -> None:
+        if not event_ids or not self._persona_event_ack:
+            return
+        try:
+            self._persona_event_ack(self.persona_id, event_ids)
+        except Exception as exc:
+            logging.debug("Failed to archive events for %s: %s", self.persona_id, exc)

@@ -254,6 +254,73 @@ def create_world_editor_ui():
         result = manager.delete_tool(int(tool_id))
         return result, manager.get_tools_df()
 
+    def on_select_item(evt: gr.SelectData):
+        manager = _require_manager()
+        if evt.index is None:
+            return "", "", "object", "", "world", "", ""
+        row_index = evt.index[0]
+        df = manager.get_items_df()
+        if df.empty or row_index >= len(df):
+            return "", "", "object", "", "world", "", ""
+        item_id = df.iloc[row_index]["ITEM_ID"]
+        details = manager.get_item_details(item_id)
+        if not details:
+            return "", "", "object", "", "world", "", ""
+        owner_kind = (details.get("OWNER_KIND") or "world").strip() or "world"
+        owner_id = details.get("OWNER_ID") or ""
+        state_json = details.get("STATE_JSON") or ""
+        return (
+            details["ITEM_ID"],
+            details["NAME"],
+            details["TYPE"],
+            details["DESCRIPTION"],
+            owner_kind,
+            owner_id,
+            state_json,
+        )
+
+    def update_item_ui(item_id, name, item_type, description, owner_kind, owner_id, state_json):
+        if not item_id:
+            return "Error: Select an item to update.", gr.update()
+        manager = _require_manager()
+        normalized_kind = (owner_kind or "world").strip() or "world"
+        owner_value = owner_id if normalized_kind != "world" else None
+        result = manager.update_item(
+            item_id,
+            name or "",
+            item_type or "object",
+            description or "",
+            normalized_kind,
+            owner_value,
+            state_json or "",
+        )
+        return result, manager.get_items_df()
+
+    def delete_item_ui(item_id, confirmed):
+        if not confirmed:
+            return "Error: Please check the confirmation box to delete.", gr.update()
+        if not item_id:
+            return "Error: Select an item to delete.", gr.update()
+        manager = _require_manager()
+        result = manager.delete_item(item_id)
+        return result, manager.get_items_df()
+
+    def create_item_ui(name, item_type, description, owner_kind, owner_id, state_json):
+        if not name:
+            return "Error: Item name is required.", gr.update()
+        manager = _require_manager()
+        normalized_kind = (owner_kind or "world").strip() or "world"
+        owner_value = owner_id if normalized_kind != "world" else None
+        result = manager.create_item(
+            name,
+            item_type or "object",
+            description or "",
+            normalized_kind,
+            owner_value,
+            state_json or "",
+        )
+        return result, manager.get_items_df()
+
     with gr.Accordion("City管理", open=True):
         with gr.Tabs():
             with gr.TabItem("編集/削除"):
@@ -473,6 +540,111 @@ def create_world_editor_ui():
         delete_tool_btn.click(fn=delete_tool_ui, inputs=[tool_id_text, delete_tool_confirm_check], outputs=[tool_status_display, tool_df])
         create_tool_btn.click(fn=create_tool_ui, inputs=[new_tool_name_text, new_tool_desc_text, new_tool_module_path_text, new_tool_function_name_text], outputs=[create_tool_status, tool_df])
 
+    with gr.Accordion("アイテム管理", open=False):
+        building_examples = ", ".join(
+            f"{b.building_id}" for b in manager.buildings[:6]
+        )
+        persona_examples = ", ".join(
+            f"{pid}" for pid in list(manager.personas.keys())[:6]
+        )
+        gr.Markdown(
+            "Owner Kind に応じて Owner ID を設定してください。<br>"
+            f"- `building`: Building ID を入力（例: {building_examples or '該当なし'}）<br>"
+            f"- `persona`: Persona ID を入力（例: {persona_examples or '該当なし'}）<br>"
+            "- `world`: Owner ID は空欄のままで構いません。"
+        )
+        with gr.Tabs():
+            with gr.TabItem("編集/削除"):
+                item_df = gr.DataFrame(value=None, interactive=False, label="Items")
+                item_id_text = gr.Textbox(label="Item ID", interactive=False)
+                item_name_text = gr.Textbox(label="Name")
+                item_type_text = gr.Textbox(label="Type", value="object")
+                item_desc_text = gr.Textbox(label="Description", lines=3)
+                item_state_text = gr.Textbox(label="State JSON", lines=3, placeholder="任意。追加情報をJSONで記述。")
+                with gr.Row():
+                    owner_kind_dropdown = gr.Dropdown(
+                        label="Owner Kind",
+                        choices=["world", "building", "persona"],
+                        value="world",
+                    )
+                    owner_id_text = gr.Textbox(
+                        label="Owner ID",
+                        placeholder="BuildingID または PersonaID（worldの場合は空欄）",
+                    )
+                with gr.Row():
+                    save_item_btn = gr.Button("Item設定を保存")
+                    delete_item_confirm_check = gr.Checkbox(label="削除を確認", value=False, scale=1)
+                    delete_item_btn = gr.Button("Itemを削除", variant="stop", interactive=False, scale=1)
+                item_status_display = gr.Textbox(label="Status", interactive=False)
+
+                item_df.select(
+                    fn=on_select_item,
+                    inputs=None,
+                    outputs=[
+                        item_id_text,
+                        item_name_text,
+                        item_type_text,
+                        item_desc_text,
+                        owner_kind_dropdown,
+                        owner_id_text,
+                        item_state_text,
+                    ],
+                )
+                save_item_btn.click(
+                    fn=update_item_ui,
+                    inputs=[
+                        item_id_text,
+                        item_name_text,
+                        item_type_text,
+                        item_desc_text,
+                        owner_kind_dropdown,
+                        owner_id_text,
+                        item_state_text,
+                    ],
+                    outputs=[item_status_display, item_df],
+                )
+                delete_item_confirm_check.change(
+                    fn=toggle_delete_button,
+                    inputs=delete_item_confirm_check,
+                    outputs=delete_item_btn,
+                )
+                delete_item_btn.click(
+                    fn=delete_item_ui,
+                    inputs=[item_id_text, delete_item_confirm_check],
+                    outputs=[item_status_display, item_df],
+                )
+
+            with gr.TabItem("新規作成"):
+                new_item_name_text = gr.Textbox(label="Name")
+                new_item_type_text = gr.Textbox(label="Type", value="object")
+                new_item_desc_text = gr.Textbox(label="Description", lines=3)
+                new_item_state_text = gr.Textbox(label="State JSON", lines=3, placeholder="任意。追加情報をJSONで記述。")
+                with gr.Row():
+                    new_owner_kind_dropdown = gr.Dropdown(
+                        label="Owner Kind",
+                        choices=["world", "building", "persona"],
+                        value="world",
+                    )
+                    new_owner_id_text = gr.Textbox(
+                        label="Owner ID",
+                        placeholder="BuildingID または PersonaID（worldの場合は空欄）",
+                    )
+                create_item_btn = gr.Button("新規Itemを作成", variant="primary")
+                create_item_status_display = gr.Textbox(label="Status", interactive=False)
+
+                create_item_btn.click(
+                    fn=create_item_ui,
+                    inputs=[
+                        new_item_name_text,
+                        new_item_type_text,
+                        new_item_desc_text,
+                        new_owner_kind_dropdown,
+                        new_owner_id_text,
+                        new_item_state_text,
+                    ],
+                    outputs=[create_item_status_display, item_df],
+                )
+
     with gr.Accordion("バックアップ/リストア管理", open=False):
         gr.Markdown("現在のワールドの状態をバックアップしたり、過去のバックアップから復元します。**リストア後はアプリケーションの再起動が必須です。**")
 
@@ -541,6 +713,7 @@ def create_world_editor_ui():
         blueprints = manager.get_blueprints_df()
         backups = manager.get_backups()
         tools = manager.get_tools_df()
+        items = manager.get_items_df()
 
         backup_choices = backups["Backup Name"].tolist() if not backups.empty else []
 
@@ -551,6 +724,7 @@ def create_world_editor_ui():
             blueprints,
             backups,
             tools,
+            items,
             gr.update(choices=backup_choices, value=None),
         )
 
@@ -564,6 +738,7 @@ def create_world_editor_ui():
             blueprint_df,
             backup_df,
             tool_df,
+            item_df,
             selected_backup_dropdown,
         ],
     )

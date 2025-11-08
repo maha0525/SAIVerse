@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import copy
+import json
 import html
 import logging
 import time
 from datetime import datetime
 from typing import Any, Dict, Iterator, List, Optional, Tuple
+import os
 
 from persona.constants import (
     RECALL_SNIPPET_MAX_CHARS,
@@ -14,6 +16,7 @@ from persona.constants import (
 )
 from model_configs import model_supports_images
 from llm_clients import get_llm_client
+from llm_clients.base import IncompleteStreamError
 
 
 class PersonaGenerationMixin:
@@ -46,6 +49,8 @@ class PersonaGenerationMixin:
         info_text: Optional[str] = None,
         guidance_text: Optional[str] = None,
         user_metadata: Optional[Dict[str, Any]] = None,
+        *,
+        include_current_user: bool = True,
     ) -> List[Dict[str, Any]]:
         building = self.buildings[self.current_building_id]
         now_local = datetime.now(self.timezone)
@@ -61,6 +66,16 @@ class PersonaGenerationMixin:
             current_time=current_time,
             current_city_name=self.city_name,
         )
+        inventory_lines: List[str] = []
+        inventory_builder = getattr(self, "_inventory_summary_lines", None)
+        if callable(inventory_builder):
+            try:
+                inventory_lines = inventory_builder()
+            except Exception as exc:
+                logging.debug("inventory summary failed: %s", exc)
+                inventory_lines = []
+        if inventory_lines:
+            system_text += "\n\n### インベントリ\n" + "\n".join(inventory_lines)
         emotion_text = self.emotion_prompt.format(
             stability_mean=self.emotion["stability"]["mean"],
             stability_var=self.emotion["stability"]["variance"],
@@ -120,7 +135,7 @@ class PersonaGenerationMixin:
             messages.append({"role": "system", "content": guidance_text})
         if extra_system_prompt:
             messages.append({"role": "system", "content": extra_system_prompt})
-        if user_message:
+        if include_current_user and user_message:
             user_entry: Dict[str, Any] = {"role": "user", "content": user_message}
             if isinstance(user_metadata, dict):
                 user_entry["metadata"] = copy.deepcopy(user_metadata)
@@ -331,6 +346,7 @@ class PersonaGenerationMixin:
             guidance_text=guidance_text_override,
             user_metadata=user_metadata if actual_user_message == user_message else None,
         )
+        self._dump_llm_context("generate", messages)
         logging.debug("Messages sent to API: %s", messages)
 
         content = self.llm_client.generate(messages, tools=[])
@@ -366,6 +382,8 @@ class PersonaGenerationMixin:
         guidance_text_override: Optional[str] = None,
         log_extra_prompt: bool = True,
         log_user_message: bool = True,
+        *,
+        include_current_user: bool = True,
     ) -> Iterator[str]:
         prev_emotion_state = copy.deepcopy(self.emotion)
         actual_user_message = user_message
@@ -416,27 +434,46 @@ class PersonaGenerationMixin:
             info_text=combined_info or None,
             guidance_text=guidance_text_override,
             user_metadata=user_metadata if actual_user_message == user_message else None,
+            include_current_user=include_current_user,
         )
+        self._dump_llm_context("generate_stream", messages)
         logging.debug("Messages sent to API: %s", messages)
 
-        attempt = 1
-        while True:
-            content_accumulator = ""
-            tokens: List[str] = []
+        content_accumulator = ""
+        tokens: List[str] = []
+        try:
             for token in self.llm_client.generate_stream(messages, tools=[]):
                 content_accumulator += token
                 tokens.append(token)
-
-            if content_accumulator.strip() != "エラーが発生しました。" or attempt >= 3:
+        except IncompleteStreamError:
+            logging.warning("LLM stream ended before completion; switching to fallback generation.")
+            try:
+                fallback_text = self.llm_client.generate(messages, tools=[])
+            except Exception:
+                logging.exception("Fallback generation failed; emitting partial stream output.")
                 for token in tokens:
                     yield token
-                break
+                content_accumulator = "".join(tokens)
+            else:
+                if fallback_text.startswith(content_accumulator):
+                    delta = fallback_text[len(content_accumulator) :]
+                else:
+                    delta = fallback_text
+                for token in tokens:
+                    yield token
+                if delta:
+                    yield delta
+                content_accumulator = fallback_text
+        else:
+            for token in tokens:
+                yield token
 
-            logging.warning(
-                "LLM stream generation failed; retrying in 10s (%d/3)", attempt
-            )
-            attempt += 1
-            time.sleep(10)
+        if content_accumulator.strip() == "エラーが発生しました。":
+            logging.warning("Stream returned generic error text; invoking fallback generation.")
+            try:
+                content_accumulator = self.llm_client.generate(messages, tools=[])
+            except Exception:
+                logging.exception("Fallback generation after error text failed; keeping original output.")
 
         logging.info("AI Response :\n%s", content_accumulator)
         say, move_target, changed = self._process_generation_result(
@@ -453,6 +490,68 @@ class PersonaGenerationMixin:
             say,
         )
         return (say, move_target, changed)
+
+    def _record_user_input(
+        self,
+        message: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+    ) -> None:
+        if not message:
+            return
+        entry: Dict[str, Any] = {"role": "user", "content": message}
+        if isinstance(metadata, dict):
+            entry["metadata"] = copy.deepcopy(metadata)
+        recorded = False
+        try:
+            self.history_manager.add_to_persona_only(entry)
+            recorded = True
+        except AttributeError:
+            self.history_manager.add_message(
+                entry,
+                self.current_building_id,
+                heard_by=self._occupants_snapshot(self.current_building_id),
+            )
+            recorded = True
+        if recorded:
+            self._mark_building_user_ingested(message)
+
+    def _mark_building_user_ingested(self, content: str) -> None:
+        try:
+            building_hist = self.history_manager.building_histories.get(self.current_building_id, [])
+            if not building_hist:
+                return
+            for msg in reversed(building_hist):
+                if msg.get("role") != "user":
+                    continue
+                if (msg.get("content") or "") != content:
+                    continue
+                bucket = msg.setdefault("ingested_by", [])
+                if isinstance(bucket, list) and self.persona_id not in bucket:
+                    bucket.append(self.persona_id)
+                break
+        except Exception:
+            logging.debug(
+                "Failed to mark building message as ingested for %s",
+                self.persona_id,
+                exc_info=True,
+            )
+
+    def _dump_llm_context(self, label: str, messages: List[Dict[str, Any]]) -> None:
+        dump_path = os.getenv("SAIVERSE_LLM_CONTEXT_DUMP")
+        if not dump_path or dump_path.lower() in {"0", "false", "off"}:
+            return
+        record = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "persona_id": self.persona_id,
+            "building_id": self.current_building_id,
+            "label": label,
+            "messages": messages,
+        }
+        try:
+            with open(dump_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            logging.warning("Failed to dump LLM context to %s: %s", dump_path, exc)
 
     def handle_user_input(
         self, message: str, metadata: Optional[Dict[str, Any]] = None
@@ -487,17 +586,13 @@ class PersonaGenerationMixin:
                 list(metadata.keys()),
             )
 
-        user_entry: Dict[str, Any] = {"role": "user", "content": message}
-        if isinstance(metadata, dict):
-            user_entry["metadata"] = metadata
-        self.history_manager.add_message(
-            user_entry,
-            self.current_building_id,
-            heard_by=self._occupants_snapshot(self.current_building_id),
-        )
+        self._record_user_input(message, metadata)
 
         generator = self._generate_stream(
-            user_message=message, user_metadata=metadata, log_user_message=False
+            user_message=message,
+            user_metadata=metadata,
+            log_user_message=False,
+            include_current_user=False,
         )
 
         try:

@@ -7,6 +7,7 @@ import os
 import json
 import argparse
 import atexit
+import signal
 from dotenv import load_dotenv
 from typing import Optional
 from pathlib import Path
@@ -15,6 +16,11 @@ load_dotenv()
 
 os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "0")
 os.environ.setdefault("GRADIO_TELEMETRY_ENABLED", "0")
+
+try:
+    import psutil  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    psutil = None  # type: ignore
 
 from saiverse_manager import SAIVerseManager
 from database.paths import default_db_path
@@ -52,63 +58,146 @@ except OSError:
 
 
 def find_pid_for_port(port: int) -> Optional[int]:
-    """指定されたポートを使用しているプロセスのPIDを見つける (Windows専用)"""
-    if sys.platform != "win32":
-        logging.warning("Port cleanup is only supported on Windows.")
+    """指定されたポートを使用しているプロセスのPIDを見つける。"""
+    if psutil is not None:
+        try:
+            for conn in psutil.net_connections(kind="inet"):
+                laddr = getattr(conn, "laddr", None)
+                if not laddr:
+                    continue
+                if laddr.port == port and conn.pid:
+                    return conn.pid
+        except psutil.AccessDenied:
+            logging.debug("psutil could not access connection information (permission denied).")
+        except psutil.Error as exc:
+            logging.debug("psutil failed while enumerating processes: %s", exc)
+
+    if sys.platform == "win32":
+        try:
+            result = subprocess.check_output(
+                ["netstat", "-ano"],
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            for line in result.splitlines():
+                if f":{port}" in line and "LISTENING" in line:
+                    pid = int(line.split()[-1])
+                    return pid
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            logging.error("Could not execute 'netstat' command. Please ensure it is in your PATH.")
+        except Exception as exc:
+            logging.error("Error finding PID for port %s: %s", port, exc)
         return None
-    try:
-        result = subprocess.check_output(["netstat", "-ano"], text=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        for line in result.splitlines():
-            if f":{port}" in line and "LISTENING" in line:
-                pid = int(line.split()[-1])
-                return pid
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        logging.error("Could not execute 'netstat' command. Please ensure it is in your PATH.")
-    except Exception as e:
-        logging.error(f"Error finding PID for port {port}: {e}")
+
+    for cmd in (["lsof", "-ti", f":{port}"], ["fuser", "-n", "tcp", str(port)]):
+        try:
+            result = subprocess.check_output(cmd, text=True)
+            for line in result.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    return int(line.split()[0])
+                except ValueError:
+                    continue
+        except FileNotFoundError:
+            continue
+        except subprocess.CalledProcessError:
+            continue
+        except Exception as exc:
+            logging.debug("Command %s failed while searching for port %s: %s", cmd[0], port, exc)
     return None
 
+
 def kill_process_by_pid(pid: int):
-    """PIDを指定してプロセスを終了させる (Windows専用)"""
+    """PIDを指定してプロセスを終了させる。"""
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/PID", str(pid)],
+                check=True,
+                capture_output=True,
+            )
+            logging.info("Process with PID %s has been terminated.", pid)
+            time.sleep(1)
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode == 128:
+                logging.warning("Process with PID %s not found. It might have already been closed.", pid)
+            else:
+                stderr = exc.stderr.decode(errors="ignore") if exc.stderr else ""
+                logging.error("Failed to terminate process with PID %s. Stderr: %s", pid, stderr)
+        except Exception as exc:
+            logging.error("An unexpected error occurred while killing process %s: %s", pid, exc)
+        return
+
     try:
-        subprocess.run(["taskkill", "/F", "/PID", str(pid)], check=True, capture_output=True)
-        logging.info(f"Process with PID {pid} has been terminated.")
-        time.sleep(1)  # プロセスが完全に終了するのを少し待つ
-    except subprocess.CalledProcessError as e:
-        if e.returncode == 128: # "No such process"
-            logging.warning(f"Process with PID {pid} not found. It might have already been closed.")
-        else:
-            logging.error(f"Failed to terminate process with PID {pid}. Stderr: {e.stderr.decode(errors='ignore')}")
-    except Exception as e:
-        logging.error(f"An unexpected error occurred while killing process {pid}: {e}")
+        os.kill(pid, signal.SIGTERM)
+        time.sleep(0.5)
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.5)
+        os.kill(pid, signal.SIGKILL)
+        logging.info("Process with PID %s forcefully terminated.", pid)
+    except ProcessLookupError:
+        logging.warning("Process with PID %s not found. It might have already been closed.", pid)
+    except PermissionError:
+        logging.error("Permission denied when trying to terminate PID %s.", pid)
+    except Exception as exc:
+        logging.error("Failed to terminate process %s: %s", pid, exc)
 
 def cleanup_and_start_server(port: int, script_path: Path, name: str):
     """ポートをクリーンアップし、指定されたスクリプトをモジュールとしてバックグラウンドで起動する"""
     pid = find_pid_for_port(port)
     if pid:
-        logging.warning(f"Port {port} for {name} is already in use by PID {pid}. Attempting to terminate the process.")
+        logging.warning("Port %s for %s is already in use by PID %s. Attempting to terminate the process.", port, name, pid)
         kill_process_by_pid(pid)
 
     project_root = Path(__file__).parent
     # Convert file path to module path (e.g., database\api_server.py -> database.api_server)
     module_path = str(script_path.relative_to(project_root)).replace(os.sep, '.')[:-3]
 
-    logging.info(f"Starting {name} as module: {module_path}")
+    logging.info("Starting %s as module: %s", name, module_path)
     # Run as a module from the project's root directory to handle relative imports correctly
-    subprocess.Popen([sys.executable, "-m", module_path], cwd=project_root)
+    return subprocess.Popen([sys.executable, "-m", module_path], cwd=project_root)
 
 def cleanup_and_start_server_with_args(port: int, script_path: Path, name: str, db_file: str):
     """ポートをクリーンアップし、引数付きでスクリプトをモジュールとして起動する"""
     pid = find_pid_for_port(port)
     if pid:
-        logging.warning(f"Port {port} for {name} is already in use by PID {pid}. Attempting to terminate the process.")
+        logging.warning("Port %s for %s is already in use by PID %s. Attempting to terminate the process.", port, name, pid)
         kill_process_by_pid(pid)
 
     project_root = Path(__file__).parent
     module_path = str(script_path.relative_to(project_root)).replace(os.sep, '.')[:-3]
 
-    logging.info(f"Starting {name} as module: {module_path} with DB: {db_file} on port: {port}")
-    subprocess.Popen([sys.executable, "-m", module_path, "--port", str(port), "--db", db_file], cwd=project_root)
+    logging.info("Starting %s as module: %s with DB: %s on port: %s", name, module_path, db_file, port)
+    return subprocess.Popen(
+        [sys.executable, "-m", module_path, "--port", str(port), "--db", db_file],
+        cwd=project_root,
+    )
+
+
+def shutdown_subprocess(process: Optional[subprocess.Popen], name: str) -> None:
+    if not process:
+        return
+    if process.poll() is not None:
+        return
+    logging.info("Shutting down %s...", name)
+    try:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            logging.warning("%s did not exit in time; forcing kill.", name)
+            process.kill()
+    except Exception as exc:
+        logging.error("Failed to shut down %s cleanly: %s", name, exc)
+
+api_server_process: Optional[subprocess.Popen] = None
+manager: Optional[SAIVerseManager] = None
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run a SAIVerse City instance.")
@@ -136,7 +225,7 @@ def main():
     else:
         db_path = default_db_path()
 
-    global manager, AUTONOMOUS_BUILDING_CHOICES, AUTONOMOUS_BUILDING_MAP, BUILDING_CHOICES, BUILDING_NAME_TO_ID_MAP
+    global manager, AUTONOMOUS_BUILDING_CHOICES, AUTONOMOUS_BUILDING_MAP, BUILDING_CHOICES, BUILDING_NAME_TO_ID_MAP, api_server_process
     manager = SAIVerseManager(
         city_name=args.city_name,
         db_path=str(db_path),
@@ -151,10 +240,20 @@ def main():
     ui_state.set_version(VERSION)
     ui_state.refresh_building_caches()
 
-    cleanup_and_start_server_with_args(manager.api_port, Path(__file__).parent / "database" / "api_server.py", "API Server", str(db_path))
+    api_server_process = cleanup_and_start_server_with_args(
+        manager.api_port,
+        Path(__file__).parent / "database" / "api_server.py",
+        "API Server",
+        str(db_path),
+    )
 
-    # --- アプリケーション終了時にManagerのシャットダウン処理を呼び出す ---
-    atexit.register(manager.shutdown)
+    # --- アプリケーション終了時のクリーンアップ ---
+    def shutdown_everything():
+        shutdown_subprocess(api_server_process, "API Server")
+        if manager:
+            manager.shutdown()
+
+    atexit.register(shutdown_everything)
 
     # --- FastAPIとGradioの統合 ---
     # 3. Gradio UIを作成

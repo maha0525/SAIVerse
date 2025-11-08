@@ -71,6 +71,14 @@ class PersonaPulseMixin:
         _log_phase(phase)
         phase = "start"
 
+        def _mark_ingested(msg: Dict[str, Any]) -> None:
+            try:
+                bucket = msg.setdefault("ingested_by", [])
+                if isinstance(bucket, list) and self.persona_id not in bucket:
+                    bucket.append(self.persona_id)
+            except Exception:
+                pass
+
 
         hist = self.history_manager.building_histories.get(building_id, [])
         last_cursor = self.pulse_cursors.get(building_id, 0)
@@ -111,6 +119,9 @@ class PersonaPulseMixin:
                 role = m.get("role")
                 pid = m.get("persona_id")
                 content = m.get("content", "")
+                ingested = m.get("ingested_by") or []
+                if isinstance(ingested, list) and self.persona_id in ingested:
+                    continue
                 # Skip empty and system-like summary notes
                 if not content or ("note-box" in content and role == "assistant"):
                     continue
@@ -131,6 +142,7 @@ class PersonaPulseMixin:
                     if created_value is not None:
                         entry["created_at"] = created_value
                     self.history_manager.add_to_persona_only(entry)
+                    _mark_ingested(m)
                     perceived += 1
                 # Ingest human/user messages directly
                 elif role == "user" and (pid is None or pid != self.persona_id):
@@ -147,6 +159,7 @@ class PersonaPulseMixin:
                     if created_value is not None:
                         entry["created_at"] = created_value
                     self.history_manager.add_to_persona_only(entry)
+                    _mark_ingested(m)
                     perceived += 1
             except Exception:
                 continue
@@ -223,10 +236,52 @@ class PersonaPulseMixin:
         if task_section:
             perception_sections.append("### タスク状況")
             perception_sections.append(task_section)
+        pending_event_entries: List[Dict[str, Any]] = []
+        pending_event_ids: List[int] = []
+        event_fetcher = getattr(self, "fetch_pending_events", None)
+        if callable(event_fetcher):
+            try:
+                pending_event_entries = event_fetcher() or []
+            except Exception as exc:
+                logging.debug("[pulse] fetch_pending_events failed: %s", exc)
+                pending_event_entries = []
+        if pending_event_entries:
+            event_lines: List[str] = []
+            for entry in pending_event_entries:
+                event_id = entry.get("event_id")
+                if isinstance(event_id, int):
+                    pending_event_ids.append(event_id)
+                content = (entry.get("content") or "").strip()
+                created_at = entry.get("created_at")
+                if created_at:
+                    try:
+                        timestamp = (
+                            created_at.strftime("%Y-%m-%d %H:%M:%S")
+                            if hasattr(created_at, "strftime")
+                            else str(created_at)
+                        )
+                    except Exception:
+                        timestamp = str(created_at)
+                    if content:
+                        event_lines.append(f"- [{timestamp}] {content}")
+                    else:
+                        event_lines.append(f"- [{timestamp}] (詳細なし)")
+                elif content:
+                    event_lines.append(f"- {content}")
+            if event_lines:
+                perception_sections.append("### 発生イベント")
+                perception_sections.append("\n".join(event_lines))
         perception_prompt_text = "\n\n".join(section for section in perception_sections if section)
         logging.debug("[pulse] perception prompt prepared:\n%s", perception_prompt_text)
         self.conscious_log.append({"role": "user", "content": perception_prompt_text})
         self._record_perception_entry(perception_prompt_text, pulse_id)
+        if pending_event_ids:
+            event_archiver = getattr(self, "archive_events", None)
+            if callable(event_archiver):
+                try:
+                    event_archiver(pending_event_ids)
+                except Exception as exc:
+                    logging.debug("[pulse] archive_events failed: %s", exc)
 
         recall_snippet = ""
         phase = "prompt_context"
@@ -357,6 +412,7 @@ class PersonaPulseMixin:
             self._current_pulse_id = previous_pulse_id
             return result
 
+        allowed_tool_names = sorted({schema.name for schema in TOOL_SCHEMAS})
         decision_schema_dict: Dict[str, Any] = {
             "title": "PersonaPulseDecision",
             "type": "object",
@@ -383,10 +439,18 @@ class PersonaPulseMixin:
                         "tool": {
                             "type": "string",
                             "description": "Identifier of the tool to execute when decision is 'tool'.",
+                            "enum": allowed_tool_names,
                         },
                         "arguments": {
                             "type": "object",
                             "description": "Arguments for the tool call.",
+                            "properties": {
+                                "__placeholder": {
+                                    "type": "string",
+                                    "description": "Placeholder to satisfy schema requirements; actual keys depend on the selected tool.",
+                                }
+                            },
+                            "additionalProperties": True,
                         },
                     },
                     "required": ["tool"],
@@ -395,8 +459,11 @@ class PersonaPulseMixin:
         }
 
         decision_schema = None
+        use_json_schema = False
         if using_gemini:
-            decision_schema = llm_clients.GeminiClient._schema_from_json(decision_schema_dict)  # type: ignore[attr-defined]
+            use_json_schema = llm_clients.GeminiClient._requires_json_schema(decision_schema_dict)  # type: ignore[attr-defined]
+            if not use_json_schema:
+                decision_schema = llm_clients.GeminiClient._schema_from_json(decision_schema_dict)  # type: ignore[attr-defined]
 
         phase = "decision_loop_setup"
         structured_temperature: Optional[float] = 0.0
@@ -487,7 +554,9 @@ class PersonaPulseMixin:
                     "safety_settings": llm_clients.GEMINI_SAFETY_CONFIG,
                     "response_mime_type": "application/json",
                 }
-                if decision_schema is not None:
+                if use_json_schema:
+                    config_kwargs["response_json_schema"] = decision_schema_dict
+                elif decision_schema is not None:
                     config_kwargs["response_schema"] = decision_schema
                 else:
                     logging.warning("[pulse] Gemini decision schema conversion failed; proceeding without schema enforcement.")
@@ -721,7 +790,7 @@ class PersonaPulseMixin:
                         tool_name,
                         json.dumps(sanitized_args, ensure_ascii=False) if sanitized_args else "{}",
                     )
-                    with persona_context(self.persona_id, self.persona_log_path.parent):
+                    with persona_context(self.persona_id, self.persona_log_path.parent, getattr(self, "manager_ref", None)):
                         result = fn(**sanitized_args)
                     result_text, snippet, file_path, metadata = parse_tool_result(result)
                     logging.info(

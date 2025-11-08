@@ -77,7 +77,9 @@ class PersonaMixin:
             )
             for db_ai in db_personas:
                 pid = db_ai.AIID
-                start_id = f"{pid}_room"
+                default_room_id = f"{pid}_room"
+                raw_private_room_id = (db_ai.PRIVATE_ROOM_ID or "").strip()
+                private_room_id = raw_private_room_id or default_room_id
 
                 self._set_persona_avatar(pid, db_ai.AVATAR_IMAGE)
 
@@ -101,7 +103,7 @@ class PersonaMixin:
                     explore_callback=self._explore_city,
                     create_persona_callback=self._create_persona,
                     session_factory=self.SessionLocal,
-                    start_building_id=start_id,
+                    start_building_id=private_room_id,
                     model=persona_model,
                     context_length=persona_context_length,
                     user_room_id=self.user_room_id,
@@ -110,7 +112,20 @@ class PersonaMixin:
                     is_dispatched=db_ai.IS_DISPATCHED,
                     timezone_info=self.timezone_info,
                     timezone_name=self.timezone_name,
+                    item_registry=self.items,
+                    inventory_item_ids=self.items_by_persona.get(pid, []),
+                    persona_event_fetcher=self.get_persona_pending_events,
+                    persona_event_ack=self.archive_persona_events,
+                    manager_ref=self,
                 )
+
+                persona.private_room_id = private_room_id
+                if private_room_id not in self.building_map:
+                    logging.warning(
+                        "Persona '%s' private room '%s' is missing from building_map.",
+                        pid,
+                        private_room_id,
+                    )
 
                 self.personas[pid] = persona
             logging.info("Loaded %d personas from database.", len(self.personas))
@@ -270,7 +285,13 @@ class PersonaMixin:
                 is_dispatched=False,
                 timezone_info=self.timezone_info,
                 timezone_name=self.timezone_name,
+                item_registry=self.items,
+                inventory_item_ids=self.items_by_persona.get(new_ai_id, []),
+                persona_event_fetcher=self.get_persona_pending_events,
+                persona_event_ack=self.archive_persona_events,
+                manager_ref=self,
             )
+            new_persona_core.private_room_id = new_building_id
             self.personas[new_ai_id] = new_persona_core
             self.avatar_map[new_ai_id] = self.default_avatar
             self.id_to_name_map[new_ai_id] = name

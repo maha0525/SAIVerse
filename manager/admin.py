@@ -1,9 +1,11 @@
+import json
 import logging
 import shutil
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from zoneinfo import ZoneInfo
@@ -15,6 +17,8 @@ from database.models import (
     BuildingOccupancyLog,
     BuildingToolLink,
     City as CityModel,
+    Item as ItemModel,
+    ItemLocation as ItemLocationModel,
 )
 from manager.blueprints import BlueprintMixin
 from manager.history import HistoryMixin
@@ -34,12 +38,20 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         self.db_path = manager.db_path
         self.saiverse_home = state.saiverse_home
         self.backup_dir = manager.backup_dir
+        self.city_id = state.city_id
+        self.city_name = state.city_name
 
         self.buildings = state.buildings
         self.building_map = state.building_map
         self.building_memory_paths = state.building_memory_paths
         self.building_histories = state.building_histories
         self.capacities = state.capacities
+        self.items = state.items
+        self.item_locations = state.item_locations
+        self.items_by_building = state.items_by_building
+        self.items_by_persona = state.items_by_persona
+        self.world_items = state.world_items
+        self.persona_pending_events = state.persona_pending_events
 
         self.personas = state.personas
         self.visiting_personas = state.visiting_personas
@@ -53,6 +65,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         self.context_length = state.context_length
         self.default_avatar = state.default_avatar
         self.host_avatar = state.host_avatar
+        self.timezone_info = state.timezone_info
+        self.timezone_name = state.timezone_name
 
         self.user_room_id = state.user_room_id
 
@@ -64,6 +78,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         self.end_conversation = runtime.end_conversation
         self.get_summonable_personas = runtime.get_summonable_personas
         self.get_conversing_personas = runtime.get_conversing_personas
+        self.get_persona_pending_events = manager.get_persona_pending_events
+        self.archive_persona_events = manager.archive_persona_events
         self.occupancy_manager = manager.occupancy_manager
         self.conversation_managers = manager.conversation_managers
         self._save_building_histories = manager._save_building_histories
@@ -394,6 +410,211 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             return f"Error: {exc}"
         finally:
             db.close()
+
+    # --- Item management ---
+
+    def get_items_df(self) -> pd.DataFrame:
+        db = self.SessionLocal()
+        try:
+            query = (
+                db.query(ItemModel, ItemLocationModel)
+                .outerjoin(ItemLocationModel, ItemModel.ITEM_ID == ItemLocationModel.ITEM_ID)
+            )
+            rows: List[Dict[str, Any]] = []
+            for item, location in query:
+                rows.append(
+                    {
+                        "ITEM_ID": item.ITEM_ID,
+                        "NAME": item.NAME,
+                        "TYPE": item.TYPE,
+                        "DESCRIPTION": item.DESCRIPTION,
+                        "OWNER_KIND": getattr(location, "OWNER_KIND", "world"),
+                        "OWNER_ID": getattr(location, "OWNER_ID", ""),
+                        "UPDATED_AT": str(getattr(item, "UPDATED_AT", "")),
+                    }
+                )
+            columns = [
+                "ITEM_ID",
+                "NAME",
+                "TYPE",
+                "DESCRIPTION",
+                "OWNER_KIND",
+                "OWNER_ID",
+                "UPDATED_AT",
+            ]
+            if not rows:
+                return pd.DataFrame(columns=columns)
+            return pd.DataFrame(rows, columns=columns)
+        finally:
+            db.close()
+
+    def get_item_details(self, item_id: str) -> Optional[Dict[str, Any]]:
+        db = self.SessionLocal()
+        try:
+            item = db.query(ItemModel).filter(ItemModel.ITEM_ID == item_id).first()
+            if not item:
+                return None
+            location = (
+                db.query(ItemLocationModel)
+                .filter(ItemLocationModel.ITEM_ID == item_id)
+                .first()
+            )
+            return {
+                "ITEM_ID": item.ITEM_ID,
+                "NAME": item.NAME,
+                "TYPE": item.TYPE,
+                "DESCRIPTION": item.DESCRIPTION or "",
+                "STATE_JSON": item.STATE_JSON or "",
+                "OWNER_KIND": location.OWNER_KIND if location else "world",
+                "OWNER_ID": location.OWNER_ID if location else "",
+            }
+        finally:
+            db.close()
+
+    def create_item(
+        self,
+        name: str,
+        item_type: str,
+        description: str,
+        owner_kind: str,
+        owner_id: Optional[str],
+        state_json: Optional[str],
+    ) -> str:
+        normalized_kind = (owner_kind or "world").strip().lower()
+        owner_id = (owner_id or "").strip()
+        if normalized_kind in {"building", "persona"} and not owner_id:
+            return "Error: owner_id is required for building or persona ownership."
+        if normalized_kind == "building" and owner_id not in self.building_map:
+            return f"Error: Building '{owner_id}' not found."
+        if normalized_kind == "persona" and owner_id not in self.personas:
+            return f"Error: Persona '{owner_id}' not found."
+        state_payload = (state_json or "").strip()
+        if state_payload:
+            try:
+                json.loads(state_payload)
+            except json.JSONDecodeError as exc:
+                return f"Error: STATE_JSON must be valid JSON. {exc}"
+        else:
+            state_payload = None
+
+        item_id = str(uuid.uuid4())
+        db = self.SessionLocal()
+        try:
+            new_item = ItemModel(
+                ITEM_ID=item_id,
+                NAME=name,
+                TYPE=item_type or "object",
+                DESCRIPTION=description or "",
+                STATE_JSON=state_payload,
+            )
+            db.add(new_item)
+            if normalized_kind != "world":
+                db.add(
+                    ItemLocationModel(
+                        ITEM_ID=item_id,
+                        OWNER_KIND=normalized_kind,
+                        OWNER_ID=owner_id,
+                    )
+                )
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logging.error("Failed to create item '%s': %s", name, exc, exc_info=True)
+            return f"Error: {exc}"
+        finally:
+            db.close()
+
+        self.manager._load_items_from_db()
+        return f"Item '{name}' created successfully."
+
+    def update_item(
+        self,
+        item_id: str,
+        name: str,
+        item_type: str,
+        description: str,
+        owner_kind: str,
+        owner_id: Optional[str],
+        state_json: Optional[str],
+    ) -> str:
+        normalized_kind = (owner_kind or "world").strip().lower()
+        owner_id = (owner_id or "").strip()
+        if normalized_kind in {"building", "persona"} and not owner_id:
+            return "Error: owner_id is required for building or persona ownership."
+        if normalized_kind == "building" and owner_id not in self.building_map:
+            return f"Error: Building '{owner_id}' not found."
+        if normalized_kind == "persona" and owner_id not in self.personas:
+            return f"Error: Persona '{owner_id}' not found."
+        state_payload = (state_json or "").strip()
+        if state_payload:
+            try:
+                json.loads(state_payload)
+            except json.JSONDecodeError as exc:
+                return f"Error: STATE_JSON must be valid JSON. {exc}"
+        else:
+            state_payload = None
+
+        db = self.SessionLocal()
+        try:
+            item = db.query(ItemModel).filter(ItemModel.ITEM_ID == item_id).first()
+            if not item:
+                return f"Error: Item '{item_id}' not found."
+            item.NAME = name
+            item.TYPE = item_type or "object"
+            item.DESCRIPTION = description or ""
+            item.STATE_JSON = state_payload
+            location = (
+                db.query(ItemLocationModel)
+                .filter(ItemLocationModel.ITEM_ID == item_id)
+                .first()
+            )
+            if normalized_kind == "world":
+                if location:
+                    db.delete(location)
+            else:
+                if location:
+                    location.OWNER_KIND = normalized_kind
+                    location.OWNER_ID = owner_id
+                else:
+                    db.add(
+                        ItemLocationModel(
+                            ITEM_ID=item_id,
+                            OWNER_KIND=normalized_kind,
+                            OWNER_ID=owner_id,
+                        )
+                    )
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logging.error("Failed to update item '%s': %s", item_id, exc, exc_info=True)
+            return f"Error: {exc}"
+        finally:
+            db.close()
+
+        self.manager._load_items_from_db()
+        return f"Item '{name}' updated successfully."
+
+    def delete_item(self, item_id: str) -> str:
+        db = self.SessionLocal()
+        try:
+            item = db.query(ItemModel).filter(ItemModel.ITEM_ID == item_id).first()
+            if not item:
+                return f"Error: Item '{item_id}' not found."
+            item_name = item.NAME
+            db.query(ItemLocationModel).filter(ItemLocationModel.ITEM_ID == item_id).delete(
+                synchronize_session=False
+            )
+            db.delete(item)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logging.error("Failed to delete item '%s': %s", item_id, exc, exc_info=True)
+            return f"Error: {exc}"
+        finally:
+            db.close()
+
+        self.manager._load_items_from_db()
+        return f"Item '{item_name}' deleted successfully."
 
     # --- AI management ---
 

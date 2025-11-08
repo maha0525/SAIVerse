@@ -19,3 +19,10 @@ for modinfo in pkgutil.iter_modules([Path(__file__).parent / "defs"]):
         OPENAI_TOOLS_SPEC.append(oa.to_openai(meta))
         GEMINI_TOOLS_SPEC.append(gm.to_gemini(meta))
         TOOL_SCHEMAS.append(meta)
+
+        alias = getattr(module, "ALIASES", None)
+        if isinstance(alias, dict):
+            for alt_name, alt_impl_name in alias.items():
+                function_name = getattr(module, alt_impl_name, None)
+                if callable(function_name):
+                    TOOL_REGISTRY[alt_name] = function_name

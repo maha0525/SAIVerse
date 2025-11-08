@@ -68,4 +68,8 @@ class LLMClient:
         return attachments
 
 
-__all__ = ["LLMClient", "raw_logger", "RAW_LOG_FILE"]
+class IncompleteStreamError(RuntimeError):
+    """Raised when a streamed response ends without a completion signal."""
+
+
+__all__ = ["LLMClient", "raw_logger", "RAW_LOG_FILE", "IncompleteStreamError"]

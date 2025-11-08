@@ -509,7 +509,12 @@ def end_conversation_ui(persona_id: str):
         manager._load_occupancy_from_db()
         return current_history, gr.update(), gr.update(choices=conversing_personas, value=None)
 
-    manager.end_conversation(persona_id)
+    result = manager.end_conversation(persona_id)
+    if result:
+        if result.startswith("Error:"):
+            gr.Warning(result)
+        else:
+            gr.Info(result)
     manager._load_occupancy_from_db()
 
     new_history = get_current_building_history()

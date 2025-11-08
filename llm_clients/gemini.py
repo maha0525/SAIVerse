@@ -10,6 +10,145 @@ from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 from google import genai
 from google.genai import types
 
+try:  # pragma: no cover - optional defensive patching
+    from google.genai import _api_client as _genai_api_client
+except Exception:  # pragma: no cover - absence is fine
+    _genai_api_client = None
+
+
+def _install_gemini_stream_patch() -> None:
+    disable_flag = os.getenv("SAIVERSE_DISABLE_GEMINI_SSE_PATCH")
+    if disable_flag and disable_flag.lower() not in {"0", "false", "off"}:
+        logging.warning(
+            "Skipping Gemini SSE patch because SAIVERSE_DISABLE_GEMINI_SSE_PATCH=%s",
+            disable_flag,
+        )
+        return
+    """Patch google.genai HttpResponse streaming to respect SSE framing."""
+
+    if _genai_api_client is None:
+        return
+
+    HttpResponse = getattr(_genai_api_client, "HttpResponse", None)
+    if HttpResponse is None:
+        return
+    if getattr(HttpResponse, "_saiverse_sse_patch", False):
+        return
+
+    def _clean_line(raw: Any) -> str:
+        if raw is None:
+            return ""
+        if not isinstance(raw, str):
+            raw = raw.decode("utf-8", errors="ignore")
+        return raw.rstrip("\r\n")
+
+    class _SSEAccumulator:
+        __slots__ = ("_buffer",)
+
+        def __init__(self) -> None:
+            self._buffer: List[str] = []
+
+        def feed(self, line: str) -> Optional[str]:
+            if not line:
+                if self._buffer:
+                    data = "".join(self._buffer)
+                    self._buffer.clear()
+                    return data
+                return None
+            if line.startswith("data:"):
+                value = line[5:]
+                if value.startswith(" "):
+                    value = value[1:]
+                self._buffer.append(value)
+            elif line.startswith(":"):
+                return None
+            else:
+                # Skip other SSE fields (event:, id:, retry:, etc.)
+                return None
+            return None
+
+        def flush(self) -> Optional[str]:
+            if self._buffer:
+                data = "".join(self._buffer)
+                self._buffer.clear()
+                return data
+            return None
+
+    original_segments = HttpResponse.segments
+    original_async_segments = HttpResponse.async_segments
+
+    def _yield_json_chunks(iterator: Iterator[str]) -> Iterator[Any]:
+        acc = _SSEAccumulator()
+        for raw_line in iterator:
+            cleaned = _clean_line(raw_line)
+            raw_logger.debug("Gemini SSE raw line: %s", cleaned)
+            combined = acc.feed(cleaned)
+            if combined:
+                raw_logger.debug("Gemini SSE payload: %s", combined)
+                yield json.loads(combined)
+        final = acc.flush()
+        if final:
+            raw_logger.debug("Gemini SSE final payload: %s", final)
+            yield json.loads(final)
+
+    async def _yield_json_chunks_async(iterator: Any) -> Any:
+        acc = _SSEAccumulator()
+        async for raw_line in iterator:
+            cleaned = _clean_line(raw_line)
+            raw_logger.debug("Gemini SSE raw line (async): %s", cleaned)
+            combined = acc.feed(cleaned)
+            if combined:
+                raw_logger.debug("Gemini SSE payload (async): %s", combined)
+                yield json.loads(combined)
+        final = acc.flush()
+        if final:
+            raw_logger.debug("Gemini SSE final payload (async): %s", final)
+            yield json.loads(final)
+
+    def _patched_segments(self) -> Iterator[Any]:
+        if isinstance(self.response_stream, list) or self.response_stream is None:
+            yield from original_segments(self)  # type: ignore[misc]
+            return
+        if hasattr(self.response_stream, "iter_lines"):
+            iterator = self.response_stream.iter_lines()  # type: ignore[union-attr]
+            yield from _yield_json_chunks(iterator)
+        else:
+            yield from original_segments(self)  # type: ignore[misc]
+
+    async def _patched_async_segments(self) -> Any:
+        if isinstance(self.response_stream, list) or self.response_stream is None:
+            async for chunk in original_async_segments(self):  # type: ignore[misc]
+                yield chunk
+            return
+        if hasattr(self.response_stream, "aiter_lines"):
+            async for item in _yield_json_chunks_async(self.response_stream.aiter_lines()):
+                yield item
+            return
+        if hasattr(self.response_stream, "content"):
+            async def _content_line_iter():
+                while True:
+                    chunk = await self.response_stream.content.readline()
+                    if not chunk:
+                        break
+                    yield chunk
+
+            try:
+                async for item in _yield_json_chunks_async(_content_line_iter()):
+                    yield item
+            finally:
+                if hasattr(self, "_session") and self._session:
+                    await self._session.close()
+            return
+        async for chunk in original_async_segments(self):  # type: ignore[misc]
+            yield chunk
+
+    HttpResponse.segments = _patched_segments  # type: ignore[assignment]
+    HttpResponse.async_segments = _patched_async_segments  # type: ignore[assignment]
+    HttpResponse._saiverse_sse_patch = True  # type: ignore[attr-defined]
+
+
+_install_gemini_stream_patch()
+
 from .gemini_utils import build_gemini_clients
 
 from media_utils import iter_image_media, load_image_bytes_for_llm
@@ -18,7 +157,7 @@ from tools import GEMINI_TOOLS_SPEC, TOOL_REGISTRY
 from tools.defs import parse_tool_result
 from llm_router import route
 
-from .base import LLMClient, raw_logger
+from .base import IncompleteStreamError, LLMClient, raw_logger
 from .utils import content_to_text, is_truthy_flag, merge_reasoning_strings
 
 GEMINI_SAFETY_CONFIG = [
@@ -112,6 +251,12 @@ class GeminiClient(LLMClient):
                 props = {k: _to_schema(v) for k, v in node["properties"].items()}
                 kwargs["properties"] = props
                 kwargs["property_ordering"] = list(node["properties"].keys())
+            if "additionalProperties" in node:
+                ap = node["additionalProperties"]
+                if isinstance(ap, dict):
+                    kwargs["additional_properties"] = _to_schema(ap)
+                elif isinstance(ap, bool):
+                    kwargs["additional_properties"] = ap
             if "required" in node and isinstance(node["required"], list):
                 kwargs["required"] = node["required"]
 
@@ -130,6 +275,31 @@ class GeminiClient(LLMClient):
             return types.Schema(**kwargs)
 
         return _to_schema(js)
+
+    @staticmethod
+    def _requires_json_schema(node: Any) -> bool:
+        if isinstance(node, dict):
+            if "additionalProperties" in node:
+                ap_val = node.get("additionalProperties")
+                if ap_val not in (None, False):
+                    return True
+            for key in ("properties", "patternProperties"):
+                props = node.get(key)
+                if isinstance(props, dict) and any(
+                    GeminiClient._requires_json_schema(value) for value in props.values()
+                ):
+                    return True
+            for key in ("items", ):
+                child = node.get(key)
+                if child and GeminiClient._requires_json_schema(child):
+                    return True
+            for key in ("anyOf", "oneOf", "allOf"):
+                child_list = node.get(key)
+                if isinstance(child_list, list) and any(GeminiClient._requires_json_schema(item) for item in child_list):
+                    return True
+        elif isinstance(node, list):
+            return any(GeminiClient._requires_json_schema(item) for item in node)
+        return False
 
     @staticmethod
     def _is_rate_limit_error(err: Exception) -> bool:
@@ -356,10 +526,19 @@ class GeminiClient(LLMClient):
                     cfg_kwargs["thinking_config"] = self._thinking_config
                 if response_schema:
                     cfg_kwargs["response_mime_type"] = "application/json"
-                    schema_obj = self._schema_from_json(response_schema)
-                    if schema_obj is not None:
-                        cfg_kwargs["response_schema"] = schema_obj
+                    if isinstance(response_schema, dict) and self._requires_json_schema(response_schema):
+                        cfg_kwargs["response_json_schema"] = response_schema
+                    else:
+                        schema_obj = self._schema_from_json(response_schema)
+                        if schema_obj is not None:
+                            cfg_kwargs["response_schema"] = schema_obj
 
+                raw_logger.debug(
+                    "Gemini generate config model=%s use_tools=%s cfg=%s",
+                    model_id,
+                    use_tools,
+                    cfg_kwargs,
+                )
                 resp = client.models.generate_content(
                     model=model_id,
                     contents=contents,
@@ -472,6 +651,19 @@ class GeminiClient(LLMClient):
         *,
         temperature: float | None = None,
     ) -> Iterator[str]:
+        disable_stream = os.getenv("SAIVERSE_DISABLE_GEMINI_STREAMING")
+        if disable_stream and disable_stream.lower() not in {"0", "false", "off"}:
+            logging.info("SAIVERSE_DISABLE_GEMINI_STREAMING set; using non-streaming Gemini call")
+            result = self.generate(
+                messages,
+                tools=tools or [],
+                history_snippets=history_snippets,
+                response_schema=response_schema,
+                temperature=temperature,
+            )
+            yield result
+            return
+
         tools_spec = GEMINI_TOOLS_SPEC if tools is None else tools
         use_tools = bool(tools_spec)
         history_snippets = history_snippets or []
@@ -517,12 +709,16 @@ class GeminiClient(LLMClient):
         seen_stream_texts: Dict[int, str] = {}
         thought_seen: Dict[int, str] = {}
 
+        saw_chunks = False
+        stream_completed = False
+
         for chunk in stream:
             raw_logger.debug("Gemini stream chunk:\n%s", chunk)
             if not chunk.candidates:
                 continue
             candidate = chunk.candidates[0]
             raw_logger.debug("Gemini stream candidate:\n%s", candidate)
+            saw_chunks = True
             if not candidate.content or not candidate.content.parts:
                 continue
             candidate_index = getattr(candidate, "index", 0)
@@ -565,6 +761,12 @@ class GeminiClient(LLMClient):
                 prefix_yielded = True
             yield new_text
             seen_stream_texts[candidate_index] = combined_text
+            finish_reason = getattr(candidate, "finish_reason", None)
+            if finish_reason:
+                stream_completed = True
+
+        if fcall is None and saw_chunks and not stream_completed:
+            raise IncompleteStreamError("Gemini stream ended without completion signal.")
 
         if fcall is None:
             self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
@@ -636,10 +838,20 @@ class GeminiClient(LLMClient):
         if use_tools:
             cfg_kwargs["tools"] = merge_tools_for_gemini(tools_spec)
             cfg_kwargs["tool_config"] = tool_cfg
+        else:
+            cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
         if self._thinking_config is not None:
             cfg_kwargs["thinking_config"] = self._thinking_config
         if temperature is not None:
             cfg_kwargs["temperature"] = temperature
+        raw_logger.debug(
+            "Gemini stream config model=%s use_tools=%s cfg=%s",
+            self.model,
+            use_tools,
+            cfg_kwargs,
+        )
+        if use_tools:
+            cfg_kwargs.setdefault("tool_config", tool_cfg)
         return client.models.generate_content_stream(
             model=self.model,
             contents=contents,
@@ -679,12 +891,16 @@ class GeminiClient(LLMClient):
         thought_seen: Dict[int, str] = {}
         yielded = False
 
+        saw_chunks = False
+        stream_completed = False
+
         for chunk in stream:
             raw_logger.debug("Gemini stream2 chunk:\n%s", chunk)
             if not chunk.candidates:
                 continue
             candidate = chunk.candidates[0]
             raw_logger.debug("Gemini stream2 candidate:\n%s", candidate)
+            saw_chunks = True
             if not candidate.content or not candidate.content.parts:
                 continue
             candidate_index = getattr(candidate, "index", 0)
@@ -724,12 +940,21 @@ class GeminiClient(LLMClient):
             yield new_text
             seen_stream_texts[candidate_index] = combined_text
             yielded = True
+            finish_reason = getattr(candidate, "finish_reason", None)
+            if finish_reason:
+                stream_completed = True
 
         if not yielded:
             if history_snippets:
                 yield "\n".join(history_snippets) + "\n" + fallback_result
             else:
                 yield fallback_result
+            self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
+            return
+
+        if saw_chunks and not stream_completed:
+            raise IncompleteStreamError("Gemini follow-up stream ended without completion signal.")
+
         self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
 
 

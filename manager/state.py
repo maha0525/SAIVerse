@@ -27,6 +27,12 @@ class CoreState:
         default_factory=dict
     )
     capacities: Dict[str, int] = field(default_factory=dict)
+    items: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    item_locations: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    items_by_building: Dict[str, List[str]] = field(default_factory=dict)
+    items_by_persona: Dict[str, List[str]] = field(default_factory=dict)
+    world_items: List[str] = field(default_factory=list)
+    persona_pending_events: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
     personas: Dict[str, Any] = field(default_factory=dict)
     visiting_personas: Dict[str, Any] = field(default_factory=dict)
