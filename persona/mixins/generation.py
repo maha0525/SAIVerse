@@ -125,9 +125,9 @@ class PersonaGenerationMixin:
             if role == "system" and "### 意識モジュールからの情報提供" in content:
                 continue
             sanitized: Dict[str, Any] = {"role": role, "content": content}
-            metadata = message.get("metadata")
-            if isinstance(metadata, dict):
-                sanitized["metadata"] = copy.deepcopy(metadata)
+            filtered = self._filter_metadata_for_llm(message.get("metadata"))
+            if filtered is not None:
+                sanitized["metadata"] = filtered
             sanitized_history.append(sanitized)
 
         messages = [{"role": "system", "content": system_text}] + sanitized_history
@@ -137,8 +137,9 @@ class PersonaGenerationMixin:
             messages.append({"role": "system", "content": extra_system_prompt})
         if include_current_user and user_message:
             user_entry: Dict[str, Any] = {"role": "user", "content": user_message}
-            if isinstance(user_metadata, dict):
-                user_entry["metadata"] = copy.deepcopy(user_metadata)
+            filtered_user_meta = self._filter_metadata_for_llm(user_metadata)
+            if filtered_user_meta is not None:
+                user_entry["metadata"] = filtered_user_meta
                 logging.debug(
                     "[persona_core] user message metadata keys=%s",
                     list(user_metadata.keys()),
@@ -499,8 +500,9 @@ class PersonaGenerationMixin:
         if not message:
             return
         entry: Dict[str, Any] = {"role": "user", "content": message}
-        if isinstance(metadata, dict):
-            entry["metadata"] = copy.deepcopy(metadata)
+        filtered_user_meta = self._filter_metadata_for_llm(metadata)
+        if filtered_user_meta is not None:
+            entry["metadata"] = filtered_user_meta
         recorded = False
         try:
             self.history_manager.add_to_persona_only(entry)
@@ -552,6 +554,13 @@ class PersonaGenerationMixin:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception as exc:
             logging.warning("Failed to dump LLM context to %s: %s", dump_path, exc)
+
+    def _filter_metadata_for_llm(self, metadata: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not isinstance(metadata, dict):
+            return None
+        allowed_keys = {"media"}
+        filtered = {key: copy.deepcopy(value) for key, value in metadata.items() if key in allowed_keys}
+        return filtered or None
 
     def handle_user_input(
         self, message: str, metadata: Optional[Dict[str, Any]] = None

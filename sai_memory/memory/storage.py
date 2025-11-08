@@ -18,9 +18,31 @@ def _ensure_dir(path: str) -> None:
         os.makedirs(d, exist_ok=True)
 
 
+def _configure_sqlite(conn: sqlite3.Connection) -> None:
+    """Apply durability-friendly PRAGMA settings with env overrides."""
+    journal_mode = os.getenv("SAIMEMORY_SQLITE_JOURNAL_MODE", "wal").strip().lower()
+    if journal_mode not in {"delete", "truncate", "persist", "memory", "wal", "off"}:
+        journal_mode = "wal"
+    conn.execute(f"PRAGMA journal_mode={journal_mode.upper()}")
+
+    synchronous = os.getenv("SAIMEMORY_SQLITE_SYNCHRONOUS", "full").strip().lower()
+    if synchronous not in {"off", "normal", "full", "extra"}:
+        synchronous = "full"
+    conn.execute(f"PRAGMA synchronous={synchronous.upper()}")
+
+    wal_autocheckpoint = os.getenv("SAIMEMORY_SQLITE_WAL_AUTOCHECKPOINT")
+    try:
+        wal_autocheckpoint_int = int(wal_autocheckpoint) if wal_autocheckpoint is not None else 1000
+    except Exception:
+        wal_autocheckpoint_int = 1000
+    if wal_autocheckpoint_int > 0:
+        conn.execute(f"PRAGMA wal_autocheckpoint={wal_autocheckpoint_int}")
+
+
 def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connection:
     _ensure_dir(db_path)
     conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
+    _configure_sqlite(conn)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS threads (

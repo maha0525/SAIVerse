@@ -83,6 +83,24 @@ python scripts/export_saimemory_to_json.py air_city_a \
 
 標準出力へ出したい場合は `--output -` を指定してください。
 
+SAIMemory の安全なバックアップは `scripts/backup_saimemory.py` で取得できます。SQLite の `.backup`
+API でスナップショットを作成し、`rdiff-backup` で差分のみを保存します。
+
+```bash
+python scripts/backup_saimemory.py air_city_a sophie_city_a \
+  --output-dir ~/.saiverse/backups/saimemory \
+  --verbose
+
+# 新しいフルコピーを作成
+python scripts/backup_saimemory.py air_city_a --output-dir ~/.saiverse/backups/saimemory --full
+```
+
+- 実行には `rdiff-backup` が必要です（例: `pip install rdiff-backup`）。
+- `--full` で既存リポジトリをアーカイブし、新しいフルコピーから差分を積み直します。
+- 成功すると `~/.saiverse/backups/saimemory/<persona>` に rdiff-backup リポジトリが作成されます。
+- 復元は `rdiff-backup -r <timestamp> ~/.saiverse/backups/saimemory/<persona> ./restore_dir` で任意時点を展開し、`memory.db` を差し替えてください。
+- サーバー起動時には `SAIMEMORY_BACKUP_ON_START=true`（既定）の場合、自動で差分バックアップが1回実行されます。
+
 開発時に SAIMemory のログを追跡したいときは `SAIVERSE_LOG_LEVEL=DEBUG`
 を指定して起動すると、取得した履歴の先頭／末尾などがログに出力されます。
 

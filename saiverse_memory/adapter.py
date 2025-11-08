@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from dataclasses import replace
@@ -25,8 +26,14 @@ from sai_memory.memory.storage import (
     compose_message_content,
     replace_message_embeddings,
 )
+from sai_memory.backup import BackupError, run_backup
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _auto_backup_enabled() -> bool:
+    value = os.getenv("SAIMEMORY_BACKUP_ON_START", "true").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 class SAIMemoryAdapter:
@@ -85,6 +92,9 @@ class SAIMemoryAdapter:
             self.settings.resource_id,
         )
 
+        if _auto_backup_enabled():
+            threading.Thread(target=self._run_startup_backup, daemon=True).start()
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -126,6 +136,21 @@ class SAIMemoryAdapter:
                 break
             selected.insert(0, payload)
         return selected
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _run_startup_backup(self) -> None:
+        db_path = Path(self.settings.db_path)
+        rdiff_path = os.getenv("SAIMEMORY_RDIFF_PATH")
+        try:
+            run_backup(persona_id=self.persona_id, db_path=db_path, rdiff_path=rdiff_path)
+            LOGGER.info("Auto SAIMemory backup completed for persona=%s", self.persona_id)
+        except BackupError as exc:
+            LOGGER.warning("Auto SAIMemory backup skipped for persona=%s: %s", self.persona_id, exc)
+        except Exception:
+            LOGGER.exception("Unexpected error during auto SAIMemory backup for %s", self.persona_id)
 
     def recent_persona_messages(
         self,
