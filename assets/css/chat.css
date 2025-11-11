@@ -48,6 +48,30 @@ body { padding-bottom: 0 !important; }
   height: 100% !important;
 }
 
+.saiverse-home {
+  max-width: 900px;
+  margin-left: auto;
+  margin-right: auto;
+  width: 100%;
+  padding-left: 1.5rem;
+  padding-right: 1.5rem;
+  box-sizing: border-box;
+}
+
+#section-home .gr-markdown,
+#section-home .gr-button {
+  max-width: 900px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+@media (max-width: 768px) {
+  .saiverse-home {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+}
+
 /* === モバイルで Chatbot 親ブロックの左右パディングを完全に殺す === */
 @media (max-width: 680px) {
   /* 親ブロック特定（:has はそのまま・@supports は外す） */

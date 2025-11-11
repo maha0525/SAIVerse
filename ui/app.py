@@ -20,6 +20,7 @@ from ui.chat import (
     select_model,
     start_conversations_ui,
     stop_conversations_ui,
+    go_to_user_room_ui,
 )
 from ui.world_editor import create_world_editor_ui
 from ui.task_manager import create_task_manager_ui
@@ -40,6 +41,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
             with gr.Accordion("セクション切り替え", open=False):
                 gr.HTML("""
                     <div id="saiverse-sidebar-nav">
+                        <div class="saiverse-nav-item" data-tab-label="ホーム">ホーム</div>
                         <div class="saiverse-nav-item" data-tab-label="ワールドビュー">ワールドビュー</div>
                         <div class="saiverse-nav-item" data-tab-label="自律会話ログ" style="display:none">自律会話ログ</div>
                         <div class="saiverse-nav-item" data-tab-label="DB Manager">DB Manager</div>
@@ -80,13 +82,29 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
             with gr.Accordion("移動", open=True):
                 move_destination_radio = gr.Radio(
                     choices=ui_state.building_choices,
-                    value=lambda: get_current_location_name(),
+                    value=None,
                     label="移動先",
                     interactive=True,
                     elem_classes=["saiverse-move-radio"],
                     show_label=False
                 )
-        with gr.Column(elem_id="section-worldview", elem_classes=['saiverse-section']):
+        with gr.Column(elem_id="section-home", elem_classes=['saiverse-section', 'saiverse-home']):
+            gr.Markdown(
+                f"""
+                ## ようこそ、{city_name} へ
+
+                ここではワールドビューを開く前にゆっくり準備できるよ。左のラジオで建物を選んでからワールドビューへ進もう。
+                """
+            )
+            gr.Markdown(
+                """
+                - ワールドビューを開くときに長い履歴を読み込む場合があるから、ここで一息ついてから進もう。
+                - DB Manager やタスクマネージャーには直接ジャンプできるよ。
+                """
+            )
+            enter_worldview_btn = gr.Button("ワールドビューに入る", variant="primary", elem_id="enter_worldview_btn")
+
+        with gr.Column(elem_id="section-worldview", elem_classes=['saiverse-section', 'saiverse-hidden']):
             with gr.Row(elem_id="chat_header"):
                 user_location_display = gr.Textbox(
                     # managerから現在地を取得して表示する
@@ -111,7 +129,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
             with gr.Group(elem_id="chat_scroll_area"):
                 chatbot = gr.Chatbot(
                     type="messages",
-                    value=lambda: get_current_building_history(),
+                    value=[],
                     group_consecutive_messages=False,
                     sanitize_html=False,
                     elem_id="my_chat",
@@ -139,7 +157,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                         )
                 with gr.Accordion("オプション", open=False):
                     model_drop = gr.Dropdown(choices=ui_state.model_choices, value="None",label="モデル選択")
-                    refresh_chat_btn = gr.Button("履歴を再読み込み", variant="secondary")
+                    refresh_chat_btn = gr.Button("履歴を再読み込み", variant="secondary", elem_id="refresh_chat_btn")
                     with gr.Row():
                         with gr.Column():
                             summon_persona_dropdown = gr.Dropdown(
@@ -185,7 +203,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                     client_location_state,
                 ],
             )
-            move_destination_radio.change(
+            move_radio_event = move_destination_radio.change(
                 fn=move_user_radio_ui,
                 inputs=[move_destination_radio, client_location_state],
                 outputs=[
@@ -213,11 +231,54 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                     };
                     const session = ensureSession();
                     console.debug('[ui-js] radio change value=%s session=%s', value, session);
-                    const navItem = document.querySelector('#saiverse-sidebar-nav .saiverse-nav-item[data-tab-label="ワールドビュー"]');
-                    if (navItem) {
-                        navItem.click();
+                    if (value) {
+                        window.saiverseNextBuilding = value;
                     }
                     return [value, null, null, null, null, null, null, {session}];
+                }
+                """
+            )
+            move_radio_event.then(
+                None,
+                None,
+                None,
+                js="""
+                () => {
+                    if (window.saiverseActiveSection !== "ワールドビュー") {
+                        const navItem = document.querySelector('#saiverse-sidebar-nav .saiverse-nav-item[data-tab-label="ワールドビュー"]');
+                        if (navItem) {
+                            window.saiverseAutoLoadEnabled = true;
+                            console.debug('[ui-js] switching to worldview for selection=%s', window.saiverseNextBuilding);
+                            navItem.click();
+                        }
+                    } else if (window.saiverseTriggerWorldviewLoad) {
+                        window.saiverseAutoLoadEnabled = true;
+                        window.saiverseWorldviewPending = true;
+                        window.saiverseTriggerWorldviewLoad();
+                    }
+                }
+                """
+            )
+            enter_worldview_btn.click(
+                fn=go_to_user_room_ui,
+                inputs=[client_location_state],
+                outputs=[
+                    chatbot,
+                    user_location_display,
+                    current_location_display,
+                    move_building_dropdown,
+                    move_destination_radio,
+                    summon_persona_dropdown,
+                    end_conv_persona_dropdown,
+                    client_location_state,
+                ],
+                js="""
+                () => {
+                    const navItem = document.querySelector('#saiverse-sidebar-nav .saiverse-nav-item[data-tab-label="ワールドビュー"]');
+                    if (navItem) {
+                        window.saiverseAutoLoadEnabled = true;
+                        navItem.click();
+                    }
                 }
                 """
             )
@@ -291,6 +352,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
         js_auto_refresh = """
         () => {
             const sections = {
+                "ホーム": "#section-home",
                 "ワールドビュー": "#section-worldview",
                 "自律会話ログ": "#section-autolog",
                 "DB Manager": "#section-db-manager",
@@ -298,7 +360,28 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                 "メモリー設定": "#section-memory-settings",
                 "ワールドエディタ": "#section-world-editor"
             };
-            const defaultLabel = "ワールドビュー";
+            const defaultLabel = "ホーム";
+            window.saiverseActiveSection = defaultLabel;
+            window.saiverseWorldviewInitialized = false;
+            window.saiverseWorldviewPending = false;
+            window.saiverseAutoLoadEnabled = window.saiverseAutoLoadEnabled ?? false;
+            const triggerWorldviewLoad = () => {
+                if (!window.saiverseWorldviewPending) {
+                    return;
+                }
+                if (!window.saiverseAutoLoadEnabled) {
+                    console.debug('[ui-js] auto load suppressed (disabled)');
+                    return;
+                }
+                const button = document.querySelector("#refresh_chat_btn button, #refresh_chat_btn");
+                if (button) {
+                    window.saiverseWorldviewInitialized = true;
+                    window.saiverseWorldviewPending = false;
+                    button.click();
+                } else {
+                    requestAnimationFrame(triggerWorldviewLoad);
+                }
+            };
             const setActive = (label) => {
                 const navItems = document.querySelectorAll("#saiverse-sidebar-nav .saiverse-nav-item");
                 navItems.forEach((item) => {
@@ -317,7 +400,18 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                     }
                 });
                 window.saiverseActiveSection = label;
+                if (label === "ワールドビュー") {
+                    window.saiverseAutoLoadEnabled = window.saiverseAutoLoadEnabled ?? true;
+                    window.saiverseAutoLoadEnabled = true;
+                    window.saiverseWorldviewPending = true;
+                    triggerWorldviewLoad();
+                } else {
+                    window.saiverseWorldviewPending = false;
+                    window.saiverseAutoLoadEnabled = false;
+                }
             };
+            window.saiverseTriggerWorldviewLoad = triggerWorldviewLoad;
+            setActive(defaultLabel);
 
             const setupAttachmentControls = () => {
                 const textarea = document.querySelector("#chat_message_textbox textarea");

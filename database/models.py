@@ -23,6 +23,7 @@ class User(Base):
     LOGGED_IN = Column(Boolean, default=False, nullable=False)
     CURRENT_CITYID = Column(Integer, ForeignKey("city.CITYID"), nullable=True)
     CURRENT_BUILDINGID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
+    AVATAR_IMAGE = Column(String(255))
 
 class AI(Base):
     __tablename__ = "ai"
@@ -64,6 +65,7 @@ class City(Base):
     UI_PORT = Column(Integer, nullable=False)
     API_PORT = Column(Integer, nullable=False)
     START_IN_ONLINE_MODE = Column(Boolean, default=False, nullable=False)
+    HOST_AVATAR_IMAGE = Column(String(255))
     __table_args__ = (UniqueConstraint('USERID', 'CITYNAME', name='uq_user_city_name'), UniqueConstraint('UI_PORT', name='uq_ui_port'), UniqueConstraint('API_PORT', name='uq_api_port'))
 
 class Tool(Base):

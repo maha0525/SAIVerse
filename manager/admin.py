@@ -1,11 +1,10 @@
 import json
 import logging
-import shutil
 import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 from zoneinfo import ZoneInfo
@@ -17,6 +16,7 @@ from database.models import (
     BuildingOccupancyLog,
     BuildingToolLink,
     City as CityModel,
+    User as UserModel,
     Item as ItemModel,
     ItemLocation as ItemLocationModel,
 )
@@ -116,6 +116,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         ui_port: int,
         api_port: int,
         timezone_name: str,
+        host_avatar_path: Optional[str] = None,
+        host_avatar_upload: Optional[str] = None,
     ) -> str:
         db = self.SessionLocal()
         try:
@@ -138,6 +140,16 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             city.UI_PORT = ui_port
             city.API_PORT = api_port
             city.TIMEZONE = tz_candidate
+            avatar_value: Optional[str] = (host_avatar_path or "").strip() or None
+            if host_avatar_upload:
+                try:
+                    upload_path = Path(host_avatar_upload)
+                    avatar_value = self._process_avatar_upload(f"host_{city_id}", upload_path)
+                except Exception as exc:
+                    db.rollback()
+                    logging.error("Failed to process host avatar upload: %s", exc, exc_info=True)
+                    return f"Error: Failed to process host avatar upload: {exc}"
+            city.HOST_AVATAR_IMAGE = avatar_value
             db.commit()
 
             if city.CITYID == self.state.city_id:
@@ -153,6 +165,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 self.manager.user_room_id = self.state.user_room_id
                 self.user_room_id = self.state.user_room_id
                 self._update_timezone_cache(tz_candidate)
+                self.manager.reload_host_avatar(avatar_value)
 
             self._load_cities_from_db()
             logging.info(
@@ -217,6 +230,59 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             )
         except Exception as exc:
             db.rollback()
+            return f"Error: {exc}"
+        finally:
+            db.close()
+
+    def get_user_profile(self) -> Tuple[str, str]:
+        db = self.SessionLocal()
+        try:
+            user = (
+                db.query(UserModel)
+                .filter(UserModel.USERID == self.state.user_id)
+                .first()
+            )
+            if not user:
+                return "ユーザー", ""
+            return user.USERNAME or "ユーザー", user.AVATAR_IMAGE or ""
+        finally:
+            db.close()
+
+    def update_user_profile(
+        self,
+        name: str,
+        avatar_path: Optional[str],
+        avatar_upload: Optional[str],
+    ) -> str:
+        clean_name = (name or "").strip()
+        if not clean_name:
+            return "Error: ユーザー名を入力してください。"
+
+        db = self.SessionLocal()
+        try:
+            user = (
+                db.query(UserModel)
+                .filter(UserModel.USERID == self.state.user_id)
+                .first()
+            )
+            if not user:
+                return "Error: User not found."
+
+            user.USERNAME = clean_name
+            avatar_value: Optional[str] = (avatar_path or "").strip() or None
+            if avatar_upload:
+                upload_path = Path(avatar_upload)
+                avatar_value = self._process_avatar_upload(f"user_{user.USERID}", upload_path)
+            user.AVATAR_IMAGE = avatar_value
+            db.commit()
+
+            self.state.user_display_name = clean_name
+            self.manager.reload_user_profile()
+            logging.info("Updated user profile for USERID=%s", user.USERID)
+            return "ユーザープロファイルを更新しました。"
+        except Exception as exc:
+            db.rollback()
+            logging.error("Failed to update user profile: %s", exc, exc_info=True)
             return f"Error: {exc}"
         finally:
             db.close()
@@ -699,17 +765,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             avatar_value: Optional[str] = (avatar_path or "").strip() or None
             if avatar_upload:
                 try:
-                    avatars_dir = Path("assets") / "avatars"
-                    avatars_dir.mkdir(parents=True, exist_ok=True)
                     upload_path = Path(avatar_upload)
-                    suffix = upload_path.suffix.lower() if upload_path.suffix else ".png"
-                    dest_name = f"{ai_id}_{int(time.time())}{suffix}"
-                    dest_path = avatars_dir / dest_name
-                    shutil.copy(upload_path, dest_path)
-                    avatar_value = str(dest_path)
-                    logging.info(
-                        "Stored uploaded avatar for '%s' at %s", ai_id, dest_path
-                    )
+                    avatar_value = self._process_avatar_upload(ai_id, upload_path)
                 except Exception as exc:
                     logging.error(
                         "Failed to store avatar upload for %s: %s",

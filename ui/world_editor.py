@@ -15,7 +15,7 @@ def _require_manager():
     return manager
 
 
-def update_city_ui(city_id_str: str, name: str, desc: str, online_mode: bool, ui_port_str: str, api_port_str: str, timezone_name: str):
+def update_city_ui(city_id_str: str, name: str, desc: str, online_mode: bool, ui_port_str: str, api_port_str: str, timezone_name: str, host_avatar_path: str, host_avatar_upload):
     manager = _require_manager()
     if not city_id_str:
         return "Error: Select a city to update.", gr.update()
@@ -26,14 +26,14 @@ def update_city_ui(city_id_str: str, name: str, desc: str, online_mode: bool, ui
     except (ValueError, TypeError):
         return "Error: Port numbers must be valid integers.", gr.update()
 
-    result = manager.update_city(city_id, name, desc, online_mode, ui_port, api_port, timezone_name)
+    result = manager.update_city(city_id, name, desc, online_mode, ui_port, api_port, timezone_name, host_avatar_path, host_avatar_upload)
     return result, manager.get_cities_df()
 
 
 def on_select_city(evt: gr.SelectData):
     manager = _require_manager()
     if evt.value is None:
-        return "", "", "", False, "", "", "UTC"
+        return "", "", "", False, "", "", "UTC", ""
     row_index = evt.index[0]
     df = manager.get_cities_df()
     selected_row = df.iloc[row_index]
@@ -45,7 +45,21 @@ def on_select_city(evt: gr.SelectData):
         selected_row["UI_PORT"],
         selected_row["API_PORT"],
         selected_row.get("TIMEZONE", "UTC"),
+        selected_row.get("HOST_AVATAR_IMAGE", ""),
     )
+
+
+def load_user_profile_ui():
+    manager = _require_manager()
+    name, avatar_path = manager.get_user_profile()
+    return name, avatar_path
+
+
+def update_user_profile_ui(name: str, avatar_path: str, avatar_upload):
+    manager = _require_manager()
+    result = manager.update_user_profile(name, avatar_path, avatar_upload)
+    fresh_name, fresh_path = manager.get_user_profile()
+    return result, fresh_name, fresh_path, gr.update(value=None)
 
 
 def update_building_ui(b_id: str, name: str, capacity_str: str, desc: str, sys_inst: str, city_id: Optional[int], tool_ids: List[int], interval_str: str):
@@ -332,6 +346,8 @@ def create_world_editor_ui():
                     city_api_port_num = gr.Number(label="API Port", precision=0)
                 city_desc_textbox = gr.Textbox(label="Description", lines=3)
                 city_timezone_textbox = gr.Textbox(label="Timezone (IANA形式)", value=lambda: manager.timezone_name, placeholder="例: Asia/Tokyo")
+                city_host_avatar_path = gr.Textbox(label="Host Avatar Path", interactive=False)
+                city_host_avatar_upload = gr.File(label="Host Avatar Upload", file_types=["image"], type="filepath")
                 online_mode_checkbox = gr.Checkbox(label="次回起動時にオンラインモードで起動する")
                 with gr.Row():
                     save_city_btn = gr.Button("City設定を保存")
@@ -342,8 +358,8 @@ def create_world_editor_ui():
                 def toggle_delete_button(is_checked):
                     return gr.update(interactive=is_checked)
 
-                city_df.select(fn=on_select_city, inputs=None, outputs=[city_id_text, city_name_textbox, city_desc_textbox, online_mode_checkbox, city_ui_port_num, city_api_port_num, city_timezone_textbox])
-                save_city_btn.click(fn=update_city_ui, inputs=[city_id_text, city_name_textbox, city_desc_textbox, online_mode_checkbox, city_ui_port_num, city_api_port_num, city_timezone_textbox], outputs=[city_status_display, city_df])
+                city_df.select(fn=on_select_city, inputs=None, outputs=[city_id_text, city_name_textbox, city_desc_textbox, online_mode_checkbox, city_ui_port_num, city_api_port_num, city_timezone_textbox, city_host_avatar_path])
+                save_city_btn.click(fn=update_city_ui, inputs=[city_id_text, city_name_textbox, city_desc_textbox, online_mode_checkbox, city_ui_port_num, city_api_port_num, city_timezone_textbox, city_host_avatar_path, city_host_avatar_upload], outputs=[city_status_display, city_df])
                 delete_city_confirm_check.change(fn=toggle_delete_button, inputs=delete_city_confirm_check, outputs=delete_city_btn)
                 delete_city_btn.click(fn=delete_city_ui, inputs=[city_id_text, delete_city_confirm_check], outputs=[city_status_display, city_df])
             with gr.TabItem("新規作成"):
@@ -441,6 +457,23 @@ def create_world_editor_ui():
                 create_ai_status = gr.Textbox(label="Status", interactive=False)
 
                 create_ai_btn.click(fn=create_ai_ui, inputs=[new_ai_name_text, new_ai_sys_prompt_text, new_ai_home_city_dropdown], outputs=[create_ai_status, ai_df])
+
+    with gr.Accordion("ユーザー管理", open=False):
+        gr.Markdown("ログインユーザーの表示名とアイコンを変更できます。")
+        user_name_text = gr.Textbox(label="ユーザー名", value=lambda: manager.user_display_name)
+        user_avatar_path = gr.Textbox(label="ユーザーアイコンの保存パス", interactive=False, value=lambda: manager.get_user_profile()[1])
+        user_avatar_upload = gr.File(label="ユーザーアイコンをアップロード", file_types=["image"], type="filepath")
+        with gr.Row():
+            load_user_btn = gr.Button("最新の情報を読み込む")
+            save_user_btn = gr.Button("ユーザー情報を保存", variant="primary")
+        user_status = gr.Textbox(label="Status", interactive=False)
+
+        load_user_btn.click(fn=load_user_profile_ui, inputs=None, outputs=[user_name_text, user_avatar_path])
+        save_user_btn.click(
+            fn=update_user_profile_ui,
+            inputs=[user_name_text, user_avatar_path, user_avatar_upload],
+            outputs=[user_status, user_name_text, user_avatar_path, user_avatar_upload],
+        )
 
     with gr.Accordion("Blueprint管理", open=False):
         blueprint_df = gr.DataFrame(value=None, interactive=False, label="Blueprints")

@@ -2,6 +2,7 @@ import importlib
 import json
 import logging
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import requests
@@ -108,6 +109,10 @@ class RuntimeService(
                 self.state.user_display_name = (
                     (user.USERNAME or "ユーザー").strip() or "ユーザー"
                 )
+                avatar_data = None
+                if getattr(user, "AVATAR_IMAGE", None):
+                    avatar_data = self.manager._load_avatar_data(Path(user.AVATAR_IMAGE))
+                self.state.user_avatar_data = avatar_data or self.manager.default_avatar
                 self.id_to_name_map[str(self.state.user_id)] = (
                     self.state.user_display_name
                 )
@@ -125,6 +130,7 @@ class RuntimeService(
                 self.state.user_current_building_id = None
                 self.state.user_current_city_id = None
                 self.state.user_display_name = "ユーザー"
+                self.state.user_avatar_data = self.manager.default_avatar
                 self.id_to_name_map[str(self.state.user_id)] = (
                     self.state.user_display_name
                 )
@@ -135,6 +141,7 @@ class RuntimeService(
             self.state.user_is_online = False
             self.state.user_current_building_id = None
             self.state.user_display_name = "ユーザー"
+            self.state.user_avatar_data = self.manager.default_avatar
             self.id_to_name_map[str(self.state.user_id)] = (
                 self.state.user_display_name
             )

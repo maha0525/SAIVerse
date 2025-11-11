@@ -151,8 +151,6 @@ class OllamaClient(LLMClient):
         }
         if format_payload_v1:
             payload_v1["format"] = format_payload_v1
-        else:
-            payload_v1["response_format"] = {"type": "json_object"}
 
         try:
             response = requests.post(self.url, json=payload_v1, timeout=(3, 300))
@@ -193,8 +191,6 @@ class OllamaClient(LLMClient):
                 }
                 if schema_payload is not None:
                     legacy_payload["format"] = schema_payload
-                else:
-                    legacy_payload["response_format"] = {"type": "json_object"}
                 response = requests.post(
                     self.chat_url,
                     json=legacy_payload,
@@ -256,8 +252,8 @@ class OllamaClient(LLMClient):
                         "strict": True,
                     },
                 }
-            else:
-                stream_payload["response_format"] = {"type": "json_object"}
+            # When no schema is requested we allow plain-text responses. Ollama defaults to
+            # unstructured text, so we intentionally avoid forcing any response_format.
 
             response = requests.post(
                 self.url,

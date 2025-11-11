@@ -46,6 +46,7 @@ class CoreState:
     user_is_online: bool = False
     user_current_building_id: Optional[str] = None
     user_current_city_id: Optional[int] = None
+    user_avatar_data: str = ""
 
     timezone_name: str = "UTC"
     timezone_info: Optional[Any] = None

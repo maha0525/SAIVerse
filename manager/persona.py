@@ -1,13 +1,13 @@
 import base64
 import logging
 import mimetypes
-import shutil
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
+from PIL import Image
 from sqlalchemy import func
 from buildings import Building
 from database.models import (
@@ -67,6 +67,26 @@ class PersonaMixin:
         self.avatar_map[ai_id] = display_value
         if ai_id in self.personas:
             self.personas[ai_id].avatar_image = avatar_value
+
+    def _process_avatar_upload(self, ai_id: str, upload_path: Path) -> str:
+        """Resize & convert avatar uploads to WebP for caching."""
+        avatars_dir = Path("assets") / "avatars"
+        avatars_dir.mkdir(parents=True, exist_ok=True)
+        dest_name = f"{ai_id}_{int(time.time())}.webp"
+        dest_path = avatars_dir / dest_name
+        with Image.open(upload_path) as img:
+            img = img.convert("RGBA")
+            img.thumbnail((256, 256), Image.LANCZOS)
+            width, height = img.size
+            img.save(dest_path, "WEBP", quality=85, method=6)
+        logging.info(
+            "Processed avatar upload for '%s': %s (%dx%d WEBP)",
+            ai_id,
+            dest_path,
+            width,
+            height,
+        )
+        return str(dest_path)
 
     def _load_personas_from_db(self) -> None:
         """DBからペルソナ情報を読み込み、PersonaCoreインスタンスを生成する"""
@@ -388,17 +408,8 @@ class PersonaMixin:
             avatar_value: Optional[str] = (avatar_path or "").strip() or None
             if avatar_upload:
                 try:
-                    avatars_dir = Path("assets") / "avatars"
-                    avatars_dir.mkdir(parents=True, exist_ok=True)
                     upload_path = Path(avatar_upload)
-                    suffix = upload_path.suffix.lower() if upload_path.suffix else ".png"
-                    dest_name = f"{ai_id}_{int(time.time())}{suffix}"
-                    dest_path = avatars_dir / dest_name
-                    shutil.copy(upload_path, dest_path)
-                    avatar_value = str(dest_path)
-                    logging.info(
-                        "Stored uploaded avatar for '%s' at %s", ai_id, dest_path
-                    )
+                    avatar_value = self._process_avatar_upload(ai_id, upload_path)
                 except Exception as exc:
                     logging.error(
                         "Failed to store avatar upload for %s: %s", ai_id, exc, exc_info=True

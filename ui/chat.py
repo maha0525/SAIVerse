@@ -91,14 +91,22 @@ def _render_message_images(metadata: Optional[Dict[str, Any]]) -> str:
 
 def _get_user_avatar_data_url() -> str:
     global _USER_AVATAR_DATA_URL
+    manager = ui_state.manager
+    if manager and getattr(manager, "user_avatar_data", None):
+        return manager.user_avatar_data
     if _USER_AVATAR_DATA_URL is None:
         if USER_AVATAR_ICON_PATH.exists():
-            mime = mimetypes.guess_type(USER_AVATAR_ICON_PATH)[0] or "image/png"
+            mime = mimetypes.guess_type(USER_AVATAR_ICON_PATH.name)[0] or "image/png"
             data_url = path_to_data_url(USER_AVATAR_ICON_PATH, mime)
             _USER_AVATAR_DATA_URL = data_url or ""
         else:
             _USER_AVATAR_DATA_URL = ""
     return _USER_AVATAR_DATA_URL or ""
+
+
+def reset_user_avatar_cache() -> None:
+    global _USER_AVATAR_DATA_URL
+    _USER_AVATAR_DATA_URL = None
 
 
 def format_history_for_chatbot(raw_history: List[Dict[str, Any]]) -> List[Dict[str, str]]:
@@ -457,11 +465,47 @@ def move_user_radio_ui(building_name: str, client_state: Optional[dict]):
         force_dropdown_value=new_location_name,
         force_radio=False,
     )
+    logging.info("[ui] move_user_radio_ui completed target=%s", new_location_name)
     return (
         dropdown_update,
         history,
         new_location_name,
         location_markdown_update,
+        radio_update,
+        summon_update,
+        conversing_update,
+        client_state,
+    )
+
+
+def go_to_user_room_ui(client_state: Optional[dict]):
+    manager = ui_state.manager
+    home_name: Optional[str] = None
+    if manager and manager.user_room_id in manager.building_map:
+        home_name = manager.building_map[manager.user_room_id].name
+        if not manager.user_current_building_id:
+            manager.move_user(manager.user_room_id)
+
+    (
+        history,
+        new_location_name,
+        location_markdown_update,
+        summon_update,
+        conversing_update,
+        client_state,
+    ) = _perform_user_move(home_name, client_state)
+
+    dropdown_update, radio_update = _prepare_move_component_updates(
+        force_dropdown_value=new_location_name,
+        force_radio=True,
+    )
+
+    logging.info("[ui] go_to_user_room_ui target=%s", new_location_name)
+    return (
+        history,
+        new_location_name,
+        location_markdown_update,
+        dropdown_update,
         radio_update,
         summon_update,
         conversing_update,

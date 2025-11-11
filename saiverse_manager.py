@@ -66,9 +66,12 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
         # --- Step 0: Database and Configuration Setup ---
         self.db_path = db_path
         self.city_model = CityModel
+        self.city_host_avatar_path: Optional[str] = None
         DATABASE_URL = f"sqlite:///{db_path}"
         engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
         self._ensure_city_timezone_column(engine)
+        self._ensure_user_avatar_column(engine)
+        self._ensure_city_host_avatar_column(engine)
         self._ensure_item_tables(engine)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         
@@ -86,6 +89,7 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
             self.api_port = my_city_config.API_PORT
             self.start_in_online_mode = my_city_config.START_IN_ONLINE_MODE
             self._update_timezone_cache(getattr(my_city_config, "TIMEZONE", "UTC"))
+            self.city_host_avatar_path = getattr(my_city_config, "HOST_AVATAR_IMAGE", None)
             
             # Load other cities' configs for inter-city communication
             other_cities = db.query(CityModel).filter(CityModel.CITYID != self.city_id).all()
@@ -141,6 +145,11 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
 
         host_avatar_data = self._load_avatar_data(Path("assets/icons/host.png"))
         self.host_avatar = host_avatar_data or self.default_avatar
+        if getattr(self, "city_host_avatar_path", None):
+            host_override = self._load_avatar_data(Path(self.city_host_avatar_path))
+            if host_override:
+                self.host_avatar = host_override
+        self.user_avatar_data = self.default_avatar
 
         # --- Step 3: Load Conversation Histories ---
         # 各建物の会話履歴をファイルから読み込みます。
@@ -185,6 +194,7 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
             occupants={b.building_id: [] for b in self.buildings},
             default_avatar=self.default_avatar,
             host_avatar=self.host_avatar,
+            user_avatar_data=self.user_avatar_data,
             start_in_online_mode=self.start_in_online_mode,
             ui_port=self.ui_port,
             api_port=self.api_port,
@@ -325,6 +335,27 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
         self.user_display_name = self.state.user_display_name
         self.user_current_building_id = self.state.user_current_building_id
         self.user_current_city_id = self.state.user_current_city_id
+        self.user_avatar_data = getattr(self.state, "user_avatar_data", None) or self.default_avatar
+
+    def reload_user_profile(self) -> None:
+        """Reload the user's profile (name/avatar) from the database."""
+        self._load_user_state_from_db()
+        try:
+            from ui import chat as chat_ui
+
+            if hasattr(chat_ui, "reset_user_avatar_cache"):
+                chat_ui.reset_user_avatar_cache()
+        except ImportError:
+            pass
+
+    def reload_host_avatar(self, avatar_path: Optional[str]) -> None:
+        """Refresh the host avatar asset from the given path."""
+        self.city_host_avatar_path = avatar_path
+        data = None
+        if avatar_path:
+            data = self._load_avatar_data(Path(avatar_path))
+        self.host_avatar = data or self.default_avatar
+        self.state.host_avatar = self.host_avatar
 
     @property
     def all_personas(self) -> Dict[str, Union[PersonaCore, RemotePersonaProxy]]:
@@ -836,6 +867,10 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
                     self.state.user_display_name = (
                         (user.USERNAME or "ユーザー").strip() or "ユーザー"
                     )
+                    avatar_data = None
+                    if getattr(user, "AVATAR_IMAGE", None):
+                        avatar_data = self._load_avatar_data(Path(user.AVATAR_IMAGE))
+                    self.state.user_avatar_data = avatar_data or self.default_avatar
                     self.id_to_name_map[str(self.state.user_id)] = (
                         self.state.user_display_name
                     )
@@ -844,6 +879,7 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
                     self.state.user_current_building_id = None
                     self.state.user_current_city_id = None
                     self.state.user_display_name = "ユーザー"
+                    self.state.user_avatar_data = self.default_avatar
                     self.id_to_name_map[str(self.state.user_id)] = (
                         self.state.user_display_name
                     )
@@ -855,6 +891,7 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
                 self.state.user_current_building_id = None
                 self.state.user_current_city_id = None
                 self.state.user_display_name = "ユーザー"
+                self.state.user_avatar_data = self.default_avatar
                 self.id_to_name_map[str(self.state.user_id)] = (
                     self.state.user_display_name
                 )
@@ -1176,6 +1213,8 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
         ui_port: int,
         api_port: int,
         timezone_name: str,
+        host_avatar_path: Optional[str] = None,
+        host_avatar_upload: Optional[str] = None,
     ) -> str:
         """ワールドエディタからCityの設定を更新する"""
         return self.admin.update_city(
@@ -1186,7 +1225,20 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
             ui_port,
             api_port,
             timezone_name,
+            host_avatar_path,
+            host_avatar_upload,
         )
+
+    def get_user_profile(self) -> Tuple[str, str]:
+        return self.admin.get_user_profile()
+
+    def update_user_profile(
+        self,
+        name: str,
+        avatar_path: Optional[str],
+        avatar_upload: Optional[str],
+    ) -> str:
+        return self.admin.update_user_profile(name, avatar_path, avatar_upload)
 
 
 

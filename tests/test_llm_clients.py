@@ -256,7 +256,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(payload["messages"], messages)
         self.assertEqual(payload["stream"], False)
         self.assertEqual(payload["options"], {"num_ctx": client.context_length})
-        self.assertEqual(payload.get("response_format"), {"type": "json_object"})
+        self.assertNotIn("response_format", payload)
         self.assertEqual(kwargs["timeout"], (3, 300))
 
     @patch('llm_clients.ollama.OllamaClient._probe_base', return_value='http://ollama.test')
@@ -308,7 +308,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(payload["messages"], messages)
         self.assertTrue(payload["stream"])
         self.assertEqual(payload["options"], {"num_ctx": client.context_length})
-        self.assertEqual(payload.get("response_format"), {"type": "json_object"})
+        self.assertNotIn("response_format", payload)
         self.assertEqual(kwargs["timeout"], (3, 300))
         self.assertTrue(kwargs["stream"])
 

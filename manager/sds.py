@@ -27,6 +27,40 @@ class SDSMixin:
         except Exception as exc:
             logging.error("Failed to add TIMEZONE column to city table: %s", exc)
 
+    @staticmethod
+    def _ensure_user_avatar_column(engine) -> None:
+        try:
+            inspector = inspect(engine)
+            columns = {col["name"] for col in inspector.get_columns("user")}
+        except Exception as exc:
+            logging.warning("Failed to inspect user table for avatar column: %s", exc)
+            return
+        if "AVATAR_IMAGE" in columns:
+            return
+        logging.info("Adding AVATAR_IMAGE column to user table.")
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE user ADD COLUMN AVATAR_IMAGE TEXT"))
+        except Exception as exc:
+            logging.error("Failed to add AVATAR_IMAGE column to user table: %s", exc)
+
+    @staticmethod
+    def _ensure_city_host_avatar_column(engine) -> None:
+        try:
+            inspector = inspect(engine)
+            columns = {col["name"] for col in inspector.get_columns("city")}
+        except Exception as exc:
+            logging.warning("Failed to inspect city table for host avatar column: %s", exc)
+            return
+        if "HOST_AVATAR_IMAGE" in columns:
+            return
+        logging.info("Adding HOST_AVATAR_IMAGE column to city table.")
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE city ADD COLUMN HOST_AVATAR_IMAGE TEXT"))
+        except Exception as exc:
+            logging.error("Failed to add HOST_AVATAR_IMAGE column to city table: %s", exc)
+
     def _sds_background_loop(self):
         while not self.sds_stop_event.wait(30):
             self._send_heartbeat()
