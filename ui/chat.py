@@ -240,12 +240,12 @@ def respond_stream(message: str, media: Optional[Any] = None):
         image_path = _extract_image_path(media)
         stored_info = _store_uploaded_image(image_path)
         if stored_info:
-            metadata = {"attachments": [stored_info]}
+            metadata = {"media": [stored_info]}
 
     current_building_id = manager.user_current_building_id
 
-    attachments = metadata.get("attachments", []) if metadata else []
-    logging.debug("[respond_stream] attachments prepared: %s", len(attachments))
+    attachment_preview = metadata.get("media", []) if metadata else []
+    logging.debug("[respond_stream] attachments prepared: %s", len(attachment_preview))
 
     if not (message and message.strip()) and not metadata:
         dropdown_update, radio_update = _prepare_move_component_updates()

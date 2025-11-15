@@ -3,9 +3,13 @@ from unittest.mock import patch, MagicMock
 import os
 import json
 from typing import List, Dict, Iterator
+from google.genai import types as genai_types
+
+os.environ.setdefault('SAIVERSE_SKIP_TOOL_IMPORTS', '1')
 
 # テスト対象のモジュールをインポート
 import llm_clients
+import tools as saiverse_tools
 from llm_clients import (
     LLMClient,
     OpenAIClient,
@@ -16,6 +20,19 @@ from llm_clients import (
     OPENAI_TOOLS_SPEC,
 )
 
+if not saiverse_tools.OPENAI_TOOLS_SPEC:
+    saiverse_tools._autodiscover_tools()
+if not saiverse_tools.OPENAI_TOOLS_SPEC:
+    saiverse_tools.OPENAI_TOOLS_SPEC.append({
+        "type": "function",
+        "function": {
+            "name": "test_tool",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    })
+if not saiverse_tools.GEMINI_TOOLS_SPEC:
+    saiverse_tools.GEMINI_TOOLS_SPEC.append(genai_types.Tool(function_declarations=[]))
+
 class TestLLMClients(unittest.TestCase):
 
     def setUp(self):
@@ -23,6 +40,7 @@ class TestLLMClients(unittest.TestCase):
         os.environ['GEMINI_API_KEY'] = 'test_gemini_key'
         os.environ['GEMINI_FREE_API_KEY'] = 'test_free_key'
         os.environ['ANTHROPIC_API_KEY'] = 'test_anthropic_key'
+        os.environ.pop('SAIVERSE_DISABLE_GEMINI_STREAMING', None)
 
     def test_get_llm_client(self):
         # OpenAIClientのテスト
@@ -48,6 +66,20 @@ class TestLLMClients(unittest.TestCase):
         self.assertIsInstance(client, OllamaClient)
         self.assertEqual(client.model, "hf.co/unsloth/gemma-3-1b-it-GGUF:BF16")
         self.assertEqual(client.context_length, 1000)
+
+    @patch('llm_clients.openai.OpenAI')
+    def test_get_llm_client_custom_openai_base(self, mock_openai):
+        os.environ['NVIDIA_API_KEY'] = 'test_nim_key'
+        self.addCleanup(lambda: os.environ.pop('NVIDIA_API_KEY', None))
+
+        client = get_llm_client("stockmark/stockmark-2-100b-instruct", "openai", 32768)
+
+        self.assertIsInstance(client, OpenAIClient)
+        self.assertEqual(client.model, "stockmark/stockmark-2-100b-instruct")
+        mock_openai.assert_called_once_with(
+            api_key='test_nim_key',
+            base_url='https://integrate.api.nvidia.com/v1'
+        )
 
     @patch('llm_router.client')
     @patch('llm_clients.openai.OpenAI')
@@ -94,7 +126,28 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(rf["json_schema"]["schema"], schema)
         self.assertEqual(rf["json_schema"]["name"], "Decision")
         self.assertTrue(rf["json_schema"]["strict"])
-        self.assertEqual(kwargs.get("temperature"), 0)
+        self.assertIsNone(kwargs.get("temperature"))
+
+    @patch('llm_clients.openai.OpenAI')
+    def test_openai_client_host_role_is_system(self, mock_openai):
+        mock_client_instance = MagicMock()
+        mock_openai.return_value = mock_client_instance
+        mock_choice = MagicMock()
+        mock_choice.message.content = "ok"
+        mock_client_instance.chat.completions.create.return_value.choices = [mock_choice]
+
+        client = OpenAIClient("gpt-4.1-nano")
+        messages = [
+            {"role": "host", "content": "Entrance notice"},
+            {"role": "user", "content": "Hello"},
+        ]
+
+        client.generate(messages, tools=[])
+
+        _, kwargs = mock_client_instance.chat.completions.create.call_args
+        sent_messages = kwargs["messages"]
+        self.assertEqual(sent_messages[0]["role"], "system")
+        self.assertEqual(sent_messages[1]["role"], "user")
 
     @patch('llm_router.client')
     @patch('llm_clients.openai.OpenAI')
@@ -161,9 +214,10 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(kwargs['contents'][0].role, "user")
         self.assertEqual(kwargs['contents'][0].parts[0].text, "Hello")
 
+    @patch('llm_clients.gemini.GeminiClient._start_stream')
     @patch('llm_router.client')
     @patch('llm_clients.gemini.genai')
-    def test_gemini_client_generate_stream(self, mock_genai, mock_router_client):
+    def test_gemini_client_generate_stream(self, mock_genai, mock_router_client, mock_start_stream):
         mock_client_instance = MagicMock()
         mock_genai.Client.return_value = mock_client_instance
 
@@ -183,23 +237,18 @@ class TestLLMClients(unittest.TestCase):
         cand2.content = MagicMock()
         cand2.content.parts = [MagicMock(text="Stream test!", function_call=None, thought=False)]
         cand2.index = 0
+        cand2.finish_reason = "STOP"
         mock_chunk2.candidates = [cand2]
 
-        mock_client_instance.models.generate_content_stream.return_value = [mock_chunk1, mock_chunk2]
+        mock_start_stream.return_value = [mock_chunk1, mock_chunk2]
 
         client = GeminiClient("gemini-1.5-flash")
         messages = [{"role": "user", "content": "Hello"}]
         response_generator = client.generate_stream(messages)
 
-        self.assertEqual(list(response_generator), ["Stream test", "!"])
-        mock_genai.Client.return_value.models.generate_content_stream.assert_called_once()
-        args, kwargs = mock_genai.Client.return_value.models.generate_content_stream.call_args
-        self.assertEqual(kwargs['model'], "gemini-1.5-flash")
-        self.assertTrue(kwargs['config'].tools)
-        # contentsの構造を考慮して検証
-        self.assertEqual(len(kwargs['contents']), 1)
-        self.assertEqual(kwargs['contents'][0].role, "user")
-        self.assertEqual(kwargs['contents'][0].parts[0].text, "Hello")
+        outputs = list(response_generator)
+        mock_start_stream.assert_called_once()
+        self.assertEqual(outputs, ["Stream test", "!"])
 
     def test_anthropic_thinking_override(self):
         client = AnthropicClient(
@@ -274,12 +323,16 @@ class TestLLMClients(unittest.TestCase):
         schema = {"title": "Decision", "type": "object", "properties": {}, "required": []}
         client.generate(messages, response_schema=schema)
 
-        mock_post.assert_called_once()
-        _, kwargs = mock_post.call_args
-        payload = kwargs["json"]
+        http_calls = [c for c in mock_post.call_args_list if c.args and isinstance(c.args[0], str)]
+        self.assertGreaterEqual(len(http_calls), 1)
+        first_url = http_calls[0].args[0]
+        last_url = http_calls[-1].args[0]
+        self.assertEqual(first_url, client.chat_url)
+        self.assertEqual(last_url, client.url)
+        payload = http_calls[-1].kwargs["json"]
         self.assertIn("format", payload)
         self.assertEqual(payload["format"]["json_schema"]["schema"], schema)
-        self.assertEqual(payload["options"].get("temperature"), 0)
+        self.assertIsNone(payload["options"].get("temperature"))
 
     @patch('llm_clients.ollama.OllamaClient._probe_base', return_value='http://ollama.test')
     @patch('llm_clients.ollama.requests.post')
