@@ -23,6 +23,36 @@
     "context_length": 32000,
     "supports_images": true
   },
+  "stockmark/stockmark-2-100b-instruct": {
+    "provider": "openai",
+    "context_length": 32768,
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "api_key_env": "NVIDIA_API_KEY"
+  },
+  "qwen/qwen3-235b-a22b": {
+    "provider": "openai",
+    "context_length": 32768,
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "api_key_env": "NVIDIA_API_KEY"
+  },
+  "moonshotai/kimi-k2-instruct-0905": {
+    "provider": "openai",
+    "context_length": 250000,
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "api_key_env": "NVIDIA_API_KEY"
+  },
+  "mistralai/mistral-large-2411": {
+    "provider": "openai",
+    "context_length": 32000,
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key_env": "OPENROUTER_API_KEY"
+  },
+  "institute-of-science-tokyo/llama-3.1-swallow-70b-instruct-v0.1": {
+    "provider": "openai",
+    "context_length": 120000,
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "api_key_env": "NVIDIA_API_KEY"
+  },
   "claude-sonnet-4-5": {
     "provider": "anthropic",
     "context_length": 32000,

@@ -71,6 +71,26 @@ class PersonaPulseMixin:
         _log_phase(phase)
         phase = "start"
 
+        def _is_gemini_rate_limit_error(exc: Exception) -> bool:
+            checker = getattr(llm_clients, "GeminiClient", None)
+            detector = getattr(checker, "_is_rate_limit_error", None)
+            if callable(detector):
+                try:
+                    return bool(detector(exc))  # type: ignore[misc]
+                except Exception:
+                    logging.debug("[pulse] Gemini rate limit detector failed: %s", exc)
+            msg = str(exc).lower()
+            keywords = [
+                "429",
+                "quota",
+                "rate",
+                "resource exhausted",
+                "resource_exhausted",
+                "unavailable",
+                "overload",
+            ]
+            return any(token in msg for token in keywords)
+
         def _mark_ingested(msg: Dict[str, Any]) -> None:
             try:
                 bucket = msg.setdefault("ingested_by", [])
@@ -637,7 +657,11 @@ class PersonaPulseMixin:
                 try:
                     resp = _call(active_client, message_sequence)
                 except Exception as e:
-                    if active_client is free_client and paid_client and "rate" in str(e).lower():
+                    if (
+                        active_client is free_client
+                        and paid_client
+                        and _is_gemini_rate_limit_error(e)
+                    ):
                         logging.info("[pulse] retrying with paid Gemini key due to rate limit")
                         active_client = paid_client
                         try:

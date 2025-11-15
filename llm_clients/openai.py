@@ -27,6 +27,11 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool) -> List
             prepared.append(msg)
             continue
 
+        role = msg.get("role")
+        if isinstance(role, str) and role.lower() == "host":
+            msg = msg.copy()
+            msg["role"] = "system"
+
         metadata = msg.get("metadata")
         attachments = iter_image_media(metadata)
         if not attachments:
@@ -151,11 +156,14 @@ class OpenAIClient(LLMClient):
         supports_images: bool = False,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
+        api_key_env: Optional[str] = None,
+        request_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__(supports_images=supports_images)
-        api_key = api_key or os.getenv("OPENAI_API_KEY")
+        key_env = api_key_env or "OPENAI_API_KEY"
+        api_key = api_key or os.getenv(key_env)
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
+            raise RuntimeError(f"{key_env} environment variable is not set.")
 
         client_kwargs: Dict[str, str] = {"api_key": api_key}
         if base_url:
@@ -163,7 +171,7 @@ class OpenAIClient(LLMClient):
 
         self.client = OpenAI(**client_kwargs)
         self.model = model
-        self._request_kwargs: Dict[str, Any] = {}
+        self._request_kwargs: Dict[str, Any] = dict(request_kwargs or {})
 
     def _create_completion(self, **kwargs: Any):
         return self.client.chat.completions.create(**kwargs)
