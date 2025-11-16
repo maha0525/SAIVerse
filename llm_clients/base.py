@@ -58,6 +58,10 @@ class LLMClient:
         self._latest_reasoning = []
         return entries
 
+    def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
+        """Apply model-specific request parameters (subclasses may override)."""
+        _ = parameters
+
     def _store_attachment(self, metadata: Dict[str, Any]) -> None:
         if metadata:
             self._latest_attachments.append(metadata)

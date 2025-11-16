@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from functools import partial
+
 import gradio as gr
 
 from database.db_manager import create_db_manager_ui
@@ -21,6 +23,7 @@ from ui.chat import (
     start_conversations_ui,
     stop_conversations_ui,
     go_to_user_room_ui,
+    update_model_parameter,
 )
 from ui.world_editor import create_world_editor_ui
 from ui.task_manager import create_task_manager_ui
@@ -157,6 +160,42 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                         )
                 with gr.Accordion("オプション", open=False):
                     model_drop = gr.Dropdown(choices=ui_state.model_choices, value="None",label="モデル選択")
+                    with gr.Row():
+                        temperature_slider = gr.Slider(
+                            minimum=0,
+                            maximum=2,
+                            step=0.1,
+                            label="temperature",
+                            visible=False,
+                            interactive=True,
+                        )
+                        top_p_slider = gr.Slider(
+                            minimum=0,
+                            maximum=1,
+                            step=0.05,
+                            label="top_p",
+                            visible=False,
+                            interactive=True,
+                        )
+                    with gr.Row():
+                        max_tokens_number = gr.Number(
+                            label="max_completion_tokens",
+                            visible=False,
+                            precision=0,
+                            interactive=True,
+                        )
+                        reasoning_dropdown = gr.Dropdown(
+                            label="reasoning_effort",
+                            choices=[],
+                            visible=False,
+                            interactive=True,
+                        )
+                        verbosity_dropdown = gr.Dropdown(
+                            label="verbosity",
+                            choices=[],
+                            visible=False,
+                            interactive=True,
+                        )
                     refresh_chat_btn = gr.Button("履歴を再読み込み", variant="secondary", elem_id="refresh_chat_btn")
                     with gr.Row():
                         with gr.Column():
@@ -177,6 +216,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                             end_conv_btn = gr.Button("帰宅", scale=1)
 
             client_location_state = gr.State()
+            parameter_state = gr.State({})
 
             # --- Event Handlers ---
             submit.click(
@@ -295,7 +335,44 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                 outputs=[login_status_display, summon_persona_dropdown, end_conv_persona_dropdown]
             )
             logout_btn.click(fn=logout_ui, inputs=None, outputs=login_status_display)
-            model_drop.change(select_model, model_drop, chatbot)
+            model_drop.change(
+                select_model,
+                [model_drop],
+                [
+                    chatbot,
+                    temperature_slider,
+                    top_p_slider,
+                    max_tokens_number,
+                    reasoning_dropdown,
+                    verbosity_dropdown,
+                    parameter_state,
+                ],
+            )
+            temperature_slider.change(
+                partial(update_model_parameter, "temperature"),
+                [temperature_slider, parameter_state, model_drop],
+                parameter_state,
+            )
+            top_p_slider.change(
+                partial(update_model_parameter, "top_p"),
+                [top_p_slider, parameter_state, model_drop],
+                parameter_state,
+            )
+            max_tokens_number.change(
+                partial(update_model_parameter, "max_completion_tokens"),
+                [max_tokens_number, parameter_state, model_drop],
+                parameter_state,
+            )
+            reasoning_dropdown.change(
+                partial(update_model_parameter, "reasoning_effort"),
+                [reasoning_dropdown, parameter_state, model_drop],
+                parameter_state,
+            )
+            verbosity_dropdown.change(
+                partial(update_model_parameter, "verbosity"),
+                [verbosity_dropdown, parameter_state, model_drop],
+                parameter_state,
+            )
             online_btn.click(fn=manager.switch_to_online_mode, inputs=None, outputs=sds_status_display)
             offline_btn.click(fn=manager.switch_to_offline_mode, inputs=None, outputs=sds_status_display)
             end_conv_btn.click(

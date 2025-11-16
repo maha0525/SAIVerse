@@ -14,7 +14,7 @@ from persona.constants import (
     RECALL_SNIPPET_MAX_CHARS,
     RECALL_SNIPPET_STREAM_MAX_CHARS,
 )
-from model_configs import model_supports_images
+from model_configs import model_supports_images, get_model_parameters
 from llm_clients import get_llm_client
 from llm_clients.base import IncompleteStreamError
 
@@ -36,11 +36,33 @@ class PersonaGenerationMixin:
     sai_memory: Any
     timezone: Any
 
-    def set_model(self, model: str, context_length: int, provider: str) -> None:
+    def set_model(
+        self,
+        model: str,
+        context_length: int,
+        provider: str,
+        parameter_overrides: Optional[Dict[str, Any]] | None = None,
+    ) -> None:
         self.model = model
         self.context_length = context_length
         self.model_supports_images = model_supports_images(model)
         self.llm_client = get_llm_client(model, provider, context_length)
+        if parameter_overrides:
+            self.apply_parameter_overrides(parameter_overrides)
+
+    def apply_parameter_overrides(self, overrides: Optional[Dict[str, Any]] = None) -> None:
+        if not overrides or not getattr(self, "llm_client", None):
+            return
+        allowed = get_model_parameters(self.model)
+        filtered = {
+            key: value for key, value in overrides.items() if key in allowed
+        }
+        if not filtered:
+            return
+        try:
+            self.llm_client.configure_parameters(filtered)
+        except Exception:
+            logging.debug("Failed to apply parameter overrides for %s", self.persona_name, exc_info=True)
 
     def _build_messages(
         self,

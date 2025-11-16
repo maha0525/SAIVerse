@@ -14,7 +14,34 @@ from typing import Any, Dict, Iterable, List, Optional
 import gradio as gr
 
 from media_utils import iter_image_media, path_to_data_url
+from model_configs import get_model_parameters, get_model_parameter_defaults
 from ui import state as ui_state
+
+CLIENT_PARAM_SCOPE = "chat"
+
+
+def _is_param_supported_for_client(conf: Optional[Dict[str, Any]], client_scope: str = CLIENT_PARAM_SCOPE) -> bool:
+    if not isinstance(conf, dict):
+        return False
+    scopes = conf.get("client_support")
+    if not scopes:
+        return True
+    if isinstance(scopes, str):
+        scopes = [scopes]
+    normalized = {str(scope).lower() for scope in scopes}
+    return client_scope in normalized
+
+
+def _filter_supported_parameter_values(model_name: str, values: Dict[str, Any]) -> Dict[str, Any]:
+    if not values:
+        return {}
+    spec = get_model_parameters(model_name)
+    filtered: Dict[str, Any] = {}
+    for key, value in values.items():
+        conf = spec.get(key)
+        if _is_param_supported_for_client(conf):
+            filtered[key] = value
+    return filtered
 
 USER_AVATAR_ICON_PATH = Path("assets/icons/user.png")
 _USER_AVATAR_DATA_URL: Optional[str] = None
@@ -107,6 +134,123 @@ def _get_user_avatar_data_url() -> str:
 def reset_user_avatar_cache() -> None:
     global _USER_AVATAR_DATA_URL
     _USER_AVATAR_DATA_URL = None
+
+
+def _hidden_param_update():
+    return gr.update(visible=False, value=None, interactive=False)
+
+
+def _build_parameter_updates(
+    model_name: str,
+    preset_values: Optional[Dict[str, Any]] = None,
+):
+    if not model_name or model_name == "None":
+        hidden = _hidden_param_update()
+        return hidden, hidden, hidden, hidden, hidden, {}
+
+    spec = get_model_parameters(model_name)
+    if not spec:
+        hidden = _hidden_param_update()
+        return hidden, hidden, hidden, hidden, hidden, {}
+
+    state_values = dict(get_model_parameter_defaults(model_name))
+    if preset_values:
+        state_values.update({k: v for k, v in preset_values.items() if v is not None})
+    state_values = _filter_supported_parameter_values(model_name, state_values)
+
+    def _get_conf(name: str) -> Optional[Dict[str, Any]]:
+        conf = spec.get(name)
+        if not isinstance(conf, dict):
+            return None
+        return conf if _is_param_supported_for_client(conf) else None
+
+    visible_values = {k: v for k, v in state_values.items() if _get_conf(k)}
+
+    def slider_update(param_name: str, fallback_label: str):
+        conf = _get_conf(param_name)
+        if not conf:
+            return _hidden_param_update()
+        return gr.update(
+            visible=True,
+            minimum=conf.get("min", 0),
+            maximum=conf.get("max", 1),
+            step=conf.get("step", 0.1),
+            value=visible_values.get(param_name, conf.get("default")),
+            label=conf.get("label", fallback_label),
+            info=conf.get("description", ""),
+            interactive=True,
+        )
+
+    def number_update(param_name: str, fallback_label: str):
+        conf = _get_conf(param_name)
+        if not conf:
+            return _hidden_param_update()
+        return gr.update(
+            visible=True,
+            value=visible_values.get(param_name, conf.get("default")),
+            label=conf.get("label", fallback_label),
+            info=conf.get("description", ""),
+            minimum=conf.get("min"),
+            maximum=conf.get("max"),
+            interactive=True,
+            precision=0,
+        )
+
+    def dropdown_update(param_name: str, fallback_label: str):
+        conf = _get_conf(param_name)
+        if not conf:
+            return _hidden_param_update()
+        choices = conf.get("options") or []
+        default_value = visible_values.get(param_name, conf.get("default"))
+        if default_value not in choices and choices:
+            default_value = choices[0]
+        return gr.update(
+            visible=True,
+            choices=choices,
+            value=default_value,
+            label=conf.get("label", fallback_label),
+            info=conf.get("description", ""),
+            interactive=True,
+        )
+
+    temperature_update = slider_update("temperature", "temperature")
+    top_p_update = slider_update("top_p", "top_p")
+    max_tokens_update = number_update("max_completion_tokens", "max_completion_tokens")
+    reasoning_update = dropdown_update("reasoning_effort", "reasoning_effort")
+    verbosity_update = dropdown_update("verbosity", "verbosity")
+    return (
+        temperature_update,
+        top_p_update,
+        max_tokens_update,
+        reasoning_update,
+        verbosity_update,
+        state_values,
+    )
+
+
+def update_model_parameter(
+    param_name: str,
+    value: Any,
+    current_state: Optional[Dict[str, Any]],
+    model_name: str,
+):
+    state = dict(current_state or {})
+    if not model_name or model_name == "None":
+        return state
+    spec = get_model_parameters(model_name)
+    conf = spec.get(param_name)
+    if not _is_param_supported_for_client(conf):
+        state.pop(param_name, None)
+        return state
+    if value is None or (isinstance(value, str) and not value.strip()):
+        state.pop(param_name, None)
+    else:
+        state[param_name] = value
+    state = _filter_supported_parameter_values(model_name, state)
+    manager = ui_state.manager
+    if manager:
+        manager.set_model_parameters(state)
+    return state
 
 
 def format_history_for_chatbot(raw_history: List[Dict[str, Any]]) -> List[Dict[str, str]]:
@@ -515,14 +659,21 @@ def go_to_user_room_ui(client_state: Optional[dict]):
 
 def select_model(model_name: str):
     manager = ui_state.manager
-    if not manager:
-        return []
-    manager.set_model(model_name or "None")
-    current_building_id = manager.user_current_building_id
-    if not current_building_id:
-        return []
-    raw_history = _limit_history(manager.get_building_history(current_building_id))
-    return format_history_for_chatbot(raw_history)
+    sanitized = model_name or "None"
+    parameter_defaults: Dict[str, Any] = {}
+    history: List[Dict[str, str]] = []
+    if manager:
+        if sanitized != "None":
+            parameter_defaults = _filter_supported_parameter_values(
+                sanitized, get_model_parameter_defaults(sanitized)
+            )
+        manager.set_model(sanitized, parameters=parameter_defaults)
+        current_building_id = manager.user_current_building_id
+        if current_building_id:
+            raw_history = _limit_history(manager.get_building_history(current_building_id))
+            history = format_history_for_chatbot(raw_history)
+    updates = _build_parameter_updates(sanitized, parameter_defaults)
+    return (history, *updates)
 
 
 def call_persona_ui(persona_name: str):

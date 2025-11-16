@@ -168,6 +168,7 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
         self.model = model
         self.context_length = get_context_length(model)
         self.provider = get_model_provider(model)
+        self.model_parameter_overrides: Dict[str, Any] = {}
 
         self.state = CoreState(
             session_factory=self.SessionLocal,
@@ -1010,7 +1011,7 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
     def end_conversation(self, persona_id: str) -> str:
         return self.runtime.end_conversation(persona_id)
 
-    def set_model(self, model: str) -> None:
+    def set_model(self, model: str, parameters: Optional[Dict[str, Any]] = None) -> None:
         """
         Update LLM model override for all active personas in memory.
         - If model == "None": clear the override and reset each persona to its DB-defined default model.
@@ -1018,6 +1019,7 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
         """
         if model == "None":
             logging.info("Clearing global model override; restoring each persona's DB default model.")
+            self.model_parameter_overrides = {}
             db = self.SessionLocal()
             try:
                 for pid, persona in self.personas.items():
@@ -1038,6 +1040,7 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
             return
 
         logging.info(f"Temporarily setting model to '{model}' for all active personas.")
+        self.model_parameter_overrides = dict(parameters or {})
         self.model = model
         self.context_length = get_context_length(model)
         self.provider = get_model_provider(model)
@@ -1049,7 +1052,16 @@ class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, 
             self.runtime.context_length = self.context_length
             self.runtime.provider = self.provider
         for persona in self.personas.values():
-            persona.set_model(model, self.context_length, self.provider)
+            persona.set_model(model, self.context_length, self.provider, self.model_parameter_overrides)
+
+    def set_model_parameters(self, parameters: Optional[Dict[str, Any]] = None) -> None:
+        """Update model parameters for the current override model."""
+        self.model_parameter_overrides = dict(parameters or {})
+        if self.model == "None":
+            logging.info("Parameter overrides ignored because no global model override is active.")
+            return
+        for persona in self.personas.values():
+            persona.apply_parameter_overrides(self.model_parameter_overrides)
 
     def start_autonomous_conversations(self):
         """Start all autonomous conversation managers."""

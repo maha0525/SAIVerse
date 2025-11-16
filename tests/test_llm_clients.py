@@ -149,6 +149,29 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(sent_messages[0]["role"], "system")
         self.assertEqual(sent_messages[1]["role"], "user")
 
+    @patch('llm_clients.openai.OpenAI')
+    def test_openai_client_configure_parameters(self, mock_openai):
+        mock_client_instance = MagicMock()
+        mock_openai.return_value = mock_client_instance
+        mock_choice = MagicMock()
+        mock_choice.message.content = "ok"
+        mock_client_instance.chat.completions.create.return_value.choices = [mock_choice]
+
+        client = OpenAIClient("gpt-4.1-nano")
+        client.configure_parameters({"temperature": 0.2, "reasoning_effort": "low", "verbosity": "high"})
+        self.assertEqual(client._request_kwargs["temperature"], 0.2)
+        self.assertEqual(client._request_kwargs["reasoning_effort"], "low")
+        self.assertNotIn("verbosity", client._request_kwargs)
+
+        messages = [{"role": "user", "content": "Hi"}]
+        client.generate(messages, tools=[])
+
+        _, kwargs = mock_client_instance.chat.completions.create.call_args
+        self.assertEqual(kwargs["temperature"], 0.2)
+
+        client.configure_parameters({"temperature": None})
+        self.assertNotIn("temperature", client._request_kwargs)
+
     @patch('llm_router.client')
     @patch('llm_clients.openai.OpenAI')
     def test_openai_client_generate_stream(self, mock_openai, mock_router_client):

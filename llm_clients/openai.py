@@ -538,5 +538,33 @@ class OpenAIClient(LLMClient):
             logging.exception("OpenAI stream call failed")
             yield "エラーが発生しました。"
 
+    def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
+        if not isinstance(parameters, dict):
+            return
+        for key, value in parameters.items():
+            if key not in OPENAI_ALLOWED_REQUEST_PARAMS:
+                continue
+            if value is None:
+                self._request_kwargs.pop(key, None)
+            else:
+                self._request_kwargs[key] = value
+
 
 __all__ = ["OpenAIClient", "OpenAI"]
+OPENAI_ALLOWED_REQUEST_PARAMS = {
+    "temperature",
+    "top_p",
+    "max_tokens",
+    "max_completion_tokens",
+    "frequency_penalty",
+    "presence_penalty",
+    "stop",
+    "n",
+    "user",
+    "response_format",
+    "logprobs",
+    "top_logprobs",
+    "reasoning_effort",
+    "seed",
+    "parallel_tool_calls",
+}

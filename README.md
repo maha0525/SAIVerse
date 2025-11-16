@@ -208,6 +208,7 @@ SAIVERSE_GATEWAY_TOKEN=super-secret-token
 - `llm_clients/factory.py` が `models.json` の provider に応じてクライアントを作成
 - OpenAI: `openai==1.97` を使用。`thinking_type` が設定された Claude モデルは自動で thinking 拡張を付与
 - OpenAI 互換エンドポイント (NVIDIA NIM など) は `models.json` の各エントリに `base_url` と任意で `api_key_env` を指定するだけで接続可能
+- `models.json` の `parameters` で `temperature` や `reasoning_effort`、`max_completion_tokens` などの許容範囲と既定値を宣言でき、チャット UI のモデル選択欄に対応スライダー／ドロップダウンが自動表示される（`temperature` は 0〜2、`top_p` は 0〜1、`reasoning_effort` は none/minimal/low/medium/high。`verbosity` は OpenAI Responses API 専用のため、現状の chat.completions ルートでは自動的に非表示）。citeturn1view0turn0search9
 - Gemini: `google-genai` の `GeminiClient` (2.5 Pro/Flash, 2.0 Flash, 1.5 Flash) をラップ。free→paid の自動リトライに対応
 - Ollama: ローカルサーバを `OLLAMA_BASE_URL` / 既知ホストへプローブし、到達不可なら Gemini 2.0 Flash へフォールバック (`llm_clients/ollama.py`)
 - 画像生成: `tools/defs/image_generator.py` が `gemini-2.5-flash-image` を利用（有料キー必須）
