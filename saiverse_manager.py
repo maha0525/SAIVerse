@@ -30,6 +30,7 @@ from manager.history import HistoryMixin
 from manager.blueprints import BlueprintMixin
 from manager.persona import PersonaMixin
 from manager.visitors import VisitorMixin
+from manager.gateway import GatewayMixin
 from manager.state import CoreState
 from manager.runtime import RuntimeService
 from manager.admin import AdminService
@@ -53,7 +54,15 @@ from database.models import (
 DEFAULT_MODEL = "gemini-2.0-flash"
 
 
-class SAIVerseManager(VisitorMixin, PersonaMixin, HistoryMixin, BlueprintMixin, SDSMixin, DatabasePollingMixin):
+class SAIVerseManager(
+    VisitorMixin,
+    PersonaMixin,
+    HistoryMixin,
+    BlueprintMixin,
+    SDSMixin,
+    DatabasePollingMixin,
+    GatewayMixin,
+):
     """Manage multiple personas and building occupancy."""
 
     def __init__(

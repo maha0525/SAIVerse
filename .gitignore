@@ -20,5 +20,8 @@ tests/tools/*
 
 #開発用ファイル
 __*.*
+!llm_clients/__init__.py
+!persona/__init__.py
+!persona/tasks/__init__.py
 tasks.md
 *.patch
