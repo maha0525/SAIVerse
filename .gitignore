@@ -23,5 +23,10 @@ __*.*
 !llm_clients/__init__.py
 !persona/__init__.py
 !persona/tasks/__init__.py
+!persona/mixins/__init__.py
+!manager/__init__.py
+!tools/utilities/__init__.py
+!ui/__init__.py
+!ui/handlers/__init__.py
 tasks.md
 *.patch
