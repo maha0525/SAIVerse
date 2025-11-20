@@ -1,21 +1,32 @@
 import json, logging
-from typing import Dict, Any, List
-from tools.defs import ToolSchema
+import os
+from typing import Any, Dict, List
+
+from dotenv import load_dotenv
+
 from google import genai
 from google.genai import types as gtypes
-from dotenv import load_dotenv
-import os
+from llm_clients.gemini_utils import build_gemini_clients
+from tools.defs import ToolSchema
 
 load_dotenv()
 
 log = logging.getLogger("saiverse.router")
 
 ROUTER_MODEL = "gemini-2.0-flash"
-free_key = os.getenv("GEMINI_FREE_API_KEY")
-paid_key = os.getenv("GEMINI_API_KEY")
-if not free_key and not paid_key:
-    raise RuntimeError("GEMINI_FREE_API_KEY or GEMINI_API_KEY environment variable is not set.")
-client = genai.Client(api_key=free_key or paid_key)
+_free_client, _paid_client, client = build_gemini_clients()
+_CLIENT_LABELS = {
+    id(_free_client): "free",
+    id(_paid_client): "paid",
+}
+
+
+def _is_rate_limit_error(err: Exception) -> bool:
+    msg = str(err).lower()
+    for keyword in ("rate", "quota", "429", "503", "unavailable", "overload"):
+        if keyword in msg:
+            return True
+    return False
 
 SYS_TEMPLATE = """\
 You are a tool-router.
@@ -109,16 +120,68 @@ def route(user_message: str, tools_spec: List[Any]) -> Dict[str, Any]:
         tools_block=build_tools_block(tools_spec),
     )
 
-    resp = client.models.generate_content(
-        model=ROUTER_MODEL,
-        contents=[gtypes.Content(role="user", parts=[gtypes.Part(text=user_message)])],
-        config=gtypes.GenerateContentConfig(
-            system_instruction=sys_prompt,
-            safety_settings=GEMINI_SAFETY_CONFIG,
-            response_mime_type="application/json",
-            temperature=0,
-        ),
-    )
+    def _client_label(target_client) -> str:
+        if target_client is None:
+            return "unknown"
+        return _CLIENT_LABELS.get(id(target_client), "unknown")
+
+    def _invoke(target_client):
+        log.debug(
+            "Router Gemini call start", extra={"client": _client_label(target_client)}
+        )
+        return target_client.models.generate_content(
+            model=ROUTER_MODEL,
+            contents=[gtypes.Content(role="user", parts=[gtypes.Part(text=user_message)])],
+            config=gtypes.GenerateContentConfig(
+                system_instruction=sys_prompt,
+                safety_settings=GEMINI_SAFETY_CONFIG,
+                response_mime_type="application/json",
+                temperature=0,
+            ),
+        )
+
+    global client
+    active_client = client
+    try:
+        resp = _invoke(active_client)
+    except Exception as exc:
+        if active_client is _free_client and _paid_client is not None and _is_rate_limit_error(exc):
+            log.info(
+                "Router retry due to rate limit",
+                extra={
+                    "client": _client_label(active_client),
+                    "retry_client": _client_label(_paid_client),
+                    "error": str(exc),
+                },
+            )
+            active_client = _paid_client
+            try:
+                resp = _invoke(active_client)
+            except Exception as exc_paid:
+                log.error(
+                    "Router Gemini retry failed",
+                    extra={
+                        "client": _client_label(active_client),
+                        "error": str(exc_paid),
+                    },
+                )
+                raise
+        else:
+            log.error(
+                "Router Gemini call failed",
+                extra={"client": _client_label(active_client), "error": str(exc)},
+            )
+            raise
+
+    if active_client is not client:
+        log.info(
+            "Router switched active Gemini client",
+            extra={
+                "previous": _client_label(client),
+                "current": _client_label(active_client),
+            },
+        )
+        client = active_client
     try:
         cand = resp.candidates[0]
         text = getattr(cand, "text", None)

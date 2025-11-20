@@ -23,6 +23,7 @@ class User(Base):
     LOGGED_IN = Column(Boolean, default=False, nullable=False)
     CURRENT_CITYID = Column(Integer, ForeignKey("city.CITYID"), nullable=True)
     CURRENT_BUILDINGID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
+    AVATAR_IMAGE = Column(String(255))
 
 class AI(Base):
     __tablename__ = "ai"
@@ -64,6 +65,7 @@ class City(Base):
     UI_PORT = Column(Integer, nullable=False)
     API_PORT = Column(Integer, nullable=False)
     START_IN_ONLINE_MODE = Column(Boolean, default=False, nullable=False)
+    HOST_AVATAR_IMAGE = Column(String(255))
     __table_args__ = (UniqueConstraint('USERID', 'CITYNAME', name='uq_user_city_name'), UniqueConstraint('UI_PORT', name='uq_ui_port'), UniqueConstraint('API_PORT', name='uq_api_port'))
 
 class Tool(Base):
@@ -130,3 +132,35 @@ class Blueprint(Base):
     BASE_SYSTEM_PROMPT = Column(String(4096), default="", nullable=False)
     BASE_AVATAR = Column(String(255), nullable=True)
     __table_args__ = (UniqueConstraint('CITYID', 'NAME', name='uq_city_blueprint_name'),)
+
+
+class Item(Base):
+    __tablename__ = "item"
+    ITEM_ID = Column(String(36), primary_key=True)
+    NAME = Column(String(255), nullable=False)
+    TYPE = Column(String(64), nullable=False, default="object")
+    DESCRIPTION = Column(String(2048), default="", nullable=False)
+    STATE_JSON = Column(String, nullable=True)
+    CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
+    UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class ItemLocation(Base):
+    __tablename__ = "item_location"
+    LOCATION_ID = Column(Integer, primary_key=True, autoincrement=True)
+    ITEM_ID = Column(String(36), ForeignKey("item.ITEM_ID"), nullable=False)
+    OWNER_KIND = Column(String(32), nullable=False)  # building / persona / world
+    OWNER_ID = Column(String(255), nullable=False)
+    UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    __table_args__ = (
+        UniqueConstraint("ITEM_ID", name="uq_item_location_item_id"),
+    )
+
+
+class PersonaEventLog(Base):
+    __tablename__ = "persona_event_log"
+    EVENT_ID = Column(Integer, primary_key=True, autoincrement=True)
+    PERSONA_ID = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
+    CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
+    CONTENT = Column(String, nullable=False)
+    STATUS = Column(String(32), default="pending", nullable=False)  # pending / archived

@@ -14,7 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from saiverse_memory import SAIMemoryAdapter
-from tools.chatgpt_importer import ChatGPTExport, ConversationRecord
+from tools.utilities.chatgpt_importer import ChatGPTExport, ConversationRecord
 
 UTC = timezone.utc
 
@@ -194,6 +194,20 @@ def handle_import(export: ChatGPTExport, args: argparse.Namespace) -> None:
                 import_result["status"] = "skipped (dry-run)"
             else:
                 for payload in payloads:
+                    metadata = payload.get("metadata")
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                        payload["metadata"] = metadata
+                    tags = metadata.get("tags")
+                    if isinstance(tags, list):
+                        tag_list = [str(tag) for tag in tags if tag]
+                    elif tags is None:
+                        tag_list = []
+                    else:
+                        tag_list = [str(tags)]
+                    if "conversation" not in tag_list:
+                        tag_list.append("conversation")
+                    metadata["tags"] = tag_list
                     adapter.append_persona_message(payload, thread_suffix=thread_suffix)  # type: ignore[arg-type]
                 import_result["status"] = "imported"
 

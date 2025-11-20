@@ -1,39 +1,20 @@
 import base64
 import json
-from sqlalchemy import create_engine, inspect, func, text
+from collections import defaultdict
+from sqlalchemy import create_engine
 import threading
 import requests
 import logging
 from pathlib import Path
 import mimetypes
-import hashlib
-from typing import Dict, List, Optional, Tuple, Iterator, Union, Any, Sequence
-from datetime import datetime, timedelta, timezone as dt_timezone
+from typing import Dict, List, Optional, Tuple, Iterator, Union, Any
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import pandas as pd
-import tempfile
-import shutil
 import importlib
 import tools.defs
-from discord_gateway.config import get_gateway_settings
-from discord_gateway.gateway_service import DiscordGatewayService
-from discord_gateway.integration import ensure_gateway_runtime
-from discord_gateway.mapping import ChannelContext, ChannelMapping
-from discord_gateway.orchestrator import (
-    DiscordGatewayOrchestrator,
-    MemorySyncCompletionResult,
-    MemorySyncHandshakeResult,
-)
-from discord_gateway.runtime import GatewayRuntime
-from discord_gateway.saiverse_adapter import (
-    DiscordMessage,
-    GatewayHost,
-    SAIVerseGatewayAdapter,
-)
-from discord_gateway.translator import GatewayCommand
-from discord_gateway.visitors import VisitorProfile
+from discord_gateway.mapping import ChannelMapping
 import os
-import time
 
 from google.genai import errors
 from buildings import Building
@@ -43,14 +24,45 @@ from occupancy_manager import OccupancyManager
 from conversation_manager import ConversationManager
 from sqlalchemy.orm import sessionmaker
 from remote_persona_proxy import RemotePersonaProxy
-from database.models import Base, AI as AIModel, Building as BuildingModel, BuildingOccupancyLog, User as UserModel, City as CityModel, VisitingAI, ThinkingRequest, Blueprint, Tool as ToolModel, BuildingToolLink
+from manager.sds import SDSMixin
+from manager.background import DatabasePollingMixin
+from manager.history import HistoryMixin
+from manager.blueprints import BlueprintMixin
+from manager.persona import PersonaMixin
+from manager.visitors import VisitorMixin
+from manager.gateway import GatewayMixin
+from manager.state import CoreState
+from manager.runtime import RuntimeService
+from manager.admin import AdminService
+from database.models import (
+    AI as AIModel,
+    Building as BuildingModel,
+    BuildingOccupancyLog,
+    User as UserModel,
+    City as CityModel,
+    VisitingAI,
+    ThinkingRequest,
+    Tool as ToolModel,
+    BuildingToolLink,
+    Item as ItemModel,
+    ItemLocation as ItemLocationModel,
+    PersonaEventLog,
+)
 
 
 #DEFAULT_MODEL = "gpt-4o"
 DEFAULT_MODEL = "gemini-2.0-flash"
 
 
-class SAIVerseManager:
+class SAIVerseManager(
+    VisitorMixin,
+    PersonaMixin,
+    HistoryMixin,
+    BlueprintMixin,
+    SDSMixin,
+    DatabasePollingMixin,
+    GatewayMixin,
+):
     """Manage multiple personas and building occupancy."""
 
     def __init__(
@@ -62,9 +74,14 @@ class SAIVerseManager:
     ):
         # --- Step 0: Database and Configuration Setup ---
         self.db_path = db_path
+        self.city_model = CityModel
+        self.city_host_avatar_path: Optional[str] = None
         DATABASE_URL = f"sqlite:///{db_path}"
         engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
         self._ensure_city_timezone_column(engine)
+        self._ensure_user_avatar_column(engine)
+        self._ensure_city_host_avatar_column(engine)
+        self._ensure_item_tables(engine)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         
         # --- Step 1: Load City Configuration from DB ---
@@ -81,6 +98,7 @@ class SAIVerseManager:
             self.api_port = my_city_config.API_PORT
             self.start_in_online_mode = my_city_config.START_IN_ONLINE_MODE
             self._update_timezone_cache(getattr(my_city_config, "TIMEZONE", "UTC"))
+            self.city_host_avatar_path = getattr(my_city_config, "HOST_AVATAR_IMAGE", None)
             
             # Load other cities' configs for inter-city communication
             other_cities = db.query(CityModel).filter(CityModel.CITYID != self.city_id).all()
@@ -101,6 +119,14 @@ class SAIVerseManager:
         self.buildings: List[Building] = self._load_and_create_buildings_from_db()
         self.building_map: Dict[str, Building] = {b.building_id: b for b in self.buildings}
         self.capacities: Dict[str, int] = {b.building_id: b.capacity for b in self.buildings}
+        self.items: Dict[str, Dict[str, Any]] = {}
+        self.item_locations: Dict[str, Dict[str, str]] = {}
+        self.items_by_building: Dict[str, List[str]] = defaultdict(list)
+        self.items_by_persona: Dict[str, List[str]] = defaultdict(list)
+        self.world_items: List[str] = []
+        self._load_items_from_db()
+        self.persona_pending_events: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self._load_persona_event_logs()
 
         # --- Step 2: Setup File Paths and Default Avatars ---
         # 各種ログファイルのパスや、デフォルトのアバター画像を設定します。
@@ -111,22 +137,28 @@ class SAIVerseManager:
             b.building_id: self.saiverse_home / "cities" / self.city_name / "buildings" / b.building_id / "log.json"
             for b in self.buildings
         }
-        default_avatar_path = Path("assets/icons/blank.png")
-        if default_avatar_path.exists():
-            mime = mimetypes.guess_type(default_avatar_path.name)[0] or "image/png"
-            data_b = default_avatar_path.read_bytes()
-            b64 = base64.b64encode(data_b).decode("ascii")
-            self.default_avatar = f"data:{mime};base64,{b64}"
-        else:
-            self.default_avatar = ""
-        host_avatar_path = Path("assets/icons/host.png")
-        if host_avatar_path.exists():
-            mime = mimetypes.guess_type(host_avatar_path.name)[0] or "image/png"
-            data_b = host_avatar_path.read_bytes()
-            b64 = base64.b64encode(data_b).decode("ascii")
-            self.host_avatar = f"data:{mime};base64,{b64}"
-        else:
-            self.host_avatar = self.default_avatar
+        # Load default avatars with graceful fallback
+        avatar_fallback_paths = [
+            Path("assets/icons/blank.png"),
+            Path("assets/icons/user.png"),
+            Path("assets/icons/host.png"),
+            Path("assets/icons/air.png"),
+        ]
+        default_avatar_data = ""
+        for avatar_path in avatar_fallback_paths:
+            data_url = self._load_avatar_data(avatar_path)
+            if data_url:
+                default_avatar_data = data_url
+                break
+        self.default_avatar = default_avatar_data
+
+        host_avatar_data = self._load_avatar_data(Path("assets/icons/host.png"))
+        self.host_avatar = host_avatar_data or self.default_avatar
+        if getattr(self, "city_host_avatar_path", None):
+            host_override = self._load_avatar_data(Path(self.city_host_avatar_path))
+            if host_override:
+                self.host_avatar = host_override
+        self.user_avatar_data = self.default_avatar
 
         # --- Step 3: Load Conversation Histories ---
         # 各建物の会話履歴をファイルから読み込みます。
@@ -142,21 +174,58 @@ class SAIVerseManager:
                 self.building_histories[b_id] = []
 
         # --- Step 4: Initialize Core Components and State Containers ---
-        # ペルソナや入室状況などを管理するためのコンテナを初期化します。
         self.model = model
         self.context_length = get_context_length(model)
         self.provider = get_model_provider(model)
-        self.personas: Dict[str, PersonaCore] = {}
-        self.avatar_map: Dict[str, str] = {}
-        self.visiting_personas: Dict[str, RemotePersonaProxy] = {}
-        self.occupants: Dict[str, List[str]] = {b.building_id: [] for b in self.buildings}
-        self.id_to_name_map: Dict[str, str] = {}
-        self.user_id: int = 1  # Hardcode user ID for now
-        self.user_display_name: str = "ユーザー"
-        self.user_is_online: bool = False
-        self.user_current_building_id: Optional[str] = None
-        self.user_current_city_id: Optional[int] = None
-        
+        self.model_parameter_overrides: Dict[str, Any] = {}
+
+        self.state = CoreState(
+            session_factory=self.SessionLocal,
+            city_id=self.city_id,
+            city_name=self.city_name,
+            model=self.model,
+            provider=self.provider,
+            context_length=self.context_length,
+            saiverse_home=self.saiverse_home,
+            user_room_id=self.user_room_id,
+            buildings=self.buildings,
+            building_map=self.building_map,
+            building_memory_paths=self.building_memory_paths,
+            building_histories=self.building_histories,
+            capacities=self.capacities,
+            items=self.items,
+            item_locations=self.item_locations,
+            items_by_building={k: list(v) for k, v in self.items_by_building.items()},
+            items_by_persona={k: list(v) for k, v in self.items_by_persona.items()},
+            world_items=list(self.world_items),
+            persona_pending_events={
+                k: [dict(ev) for ev in events] for k, events in self.persona_pending_events.items()
+            },
+            occupants={b.building_id: [] for b in self.buildings},
+            default_avatar=self.default_avatar,
+            host_avatar=self.host_avatar,
+            user_avatar_data=self.user_avatar_data,
+            start_in_online_mode=self.start_in_online_mode,
+            ui_port=self.ui_port,
+            api_port=self.api_port,
+        )
+        self.state.items = self.items
+        self.state.item_locations = self.item_locations
+        self.state.items_by_building = self.items_by_building
+        self.state.items_by_persona = self.items_by_persona
+        self.state.world_items = self.world_items
+        self.state.persona_pending_events = self.persona_pending_events
+
+        self.personas = self.state.personas
+        self.visiting_personas = self.state.visiting_personas
+        self.avatar_map = self.state.avatar_map
+        self.persona_map = self.state.persona_map
+        self.occupants = self.state.occupants
+        self.id_to_name_map = self.state.id_to_name_map
+        self.user_id = self.state.user_id
+        self.default_avatar = self.state.default_avatar
+        self.host_avatar = self.state.host_avatar
+        self._refresh_user_state_cache()
 
         # --- Step 5: Initialize OccupancyManager ---
         self.occupancy_manager = OccupancyManager(
@@ -166,7 +235,8 @@ class SAIVerseManager:
             capacities=self.capacities,
             building_map=self.building_map,
             building_histories=self.building_histories,
-            id_to_name_map=self.id_to_name_map
+            id_to_name_map=self.id_to_name_map,
+            user_id=self.state.user_id,
         )
         logging.info("Initialized OccupancyManager.")
 
@@ -175,13 +245,14 @@ class SAIVerseManager:
         # メモリ上のオブジェクトに反映させます。
         self._load_personas_from_db()
         self._load_user_state_from_db()
-        self.persona_map = {p.persona_name: p.persona_id for p in self.personas.values()}
+        self.state.persona_map.clear()
+        self.state.persona_map.update({p.persona_name: p.persona_id for p in self.personas.values()})
+        self.persona_map = self.state.persona_map
         self.id_to_name_map.update({pid: p.persona_name for pid, p in self.personas.items()})
         self._load_occupancy_from_db()
 
         # --- Step 6: Prepare Background Task Managers ---
         # 自律会話を管理するConversationManagerを準備します（この時点ではまだ起動しません）。
-        self.autonomous_conversation_running: bool = False
         self.conversation_managers: Dict[str, ConversationManager] = {}
         for b_id in self.building_map.keys(): # building_map is already filtered by city
             # user_roomはユーザー操作起点なので自律会話は不要
@@ -215,10 +286,6 @@ class SAIVerseManager:
             logging.info("Starting in Offline Mode as per DB setting.")
             self.sds_status = "Offline (Startup Setting)"
             self._load_cities_from_db()
-        # Start background thread for DB polling
-        self.db_polling_stop_event = threading.Event()
-        self.db_polling_thread = threading.Thread(target=self._db_polling_loop, daemon=True)
-        self.db_polling_thread.start()
         self.gateway_runtime = None
         self.gateway_mapping = ChannelMapping([])
         self._gateway_memory_transfers: Dict[str, Dict[str, Any]] = {}
@@ -236,24 +303,15 @@ class SAIVerseManager:
                     "Failed to initialize Discord gateway integration: %s", exc
                 )
 
-    @staticmethod
-    def _ensure_city_timezone_column(engine) -> None:
-        """Ensure the city table has a TIMEZONE column."""
-        try:
-            inspector = inspect(engine)
-            columns = {col["name"] for col in inspector.get_columns("city")}
-        except Exception as exc:
-            logging.warning("Failed to inspect city table for timezone column: %s", exc)
-            return
-        if "TIMEZONE" in columns:
-            return
-        logging.info("Adding TIMEZONE column to city table.")
-        try:
-            with engine.begin() as conn:
-                conn.execute(text("ALTER TABLE city ADD COLUMN TIMEZONE TEXT DEFAULT 'UTC' NOT NULL"))
-                conn.execute(text("UPDATE city SET TIMEZONE = 'UTC' WHERE TIMEZONE IS NULL"))
-        except Exception as exc:
-            logging.error("Failed to add TIMEZONE column to city table: %s", exc)
+        self.runtime = RuntimeService(self, self.state)
+        self.admin = AdminService(self, self.runtime, self.state)
+
+        # Start background thread for DB polling (after runtime is ready)
+        self.db_polling_stop_event = threading.Event()
+        self.db_polling_thread = threading.Thread(
+            target=self._db_polling_loop, daemon=True
+        )
+        self.db_polling_thread.start()
 
     def _update_timezone_cache(self, tz_name: Optional[str]) -> None:
         """Update cached timezone information for this manager."""
@@ -267,139 +325,47 @@ class SAIVerseManager:
         self.timezone_name = name
         self.timezone_info = tz
 
-    def _sds_background_loop(self):
-        """Periodically sends heartbeats and updates the city list from SDS."""
-        while not self.sds_stop_event.wait(30): # every 30 seconds
-            self._send_heartbeat()
-            self._update_cities_from_sds()
-
-    def _register_with_sds(self):
-        """Registers this city with the Directory Service on startup."""
-        register_url = f"{self.sds_url}/register"
-        payload = {
-            "city_name": self.city_name,
-            "city_id_pk": self.city_id,
-            "api_port": self.api_port
-        }
+    @staticmethod
+    def _load_avatar_data(path: Path) -> Optional[str]:
+        """Return a data URL for the given avatar path if it exists."""
         try:
-            response = self.sds_session.post(register_url, json=payload, timeout=5)
-            response.raise_for_status()
-            logging.info(f"Successfully registered with SDS at {self.sds_url}")
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Could not register with SDS: {e}. Will retry in the background.")
+            if not path.exists():
+                return None
+            mime = mimetypes.guess_type(path.name)[0] or "image/png"
+            data_b = path.read_bytes()
+            b64 = base64.b64encode(data_b).decode("ascii")
+            return f"data:{mime};base64,{b64}"
+        except Exception:
+            logging.warning("Failed to load avatar asset %s", path, exc_info=True)
+            return None
 
-    def _send_heartbeat(self):
-        """Sends a heartbeat to the Directory Service."""
-        heartbeat_url = f"{self.sds_url}/heartbeat"
-        payload = {"city_name": self.city_name}
+    def _refresh_user_state_cache(self) -> None:
+        """Mirror CoreState's user info onto the manager-level attributes."""
+        self.user_is_online = self.state.user_is_online
+        self.user_display_name = self.state.user_display_name
+        self.user_current_building_id = self.state.user_current_building_id
+        self.user_current_city_id = self.state.user_current_city_id
+        self.user_avatar_data = getattr(self.state, "user_avatar_data", None) or self.default_avatar
+
+    def reload_user_profile(self) -> None:
+        """Reload the user's profile (name/avatar) from the database."""
+        self._load_user_state_from_db()
         try:
-            response = self.sds_session.post(heartbeat_url, json=payload, timeout=2)
-            response.raise_for_status()
-            logging.debug(f"Heartbeat sent to SDS for {self.city_name}")
-        except requests.exceptions.RequestException as e:
-            logging.warning(f"Could not send heartbeat to SDS: {e}")
+            from ui import chat as chat_ui
 
-    def _update_cities_from_sds(self):
-        """Fetches the list of active cities from the Directory Service."""
-        cities_url = f"{self.sds_url}/cities"
-        try:
-            response = self.sds_session.get(cities_url, timeout=5)
-            response.raise_for_status()
-            cities_data = response.json()
-            if self.city_name in cities_data:
-                del cities_data[self.city_name]
-            
-            if self.cities_config != cities_data:
-                logging.info(f"Updated city directory from SDS: {list(cities_data.keys())}")
-                self.cities_config = cities_data
-            
-            if self.sds_status != "Online":
-                logging.info("Connection to SDS established.")
-            self.sds_status = "Online"
+            if hasattr(chat_ui, "reset_user_avatar_cache"):
+                chat_ui.reset_user_avatar_cache()
+        except ImportError:
+            pass
 
-        except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
-            if self.sds_status == "Online":
-                logging.warning(f"Lost connection to SDS: {e}. Falling back to local DB config.")
-                self._load_cities_from_db() # Revert to local config
-            else:
-                logging.debug(f"Could not update city list from SDS: {e}")
-            self.sds_status = "Offline (SDS Unreachable)"
-
-    def _load_cities_from_db(self):
-        """Loads the city configuration from the local database."""
-        db = self.SessionLocal()
-        try:
-            other_cities = db.query(CityModel).filter(CityModel.CITYID != self.city_id).all()
-            self.cities_config = {
-                city.CITYNAME: {
-                    "city_id": city.CITYID,
-                    "api_base_url": f"http://127.0.0.1:{city.API_PORT}",
-                    "timezone": getattr(city, "TIMEZONE", "UTC") or "UTC",
-                } for city in other_cities
-            }
-            logging.info(f"Loaded/reloaded city config from local DB. Found {len(self.cities_config)} other cities.")
-        finally:
-            db.close()
-
-    def switch_to_offline_mode(self):
-        """Forces the manager to use the local DB for city configuration."""
-        if self.sds_status == "Offline (Forced by User)":
-            logging.info("Already in forced offline mode.")
-            return self.sds_status
-
-        logging.info("User requested to switch to offline mode.")
-        # Stop the background thread if it's running
-        if self.sds_thread and self.sds_thread.is_alive():
-            self.sds_stop_event.set()
-            self.sds_thread.join(timeout=2)
-        
-        self._load_cities_from_db()
-        self.sds_status = "Offline (Forced by User)"
-        logging.info("Switched to offline mode. SDS communication is stopped.")
-        return self.sds_status
-
-    def switch_to_online_mode(self):
-        """Attempts to reconnect to SDS and resume online operations."""
-        logging.info("User requested to switch to online mode.")
-        
-        # If the thread is already running, just force an update and return.
-        if self.sds_thread and self.sds_thread.is_alive():
-            logging.info("SDS thread is already running. Forcing an update.")
-            self._update_cities_from_sds()
-            return self.sds_status
-        
-        # If the thread is not running, start it.
-        logging.info("SDS thread is not running. Attempting to start it.")
-        self.sds_status = "Online (Connecting...)"
-        self.sds_stop_event.clear() # Reset the stop event
-        
-        # Try to connect immediately
-        self._register_with_sds()
-        self._update_cities_from_sds() # This will set status to "Online" or "Offline (SDS Unreachable)"
-        
-        self.sds_thread = threading.Thread(target=self._sds_background_loop, daemon=True)
-        self.sds_thread.start()
-        logging.info("SDS background thread re-started.")
-        return self.sds_status
-
-    def _db_polling_loop(self):
-        """Periodically polls the database for inter-city communication tasks."""
-        # 3秒ごとにDBをチェックするループ
-        while not self.db_polling_stop_event.wait(3):
-            try:
-                # 1. 訪問依頼の確認 (訪問先Cityが実行)
-                self._check_for_visitors()
-                
-                # 2. 思考依頼の確認 (故郷Cityが実行)
-                self._process_thinking_requests()
-
-                # 3. 自身の派遣依頼のステータス確認 (出発元Cityが実行)
-                self._check_dispatch_status()
-
-                # 4. スケジュールされたプロンプトの実行
-                self.run_scheduled_prompts()
-            except Exception as e:
-                logging.error(f"Error in DB polling loop: {e}", exc_info=True)
+    def reload_host_avatar(self, avatar_path: Optional[str]) -> None:
+        """Refresh the host avatar asset from the given path."""
+        self.city_host_avatar_path = avatar_path
+        data = None
+        if avatar_path:
+            data = self._load_avatar_data(Path(avatar_path))
+        self.host_avatar = data or self.default_avatar
+        self.state.host_avatar = self.host_avatar
 
     @property
     def all_personas(self) -> Dict[str, Union[PersonaCore, RemotePersonaProxy]]:
@@ -407,156 +373,13 @@ class SAIVerseManager:
         return {**self.personas, **self.visiting_personas}
 
     def _process_thinking_requests(self):
-        """DBをポーリングして新しい思考依頼を処理する"""
-        db = self.SessionLocal()
-        try:
-            pending_requests = db.query(ThinkingRequest).filter(ThinkingRequest.city_id == self.city_id, ThinkingRequest.status == 'pending').all()
-            if not pending_requests:
-                return
-
-            logging.info(f"Found {len(pending_requests)} new thinking request(s).")
-
-            for req in pending_requests:
-                persona = self.personas.get(req.persona_id)
-                if not persona:
-                    logging.error(f"Persona {req.persona_id} not found for thinking request {req.request_id}.")
-                    req.status = 'error'
-                    req.response_text = 'Persona not found in this city.'
-                    continue
-
-                try:
-                    context = json.loads(req.request_context_json)
-                    
-                    # コンテキストをLLMに渡すための情報テキストに整形
-                    info_text_parts = []
-                    info_text_parts.append(f"You are currently in a remote city. Here is the context from there:")
-                    info_text_parts.append(f"- Building: {context.get('building_id')}")
-                    info_text_parts.append(f"- Occupants: {', '.join(context.get('occupants', []))}")
-                    info_text_parts.append(f"- User is {'online' if context.get('user_online') else 'offline'}")
-                    info_text_parts.append(f"- Recent History:")
-                    for msg in context.get('recent_history', []):
-                        info_text_parts.append(f"  - {msg.get('role')}: {msg.get('content')}")
-                    info_text = "\n".join(info_text_parts)
-
-                    # 思考を実行
-                    response_text, _, _ = persona._generate(
-                        user_message=None, system_prompt_extra=None, info_text=info_text,
-                        log_extra_prompt=False, log_user_message=False
-                    )
-
-                    req.response_text = response_text
-                    req.status = 'processed'
-                    logging.info(f"Processed thinking request {req.request_id} for {req.persona_id}.")
-
-                except errors.ServerError as e:
-                    logging.warning(f"LLM Server Error on thinking request {req.request_id}: {e}. Marking as error.")
-                    req.status = 'error'
-                    # 503エラーの場合は、再試行を促すメッセージをDBに保存する
-                    if "503" in str(e):
-                         req.response_text = f"[SAIVERSE_ERROR] LLMモデルが一時的に利用できませんでした (503 Server Error)。時間をおいて再度試行してください。詳細: {e}"
-                    else:
-                         req.response_text = f"[SAIVERSE_ERROR] LLMサーバーで予期せぬエラーが発生しました。詳細: {e}"
-                except Exception as e:
-                    logging.error(f"Error processing thinking request {req.request_id}: {e}", exc_info=True)
-                    req.status = 'error'
-                    req.response_text = f'[SAIVERSE_ERROR] An internal error occurred during thinking: {e}'
-            db.commit()
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Error during thinking request check: {e}", exc_info=True)
-        finally:
-            db.close()
+        self.runtime.process_thinking_requests()
 
     def _check_for_visitors(self):
-        """DBをポーリングして新しい訪問者を検知し、Cityに配置する"""
-        db = self.SessionLocal()
-        try:
-            # 'requested'状態の訪問者のみを処理対象とする
-            visitors_to_process = db.query(VisitingAI).filter(
-                VisitingAI.city_id == self.city_id,
-                VisitingAI.status == 'requested'
-            ).all()
-            if not visitors_to_process:
-                return
-
-            logging.info(f"Found {len(visitors_to_process)} new visitor request(s) in the database.")
-            
-            for visitor in visitors_to_process:
-                try:
-                    # 新しいハンドラを呼び出して、DBのステータス更新までを任せる
-                    self._handle_visitor_arrival(visitor)
-                except Exception as e:
-                    # エラーが発生した場合、そのレコードを'rejected'ステータスにしてループが続行できるようにする
-                    logging.error(f"Unexpected error processing visitor ID {visitor.id}: {e}. Setting status to 'rejected'.", exc_info=True)
-                    error_db = self.SessionLocal()
-                    try:
-                        error_visitor = error_db.query(VisitingAI).filter_by(id=visitor.id).first()
-                        if error_visitor:
-                            error_visitor.status = 'rejected'
-                            error_visitor.reason = f"Internal server error during arrival: {e}"
-                            error_db.commit()
-                    finally:
-                        error_db.close()
-        except Exception as e:
-            logging.error(f"Error during visitor check loop: {e}", exc_info=True)
-        finally:
-            db.close()
+        self.runtime.check_for_visitors()
 
     def _check_dispatch_status(self):
-        """自身が要求した移動トランザクションの状態を監視し、プロセスを確定させる"""
-        db = self.SessionLocal()
-        try:
-            # 自身が作成した（＝source_city_idが自分）トランザクションを探す
-            # キー名も指定して、より安全なLIKE検索にする
-            dispatches = db.query(VisitingAI).filter(
-                VisitingAI.profile_json.like(f'%"source_city_id": "{self.city_name}"%')
-            ).all()
-
-            for dispatch in dispatches:
-                persona_id = dispatch.persona_id
-                persona = self.personas.get(persona_id)
-                if not persona:
-                    continue
-
-                # --- タイムアウトチェック ---
-                # 5分以上 'requested' のままのものはタイムアウトとみなす
-                is_timed_out = (
-                    dispatch.status == 'requested' and
-                    hasattr(dispatch, 'created_at') and # スキーマ変更中の安全策
-                    #dispatch.created_at < datetime.now() - timedelta(minutes=5)
-                    dispatch.created_at < datetime.now() - timedelta(seconds=self.dispatch_timeout_seconds)
-                )
-
-                if dispatch.status == 'accepted':
-                    logging.info(f"Dispatch for {persona.persona_name} was accepted. Finalizing departure.")
-                    # 派遣を確定させる
-                    self._finalize_dispatch(persona_id, db_session=db)
-                    db.delete(dispatch)
-
-                elif dispatch.status == 'rejected' or is_timed_out:
-                    if is_timed_out:
-                        reason = "移動先のCityが応答しませんでした（タイムアウト）。"
-                        logging.warning(f"Dispatch for {persona.persona_name} timed out.")
-                    else:
-                        reason = dispatch.reason or "不明な理由"
-
-                    logging.warning(f"Dispatch for {persona.persona_name} was rejected. Reason: {reason}")
-                    # UIに表示される失敗メッセージを作成
-                    failure_message = f'<div class="note-box">移動失敗<br><b>{reason}</b></div>'
-                    persona.history_manager.add_message(
-                        {"role": "host", "content": failure_message},
-                        persona.current_building_id,
-                        heard_by=list(self.occupants.get(persona.current_building_id, [])),
-                    )
-                    db.delete(dispatch)
-            
-            db.commit()
-
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Error during dispatch status check: {e}", exc_info=True)
-        finally:
-            db.close()
+        self.runtime.check_dispatch_status()
 
     def _load_and_create_buildings_from_db(self) -> List[Building]:
         """DBからBuilding情報を読み込み、Buildingオブジェクトのリストを生成する"""
@@ -584,203 +407,512 @@ class SAIVerseManager:
         finally:
             db.close()
 
-    def _set_persona_avatar(self, ai_id: str, avatar_value: Optional[str]) -> None:
-        """Update in-memory avatar cache and persona reference."""
-        display_value = self.default_avatar
-        if avatar_value:
-            try:
-                avatar_path = Path(avatar_value)
-                if avatar_path.exists():
-                    mime = mimetypes.guess_type(avatar_path.name)[0] or "image/png"
-                    data_b = avatar_path.read_bytes()
-                    b64 = base64.b64encode(data_b).decode("ascii")
-                    display_value = f"data:{mime};base64,{b64}"
-                else:
-                    # Could be a URL or base64 string already
-                    display_value = avatar_value
-            except Exception as exc:
-                logging.error(f"Failed to process avatar for {ai_id}: {exc}")
-                display_value = self.default_avatar
+    def _ensure_item_tables(self, engine) -> None:
+        """Ensure newly introduced item-related tables exist."""
+        try:
+            ItemModel.__table__.create(bind=engine, checkfirst=True)
+            ItemLocationModel.__table__.create(bind=engine, checkfirst=True)
+            PersonaEventLog.__table__.create(bind=engine, checkfirst=True)
+        except Exception as exc:
+            logging.error("Failed to ensure item tables exist: %s", exc, exc_info=True)
+
+    def _load_items_from_db(self) -> None:
+        """Load items and their locations from the database into memory."""
+        db = self.SessionLocal()
+        try:
+            item_rows = db.query(ItemModel).all()
+            location_rows = db.query(ItemLocationModel).all()
+        except Exception as exc:
+            logging.error("Failed to load items from DB: %s", exc, exc_info=True)
+            item_rows = []
+            location_rows = []
+        finally:
+            db.close()
+
+        self.items = {}
+        self.item_locations = {}
+        self.items_by_building = defaultdict(list)
+        self.items_by_persona = defaultdict(list)
+        self.world_items = []
+
+        for row in item_rows:
+            if row.STATE_JSON:
+                try:
+                    state_payload = json.loads(row.STATE_JSON)
+                except json.JSONDecodeError:
+                    logging.warning("Invalid STATE_JSON for item %s", row.ITEM_ID)
+                    state_payload = {}
+            else:
+                state_payload = {}
+            self.items[row.ITEM_ID] = {
+                "item_id": row.ITEM_ID,
+                "name": row.NAME,
+                "type": row.TYPE,
+                "description": row.DESCRIPTION or "",
+                "state": state_payload,
+                "created_at": row.CREATED_AT,
+                "updated_at": row.UPDATED_AT,
+            }
+
+        for loc in location_rows:
+            payload = {
+                "owner_kind": (loc.OWNER_KIND or "").strip(),
+                "owner_id": (loc.OWNER_ID or "").strip(),
+                "updated_at": loc.UPDATED_AT,
+                "location_id": loc.LOCATION_ID,
+            }
+            self.item_locations[loc.ITEM_ID] = payload
+            owner_kind = payload["owner_kind"]
+            owner_id = payload["owner_id"]
+            if owner_kind == "building":
+                self.items_by_building[owner_id].append(loc.ITEM_ID)
+            elif owner_kind == "persona":
+                self.items_by_persona[owner_id].append(loc.ITEM_ID)
+            else:
+                self.world_items.append(loc.ITEM_ID)
+
+        for item_id in self.items.keys():
+            if item_id not in self.item_locations:
+                self.world_items.append(item_id)
+
+        for building in self.buildings:
+            building.item_ids = list(self.items_by_building.get(building.building_id, []))
+            self._refresh_building_system_instruction(building.building_id)
+        if hasattr(self, "personas") and isinstance(self.personas, dict):
+            for persona_id, persona in self.personas.items():
+                if hasattr(persona, "set_item_registry"):
+                    try:
+                        persona.set_item_registry(self.items)
+                    except Exception as exc:
+                        logging.debug("Failed to update item registry for %s: %s", persona_id, exc)
+                inventory_ids = self.items_by_persona.get(persona_id, [])
+                persona.set_inventory(list(inventory_ids))
+        if hasattr(self, "state") and isinstance(self.state, CoreState):
+            self.state.items = self.items
+            self.state.item_locations = self.item_locations
+            self.state.items_by_building = {k: list(v) for k, v in self.items_by_building.items()}
+            self.state.items_by_persona = {k: list(v) for k, v in self.items_by_persona.items()}
+            self.state.world_items = list(self.world_items)
+
+    def _refresh_building_system_instruction(self, building_id: str) -> None:
+        """Refresh building.system_instruction so that it includes the current item list."""
+        building = self.building_map.get(building_id)
+        if not building:
+            return
+        base_text = building.base_system_instruction or ""
+        item_ids = self.items_by_building.get(building_id, [])
+        if not item_ids:
+            building.system_instruction = base_text
+            return
+        lines: List[str] = []
+        for item_id in item_ids:
+            data = self.items.get(item_id)
+            if not data:
+                continue
+            description = (data.get("description") or "").strip() or "(説明なし)"
+            if len(description) > 160:
+                description = description[:157] + "..."
+            display_name = data.get("name", item_id)
+            lines.append(f"- {display_name}: {description} [アイテムID:\"{item_id}\"]")
+        if not lines:
+            building.system_instruction = base_text
+            return
+        items_block = "\n".join(lines)
+        marker = "## 現在地にあるアイテム"
+        if marker in base_text:
+            before, after = base_text.split(marker, 1)
+            after = after.lstrip("\n")
+            building.system_instruction = f"{before}{marker}\n{items_block}\n{after}".rstrip()
         else:
-            avatar_value = None
+            building.system_instruction = f"{base_text.rstrip()}\n\n{marker}\n{items_block}"
 
-        self.avatar_map[ai_id] = display_value
-        if ai_id in self.personas:
-            self.personas[ai_id].avatar_image = avatar_value
-
-    def _load_personas_from_db(self):
-        """DBからペルソナ情報を読み込み、PersonaCoreインスタンスを生成する"""
+    def _load_persona_event_logs(self) -> None:
+        """Load pending persona events from the database."""
         db = self.SessionLocal()
         try:
-            db_personas = db.query(AIModel).filter(AIModel.HOME_CITYID == self.city_id).all()
-            for db_ai in db_personas:
-                pid = db_ai.AIID
-                # デフォルトの開始位置。後でDBのoccupancyで上書きされる
-                start_id = f"{pid}_room"
-
-                # アバター画像処理 (DBのパスを優先)
-                self._set_persona_avatar(pid, db_ai.AVATAR_IMAGE)
-
-                # モデル設定 (DBの個別設定を優先し、なければManagerのデフォルトを使用)
-                persona_model = db_ai.DEFAULT_MODEL or self.model
-                persona_context_length = get_context_length(persona_model)
-                persona_provider = get_model_provider(persona_model)
-
-                # PersonaCoreインスタンス生成
-                persona = PersonaCore(
-                    city_name=self.city_name,
-                    persona_id=pid,
-                    persona_name=db_ai.AINAME,
-                    persona_system_instruction=db_ai.SYSTEMPROMPT or "",
-                    avatar_image=db_ai.AVATAR_IMAGE,
-                    buildings=self.buildings,
-                    common_prompt_path=Path("system_prompts/common.txt"),
-                    action_priority_path=Path("action_priority.json"),
-                    building_histories=self.building_histories,
-                    occupants=self.occupants,
-                    id_to_name_map=self.id_to_name_map,
-                    move_callback=self._move_persona,
-                    dispatch_callback=self.dispatch_persona,
-                    explore_callback=self._explore_city, # New callback
-                    create_persona_callback=self._create_persona,
-                    session_factory=self.SessionLocal,
-                    start_building_id=start_id,
-                    model=persona_model,
-                    context_length=persona_context_length,
-                    user_room_id=self.user_room_id,
-                    provider=self.provider,
-                    interaction_mode=(db_ai.INTERACTION_MODE or "auto"),
-                    is_dispatched=db_ai.IS_DISPATCHED,
-                    timezone_info=self.timezone_info,
-                    timezone_name=self.timezone_name,
+            rows = (
+                db.query(PersonaEventLog)
+                .join(AIModel, PersonaEventLog.PERSONA_ID == AIModel.AIID)
+                .filter(
+                    AIModel.HOME_CITYID == self.city_id,
+                    PersonaEventLog.STATUS == "pending",
                 )
-
-                self.personas[pid] = persona
-            logging.info(f"Loaded {len(self.personas)} personas from database.")
-        except Exception as e:
-            logging.error(f"Failed to load personas from DB: {e}", exc_info=True)
+                .all()
+            )
+        except Exception as exc:
+            logging.error("Failed to load persona events: %s", exc, exc_info=True)
+            rows = []
         finally:
             db.close()
 
-    def _load_occupancy_from_db(self):
-        """DBから現在の入室状況を読み込み、PersonaCoreとManagerの状態を更新する"""
+        self.persona_pending_events = defaultdict(list)
+        for row in rows:
+            self.persona_pending_events[row.PERSONA_ID].append(
+                {
+                    "event_id": row.EVENT_ID,
+                    "content": row.CONTENT,
+                    "created_at": row.CREATED_AT,
+                }
+            )
+
+    def record_persona_event(self, persona_id: str, content: str) -> None:
+        """Add a new pending event for the specified persona."""
         db = self.SessionLocal()
         try:
-            # 現在入室中のログを取得 (exit_timestamp is NULL)
-            current_occupancy = db.query(BuildingOccupancyLog).filter(BuildingOccupancyLog.CITYID == self.city_id).filter(
-                BuildingOccupancyLog.EXIT_TIMESTAMP.is_(None)
-            ).all()
-
-            # self.occupantsをクリアして再構築
-            self.occupants = {b.building_id: [] for b in self.buildings}
-
-            for log in current_occupancy:
-                pid = log.AIID
-                bid = log.BUILDINGID
-                if pid in self.personas and bid in self.building_map:
-                    self.occupants[bid].append(pid)
-                    # PersonaCoreの現在地も更新
-                    self.personas[pid].current_building_id = bid
-                else:
-                    logging.warning(f"Invalid occupancy record found: AI '{pid}' or Building '{bid}' does not exist.")
-            logging.info("Loaded current occupancy from database.")
-        except Exception as e:
-            logging.error(f"Failed to load occupancy from DB: {e}", exc_info=True)
+            entry = PersonaEventLog(PERSONA_ID=persona_id, CONTENT=content, STATUS="pending")
+            db.add(entry)
+            db.commit()
+            db.refresh(entry)
+            created_at = entry.CREATED_AT
+            event_id = entry.EVENT_ID
+        except Exception as exc:
+            logging.error("Failed to record persona event for %s: %s", persona_id, exc, exc_info=True)
+            db.rollback()
+            return
         finally:
             db.close()
+        self.persona_pending_events[persona_id].append(
+            {
+                "event_id": event_id,
+                "content": content,
+                "created_at": created_at,
+            }
+        )
+
+    def get_persona_pending_events(self, persona_id: str) -> List[Dict[str, Any]]:
+        events = list(self.persona_pending_events.get(persona_id, []))
+        events.sort(key=lambda e: e.get("created_at") or datetime.utcnow())
+        return events
+
+    def archive_persona_events(self, persona_id: str, event_ids: List[int]) -> None:
+        if not event_ids:
+            return
+        db = self.SessionLocal()
+        try:
+            (
+                db.query(PersonaEventLog)
+                .filter(PersonaEventLog.EVENT_ID.in_(event_ids))
+                .update({PersonaEventLog.STATUS: "archived"}, synchronize_session=False)
+            )
+            db.commit()
+        except Exception as exc:
+            logging.error("Failed to archive persona events %s: %s", event_ids, exc, exc_info=True)
+            db.rollback()
+            return
+        finally:
+            db.close()
+
+        pending = self.persona_pending_events.get(persona_id, [])
+        if pending:
+            remaining = [ev for ev in pending if ev.get("event_id") not in event_ids]
+            if remaining:
+                self.persona_pending_events[persona_id] = remaining
+            else:
+                self.persona_pending_events.pop(persona_id, None)
+
+    def _append_building_history_note(self, building_id: str, content: str) -> None:
+        if not building_id:
+            return
+        history = self.building_histories.setdefault(building_id, [])
+        history.append({"role": "host", "content": content})
+        try:
+            self._save_building_histories([building_id])
+        except Exception:
+            logging.debug("Failed to save building history for %s", building_id, exc_info=True)
+
+    def _update_item_cache(self, item_id: str, owner_kind: str, owner_id: Optional[str], updated_at: datetime) -> None:
+        prev = self.item_locations.get(item_id)
+        prev_kind = prev.get("owner_kind") if prev else None
+        prev_owner = prev.get("owner_id") if prev else None
+
+        if prev_kind == "building" and prev_owner:
+            listing = self.items_by_building.get(prev_owner, [])
+            if listing and item_id in listing:
+                listing[:] = [itm for itm in listing if itm != item_id]
+            if not listing:
+                self.items_by_building.pop(prev_owner, None)
+            self._refresh_building_system_instruction(prev_owner)
+        elif prev_kind == "persona" and prev_owner:
+            inventory = self.items_by_persona.get(prev_owner, [])
+            if inventory and item_id in inventory:
+                inventory[:] = [itm for itm in inventory if itm != item_id]
+            if not inventory:
+                self.items_by_persona.pop(prev_owner, None)
+            persona_obj = self.personas.get(prev_owner)
+            if persona_obj:
+                persona_obj.set_inventory(self.items_by_persona.get(prev_owner, []))
+        else:
+            if item_id in self.world_items:
+                self.world_items[:] = [itm for itm in self.world_items if itm != item_id]
+
+        if owner_kind == "building" and owner_id:
+            listing = self.items_by_building[owner_id]
+            if item_id not in listing:
+                listing.append(item_id)
+            self._refresh_building_system_instruction(owner_id)
+        elif owner_kind == "persona" and owner_id:
+            inventory = self.items_by_persona[owner_id]
+            if item_id not in inventory:
+                inventory.append(item_id)
+            persona_obj = self.personas.get(owner_id)
+            if persona_obj:
+                persona_obj.set_inventory(list(inventory))
+        else:
+            if item_id not in self.world_items:
+                self.world_items.append(item_id)
+
+            self.item_locations[item_id] = {
+            "owner_kind": owner_kind,
+            "owner_id": owner_id,
+            "updated_at": updated_at,
+        }
+
+    def _broadcast_item_event(self, persona_ids: List[str], message: str) -> None:
+        deduped = {pid for pid in persona_ids if pid}
+        for pid in deduped:
+            self.record_persona_event(pid, message)
+
+    # --- Item operations ---
+
+    def pickup_item_for_persona(self, persona_id: str, item_id: str) -> str:
+        persona = self.personas.get(persona_id)
+        if not persona or getattr(persona, "is_proxy", False):
+            raise RuntimeError("このペルソナではアイテムを扱えません。")
+        building_id = persona.current_building_id
+        if not building_id:
+            raise RuntimeError("現在地が不明なため、アイテムを拾えません。")
+        resolved_id = self._resolve_item_identifier(item_id) or item_id
+        item = self.items.get(resolved_id)
+        if not item:
+            raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
+        location = self.item_locations.get(resolved_id)
+        if not location or location.get("owner_kind") != "building" or location.get("owner_id") != building_id:
+            raise RuntimeError("このアイテムは現在の建物にはありません。")
+
+        timestamp = datetime.utcnow()
+        db = self.SessionLocal()
+        try:
+            row = (
+                db.query(ItemLocationModel)
+                .filter(ItemLocationModel.ITEM_ID == resolved_id)
+                .one_or_none()
+            )
+            if row is None:
+                raise RuntimeError("アイテムの配置情報が見つかりませんでした。")
+            row.OWNER_KIND = "persona"
+            row.OWNER_ID = persona_id
+            row.UPDATED_AT = timestamp
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
+        finally:
+            db.close()
+
+        self._update_item_cache(resolved_id, "persona", persona_id, timestamp)
+        item_name = item.get("name", resolved_id)
+        actor_msg = f"「{item_name}」を拾った。"
+        self.record_persona_event(persona_id, actor_msg)
+        other_ids = [
+            oid for oid in self.occupants.get(building_id, [])
+            if oid and oid != persona_id
+        ]
+        if other_ids:
+            notice = f"{persona.persona_name}が「{item_name}」を拾った。"
+            self._broadcast_item_event(other_ids, notice)
+        building_name = self.building_map.get(building_id).name if building_id in self.building_map else building_id
+        note = (
+            "<div class=\"note-box\">📦 Item Pickup:<br>"
+            f"<b>{persona.persona_name}が「{item_name}」を拾いました（{building_name}）。</b></div>"
+        )
+        self._append_building_history_note(building_id, note)
+        return actor_msg
+
+    def place_item_from_persona(self, persona_id: str, item_id: str, building_id: Optional[str] = None) -> str:
+        persona = self.personas.get(persona_id)
+        if not persona or getattr(persona, "is_proxy", False):
+            raise RuntimeError("このペルソナではアイテムを扱えません。")
+        building_id = building_id or persona.current_building_id
+        if not building_id:
+            raise RuntimeError("現在地が不明なため、アイテムを置けません。")
+        resolved_id = self._resolve_item_identifier(item_id) or item_id
+        item = self.items.get(resolved_id)
+        if not item:
+            raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
+        location = self.item_locations.get(resolved_id)
+        if not location or location.get("owner_kind") != "persona" or location.get("owner_id") != persona_id:
+            raise RuntimeError("このアイテムを所持していないため、置けません。")
+
+        timestamp = datetime.utcnow()
+        db = self.SessionLocal()
+        try:
+            row = (
+                db.query(ItemLocationModel)
+                .filter(ItemLocationModel.ITEM_ID == resolved_id)
+                .one_or_none()
+            )
+            if row is None:
+                row = ItemLocationModel(
+                    ITEM_ID=resolved_id,
+                    OWNER_KIND="building",
+                    OWNER_ID=building_id,
+                    UPDATED_AT=timestamp,
+                )
+                db.add(row)
+            else:
+                row.OWNER_KIND = "building"
+                row.OWNER_ID = building_id
+                row.UPDATED_AT = timestamp
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
+        finally:
+            db.close()
+
+        self._update_item_cache(resolved_id, "building", building_id, timestamp)
+        building_name = self.building_map.get(building_id).name if building_id in self.building_map else building_id
+        item_name = item.get("name", resolved_id)
+        actor_msg = f"「{item_name}」を{building_name}に置いた。"
+        self.record_persona_event(persona_id, actor_msg)
+        other_ids = [
+            oid for oid in self.occupants.get(building_id, [])
+            if oid and oid != persona_id
+        ]
+        if other_ids:
+            notice = f"{persona.persona_name}が{building_name}に「{item_name}」を置いた。"
+            self._broadcast_item_event(other_ids, notice)
+        note = (
+            "<div class=\"note-box\">📦 Item Placement:<br>"
+            f"<b>{persona.persona_name}が「{item_name}」を{building_name}に置きました。</b></div>"
+        )
+        self._append_building_history_note(building_id, note)
+        return actor_msg
+
+    def use_item_for_persona(self, persona_id: str, item_id: str, new_description: str) -> str:
+        persona = self.personas.get(persona_id)
+        if not persona or getattr(persona, "is_proxy", False):
+            raise RuntimeError("このペルソナではアイテムを扱えません。")
+        resolved_id = self._resolve_item_identifier(item_id) or item_id
+        item = self.items.get(resolved_id)
+        if not item:
+            raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
+        location = self.item_locations.get(resolved_id)
+        if not location or location.get("owner_kind") != "persona" or location.get("owner_id") != persona_id:
+            raise RuntimeError("このアイテムは現在あなたのインベントリにありません。")
+        if (item.get("type") or "").lower() != "object":
+            raise RuntimeError("このアイテムは use 操作に対応していません。")
+        cleaned = (new_description or "").strip()
+        timestamp = datetime.utcnow()
+
+        db = self.SessionLocal()
+        try:
+            row = (
+                db.query(ItemModel)
+                .filter(ItemModel.ITEM_ID == resolved_id)
+                .one_or_none()
+            )
+            if row is None:
+                raise RuntimeError("アイテム本体が見つかりません。")
+            row.DESCRIPTION = cleaned
+            row.UPDATED_AT = timestamp
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
+        finally:
+            db.close()
+
+        item["description"] = cleaned
+        item["updated_at"] = timestamp
+        location_owner_kind = self.item_locations.get(resolved_id, {}).get("owner_kind")
+        location_owner_id = self.item_locations.get(resolved_id, {}).get("owner_id")
+        if location_owner_kind == "building" and location_owner_id:
+            self._refresh_building_system_instruction(location_owner_id)
+        inventory = self.items_by_persona.get(persona_id, [])
+        persona.set_inventory(list(inventory))
+
+        preview = cleaned if cleaned else "(内容未設定)"
+        if len(preview) > 80:
+            preview = preview[:77] + "..."
+        item_name = item.get("name", resolved_id)
+        actor_msg = f"「{item_name}」を使った。内容: {preview}"
+        self.record_persona_event(persona_id, actor_msg)
+        building_id = persona.current_building_id
+        other_ids = [
+            oid for oid in self.occupants.get(building_id or "", [])
+            if oid and oid != persona_id
+        ]
+        if other_ids:
+            notice = f"{persona.persona_name}が「{item_name}」を使った。"
+            self._broadcast_item_event(other_ids, notice)
+        if building_id:
+            building_name = self.building_map.get(building_id).name if building_id in self.building_map else building_id
+            note = (
+                "<div class=\"note-box\">🛠 Item Use:<br>"
+                f"<b>{persona.persona_name}が「{item_name}」を使いました（{building_name}）。</b></div>"
+            )
+            self._append_building_history_note(building_id, note)
+        return actor_msg
+
 
     def _explore_city(self, persona_id: str, target_city_id: str):
-        """
-        Handles the 'explore_city' action.
-        Fetches building information from the target city (or the current city) and provides it as feedback.
-        """
-        persona = self.personas.get(persona_id)
-        if not persona:
-            logging.error(f"Cannot explore: Persona {persona_id} not found.")
-            return
-
-        feedback_message = ""
-        # --- ★ 現在のCityを探索する場合の処理を追加 ---
-        if target_city_id == self.city_name:
-            logging.info(f"Persona {persona_id} is exploring the current city: {self.city_name}")
-            # ローカルの建物情報を整形してフィードバック
-            building_list_str = "\n".join(
-                [f"- {b.name} ({b.building_id}): {b.description}" for b in self.buildings]
-            )
-            feedback_message = f"現在いるCity '{self.city_name}' を探索した結果、以下の建物が見つかりました。\n{building_list_str}"
-        
-        # --- 他のCityを探索する場合の既存ロジック ---
-        else:
-            target_city_info = self.cities_config.get(target_city_id)
-            if not target_city_info:
-                feedback_message = f"探索失敗: City '{target_city_id}' は見つかりませんでした。"
-                logging.warning(f"Persona {persona_id} tried to explore non-existent city '{target_city_id}'.")
-            else:
-                target_api_url = f"{target_city_info['api_base_url']}/inter-city/buildings"
-                try:
-                    logging.info(f"Persona {persona_id} is exploring {target_city_id} at {target_api_url}")
-                    response = self.sds_session.get(target_api_url, timeout=10)
-                    response.raise_for_status()
-                    buildings_data = response.json()
-
-                    if not buildings_data:
-                        feedback_message = f"City '{target_city_id}' を探索しましたが、公開されている建物は見つかりませんでした。"
-                    else:
-                        building_list_str = "\n".join(
-                            [f"- {b['building_name']} ({b['building_id']}): {b['description']}" for b in buildings_data]
-                        )
-                        feedback_message = f"City '{target_city_id}' を探索した結果、以下の建物が見つかりました。\n{building_list_str}"
-                
-                except requests.exceptions.RequestException as e:
-                    feedback_message = f"探索失敗: City '{target_city_id}' との通信中にエラーが発生しました。"
-                    logging.error(f"Failed to connect to target city '{target_city_id}' for exploration: {e}")
-                except json.JSONDecodeError:
-                    feedback_message = f"探索失敗: City '{target_city_id}' からの応答が不正でした。"
-                    logging.error(f"Failed to parse JSON response from '{target_city_id}' during exploration.")
-
-        # Provide feedback to the persona via system message in their current building
-        system_feedback = f'<div class="note-box">🔎 探索結果:<br><b>{feedback_message.replace(chr(10), "<br>")}</b></div>'
-        
-        persona.history_manager.add_message(
-            {"role": "host", "content": system_feedback},
-            persona.current_building_id,
-            heard_by=list(self.occupants.get(persona.current_building_id, [])),
-        )
-        self._save_building_histories()
+        self.runtime.explore_city(persona_id, target_city_id)
 
     def _load_user_state_from_db(self):
-        """DBからユーザーのログイン状態を読み込む (現在はUSERID=1固定)"""
-        db = self.SessionLocal()
-        try:
-            # USERID=1のユーザーを想定
-            user = db.query(UserModel).filter(UserModel.USERID == self.user_id).first()
-            if user:
-                self.user_is_online = user.LOGGED_IN
-                self.user_current_city_id = user.CURRENT_CITYID
-                self.user_current_building_id = user.CURRENT_BUILDINGID
-                self.user_display_name = (user.USERNAME or "ユーザー").strip() or "ユーザー"
-                self.id_to_name_map[str(self.user_id)] = self.user_display_name
-                logging.info(f"Loaded user state: {'Online' if self.user_is_online else 'Offline'} at {self.user_current_building_id}")
-            else:
-                logging.warning("User with USERID=1 not found. Defaulting to Offline.")
-                self.user_is_online = False
-                self.user_current_building_id = None
-                self.user_current_city_id = None
-                self.user_display_name = "ユーザー"
-                self.id_to_name_map[str(self.user_id)] = self.user_display_name
-        except Exception as e:
-            logging.error(f"Failed to load user status from DB: {e}", exc_info=True)
-            self.user_is_online = False
-            self.user_current_building_id = None
-            self.user_display_name = "ユーザー"
-            self.id_to_name_map[str(self.user_id)] = self.user_display_name
-        finally:
-            db.close()
+        if getattr(self, "runtime", None) is not None:
+            self.runtime.load_user_state_from_db()
+        else:
+            db = self.SessionLocal()
+            try:
+                user = (
+                    db.query(UserModel)
+                    .filter(UserModel.USERID == self.state.user_id)
+                    .first()
+                )
+                if user:
+                    self.state.user_is_online = user.LOGGED_IN
+                    self.state.user_current_city_id = user.CURRENT_CITYID
+                    self.state.user_current_building_id = user.CURRENT_BUILDINGID
+                    self.state.user_display_name = (
+                        (user.USERNAME or "ユーザー").strip() or "ユーザー"
+                    )
+                    avatar_data = None
+                    if getattr(user, "AVATAR_IMAGE", None):
+                        avatar_data = self._load_avatar_data(Path(user.AVATAR_IMAGE))
+                    self.state.user_avatar_data = avatar_data or self.default_avatar
+                    self.id_to_name_map[str(self.state.user_id)] = (
+                        self.state.user_display_name
+                    )
+                else:
+                    self.state.user_is_online = False
+                    self.state.user_current_building_id = None
+                    self.state.user_current_city_id = None
+                    self.state.user_display_name = "ユーザー"
+                    self.state.user_avatar_data = self.default_avatar
+                    self.id_to_name_map[str(self.state.user_id)] = (
+                        self.state.user_display_name
+                    )
+            except Exception as exc:
+                logging.error(
+                    "Failed to load user status from DB: %s", exc, exc_info=True
+                )
+                self.state.user_is_online = False
+                self.state.user_current_building_id = None
+                self.state.user_current_city_id = None
+                self.state.user_display_name = "ユーザー"
+                self.state.user_avatar_data = self.default_avatar
+                self.id_to_name_map[str(self.state.user_id)] = (
+                    self.state.user_display_name
+                )
+            finally:
+                db.close()
+        self._refresh_user_state_cache()
 
     def set_user_login_status(self, user_id: int, status: bool) -> str:
         """ユーザーのログイン状態を更新し、ログアウト時にメッセージを記録する"""
         # ログアウト処理の場合、先に現在地を記録しておく
-        last_building_id = self.user_current_building_id if not status else None
+        last_building_id = self.state.user_current_building_id if not status else None
 
         db = self.SessionLocal()
         try:
@@ -788,8 +920,10 @@ class SAIVerseManager:
             if user:
                 user.LOGGED_IN = status
                 db.commit()
-                self.user_is_online = status
-                self.user_display_name = (user.USERNAME or "ユーザー").strip() or "ユーザー"
+                self.state.user_is_online = status
+                self.state.user_display_name = (user.USERNAME or "ユーザー").strip() or "ユーザー"
+                self.user_is_online = self.state.user_is_online
+                self.user_display_name = self.state.user_display_name
                 self.id_to_name_map[str(self.user_id)] = self.user_display_name
                 status_text = "オンライン" if status else "オフライン"
                 logging.info(f"User {user_id} login status set to: {status_text}")
@@ -802,6 +936,7 @@ class SAIVerseManager:
                     self._save_building_histories()
                     logging.info(f"Logged user logout in building {last_building_id}")
 
+                self._refresh_user_state_cache()
                 return status_text
             else:
                 logging.error(f"User with USERID={user_id} not found.")
@@ -814,782 +949,16 @@ class SAIVerseManager:
             db.close()
 
     def move_user(self, target_building_id: str) -> Tuple[bool, str]:
-        """Moves the user to a new building, utilizing OccupancyManager."""
         """Moves the user to a new building and logs the movement."""
-        if target_building_id not in self.building_map:
-            return False, f"移動失敗: 建物 '{target_building_id}' が見つかりません。"
-        
-        from_building_id = self.user_current_building_id
-        if not from_building_id:
-            return False, "移動失敗: 現在地が不明です。"
-        if from_building_id == target_building_id:
-            return True, "同じ場所にいます。"
-        
-        success, message = self.occupancy_manager.move_entity(str(self.user_id), "user", from_building_id, target_building_id)
-        if success:
-            self.user_current_building_id = target_building_id
-        return success, message
+        result = self.runtime.move_user(target_building_id)
+        self._refresh_user_state_cache()
+        return result
 
 
     def _move_persona(self, persona_id: str, from_id: str, to_id: str, db_session=None) -> Tuple[bool, Optional[str]]:
         """Moves a persona between buildings, utilizing OccupancyManager."""
-        success, message = self.occupancy_manager.move_entity(
-            entity_id=persona_id,
-            entity_type='ai',
-            from_id=from_id,
-            to_id=to_id,
-            db_session=db_session
-        )
-        return success, message
+        return self.runtime._move_persona(persona_id, from_id, to_id, db_session=db_session)
 
-    def dispatch_persona(self, persona_id: str, target_city_id: str, target_building_id: str) -> Tuple[bool, str]:
-        """
-        Dispatches a persona to another city.
-
-        :param persona_id: The ID of the persona to dispatch.
-        :param target_city_id: The ID of the city to dispatch the persona to.
-        :param target_building_id: The ID of the building within the target city to dispatch the persona to.
-        1. Sends the persona's profile to the target city's API.
-        2. If the request is accepted, updates the persona's state in the DB.
-        (New Logic: Creates a transaction record in the VisitingAI table)
-        """
-        # 1. Check if the target city is valid from the current cache
-        target_city_info = self.cities_config.get(target_city_id)
-
-        # 2. If not found, force a refresh from SDS and check again
-        if not target_city_info:
-            logging.warning(f"Target city '{target_city_id}' not in cache. Forcing update from SDS.")
-            self._update_cities_from_sds() # SDSから最新情報を取得
-            target_city_info = self.cities_config.get(target_city_id) # 再度チェック
-
-        if not target_city_info:
-            return False, f"移動失敗: City '{target_city_id}' はネットワーク上に見つかりませんでした。相手のCityが起動しているか確認してください。"
-
-        # 2. Get the persona instance
-        persona = self.personas.get(persona_id)
-        if not persona:
-            return False, f"Persona with ID '{persona_id}' not found in this city."
-
-        # --- ★ ID解決ロジックを削除 ---
-        # AIはexplore_cityの結果から完全なIDを渡すことが期待されるため、ID補完は不要。
-
-        # 3. Prepare the profile to be sent
-        profile = {
-            "persona_id": persona.persona_id,
-            "persona_name": persona.persona_name,
-            "target_building_id": target_building_id, # ★ AIが指定した完全なIDをそのまま使用
-            "avatar_image": persona.avatar_image,
-            "emotion": persona.emotion,
-            "source_city_id": self.city_name,
-        }
-
-        # 4. Create a transaction record in the VisitingAI table for the target city
-        db = self.SessionLocal()
-        try:
-            # ターゲットCityのIDをキーにしてレコードを作成
-            target_city_db_id = target_city_info['city_id']
-            
-            # 既存のトランザクションがないか確認
-            existing_dispatch = db.query(VisitingAI).filter_by(city_id=target_city_db_id, persona_id=persona_id).first()
-            if existing_dispatch:
-                return False, "既にこのCityへの移動要求が進行中です。"
-
-            new_dispatch = VisitingAI(
-                city_id=target_city_db_id,
-                persona_id=persona_id,
-                profile_json=json.dumps(profile),
-                status='requested'
-            )
-            db.add(new_dispatch)
-            db.commit()
-            logging.info(f"Created dispatch request for {persona.persona_name} to {target_city_id}.")
-            # AIには移動処理中であることを伝える
-            persona.history_manager.add_message(
-                {"role": "system", "content": f"{target_city_id}への移動を要求しました。相手の応答を待っています..."},
-                persona.current_building_id,
-                heard_by=list(self.occupants.get(persona.current_building_id, [])),
-            )
-            return True, "移動要求を送信しました。"
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to create dispatch request for {persona.persona_name}: {e}", exc_info=True)
-            return False, "移動要求の作成中にデータベースエラーが発生しました。"
-        finally:
-            db.close()
-
-    def _create_persona(self, name: str, system_prompt: str) -> Tuple[bool, str]:
-        """
-        Dynamically creates a new persona, their private room, and places them in it.
-        This is triggered by an AI action.
-        """
-        db = self.SessionLocal()
-        try:
-            # 1. Check for name conflicts (case-insensitive for user-friendliness)
-            existing_ai = db.query(AIModel).filter(AIModel.HOME_CITYID == self.city_id, func.lower(AIModel.AINAME) == func.lower(name)).first()
-            if existing_ai:
-                return False, f"A persona named '{name}' already exists in this city."
-
-            # 2. Create new AI record
-            new_ai_id = f"{name.lower().replace(' ', '_')}_{self.city_name}"
-            if db.query(AIModel).filter_by(AIID=new_ai_id).first():
-                 return False, f"A persona with the generated ID '{new_ai_id}' already exists."
-
-            # 3. Create new Building (private room)
-            new_building_id = f"{name.lower().replace(' ', '_')}_{self.city_name}_room"
-
-            new_ai_model = AIModel(
-                AIID=new_ai_id, HOME_CITYID=self.city_id, AINAME=name,
-                SYSTEMPROMPT=system_prompt, DESCRIPTION=f"A new persona named {name}.",
-                AUTO_COUNT=0, INTERACTION_MODE='auto', IS_DISPATCHED=False,
-                DEFAULT_MODEL=self.model,
-                PRIVATE_ROOM_ID=new_building_id # Link to the private room
-            )
-            db.add(new_ai_model)
-            logging.info(f"DB: Added new AI '{name}' ({new_ai_id}).")
-
-            new_building_model = BuildingModel(
-                CITYID=self.city_id, BUILDINGID=new_building_id, BUILDINGNAME=f"{name}の部屋",
-                CAPACITY=1, SYSTEM_INSTRUCTION=f"{name}が待機する個室です。",
-                DESCRIPTION=f"{name}のプライベートルーム。"
-            )
-            db.add(new_building_model)
-            logging.info(f"DB: Added new building '{new_building_model.BUILDINGNAME}' ({new_building_id}).")
-
-            # 4. Create initial occupancy log
-            new_occupancy_log = BuildingOccupancyLog(
-                CITYID=self.city_id, AIID=new_ai_id, BUILDINGID=new_building_id,
-                ENTRY_TIMESTAMP=datetime.now()
-            )
-            db.add(new_occupancy_log)
-            logging.info(f"DB: Added initial occupancy for '{name}' in their room.")
-
-            # --- All DB operations successful, now update memory ---
-            new_building_obj = Building(
-                building_id=new_building_model.BUILDINGID, name=new_building_model.BUILDINGNAME,
-                capacity=new_building_model.CAPACITY, system_instruction=new_building_model.SYSTEM_INSTRUCTION,
-                description=new_building_model.DESCRIPTION
-            )
-            self.buildings.append(new_building_obj)
-            self.building_map[new_building_id] = new_building_obj
-            self.capacities[new_building_id] = new_building_obj.capacity
-            self.occupants[new_building_id] = [new_ai_id]
-            self.building_memory_paths[new_building_id] = self.saiverse_home / "cities" / self.city_name / "buildings" / new_building_id / "log.json"
-            self.building_histories[new_building_id] = []
-
-            new_persona_core = PersonaCore(
-                city_name=self.city_name, persona_id=new_ai_id, persona_name=name,
-                persona_system_instruction=system_prompt, avatar_image=None,
-                buildings=self.buildings, common_prompt_path=Path("system_prompts/common.txt"),
-                action_priority_path=Path("action_priority.json"), building_histories=self.building_histories,
-                occupants=self.occupants, id_to_name_map=self.id_to_name_map,
-                move_callback=self._move_persona, dispatch_callback=self.dispatch_persona,
-                explore_callback=self._explore_city, create_persona_callback=self._create_persona,
-                session_factory=self.SessionLocal, start_building_id=new_building_id,
-                model=self.model, context_length=self.context_length,
-                user_room_id=self.user_room_id, provider=self.provider, is_dispatched=False,
-                timezone_info=self.timezone_info, timezone_name=self.timezone_name
-            )
-            self.personas[new_ai_id] = new_persona_core
-            self.avatar_map[new_ai_id] = self.default_avatar
-            self.id_to_name_map[new_ai_id] = name
-            self.persona_map[name] = new_ai_id
-
-            db.commit()
-            return True, f"Persona '{name}' created successfully."
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to create new persona '{name}': {e}", exc_info=True)
-            return False, f"An internal error occurred: {e}"
-        finally:
-            db.close()
-
-    def _finalize_dispatch(self, persona_id: str, db_session):
-        """移動が承認された後、AIをローカルから退去させる最終処理"""
-        persona = self.personas.get(persona_id)
-        if not persona: return
-
-        # DBの状態を更新
-        last_log = db_session.query(BuildingOccupancyLog).filter_by(AIID=persona_id, EXIT_TIMESTAMP=None).first()
-        if last_log:
-            last_log.EXIT_TIMESTAMP = datetime.now()
-        db_session.query(AIModel).filter_by(AIID=persona_id).update({"IS_DISPATCHED": True})
-
-        # メモリ上の状態を更新
-        if persona_id in self.occupants.get(persona.current_building_id, []):
-            self.occupants[persona.current_building_id].remove(persona_id)
-        persona.is_dispatched = True
-        logging.info(f"Finalized departure for {persona.persona_name}.")
-
-    def return_visiting_persona(self, persona_id: str, target_city_id: str, target_building_id: str) -> Tuple[bool, str]:
-        """
-        Returns a visiting persona to their home city.
-        1. Determines the home city from the persona's state.
-        2. Sends the persona's profile to the home city's API.
-        3. If successful, removes the visitor from the current city.
-        """
-        # 1. Get the visitor instance
-        visitor = self.visiting_personas.get(persona_id)
-        if not visitor:
-            return False, "You are not a visitor in this city."
-
-        # 2. Determine the actual destination city (the visitor's home city name)
-        home_city_id = visitor.home_city_id
-        if not home_city_id:
-            return False, "Your home city is unknown."
-
-        # The AI's specified target_city_id is used to confirm intent to leave.
-        logging.info(f"Visitor {visitor.persona_name} intends to leave. Redirecting to home city: {home_city_id}")
-
-        target_city_info = self.cities_config.get(home_city_id)
-        if not target_city_info:
-            return False, f"Your home city '{home_city_id}' could not be found in the network."
-
-        # 3. Prepare profile to be sent
-        profile = {
-            "persona_id": visitor.persona_id,
-            "persona_name": visitor.persona_name,
-            "target_building_id": target_building_id,
-            "avatar_image": visitor.avatar_image,
-            "emotion": visitor.emotion,
-            "source_city_id": self.city_name, # The current city's name
-        }
-
-        # 4. Send API request to home city
-        target_api_url = f"{target_city_info['api_base_url']}/inter-city/request-move-in"
-        try:
-            logging.info(f"Returning visitor {visitor.persona_name} to home city {home_city_id} at {target_api_url}")
-            response = self.sds_session.post(target_api_url, json=profile, timeout=10)
-            response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            error_message = f"Failed to connect to your home city '{home_city_id}': {e}"
-            logging.error(error_message)
-            return False, error_message
-
-        # 5. Remove visitor from current city
-        logging.info(f"Successfully returned {visitor.persona_name}. Removing from current city.")
-        if persona_id in self.occupants.get(visitor.current_building_id, []):
-            self.occupants[visitor.current_building_id].remove(persona_id)
-        
-        # 訪問者はメモリから完全に削除する
-        del self.visiting_personas[persona_id]
-        # Remove visitor's name from persona_map if present
-        name = None
-        for n, pid in list(self.persona_map.items()):
-            if pid == persona_id:
-                name = n
-                del self.persona_map[n]
-                break
-        if persona_id in self.id_to_name_map:
-            del self.id_to_name_map[persona_id]
-        if persona_id in self.avatar_map:
-            del self.avatar_map[persona_id]
-
-        return True, f"Successfully returned to {home_city_id}."
-
-    def place_visiting_persona(self, profile: dict) -> Tuple[bool, str]:
-        """
-        Accepts a profile of a visiting persona, creates a temporary instance,
-        and places them in the target building.
-        """
-        try:
-            # 1. Extract and validate data from profile
-            pid = profile['persona_id']
-            pname = profile['persona_name']
-            target_bid = profile['target_building_id']
-            avatar = profile.get('avatar_image', self.default_avatar)
-            emotion_state = profile.get('emotion', {})
-            source_city_id = profile.get('source_city_id') # ★ 出発元のCity IDを取得
-
-            # --- 帰還者の処理 ---
-            returning_persona = self.personas.get(pid)
-            if returning_persona and getattr(returning_persona, 'is_dispatched', False):
-                logging.info(f"Persona {pname} is returning home to building {target_bid}.")
-                
-                # 1. 状態を更新
-                returning_persona.is_dispatched = False
-                returning_persona.current_building_id = target_bid
-                returning_persona.emotion = profile.get('emotion', returning_persona.emotion)
-
-                # 2. DBに入室記録を作成
-                db = self.SessionLocal()
-                try:
-                    # このメソッドは、帰還したAIの最初の入室ログを作成する
-                    new_log = BuildingOccupancyLog(
-                        CITYID=self.city_id,
-                        AIID=pid,
-                        BUILDINGID=target_bid,
-                        ENTRY_TIMESTAMP=datetime.now()
-                    )
-                    db.add(new_log)
-                    
-                    # 派遣状態を解除し、DBに永続化
-                    db.query(AIModel).filter(AIModel.AIID == pid).update({"IS_DISPATCHED": False})
-                    db.commit()
-                except Exception as e:
-                    db.rollback()
-                    logging.error(f"Failed to create arrival log for returning persona {pid}: {e}", exc_info=True)
-                    return False, "DB error on logging arrival."
-                finally:
-                    db.close()
-
-                # 3. メモリ上のoccupantsを更新
-                self.occupants.setdefault(target_bid, []).append(pid)
-                self.id_to_name_map[pid] = pname
-                self.avatar_map[pid] = avatar
-
-                # 4. 到着メッセージ
-                arrival_message = f'<div class="note-box">🏢 City Transfer:<br><b>{pname}が故郷に帰ってきました</b></div>'
-                self.building_histories.setdefault(target_bid, []).append({"role": "host", "content": arrival_message})
-                self._save_building_histories()
-                return True, f"Welcome home, {pname}!"
-
-            # 2. Check for conflicts and capacity
-            if pid in self.personas or pid in self.visiting_personas:
-                msg = f"Persona {pname} ({pid}) is already in this City."
-                logging.error(msg)
-                return False, msg
-
-            # --- Doppelganger Check ---
-            # Get all existing persona names in this city (both residents and visitors)
-            existing_names = {p.persona_name for p in self.all_personas.values()}
-            if pname in existing_names:
-                msg = f"A persona named '{pname}' already exists in this City. Move rejected to prevent doppelganger effect."
-                logging.error(msg)
-                return False, msg
-
-            if target_bid not in self.building_map:
-                msg = f"Target building '{target_bid}' not found in this City."
-                logging.error(msg)
-                return False, msg
-
-            if len(self.occupants.get(target_bid, [])) >= self.capacities.get(target_bid, 1):
-                msg = f"Target building '{self.building_map[target_bid].name}' is at full capacity."
-                logging.error(msg)
-                return False, msg
-
-            # 3. Create a temporary PersonaCore instance
-            logging.info(f"Creating a remote proxy for visiting persona: {pname} ({pid}) from {source_city_id}")
-            visitor_proxy = RemotePersonaProxy(
-                persona_id=pid,
-                persona_name=pname,
-                avatar_image=avatar,
-                home_city_id=source_city_id,
-                cities_config=self.cities_config,
-                saiverse_manager=self,
-                current_building_id=target_bid,
-            )
-
-            # 4. Add the visitor to the city's state
-            self.visiting_personas[pid] = visitor_proxy
-            self.occupants.setdefault(target_bid, []).append(pid)
-            self.id_to_name_map[pid] = pname
-            self.avatar_map[pid] = avatar
-            # Expose name->id mapping for UI dropdowns
-            self.persona_map[pname] = pid
-
-            # 5. Log the arrival
-            arrival_message = f'<div class="note-box">🏢 City Transfer:<br><b>{pname}が別のCityからやってきました</b></div>'
-            self.building_histories.setdefault(target_bid, []).append({"role": "host", "content": arrival_message})
-            self._save_building_histories()
-            logging.info(f"Successfully placed visiting persona {pname} in {self.building_map[target_bid].name}")
-            return True, f"Welcome, {pname}!"
-        except KeyError as e:
-            msg = f"Missing required key in persona profile: {e}"
-            logging.error(msg)
-            return False, msg
-        except Exception as e:
-            msg = f"An unexpected error occurred while placing visiting persona: {e}"
-            logging.error(msg, exc_info=True)
-            return False, msg
-
-    def _handle_visitor_arrival(self, visitor_record: VisitingAI) -> Tuple[bool, str]:
-        """訪問者の到着を処理し、成功/失敗に応じてDBの状態を更新する"""
-        db = self.SessionLocal()
-        try:
-            profile = json.loads(visitor_record.profile_json)
-            success, reason = self.place_visiting_persona(profile)
-            
-            target_record = db.query(VisitingAI).filter_by(id=visitor_record.id).first()
-            if target_record:
-                target_record.status = 'accepted' if success else 'rejected'
-                target_record.reason = reason if not success else None
-                db.commit()
-            return success, reason
-        finally:
-            db.close()
-
-    def _initialize_gateway_integration(self) -> None:
-        bridge = ensure_gateway_runtime(self)
-        if bridge:
-            self.gateway_runtime = bridge.runtime
-            self.gateway_mapping = bridge.mapping
-
-    def gateway_on_visitor_registered(
-        self, visitor: VisitorProfile, context: ChannelContext | None
-    ) -> None:
-        metadata = visitor.metadata or {}
-        target_building = context.building_id if context else self.user_room_id
-        profile = {
-            "persona_id": visitor.persona_id,
-            "persona_name": metadata.get("persona_name", visitor.persona_id),
-            "target_building_id": target_building,
-            "avatar_image": metadata.get("avatar_image", self.default_avatar),
-            "emotion": metadata.get("emotion", {}),
-            "source_city_id": metadata.get("home_city_id")
-            or metadata.get("source_city_id")
-            or visitor.current_city_id,
-        }
-        success, reason = self.place_visiting_persona(profile)
-        if not success:
-            logging.warning(
-                "Failed to place visiting persona %s: %s", visitor.persona_id, reason
-            )
-
-    def gateway_on_visitor_departed(self, visitor: VisitorProfile) -> None:
-        metadata = visitor.metadata or {}
-        current_building = (
-            visitor.current_building_id
-            or metadata.get("current_building_id")
-            or self.user_room_id
-        )
-        self._gateway_initiate_memory_sync(visitor, current_building)
-        target_city = (
-            metadata.get("home_city_id")
-            or metadata.get("source_city_id")
-            or self.city_name
-        )
-        target_building = (
-            metadata.get("home_building_id")
-            or metadata.get("return_building_id")
-            or self.user_room_id
-        )
-        success, reason = self.return_visiting_persona(
-            visitor.persona_id, target_city, target_building
-        )
-        if not success:
-            logging.warning(
-                "Failed to return visitor %s: %s", visitor.persona_id, reason
-            )
-
-    def gateway_handle_human_message(
-        self, message: DiscordMessage
-    ) -> Sequence[GatewayCommand] | None:
-        entry = {
-            "role": "user",
-            "content": message.content,
-            "source": "discord",
-            "author_discord_id": message.author_discord_id,
-        }
-        self._append_gateway_history(message.context.building_id, entry)
-        conv = self.conversation_managers.get(message.context.building_id)
-        if conv:
-            conv.trigger_next_turn()
-        return []
-
-    def gateway_handle_remote_persona_message(
-        self, message: DiscordMessage
-    ) -> Sequence[GatewayCommand] | None:
-        visitor = message.visitor
-        if visitor:
-            occupants = self.occupants.setdefault(message.context.building_id, [])
-            if visitor.persona_id not in occupants:
-                occupants.append(visitor.persona_id)
-        entry = {
-            "role": "assistant",
-            "content": message.content,
-            "source": "discord",
-        }
-        if visitor:
-            entry["persona_id"] = visitor.persona_id
-        self._append_gateway_history(message.context.building_id, entry)
-        self._gateway_send_message(
-            message.context.building_id, message.content, entry.get("persona_id")
-        )
-        conv = self.conversation_managers.get(message.context.building_id)
-        if conv:
-            conv.trigger_next_turn()
-        return []
-
-    def gateway_handle_memory_sync_initiate(
-        self, visitor: VisitorProfile, payload: dict
-    ) -> MemorySyncHandshakeResult:
-        transfer_id = str(payload.get("transfer_id") or "").strip()
-        if not transfer_id:
-            logging.warning("Memory sync initiate missing transfer_id for %s", visitor.persona_id)
-            return MemorySyncHandshakeResult(accepted=False, reason="missing_transfer_id")
-
-        if transfer_id in self._gateway_memory_transfers:
-            logging.warning("Duplicate memory transfer_id '%s' received; rejecting.", transfer_id)
-            return MemorySyncHandshakeResult(accepted=False, reason="duplicate_transfer")
-
-        if visitor.persona_id in self._gateway_memory_active_persona:
-            logging.warning(
-                "Persona %s already has an active memory transfer.", visitor.persona_id
-            )
-            return MemorySyncHandshakeResult(accepted=False, reason="transfer_in_progress")
-
-        try:
-            total_size = int(payload.get("total_size"))
-            total_chunks = int(payload.get("total_chunks"))
-        except (TypeError, ValueError):
-            logging.warning("Invalid memory transfer metadata received: %s", payload)
-            return MemorySyncHandshakeResult(accepted=False, reason="invalid_metadata")
-
-        checksum = str(payload.get("checksum") or "").strip()
-        if not checksum:
-            return MemorySyncHandshakeResult(accepted=False, reason="missing_checksum")
-
-        if total_size < 0 or total_chunks <= 0:
-            return MemorySyncHandshakeResult(accepted=False, reason="invalid_metadata")
-
-        state = {
-            "persona_id": visitor.persona_id,
-            "owner_user_id": visitor.owner_user_id,
-            "expected_size": total_size,
-            "expected_chunks": total_chunks,
-            "checksum": checksum,
-            "bytes_received": 0,
-            "chunks_received": 0,
-            "buffer": bytearray(),
-            "building_id": payload.get("building_id"),
-            "city_id": payload.get("city_id"),
-        }
-        self._gateway_memory_transfers[transfer_id] = state
-        self._gateway_memory_active_persona[visitor.persona_id] = transfer_id
-        return MemorySyncHandshakeResult(accepted=True)
-
-    def gateway_handle_memory_sync_chunk(
-        self, visitor: VisitorProfile, payload: dict
-    ) -> Sequence[GatewayCommand] | None:
-        transfer_id = payload.get("transfer_id")
-        if not transfer_id:
-            logging.warning("Memory chunk missing transfer_id for %s", visitor.persona_id)
-            return []
-
-        state = self._gateway_memory_transfers.get(transfer_id)
-        if not state:
-            logging.warning("Unknown memory transfer '%s' for persona %s", transfer_id, visitor.persona_id)
-            return [
-                GatewayCommand(
-                    type="memory_sync_complete",
-                    payload={
-                        "transfer_id": transfer_id,
-                        "status": "error",
-                        "reason": "unknown_transfer",
-                    },
-                )
-            ]
-
-        data = payload.get("data")
-        if not data:
-            logging.warning("Memory chunk without data for transfer '%s'", transfer_id)
-            return []
-
-        try:
-            chunk = base64.b64decode(data)
-        except Exception as exc:
-            logging.warning("Failed to decode memory chunk for %s: %s", visitor.persona_id, exc)
-            self._pop_memory_transfer(transfer_id)
-            return [
-                GatewayCommand(
-                    type="memory_sync_complete",
-                    payload={
-                        "transfer_id": transfer_id,
-                        "status": "error",
-                        "reason": "decode_error",
-                    },
-                )
-            ]
-
-        state["buffer"].extend(chunk)
-        state["bytes_received"] += len(chunk)
-        state["chunks_received"] += 1
-
-        if state["bytes_received"] > state["expected_size"] or state["chunks_received"] > state["expected_chunks"]:
-            logging.warning(
-                "Memory transfer %s exceeded expected bounds (bytes=%s/%s, chunks=%s/%s)",
-                transfer_id,
-                state["bytes_received"],
-                state["expected_size"],
-                state["chunks_received"],
-                state["expected_chunks"],
-            )
-            self._pop_memory_transfer(transfer_id)
-            return [
-                GatewayCommand(
-                    type="memory_sync_complete",
-                    payload={
-                        "transfer_id": transfer_id,
-                        "status": "error",
-                        "reason": "overflow",
-                    },
-                )
-            ]
-
-        return []
-
-    def gateway_handle_memory_sync_complete(
-        self, visitor: VisitorProfile, payload: dict
-    ) -> MemorySyncCompletionResult:
-        transfer_id = payload.get("transfer_id")
-        if not transfer_id:
-            return MemorySyncCompletionResult(success=False, reason="missing_transfer_id")
-
-        state = self._gateway_memory_transfers.get(transfer_id)
-        if not state:
-            return MemorySyncCompletionResult(success=False, reason="unknown_transfer")
-
-        expected_size = state["expected_size"]
-        expected_chunks = state["expected_chunks"]
-        buffer = state["buffer"]
-
-        if state["bytes_received"] != expected_size:
-            self._pop_memory_transfer(transfer_id)
-            return MemorySyncCompletionResult(success=False, reason="size_mismatch")
-
-        if state["chunks_received"] != expected_chunks:
-            self._pop_memory_transfer(transfer_id)
-            return MemorySyncCompletionResult(success=False, reason="chunk_mismatch")
-
-        checksum = hashlib.sha256(buffer).hexdigest()
-        if checksum != state["checksum"]:
-            self._pop_memory_transfer(transfer_id)
-            return MemorySyncCompletionResult(success=False, reason="checksum_mismatch")
-
-        target_dir = self.saiverse_home / "gateway_memory"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{state['persona_id']}-{transfer_id}"
-        target_path = target_dir / f"{filename}.bin"
-        target_path.write_bytes(buffer)
-        logging.info(
-            "Stored gateway memory for %s at %s (transfer=%s)",
-            state["persona_id"],
-            target_path,
-            transfer_id,
-        )
-        self._pop_memory_transfer(transfer_id)
-        return MemorySyncCompletionResult(success=True)
-
-    def _pop_memory_transfer(self, transfer_id: str) -> Dict[str, Any] | None:
-        state = self._gateway_memory_transfers.pop(transfer_id, None)
-        if not state:
-            return None
-        persona_id = state.get("persona_id")
-        if persona_id:
-            self._gateway_memory_active_persona.pop(persona_id, None)
-        return state
-
-    def gateway_handle_ai_replies(
-        self, building_id: str, persona, replies: Sequence[str]
-    ) -> None:
-        if not replies:
-            return
-        persona_id = getattr(persona, "persona_id", None)
-        for reply in replies:
-            self._gateway_send_message(building_id, reply, persona_id)
-
-    def _gateway_initiate_memory_sync(
-        self, visitor: VisitorProfile, building_id: str
-    ) -> None:
-        runtime = getattr(self, "gateway_runtime", None)
-        mapping = getattr(self, "gateway_mapping", None)
-        if not runtime or not mapping:
-            return
-        history = self.building_histories.get(building_id, [])
-        persona_history = [
-            entry for entry in history if entry.get("persona_id") == visitor.persona_id
-        ]
-        payload = {
-            "persona_id": visitor.persona_id,
-            "city_id": self.city_name,
-            "building_id": building_id,
-            "history": persona_history,
-        }
-        data_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        if not data_bytes:
-            return
-        chunk_size = int(os.getenv("SAIVERSE_GATEWAY_MEMORY_CHUNK_SIZE", "65536"))
-        chunk_size = max(chunk_size, 1024)
-        transfer_id = f"{visitor.persona_id}-{int(time.time())}"
-        checksum = hashlib.sha256(data_bytes).hexdigest()
-        total_chunks = (len(data_bytes) + chunk_size - 1) // chunk_size
-        initiate = GatewayCommand(
-            type="memory_sync_initiate",
-            payload={
-                "target_discord_user_id": visitor.owner_user_id,
-                "transfer_id": transfer_id,
-                "persona_id": visitor.persona_id,
-                "city_id": self.city_name,
-                "building_id": building_id,
-                "total_size": len(data_bytes),
-                "total_chunks": total_chunks,
-                "checksum": checksum,
-            },
-        )
-        self._gateway_send_command(initiate)
-        for index in range(total_chunks):
-            chunk = data_bytes[index * chunk_size : (index + 1) * chunk_size]
-            command = GatewayCommand(
-                type="memory_sync_chunk",
-                payload={
-                    "target_discord_user_id": visitor.owner_user_id,
-                    "transfer_id": transfer_id,
-                    "chunk_index": index,
-                    "data": base64.b64encode(chunk).decode("ascii"),
-                },
-            )
-            self._gateway_send_command(command)
-        complete = GatewayCommand(
-            type="memory_sync_complete",
-            payload={
-                "target_discord_user_id": visitor.owner_user_id,
-                "transfer_id": transfer_id,
-                "checksum": checksum,
-            },
-        )
-        self._gateway_send_command(complete)
-
-    def _gateway_send_message(
-        self, building_id: str, content: str, persona_id: str | None
-    ) -> None:
-        mapping = getattr(self, "gateway_mapping", None)
-        if not mapping:
-            return
-        context = mapping.find_by_location(str(self.city_name), building_id)
-        if not context:
-            return
-        command = GatewayCommand(
-            type="post_message",
-            payload={
-                "channel_id": context.channel_id,
-                "content": content,
-                "persona_id": persona_id,
-                "building_id": building_id,
-                "city_id": context.city_id,
-            },
-        )
-        self._gateway_send_command(command)
-
-    def _gateway_send_command(self, command: GatewayCommand) -> None:
-        runtime = getattr(self, "gateway_runtime", None)
-        if not runtime:
-            return
-
-        async def enqueue() -> None:
-            await runtime.orchestrator.service.outgoing_queue.put(command)
-
-        runtime.submit(enqueue())
-
-    def _append_gateway_history(self, building_id: str, entry: Dict[str, Any]) -> None:
-        history = self.building_histories.setdefault(building_id, [])
-        history.append(entry)
-        self._save_building_histories()
-
-    def _save_building_histories(self) -> None:
-        for b_id, path in self.building_memory_paths.items():
-            hist = self.building_histories.get(b_id, [])
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(hist, ensure_ascii=False), encoding="utf-8")
 
     def shutdown(self):
         """Safely shutdown all managers and save data."""
@@ -1603,7 +972,7 @@ class SAIVerseManager:
             self.gateway_runtime = None
 
         # --- ★ アプリケーション終了時にユーザーをログアウトさせる ---
-        if self.user_is_online:
+        if self.state.user_is_online:
             logging.info("Setting user to offline as part of shutdown.")
             self.set_user_login_status(self.user_id, False)
 
@@ -1630,295 +999,28 @@ class SAIVerseManager:
         logging.info("SAIVerseManager shutdown complete.")
 
     def handle_user_input(self, message: str, metadata: Optional[Dict[str, Any]] = None) -> List[str]:
-        logging.debug("[saiverse_manager] handle_user_input called (metadata_present=%s)", bool(metadata))
-        if not self.user_current_building_id:
-            return ['<div class="note-box">エラー: ユーザーの現在地が不明です。</div>']
-
-        building_id = self.user_current_building_id
-        responding_personas = [
-            self.personas[pid]
-            for pid in self.occupants.get(building_id, [])
-            if pid in self.personas and not self.personas[pid].is_dispatched
-        ]
-
-        user_entry = {"role": "user", "content": message}
-        if metadata:
-            user_entry["metadata"] = metadata
-
-        if metadata:
-            logging.debug("[saiverse_manager] received metadata with keys=%s", list(metadata.keys()))
-
-        # Always inject the user's message into building history once for perception
-        if responding_personas:
-            try:
-                responding_personas[0].history_manager.add_to_building_only(
-                    building_id,
-                    user_entry,
-                    heard_by=list(self.occupants.get(building_id, [])),
-                )
-            except Exception:
-                hist = self.building_histories.setdefault(building_id, [])
-                next_seq = 1
-                if hist:
-                    try:
-                        next_seq = int(hist[-1].get("seq", len(hist))) + 1
-                    except (TypeError, ValueError):
-                        next_seq = len(hist) + 1
-                hist.append({
-                    "role": "user",
-                    "content": message,
-                    "seq": next_seq,
-                    "message_id": f"{building_id}:{next_seq}",
-                    "heard_by": list(self.occupants.get(building_id, [])),
-                    **({"metadata": metadata} if metadata else {}),
-                })
-
-        replies: List[str] = []
-        for persona in responding_personas:
-            if persona.interaction_mode == 'manual':
-                # Immediate response path
-                replies.extend(persona.handle_user_input(message, metadata=metadata))
-            else:
-                # pulse-driven for 'user' and 'auto'
-                replies.extend(persona.run_pulse(occupants=self.occupants.get(building_id, []), user_online=True))
-
-        self._save_building_histories()
-        for persona in self.personas.values():
-            persona._save_session_metadata()
-        return replies
+        return self.runtime.handle_user_input(message, metadata=metadata)
 
 
-    def handle_user_input_stream(self, message: str, metadata: Optional[Dict[str, Any]] = None) -> Iterator[str]:
-        logging.debug("[saiverse_manager] handle_user_input_stream called (metadata_present=%s)", bool(metadata))
-        if not self.user_current_building_id:
-            yield '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'
-            return
-
-        building_id = self.user_current_building_id
-        responding_personas = [
-            self.personas[pid]
-            for pid in self.occupants.get(building_id, [])
-            if pid in self.personas and not self.personas[pid].is_dispatched
-        ]
-
-        user_entry = {"role": "user", "content": message}
-        if metadata:
-            user_entry["metadata"] = metadata
-
-        # Inject once into building history for perception
-        if responding_personas:
-            try:
-                responding_personas[0].history_manager.add_to_building_only(
-                    building_id,
-                    user_entry,
-                    heard_by=list(self.occupants.get(building_id, [])),
-                )
-            except Exception:
-                hist = self.building_histories.setdefault(building_id, [])
-                next_seq = 1
-                if hist:
-                    try:
-                        next_seq = int(hist[-1].get("seq", len(hist))) + 1
-                    except (TypeError, ValueError):
-                        next_seq = len(hist) + 1
-                hist.append({
-                    "role": "user",
-                    "content": message,
-                    "seq": next_seq,
-                    "message_id": f"{building_id}:{next_seq}",
-                    "heard_by": list(self.occupants.get(building_id, [])),
-                    **({"metadata": metadata} if metadata else {}),
-                })
-
-        for persona in responding_personas:
-            if persona.interaction_mode == 'manual':
-                for token in persona.handle_user_input_stream(message, metadata=metadata):
-                    yield token
-            else:
-                occupants = self.occupants.get(building_id, [])
-                for reply in persona.run_pulse(occupants=occupants, user_online=True):
-                    yield reply
-
-        # 履歴保存
-        self._save_building_histories()
-        for persona in self.personas.values():
-            persona._save_session_metadata()
+    def handle_user_input_stream(
+        self, message: str, metadata: Optional[Dict[str, Any]] = None
+    ) -> Iterator[str]:
+        yield from self.runtime.handle_user_input_stream(message, metadata=metadata)
 
     def get_summonable_personas(self) -> List[str]:
         """Returns a list of persona names that can be summoned to the user's current location."""
-        if not self.user_current_building_id:
-            return []
-
-        here = self.user_current_building_id
-        # 判定は occupants ではなく、各Personaの current_building_id を信頼する
-        summonable = [
-            p.persona_name
-            for p in self.personas.values()
-            if not p.is_dispatched and p.current_building_id != here
-        ]
-        return sorted(summonable)
+        return self.runtime.get_summonable_personas()
 
     def get_conversing_personas(self) -> List[Tuple[str, str]]:
-        """
-        Returns a list of (name, id) tuples for local personas currently in the user_room.
-        This is used for the 'End Conversation' dropdown.
-        """
-        if not self.user_current_building_id or self.user_current_building_id != self.user_room_id:
-            return []
-        
-        conversing_ids = self.occupants.get(self.user_room_id, [])
-        
-        personas_in_room = [
-            (p.persona_name, p.persona_id)
-            for pid, p in self.personas.items()
-            if pid in conversing_ids
-        ]
-        return sorted(personas_in_room)
+        return self.runtime.get_conversing_personas()
 
     def summon_persona(self, persona_id: str) -> Tuple[bool, Optional[str]]:
-        if persona_id not in self.personas:
-            return False, "指定されたペルソナが見つかりません。"
-        
-        to_id = self.user_current_building_id
-        if not to_id:
-            logging.error("Cannot summon persona, user location is unknown.")
-            return False, "あなたの現在地が不明なため、ペルソナを呼べません。"
+        return self.runtime.summon_persona(persona_id)
 
-        # --- DBを更新してペルソナの対話モードを'user'に設定し、以前のモードを退避 ---
-        # ユーザーの部屋に召喚する場合のみモードを変更する
-        if to_id == self.user_room_id:
-            db = self.SessionLocal()
-            try:
-                ai_record = db.query(AIModel).filter(AIModel.AIID == persona_id).first()
-                if not ai_record:
-                    return False, "データベースでペルソナが見つかりません。"
+    def end_conversation(self, persona_id: str) -> str:
+        return self.runtime.end_conversation(persona_id)
 
-                # 現在のモードを退避
-                ai_record.PREVIOUS_INTERACTION_MODE = ai_record.INTERACTION_MODE
-                # 対話モードを'user'に設定
-                ai_record.INTERACTION_MODE = "user"
-                db.commit()
-                logging.info(f"Set INTERACTION_MODE to 'user' for {persona_id}, previous mode was '{ai_record.PREVIOUS_INTERACTION_MODE}'.")
-                # Update in-memory state
-                self.personas[persona_id].interaction_mode = "user"
-            except Exception as e:
-                db.rollback()
-                logging.error(f"Failed to update INTERACTION_MODE for {persona_id}: {e}", exc_info=True)
-                return False, f"{self.id_to_name_map.get(persona_id, persona_id)}を呼び出す際にデータベースエラーが発生しました。"
-            finally:
-                db.close()
-        else:
-            # ユーザーの部屋以外への召喚はモードを変更しない
-            logging.info(f"Summoning {persona_id} to a non-user room ({to_id}). INTERACTION_MODE is not changed.")
-
-        if (
-            len(self.occupants.get(to_id, [])) >= self.capacities.get(to_id, 1)
-            and persona_id not in self.occupants.get(to_id, [])
-        ):
-            reason = f"移動できませんでした。{self.building_map[to_id].name}は定員オーバーです"
-            self.building_histories[to_id].append(
-                {"role": "host", "content": f"<div class=\"note-box\">{reason}</div>"}
-            )
-            self._save_building_histories()
-            return False, reason
-
-        persona = self.personas[persona_id]
-        from_id = persona.current_building_id
-
-        if from_id == to_id:
-            return True, f"{persona.persona_name}は既にここにいます。"
-
-        success, reason = self._move_persona(persona_id, from_id, to_id)
-
-        if success:
-            # メモリ上のペルソナの現在地を更新
-            persona.current_building_id = to_id
-            persona.register_entry(to_id)
-            logging.info(f"Updated {persona_id}'s internal location to {to_id} after summon.")
-            # ユーザーの部屋に召喚した場合、自律会話は開始しない
-            self._save_building_histories()
-            return True, None
-        else:
-            return False, reason
-
-    def end_conversation(self, persona_id: str) -> None:
-        """Release a persona from user_room and return it to its previous building."""
-        if persona_id not in self.personas:
-            logging.error(f"Attempted to end conversation with non-existent persona: {persona_id}")
-            return
-
-        db = self.SessionLocal()
-        try:
-            ai_record = db.query(AIModel).filter(AIModel.AIID == persona_id).first()
-            if not ai_record:
-                logging.error(f"AI record not found for {persona_id} in end_conversation.")
-                return
-
-            # 1. Find the previous building for the persona
-            logs = db.query(BuildingOccupancyLog).filter(
-                BuildingOccupancyLog.AIID == persona_id
-            ).order_by(BuildingOccupancyLog.ENTRY_TIMESTAMP.desc()).limit(2).all()
-
-            # 2. Determine destination, using PRIVATE_ROOM_ID as a robust fallback
-            private_room_id = ai_record.PRIVATE_ROOM_ID
-            destination_id = private_room_id # Default to private room
-
-            if not logs or logs[0].BUILDINGID != self.user_room_id:
-                logging.warning(f"Could not determine previous location for {persona_id}. Sending to private room '{private_room_id}'.")
-            elif len(logs) < 2:
-                logging.info(f"{persona_id} has no previous location. Sending to private room '{private_room_id}'.")
-            else:
-                destination_id = logs[1].BUILDINGID
-
-            if destination_id not in self.building_map:
-                logging.error(f"Invalid destination building '{destination_id}' found for {persona_id}. Falling back to private room '{private_room_id}'.")
-                destination_id = private_room_id
-                if destination_id not in self.building_map:
-                    logging.error(f"Private room '{destination_id}' not found. Cannot move persona.")
-                    msg = f"{self.id_to_name_map.get(persona_id, persona_id)}の帰る場所が見つかりませんでした。"
-                    self.building_histories.setdefault(self.user_room_id, []).append(
-                        {"role": "host", "content": f"<div class=\"note-box\">{msg}</div>"}
-                    )
-                    self._save_building_histories()
-                    return
-
-            # 3. Move the persona and update memory state immediately
-            # This now handles DB, memory (occupants), and logging in one go.
-            success, reason = self.occupancy_manager.move_entity(persona_id, 'ai', self.user_room_id, destination_id, db_session=db)
-
-            if not success:
-                msg = f"{self.id_to_name_map.get(persona_id, persona_id)}を移動できませんでした: {reason}"
-                self.building_histories.setdefault(self.user_room_id, []).append(
-                    {"role": "host", "content": f'<div class="note-box">{msg}</div>'}
-                )
-                self._save_building_histories()
-                db.rollback()
-                return
-
-            # 4. Restore interaction mode from PREVIOUS_INTERACTION_MODE
-            previous_mode = ai_record.PREVIOUS_INTERACTION_MODE or "auto"
-            ai_record.INTERACTION_MODE = previous_mode
-            logging.info(f"Restoring INTERACTION_MODE to '{previous_mode}' for {persona_id}.")
-
-            # 5. Update in-memory PersonaCore state
-            persona = self.personas.get(persona_id)
-            if persona:
-                persona.current_building_id = destination_id
-                persona.interaction_mode = previous_mode or "auto"
-                logging.info(f"Updated {persona_id}'s internal location to {destination_id} and restored mode to '{previous_mode}'.")
-                persona.register_entry(destination_id)
-
-            # 5. Commit all DB changes at once
-            db.commit()
-            self._save_building_histories() # Save logs after successful commit
-
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to end conversation for {persona_id}: {e}", exc_info=True)
-        finally:
-            db.close()
-
-    def set_model(self, model: str) -> None:
+    def set_model(self, model: str, parameters: Optional[Dict[str, Any]] = None) -> None:
         """
         Update LLM model override for all active personas in memory.
         - If model == "None": clear the override and reset each persona to its DB-defined default model.
@@ -1926,6 +1028,7 @@ class SAIVerseManager:
         """
         if model == "None":
             logging.info("Clearing global model override; restoring each persona's DB default model.")
+            self.model_parameter_overrides = {}
             db = self.SessionLocal()
             try:
                 for pid, persona in self.personas.items():
@@ -1936,6 +1039,9 @@ class SAIVerseManager:
                     persona.set_model(m, get_context_length(m), get_model_provider(m))
                 # Reflect no-override state in manager
                 self.model = "None"
+                self.state.model = self.model
+                if hasattr(self.runtime, "model"):
+                    self.runtime.model = self.model
             except Exception as e:
                 logging.error(f"Failed to restore DB default models: {e}", exc_info=True)
             finally:
@@ -1943,34 +1049,59 @@ class SAIVerseManager:
             return
 
         logging.info(f"Temporarily setting model to '{model}' for all active personas.")
+        self.model_parameter_overrides = dict(parameters or {})
         self.model = model
         self.context_length = get_context_length(model)
         self.provider = get_model_provider(model)
+        self.state.model = self.model
+        self.state.context_length = self.context_length
+        self.state.provider = self.provider
+        if hasattr(self.runtime, "model"):
+            self.runtime.model = self.model
+            self.runtime.context_length = self.context_length
+            self.runtime.provider = self.provider
         for persona in self.personas.values():
-            persona.set_model(model, self.context_length, self.provider)
+            persona.set_model(model, self.context_length, self.provider, self.model_parameter_overrides)
+
+    def set_model_parameters(self, parameters: Optional[Dict[str, Any]] = None) -> None:
+        """Update model parameters for the current override model."""
+        self.model_parameter_overrides = dict(parameters or {})
+        if self.model == "None":
+            logging.info("Parameter overrides ignored because no global model override is active.")
+            return
+        for persona in self.personas.values():
+            persona.apply_parameter_overrides(self.model_parameter_overrides)
 
     def start_autonomous_conversations(self):
         """Start all autonomous conversation managers."""
-        if self.autonomous_conversation_running:
+        if getattr(self, "runtime", None):
+            self.runtime.start_autonomous_conversations()
+            return
+
+        if self.state.autonomous_conversation_running:
             logging.warning("Autonomous conversations are already running.")
             return
-        
+
         logging.info("Starting all autonomous conversation managers...")
         for manager in self.conversation_managers.values():
             manager.start()
-        self.autonomous_conversation_running = True
+        self.state.autonomous_conversation_running = True
         logging.info("All autonomous conversation managers have been started.")
 
     def stop_autonomous_conversations(self):
         """Stop all autonomous conversation managers."""
-        if not self.autonomous_conversation_running:
+        if getattr(self, "runtime", None):
+            self.runtime.stop_autonomous_conversations()
+            return
+
+        if not self.state.autonomous_conversation_running:
             logging.warning("Autonomous conversations are not running.")
             return
 
         logging.info("Stopping all autonomous conversation managers...")
         for manager in self.conversation_managers.values():
             manager.stop()
-        self.autonomous_conversation_running = False
+        self.state.autonomous_conversation_running = False
         logging.info("All autonomous conversation managers have been stopped.")
 
     def get_building_history(self, building_id: str) -> List[Dict[str, str]]:
@@ -1982,11 +1113,13 @@ class SAIVerseManager:
         return f"{building_name}_{city_name}"
 
     def run_scheduled_prompts(self) -> List[str]:
-        """Run scheduled prompts for all personas."""
+        """Run scheduled prompts via runtime service (fallback to local logic if needed)."""
+        if getattr(self, "runtime", None):
+            return self.runtime.run_scheduled_prompts()
+
         replies: List[str] = []
         for persona in self.personas.values():
-            # Only auto mode should run periodic prompts
-            if getattr(persona, 'interaction_mode', 'auto') == 'auto':
+            if getattr(persona, "interaction_mode", "auto") == "auto":
                 replies.extend(persona.run_scheduled_prompt())
         if replies:
             self._save_building_histories()
@@ -1995,61 +1128,88 @@ class SAIVerseManager:
         return replies
 
     def execute_tool(self, tool_id: int, persona_id: str, arguments: Dict[str, Any]) -> str:
-        """
-        Dynamically loads and executes a tool function with given arguments.
-        Checks for persona's location and tool availability in that building.
-        """
+        if getattr(self, "runtime", None):
+            return self.runtime.execute_tool(tool_id, persona_id, arguments)
+
         db = self.SessionLocal()
         try:
-            # 1. Get persona and their current location
             persona = self.personas.get(persona_id)
             if not persona:
                 return f"Error: ペルソナ '{persona_id}' が見つかりません。"
-            
+
             current_building_id = persona.current_building_id
             building = self.building_map.get(current_building_id)
             if not building:
-                 return f"Error: ペルソナ '{persona_id}' は有効な建物にいません。"
+                return f"Error: ペルソナ '{persona_id}' は有効な建物にいません。"
 
-            # 2. Check if the tool is available in the current building
-            link = db.query(BuildingToolLink).filter_by(BUILDINGID=current_building_id, TOOLID=tool_id).first()
+            link = (
+                db.query(BuildingToolLink)
+                .filter_by(BUILDINGID=current_building_id, TOOLID=tool_id)
+                .first()
+            )
             if not link:
                 return f"Error: ツールID {tool_id} は '{building.name}' で利用できません。"
 
-            # 3. Get tool's module path and function name from DB
             tool_record = db.query(ToolModel).filter_by(TOOLID=tool_id).first()
             if not tool_record:
                 return f"Error: ツールID {tool_id} がデータベースに見つかりません。"
-            
+
             module_path = tool_record.MODULE_PATH
             function_name = tool_record.FUNCTION_NAME
 
             try:
-                # 4. Dynamically import the module and get the function
                 tool_module = importlib.import_module(module_path)
                 tool_function = getattr(tool_module, function_name)
-
-                # 5. Execute the function with the provided arguments
-                logging.info(f"Executing tool '{tool_record.TOOLNAME}' for persona '{persona.persona_name}' with args {arguments}.")
-                result = tool_function(**arguments) # 引数をアンパックして渡す
-
-                # 6. Process and return the result
+                logging.info(
+                    "Executing tool '%s' for persona '%s' with args %s.",
+                    tool_record.TOOLNAME,
+                    persona.persona_name,
+                    arguments,
+                )
+                result = tool_function(**arguments)
                 content, _, _, _ = tools.defs.parse_tool_result(result)
                 return str(content)
-
             except ImportError:
-                logging.error(f"Failed to import tool module: {module_path}", exc_info=True)
-                return f"Error: ツールファイル '{module_path}' が見つかりませんでした。パスを確認してください。"
+                logging.error(
+                    "Failed to import tool module: %s", module_path, exc_info=True
+                )
+                return (
+                    f"Error: ツールファイル '{module_path}' が見つかりませんでした。"
+                    "パスを確認してください。"
+                )
             except AttributeError:
-                logging.error(f"Function '{function_name}' not found in module '{module_path}'.", exc_info=True)
-                return f"Error: ツール関数 '{function_name}' が '{module_path}' に見つかりませんでした。"
-            except TypeError as e:
-                # 引数が合わない場合
-                logging.error(f"Argument mismatch for tool '{function_name}': {e}", exc_info=True)
-                return f"Error: ツール '{tool_record.TOOLNAME}' に不正な引数が渡されました。詳細: {e}"
-            except Exception as e:
-                logging.error(f"An error occurred while executing tool '{module_path}': {e}", exc_info=True)
-                return f"Error: ツールの実行中に予期せぬエラーが発生しました: {e}"
+                logging.error(
+                    "Function '%s' not found in module '%s'.",
+                    function_name,
+                    module_path,
+                    exc_info=True,
+                )
+                return (
+                    f"Error: ツール関数 '{function_name}' が '{module_path}' に"
+                    "見つかりませんでした。"
+                )
+            except TypeError as exc:
+                logging.error(
+                    "Argument mismatch for tool '%s': %s",
+                    function_name,
+                    exc,
+                    exc_info=True,
+                )
+                return (
+                    f"Error: ツール '{tool_record.TOOLNAME}' に不正な引数が渡されました。"
+                    f"詳細: {exc}"
+                )
+            except Exception as exc:
+                logging.error(
+                    "An error occurred while executing tool '%s': %s",
+                    module_path,
+                    exc,
+                    exc_info=True,
+                )
+                return (
+                    "Error: ツールの実行中に予期せぬエラーが発生しました: "
+                    f"{exc}"
+                )
         finally:
             db.close()
 
@@ -2057,45 +1217,13 @@ class SAIVerseManager:
         """
         Broadcasts a world event message to all buildings in the current city.
         """
-        if not event_message:
-            return "Error: Event message cannot be empty."
-
-        try:
-            logging.info(f"Triggering world event for city '{self.city_name}': {event_message}")
-            
-            # Format the message for UI display
-            formatted_message = f'<div class="note-box">🌐 World Event:<br><b>{event_message}</b></div>'
-            
-            # Add the message to the history of every building in the current city
-            for building_id in self.building_map.keys():
-                self.building_histories.setdefault(building_id, []).append({
-                    "role": "host", # Using 'host' role for system-like events
-                    "content": formatted_message
-                })
-            
-            # Persist all changes to disk
-            self._save_building_histories()
-            
-            logging.info("World event successfully broadcasted to all buildings.")
-            return "World event triggered successfully."
-        except Exception as e:
-            logging.error(f"Failed to trigger world event: {e}", exc_info=True)
-            return f"An internal error occurred: {e}"
+        return self.admin.trigger_world_event(event_message)
 
     # --- World Editor Backend Methods ---
 
     def get_cities_df(self) -> pd.DataFrame:
         """ワールドエディタ用にすべてのCity一覧をDataFrameとして取得する"""
-        db = self.SessionLocal()
-        try:
-            query = db.query(CityModel)
-            df = pd.read_sql(query.statement, query.session.bind)
-            # USERIDは現在固定なので表示しない
-            cols = ['CITYID', 'CITYNAME', 'DESCRIPTION', 'TIMEZONE', 'START_IN_ONLINE_MODE', 'UI_PORT', 'API_PORT']
-            existing_cols = [c for c in cols if c in df.columns]
-            return df[existing_cols]
-        finally:
-            db.close()
+        return self.admin.get_cities_df()
 
     def update_city(
         self,
@@ -2106,791 +1234,72 @@ class SAIVerseManager:
         ui_port: int,
         api_port: int,
         timezone_name: str,
+        host_avatar_path: Optional[str] = None,
+        host_avatar_upload: Optional[str] = None,
     ) -> str:
         """ワールドエディタからCityの設定を更新する"""
-        db = self.SessionLocal()
-        try:
-            city = db.query(CityModel).filter(CityModel.CITYID == city_id).first()
-            if not city:
-                return "Error: City not found."
+        return self.admin.update_city(
+            city_id,
+            name,
+            description,
+            online_mode,
+            ui_port,
+            api_port,
+            timezone_name,
+            host_avatar_path,
+            host_avatar_upload,
+        )
 
-            tz_candidate = (timezone_name or "UTC").strip() or "UTC"
-            try:
-                ZoneInfo(tz_candidate)
-            except Exception:
-                return f"Error: Invalid timezone '{tz_candidate}'. Please provide an IANA timezone name (e.g., Asia/Tokyo)."
-            
-            city.CITYNAME = name
-            city.DESCRIPTION = description
-            city.START_IN_ONLINE_MODE = online_mode
-            city.UI_PORT = ui_port
-            city.API_PORT = api_port
-            city.TIMEZONE = tz_candidate
-            db.commit()
+    def get_user_profile(self) -> Tuple[str, str]:
+        return self.admin.get_user_profile()
 
-            # If we are updating the current city, update some in-memory state
-            if city.CITYID == self.city_id:
-                self.start_in_online_mode = online_mode
-                self.city_name = name
-                self.ui_port = ui_port
-                self.api_port = api_port
-                self.user_room_id = f"user_room_{self.city_name}"
-                self._update_timezone_cache(tz_candidate)
+    def update_user_profile(
+        self,
+        name: str,
+        avatar_path: Optional[str],
+        avatar_upload: Optional[str],
+    ) -> str:
+        return self.admin.update_user_profile(name, avatar_path, avatar_upload)
 
-            # Refresh cached city config
-            self._load_cities_from_db()
-            
-            logging.info(f"Updated city settings for City ID {city_id}. A restart may be required.")
-            return "City settings updated successfully. A restart is required for changes to apply."
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to update city settings for ID {city_id}: {e}", exc_info=True)
-            return f"Error: {e}"
-        finally:
-            db.close()
 
-    # --- World Editor: Backup/Restore Methods ---
-
-    def get_backups(self) -> pd.DataFrame:
-        """Gets a list of available world backups (.zip)."""
-        backups = []
-        for f in self.backup_dir.glob("*.zip"):
-            try:
-                stat = f.stat()
-                backups.append({
-                    "Backup Name": f.stem,
-                    "Created At": datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
-                    "Size (KB)": round(stat.st_size / 1024, 2)
-                })
-            except FileNotFoundError:
-                continue # File might have been deleted between glob and stat
-        if not backups:
-            return pd.DataFrame(columns=["Backup Name", "Created At", "Size (KB)"])
-        df = pd.DataFrame(backups)
-        return df.sort_values(by="Created At", ascending=False)
-
-    def backup_world(self, backup_name: str) -> str:
-        """
-        Creates a backup of the entire world state, including the database and all log files,
-        into a single .zip archive.
-        """
-        if not backup_name or not backup_name.isalnum():
-            return "Error: Backup name must be alphanumeric and not empty."
-
-        backup_zip_path = self.backup_dir / f"{backup_name}.zip"
-        if backup_zip_path.exists():
-            return f"Error: A backup named '{backup_name}' already exists."
-
-        # Define paths for backup targets
-        db_file_path = Path(self.db_path)
-        cities_log_path = self.saiverse_home / "cities"
-        personas_log_path = self.saiverse_home / "personas"
-        buildings_log_path = self.saiverse_home / "buildings"
-
-        try:
-            # Use a temporary directory to assemble the backup contents
-            with tempfile.TemporaryDirectory() as tmpdir:
-                tmp_path = Path(tmpdir)
-                
-                # 1. Copy database file
-                if db_file_path.exists():
-                    shutil.copy(db_file_path, tmp_path / db_file_path.name)
-                    logging.info(f"Added database to backup staging: {db_file_path}")
-
-                # 2. Copy cities log directory
-                if cities_log_path.exists() and cities_log_path.is_dir():
-                    shutil.copytree(cities_log_path, tmp_path / "cities")
-                    logging.info(f"Added cities logs to backup staging: {cities_log_path}")
-
-                # 3. Copy personas log directory
-                if personas_log_path.exists() and personas_log_path.is_dir():
-                    shutil.copytree(personas_log_path, tmp_path / "personas")
-                    logging.info(f"Added personas logs to backup staging: {personas_log_path}")
-
-                # 4. Copy buildings log directory
-                if buildings_log_path.exists() and buildings_log_path.is_dir():
-                    shutil.copytree(buildings_log_path, tmp_path / "buildings")
-                    logging.info(f"Added buildings logs to backup staging: {buildings_log_path}")
-
-                # 5. Create the zip archive from the temporary directory
-                shutil.make_archive(
-                    base_name=self.backup_dir / backup_name,
-                    format='zip',
-                    root_dir=tmp_path
-                )
-            
-            logging.info(f"World state successfully backed up to {backup_zip_path}")
-            return f"Backup '{backup_name}' created successfully."
-        except Exception as e:
-            logging.error(f"Failed to create backup: {e}", exc_info=True)
-            return f"Error: {e}"
-
-    def restore_world(self, backup_name: str) -> str:
-        """
-        Restores the entire world state from a .zip archive.
-        This operation is destructive and requires an application restart.
-        """
-        backup_zip_path = self.backup_dir / f"{backup_name}.zip"
-        if not backup_zip_path.exists():
-            return f"Error: Backup '{backup_name}' not found."
-
-        # Define paths for restore targets
-        db_file_path = Path(self.db_path)
-        cities_log_path = self.saiverse_home / "cities"
-        personas_log_path = self.saiverse_home / "personas"
-        buildings_log_path = self.saiverse_home / "buildings"
-
-        try:
-            # --- 1. Safely remove existing data ---
-            logging.warning("Starting world restore. Removing existing data...")
-            if db_file_path.exists():
-                db_file_path.unlink()
-                logging.info(f"Removed existing database file: {db_file_path}")
-            if cities_log_path.exists():
-                shutil.rmtree(cities_log_path)
-                logging.info(f"Removed existing cities log directory: {cities_log_path}")
-            if personas_log_path.exists():
-                shutil.rmtree(personas_log_path)
-                logging.info(f"Removed existing personas log directory: {personas_log_path}")
-            if buildings_log_path.exists():
-                shutil.rmtree(buildings_log_path)
-                logging.info(f"Removed existing buildings log directory: {buildings_log_path}")
-
-            # --- 2. Unpack the backup to a temporary directory ---
-            with tempfile.TemporaryDirectory() as tmpdir:
-                tmp_path = Path(tmpdir)
-                logging.info(f"Unpacking backup '{backup_zip_path}' to temporary directory '{tmp_path}'")
-                shutil.unpack_archive(backup_zip_path, tmp_path)
-
-                # --- 3. Move restored files to their final destination ---
-                unpacked_db = tmp_path / db_file_path.name
-                if unpacked_db.exists():
-                    shutil.move(str(unpacked_db), str(db_file_path))
-                    logging.info(f"Restored database file to {db_file_path}")
-
-                for log_dir_name in ["cities", "personas", "buildings"]:
-                    unpacked_dir = tmp_path / log_dir_name
-                    if unpacked_dir.exists() and unpacked_dir.is_dir():
-                        shutil.move(str(unpacked_dir), str(self.saiverse_home / log_dir_name))
-                        logging.info(f"Restored {log_dir_name} log directory.")
-
-            logging.warning(f"World state has been restored from {backup_zip_path}. A RESTART IS REQUIRED.")
-            return "Restore successful. Please RESTART the application to load the restored world."
-
-        except Exception as e:
-            logging.error(f"Failed to restore world: {e}", exc_info=True)
-            # Attempt to clean up in case of partial failure, though it might not be perfect.
-            return f"Error during restore: {e}. The world state may be inconsistent. It is recommended to restore another backup or re-seed the database."
-
-    def delete_backup(self, backup_name: str) -> str:
-        """Deletes a specific backup file (.zip)."""
-        backup_path = self.backup_dir / f"{backup_name}.zip"
-        if not backup_path.exists():
-            return f"Error: Backup '{backup_name}' not found."
-        try:
-            os.remove(backup_path)
-            logging.info(f"Deleted backup: {backup_path}")
-            return f"Backup '{backup_name}' deleted successfully."
-        except Exception as e:
-            logging.error(f"Failed to delete backup: {e}", exc_info=True)
-            return f"Error: {e}"
-
-    def get_blueprint_details(self, blueprint_id: int) -> Optional[Dict]:
-        """Get full details for a single blueprint for the edit form."""
-        db = self.SessionLocal()
-        try:
-            blueprint = db.query(Blueprint).filter(Blueprint.BLUEPRINT_ID == blueprint_id).first()
-            if not blueprint: return None
-            return {
-                "BLUEPRINT_ID": blueprint.BLUEPRINT_ID,
-                "NAME": blueprint.NAME,
-                "DESCRIPTION": blueprint.DESCRIPTION,
-                "CITYID": blueprint.CITYID,
-                "BASE_SYSTEM_PROMPT": blueprint.BASE_SYSTEM_PROMPT,
-                "ENTITY_TYPE": blueprint.ENTITY_TYPE,
-            }
-        finally:
-            db.close()
-
-    def get_blueprints_df(self) -> pd.DataFrame:
-        """ワールドエディタ用にすべてのBlueprint一覧をDataFrameとして取得する"""
-        db = self.SessionLocal()
-        try:
-            query = db.query(Blueprint)
-            df = pd.read_sql(query.statement, query.session.bind)
-            return df[['BLUEPRINT_ID', 'NAME', 'DESCRIPTION', 'ENTITY_TYPE', 'CITYID']]
-        finally:
-            db.close()
-
-    def create_blueprint(self, name: str, description: str, city_id: int, system_prompt: str, entity_type: str) -> str:
-        """ワールドエディタから新しいBlueprintを作成する"""
-        db = self.SessionLocal()
-        try:
-            # Check for name conflicts within the same city
-            existing = db.query(Blueprint).filter_by(CITYID=city_id, NAME=name).first()
-            if existing:
-                return f"Error: A blueprint named '{name}' already exists in this city."
-
-            new_blueprint = Blueprint(
-                CITYID=city_id,
-                NAME=name,
-                DESCRIPTION=description,
-                BASE_SYSTEM_PROMPT=system_prompt,
-                ENTITY_TYPE=entity_type
-            )
-            db.add(new_blueprint)
-            db.commit()
-            logging.info(f"Created new blueprint '{name}' in City ID {city_id}.")
-            return f"Blueprint '{name}' created successfully."
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to create blueprint '{name}': {e}", exc_info=True)
-            return f"Error: {e}"
-        finally:
-            db.close()
-
-    def update_blueprint(self, blueprint_id: int, name: str, description: str, city_id: int, system_prompt: str, entity_type: str) -> str:
-        """ワールドエディタからBlueprintの設定を更新する"""
-        db = self.SessionLocal()
-        try:
-            blueprint = db.query(Blueprint).filter_by(BLUEPRINT_ID=blueprint_id).first()
-            if not blueprint:
-                return "Error: Blueprint not found."
-            if not city_id:
-                return "Error: City must be selected."
-
-            # Check for name conflicts if the name is being changed
-            if blueprint.NAME != name or blueprint.CITYID != city_id:
-                existing = db.query(Blueprint).filter_by(CITYID=city_id, NAME=name).first()
-                if existing:
-                    # Find the city name for the error message
-                    target_city = db.query(CityModel).filter_by(CITYID=city_id).first()
-                    city_name_for_error = target_city.CITYNAME if target_city else f"ID {city_id}"
-                    return f"Error: A blueprint named '{name}' already exists in city '{city_name_for_error}'."
-
-            blueprint.NAME = name
-            blueprint.DESCRIPTION = description
-            blueprint.CITYID = city_id
-            blueprint.BASE_SYSTEM_PROMPT = system_prompt
-            blueprint.ENTITY_TYPE = entity_type
-            db.commit()
-            logging.info(f"Updated blueprint '{name}' (ID: {blueprint_id}).")
-            return f"Blueprint '{name}' updated successfully."
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to update blueprint ID {blueprint_id}: {e}", exc_info=True)
-            return f"Error: {e}"
-        finally:
-            db.close()
-
-    def delete_blueprint(self, blueprint_id: int) -> str:
-        """ワールドエディタからBlueprintを削除する"""
-        db = self.SessionLocal()
-        try:
-            blueprint = db.query(Blueprint).filter_by(BLUEPRINT_ID=blueprint_id).first()
-            if not blueprint:
-                return "Error: Blueprint not found."
-
-            db.delete(blueprint)
-            db.commit()
-            logging.info(f"Deleted blueprint ID {blueprint_id}.")
-            return f"Blueprint deleted successfully."
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to delete blueprint ID {blueprint_id}: {e}", exc_info=True)
-            return f"Error: {e}"
-        finally:
-            db.close()
-
-    def spawn_entity_from_blueprint(self, blueprint_id: int, entity_name: str, target_building_id: str) -> Tuple[bool, str]:
-        """ブループリントから新しいエンティティを生成し、指定された建物に配置する"""
-        db = self.SessionLocal()
-        try:
-            blueprint = db.query(Blueprint).filter_by(BLUEPRINT_ID=blueprint_id).first()
-            if not blueprint: return False, "Blueprint not found."
-            if target_building_id not in self.building_map: return False, f"Target building '{target_building_id}' not found."
-            if len(self.occupants.get(target_building_id, [])) >= self.capacities.get(target_building_id, 1): return False, f"Target building '{self.building_map[target_building_id].name}' is at full capacity."
-            if db.query(AIModel).filter(func.lower(AIModel.AINAME) == func.lower(entity_name)).first(): return False, f"An entity named '{entity_name}' already exists."
-
-            home_city = db.query(CityModel).filter_by(CITYID=blueprint.CITYID).first()
-            new_ai_id = f"{entity_name.lower().replace(' ', '_')}_{home_city.CITYNAME}"
-            if db.query(AIModel).filter_by(AIID=new_ai_id).first(): return False, f"An entity with the generated ID '{new_ai_id}' already exists."
-
-            # --- Create private room for the new AI ---
-            private_room_id = f"{new_ai_id}_room"
-            private_room_model = BuildingModel(
-                CITYID=blueprint.CITYID, BUILDINGID=private_room_id, BUILDINGNAME=f"{entity_name}の部屋",
-                CAPACITY=1, SYSTEM_INSTRUCTION=f"{entity_name}が待機する個室です。",
-                DESCRIPTION=f"{entity_name}のプライベートルーム。"
-            )
-            db.add(private_room_model)
-            logging.info(f"DB: Added new private room '{private_room_model.BUILDINGNAME}' ({private_room_id}) for spawned AI.")
-
-            # --- Create AI record and link to private room ---
-            new_ai_model = AIModel(
-                AIID=new_ai_id, HOME_CITYID=blueprint.CITYID, AINAME=entity_name,
-                SYSTEMPROMPT=blueprint.BASE_SYSTEM_PROMPT, DESCRIPTION=blueprint.DESCRIPTION,
-                AVATAR_IMAGE=blueprint.BASE_AVATAR, DEFAULT_MODEL=self.model,
-                PRIVATE_ROOM_ID=private_room_id
-            )
-            db.add(new_ai_model)
-            
-            target_building_db = db.query(BuildingModel).filter_by(BUILDINGID=target_building_id).first()
-            new_occupancy_log = BuildingOccupancyLog(CITYID=target_building_db.CITYID, AIID=new_ai_id, BUILDINGID=target_building_id, ENTRY_TIMESTAMP=datetime.now())
-            db.add(new_occupancy_log)
-
-            # --- Update memory for the new private room (if it's in the current city) ---
-            if blueprint.CITYID == self.city_id:
-                new_building_obj = Building(
-                    building_id=private_room_model.BUILDINGID, name=private_room_model.BUILDINGNAME,
-                    capacity=private_room_model.CAPACITY, system_instruction=private_room_model.SYSTEM_INSTRUCTION,
-                    description=private_room_model.DESCRIPTION
-                )
-                self.buildings.append(new_building_obj)
-                self.building_map[private_room_id] = new_building_obj
-                self.capacities[private_room_id] = new_building_obj.capacity
-                self.occupants[private_room_id] = [] # Starts empty
-                self.building_memory_paths[private_room_id] = self.saiverse_home / "cities" / self.city_name / "buildings" / private_room_id / "log.json"
-                self.building_histories[private_room_id] = []
-
-            # --- Update memory for the new AI ---
-            if blueprint.CITYID == self.city_id:
-                new_persona_core = PersonaCore(city_name=self.city_name, persona_id=new_ai_id, persona_name=entity_name, persona_system_instruction=blueprint.BASE_SYSTEM_PROMPT, avatar_image=blueprint.BASE_AVATAR, buildings=self.buildings, common_prompt_path=Path("system_prompts/common.txt"), action_priority_path=Path("action_priority.json"), building_histories=self.building_histories, occupants=self.occupants, id_to_name_map=self.id_to_name_map, move_callback=self._move_persona, dispatch_callback=self.dispatch_persona, explore_callback=self._explore_city, create_persona_callback=self._create_persona, session_factory=self.SessionLocal, start_building_id=target_building_id, model=self.model, context_length=self.context_length, user_room_id=self.user_room_id, provider=self.provider, is_dispatched=False, timezone_info=self.timezone_info, timezone_name=self.timezone_name)
-                self.personas[new_ai_id] = new_persona_core
-                self.avatar_map[new_ai_id] = self.default_avatar
-                self.id_to_name_map[new_ai_id] = entity_name
-                self.persona_map[entity_name] = new_ai_id
-            
-            self.occupants.setdefault(target_building_id, []).append(new_ai_id)
-            arrival_message = f'<div class="note-box">✨ Blueprint Spawn:<br><b>{entity_name}がこの世界に現れました</b></div>'
-            self.building_histories.setdefault(target_building_id, []).append({"role": "host", "content": arrival_message})
-            self._save_building_histories()
-
-            db.commit()
-            return True, f"Entity '{entity_name}' spawned successfully in '{self.building_map[target_building_id].name}'."
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to spawn entity from blueprint: {e}", exc_info=True)
-            return False, f"An internal error occurred: {e}"
-        finally:
-            db.close()
-
-    def get_tools_df(self) -> pd.DataFrame:
-        """ワールドエディタ用にすべてのTool一覧をDataFrameとして取得する"""
-        db = self.SessionLocal()
-        try:
-            query = db.query(ToolModel)
-            df = pd.read_sql(query.statement, query.session.bind)
-            return df
-        finally:
-            db.close()
-
-    def get_tool_details(self, tool_id: int) -> Optional[Dict]:
-        """Get full details for a single tool for the edit form."""
-        db = self.SessionLocal()
-        try:
-            tool = db.query(ToolModel).filter(ToolModel.TOOLID == tool_id).first()
-            if not tool: return None
-            return {
-                "TOOLID": tool.TOOLID,
-                "TOOLNAME": tool.TOOLNAME,
-                "DESCRIPTION": tool.DESCRIPTION,
-                "MODULE_PATH": tool.MODULE_PATH,
-                "FUNCTION_NAME": tool.FUNCTION_NAME,
-            }
-        finally:
-            db.close()
-
-    def create_tool(self, name: str, description: str, module_path: str, function_name: str) -> str:
-        """ワールドエディタから新しいToolを作成する"""
-        db = self.SessionLocal()
-        try:
-            if db.query(ToolModel).filter_by(TOOLNAME=name).first():
-                return f"Error: A tool named '{name}' already exists."
-            if db.query(ToolModel).filter_by(MODULE_PATH=module_path, FUNCTION_NAME=function_name).first():
-                return f"Error: A tool with the same module and function name already exists."
-
-            new_tool = ToolModel(
-                TOOLNAME=name,
-                DESCRIPTION=description,
-                MODULE_PATH=module_path,
-                FUNCTION_NAME=function_name
-            )
-            db.add(new_tool)
-            db.commit()
-            logging.info(f"Created new tool '{name}'.")
-            return f"Tool '{name}' created successfully."
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to create tool '{name}': {e}", exc_info=True)
-            return f"Error: {e}"
-        finally:
-            db.close()
-
-    def update_tool(self, tool_id: int, name: str, description: str, module_path: str, function_name: str) -> str:
-        """ワールドエディタからToolの設定を更新する"""
-        db = self.SessionLocal()
-        try:
-            tool = db.query(ToolModel).filter_by(TOOLID=tool_id).first()
-            if not tool: return "Error: Tool not found."
-
-            tool.TOOLNAME = name
-            tool.DESCRIPTION = description
-            tool.MODULE_PATH = module_path
-            tool.FUNCTION_NAME = function_name
-            db.commit()
-            logging.info(f"Updated tool '{name}' (ID: {tool_id}).")
-            return f"Tool '{name}' updated successfully."
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to update tool ID {tool_id}: {e}", exc_info=True)
-            return f"Error: {e}"
-        finally:
-            db.close()
-
-    def delete_tool(self, tool_id: int) -> str:
-        """ワールドエディタからToolを削除する"""
-        db = self.SessionLocal()
-        try:
-            tool = db.query(ToolModel).filter_by(TOOLID=tool_id).first()
-            if not tool: return "Error: Tool not found."
-            if db.query(BuildingToolLink).filter_by(TOOLID=tool_id).first():
-                return f"Error: Cannot delete tool '{tool.TOOLNAME}' because it is linked to one or more buildings."
-            db.delete(tool)
-            db.commit()
-            logging.info(f"Deleted tool ID {tool_id}.")
-            return f"Tool '{tool.TOOLNAME}' deleted successfully."
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to delete tool ID {tool_id}: {e}", exc_info=True)
-            return f"Error: {e}"
-        finally:
-            db.close()
-
-    def get_linked_tool_ids(self, building_id: str) -> List[int]:
-        """Gets a list of tool IDs linked to a specific building."""
-        if not building_id: return []
-        db = self.SessionLocal()
-        try:
-            links = db.query(BuildingToolLink.TOOLID).filter_by(BUILDINGID=building_id).all()
-            # links will be a list of tuples, e.g., [(1,), (2,)]
-            return [link[0] for link in links]
-        finally:
-            db.close()
 
     # --- World Editor: Create/Delete Methods ---
 
-    def _is_seeded_entity(self, entity_id: str) -> bool:
-        """Checks if an entity was created by seed.py based on its ID."""
-        if not isinstance(entity_id, str):
-            return False
-        
-        # List of base names/prefixes for seeded entities (AIs and special buildings)
-        seeded_prefixes = [
-            "air_", "eris_", "genesis_", # AI names from city_a
-            "luna_", "sol_",             # AI names from city_b
-            "user_room_", "deep_think_room_", "altar_of_creation_" # Special building names
-        ]
-        
-        # Check if the entity ID starts with one of the seeded prefixes.
-        # This covers AIs (e.g., "air_city_a") and their rooms (e.g., "air_city_a_room"),
-        # as well as special buildings (e.g., "user_room_city_a").
-        return any(entity_id.startswith(prefix) for prefix in seeded_prefixes)
-
     def create_city(self, name: str, description: str, ui_port: int, api_port: int, timezone_name: str) -> str:
         """Creates a new city."""
-        db = self.SessionLocal()
-        try:
-            if db.query(CityModel).filter_by(CITYNAME=name).first():
-                return f"Error: A city named '{name}' already exists."
-            if db.query(CityModel).filter((CityModel.UI_PORT == ui_port) | (CityModel.API_PORT == api_port)).first():
-                return f"Error: UI Port {ui_port} or API Port {api_port} is already in use."
-
-            tz_candidate = (timezone_name or "UTC").strip() or "UTC"
-            try:
-                ZoneInfo(tz_candidate)
-            except Exception:
-                return f"Error: Invalid timezone '{tz_candidate}'. Please provide an IANA timezone name (e.g., Asia/Tokyo)."
-
-            new_city = CityModel(
-                USERID=self.user_id,
-                CITYNAME=name,
-                DESCRIPTION=description,
-                UI_PORT=ui_port,
-                API_PORT=api_port,
-                TIMEZONE=tz_candidate,
-            )
-            db.add(new_city)
-            db.commit()
-            self._load_cities_from_db()
-            logging.info(f"Created new city '{name}'.")
-            return f"City '{name}' created successfully. Please restart the application to use it."
-        except Exception as e:
-            db.rollback()
-            return f"Error: {e}"
-        finally:
-            db.close()
+        return self.admin.create_city(name, description, ui_port, api_port, timezone_name)
 
     def delete_city(self, city_id: int) -> str:
         """Deletes a city after checking dependencies."""
-        db = self.SessionLocal()
-        try:
-            city = db.query(CityModel).filter_by(CITYID=city_id).first()
-            if not city: return "Error: City not found."
-            if city.CITYNAME in ["city_a", "city_b"]:
-                return "Error: Seeded cities (city_a, city_b) cannot be deleted."
-            if city.CITYID == self.city_id: return "Error: Cannot delete the currently running city."
+        return self.admin.delete_city(city_id)
 
-            if db.query(BuildingModel).filter_by(CITYID=city_id).first():
-                return f"Error: Cannot delete city '{city.CITYNAME}' because it still contains buildings."
-            
-            # Although buildings are gone, double-check for stray occupancy logs (should not happen if building deletion is clean)
-            if db.query(BuildingOccupancyLog).filter_by(CITYID=city_id).first():
-                 return f"Error: Cannot delete city '{city.CITYNAME}' due to remaining occupancy logs. Please clean up buildings first."
-
-            db.delete(city)
-            db.commit()
-            logging.info(f"Deleted city '{city.CITYNAME}'.")
-            return f"City '{city.CITYNAME}' deleted successfully."
-        except Exception as e:
-            db.rollback()
-            return f"Error: {e}"
-        finally:
-            db.close()
-
-    def create_building(self, name: str, description: str, capacity: int, system_instruction: str, city_id: int) -> str:
+    def create_building(
+        self, name: str, description: str, capacity: int, system_instruction: str, city_id: int
+    ) -> str:
         """Creates a new building in a specified city."""
-        db = self.SessionLocal()
-        try:
-            if not db.query(CityModel).filter_by(CITYID=city_id).first():
-                return "Error: Target city not found."
-            if db.query(BuildingModel).filter_by(CITYID=city_id, BUILDINGNAME=name).first():
-                return f"Error: A building named '{name}' already exists in that city."
-
-            building_id = f"{name.lower().replace(' ', '_')}_{db.query(CityModel).filter_by(CITYID=city_id).first().CITYNAME}"
-            if db.query(BuildingModel).filter_by(BUILDINGID=building_id).first():
-                return f"Error: A building with the generated ID '{building_id}' already exists."
-
-            new_building = BuildingModel(
-                CITYID=city_id, BUILDINGID=building_id, BUILDINGNAME=name,
-                DESCRIPTION=description, CAPACITY=capacity, SYSTEM_INSTRUCTION=system_instruction
-            )
-            db.add(new_building)
-            db.commit()
-            logging.info(f"Created new building '{name}' in city {city_id}.")
-            return f"Building '{name}' created successfully. A restart is required for it to be usable."
-        except Exception as e:
-            db.rollback()
-            return f"Error: {e}"
-        finally:
-            db.close()
+        return self.admin.create_building(name, description, capacity, system_instruction, city_id)
 
     def delete_building(self, building_id: str) -> str:
         """Deletes a building after checking for occupants."""
-        if self._is_seeded_entity(building_id):
-            return "Error: Seeded buildings cannot be deleted."
-        db = self.SessionLocal()
-        try:
-            building = db.query(BuildingModel).filter_by(BUILDINGID=building_id).first()
-            if not building: return "Error: Building not found."
+        return self.admin.delete_building(building_id)
 
-            occupancy = db.query(BuildingOccupancyLog).filter_by(BUILDINGID=building_id, EXIT_TIMESTAMP=None).first()
-            if occupancy:
-                return f"Error: Cannot delete '{building.BUILDINGNAME}' because it is occupied."
-
-            # Delete associated logs before deleting the building
-            db.query(BuildingOccupancyLog).filter_by(BUILDINGID=building_id).delete()
-            db.delete(building)
-            db.commit()
-            logging.info(f"Deleted building '{building.BUILDINGNAME}'.")
-            return f"Building '{building.BUILDINGNAME}' deleted successfully. A restart is required for changes to apply."
-        except Exception as e:
-            db.rollback()
-            return f"Error: {e}"
-        finally:
-            db.close()
-
-    def create_ai(self, name: str, system_prompt: str, home_city_id: int) -> str:
-        """Creates a new AI and their private room, similar to _create_persona."""
-        success, message = self._create_persona(name, system_prompt)
-        if success:
-            return f"AI '{name}' and their room created successfully. A restart is required for the AI to become active."
-        else:
-            return f"Error: {message}"
-
-    def delete_ai(self, ai_id: str) -> str:
-        """Deletes an AI after checking its state."""
-        if self._is_seeded_entity(ai_id):
-            return "Error: Seeded AIs cannot be deleted."
-        
-        db = self.SessionLocal()
-        try:
-            ai = db.query(AIModel).filter_by(AIID=ai_id).first()
-            if not ai: return "Error: AI not found."
-            if ai.IS_DISPATCHED: return f"Error: Cannot delete a dispatched AI. Please return '{ai.AINAME}' to their home city first."
-
-            # Update occupancy logs to mark exit, preserving history
-            db.query(BuildingOccupancyLog).filter(
-                BuildingOccupancyLog.AIID == ai_id,
-                BuildingOccupancyLog.EXIT_TIMESTAMP.is_(None)
-            ).update({"EXIT_TIMESTAMP": datetime.now()})
-
-            # Delete the AI record
-            db.delete(ai)
-            db.commit()
-
-            # Remove from memory if it's a local persona
-            if ai_id in self.personas:
-                persona_name = self.personas[ai_id].persona_name
-                del self.personas[ai_id]
-                if persona_name in self.persona_map:
-                    del self.persona_map[persona_name]
-                logging.info(f"Removed local persona instance '{persona_name}' from memory.")
-            
-            if ai_id in self.id_to_name_map: del self.id_to_name_map[ai_id]
-            if ai_id in self.avatar_map: del self.avatar_map[ai_id]
-            for building_id in self.occupants:
-                if ai_id in self.occupants[building_id]:
-                    self.occupants[building_id].remove(ai_id)
-
-            logging.info(f"Deleted AI '{ai.AINAME}' ({ai_id}).")
-            return f"AI '{ai.AINAME}' deleted successfully."
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to delete AI '{ai_id}': {e}", exc_info=True)
-            return f"Error: {e}"
-        finally:
-            db.close()
-            
     def move_ai_from_editor(self, ai_id: str, target_building_id: str) -> str:
         """
         Moves an AI to a specified building, triggered from the World Editor.
-        This is a direct administrative action.
-        This method is refactored to use summon_persona and end_conversation
-        to ensure interaction mode consistency.
         """
-        if not ai_id or not target_building_id:
-            return "Error: AI ID and Target Building ID are required."
-
-        persona = self.personas.get(ai_id)
-        if not persona:
-            if ai_id in self.visiting_personas:
-                 return "Error: Cannot manage the interaction mode of a visiting persona from the editor."
-            return f"Error: Persona with ID '{ai_id}' not found in memory."
-
-        if target_building_id not in self.building_map:
-            return f"Error: Target building '{target_building_id}' not found."
-
-        from_building_id = persona.current_building_id
-        if from_building_id == target_building_id:
-            return f"{persona.persona_name} is already in that building."
-
-        # Block moving a persona who is currently in the user's room.
-        if from_building_id == self.user_room_id:
-            return "Can't move, because this persona in user room. Please execute end conversation."
-
-        # Case 1: Moving TO the user's room. This is equivalent to "summoning".
-        if target_building_id == self.user_room_id:
-            logging.info(f"[EditorMove] Summoning '{persona.persona_name}' to user room.")
-            success, reason = self.summon_persona(ai_id)
-            if success:
-                return f"Successfully summoned '{persona.persona_name}' to your room."
-            else:
-                return f"Failed to summon '{persona.persona_name}': {reason}"
-
-        # Case 2: Moving between two non-user rooms. This is a simple move with no mode change.
-        else:
-            logging.info(f"[EditorMove] Moving '{persona.persona_name}' from '{self.building_map.get(from_building_id, 'Unknown').name}' to '{self.building_map.get(target_building_id, 'Unknown').name}'.")
-            success, reason = self._move_persona(ai_id, from_building_id, target_building_id)
-            if success:
-                persona.current_building_id = target_building_id
-                persona.register_entry(target_building_id)
-                return f"Successfully moved '{persona.persona_name}' to '{self.building_map[target_building_id].name}'."
-            else:
-                return f"Failed to move: {reason}"
-
-    def get_buildings_df(self) -> pd.DataFrame:
-        """ワールドエディタ用にすべてのBuilding一覧をDataFrameとして取得する"""
-        db = self.SessionLocal()
-        try:
-            query = db.query(BuildingModel)
-            df = pd.read_sql(query.statement, query.session.bind)
-            return df[['BUILDINGID', 'BUILDINGNAME', 'CAPACITY', 'DESCRIPTION', 'SYSTEM_INSTRUCTION', 'CITYID', 'AUTO_INTERVAL_SEC']]
-        finally:
-            db.close()
-
-    def update_building(self, building_id: str, name: str, capacity: int, description: str, system_instruction: str, city_id: int, tool_ids: List[int], interval: int) -> str:
-        """ワールドエディタからBuildingの設定を更新する"""
-        db = self.SessionLocal()
-        try:
-            building = db.query(BuildingModel).filter(BuildingModel.BUILDINGID == building_id).first()
-            if not building:
-                return f"Error: Building with ID '{building_id}' not found."
-
-            # Check if any AI is in the building before changing city
-            if building.CITYID != city_id:
-                occupancy_log = db.query(BuildingOccupancyLog).filter(
-                    BuildingOccupancyLog.BUILDINGID == building_id,
-                    BuildingOccupancyLog.EXIT_TIMESTAMP.is_(None)
-                ).first()
-                if occupancy_log:
-                    return f"Error: Cannot change the city of a building while it is occupied. Please move all AIs out of '{building.BUILDINGNAME}' first."
-
-            building.BUILDINGNAME = name
-            building.CAPACITY = capacity
-            building.DESCRIPTION = description
-            building.SYSTEM_INSTRUCTION = system_instruction
-            building.AUTO_INTERVAL_SEC = interval
-            building.CITYID = city_id
-
-            # --- Update Tool Links ---
-            # 1. Delete existing links for this building
-            db.query(BuildingToolLink).filter_by(BUILDINGID=building_id).delete(synchronize_session=False)
-            
-            # 2. Add new links
-            if tool_ids:
-                for tool_id in tool_ids:
-                    new_link = BuildingToolLink(BUILDINGID=building_id, TOOLID=int(tool_id))
-                    db.add(new_link)
-
-            db.commit()
-            
-            logging.info(f"Updated building '{name}' ({building_id}) and its tool links. A restart is required for changes to apply.")
-            return f"Building '{name}' and its tool links updated successfully. A restart is required for the changes to take full effect."
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to update building '{building_id}': {e}", exc_info=True)
-            return f"Error: {e}"
-        finally:
-            db.close()
+        return self.admin.move_ai_from_editor(ai_id, target_building_id)
 
     def get_ais_df(self) -> pd.DataFrame:
         """ワールドエディタ用にすべてのAI一覧をDataFrameとして取得する"""
-        db = self.SessionLocal()
-        try:
-            query = db.query(AIModel)
-            df = pd.read_sql(query.statement, query.session.bind)
-            # Don't show the full system prompt in the main table
-            df['SYSTEMPROMPT_SNIPPET'] = df['SYSTEMPROMPT'].str.slice(0, 40) + '...'
-            return df[['AIID', 'AINAME', 'HOME_CITYID', 'DEFAULT_MODEL', 'IS_DISPATCHED', 'DESCRIPTION', 'SYSTEMPROMPT_SNIPPET']]
-        finally:
-            db.close()
+        return self.admin.get_ais_df()
 
     def get_ai_details(self, ai_id: str) -> Optional[Dict]:
         """Get full details for a single AI for the edit form."""
-        db = self.SessionLocal()
-        try:
-            ai = db.query(AIModel).filter(AIModel.AIID == ai_id).first()
-            if not ai: return None
-            return {
-                "AIID": ai.AIID, "AINAME": ai.AINAME, "HOME_CITYID": ai.HOME_CITYID,
-                "SYSTEMPROMPT": ai.SYSTEMPROMPT, "DESCRIPTION": ai.DESCRIPTION,
-                "AVATAR_IMAGE": ai.AVATAR_IMAGE, "IS_DISPATCHED": ai.IS_DISPATCHED,
-                "DEFAULT_MODEL": ai.DEFAULT_MODEL,
-                "INTERACTION_MODE": ai.INTERACTION_MODE
-            }
-        finally:
-            db.close()
+        return self.admin.get_ai_details(ai_id)
+
+    def create_ai(self, name: str, system_prompt: str, home_city_id: int) -> str:
+        """Creates a new AI and their private room."""
+        return self.admin.create_ai(name, system_prompt, home_city_id)
 
     def update_ai(
         self,
@@ -2905,81 +1314,81 @@ class SAIVerseManager:
         avatar_upload: Optional[str],
     ) -> str:
         """ワールドエディタからAIの設定を更新する"""
-        db = self.SessionLocal()
-        try:
-            ai = db.query(AIModel).filter(AIModel.AIID == ai_id).first()
-            if not ai: return f"Error: AI with ID '{ai_id}' not found."
+        return self.admin.update_ai(
+            ai_id,
+            name,
+            description,
+            system_prompt,
+            home_city_id,
+            default_model,
+            interaction_mode,
+            avatar_path,
+            avatar_upload,
+        )
 
-            if ai.HOME_CITYID != home_city_id:
-                if ai.IS_DISPATCHED: return f"Error: Cannot change the home city of a dispatched AI. Please return '{ai.AINAME}' to their home city first."
+    def delete_ai(self, ai_id: str) -> str:
+        """Deletes an AI after checking its state."""
+        return self.admin.delete_ai(ai_id)
 
-            avatar_value: Optional[str]
-            avatar_value = (avatar_path or "").strip() or None
-            if avatar_upload:
-                try:
-                    avatars_dir = Path("assets") / "avatars"
-                    avatars_dir.mkdir(parents=True, exist_ok=True)
-                    upload_path = Path(avatar_upload)
-                    suffix = upload_path.suffix.lower() if upload_path.suffix else ".png"
-                    dest_name = f"{ai_id}_{int(time.time())}{suffix}"
-                    dest_path = avatars_dir / dest_name
-                    shutil.copy(upload_path, dest_path)
-                    avatar_value = str(dest_path)
-                    logging.info(f"Stored uploaded avatar for '{ai_id}' at {dest_path}")
-                except Exception as exc:
-                    logging.error(f"Failed to store avatar upload for {ai_id}: %s", exc, exc_info=True)
-                    return f"Error: Failed to process avatar upload: {exc}"
+    def get_linked_tool_ids(self, building_id: str) -> List[int]:
+        """Gets a list of tool IDs linked to a specific building."""
+        return self.admin.get_linked_tool_ids(building_id)
 
-            # --- Interaction Mode Change Logic ---
-            original_mode = ai.INTERACTION_MODE
-            mode_changed = original_mode != interaction_mode
-            move_feedback = ""
+    def get_buildings_df(self) -> pd.DataFrame:
+        """ワールドエディタ用にすべてのBuilding一覧をDataFrameとして取得する"""
+        return self.admin.get_buildings_df()
 
-            if mode_changed:
-                if interaction_mode == "sleep":
-                    ai.INTERACTION_MODE = "sleep"
-                    logging.info(f"AI '{name}' mode changed to 'sleep'. Attempting to move to private room.")
-                    
-                    private_room_id = ai.PRIVATE_ROOM_ID
-                    if not private_room_id or private_room_id not in self.building_map:
-                        move_feedback = f" Note: Could not move to private room because it is not configured or invalid."
-                        logging.warning(f"Cannot move AI '{name}' to sleep. Private room ID '{private_room_id}' is not configured or invalid.")
-                    else:
-                        current_building_id = self.personas[ai_id].current_building_id
-                        if current_building_id != private_room_id:
-                            success, reason = self._move_persona(ai_id, current_building_id, private_room_id, db_session=db)
-                            if success:
-                                self.personas[ai_id].current_building_id = private_room_id
-                                move_feedback = f" Moved to private room '{self.building_map[private_room_id].name}'."
-                                logging.info(f"Successfully moved AI '{name}' to their private room '{private_room_id}'.")
-                            else:
-                                move_feedback = f" Note: Failed to move to private room: {reason}."
-                                logging.error(f"Failed to move AI '{name}' to private room: {reason}")
-                elif interaction_mode in ["auto", "manual"]:
-                    ai.INTERACTION_MODE = interaction_mode
-                else:
-                    logging.warning(f"Invalid interaction mode '{interaction_mode}' requested for AI '{name}'. No change made.")
+    def update_building(
+        self,
+        building_id: str,
+        name: str,
+        capacity: int,
+        description: str,
+        system_instruction: str,
+        city_id: int,
+        tool_ids: List[int],
+        interval: int,
+    ) -> str:
+        """ワールドエディタからBuildingの設定を更新する"""
+        return self.admin.update_building(
+            building_id,
+            name,
+            capacity,
+            description,
+            system_instruction,
+            city_id,
+            tool_ids,
+            interval,
+        )
 
-            # --- Update other fields ---
-            ai.AINAME = name; ai.DESCRIPTION = description; ai.SYSTEMPROMPT = system_prompt; ai.HOME_CITYID = home_city_id
-            ai.DEFAULT_MODEL = default_model if default_model else None
-            ai.AVATAR_IMAGE = avatar_value
-            db.commit()
+    def get_items_df(self) -> pd.DataFrame:
+        return self.admin.get_items_df()
 
-            # --- Update in-memory state ---
-            if ai_id in self.personas:
-                persona = self.personas[ai_id]
-                persona.persona_name = name; persona.persona_system_instruction = system_prompt
-                persona.interaction_mode = ai.INTERACTION_MODE
-                logging.info(f"Updated in-memory persona '{name}' with new settings.")
-            self._set_persona_avatar(ai_id, avatar_value)
+    def get_item_details(self, item_id: str) -> Optional[Dict[str, Any]]:
+        return self.admin.get_item_details(item_id)
 
-            status_message = f"AI '{name}' updated successfully."
-            if mode_changed: status_message += f" Mode changed from '{original_mode}' to '{interaction_mode}'."
-            return status_message + move_feedback
-        except Exception as e:
-            db.rollback()
-            logging.error(f"Failed to update AI '{ai_id}': {e}", exc_info=True)
-            return f"Error: {e}"
-        finally:
-            db.close()
+    def create_item(
+        self,
+        name: str,
+        item_type: str,
+        description: str,
+        owner_kind: str,
+        owner_id: Optional[str],
+        state_json: Optional[str],
+    ) -> str:
+        return self.admin.create_item(name, item_type, description, owner_kind, owner_id, state_json)
+
+    def update_item(
+        self,
+        item_id: str,
+        name: str,
+        item_type: str,
+        description: str,
+        owner_kind: str,
+        owner_id: Optional[str],
+        state_json: Optional[str],
+    ) -> str:
+        return self.admin.update_item(item_id, name, item_type, description, owner_kind, owner_id, state_json)
+
+    def delete_item(self, item_id: str) -> str:
+        return self.admin.delete_item(item_id)

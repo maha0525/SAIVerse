@@ -1,12 +1,12 @@
 import json
 import logging
-import os
-from pathlib import Path
-
 import re
-from google import genai
-from google.genai import types
+from pathlib import Path
 from typing import Dict, Optional
+
+from google import genai
+from llm_clients.gemini_utils import build_gemini_clients
+from google.genai import types
 
 
 class EmotionControlModule:
@@ -15,15 +15,7 @@ class EmotionControlModule:
     def __init__(self, prompt_path: Path = Path("system_prompts/emotion_control.txt"), model: str = "gemini-2.0-flash") -> None:
         self.prompt_template = prompt_path.read_text(encoding="utf-8")
         self.model = model
-        free_key = os.getenv("GEMINI_FREE_API_KEY")
-        paid_key = os.getenv("GEMINI_API_KEY")
-        if not free_key and not paid_key:
-            raise RuntimeError(
-                "GEMINI_FREE_API_KEY or GEMINI_API_KEY environment variable is not set."
-            )
-        self.free_client = genai.Client(api_key=free_key) if free_key else None
-        self.paid_client = genai.Client(api_key=paid_key) if paid_key else None
-        self.client = self.free_client or self.paid_client
+        self.free_client, self.paid_client, self.client = build_gemini_clients()
 
     def evaluate(
         self,

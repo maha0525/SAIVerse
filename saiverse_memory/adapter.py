@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from dataclasses import replace
@@ -25,8 +26,14 @@ from sai_memory.memory.storage import (
     compose_message_content,
     replace_message_embeddings,
 )
+from sai_memory.backup import BackupError, run_backup
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _auto_backup_enabled() -> bool:
+    value = os.getenv("SAIMEMORY_BACKUP_ON_START", "true").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 class SAIMemoryAdapter:
@@ -68,7 +75,11 @@ class SAIMemoryAdapter:
             raise exc
 
         try:
-            self.embedder = Embedder(model=self.settings.embed_model)
+            self.embedder = Embedder(
+                model=self.settings.embed_model,
+                local_model_path=self.settings.embed_model_path,
+                model_dim=self.settings.embed_model_dim,
+            )
         except Exception as exc:
             LOGGER.exception("Failed to load embedding model '%s'", self.settings.embed_model)
             self.embedder = None
@@ -80,6 +91,9 @@ class SAIMemoryAdapter:
             self.settings.db_path,
             self.settings.resource_id,
         )
+
+        if _auto_backup_enabled():
+            threading.Thread(target=self._run_startup_backup, daemon=True).start()
 
     # ------------------------------------------------------------------
     # Public API
@@ -123,7 +137,28 @@ class SAIMemoryAdapter:
             selected.insert(0, payload)
         return selected
 
-    def recent_persona_messages(self, max_chars: int) -> List[dict]:
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _run_startup_backup(self) -> None:
+        db_path = Path(self.settings.db_path)
+        rdiff_path = os.getenv("SAIMEMORY_RDIFF_PATH")
+        try:
+            run_backup(persona_id=self.persona_id, db_path=db_path, rdiff_path=rdiff_path)
+            LOGGER.info("Auto SAIMemory backup completed for persona=%s", self.persona_id)
+        except BackupError as exc:
+            LOGGER.warning("Auto SAIMemory backup skipped for persona=%s: %s", self.persona_id, exc)
+        except Exception:
+            LOGGER.exception("Unexpected error during auto SAIMemory backup for %s", self.persona_id)
+
+    def recent_persona_messages(
+        self,
+        max_chars: int,
+        *,
+        required_tags: Optional[List[str]] = None,
+        pulse_id: Optional[str] = None,
+    ) -> List[dict]:
         if not self._ready:
             return []
         thread_id = self._thread_id(None)
@@ -137,7 +172,27 @@ class SAIMemoryAdapter:
 
         selected: List[dict] = []
         consumed = 0
+        required_tags = required_tags or []
+        pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
+
         for payload in reversed(payloads):
+            tags = []
+            metadata = payload.get("metadata")
+            if isinstance(metadata, dict):
+                raw_tags = metadata.get("tags")
+                if isinstance(raw_tags, list):
+                    tags = [str(tag) for tag in raw_tags if tag]
+
+            include = True
+            if required_tags:
+                include = any(tag in tags for tag in required_tags)
+            if pulse_tag and pulse_tag in tags:
+                include = True
+            if not tags and required_tags:
+                # fallback: include legacy entries without tags only if we expect conversation logs
+                include = not required_tags or "conversation" not in required_tags
+            if not include:
+                continue
             text = payload.get("content", "") or ""
             consumed += len(text)
             if consumed > max_chars:

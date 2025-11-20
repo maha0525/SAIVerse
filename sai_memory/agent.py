@@ -23,7 +23,11 @@ class Agent:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or load_settings()
         self.db = init_db(self.settings.db_path) if self.settings.memory_enabled else None
-        self.embedder = Embedder(model=self.settings.embed_model)
+        self.embedder = Embedder(
+            model=self.settings.embed_model,
+            local_model_path=self.settings.embed_model_path,
+            model_dim=self.settings.embed_model_dim,
+        )
         self.system_prompt = load_system_prompt()
 
         if self.settings.provider == "google":

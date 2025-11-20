@@ -1,27 +1,434 @@
 {
+  "gpt-5.1": {
+    "provider": "openai",
+    "context_length": 32000,
+    "supports_images": true,
+    "parameters": {
+      "reasoning_effort": {
+        "type": "enum",
+        "options": ["none", "low", "medium", "high"],
+        "default": "medium",
+        "label": "Reasoning Effort",
+        "description": "Controls how much thinking time the model spends."
+      },
+      "verbosity": {
+        "type": "enum",
+        "options": ["low", "medium", "high"],
+        "default": "high",
+        "label": "Verbosity",
+        "description": "Controls how long or detailed responses should be.",
+        "client_support": ["responses"]
+      },
+      "max_completion_tokens": {
+        "type": "int",
+        "min": 32,
+        "max": 8192,
+        "step": 1,
+        "default": 4096,
+        "label": "Max completion tokens",
+        "description": "Upper bound on how many tokens the reply can use."
+      }
+    }
+  },
   "gpt-5": {
     "provider": "openai",
-    "context_length": 128000,
-    "supports_images": true
+    "context_length": 32000,
+    "supports_images": true,
+    "parameters": {
+      "reasoning_effort": {
+        "type": "enum",
+        "options": ["minimal", "low", "medium", "high"],
+        "default": "medium",
+        "label": "Reasoning Effort",
+        "description": "Controls how much thinking time the model spends."
+      },
+      "verbosity": {
+        "type": "enum",
+        "options": ["low", "medium", "high"],
+        "default": "high",
+        "label": "Verbosity",
+        "description": "Controls how long or detailed responses should be.",
+        "client_support": ["responses"]
+      },
+      "max_completion_tokens": {
+        "type": "int",
+        "min": 32,
+        "max": 8192,
+        "step": 1,
+        "default": 4096,
+        "label": "Max completion tokens",
+        "description": "Upper bound on how many tokens the reply can use."
+      }
+    }
   },
   "gpt-4.1": {
     "provider": "openai",
     "context_length": 32000,
-    "supports_images": true
+    "supports_images": true,
+    "parameters": {
+      "temperature": {
+        "type": "float",
+        "min": 0,
+        "max": 2,
+        "step": 0.1,
+        "default": 1,
+        "label": "Temperature",
+        "description": "0 is deterministic, higher values add randomness."
+      },
+      "top_p": {
+        "type": "float",
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "default": 1.0,
+        "label": "Top P",
+        "description": "Nucleus sampling threshold."
+      },
+      "max_completion_tokens": {
+        "type": "int",
+        "min": 32,
+        "max": 4096,
+        "step": 1,
+        "default": 4096,
+        "label": "Max completion tokens",
+        "description": "Upper bound on reply length."
+      }
+    }
   },
   "gpt-4o": {
     "provider": "openai",
     "context_length": 32000,
-    "supports_images": true
+    "supports_images": true,
+    "parameters": {
+      "temperature": {
+        "type": "float",
+        "min": 0,
+        "max": 2,
+        "step": 0.1,
+        "default": 1,
+        "label": "Temperature",
+        "description": "Controls randomness."
+      },
+      "top_p": {
+        "type": "float",
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "default": 1.0,
+        "label": "Top P",
+        "description": "Nucleus sampling cutoff."
+      },
+      "max_completion_tokens": {
+        "type": "int",
+        "min": 32,
+        "max": 4096,
+        "step": 1,
+        "default": 4096,
+        "label": "Max completion tokens",
+        "description": "Upper bound on reply length."
+      }
+    }
   },
   "o3": {
     "provider": "openai",
-    "context_length": 200000
+    "context_length": 200000,
+    "parameters": {
+      "reasoning_effort": {
+        "type": "enum",
+        "options": ["minimal", "low", "medium", "high"],
+        "default": "medium",
+        "label": "Reasoning Effort",
+        "description": "Controls how much time the reasoning model spends thinking."
+      },
+      "max_completion_tokens": {
+        "type": "int",
+        "min": 32,
+        "max": 4096,
+        "step": 1,
+        "default": 4096,
+        "label": "Max completion tokens",
+        "description": "Upper bound on generated tokens."
+      }
+    }
   },
   "chatgpt-4o-latest": {
     "provider": "openai",
     "context_length": 32000,
-    "supports_images": true
+    "supports_images": true,
+    "parameters": {
+      "temperature": {
+        "type": "float",
+        "min": 0,
+        "max": 2,
+        "step": 0.1,
+        "default": 1,
+        "label": "Temperature",
+        "description": "Controls randomness."
+      },
+      "top_p": {
+        "type": "float",
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "default": 1.0,
+        "label": "Top P",
+        "description": "Nucleus sampling cutoff."
+      },
+      "max_completion_tokens": {
+        "type": "int",
+        "min": 32,
+        "max": 4096,
+        "step": 1,
+        "default": 4096,
+        "label": "Max completion tokens",
+        "description": "Upper bound on reply length."
+      }
+    }
+  },
+  "grok-4-0709": {
+    "provider": "openai",
+    "context_length": 32768,
+    "base_url": "https://api.x.ai/v1",
+    "api_key_env": "XAI_API_KEY",
+    "parameters": {
+      "temperature": {
+        "type": "float",
+        "min": 0,
+        "max": 2,
+        "step": 0.1,
+        "default": 1,
+        "label": "Temperature",
+        "description": "Controls randomness."
+      },
+      "top_p": {
+        "type": "float",
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "default": 1,
+        "label": "Top P",
+        "description": "Nucleus sampling cutoff."
+      },
+      "max_tokens": {
+        "type": "int",
+        "min": 32,
+        "max": 2048,
+        "step": 1,
+        "default": 2048,
+        "label": "Max tokens",
+        "description": "Upper bound on generated tokens."
+      }
+    }
+  },
+  "stockmark/stockmark-2-100b-instruct": {
+    "provider": "openai",
+    "context_length": 32768,
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "api_key_env": "NVIDIA_API_KEY",
+    "parameters": {
+      "temperature": {
+        "type": "float",
+        "min": 0,
+        "max": 2,
+        "step": 0.1,
+        "default": 1,
+        "label": "Temperature",
+        "description": "Controls randomness."
+      },
+      "top_p": {
+        "type": "float",
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "default": 1,
+        "label": "Top P",
+        "description": "Nucleus sampling cutoff."
+      },
+      "max_tokens": {
+        "type": "int",
+        "min": 32,
+        "max": 2048,
+        "step": 1,
+        "default": 2048,
+        "label": "Max tokens",
+        "description": "Upper bound on generated tokens."
+      }
+    }
+  },
+  "qwen/qwen3-235b-a22b": {
+    "provider": "openai",
+    "context_length": 32768,
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "api_key_env": "NVIDIA_API_KEY",
+    "parameters": {
+      "temperature": {
+        "type": "float",
+        "min": 0,
+        "max": 2,
+        "step": 0.1,
+        "default": 1,
+        "label": "Temperature",
+        "description": "Controls randomness."
+      },
+      "top_p": {
+        "type": "float",
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "default": 1,
+        "label": "Top P",
+        "description": "Nucleus sampling cutoff."
+      },
+      "max_tokens": {
+        "type": "int",
+        "min": 32,
+        "max": 8192,
+        "step": 1,
+        "default": 4096,
+        "label": "Max tokens",
+        "description": "Upper bound on generated tokens."
+      }
+    }
+  },
+  "moonshotai/kimi-k2-instruct-0905": {
+    "provider": "openai",
+    "context_length": 250000,
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "api_key_env": "NVIDIA_API_KEY",
+    "parameters": {
+      "temperature": {
+        "type": "float",
+        "min": 0,
+        "max": 2,
+        "step": 0.1,
+        "default": 1,
+        "label": "Temperature",
+        "description": "Controls randomness."
+      },
+      "top_p": {
+        "type": "float",
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "default": 1,
+        "label": "Top P",
+        "description": "Nucleus sampling cutoff."
+      },
+      "max_tokens": {
+        "type": "int",
+        "min": 32,
+        "max": 4096,
+        "step": 1,
+        "default": 4096,
+        "label": "Max tokens",
+        "description": "Upper bound on generated tokens."
+      }
+    }
+  },
+  "mistralai/mistral-large-2411": {
+    "provider": "openai",
+    "context_length": 32000,
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key_env": "OPENROUTER_API_KEY",
+    "parameters": {
+      "temperature": {
+        "type": "float",
+        "min": 0,
+        "max": 2,
+        "step": 0.1,
+        "default": 1,
+        "label": "Temperature",
+        "description": "Controls randomness."
+      },
+      "top_p": {
+        "type": "float",
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "default": 1,
+        "label": "Top P",
+        "description": "Nucleus sampling cutoff."
+      },
+      "max_tokens": {
+        "type": "int",
+        "min": 32,
+        "max": 120000,
+        "step": 1,
+        "default": 8000,
+        "label": "Max tokens",
+        "description": "Upper bound on generated tokens."
+      }
+    }
+  },
+  "z-ai/glm-4.6": {
+    "provider": "openai",
+    "context_length": 32000,
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key_env": "OPENROUTER_API_KEY",
+    "parameters": {
+      "temperature": {
+        "type": "float",
+        "min": 0,
+        "max": 2,
+        "step": 0.1,
+        "default": 1,
+        "label": "Temperature",
+        "description": "Controls randomness."
+      },
+      "top_p": {
+        "type": "float",
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "default": 0.95,
+        "label": "Top P",
+        "description": "Nucleus sampling cutoff."
+      },
+      "max_tokens": {
+        "type": "int",
+        "min": 32,
+        "max": 120000,
+        "step": 1,
+        "default": 8000,
+        "label": "Max tokens",
+        "description": "Upper bound on generated tokens."
+      }
+    }
+  },
+  "institute-of-science-tokyo/llama-3.1-swallow-70b-instruct-v0.1": {
+    "provider": "openai",
+    "context_length": 120000,
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "api_key_env": "NVIDIA_API_KEY",
+    "parameters": {
+      "temperature": {
+        "type": "float",
+        "min": 0,
+        "max": 2,
+        "step": 0.1,
+        "default": 1,
+        "label": "Temperature",
+        "description": "Controls randomness."
+      },
+      "top_p": {
+        "type": "float",
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "default": 1,
+        "label": "Top P",
+        "description": "Nucleus sampling cutoff."
+      },
+      "max_tokens": {
+        "type": "int",
+        "min": 32,
+        "max": 1024,
+        "step": 1,
+        "default": 1024,
+        "label": "Max tokens",
+        "description": "Upper bound on generated tokens."
+      }
+    }
   },
   "claude-sonnet-4-5": {
     "provider": "anthropic",
@@ -37,6 +444,11 @@
     "thinking_budget": 8192,
     "supports_images": true
   },
+  "gemini-3-pro-preview": {
+    "provider": "gemini",
+    "context_length": 128000,
+    "supports_images": true
+  },
   "gemini-2.5-pro": {
     "provider": "gemini",
     "context_length": 128000,
@@ -48,6 +460,16 @@
     "supports_images": true
   },
   "gemini-2.5-flash-preview-09-2025": {
+    "provider": "gemini",
+    "context_length": 128000,
+    "supports_images": true
+  },
+  "gemini-2.5-flash-lite": {
+    "provider": "gemini",
+    "context_length": 128000,
+    "supports_images": true
+  },
+  "gemini-2.5-flash-lite-preview-09-2025": {
     "provider": "gemini",
     "context_length": 128000,
     "supports_images": true
@@ -98,7 +520,42 @@
     "provider": "ollama",
     "context_length": 32768
   },
-  "gpt-oss:120b": {
+  "openai/gpt-oss-120b": {
+    "provider": "openai",
+    "context_length": 120000,
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "api_key_env": "NVIDIA_API_KEY",
+    "parameters": {
+      "temperature": {
+        "type": "float",
+        "min": 0,
+        "max": 2,
+        "step": 0.1,
+        "default": 1,
+        "label": "Temperature",
+        "description": "Controls randomness."
+      },
+      "top_p": {
+        "type": "float",
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "default": 1,
+        "label": "Top P",
+        "description": "Nucleus sampling cutoff."
+      },
+      "max_tokens": {
+        "type": "int",
+        "min": 32,
+        "max": 8000,
+        "step": 1,
+        "default": 8000,
+        "label": "Max tokens",
+        "description": "Upper bound on generated tokens."
+      }
+    }
+  },
+  "hf.co/mradermacher/shisa-v2-llama3.3-70b-i1-GGUF:Q4_K_M": {
     "provider": "ollama",
     "context_length": 32768
   }

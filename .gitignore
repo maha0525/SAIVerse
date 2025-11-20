@@ -11,6 +11,8 @@ generate_image/
 /bk
 sai_memory/__pycache__/
 .gradio/*.pem
+database/data/*
+!database/data/.gitkeep
 
 #開発用フォルダ
 tests/Nature/*
@@ -18,5 +20,13 @@ tests/tools/*
 
 #開発用ファイル
 __*.*
+!llm_clients/__init__.py
+!persona/__init__.py
+!persona/tasks/__init__.py
+!persona/mixins/__init__.py
+!manager/__init__.py
+!tools/utilities/__init__.py
+!ui/__init__.py
+!ui/handlers/__init__.py
 tasks.md
 *.patch

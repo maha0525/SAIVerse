@@ -176,6 +176,18 @@ class ConversationMessage:
         }
         if timestamp:
             payload["timestamp"] = timestamp
+        metadata = dict(self.metadata) if isinstance(self.metadata, dict) else {}
+        tags = metadata.get("tags")
+        if isinstance(tags, list):
+            tag_list = [str(tag) for tag in tags if tag]
+        elif tags is None:
+            tag_list = []
+        else:
+            tag_list = [str(tags)]
+        if "conversation" not in {tag.lower() if isinstance(tag, str) else tag for tag in tag_list}:
+            tag_list.append("conversation")
+        metadata["tags"] = tag_list
+        payload["metadata"] = metadata
         return payload
 
 

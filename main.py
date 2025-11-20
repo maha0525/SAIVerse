@@ -7,25 +7,26 @@ import os
 import json
 import argparse
 import atexit
-from html import escape as html_escape
-import mimetypes
-import shutil
-import uuid
-from datetime import datetime
+import signal
 from dotenv import load_dotenv
-from typing import Optional, List, Dict, Any
+from typing import Optional
 from pathlib import Path
-import pandas as pd
-
-import gradio as gr
 
 load_dotenv()
 
+os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "0")
+os.environ.setdefault("GRADIO_TELEMETRY_ENABLED", "0")
+
+try:
+    import psutil  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    psutil = None  # type: ignore
+
 from saiverse_manager import SAIVerseManager
+from database.paths import default_db_path
 from model_configs import get_model_choices
-from media_utils import iter_image_media, path_to_data_url
-from database.db_manager import create_db_manager_ui
-from tools.memory_settings_ui import create_memory_settings_ui
+from ui import state as ui_state
+from ui.app import build_app
 try:
     from discord_gateway import ensure_gateway_runtime
 except ImportError:  # pragma: no cover - optional dependency
@@ -35,1479 +36,196 @@ level_name = os.getenv("SAIVERSE_LOG_LEVEL", "INFO").upper()
 if level_name not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
     level_name = "INFO"
 logging.basicConfig(level=getattr(logging, level_name))
-manager: SAIVerseManager = None
-BUILDING_CHOICES = []
-BUILDING_NAME_TO_ID_MAP = {}
-MODEL_CHOICES = ["None"] + get_model_choices()
-AUTONOMOUS_BUILDING_CHOICES = []
-AUTONOMOUS_BUILDING_MAP = {}
 try:
     _chat_limit_env = int(os.getenv("SAIVERSE_CHAT_HISTORY_LIMIT", "120"))
 except ValueError:
     _chat_limit_env = 120
 CHAT_HISTORY_LIMIT = max(0, _chat_limit_env)
+MODEL_CHOICES = ["None"] + get_model_choices()
 
 VERSION = time.strftime("%Y%m%d%H%M%S")  # 例: 20251008121530
 
 HEAD_VIEWPORT = '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">'
 
 
-NOTE_CSS = """
-/* Gradio 5.38.0 の main に付く構成をそのまま踏襲して勝ちに行く */
-.gradio-container-5-38-0 main.fillable.app.fill_width[class*="svelte-"] {
-  padding-left: 0 !important;
-  padding-right: 0 !important;
-}
-/* ヘッダー */
-#chat_header {
-  position: fixed;
-  top: 0;
-  left: 0;
-  height: 1.5rem;
-  z-index: 100;
-  background: var(--body-background-fill);
-  border-bottom: 1px solid var(--border-color-primary);
-  width: 100vw;
-  margin-left: auto;
-  margin-right: auto;
-  margin-bottom: auto;
-  padding-left: 2rem;
-  padding-right: 2rem;
-}
+CSS_PATH = Path("assets/css/chat.css")
+try:
+    NOTE_CSS = CSS_PATH.read_text(encoding="utf-8")
+except OSError:
+    logging.warning("Failed to load CSS from %s", CSS_PATH)
+    NOTE_CSS = ""
 
-/* チャット欄をスクロール領域として分離 */
-:root { --composer-h: 5rem; }
-#chat_scroll_area {
-  height: calc(100dvh - var(--composer-h));
-  overflow-y: auto;
-  transition: height 0.1s;
-  padding-bottom: 5rem !important;
-  background: transparent;
-}
 
-/* 入力欄を画面下部に固定 */
-#composer_fixed {
-  position: fixed;
-  left: 0; right: 0; bottom: 0;
-  z-index: 100;
-  background: var(--body-background-fill);
-  border-top: 1px solid var(--border-color-primary);
-  box-shadow: 0 -2px 8px rgba(0,0,0,0.15);
-  max-width: 700px;
-  margin-left: auto;
-  margin-right: auto;
-}
-body { padding-bottom: 0 !important; }
-
-#my_chat {
-  height: 100% !important;
-}
-
-/* === モバイルで Chatbot 親ブロックの左右パディングを完全に殺す === */
-@media (max-width: 680px) {
-  /* 親ブロック特定（:has はそのまま・@supports は外す） */
-  :is(.gr-block, .gr-column, .gr-row, .group, .tabitem):has(> #chat_wrap):not(.sidebar-parent),
-  :is(.gr-block, .gr-column, .gr-row, .group, .tabitem):has(#my_chat):not(.sidebar-parent) {
-    padding-left: 0 !important;
-    padding-right: 0 !important;
-    margin-left: 0 !important;
-    margin-right: 0 !important;
-    max-width: 100% !important;
-    width: 100% !important;
-  }
-
-  /* フォールバック：親の内側余白を“子から”物理的に打ち消す */
-  #chat_wrap {
-    /* ビューポートいっぱいに拡げて親のpaddingを無効化 */
-    width: 100vw !important;
-    max-width: 100vw !important;
-    margin-left: calc(50% - 50vw) !important;
-    margin-right: calc(50% - 50vw) !important;
-  }
-
-  /* Chatbot 本体も全幅に */
-  #my_chat {
-    max-width: 100vw !important;
-    width: 100vw !important;
-    padding-bottom: 0 !important;
-  }
-
-  /* Markdown クランプ解除（保険） */
-  #my_chat .prose, #my_chat [class*="prose"] { max-width: none !important; }
-
-  /* 長文の折返し */
-  #my_chat pre { white-space: pre-wrap !important; word-break: break-word !important; }
-}
-
-/* iOS セーフエリア（必要なら併用可：viewport-fit=cover を head に入れている前提） */
-@supports (padding: env(safe-area-inset-left)) {
-  body {
-    padding-left: max(0px, env(safe-area-inset-left));
-    padding-right: max(0px, env(safe-area-inset-right));
-  }
-}
-
-html[data-theme='light'] {
-  --msg-bg: #f3f4f6;
-  --msg-fg: #111827;
-  --user-bg: #dbeafe;  /* light blue */
-  --user-fg: #111827;
-  --note-bg: #fff9db;
-  --note-fg: #1f2937;
-  --timestamp-fg: #6b7280;
-}
-html[data-theme='dark'] {
-  --msg-bg: #333333;
-  --msg-fg: #f9fafb;
-  --user-bg: #1f3b57; /* darker blue for contrast */
-  --user-fg: #e5e7eb;
-  --note-bg: #3b3a2a;
-  --note-fg: #f3f4f6;
-  --timestamp-fg: #9ca3af;
-}
-/* Fallback to system preference if theme attr not present */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) {
-    --msg-bg: #333333;
-    --msg-fg: #f9fafb;
-    --user-bg: #1f3b57;
-    --user-fg: #e5e7eb;
-    --note-bg: #3b3a2a;
-    --note-fg: #f3f4f6;
-    --timestamp-fg: #9ca3af;
-  }
-}
-
-/* --- 縦積みレイアウト --- */
-.message-block { display: flex !important; flex-direction: column; align-items: flex-start; gap: 8px;}
-.message-block .avatar-top { width: 60px; height: 60px; min-width: 60px; border-radius: 12px !important; overflow: hidden; margin: 0 !important; display: inline-block; }
-.message-block .avatar-top img { width: 100%; height: 100%; object-fit: cover; border-radius: inherit !important; display: block; }
-.message-header { display: flex !important; align-items: center; gap: 12px; width: 100%; }
-.message-header .speaker-name { font-weight: 600; font-size: 0.95rem; color: var(--msg-fg); }
-.message-block.user .message-header .speaker-name { color: var(--user-fg); }
-.message-block .bubble { padding: 12px 16px; background-color: var(--msg-bg); color: var(--msg-fg) !important; border-radius: 12px; font-size: 1rem !important; overflow-wrap: break-word; max-width: min(640px, 90vw); box-shadow: 0 2px 6px rgba(0,0,0,0.08); display: flex; flex-direction: column; gap: 8px; }
-.message-block.user .bubble { background-color: var(--user-bg); color: var(--user-fg) !important; }
-.message-block .bubble .bubble-content { line-height: 1.6; }
-.message-block .bubble .bubble-meta { font-size: 0.75rem; color: var(--timestamp-fg); align-self: flex-end; white-space: nowrap; }
-.message-block.user { align-items: flex-start; text-align: left; }
-.message-block.user .avatar-top { align-self: flex-start; }
-.message-block.host { align-items: flex-start; }
-.message-block.host .avatar-top { align-self: flex-start; }
-
-.message-wrap {
-  max-width: 700px;      /* 好きな値に調整 */
-  margin-left: auto;
-  margin-right: auto;
-  width: 100%;
-}
-
-/* ユーザー側（右寄せ、幅狭め） */
-.message-row.bubble.user-row {
-  max-width: 520px;      /* 例: 右は細め */
-  margin-left: auto;
-  margin-right: 0;
-  text-align: left;
-}
-
-/* アシスタント側（左寄せ、幅広め） */
-.message-row.bubble.bot-row {
-  max-width: 700px;      /* 例: 左は広め */
-  margin-left: 0;
-  margin-right: auto;
-  text-align: left;
-}
-
-#my_chat .message,
-#my_chat .message.user,
-#my_chat .message.assistant {
-  justify-content: flex-start !important;
-  text-align: left !important;
-}
-#my_chat .message .avatar,
-#my_chat .message .message-avatar,
-#my_chat .message .chatbot-avatar,
-#my_chat .message svg {
-  display: none !important;
-}
-#my_chat .message .chatbot-message,
-#my_chat .message .message-content {
-  background: transparent !important;
-  box-shadow: none !important;
-  padding: 0 !important;
-}
-
-/* Notes */
-.note-box { background: var(--note-bg); color: var(--note-fg) !important; border-left: 4px solid #ffbf00; padding: 8px 12px; margin: 0; border-radius: 6px; font-size: .92rem; }
-.note-box b { color: var(--note-fg) !important; }
-
-.saiverse-move-radio .wrap {
-  display: flex !important;
-  flex-direction: column !important;
-  gap: 6px;
-}
-
-  gap: 6px;
-}
-.saiverse-move-radio .wrap label {
-  margin: 0 !important;
-}
-/* Reasoning (Thinking) blocks */
-details.saiv-thinking { margin-top: 10px; border: 1px solid rgba(128,128,128,0.25); border-radius: 8px; padding: 8px 12px; background: rgba(0,0,0,0.02); }
-html[data-theme='dark'] details.saiv-thinking { background: rgba(255,255,255,0.04); border-color: rgba(255,255,255,0.12); }
-details.saiv-thinking summary { cursor: pointer; font-weight: 600; outline: none; }
-details.saiv-thinking summary:focus { outline: none; }
-.saiv-thinking-body { margin-top: 6px; display: flex; flex-direction: column; gap: 8px; font-size: 0.96rem; color: inherit; }
-.saiv-thinking-item { border-top: 1px solid rgba(128,128,128,0.2); padding-top: 6px; }
-.saiv-thinking-item:first-child { border-top: none; padding-top: 0; }
-.saiv-thinking-title { font-weight: 600; margin-bottom: 4px; }
-.saiv-thinking-text { line-height: 1.45; word-break: break-word; }
-
-/* Strongly scoped avatar rounding for Chatbot area */
-#my_chat .saiv-avatar { border-radius: 12px !important; overflow: hidden !important; display: inline-block; width: 60px; height: 60px; min-width: 60px; }
-#my_chat .saiv-avatar > img { border-radius: 12px !important; margin: 0 !important; width: 100% !important; height: 100% !important; object-fit: cover !important; display: block !important; clip-path: inset(0 round 12px) !important; }
-#my_chat .saiv-avatar > picture > img { border-radius: 12px !important; margin: 0 !important; clip-path: inset(0 round 12px) !important; }
-
-:global(.saiverse-sidebar.sidebar) {
-  width: 20vw !important;
-}
-:global(.saiverse-sidebar.sidebar):not(.right) {
-  left: calc(-1 * 20vw) !important;
-}
-:global(.saiverse-sidebar.sidebar).right {
-  right: calc(-1 * 20vw) !important;
-}
-
-/* Sidebar toggle を押しやすく */
-:global(.saiverse-sidebar.sidebar) .toggle-button {
-  width: 56px !important;
-  height: 56px !important;
-  padding: 0 !important;
-}
-:global(.saiverse-sidebar.sidebar):not(.right) .toggle-button,
-:global(.saiverse-sidebar.sidebar).open:not(.right) .toggle-button {
-  border-radius: 0 28px 28px 0 !important;
-}
-:global(.saiverse-sidebar.sidebar).right .toggle-button,
-:global(.saiverse-sidebar.sidebar).open.right .toggle-button {
-  border-radius: 28px 0 0 28px !important;
-}
-:global(.saiverse-sidebar.sidebar) .chevron {
-  padding-right: 0 !important;
-}
-:global(.saiverse-sidebar.sidebar) .chevron-left {
-  width: 18px !important;
-  height: 18px !important;
-  border-top-width: 3px !important;
-  border-right-width: 3px !important;
-}
-
-#saiverse-sidebar-nav {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 12px;
-}
-#saiverse-sidebar-nav .saiverse-nav-item {
-  cursor: pointer;
-  padding: 8px 12px;
-  border-radius: 8px;
-  color: inherit;
-  background: transparent;
-  transition: background-color 0.2s ease, color 0.2s ease;
-}
-#saiverse-sidebar-nav .saiverse-nav-item:hover {
-  background: rgba(0, 0, 0, 0.08);
-}
-html[data-theme='dark'] #saiverse-sidebar-nav .saiverse-nav-item:hover {
-  background: rgba(255, 255, 255, 0.1);
-}
-#saiverse-sidebar-nav .saiverse-nav-item.active {
-  font-weight: 600;
-  background: rgba(64, 128, 255, 0.16);
-  color: inherit;
-}
-html[data-theme='dark'] #saiverse-sidebar-nav .saiverse-nav-item.active {
-  background: rgba(64, 128, 255, 0.28);
-}
-.saiverse-section.saiverse-hidden {
-  display: none !important;
-}
-
-.saiv-image-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 8px;
-}
-.saiv-image-grid img {
-  max-width: 240px;
-  height: auto;
-  border-radius: 8px;
-  object-fit: cover;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
-}
-html[data-theme='dark'] .saiv-image-grid img {
-  box-shadow: 0 2px 6px rgba(255, 255, 255, 0.1);
-}
-
-@media (max-width: 768px) {
-  :global(.saiverse-sidebar.sidebar) {
-    width: 60vw !important;
-  }
-  :global(.saiverse-sidebar.sidebar):not(.right) {
-    left: -60vw !important;
-  }
-  :global(.saiverse-sidebar.sidebar).right {
-    right: -60vw !important;
-  }
-}
-
-#message_input_row {
-  align-items: flex-end;
-  gap: 8px;
-}
-#attachment_button {
-  width: auto !important;
-  min-width: 0 !important;
-}
-#attachment_button button {
-  width: 44px !important;
-  height: 44px !important;
-  border-radius: 50% !important;
-  display: flex !important;
-  align-items: center;
-  justify-content: center;
-  padding: 0 !important;
-  font-size: 1.4rem !important;
-  line-height: 1 !important;
-}
-#attachment_button button .icon,
-#attachment_button button span {
-  pointer-events: none;
-}
-#chat_message_textbox textarea {
-  border-radius: 12px;
-}
-#chat_message_textbox textarea.drop-target-active {
-  border-color: #2563eb !important;
-  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25);
-}
-"""
-
-
-def _store_uploaded_image(file_path: Optional[str]) -> Optional[Dict[str, str]]:
-    if not file_path:
-        return None
-    source = Path(file_path)
-    if not source.exists():
-        logging.warning("Uploaded image path missing: %s", file_path)
-        return None
-
-    dest_dir = Path.home() / ".saiverse" / "image"
-    try:
-        dest_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        logging.exception("Failed to prepare image directory: %s", dest_dir)
-        return None
-    suffix = source.suffix or ".png"
-    dest_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}{suffix}"
-    dest_path = dest_dir / dest_name
-    try:
-        shutil.copy2(source, dest_path)
-    except OSError:
-        logging.exception("Failed to store uploaded image: %s", file_path)
-        return None
-
-    mime_type = mimetypes.guess_type(dest_path)[0] or "image/png"
-    return {
-        "type": "image",
-        "uri": f"saiverse://image/{dest_name}",
-        "mime_type": mime_type,
-        "source": "user_upload",
-    }
-
-
-def _extract_image_path(value: Optional[Any]) -> Optional[str]:
-    """Normalize the upload component value to a filesystem path."""
-    if not value:
-        return None
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        candidate = value.get("name") or value.get("path")
-        return str(candidate) if candidate else None
-    if isinstance(value, list):
-        for item in value:
-            candidate = _extract_image_path(item)
-            if candidate:
-                return candidate
-        return None
-    name_attr = getattr(value, "name", None)
-    if name_attr:
-        return str(name_attr)
-    path_attr = getattr(value, "path", None)
-    if path_attr:
-        return str(path_attr)
-    return None
-
-
-def _render_message_images(metadata: Optional[Dict[str, Any]]) -> str:
-    attachments = iter_image_media(metadata)
-    if not attachments:
-        return ""
-    html_chunks: List[str] = []
-    for att in attachments:
-        data_url = path_to_data_url(att["path"], att["mime_type"])
-        if not data_url:
-            continue
-        html_chunks.append(f"<img src='{data_url}' alt='attachment'>")
-    if not html_chunks:
-        return ""
-    return "<div class=\"saiv-image-grid\">" + "".join(html_chunks) + "</div>"
-
-
-USER_AVATAR_ICON_PATH = Path("assets/icons/user.png")
-_USER_AVATAR_DATA_URL: Optional[str] = None
-
-
-def _get_user_avatar_data_url() -> str:
-    global _USER_AVATAR_DATA_URL
-    if _USER_AVATAR_DATA_URL is None:
-        if USER_AVATAR_ICON_PATH.exists():
-            mime = mimetypes.guess_type(USER_AVATAR_ICON_PATH)[0] or "image/png"
-            data_url = path_to_data_url(USER_AVATAR_ICON_PATH, mime)
-            _USER_AVATAR_DATA_URL = data_url or ""
-        else:
-            _USER_AVATAR_DATA_URL = ""
-    return _USER_AVATAR_DATA_URL or ""
-
-
-def format_history_for_chatbot(raw_history: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """生の会話履歴をGradio Chatbotの表示形式（HTML）に変換する"""
-    display: List[Dict[str, str]] = []
-
-    avatar_box = (
-        "width:60px;height:60px;min-width:60px;"
-        "border-radius:12px;overflow:hidden;display:inline-block;margin:0;"
-    )
-    avatar_img = (
-        "width:100%;height:100%;object-fit:cover;display:block;"
-        "margin:0;border-radius:inherit;clip-path: inset(0 round 12px);"
-    )
-
-    def render_block(role_class: str, avatar_src: Optional[str], speaker_name: str, body_html: str, timestamp_text: str) -> str:
-        avatar_html = ""
-        if avatar_src:
-            avatar_html = (
-                f"<div class='avatar-top saiv-avatar' style=\"{avatar_box}\">"
-                f"<img class='saiv-avatar-img' src='{avatar_src}' style=\"{avatar_img}\"></div>"
-            )
-        name_html = f"<span class='speaker-name'>{html_escape(speaker_name)}</span>" if speaker_name else ""
-        header_inner = ""
-        if avatar_html or name_html:
-            header_inner = f"<div class='message-header'>{avatar_html}{name_html}</div>"
-        timestamp_html = f"<div class='bubble-meta'>{html_escape(timestamp_text)}</div>" if timestamp_text else ""
-        return (
-            f"<div class='message-block {role_class}'>"
-            f"{header_inner}"
-            f"<div class='bubble'><div class='bubble-content'>{body_html}</div>{timestamp_html}</div>"
-            "</div>"
-        )
-
-    user_avatar_src = _get_user_avatar_data_url() or (manager.default_avatar if manager else "")
-
-    def _format_timestamp(ts_raw: Optional[str]) -> str:
-        if not ts_raw:
-            return ""
-        ts_value = str(ts_raw).strip()
-        if not ts_value:
-            return ""
-        if ts_value.endswith("Z"):
-            ts_value = ts_value[:-1] + "+00:00"
-        try:
-            dt = datetime.fromisoformat(ts_value)
-        except ValueError:
-            return ""
-        tz = getattr(manager, "timezone_info", None) if manager else None
-        if tz:
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=tz)
-            else:
-                dt = dt.astimezone(tz)
-        return dt.strftime("%Y-%m-%d %H:%M")
-
-    def _resolve_speaker_name(role: str, msg: Dict[str, Any]) -> str:
-        explicit = msg.get("speaker_name") or msg.get("speaker")
-        if explicit:
-            return str(explicit)
-        if role == "assistant":
-            persona_id = msg.get("persona_id") or msg.get("id") or ""
-            name = ""
-            if manager:
-                if persona_id:
-                    name = manager.id_to_name_map.get(persona_id, "")
-                    if not name:
-                        persona_core = manager.personas.get(persona_id)
-                        if persona_core:
-                            name = getattr(persona_core, "persona_name", "") or ""
-                if not name:
-                    heard = msg.get("heard_by") or []
-                    if isinstance(heard, list):
-                        for pid in heard:
-                            candidate = manager.id_to_name_map.get(str(pid), "")
-                            if candidate:
-                                name = candidate
-                                break
-            return name or "AI"
-        if role == "user":
-            if manager:
-                return getattr(manager, "user_display_name", "ユーザー") or "ユーザー"
-            return "ユーザー"
-        if role == "host":
-            if manager:
-                return manager.id_to_name_map.get("host", "ホスト") or "ホスト"
-            return "ホスト"
-        return role or "system"
-
-    for msg in raw_history:
-        role = msg.get("role")
-        timestamp_text = _format_timestamp(msg.get("timestamp"))
-        if role == "assistant":
-            pid = msg.get("persona_id")
-            if manager:
-                avatar = manager.avatar_map.get(pid, manager.default_avatar) or manager.default_avatar
-            else:
-                avatar = ""
-            say = msg.get("content", "")
-            image_html = _render_message_images(msg.get("metadata"))
-            speaker_name = _resolve_speaker_name("assistant", msg)
-            bubble_html = render_block("assistant", avatar, speaker_name, f"{say}{image_html}", timestamp_text)
-            display.append({"role": "assistant", "content": bubble_html})
-        elif role == "user":
-            text = msg.get("content", "") or ""
-            escaped_text = html_escape(text).replace("\n", "<br>")
-            image_html = _render_message_images(msg.get("metadata"))
-            body_parts: List[str] = []
-            if escaped_text:
-                body_parts.append(escaped_text)
-            if image_html:
-                body_parts.append(image_html if escaped_text else f"(画像を送信しました){image_html}")
-            body_html = "".join(body_parts)
-            speaker_name = _resolve_speaker_name("user", msg)
-            bubble_html = render_block("user", user_avatar_src, speaker_name, body_html, timestamp_text)
-            display.append({"role": "user", "content": bubble_html})
-        elif role == "host":
-            say = msg.get("content", "")
-            image_html = _render_message_images(msg.get("metadata"))
-            if manager:
-                host_avatar = manager.host_avatar or manager.default_avatar
-            else:
-                host_avatar = ""
-            speaker_name = _resolve_speaker_name("host", msg)
-            bubble_html = render_block("host", host_avatar, speaker_name, f"{say}{image_html}", timestamp_text)
-            display.append({"role": "assistant", "content": bubble_html})
-        else:
-            say = msg.get("content", "")
-            image_html = _render_message_images(msg.get("metadata"))
-            speaker_name = _resolve_speaker_name(role or "assistant", msg)
-            default_avatar = manager.default_avatar if manager else ""
-            bubble_html = render_block("assistant", default_avatar, speaker_name, f"{say}{image_html}", timestamp_text)
-            display.append({"role": "assistant", "content": bubble_html})
-
-    return display
-
-
-def _limit_history(raw_history: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """Return only the tail of the history based on CHAT_HISTORY_LIMIT."""
-    if CHAT_HISTORY_LIMIT <= 0:
-        return list(raw_history)
-    return list(raw_history[-CHAT_HISTORY_LIMIT:])
-
-
-def get_current_building_history() -> List[Dict[str, str]]:
-    """Return the formatted chat history for the user's current building."""
-    current_building_id = getattr(manager, "user_current_building_id", None)
-    if not current_building_id:
-        return []
-    raw_history = manager.get_building_history(current_building_id)
-    return format_history_for_chatbot(_limit_history(raw_history))
-
-
-def respond_stream(message: str, image_value: Optional[Any] = None):
-    """Stream AI response for chat and update UI components if needed."""
-    current_building_id = manager.user_current_building_id
-    if not current_building_id:
-        dropdown_update, radio_update = _prepare_move_component_updates()
-        yield (
-            [{"role": "assistant", "content": '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'}],
-            dropdown_update,
-            radio_update,
-            gr.update(),
-            gr.update(),
-            gr.update(),
-        )
-        return
-
-    print(manager.occupants[current_building_id])
-
-    raw_history = _limit_history(manager.get_building_history(current_building_id))
-
-    normalized_image_path = _extract_image_path(image_value)
-    stored_image = _store_uploaded_image(normalized_image_path)
-    if normalized_image_path and stored_image is None:
-        dropdown_update, radio_update = _prepare_move_component_updates()
-        base_history = format_history_for_chatbot(raw_history)
-        base_history.append({"role": "assistant", "content": '<div class="note-box">画像の保存に失敗しました。権限やディスク容量を確認してください。</div>'})
-        yield (
-            base_history,
-            dropdown_update,
-            radio_update,
-            gr.update(),
-            gr.update(),
-            gr.update(value=None),
-        )
-        return
-
-    attachments: List[Dict[str, str]] = [stored_image] if stored_image else []
-    metadata: Optional[Dict[str, Any]] = {"media": attachments} if attachments else None
-    if metadata:
-        logging.debug("[respond_stream] prepared metadata with %d media entries", len(attachments))
-
-    if not (message and message.strip()) and not metadata:
-        dropdown_update, radio_update = _prepare_move_component_updates()
-        base_history = format_history_for_chatbot(raw_history)
-        base_history.append({"role": "assistant", "content": '<div class="note-box">テキストか画像を入力してね。</div>'})
-        yield (
-            base_history,
-            dropdown_update,
-            radio_update,
-            gr.update(),
-            gr.update(),
-            gr.update(),
-        )
-        return
-
-    history = format_history_for_chatbot(raw_history)
-
-    user_payload = {"role": "user", "content": message}
-    if metadata:
-        user_payload["metadata"] = metadata
-
-    user_display_entry = format_history_for_chatbot([user_payload])[0]
-    history.append(user_display_entry)
-
-    ai_message = ""
-    stream = manager.handle_user_input_stream(message, metadata=metadata)
-    for token in stream:
-        ai_message += token
-        yield (
-            history + [{"role": "assistant", "content": ai_message}],
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            gr.update(),
-        )
-
-    final_raw = _limit_history(manager.get_building_history(current_building_id))
-    final_history_formatted = format_history_for_chatbot(final_raw)
-
-    summonable_personas = manager.get_summonable_personas()
-    conversing_personas = manager.get_conversing_personas()
-    dropdown_update, radio_update = _prepare_move_component_updates()
-    yield (
-        final_history_formatted,
-        dropdown_update,
-        radio_update,
-        gr.update(choices=summonable_personas, value=None),
-        gr.update(choices=conversing_personas, value=None),
-        gr.update(value=None),
-    )
-
-
-def _get_current_location_name() -> str:
-    if not manager or not manager.user_current_building_id:
-        return "不明な場所"
-    if manager.user_current_building_id in manager.building_map:
-        return manager.building_map.get(manager.user_current_building_id).name
-    return "不明な場所"
-
-
-def _format_location_label(location_name: str) -> str:
-    return f"現在地: {location_name}"
-
-
-def _prepare_move_component_updates(force_dropdown_value: Optional[str] = None, force_radio: bool = False):
-    if not manager:
-        return gr.update(), gr.update()
-    global BUILDING_CHOICES, BUILDING_NAME_TO_ID_MAP
-    new_building_names = sorted([b.name for b in manager.buildings])
-    dropdown_kwargs = {}
-    radio_kwargs = {}
-    if new_building_names != sorted(BUILDING_CHOICES):
-        logging.info("Building list has changed. Updating selection components.")
-        BUILDING_CHOICES = new_building_names
-        BUILDING_NAME_TO_ID_MAP = {b.name: b.building_id for b in manager.buildings}
-        dropdown_kwargs["choices"] = BUILDING_CHOICES
-        radio_kwargs["choices"] = BUILDING_CHOICES
-    if force_dropdown_value is not None:
-        dropdown_kwargs["value"] = force_dropdown_value
-    if force_radio or "choices" in radio_kwargs:
-        radio_kwargs["value"] = _get_current_location_name()
-    dropdown_update = gr.update(**dropdown_kwargs) if dropdown_kwargs else gr.update()
-    radio_update = gr.update(**radio_kwargs) if radio_kwargs else gr.update()
-    return dropdown_update, radio_update
-
-
-def _perform_user_move(building_name: Optional[str]):
-    if not manager or not manager.user_current_building_id:
-        location_name = _get_current_location_name()
-        return (
-            [],
-            location_name,
-            gr.update(value=_format_location_label(location_name)),
-            gr.update(),
-            gr.update(),
-        )
-
-    if not building_name:
-        current_history = get_current_building_history()
-        location_name = _get_current_location_name()
-        return (
-            current_history,
-            location_name,
-            gr.update(value=_format_location_label(location_name)),
-            gr.update(),
-            gr.update(),
-        )
-
-    target_building_id = BUILDING_NAME_TO_ID_MAP.get(building_name)
-    if target_building_id:
-        manager.move_user(target_building_id)
-
-    new_history = get_current_building_history()
-    new_location_name = _get_current_location_name()
-    summonable_personas = manager.get_summonable_personas()
-    conversing_personas = manager.get_conversing_personas()
-    return (
-        new_history,
-        new_location_name,
-        gr.update(value=_format_location_label(new_location_name)),
-        gr.update(choices=summonable_personas, value=None),
-        gr.update(choices=conversing_personas, value=None),
-    )
-
-
-def move_user_ui(building_name: str):
-    """UI handler for moving the user."""
-    history, new_location_name, location_markdown_update, summon_update, conversing_update = _perform_user_move(building_name)
-    dropdown_update, radio_update = _prepare_move_component_updates(force_radio=True)
-    return (
-        history,
-        new_location_name,
-        location_markdown_update,
-        dropdown_update,
-        radio_update,
-        summon_update,
-        conversing_update,
-    )
-
-
-def move_user_radio_ui(building_name: str):
-    """Radio handler for moving the user and syncing dropdown."""
-    history, new_location_name, location_markdown_update, summon_update, conversing_update = _perform_user_move(building_name)
-    dropdown_update, radio_update = _prepare_move_component_updates(
-        force_dropdown_value=new_location_name,
-        force_radio=True,
-    )
-    return (
-        dropdown_update,
-        history,
-        new_location_name,
-        location_markdown_update,
-        radio_update,
-        summon_update,
-        conversing_update,
-    )
-
-
-def select_model(model_name: str):
-    # "None" means clear override and use each persona's DB default
-    manager.set_model(model_name or "None")
-    # Get history from current location
-    current_building_id = manager.user_current_building_id
-    if not current_building_id:
-        return []
-    raw_history = _limit_history(manager.get_building_history(current_building_id))
-    return format_history_for_chatbot(raw_history)
-
-def call_persona_ui(persona_name: str):
-    """UI handler for summoning a persona."""
-    if not persona_name:
-        return get_current_building_history(), gr.update(), gr.update()
-
-    persona_id = manager.persona_map.get(persona_name)
-    if persona_id:
-        manager.summon_persona(persona_id)
-        manager._load_occupancy_from_db()
-
-    new_history = get_current_building_history()
-    summonable_personas = manager.get_summonable_personas()
-    conversing_personas = manager.get_conversing_personas()
-    return new_history, gr.update(choices=summonable_personas, value=None), gr.update(choices=conversing_personas, value=None)
-
-def end_conversation_ui(persona_id: str):
-    """UI handler to end a conversation with a persona."""
-    if not persona_id:
-        # This can happen on initial load, just return current state
-        current_history = get_current_building_history()
-        conversing_personas = manager.get_conversing_personas()
-        manager._load_occupancy_from_db()
-        return current_history, gr.update(), gr.update(choices=conversing_personas, value=None)
-
-    manager.end_conversation(persona_id)
-    manager._load_occupancy_from_db()
-
-    new_history = get_current_building_history()
-    summonable_personas = manager.get_summonable_personas()
-    conversing_personas = manager.get_conversing_personas()
-    return new_history, gr.update(choices=summonable_personas, value=None), gr.update(choices=conversing_personas, value=None)
-
-
-def get_autonomous_log(building_name: str):
-    """指定されたBuildingの会話ログを取得する"""
-    building_id = AUTONOMOUS_BUILDING_MAP.get(building_name)
-    if building_id:
-        raw_history = _limit_history(manager.get_building_history(building_id))
-        return format_history_for_chatbot(raw_history)
-    return []
-
-def start_conversations_ui():
-    """UI handler to start autonomous conversations and update status."""
-    manager.start_autonomous_conversations()
-    return "実行中"
-
-def stop_conversations_ui():
-    """UI handler to stop autonomous conversations and update status."""
-    manager.stop_autonomous_conversations()
-    return "停止中"
-
-def login_ui():
-    """UI handler for user login."""
-    # OccupantsリストをDBから最新化
-    manager._load_occupancy_from_db()
-    # USERID=1をハードコード
-    summonable_personas = manager.get_summonable_personas()
-    conversing_personas = manager.get_conversing_personas()
-    status = manager.set_user_login_status(1, True)
-    return status, gr.update(choices=summonable_personas, value=None), gr.update(choices=conversing_personas, value=None)
-
-def logout_ui():
-    """UI handler for user logout."""
-    # USERID=1をハードコード
-    return manager.set_user_login_status(1, False)
-
-# --- World Editor UI Handlers ---
-
-def update_city_ui(city_id_str: str, name: str, desc: str, online_mode: bool, ui_port_str: str, api_port_str: str, timezone_name: str):
-    """UI handler to update city settings."""
-    if not city_id_str: return "Error: Select a city to update.", gr.update()
-    try:
-        city_id = int(city_id_str)
-        ui_port = int(ui_port_str)
-        api_port = int(api_port_str)
-    except (ValueError, TypeError):
-        return "Error: Port numbers must be valid integers.", gr.update()
-    
-    result = manager.update_city(city_id, name, desc, online_mode, ui_port, api_port, timezone_name)
-    return result, manager.get_cities_df()
-
-def on_select_city(evt: gr.SelectData):
-    """Handler for when a city is selected in the DataFrame."""
-    if evt.value is None: return "", "", "", False, "", "", "UTC"
-    row_index = evt.index[0]
-    df = manager.get_cities_df()
-    selected_row = df.iloc[row_index]
-    return (
-        selected_row['CITYID'], selected_row['CITYNAME'], selected_row['DESCRIPTION'],
-        selected_row['START_IN_ONLINE_MODE'], selected_row['UI_PORT'], selected_row['API_PORT'],
-        selected_row.get('TIMEZONE', 'UTC')
-    )
-
-def update_building_ui(b_id: str, name: str, capacity_str: str, desc: str, sys_inst: str, city_id: Optional[int], tool_ids: List[int], interval_str: str):
-    """UI handler to update building settings."""
-    if not b_id: return "Error: Select a building to update.", gr.update()
-    if city_id is None:
-        return "Error: City must be selected.", gr.update()
-    try:
-        capacity = int(capacity_str)
-        interval = int(interval_str)
-    except (ValueError, TypeError):
-        return "Error: Capacity and Interval must be valid integers.", gr.update()
-    
-    result = manager.update_building(b_id, name, capacity, desc, sys_inst, city_id, tool_ids, interval)
-    return result, manager.get_buildings_df()
-
-def on_select_building(evt: gr.SelectData):
-    """Handler for when a building is selected in the DataFrame."""
-    if evt.value is None: return "", "", 1, "", "", None, None, 10
-    row_index = evt.index[0]
-    df = manager.get_buildings_df()
-    selected_row = df.iloc[row_index]
-    linked_tool_ids = manager.get_linked_tool_ids(selected_row['BUILDINGID'])
-    return (
-        selected_row['BUILDINGID'], selected_row['BUILDINGNAME'], selected_row['CAPACITY'],
-        selected_row['DESCRIPTION'], selected_row['SYSTEM_INSTRUCTION'], int(selected_row['CITYID']),
-        linked_tool_ids, selected_row.get('AUTO_INTERVAL_SEC', 10) # Fallback for old DB
-    )
-
-def on_select_ai(evt: gr.SelectData):
-    """Handler for when an AI is selected in the DataFrame."""
-    if evt.index is None:
-        return "", "", "", "", None, "", False, "auto", "", "", gr.update(value=None)
-    row_index = evt.index[0]
-    # We need the full DF to get the ID, not just the visible part
-    df = manager.get_ais_df()
-    ai_id = df.iloc[row_index]['AIID']
-    details = manager.get_ai_details(ai_id)
-    if not details:
-        return "", "", "", "", None, "", False, "auto", "", "", gr.update(value=None)
-
-    # --- 現在地を取得 ---
-    current_location_name = "不明"
-    if ai_id in manager.personas:
-        current_building_id = manager.personas[ai_id].current_building_id
-        if current_building_id in manager.building_map:
-            current_location_name = manager.building_map[current_building_id].name
-
-    return (
-        details['AIID'],
-        details['AINAME'],
-        details['DESCRIPTION'],
-        details['SYSTEMPROMPT'],
-        int(details['HOME_CITYID']),
-        details['DEFAULT_MODEL'],
-        details['IS_DISPATCHED'],
-        details['INTERACTION_MODE'],
-        current_location_name,
-        details.get('AVATAR_IMAGE') or "",
-        gr.update(value=None)
-    )
-
-def update_ai_ui(ai_id: str, name: str, desc: str, sys_prompt: str, home_city_id, model: str, interaction_mode: str, avatar_path: str, avatar_file):
-    """UI handler to update AI settings."""
-    if not ai_id:
-        return "Error: Select an AI to update.", gr.update()
-    if home_city_id is None or home_city_id == "":
-        return "Error: Home City must be selected.", gr.update()
-
-    if isinstance(home_city_id, str):
-        try:
-            home_city_id = int(home_city_id)
-        except ValueError:
-            return "Error: Home City must be an integer.", gr.update()
-
-    upload_path = None
-    if isinstance(avatar_file, list):
-        upload_path = avatar_file[0] if avatar_file else None
-    elif isinstance(avatar_file, dict):
-        upload_path = avatar_file.get("name") or avatar_file.get("path")
-    else:
-        upload_path = avatar_file
-
-    result = manager.update_ai(ai_id, name, desc, sys_prompt, home_city_id, model, interaction_mode, avatar_path, upload_path)
-    return result, manager.get_ais_df()
-
-def move_ai_ui(ai_id: str, target_building_name: str):
-    """UI handler to move an AI from the world editor."""
-    if not ai_id or not target_building_name:
-        return "Error: AIと移動先を選択してください。", gr.update()
-    
-    target_building_id = BUILDING_NAME_TO_ID_MAP.get(target_building_name)
-    if not target_building_id:
-        return f"Error: 建物 '{target_building_name}' のIDが見つかりません。", gr.update()
-        
-    result = manager.move_ai_from_editor(ai_id, target_building_id)
-    
-    # 移動後の現在地を再取得してUIに反映
-    new_location_name = "不明"
-    if ai_id in manager.personas:
-        current_building_id = manager.personas[ai_id].current_building_id
-        if current_building_id in manager.building_map:
-            new_location_name = manager.building_map[current_building_id].name
-            
-    return result, new_location_name
-
-def on_select_tool(evt: gr.SelectData):
-    """Handler for when a tool is selected in the DataFrame."""
-    if evt.index is None: return "", "", "", "", ""
-    row_index = evt.index[0]
-    df = manager.get_tools_df()
-    selected_row = df.iloc[row_index]
-    details = manager.get_tool_details(int(selected_row['TOOLID']))
-    if not details: return "", "", "", "", ""
-    return (
-        details['TOOLID'], details['TOOLNAME'], details['DESCRIPTION'],
-        details['MODULE_PATH'], details['FUNCTION_NAME']
-    )
-
-def create_world_editor_ui():
-    """Creates all UI components for the World Editor tab."""
-    # --- ★ UI構築の最初にCity情報を一度だけ取得 ---
-    all_cities_df = manager.get_cities_df()
-    city_choices = list(zip(all_cities_df['CITYNAME'], all_cities_df['CITYID'].astype(int)))
-    # --- ★ UI構築の最初にTool情報を一度だけ取得 ---
-    all_tools_df = manager.get_tools_df()
-    tool_choices = list(zip(all_tools_df['TOOLNAME'], all_tools_df['TOOLID'].astype(int))) if not all_tools_df.empty else []
-
-
-    # --- ★ Refresh Button ---
-    with gr.Row():
-        refresh_editor_btn = gr.Button("🔄 ワールドエディタ全体を更新", variant="secondary")
-
-    # --- Handlers for Create/Delete ---
-    def create_city_ui(name, desc, ui_port, api_port, timezone_name):
-        if not all([name, ui_port, api_port, timezone_name]): return "Error: Name, UI Port, API Port, and Timezone are required.", gr.update()
-        result = manager.create_city(name, desc, int(ui_port), int(api_port), timezone_name)
-        return result, manager.get_cities_df()
-
-    def delete_city_ui(city_id_str, confirmed):
-        if not confirmed: return "Error: Please check the confirmation box to delete.", gr.update()
-        if not city_id_str: return "Error: Select a city to delete.", gr.update()
-        result = manager.delete_city(int(city_id_str))
-        return result, manager.get_cities_df()
-
-    def create_building_ui(name, desc, capacity, sys_inst, city_id):
-        if not all([name, capacity, city_id]): return "Error: Name, Capacity, and City are required.", gr.update()
-        result = manager.create_building(name, desc, int(capacity), sys_inst, city_id)
-        return result, manager.get_buildings_df()
-
-    def delete_building_ui(b_id, confirmed):
-        if not confirmed: return "Error: Please check the confirmation box to delete.", gr.update()
-        if not b_id: return "Error: Select a building to delete.", gr.update()
-        result = manager.delete_building(b_id)
-        return result, manager.get_buildings_df()
-
-    def create_ai_ui(name, sys_prompt, home_city_id):
-        if not all([name, sys_prompt, home_city_id]): return "Error: Name, System Prompt, and Home City are required.", gr.update()
-        result = manager.create_ai(name, sys_prompt, home_city_id)
-        return result, manager.get_ais_df()
-
-    def delete_ai_ui(ai_id, confirmed):
-        if not confirmed: return "Error: Please check the confirmation box to delete.", gr.update()
-        if not ai_id: return "Error: Select an AI to delete.", gr.update()
-        result = manager.delete_ai(ai_id)
-        return result, manager.get_ais_df()
-    
-    def create_tool_ui(name, desc, module_path, func_name):
-        if not all([name, module_path, func_name]): return "Error: Name, Module Path, and Function Name are required.", gr.update()
-        result = manager.create_tool(name, desc, module_path, func_name)
-        return result, manager.get_tools_df()
-
-    def update_tool_ui(tool_id, name, desc, module_path, func_name):
-        if not tool_id: return "Error: Select a tool to update.", gr.update()
-        result = manager.update_tool(int(tool_id), name, desc, module_path, func_name)
-        return result, manager.get_tools_df()
-
-    def delete_tool_ui(tool_id, confirmed):
-        if not confirmed: return "Error: Please check the confirmation box to delete.", gr.update()
-        if not tool_id: return "Error: Select a tool to delete.", gr.update()
-        result = manager.delete_tool(int(tool_id))
-        return result, manager.get_tools_df()
-
-    # --- UI Layout with Create/Delete ---
-    with gr.Accordion("City管理", open=True):
-        with gr.Tabs():
-            with gr.TabItem("編集/削除"):
-                city_df = gr.DataFrame(value=None, interactive=False, label="Cities in this World")
-                with gr.Row():
-                    city_id_text = gr.Textbox(label="City ID", interactive=False)
-                    city_name_textbox = gr.Textbox(label="City Name")
-                    city_ui_port_num = gr.Number(label="UI Port", precision=0)
-                    city_api_port_num = gr.Number(label="API Port", precision=0)
-                city_desc_textbox = gr.Textbox(label="Description", lines=3)
-                city_timezone_textbox = gr.Textbox(label="Timezone (IANA形式)", value=lambda: manager.timezone_name, placeholder="例: Asia/Tokyo")
-                online_mode_checkbox = gr.Checkbox(label="次回起動時にオンラインモードで起動する")
-                with gr.Row():
-                    save_city_btn = gr.Button("City設定を保存")
-                    delete_city_confirm_check = gr.Checkbox(label="削除を確認", value=False, scale=1)
-                    delete_city_btn = gr.Button("Cityを削除", variant="stop", interactive=False, scale=1)
-                city_status_display = gr.Textbox(label="Status", interactive=False)
-            with gr.TabItem("新規作成"):
-                gr.Markdown("新しいCityを作成します。作成後、アプリケーションの再起動が必要です。")
-                new_city_name_text = gr.Textbox(label="New City Name")
-                new_city_desc_text = gr.Textbox(label="Description", lines=2)
-                with gr.Row():
-                    new_city_ui_port = gr.Number(label="UI Port", precision=0)
-                    new_city_api_port = gr.Number(label="API Port", precision=0)
-                new_city_timezone_text = gr.Textbox(label="Timezone (IANA形式)", value="UTC", placeholder="例: Asia/Tokyo")
-                create_city_btn = gr.Button("新規Cityを作成", variant="primary")
-                create_city_status = gr.Textbox(label="Status", interactive=False)
-
-    with gr.Accordion("Building管理", open=False):
-        with gr.Tabs():
-            with gr.TabItem("編集/削除"):
-                building_df = gr.DataFrame(value=None, interactive=False, label="Buildings in this World")
-                with gr.Row():
-                    building_id_text = gr.Textbox(label="Building ID", interactive=False)
-                    building_name_text = gr.Textbox(label="Building Name")
-                    building_capacity_num = gr.Number(label="Capacity", precision=0)
-                    building_city_dropdown = gr.Dropdown(choices=city_choices, label="所属City", type="value")
-                    building_interval_num = gr.Number(label="自律会話周期(秒)", precision=0)
-                building_desc_text = gr.Textbox(label="Description", lines=3)
-                building_sys_inst_text = gr.Textbox(label="System Instruction", lines=5)
-                building_tools_checkbox = gr.CheckboxGroup(choices=tool_choices, label="利用可能なツール", type="value")
-                with gr.Row():
-                    save_building_btn = gr.Button("Building設定を保存")
-                    delete_bldg_confirm_check = gr.Checkbox(label="削除を確認", value=False, scale=1)
-                    delete_bldg_btn = gr.Button("Buildingを削除", variant="stop", interactive=False, scale=1)
-                building_status_display = gr.Textbox(label="Status", interactive=False)
-                
-                # --- City Event Handlers ---
-                def toggle_delete_button(is_checked):
-                    return gr.update(interactive=is_checked)
-
-                city_df.select(fn=on_select_city, inputs=None, outputs=[city_id_text, city_name_textbox, city_desc_textbox, online_mode_checkbox, city_ui_port_num, city_api_port_num, city_timezone_textbox])
-                save_city_btn.click(fn=update_city_ui, inputs=[city_id_text, city_name_textbox, city_desc_textbox, online_mode_checkbox, city_ui_port_num, city_api_port_num, city_timezone_textbox], outputs=[city_status_display, city_df])
-                delete_city_confirm_check.change(fn=toggle_delete_button, inputs=delete_city_confirm_check, outputs=delete_city_btn)
-                delete_city_btn.click(fn=delete_city_ui, inputs=[city_id_text, delete_city_confirm_check], outputs=[city_status_display, city_df])
-                create_city_btn.click(fn=create_city_ui, inputs=[new_city_name_text, new_city_desc_text, new_city_ui_port, new_city_api_port, new_city_timezone_text], outputs=[create_city_status, city_df])
-
-                # --- Building Event Handlers ---
-                building_df.select(fn=on_select_building, inputs=None, outputs=[building_id_text, building_name_text, building_capacity_num, building_desc_text, building_sys_inst_text, building_city_dropdown, building_tools_checkbox, building_interval_num])
-                save_building_btn.click(fn=update_building_ui, inputs=[building_id_text, building_name_text, building_capacity_num, building_desc_text, building_sys_inst_text, building_city_dropdown, building_tools_checkbox, building_interval_num], outputs=[building_status_display, building_df])
-                delete_bldg_confirm_check.change(fn=toggle_delete_button, inputs=delete_bldg_confirm_check, outputs=delete_bldg_btn)
-                delete_bldg_btn.click(fn=delete_building_ui, inputs=[building_id_text, delete_bldg_confirm_check], outputs=[building_status_display, building_df])
-
-            with gr.TabItem("新規作成"):
-                gr.Markdown("新しいBuildingを作成します。作成後、アプリケーションの再起動が必要です。")
-                new_bldg_name_text = gr.Textbox(label="New Building Name")
-                new_bldg_desc_text = gr.Textbox(label="Description", lines=2)
-                with gr.Row():
-                    new_bldg_capacity_num = gr.Number(label="Capacity", precision=0, value=1)
-                    new_bldg_city_dropdown = gr.Dropdown(choices=city_choices, label="所属City", type="value")
-                new_bldg_sys_inst_text = gr.Textbox(label="System Instruction", lines=4)
-                create_bldg_btn = gr.Button("新規Buildingを作成", variant="primary")
-                create_bldg_status = gr.Textbox(label="Status", interactive=False)
-
-                create_bldg_btn.click(fn=create_building_ui, inputs=[new_bldg_name_text, new_bldg_desc_text, new_bldg_capacity_num, new_bldg_sys_inst_text, new_bldg_city_dropdown], outputs=[create_bldg_status, building_df])
-
-    with gr.Accordion("AI管理", open=False):
-        with gr.Tabs():
-            with gr.TabItem("編集/削除"):
-                ai_df = gr.DataFrame(value=None, interactive=False, label="AIs in this World")
-                with gr.Row():
-                    ai_id_text = gr.Textbox(label="AI ID", interactive=False)
-                    ai_name_text = gr.Textbox(label="AI Name")
-                    ai_home_city_dropdown = gr.Dropdown(choices=city_choices, label="所属City", type="value")
-                    ai_model_dropdown = gr.Dropdown(choices=MODEL_CHOICES, label="Default Model", allow_custom_value=True)
-                    ai_interaction_mode_dropdown = gr.Dropdown(choices=["auto", "manual", "sleep"], label="対話モード", value="auto")
-                ai_desc_text = gr.Textbox(label="Description", lines=2)
-                ai_sys_prompt_text = gr.Textbox(label="System Prompt", lines=8)
-                with gr.Row():
-                    ai_avatar_path_text = gr.Textbox(label="Avatar Image Path/URL", placeholder="例: assets/avatars/air.png")
-                    ai_avatar_upload = gr.File(label="Upload New Avatar", file_types=["image"], type="filepath")
-                with gr.Row():
-                    is_dispatched_checkbox = gr.Checkbox(label="派遣中 (編集不可)", interactive=False)
-                    save_ai_btn = gr.Button("AI設定を保存")
-                    delete_ai_confirm_check = gr.Checkbox(label="削除を確認", value=False, scale=1)
-                    delete_ai_btn = gr.Button("AIを削除", variant="stop", interactive=False, scale=1)
-                ai_status_display = gr.Textbox(label="Status", interactive=False)
-
-                gr.Markdown("---")
-                gr.Markdown("### AIを移動させる")
-                with gr.Row():
-                    ai_current_location_text = gr.Textbox(label="現在地", interactive=False, scale=2)
-                    ai_move_target_dropdown = gr.Dropdown(
-                        choices=BUILDING_CHOICES,
-                        label="移動先",
-                        scale=2
-                    )
-                    move_ai_btn = gr.Button("移動実行", scale=1)
-                move_ai_status_display = gr.Textbox(label="Status", interactive=False)
-
-
-                # --- AI Event Handlers (Update/Delete) ---
-                ai_df.select(fn=on_select_ai, inputs=None, outputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, is_dispatched_checkbox, ai_interaction_mode_dropdown, ai_current_location_text, ai_avatar_path_text, ai_avatar_upload])
-                save_ai_btn.click(fn=update_ai_ui, inputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, ai_interaction_mode_dropdown, ai_avatar_path_text, ai_avatar_upload], outputs=[ai_status_display, ai_df])
-                delete_ai_confirm_check.change(fn=toggle_delete_button, inputs=delete_ai_confirm_check, outputs=delete_ai_btn)
-                delete_ai_btn.click(fn=delete_ai_ui, inputs=[ai_id_text, delete_ai_confirm_check], outputs=[ai_status_display, ai_df])
-                move_ai_btn.click(fn=move_ai_ui, inputs=[ai_id_text, ai_move_target_dropdown], outputs=[move_ai_status_display, ai_current_location_text])
-
-            with gr.TabItem("新規作成"):
-                gr.Markdown("新しいAIを作成します。作成すると、そのAIの個室も自動で生成されます。")
-                new_ai_name_text = gr.Textbox(label="New AI Name")
-                new_ai_home_city_dropdown = gr.Dropdown(choices=city_choices, label="所属City", type="value")
-                new_ai_sys_prompt_text = gr.Textbox(label="System Prompt", lines=6, value="ここにペルソナの基本設定を記述します。")
-                create_ai_btn = gr.Button("新規AIを作成", variant="primary")
-                create_ai_status = gr.Textbox(label="Status", interactive=False)
-
-                create_ai_btn.click(fn=create_ai_ui, inputs=[new_ai_name_text, new_ai_sys_prompt_text, new_ai_home_city_dropdown], outputs=[create_ai_status, ai_df])
-
-    with gr.Accordion("ツール管理", open=False):
-        gr.Markdown("AIが利用可能なツールを定義します。")
-        with gr.Tabs():
-            with gr.TabItem("編集/削除"):
-                tool_df = gr.DataFrame(value=None, interactive=False, label="Available Tools")
-                with gr.Row():
-                    tool_id_text = gr.Textbox(label="Tool ID", interactive=False)
-                    tool_name_text = gr.Textbox(label="Tool Name")
-                tool_desc_text = gr.Textbox(label="Description", lines=2)
-                with gr.Row():
-                    tool_module_path_text = gr.Textbox(label="Module Path", placeholder="e.g., tools.defs.calculator")
-                    tool_function_name_text = gr.Textbox(label="Function Name", placeholder="e.g., calculate_expression")
-                with gr.Row():
-                    save_tool_btn = gr.Button("ツール設定を保存")
-                    delete_tool_confirm_check = gr.Checkbox(label="削除を確認", value=False, scale=1)
-                    delete_tool_btn = gr.Button("ツールを削除", variant="stop", interactive=False, scale=1)
-                tool_status_display = gr.Textbox(label="Status", interactive=False)
-            with gr.TabItem("新規作成"):
-                gr.Markdown("新しいツールを登録します。")
-                new_tool_name_text = gr.Textbox(label="New Tool Name")
-                new_tool_desc_text = gr.Textbox(label="Description", lines=2)
-                with gr.Row():
-                    new_tool_module_path_text = gr.Textbox(label="Module Path", placeholder="e.g., tools.defs.new_tool")
-                    new_tool_function_name_text = gr.Textbox(label="Function Name", placeholder="e.g., run_new_tool")
-                create_tool_btn = gr.Button("新規ツールを作成", variant="primary")
-                create_tool_status = gr.Textbox(label="Status", interactive=False)
-
-    with gr.Accordion("ブループリント管理", open=False):
-        gr.Markdown("エンティティの設計図を作成・管理し、ワールドに配置します。\n行を選択する際はBLUEPRINT_ID列をクリックしてください。")
-        with gr.Tabs():
-            with gr.TabItem("編集"):
-                blueprint_df = gr.DataFrame(value=None, interactive=False, label="Blueprints in this World")
-                with gr.Row():
-                    bp_id_text = gr.Textbox(label="Blueprint ID", interactive=False)
-                    bp_name_text = gr.Textbox(label="Blueprint Name")
-                    bp_city_dropdown = gr.Dropdown(choices=city_choices, label="所属City", type="value")
-                    bp_entity_type_text = gr.Textbox(label="Entity Type", value="ai")
-                bp_desc_text = gr.Textbox(label="Description", lines=2)
-                bp_sys_prompt_text = gr.Textbox(label="Base System Prompt", lines=6)
-                with gr.Row():
-                    bp_create_btn = gr.Button("新規作成")
-                    bp_update_btn = gr.Button("更新")
-                    bp_delete_btn = gr.Button("削除", variant="stop")
-                bp_status_display = gr.Textbox(label="Status", interactive=False)
-
-            with gr.TabItem("スポーン"):
-                gr.Markdown("リストからブループリントを選択し、新しいエンティティをワールドに配置します。")
-                all_blueprints_df = manager.get_blueprints_df()
-                blueprint_choices = list(zip(all_blueprints_df['NAME'], all_blueprints_df['BLUEPRINT_ID']))
-                spawn_bp_dropdown = gr.Dropdown(choices=blueprint_choices, label="使用するブループリント", type="value")
-                spawn_entity_name_text = gr.Textbox(label="新しいエンティティ名")
-                spawn_building_dropdown = gr.Dropdown(choices=BUILDING_CHOICES, label="配置先の建物")
-                spawn_btn = gr.Button("スポーン実行", variant="primary")
-                spawn_status_display = gr.Textbox(label="Status", interactive=False)
-
-        # --- Blueprint Handlers ---
-        def on_select_blueprint(evt: gr.SelectData):
-            # evt.indexの代わりにevt.valueを使用する
-            # evt.valueには選択された行の最初の列の値（BLUEPRINT_ID）が入る
-            if evt.value is None:
-                # 選択が解除されたらフォームをクリア
-                return "", "", "", None, "", "ai"
-
-            try:
-                # valueは文字列として渡されることがあるのでintに変換
-                blueprint_id = int(evt.value)
-            except (ValueError, TypeError):
-                # ヘッダーをクリックした場合など、intに変換できない場合はフォームをクリア
-                return "", "", "", None, "", "ai"
-            details = manager.get_blueprint_details(blueprint_id)
-            if not details: return "", "", "", None, "", "ai"
-            return details['BLUEPRINT_ID'], details['NAME'], details['DESCRIPTION'], int(details['CITYID']), details['BASE_SYSTEM_PROMPT'], details['ENTITY_TYPE']
-
-        def create_blueprint_ui(name, desc, city_id, sys_prompt, entity_type):
-            if not all([name, city_id, sys_prompt, entity_type]): return "Error: Name, City, System Prompt, and Entity Type are required.", gr.update()
-            result = manager.create_blueprint(name, desc, city_id, sys_prompt, entity_type)
-            return result, manager.get_blueprints_df()
-
-        def update_blueprint_ui(bp_id, name, desc, city_id, sys_prompt, entity_type):
-            if not bp_id: return "Error: Select a blueprint to update.", gr.update()
-            result = manager.update_blueprint(int(bp_id), name, desc, city_id, sys_prompt, entity_type)
-            return result, manager.get_blueprints_df()
-
-        def delete_blueprint_ui(bp_id):
-            if not bp_id: return "Error: Select a blueprint to delete.", gr.update()
-            result = manager.delete_blueprint(int(bp_id))
-            return result, manager.get_blueprints_df()
-
-        def spawn_entity_ui(blueprint_id, entity_name, building_name):
-            if not all([blueprint_id, entity_name, building_name]): return "Error: Blueprint, Entity Name, and Target Building are required.", gr.update()
-            building_id = BUILDING_NAME_TO_ID_MAP.get(building_name)
-            if not building_id: return f"Error: Building '{building_name}' not found.", gr.update()
-            success, message = manager.spawn_entity_from_blueprint(blueprint_id, entity_name, building_id)
-            return message, manager.get_ais_df()
-
-        blueprint_df.select(fn=on_select_blueprint, inputs=None, outputs=[bp_id_text, bp_name_text, bp_desc_text, bp_city_dropdown, bp_sys_prompt_text, bp_entity_type_text])
-        bp_create_btn.click(fn=create_blueprint_ui, inputs=[bp_name_text, bp_desc_text, bp_city_dropdown, bp_sys_prompt_text, bp_entity_type_text], outputs=[bp_status_display, blueprint_df])
-        bp_update_btn.click(fn=update_blueprint_ui, inputs=[bp_id_text, bp_name_text, bp_desc_text, bp_city_dropdown, bp_sys_prompt_text, bp_entity_type_text], outputs=[bp_status_display, blueprint_df])
-        bp_delete_btn.click(fn=delete_blueprint_ui, inputs=[bp_id_text], outputs=[bp_status_display, blueprint_df])
-        spawn_btn.click(fn=spawn_entity_ui, inputs=[spawn_bp_dropdown, spawn_entity_name_text, spawn_building_dropdown], outputs=[spawn_status_display, ai_df])
-
-        # --- Tool Handlers ---
-        tool_df.select(fn=on_select_tool, inputs=None, outputs=[tool_id_text, tool_name_text, tool_desc_text, tool_module_path_text, tool_function_name_text])
-        save_tool_btn.click(fn=update_tool_ui, inputs=[tool_id_text, tool_name_text, tool_desc_text, tool_module_path_text, tool_function_name_text], outputs=[tool_status_display, tool_df])
-        delete_tool_confirm_check.change(fn=toggle_delete_button, inputs=delete_tool_confirm_check, outputs=delete_tool_btn)
-        delete_tool_btn.click(fn=delete_tool_ui, inputs=[tool_id_text, delete_tool_confirm_check], outputs=[tool_status_display, tool_df])
-        create_tool_btn.click(fn=create_tool_ui, inputs=[new_tool_name_text, new_tool_desc_text, new_tool_module_path_text, new_tool_function_name_text], outputs=[create_tool_status, tool_df])
-
-    with gr.Accordion("バックアップ/リストア管理", open=False):
-        gr.Markdown("現在のワールドの状態をバックアップしたり、過去のバックアップから復元します。**リストア後はアプリケーションの再起動が必須です。**")
-        
-        backup_df = gr.DataFrame(value=None, interactive=False, label="利用可能なバックアップ")
-        
-        with gr.Row():
-            selected_backup_dropdown = gr.Dropdown(label="操作対象のバックアップ", choices=[], scale=2)
-            restore_confirm_check = gr.Checkbox(label="リストアを確認", value=False, scale=1)
-            restore_btn = gr.Button("リストア実行", variant="primary", interactive=False, scale=1)
-            delete_backup_confirm_check = gr.Checkbox(label="削除を確認", value=False, scale=1)
-            delete_backup_btn = gr.Button("削除", variant="stop", interactive=False, scale=1)
-
-        with gr.Row():
-            new_backup_name_text = gr.Textbox(label="新しいバックアップ名 (英数字のみ)", scale=3)
-            create_backup_btn = gr.Button("現在のワールドをバックアップ", scale=1)
-        
-        backup_status_display = gr.Textbox(label="Status", interactive=False)
-
-        # --- Backup/Restore Handlers ---
-        def update_backup_components():
-            df = manager.get_backups()
-            choices = df['Backup Name'].tolist() if not df.empty else []
-            return gr.update(value=df), gr.update(choices=choices, value=None)
-
-        def create_backup_ui(name):
-            if not name: return "Error: Backup name is required.", gr.update(), gr.update()
-            result = manager.backup_world(name)
-            return result, *update_backup_components()
-
-        def restore_backup_ui(name, confirmed):
-            if not confirmed: return "Error: Please check the confirmation box to restore."
-            if not name: return "Error: Select a backup to restore."
-            return manager.restore_world(name)
-
-        def delete_backup_ui(name, confirmed):
-            if not confirmed: return "Error: Please check the confirmation box to delete.", gr.update(), gr.update()
-            if not name: return "Error: Select a backup to delete.", gr.update(), gr.update()
-            result = manager.delete_backup(name)
-            return result, *update_backup_components()
-
-        create_backup_btn.click(fn=create_backup_ui, inputs=[new_backup_name_text], outputs=[backup_status_display, backup_df, selected_backup_dropdown])
-        restore_confirm_check.change(fn=toggle_delete_button, inputs=restore_confirm_check, outputs=restore_btn)
-        restore_btn.click(fn=restore_backup_ui, inputs=[selected_backup_dropdown, restore_confirm_check], outputs=[backup_status_display])
-        delete_backup_confirm_check.change(fn=toggle_delete_button, inputs=delete_backup_confirm_check, outputs=delete_backup_btn)
-        delete_backup_btn.click(fn=delete_backup_ui, inputs=[selected_backup_dropdown, delete_backup_confirm_check], outputs=[backup_status_display, backup_df, selected_backup_dropdown])
-
-    with gr.Accordion("ワールド・イベント", open=False):
-        gr.Markdown("ワールド全体に影響を与えるイベントを発生させます。イベントはシステムメッセージとして各Buildingのログに記録され、AIたちの新たな行動のきっかけとなります。")
-        with gr.Row():
-            world_event_text = gr.Textbox(label="イベントメッセージ", placeholder="例: 空にオーロラが現れた。", scale=3)
-            trigger_event_btn = gr.Button("イベントを発生させる", variant="primary", scale=1)
-        world_event_status_display = gr.Textbox(label="Status", interactive=False)
-
-        trigger_event_btn.click(fn=manager.trigger_world_event, inputs=[world_event_text], outputs=[world_event_status_display])
-
-
-    # --- ★ Refresh Handler Definition ---
-    def refresh_world_editor_data():
-        """Refreshes all DataFrames and related components in the world editor."""
-        logging.info("Refreshing all world editor DataFrames.")
-        
-        cities = manager.get_cities_df()
-        buildings = manager.get_buildings_df()
-        ais = manager.get_ais_df()
-        blueprints = manager.get_blueprints_df()
-        backups = manager.get_backups()
-        tools = manager.get_tools_df()
-        
-        backup_choices = backups['Backup Name'].tolist() if not backups.empty else []
-        
-        return (
-            cities,
-            buildings,
-            ais,
-            blueprints,
-            backups,
-            tools,
-            gr.update(choices=backup_choices, value=None) # ドロップダウンも更新
-        )
-
-    # --- ★ Connect Refresh Button to all DataFrames ---
-    refresh_editor_btn.click(
-        fn=refresh_world_editor_data, inputs=None,
-        outputs=[city_df, building_df, ai_df, blueprint_df, backup_df, tool_df, selected_backup_dropdown]
-    )
 
 def find_pid_for_port(port: int) -> Optional[int]:
-    """指定されたポートを使用しているプロセスのPIDを見つける (Windows専用)"""
-    if sys.platform != "win32":
-        logging.warning("Port cleanup is only supported on Windows.")
+    """指定されたポートを使用しているプロセスのPIDを見つける。"""
+    if psutil is not None:
+        try:
+            for conn in psutil.net_connections(kind="inet"):
+                laddr = getattr(conn, "laddr", None)
+                if not laddr:
+                    continue
+                if laddr.port == port and conn.pid:
+                    return conn.pid
+        except psutil.AccessDenied:
+            logging.debug("psutil could not access connection information (permission denied).")
+        except psutil.Error as exc:
+            logging.debug("psutil failed while enumerating processes: %s", exc)
+
+    if sys.platform == "win32":
+        try:
+            result = subprocess.check_output(
+                ["netstat", "-ano"],
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            for line in result.splitlines():
+                if f":{port}" in line and "LISTENING" in line:
+                    pid = int(line.split()[-1])
+                    return pid
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            logging.error("Could not execute 'netstat' command. Please ensure it is in your PATH.")
+        except Exception as exc:
+            logging.error("Error finding PID for port %s: %s", port, exc)
         return None
-    try:
-        result = subprocess.check_output(["netstat", "-ano"], text=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        for line in result.splitlines():
-            if f":{port}" in line and "LISTENING" in line:
-                pid = int(line.split()[-1])
-                return pid
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        logging.error("Could not execute 'netstat' command. Please ensure it is in your PATH.")
-    except Exception as e:
-        logging.error(f"Error finding PID for port {port}: {e}")
+
+    for cmd in (["lsof", "-ti", f":{port}"], ["fuser", "-n", "tcp", str(port)]):
+        try:
+            result = subprocess.check_output(cmd, text=True)
+            for line in result.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    return int(line.split()[0])
+                except ValueError:
+                    continue
+        except FileNotFoundError:
+            continue
+        except subprocess.CalledProcessError:
+            continue
+        except Exception as exc:
+            logging.debug("Command %s failed while searching for port %s: %s", cmd[0], port, exc)
     return None
 
+
 def kill_process_by_pid(pid: int):
-    """PIDを指定してプロセスを終了させる (Windows専用)"""
+    """PIDを指定してプロセスを終了させる。"""
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/PID", str(pid)],
+                check=True,
+                capture_output=True,
+            )
+            logging.info("Process with PID %s has been terminated.", pid)
+            time.sleep(1)
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode == 128:
+                logging.warning("Process with PID %s not found. It might have already been closed.", pid)
+            else:
+                stderr = exc.stderr.decode(errors="ignore") if exc.stderr else ""
+                logging.error("Failed to terminate process with PID %s. Stderr: %s", pid, stderr)
+        except Exception as exc:
+            logging.error("An unexpected error occurred while killing process %s: %s", pid, exc)
+        return
+
     try:
-        subprocess.run(["taskkill", "/F", "/PID", str(pid)], check=True, capture_output=True)
-        logging.info(f"Process with PID {pid} has been terminated.")
-        time.sleep(1)  # プロセスが完全に終了するのを少し待つ
-    except subprocess.CalledProcessError as e:
-        if e.returncode == 128: # "No such process"
-            logging.warning(f"Process with PID {pid} not found. It might have already been closed.")
-        else:
-            logging.error(f"Failed to terminate process with PID {pid}. Stderr: {e.stderr.decode(errors='ignore')}")
-    except Exception as e:
-        logging.error(f"An unexpected error occurred while killing process {pid}: {e}")
+        os.kill(pid, signal.SIGTERM)
+        time.sleep(0.5)
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.5)
+        os.kill(pid, signal.SIGKILL)
+        logging.info("Process with PID %s forcefully terminated.", pid)
+    except ProcessLookupError:
+        logging.warning("Process with PID %s not found. It might have already been closed.", pid)
+    except PermissionError:
+        logging.error("Permission denied when trying to terminate PID %s.", pid)
+    except Exception as exc:
+        logging.error("Failed to terminate process %s: %s", pid, exc)
 
 def cleanup_and_start_server(port: int, script_path: Path, name: str):
     """ポートをクリーンアップし、指定されたスクリプトをモジュールとしてバックグラウンドで起動する"""
     pid = find_pid_for_port(port)
     if pid:
-        logging.warning(f"Port {port} for {name} is already in use by PID {pid}. Attempting to terminate the process.")
+        logging.warning("Port %s for %s is already in use by PID %s. Attempting to terminate the process.", port, name, pid)
         kill_process_by_pid(pid)
 
     project_root = Path(__file__).parent
     # Convert file path to module path (e.g., database\api_server.py -> database.api_server)
     module_path = str(script_path.relative_to(project_root)).replace(os.sep, '.')[:-3]
 
-    logging.info(f"Starting {name} as module: {module_path}")
+    logging.info("Starting %s as module: %s", name, module_path)
     # Run as a module from the project's root directory to handle relative imports correctly
-    subprocess.Popen([sys.executable, "-m", module_path], cwd=project_root)
+    return subprocess.Popen([sys.executable, "-m", module_path], cwd=project_root)
 
 def cleanup_and_start_server_with_args(port: int, script_path: Path, name: str, db_file: str):
     """ポートをクリーンアップし、引数付きでスクリプトをモジュールとして起動する"""
     pid = find_pid_for_port(port)
     if pid:
-        logging.warning(f"Port {port} for {name} is already in use by PID {pid}. Attempting to terminate the process.")
+        logging.warning("Port %s for %s is already in use by PID %s. Attempting to terminate the process.", port, name, pid)
         kill_process_by_pid(pid)
 
     project_root = Path(__file__).parent
     module_path = str(script_path.relative_to(project_root)).replace(os.sep, '.')[:-3]
 
-    logging.info(f"Starting {name} as module: {module_path} with DB: {db_file} on port: {port}")
-    subprocess.Popen([sys.executable, "-m", module_path, "--port", str(port), "--db", db_file], cwd=project_root)
+    logging.info("Starting %s as module: %s with DB: %s on port: %s", name, module_path, db_file, port)
+    return subprocess.Popen(
+        [sys.executable, "-m", module_path, "--port", str(port), "--db", db_file],
+        cwd=project_root,
+    )
+
+
+def shutdown_subprocess(process: Optional[subprocess.Popen], name: str) -> None:
+    if not process:
+        return
+    if process.poll() is not None:
+        return
+    logging.info("Shutting down %s...", name)
+    try:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            logging.warning("%s did not exit in time; forcing kill.", name)
+            process.kill()
+    except Exception as exc:
+        logging.error("Failed to shut down %s cleanly: %s", name, exc)
+
+api_server_process: Optional[subprocess.Popen] = None
+manager: Optional[SAIVerseManager] = None
+
 
 def main():
     parser = argparse.ArgumentParser(description="Run a SAIVerse City instance.")
     parser.add_argument("city_name", type=str, nargs='?', default='city_a', help="The name of the city to run (defaults to city_a).")
-    parser.add_argument("--db-file", type=str, default="saiverse.db", help="Path to the unified database file.")
+    parser.add_argument(
+        "--db-file",
+        type=str,
+        default=None,
+        help="Path to the unified database file. Defaults to the managed database/data directory.",
+    )
     default_sds_url = os.getenv("SDS_URL", "http://127.0.0.1:8080")
     parser.add_argument("--sds-url", type=str, default=default_sds_url, help="URL of the SAIVerse Directory Service (or from .env).")
     args = parser.parse_args()
 
-    db_path = Path(__file__).parent / "database" / args.db_file
+    if args.db_file:
+        provided_path = Path(args.db_file)
+        if provided_path.is_absolute():
+            db_path = provided_path
+        else:
+            root_dir = Path(__file__).parent
+            if ("/" not in args.db_file and "\\" not in args.db_file):
+                db_path = (root_dir / "database" / provided_path).resolve()
+            else:
+                db_path = (root_dir / provided_path).resolve()
+    else:
+        db_path = default_db_path()
 
-    global manager, AUTONOMOUS_BUILDING_CHOICES, AUTONOMOUS_BUILDING_MAP, BUILDING_CHOICES, BUILDING_NAME_TO_ID_MAP
+    global manager, AUTONOMOUS_BUILDING_CHOICES, AUTONOMOUS_BUILDING_MAP, BUILDING_CHOICES, BUILDING_NAME_TO_ID_MAP, api_server_process
     manager = SAIVerseManager(
         city_name=args.city_name,
         db_path=str(db_path),
@@ -1516,418 +234,36 @@ def main():
     if ensure_gateway_runtime:
         ensure_gateway_runtime(manager)
     
-    # Populate new globals for the move dropdown
-    BUILDING_CHOICES = [b.name for b in manager.buildings]
-    BUILDING_NAME_TO_ID_MAP = {b.name: b.building_id for b in manager.buildings}
-    AUTONOMOUS_BUILDING_CHOICES = [b.name for b in manager.buildings if b.building_id != manager.user_room_id]
-    AUTONOMOUS_BUILDING_MAP = {b.name: b.building_id for b in manager.buildings if b.building_id != manager.user_room_id}
+    ui_state.bind_manager(manager)
+    ui_state.set_model_choices(MODEL_CHOICES)
+    ui_state.set_chat_history_limit(CHAT_HISTORY_LIMIT)
+    ui_state.set_version(VERSION)
+    ui_state.refresh_building_caches()
 
-    cleanup_and_start_server_with_args(manager.api_port, Path(__file__).parent / "database" / "api_server.py", "API Server", str(db_path))
+    api_server_process = cleanup_and_start_server_with_args(
+        manager.api_port,
+        Path(__file__).parent / "database" / "api_server.py",
+        "API Server",
+        str(db_path),
+    )
 
-    # --- アプリケーション終了時にManagerのシャットダウン処理を呼び出す ---
-    atexit.register(manager.shutdown)
+    # --- アプリケーション終了時のクリーンアップ ---
+    def shutdown_everything():
+        shutdown_subprocess(api_server_process, "API Server")
+        if manager:
+            manager.shutdown()
+
+    atexit.register(shutdown_everything)
 
     # --- FastAPIとGradioの統合 ---
     # 3. Gradio UIを作成
-    with gr.Blocks(fill_width=True, head=HEAD_VIEWPORT, css=NOTE_CSS, title=f"SAIVerse City: {args.city_name}", theme=gr.themes.Soft()) as demo:
-        with gr.Sidebar(open=False, width=340, elem_id="sample_sidebar", elem_classes=["saiverse-sidebar"]):
-            with gr.Accordion("セクション切り替え", open=False):
-                gr.HTML("""
-                    <div id="saiverse-sidebar-nav">
-                        <div class="saiverse-nav-item" data-tab-label="ワールドビュー">ワールドビュー</div>
-                        <div class="saiverse-nav-item" data-tab-label="自律会話ログ" style="display:none">自律会話ログ</div>
-                        <div class="saiverse-nav-item" data-tab-label="DB Manager">DB Manager</div>
-                        <div class="saiverse-nav-item" data-tab-label="メモリー設定">メモリー設定</div>
-                        <div class="saiverse-nav-item" data-tab-label="ワールドエディタ">ワールドエディタ</div>
-                    </div>
-                    """)
-            with gr.Row():
-                login_status_display = gr.Textbox(
-                    value="オンライン" if manager.user_is_online else "オフライン",
-                    label="ログイン状態",
-                    interactive=False,
-                    scale=1
-                )
-                login_btn = gr.Button("ログイン", scale=1)
-                logout_btn = gr.Button("ログアウト", scale=1)
-            with gr.Accordion("自律会話管理", open=False):
-                with gr.Column(elem_classes=["saiverse-sidebar-autolog-controls"]):
-                    start_button = gr.Button("自律会話を開始", variant="primary", scale=1)
-                    stop_button = gr.Button("自律会話を停止", variant="stop", scale=1)
-                    status_display = gr.Textbox(
-                        value="停止中",
-                        label="現在のステータス",
-                        interactive=False,
-                        scale=1
-                    )
-            with gr.Accordion("ネットワークモード", open=False):
-                with gr.Row():
-                    sds_status_display = gr.Textbox(
-                        value=manager.sds_status,
-                        interactive=False,
-                        scale=2,
-                        show_label=False
-                    )
-                    online_btn = gr.Button("オンラインモードへ", scale=1)
-                    offline_btn = gr.Button("オフラインモードへ", scale=1)
-            with gr.Accordion("移動", open=True):
-                move_destination_radio = gr.Radio(
-                    choices=BUILDING_CHOICES,
-                    value=lambda: _get_current_location_name(),
-                    label="移動先",
-                    interactive=True,
-                    elem_classes=["saiverse-move-radio"],
-                    show_label=False
-                )
-        with gr.Column(elem_id="section-worldview", elem_classes=['saiverse-section']):
-            with gr.Row(elem_id="chat_header"):
-                user_location_display = gr.Textbox(
-                    # managerから現在地を取得して表示する
-                    value=lambda: manager.building_map.get(manager.user_current_building_id).name if manager.user_current_building_id and manager.user_current_building_id in manager.building_map else "不明な場所",
-                    label="あなたの現在地",
-                    interactive=False,
-                    scale=2,
-                    visible=False
-                )
-                move_building_dropdown = gr.Dropdown(
-                    choices=BUILDING_CHOICES,
-                    label="移動先の建物",
-                    interactive=True,
-                    scale=2,
-                    visible=False
-                )
-                move_btn = gr.Button("移動", scale=1, visible=False)
-
-                current_location_display = gr.Markdown(
-                    value=lambda: _format_location_label(_get_current_location_name())
-                )
-            with gr.Group(elem_id="chat_scroll_area"):
-                chatbot = gr.Chatbot(
-                    type="messages",
-                    value=lambda: get_current_building_history(),
-                    group_consecutive_messages=False,
-                    sanitize_html=False,
-                    elem_id="my_chat",
-                    avatar_images=(None, None),
-                    autoscroll=True,
-                    show_label=False
-                )
-            with gr.Group(elem_id="composer_fixed"):
-                with gr.Row():
-                    with gr.Column(scale=5):
-                        with gr.Row(elem_id="message_input_row", equal_height=True):
-                            txt = gr.Textbox(
-                                placeholder="ここにメッセージを入力...",
-                                lines=3,
-                                elem_id="chat_message_textbox",
-                                show_label=False
-                            )
-                    with gr.Column(scale=1, min_width=0):
-                        submit = gr.Button(value="↑",variant="primary")
-                        image_input = gr.UploadButton(
-                            "📎",
-                            file_types=["image"],
-                            file_count="single",
-                            elem_id="attachment_button"
-                        )
-                with gr.Accordion("オプション", open=False):
-                    model_drop = gr.Dropdown(choices=MODEL_CHOICES, value="None",label="モデル選択")
-                    refresh_chat_btn = gr.Button("履歴を再読み込み", variant="secondary")
-                    with gr.Row():
-                        with gr.Column():
-                            summon_persona_dropdown = gr.Dropdown(
-                                choices=manager.get_summonable_personas(),
-                                label="呼ぶペルソナを選択",
-                                interactive=True,
-                                scale=3
-                            )
-                            summon_btn = gr.Button("呼ぶ", scale=1)
-                        with gr.Column():
-                            end_conv_persona_dropdown = gr.Dropdown(
-                                choices=manager.get_conversing_personas(),
-                                label="帰ってもらうペルソナを選択",
-                                interactive=True,
-                                scale=3
-                            )
-                            end_conv_btn = gr.Button("帰宅", scale=1)
-
-            # --- Event Handlers ---
-            submit.click(
-                respond_stream,
-                [txt, image_input],
-                [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown, image_input],
-            )
-            txt.submit(
-                respond_stream,
-                [txt, image_input],
-                [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown, image_input],
-            )  # Enter key submission
-            move_btn.click(fn=move_user_ui, inputs=[move_building_dropdown], outputs=[chatbot, user_location_display, current_location_display, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown])
-            move_destination_radio.change(
-                fn=move_user_radio_ui,
-                inputs=[move_destination_radio],
-                outputs=[move_building_dropdown, chatbot, user_location_display, current_location_display, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown],
-                show_progress="hidden",
-                js="""
-                (value) => {
-                    const navItem = document.querySelector('#saiverse-sidebar-nav .saiverse-nav-item[data-tab-label="ワールドビュー"]');
-                    if (navItem) {
-                        navItem.click();
-                    }
-                    return value;
-                }
-                """
-            )
-            summon_btn.click(fn=call_persona_ui, inputs=[summon_persona_dropdown], outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown])
-            refresh_chat_btn.click(
-                fn=get_current_building_history,
-                inputs=None,
-                outputs=chatbot,
-                show_progress="hidden",
-            )
-            login_btn.click(
-                fn=login_ui,
-                inputs=None,
-                outputs=[login_status_display, summon_persona_dropdown, end_conv_persona_dropdown]
-            )
-            logout_btn.click(fn=logout_ui, inputs=None, outputs=login_status_display)
-            model_drop.change(select_model, model_drop, chatbot)
-            online_btn.click(fn=manager.switch_to_online_mode, inputs=None, outputs=sds_status_display)
-            offline_btn.click(fn=manager.switch_to_offline_mode, inputs=None, outputs=sds_status_display)
-            end_conv_btn.click(
-                fn=end_conversation_ui,
-                inputs=[end_conv_persona_dropdown],
-                outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown]
-            )
-
-
-        with gr.Column(elem_id="section-autolog", elem_classes=['saiverse-section', 'saiverse-hidden']):
-            with gr.Row():
-                log_building_dropdown = gr.Dropdown(
-                    choices=AUTONOMOUS_BUILDING_CHOICES,
-                    value=AUTONOMOUS_BUILDING_CHOICES[0] if AUTONOMOUS_BUILDING_CHOICES else None,
-                    label="Building選択",
-                    interactive=bool(AUTONOMOUS_BUILDING_CHOICES)
-                )
-                log_refresh_btn = gr.Button("手動更新")
-            log_chatbot = gr.Chatbot(
-                type="messages",
-                group_consecutive_messages=False,
-                sanitize_html=False,
-                elem_id="log_chat",
-                height=800
-            )
-            # JavaScriptからクリックされるための、非表示の自動更新ボタン
-            auto_refresh_log_btn = gr.Button("Auto-Refresh Trigger", visible=False, elem_id="auto_refresh_log_btn")
-
-            # イベントハンドラ (ON/OFF)
-            start_button.click(fn=start_conversations_ui, inputs=None, outputs=status_display)
-            stop_button.click(fn=stop_conversations_ui, inputs=None, outputs=status_display)
-
-            # イベントハンドラ
-            log_building_dropdown.change(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
-            log_refresh_btn.click(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
-            auto_refresh_log_btn.click(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
-
-
-        with gr.Column(elem_id="section-db-manager", elem_classes=['saiverse-section', 'saiverse-hidden']):
-            create_db_manager_ui(manager.SessionLocal)
-
-        with gr.Column(elem_id="section-memory-settings", elem_classes=['saiverse-section', 'saiverse-hidden']):
-            create_memory_settings_ui(manager)
-
-
-        with gr.Column(elem_id="section-world-editor", elem_classes=['saiverse-section', 'saiverse-hidden']):
-            create_world_editor_ui() # This function now contains all editor sections
-
-
-        # UIロード時にJavaScriptを実行し、5秒ごとの自動更新タイマーを設定する
-        js_auto_refresh = """
-        () => {
-            const sections = {
-                "ワールドビュー": "#section-worldview",
-                "自律会話ログ": "#section-autolog",
-                "DB Manager": "#section-db-manager",
-                "メモリー設定": "#section-memory-settings",
-                "ワールドエディタ": "#section-world-editor"
-            };
-            const defaultLabel = "ワールドビュー";
-            const setActive = (label) => {
-                const navItems = document.querySelectorAll("#saiverse-sidebar-nav .saiverse-nav-item");
-                navItems.forEach((item) => {
-                    const isActive = item.dataset.tabLabel === label;
-                    item.classList.toggle("active", isActive);
-                });
-                Object.entries(sections).forEach(([name, selector]) => {
-                    const el = document.querySelector(selector);
-                    if (!el) {
-                        return;
-                    }
-                    if (name === label) {
-                        el.classList.remove("saiverse-hidden");
-                    } else {
-                        el.classList.add("saiverse-hidden");
-                    }
-                });
-                window.saiverseActiveSection = label;
-            };
-
-            const setupAttachmentControls = () => {
-                const textarea = document.querySelector("#chat_message_textbox textarea");
-                const fileInput = document.querySelector("#attachment_button input[type='file']");
-                if (!textarea || !fileInput) {
-                    return false;
-                }
-                if (textarea.dataset.dropHandlerAttached === "true") {
-                    return true;
-                }
-                const highlightClass = "drop-target-active";
-                const hasImage = (items) => {
-                    if (!items) {
-                        return false;
-                    }
-                    const list = Array.from(items);
-                    if (!list.length) {
-                        return false;
-                    }
-                    return list.some((item) => {
-                        const type = item.type || "";
-                        if (type.startsWith("image/")) {
-                            return true;
-                        }
-                        const name = item.name || "";
-                        return /\\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(name);
-                    });
-                };
-                const addHighlight = () => textarea.classList.add(highlightClass);
-                const removeHighlight = () => textarea.classList.remove(highlightClass);
-                ["dragenter", "dragover"].forEach((eventName) => {
-                    textarea.addEventListener(eventName, (event) => {
-                        if (hasImage(event.dataTransfer?.items || event.dataTransfer?.files)) {
-                            event.preventDefault();
-                            event.dataTransfer.dropEffect = "copy";
-                            addHighlight();
-                        }
-                    });
-                });
-                ["dragleave", "dragend"].forEach((eventName) => {
-                    textarea.addEventListener(eventName, () => {
-                        removeHighlight();
-                    });
-                });
-                textarea.addEventListener("drop", (event) => {
-                    const files = event.dataTransfer?.files;
-                    if (!files || !files.length) {
-                        removeHighlight();
-                        return;
-                    }
-                    const imageFiles = Array.from(files).filter((file) => {
-                        return file.type.startsWith("image/") || /\\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(file.name);
-                    });
-                    if (!imageFiles.length) {
-                        removeHighlight();
-                        return;
-                    }
-                    event.preventDefault();
-                    let assigned = false;
-                    try {
-                        const transfer = new DataTransfer();
-                        transfer.items.add(imageFiles[0]);
-                        fileInput.files = transfer.files;
-                        assigned = true;
-                    } catch (error) {
-                        try {
-                            fileInput.files = files;
-                            assigned = true;
-                        } catch (_) {
-                            assigned = false;
-                        }
-                    }
-                    if (assigned) {
-                        fileInput.dispatchEvent(new Event("change", { bubbles: true }));
-                    }
-                    removeHighlight();
-                });
-                textarea.dataset.dropHandlerAttached = "true";
-                return true;
-            };
-
-            const attachNavHandlers = () => {
-                const navItems = document.querySelectorAll("#saiverse-sidebar-nav .saiverse-nav-item");
-                if (!navItems.length) {
-                    return false;
-                }
-                navItems.forEach((item) => {
-                    if (item.dataset.listenerAttached === "true") {
-                        return;
-                    }
-                    item.dataset.listenerAttached = "true";
-                    item.addEventListener("click", () => {
-                        setActive(item.dataset.tabLabel);
-                    });
-                });
-                return true;
-            };
-
-            const markSidebars = () => {
-                let found = false;
-                document.querySelectorAll(".sidebar").forEach((el) => {
-                    if (!el.classList.contains("saiverse-sidebar")) {
-                        el.classList.add("saiverse-sidebar");
-                    }
-                    const isMobile = window.matchMedia("(max-width: 768px)").matches;
-                    const widthValue = isMobile ? "80vw" : "20vw";
-                    const offsetValue = `calc(-1 * ${widthValue})`;
-                    el.style.setProperty("width", widthValue, "important");
-                    if (el.classList.contains("right")) {
-                        el.style.removeProperty("left");
-                        el.style.setProperty("right", offsetValue, "important");
-                    } else {
-                        el.style.removeProperty("right");
-                        el.style.setProperty("left", offsetValue, "important");
-                    }
-                    found = true;
-                });
-                if (found) {
-                    if (attachNavHandlers()) {
-                        const current = window.saiverseActiveSection || defaultLabel;
-                        setActive(current);
-                    }
-                    setupAttachmentControls();
-                }
-                return found;
-            };
-
-            if (!markSidebars()) {
-                let attempts = 0;
-                const watcher = setInterval(() => {
-                    attempts += 1;
-                    if (markSidebars() || attempts > 20) {
-                        clearInterval(watcher);
-                    }
-                }, 250);
-            }
-            const ensureAttachmentSetup = () => {
-                if (!setupAttachmentControls()) {
-                    requestAnimationFrame(ensureAttachmentSetup);
-                }
-            };
-            ensureAttachmentSetup();
-
-            setInterval(() => {
-                const button = document.getElementById("auto_refresh_log_btn");
-                if (button) {
-                    button.click();
-                }
-                markSidebars();
-                setupAttachmentControls();
-            }, 5000);
-        }
-        """
-        demo.load(fn=get_current_building_history, inputs=None, outputs=[chatbot])
-        demo.load(None, None, None, js=js_auto_refresh)
-
-    demo.launch(server_name="0.0.0.0",server_port=manager.ui_port, debug=True, share = False)
+    demo = build_app(args.city_name, NOTE_CSS, HEAD_VIEWPORT)
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=manager.ui_port,
+        debug=False,
+        share=False,
+    )
 
 
 if __name__ == "__main__":

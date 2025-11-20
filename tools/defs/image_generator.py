@@ -1,7 +1,7 @@
-import os
-from google import genai
-from google.genai import types
 from dotenv import load_dotenv
+
+from llm_clients.gemini_utils import build_gemini_clients
+from google.genai import types
 
 from tools.defs import ToolSchema, ToolResult
 from media_utils import store_image_bytes
@@ -11,15 +11,12 @@ load_dotenv()
 
 def generate_image(prompt: str) -> tuple[str, ToolResult, str | None, dict | None]:
     """Generate an image and return (prompt, snippet, file path, metadata)."""
-    free_key = os.getenv("GEMINI_FREE_API_KEY")
-    paid_key = os.getenv("GEMINI_API_KEY")
-    if not free_key and not paid_key:
-        raise RuntimeError(
-            "GEMINI_FREE_API_KEY or GEMINI_API_KEY environment variable is not set."
-        )
-    client = genai.Client(api_key=free_key or paid_key)
-    resp = client.models.generate_content(
-        model="gemini-2.0-flash-preview-image-generation",
+    _free_client, _paid_client, _active_client = build_gemini_clients(prefer_paid=True)
+    if _paid_client is None:
+        raise RuntimeError("GEMINI_API_KEY (paid tier) is required for image generation.")
+
+    resp = _paid_client.models.generate_content(
+        model="gemini-2.5-flash-image",
         contents=prompt,
         config=types.GenerateContentConfig(
             response_modalities=["TEXT", "IMAGE"]  # ← TEXT を必ず含める

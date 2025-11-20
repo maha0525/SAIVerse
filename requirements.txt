@@ -20,3 +20,6 @@ torch
 fastembed>=0.7.3
 numpy>=1.26.0
 Pillow>=11.0.0
+
+# SAIMemory
+rdiff-backup>=2.2.6

@@ -16,6 +16,7 @@ except ImportError:  # pragma: no cover
 LOGGER = logging.getLogger(__name__)
 IMAGE_URI_PREFIX = "saiverse://image/"
 SUPPORTED_LLM_IMAGE_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
+SUMMARY_SUFFIX = ".summary.txt"
 
 
 def _ensure_image_dir() -> Path:
@@ -67,6 +68,33 @@ def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:
             }
         )
     return results
+
+
+def _summary_path_for_media(path: Path) -> Path:
+    return path.with_suffix(path.suffix + SUMMARY_SUFFIX)
+
+
+def get_media_summary(path: Path) -> Optional[str]:
+    summary_path = _summary_path_for_media(path)
+    if not summary_path.exists():
+        return None
+    try:
+        return summary_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        LOGGER.exception("Failed to read media summary: %s", summary_path)
+        return None
+
+
+def save_media_summary(path: Path, summary: str) -> None:
+    summary_path = _summary_path_for_media(path)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    text = summary.strip()
+    if not text:
+        text = summary.strip()
+    try:
+        summary_path.write_text(text, encoding="utf-8")
+    except OSError:
+        LOGGER.exception("Failed to write media summary: %s", summary_path)
 
 
 def store_image_bytes(data: bytes, mime_type: str, *, source: str = "generated") -> Tuple[Dict[str, str], Path]:

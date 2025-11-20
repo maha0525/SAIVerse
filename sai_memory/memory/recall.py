@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from typing import List, Tuple
+import json
+import logging
+from pathlib import Path
+from threading import RLock
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 from fastembed import TextEmbedding
+from fastembed.common.model_description import ModelSource, PoolingType
 
 from sai_memory.logging_utils import debug
 from sai_memory.memory.storage import (
@@ -15,14 +20,188 @@ from sai_memory.memory.storage import (
 )
 
 
+_REGISTERED_MODELS: set[tuple[str, str]] = set()
+_EMBEDDING_MODEL_CACHE: dict[tuple[str, str | None, int | None], TextEmbedding] = {}
+_EMBEDDING_MODEL_CACHE_LOCK = RLock()
+
+
 class Embedder:
-    def __init__(self, model: str = "BAAI/bge-small-en-v1.5"):
+    def __init__(
+        self,
+        model: str = "BAAI/bge-small-en-v1.5",
+        *,
+        local_model_path: str | None = None,
+        model_dim: int | None = None,
+    ):
         self.model_name = model
-        self.model = TextEmbedding(model_name=self.model_name)
+        logger = logging.getLogger(__name__)
+        resolved_local_path: str | None = None
+        if local_model_path:
+            resolved_local_path = str(Path(local_model_path).expanduser().resolve())
+
+        cache_key = (self.model_name.lower(), resolved_local_path, model_dim)
+
+        with _EMBEDDING_MODEL_CACHE_LOCK:
+            cached = _EMBEDDING_MODEL_CACHE.get(cache_key)
+            if cached is None:
+                kwargs: Dict[str, Any] = {}
+                if resolved_local_path:
+                    kwargs = _build_local_model_kwargs(
+                        model_name=self.model_name,
+                        local_model_path=resolved_local_path,
+                        explicit_dim=model_dim,
+                    )
+                    logger.warning(
+                        "Embedder using local path '%s' for model '%s'.",
+                        resolved_local_path,
+                        self.model_name,
+                    )
+                else:
+                    logger.warning(
+                        "Embedder using remote model '%s' without local override.",
+                        self.model_name,
+                    )
+                cached = TextEmbedding(model_name=self.model_name, **kwargs)
+                _EMBEDDING_MODEL_CACHE[cache_key] = cached
+            self.model = cached
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         vectors = list(self.model.embed(texts))
         return [list(map(float, v)) for v in vectors]
+
+
+def _build_local_model_kwargs(
+    *,
+    model_name: str,
+    local_model_path: str,
+    explicit_dim: int | None,
+) -> Dict[str, Any]:
+    model_dir = Path(local_model_path).expanduser().resolve()
+    if not model_dir.exists():
+        raise FileNotFoundError(f"SAIMemory embedding model path does not exist: {model_dir}")
+
+    model_file = _resolve_model_file(model_dir)
+    model_file_path = (model_dir / model_file).resolve()
+    model_base = model_file_path.parent if model_file_path.exists() else model_dir
+    embedding_dim = explicit_dim or _infer_embedding_dimension(model_dir)
+    pooling = _infer_pooling(model_dir)
+    normalization = _infer_normalization(model_dir)
+    additional_files = _collect_additional_files(model_dir)
+
+    key = (model_name.lower(), str(model_dir))
+
+    supported_models = {
+        entry["model"].lower()
+        for entry in TextEmbedding.list_supported_models()
+        if isinstance(entry, dict) and "model" in entry
+    }
+
+    if model_name.lower() not in supported_models and key not in _REGISTERED_MODELS:
+        TextEmbedding.add_custom_model(
+            model=model_name,
+            pooling=pooling,
+            normalization=normalization,
+            sources=ModelSource(hf=f"local/{model_dir.name}"),
+            dim=embedding_dim,
+            model_file=model_file,
+            additional_files=additional_files,
+        )
+        _REGISTERED_MODELS.add(key)
+
+    return {
+        "specific_model_path": str(model_base),
+        "local_files_only": True,
+    }
+
+
+def _resolve_model_file(model_dir: Path) -> str:
+    candidates = [
+        "onnx/model.onnx",
+        "onnx/model_optimized.onnx",
+        "model.onnx",
+        "model_optimized.onnx",
+    ]
+    for candidate in candidates:
+        if (model_dir / candidate).exists():
+            return candidate
+    raise FileNotFoundError(f"Could not locate ONNX model inside {model_dir}")
+
+
+def _infer_embedding_dimension(model_dir: Path) -> int:
+    pooling_cfg = model_dir / "1_Pooling" / "config.json"
+    if pooling_cfg.exists():
+        try:
+            data = json.loads(pooling_cfg.read_text(encoding="utf-8"))
+            dim = data.get("word_embedding_dimension")
+            if isinstance(dim, int) and dim > 0:
+                return dim
+        except Exception:
+            pass
+
+    config_candidates = [
+        model_dir / "config.json",
+        model_dir / "sentence_bert_config.json",
+    ]
+    for cfg in config_candidates:
+        if cfg.exists():
+            try:
+                data = json.loads(cfg.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            for key in ("word_embedding_dimension", "hidden_size", "embedding_size", "d_model"):
+                value = data.get(key)
+                if isinstance(value, int) and value > 0:
+                    return value
+    raise ValueError(f"Could not determine embedding dimension from files in {model_dir}")
+
+
+def _infer_pooling(model_dir: Path) -> PoolingType:
+    pooling_cfg = model_dir / "1_Pooling" / "config.json"
+    if pooling_cfg.exists():
+        try:
+            data = json.loads(pooling_cfg.read_text(encoding="utf-8"))
+            if data.get("pooling_mode_mean_tokens"):
+                return PoolingType.MEAN
+            if data.get("pooling_mode_cls_token"):
+                return PoolingType.CLS
+        except Exception:
+            pass
+    return PoolingType.MEAN
+
+
+def _infer_normalization(model_dir: Path) -> bool:
+    modules_path = model_dir / "modules.json"
+    if modules_path.exists():
+        try:
+            data = json.loads(modules_path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                for module in data:
+                    if isinstance(module, dict):
+                        module_type = str(module.get("type", "")).lower()
+                        if "normalize" in module_type:
+                            return True
+        except Exception:
+            pass
+    # Default to True for sentence-transformer style checkpoints.
+    return True
+
+
+def _collect_additional_files(model_dir: Path) -> List[str]:
+    candidates = [
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "sentencepiece.bpe.model",
+        "vocab.txt",
+        "modules.json",
+        "config.json",
+        "1_Pooling/config.json",
+    ]
+    extras: List[str] = []
+    for rel in candidates:
+        if (model_dir / rel).exists():
+            extras.append(rel)
+    return extras
 
 
 def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
@@ -47,6 +226,7 @@ def semantic_recall(
 ) -> List[Message]:
     vectors: List[List[float]] = embedder.embed([query_text])
     q = np.array(vectors[0], dtype=np.float32)
+    vector_dim = q.shape[0]
 
     if scope == "resource" and resource_id:
         corpus = get_embeddings_for_scope(conn, thread_id=None, resource_id=resource_id)
@@ -56,6 +236,14 @@ def semantic_recall(
     scored_map: dict[str, Tuple[Message, float, int]] = {}
     for msg, vec, chunk_index in corpus:
         if exclude_message_ids and msg.id in exclude_message_ids:
+            continue
+        if len(vec) != vector_dim:
+            logging.warning(
+                "semantic_recall: skipping message %s due to embedding dim mismatch (expected %s, got %s)",
+                msg.id,
+                vector_dim,
+                len(vec),
+            )
             continue
         v = np.array(vec, dtype=np.float32)
         s = _cosine_sim(q, v)
@@ -114,6 +302,7 @@ def semantic_recall_groups(
     """
     vectors: List[List[float]] = embedder.embed([query_text])
     q = np.array(vectors[0], dtype=np.float32)
+    vector_dim = q.shape[0]
 
     if scope == "resource" and resource_id:
         corpus = get_embeddings_for_scope(conn, thread_id=None, resource_id=resource_id)
@@ -123,6 +312,14 @@ def semantic_recall_groups(
     scored_map: dict[str, Tuple[Message, float, int]] = {}
     for msg, vec, chunk_index in corpus:
         if exclude_message_ids and msg.id in exclude_message_ids:
+            continue
+        if len(vec) != vector_dim:
+            logging.warning(
+                "semantic_recall_groups: skipping message %s due to embedding dim mismatch (expected %s, got %s)",
+                msg.id,
+                vector_dim,
+                len(vec),
+            )
             continue
         v = np.array(vec, dtype=np.float32)
         s = _cosine_sim(q, v)

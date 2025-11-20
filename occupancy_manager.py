@@ -23,6 +23,7 @@ class OccupancyManager:
         building_map: Dict[str, 'Building'],
         building_histories: Dict[str, List[Dict[str, str]]],
         id_to_name_map: Dict[str, str],
+        user_id: int,
     ):
         self.SessionLocal = session_factory
         self.city_id = city_id
@@ -31,6 +32,7 @@ class OccupancyManager:
         self.building_map = building_map
         self.building_histories = building_histories
         self.id_to_name_map = id_to_name_map
+        self.user_entity_id = str(user_id)
 
     def move_entity(
         self,
@@ -43,13 +45,28 @@ class OccupancyManager:
         """
         エンティティを建物間で移動させる。移動に関するすべてのロジックをここに集約する。
         """
+        entity_id = str(entity_id)
+
         # 1. 移動前のチェック
         if to_id not in self.building_map:
+            logging.warning("move_entity aborted: destination %s unknown", to_id)
             return False, f"移動失敗: 建物 '{to_id}' が見つかりません。"
         if from_id == to_id:
             return True, "同じ場所にいます。"
-        if len(self.occupants.get(to_id, [])) >= self.capacities.get(to_id, 1):
-            if entity_id not in self.occupants.get(to_id, []):
+
+        if entity_type == 'ai':
+            capacity_limit = self.capacities.get(to_id, 1)
+            current_ai = sum(
+                1 for occ in self.occupants.get(to_id, []) if not self._is_user(occ)
+            )
+            if current_ai >= capacity_limit and entity_id not in self.occupants.get(to_id, []):
+                logging.info(
+                    "move_entity denied: %s -> %s capacity reached (current=%d, limit=%d)",
+                    from_id,
+                    to_id,
+                    current_ai,
+                    capacity_limit,
+                )
                 return False, f"{self.building_map[to_id].name}は定員オーバーです"
 
         # 2. DBとメモリの操作
@@ -71,6 +88,7 @@ class OccupancyManager:
                 user.CURRENT_BUILDINGID = to_id
                 entity_name = user.USERNAME or "ユーザー"
             else:
+                logging.warning("move_entity aborted: unknown entity type %s", entity_type)
                 return False, f"不明なエンティティタイプ: {entity_type}"
 
             if manage_session_locally: db.commit()
@@ -96,3 +114,5 @@ class OccupancyManager:
         finally:
             if manage_session_locally: db.close()
 
+    def _is_user(self, entity_id: str) -> bool:
+        return entity_id == self.user_entity_id

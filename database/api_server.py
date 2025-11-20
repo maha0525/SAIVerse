@@ -1,6 +1,8 @@
 import logging
 import os
 import argparse
+from pathlib import Path
+
 import uvicorn
 import uuid
 import time
@@ -12,6 +14,7 @@ from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
 from .models import Base, VisitingAI, ThinkingRequest, City as CityModel, Building as BuildingModel
+from .paths import default_db_path
 
 # グローバル変数をプレースホルダーとして定義
 engine = None
@@ -156,20 +159,27 @@ app.include_router(proxy_router)
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SAIVerse DB API Server")
     parser.add_argument("--port", type=int, default=8001, help="Port to run the API server on")
-    parser.add_argument("--db", type=str, default="saiverse.db", help="Path to the unified database file.")
+    parser.add_argument(
+        "--db",
+        type=str,
+        default=str(default_db_path()),
+        help="Path to the unified database file.",
+    )
     args = parser.parse_args()
 
     # グローバル変数をコマンドライン引数に基づいて設定
-    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    DB_FILE_PATH = os.path.join(SCRIPT_DIR, args.db)
-    DATABASE_URL = f"sqlite:///{DB_FILE_PATH}"
+    db_path = Path(args.db)
+    if not db_path.is_absolute():
+        db_path = Path(__file__).resolve().parent / db_path
+    db_path = db_path.resolve()
+    DATABASE_URL = f"sqlite:///{db_path}"
 
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     # DBファイルが存在しない場合、またはテーブルが存在しない場合にテーブルを作成する
-    if not os.path.exists(DB_FILE_PATH) or not inspect(engine).get_table_names():
-        logging.info(f"API Server: Database '{args.db}' not found or empty. Creating tables...")
+    if not db_path.exists() or not inspect(engine).get_table_names():
+        logging.info(f"API Server: Database '{db_path}' not found or empty. Creating tables...")
         Base.metadata.create_all(bind=engine)
         logging.info("API Server: Tables created successfully.")
 

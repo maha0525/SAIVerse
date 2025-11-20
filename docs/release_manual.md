@@ -81,7 +81,7 @@ SDSは`sds.db`というファイルにCityの情報を保存するため、サ�
 
 ### Step 2.2: `.gitignore`の最終確認
 
-`.env`ファイル、`saiverse.db`、ログファイル、`.saiverse/`ディレクトリなどがコミット対象に含まれていないことを再度確認します。
+`.env`ファイル、`database/data/saiverse.db`（および同ディレクトリ配下のバックアップ）、ログファイル、`.saiverse/`ディレクトリなどがコミット対象に含まれていないことを再度確認します。
 
 ### Step 2.3: 開発者向けドキュメントの更新
 
@@ -107,4 +107,3 @@ GitHubの「Releases」ページから、「Create a new release」をクリッ�
 ---
 
 以上で、SAIVerse β版のリリース作業は完了です。
-

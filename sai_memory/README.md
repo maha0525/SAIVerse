@@ -73,6 +73,13 @@ python sai_memory/scripts/diag.py
 
 - デバッグ
   - `SAIMEMORY_DEBUG`: `true|false`。有効時にJSONログをstderrへ出力
+- SQLite 耐久性
+  - `SAIMEMORY_SQLITE_JOURNAL_MODE`: 既定 `wal`。`delete|truncate|persist|memory|wal|off` を指定可能。
+  - `SAIMEMORY_SQLITE_SYNCHRONOUS`: 既定 `full`。`off|normal|full|extra` を選択。
+  - `SAIMEMORY_SQLITE_WAL_AUTOCHECKPOINT`: 既定 `1000`（ページ数）。WAL利用時の自動チェックポイント間隔。
+- バックアップ
+  - `SAIMEMORY_BACKUP_ON_START`: 既定 `true`。SAIVerse 起動時に各ペルソナの差分バックアップを自動実行。
+  - `SAIMEMORY_RDIFF_PATH`: `rdiff-backup` バイナリを明示したい場合に指定。
 
 ## 補足
 - ツール/関数呼び出し（function calling）は未実装。必要に応じて拡張可能。

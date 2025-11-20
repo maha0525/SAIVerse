@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict
 
 CONFIG_PATH = Path("models.json")
 
@@ -35,3 +35,19 @@ def get_model_config(model: str) -> Dict:
 def model_supports_images(model: str) -> bool:
     config = get_model_config(model)
     return bool(config.get("supports_images"))
+
+
+def get_model_parameters(model: str) -> Dict[str, Dict[str, Any]]:
+    config = get_model_config(model)
+    params = config.get("parameters")
+    if isinstance(params, dict):
+        return params
+    return {}
+
+
+def get_model_parameter_defaults(model: str) -> Dict[str, Any]:
+    defaults: Dict[str, Any] = {}
+    for name, spec in get_model_parameters(model).items():
+        if isinstance(spec, dict) and "default" in spec:
+            defaults[name] = spec.get("default")
+    return defaults
