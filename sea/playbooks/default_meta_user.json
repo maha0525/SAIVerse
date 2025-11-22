@@ -1,0 +1,13 @@
+{
+  "name": "meta_user",
+  "description": "Router -> subgraph -> speak for user queries",
+  "input_schema": [
+    { "name": "query", "description": "User input" }
+  ],
+  "nodes": [
+    { "id": "router", "type": "llm", "action": "Select a playbook name or 'basic_chat'. Input: {query}", "next": "exec" },
+    { "id": "exec", "type": "llm", "action": "Act as selected playbook and produce final answer for: {query}", "next": "speak" },
+    { "id": "speak", "type": "speak", "action": "{last}", "next": null }
+  ],
+  "start_node": "router"
+}

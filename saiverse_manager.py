@@ -18,6 +18,7 @@ import os
 
 from google.genai import errors
 from buildings import Building
+from sea import SEARuntime
 from persona_core import PersonaCore
 from model_configs import get_model_provider, get_context_length
 from occupancy_manager import OccupancyManager
@@ -303,6 +304,10 @@ class SAIVerseManager(
                     "Failed to initialize Discord gateway integration: %s", exc
                 )
 
+        # SEA runtime (disabled by default unless env set)
+        self.sea_enabled = os.getenv("SAIVERSE_SEA_ENABLED", "0").lower() in {"1", "true", "yes"}
+        self.sea_runtime: Optional[SEARuntime] = SEARuntime(self) if self.sea_enabled else None
+
         self.runtime = RuntimeService(self, self.state)
         self.admin = AdminService(self, self.runtime, self.state)
 
@@ -366,6 +371,26 @@ class SAIVerseManager(
             data = self._load_avatar_data(Path(avatar_path))
         self.host_avatar = data or self.default_avatar
         self.state.host_avatar = self.host_avatar
+
+    # SEA integration helpers -------------------------------------------------
+    def run_sea_auto(self, persona, building_id: str, occupants: List[str]) -> None:
+        if not self.sea_runtime:
+            return None
+        try:
+            self.sea_runtime.run_meta_auto(persona, building_id, occupants)
+        except Exception as exc:
+            logging.exception("SEA auto run failed: %s", exc)
+            return None
+        return None
+
+    def run_sea_user(self, persona, building_id: str, user_input: str) -> List[str]:
+        if not self.sea_runtime:
+            return []
+        try:
+            return self.sea_runtime.run_meta_user(persona, user_input, building_id)
+        except Exception as exc:
+            logging.exception("SEA user run failed: %s", exc)
+            return []
 
     @property
     def all_personas(self) -> Dict[str, Union[PersonaCore, RemotePersonaProxy]]:

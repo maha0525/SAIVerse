@@ -122,8 +122,13 @@ class ConversationManager:
             # PersonaCoreのrun_pulseを呼び出す
             # これにより、ペルソナは自ら状況を判断して発話するかどうかを決める
             logging.info(f"[ConvManager] Triggering pulse for '{speaker_persona.persona_name}' (mode={mode}, proxy={getattr(speaker_persona,'is_proxy',False)}) in '{self.building_id}'.")
-            # AIが周囲を認識できるよう、run_pulseにはユーザーを含む全員のリストを渡す
-            replies = speaker_persona.run_pulse(occupants=all_occupants, user_online=self.saiverse_manager.user_is_online)
+            # SEA 有効時は meta_auto を介して実行（発話は内部で処理される）
+            if getattr(self.saiverse_manager, "sea_enabled", False):
+                self.saiverse_manager.run_sea_auto(speaker_persona, self.building_id, all_occupants)
+                replies = []
+            else:
+                # AIが周囲を認識できるよう、run_pulseにはユーザーを含む全員のリストを渡す
+                replies = speaker_persona.run_pulse(occupants=all_occupants, user_online=self.saiverse_manager.user_is_online)
 
             # RemotePersonaProxyからの返信の場合、ここで履歴を保存する
             # (PersonaCoreはrun_pulse内部で履歴を保存するため、二重保存を防ぐ)
