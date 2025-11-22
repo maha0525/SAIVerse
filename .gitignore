@@ -28,5 +28,6 @@ __*.*
 !tools/utilities/__init__.py
 !ui/__init__.py
 !ui/handlers/__init__.py
+!sea/__init__.py
 tasks.md
 *.patch

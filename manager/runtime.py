@@ -352,8 +352,13 @@ class RuntimeService(
                 )
 
         replies: List[str] = []
+        sea_enabled = getattr(self.manager, "sea_enabled", False)
         for persona in responding_personas:
-            if persona.interaction_mode == "manual":
+            if sea_enabled:
+                replies.extend(
+                    self.manager.run_sea_user(persona, building_id, message)
+                )
+            elif persona.interaction_mode == "manual":
                 replies.extend(
                     persona.handle_user_input(message, metadata=metadata)
                 )
@@ -424,8 +429,12 @@ class RuntimeService(
                     }
                 )
 
+        sea_enabled = getattr(self.manager, "sea_enabled", False)
         for persona in responding_personas:
-            if persona.interaction_mode == "manual":
+            if sea_enabled:
+                for reply in self.manager.run_sea_user(persona, building_id, message):
+                    yield reply
+            elif persona.interaction_mode == "manual":
                 for token in persona.handle_user_input_stream(
                     message, metadata=metadata
                 ):
