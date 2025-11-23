@@ -158,7 +158,7 @@ class SEARuntime:
                 memo_text = _format(current.action, {**variables, "last": last_text}) if current.action else last_text
                 role = getattr(current, "role", "assistant") or "assistant"
                 tags = getattr(current, "tags", None)
-                self._store_memory(persona, building_id, memo_text, role=role, tags=tags)
+                self._store_memory(persona, memo_text, role=role, tags=tags)
                 last_text = memo_text
                 variables["last"] = memo_text
                 if self._should_collect_memory_output(playbook):
@@ -215,7 +215,7 @@ class SEARuntime:
             speak_node=lambda state: self._lg_speak_node(state, persona, building_id, _lg_outputs),
             think_node=lambda state: self._lg_think_node(state, persona, _lg_outputs),
             say_node=lambda state: self._lg_say_node(state, persona, building_id, _lg_outputs),
-            memorize_node_factory=lambda node_def: self._lg_memorize_node(node_def, persona, building_id, playbook, _lg_outputs),
+            memorize_node_factory=lambda node_def: self._lg_memorize_node(node_def, persona, playbook, _lg_outputs),
             exec_node_factory=(lambda node_def: self._lg_exec_node(node_def, playbook, persona, building_id, auto_mode, _lg_outputs))
             if playbook.name.startswith("meta_")
             else None,
@@ -523,7 +523,7 @@ class SEARuntime:
             self._update_router_selection(variables, last_text, parsed)
         return last_text
 
-    def _lg_memorize_node(self, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, outputs: Optional[List[str]] = None):
+    def _lg_memorize_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, outputs: Optional[List[str]] = None):
         async def node(state: dict):
             variables = {
                 "input": state.get("inputs", {}).get("input", ""),
@@ -534,7 +534,7 @@ class SEARuntime:
             memo_text = _format(getattr(node_def, "action", None) or "{last}", {**variables, "last": variables.get("last", "")})
             role = getattr(node_def, "role", "assistant") or "assistant"
             tags = getattr(node_def, "tags", None)
-            self._store_memory(persona, building_id, memo_text, role=role, tags=tags)
+            self._store_memory(persona, memo_text, role=role, tags=tags)
             state["last"] = memo_text
             if outputs is not None and self._should_collect_memory_output(playbook):
                 outputs.append(memo_text)
@@ -647,7 +647,6 @@ class SEARuntime:
     def _store_memory(
         self,
         persona: Any,
-        building_id: str,
         text: str,
         *,
         role: str = "assistant",
@@ -655,22 +654,11 @@ class SEARuntime:
     ) -> None:
         if not text:
             return
-        clean_tags = [str(tag) for tag in (tags or []) if tag]
-        conversation_log = role == "assistant" and (clean_tags and "conversation" in clean_tags)
-        if conversation_log:
-            history_mgr = getattr(persona, "history_manager", None)
-            if history_mgr:
-                msg = {"role": role, "content": text, "persona_id": getattr(persona, "persona_id", None)}
-                try:
-                    history_mgr.add_message(msg, building_id, heard_by=None)
-                except Exception:
-                    LOGGER.exception("Failed to record conversation memory")
-                return
-
         adapter = getattr(persona, "sai_memory", None)
         try:
             if adapter and adapter.is_ready():
                 message = {"role": role or "assistant", "content": text}
+                clean_tags = [str(tag) for tag in (tags or []) if tag]
                 if clean_tags:
                     message["metadata"] = {"tags": clean_tags}
                 adapter.append_persona_message(message)
@@ -711,6 +699,7 @@ class SEARuntime:
 
     def _emit_say(self, persona: Any, building_id: str, text: str) -> None:
         try:
+            persona.history_manager.add_to_building_only(building_id, {"role": "assistant", "content": text, "persona_id": persona.persona_id})
             self.manager.gateway_handle_ai_replies(building_id, persona, [text])
         except Exception:
             LOGGER.exception("Failed to emit say message")
