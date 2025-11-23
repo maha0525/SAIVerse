@@ -1,0 +1,59 @@
+{
+  "name": "sub_router_user",
+  "description": "Route user input to appropriate playbook",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "User input"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "llm",
+      "type": "llm",
+      "action": "You are the SEA router. Choose the best playbook for the user's request. Valid playbooks: ['basic_chat','memory_recall']. Respond ONLY with JSON per the schema. User query: {input}",
+      "next": "log",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "playbook": {
+            "type": "string",
+            "enum": [
+              "basic_chat",
+              "memory_recall"
+            ],
+            "description": "Playbook name to execute"
+          },
+          "args": {
+            "type": "object",
+            "properties": {
+              "input": {
+                "type": "string",
+                "description": "Input text for the selected playbook"
+              }
+            },
+            "additionalProperties": true
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "playbook"
+        ]
+      },
+      "output_key": "router"
+    },
+    {
+      "id": "log",
+      "type": "memorize",
+      "action": "{last}",
+      "role": "assistant",
+      "tags": [
+        "router"
+      ],
+      "next": null
+    }
+  ],
+  "start_node": "llm"
+}
