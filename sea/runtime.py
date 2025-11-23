@@ -59,9 +59,12 @@ class SEARuntime:
     ) -> List[str]:
         # Prepare shared context (system prompt, history, inventories)
         base_messages = self._prepare_context(persona, building_id, user_input)
+        conversation_msgs = list(base_messages)
+        if user_input:
+            conversation_msgs.append({"role": "user", "content": user_input})
 
         # Try LangGraph path first
-        compiled_ok = self._compile_with_langgraph(playbook, persona, building_id, user_input, auto_mode, base_messages)
+        compiled_ok = self._compile_with_langgraph(playbook, persona, building_id, user_input, auto_mode, conversation_msgs)
         if compiled_ok is not None:
             return compiled_ok
 
@@ -74,7 +77,7 @@ class SEARuntime:
             "input": user_input or "",
             "persona_id": persona.persona_id,
             "persona_name": persona.persona_name,
-            "messages": list(base_messages),
+            "messages": conversation_msgs,
             "context_bundle": [],
             "context_bundle_text": "",
         }
@@ -104,11 +107,15 @@ class SEARuntime:
                 continue
 
             if current.type == NodeType.LLM:
-                prompt = _format(current.action, variables)
+                action_template = getattr(current, "action", None)
                 schema_consumed = False
                 try:
                     msg_base = variables.get("messages", [])
-                    messages = list(msg_base) + [{"role": "user", "content": prompt}]
+                    if action_template:
+                        prompt = _format(action_template, variables)
+                        messages = list(msg_base) + [{"role": "user", "content": prompt}]
+                    else:
+                        messages = list(msg_base)
                     text = persona.llm_client.generate(
                         messages,
                         tools=[],
@@ -147,6 +154,26 @@ class SEARuntime:
                         last_text = f"Tool error: {exc}"
                         LOGGER.exception("SEA tool %s failed", tool_name)
 
+            elif current.type == NodeType.MEMORY:
+                memo_text = _format(current.action, {**variables, "last": last_text}) if current.action else last_text
+                role = getattr(current, "role", "assistant") or "assistant"
+                tags = getattr(current, "tags", None)
+                self._store_memory(persona, building_id, memo_text, role=role, tags=tags)
+                last_text = memo_text
+                variables["last"] = memo_text
+                if self._should_collect_memory_output(playbook):
+                    outputs.append(memo_text)
+
+            elif current.type == NodeType.SUBPLAY:
+                last_text = self._run_subplay_node(current, persona, building_id, auto_mode, variables, playbook, outputs)
+
+            elif current.type == NodeType.SAY:
+                say_text = _format(current.action, {**variables, "last": last_text}) if current.action else last_text
+                self._emit_say(persona, building_id, say_text)
+                outputs.append(say_text)
+                last_text = say_text
+                variables["last"] = say_text
+
             elif current.type == NodeType.SPEAK:
                 speak_text = _format(current.action, {**variables, "last": last_text}) if current.action else last_text
                 self._emit_speak(persona, building_id, speak_text, record_history=record_history)
@@ -178,12 +205,17 @@ class SEARuntime:
         _lg_outputs: List[str] = []
         temperature = self._default_temperature(persona)
 
+        if any(getattr(node, 'type', None) == NodeType.SUBPLAY for node in playbook.nodes):
+            return None
+
         compiled = compile_playbook(
             playbook,
             llm_node_factory=lambda node_def: self._lg_llm_node(node_def, persona, playbook),
             tool_node_factory=lambda action: self._lg_tool_node(action),
             speak_node=lambda state: self._lg_speak_node(state, persona, building_id, _lg_outputs),
             think_node=lambda state: self._lg_think_node(state, persona, _lg_outputs),
+            say_node=lambda state: self._lg_say_node(state, persona, building_id, _lg_outputs),
+            memorize_node_factory=lambda node_def: self._lg_memorize_node(node_def, persona, building_id, playbook, _lg_outputs),
             exec_node_factory=(lambda node_def: self._lg_exec_node(node_def, playbook, persona, building_id, auto_mode, _lg_outputs))
             if playbook.name.startswith("meta_")
             else None,
@@ -228,12 +260,16 @@ class SEARuntime:
                 "persona_name": getattr(persona, "persona_name", None),
                 "context_bundle_text": state.get("context_bundle_text", ""),
             }
-            prompt = _format(node_def.action, variables)
             text = ""
             schema_consumed = False
             try:
                 base_msgs = state.get("messages", [])
-                messages = list(base_msgs) + [{"role": "user", "content": prompt}]
+                action_template = getattr(node_def, "action", None)
+                if action_template:
+                    prompt = _format(action_template, variables)
+                    messages = list(base_msgs) + [{"role": "user", "content": prompt}]
+                else:
+                    messages = list(base_msgs)
                 text = persona.llm_client.generate(
                     messages,
                     tools=[],
@@ -454,9 +490,68 @@ class SEARuntime:
 
         return node
 
+
+    def _run_subplay_node(
+        self,
+        node_def: Any,
+        persona: Any,
+        building_id: str,
+        auto_mode: bool,
+        variables: Dict[str, Any],
+        parent_playbook: PlaybookSchema,
+        parent_outputs: List[str],
+    ) -> str:
+        sub_name = getattr(node_def, "playbook", None) or getattr(node_def, "action", None)
+        if not sub_name:
+            msg = "(sub-playbook missing name)"
+            variables["last"] = msg
+            return msg
+        sub_pb = self._load_playbook_for(sub_name, persona, building_id)
+        if not sub_pb:
+            msg = f"Sub-playbook {sub_name} not found"
+            variables["last"] = msg
+            return msg
+        template = getattr(node_def, "input_template", "{input}") or "{input}"
+        sub_input = _format(template, {**variables})
+        sub_outputs = self._run_playbook(sub_pb, persona, building_id, sub_input, auto_mode, record_history=True)
+        last_text = sub_outputs[-1] if sub_outputs else ""
+        variables["last"] = last_text
+        if getattr(node_def, "propagate_output", False) and sub_outputs:
+            parent_outputs.extend(sub_outputs)
+        if getattr(node_def, "id", "") == "router":
+            parsed = self._extract_structured_json(last_text)
+            self._update_router_selection(variables, last_text, parsed)
+        return last_text
+
+    def _lg_memorize_node(self, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, outputs: Optional[List[str]] = None):
+        async def node(state: dict):
+            variables = {
+                "input": state.get("inputs", {}).get("input", ""),
+                "last": state.get("last", ""),
+                "persona_id": getattr(persona, "persona_id", None),
+                "persona_name": getattr(persona, "persona_name", None),
+            }
+            memo_text = _format(getattr(node_def, "action", None) or "{last}", {**variables, "last": variables.get("last", "")})
+            role = getattr(node_def, "role", "assistant") or "assistant"
+            tags = getattr(node_def, "tags", None)
+            self._store_memory(persona, building_id, memo_text, role=role, tags=tags)
+            state["last"] = memo_text
+            if outputs is not None and self._should_collect_memory_output(playbook):
+                outputs.append(memo_text)
+            return state
+
+        return node
+
     def _lg_speak_node(self, state: dict, persona: Any, building_id: str, outputs: Optional[List[str]] = None):
         text = state.get("last") or ""
         self._emit_speak(persona, building_id, text)
+        if outputs is not None:
+            outputs.append(text)
+        return state
+
+    def _lg_say_node(self, state: dict, persona: Any, building_id: str, outputs: Optional[List[str]] = None):
+        text = state.get("last") or ""
+        self._emit_say(persona, building_id, text)
         if outputs is not None:
             outputs.append(text)
         return state
@@ -546,6 +641,42 @@ class SEARuntime:
             blocks.append(f"[{label}]\n{payload}" if payload else f"[{label}]")
         return "\n\n".join(blocks)
 
+    def _should_collect_memory_output(self, playbook: PlaybookSchema) -> bool:
+        return not playbook.name.startswith("meta_")
+
+    def _store_memory(
+        self,
+        persona: Any,
+        building_id: str,
+        text: str,
+        *,
+        role: str = "assistant",
+        tags: Optional[List[str]] = None,
+    ) -> None:
+        if not text:
+            return
+        clean_tags = [str(tag) for tag in (tags or []) if tag]
+        conversation_log = role == "assistant" and (clean_tags and "conversation" in clean_tags)
+        if conversation_log:
+            history_mgr = getattr(persona, "history_manager", None)
+            if history_mgr:
+                msg = {"role": role, "content": text, "persona_id": getattr(persona, "persona_id", None)}
+                try:
+                    history_mgr.add_message(msg, building_id, heard_by=None)
+                except Exception:
+                    LOGGER.exception("Failed to record conversation memory")
+                return
+
+        adapter = getattr(persona, "sai_memory", None)
+        try:
+            if adapter and adapter.is_ready():
+                message = {"role": role or "assistant", "content": text}
+                if clean_tags:
+                    message["metadata"] = {"tags": clean_tags}
+                adapter.append_persona_message(message)
+        except Exception:
+            LOGGER.debug("memorize node not stored", exc_info=True)
+
     def _append_tool_result_message(
         self,
         state: Dict[str, Any],
@@ -577,6 +708,12 @@ class SEARuntime:
                 self.manager.gateway_handle_ai_replies(building_id, persona, [text])
             except Exception:
                 LOGGER.exception("Failed to emit speak message")
+
+    def _emit_say(self, persona: Any, building_id: str, text: str) -> None:
+        try:
+            self.manager.gateway_handle_ai_replies(building_id, persona, [text])
+        except Exception:
+            LOGGER.exception("Failed to emit say message")
 
     def _emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True) -> None:
         if not record_history:
