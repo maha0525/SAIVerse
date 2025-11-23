@@ -1,0 +1,69 @@
+{
+  "name": "meta_user",
+  "description": "Router -> sub-playbook -> speak (exec handled by runtime)",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "User input"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "router",
+      "type": "llm",
+      "action": "You are the SEA router. Choose the best playbook for the user's request. Valid playbooks: ['basic_chat','memory_recall']. Respond ONLY with JSON matching the schema. Include a short reason and args.input (defaults to the user query). User query: {input}",
+      "next": "exec",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "playbook": {
+            "type": "string",
+            "enum": [
+              "basic_chat",
+              "memory_recall"
+            ],
+            "description": "Playbook name to execute"
+          },
+          "args": {
+            "type": "object",
+            "properties": {
+              "input": {
+                "type": "string",
+                "description": "Input text for the selected playbook"
+              }
+            },
+            "additionalProperties": true,
+            "description": "Arguments to pass into the selected playbook"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why this playbook fits"
+          }
+        },
+        "required": [
+          "playbook"
+        ]
+      },
+      "output_key": "router"
+    },
+    {
+      "id": "exec",
+      "type": "tool",
+      "action": "exec",
+      "next": "compose"
+    },
+    {
+      "id": "compose",
+      "type": "llm",
+      "action": "You are Sophie. Continue the conversation in Japanese, replying naturally to the user's latest message. Use any prior tool outputs present in the conversation history when they help, but do not mention tools or internal systems explicitly.",
+      "next": "speak"
+    },
+    {
+      "id": "speak",
+      "type": "speak",
+      "action": "{last}",
+      "next": null
+    }
+  ],
+  "start_node": "router"
+}

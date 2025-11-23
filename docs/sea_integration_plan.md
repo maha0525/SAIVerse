@@ -24,7 +24,8 @@
 - Tool: Playbook action 名→`tools.TOOL_REGISTRY` を解決するマッピング層。軽量 LLM でも引数が揃うよう、必要なら事前質問を Playbook に記述する運用とする。
 
 ## Playbook 永続化
-- DB テーブル案 `playbooks`: id, name, description, scope(enum: public/personal/building), created_by_persona_id, building_id, schema_json, nodes_json, created_at, updated_at.
+- DB テーブル `playbooks`: id, name, description, scope(enum: public/personal/building), created_by_persona_id, building_id, schema_json, nodes_json, created_at, updated_at。（models.py 追加済み）
+- 既存 DB への適用例: `python database/migrate.py --db database/data/saiverse.db`
 - ロード時フィルタ:
   - scope=public
   - scope=personal AND created_by_persona_id = persona
@@ -36,7 +37,7 @@
 2) ConversationManager とユーザー入力ハンドラにフックを挿入するための adapter 層を用意（run_pulse の呼び換え）。
 3) Playbook テーブルのスキーマ追加と migrate スクリプト案を作成。
 4) 既存 Manual モードは `speak` ノードだけの meta Playbook で置き換え。
-5) building スコープは enum/カラムだけ先に入れ、実装は後続。
+5) building スコープはカラム定義済み。利用ロジックは後続。
 
 ## 段階的ロールアウト & 検証
 - Phase 1: SEA ランタイム雛形＋DB スキーマだけ追加し、既存フローは変更しない。ユニットテストで meta Playbook 実行が単体で動くことを確認。

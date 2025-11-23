@@ -236,8 +236,8 @@ class SAIMemoryAdapter:
 
     def recall_snippet(
         self,
-        building_id: str,
-        query_text: str,
+        building_id: Optional[str] = None,
+        query_text: str = "",
         *,
         max_chars: int = 800,
         exclude_created_at: Optional[int | List[int]] = None,

@@ -1,0 +1,22 @@
+{
+  "name": "basic_chat",
+  "description": "Simple reply without speaking (meta playbook will speak)",
+  "input_schema": [
+    { "name": "input", "description": "User or system input" }
+  ],
+  "nodes": [
+    {
+      "id": "llm",
+      "type": "llm",
+      "action": "You are a helpful persona. Respond briefly to: {input}",
+      "next": "think"
+    },
+    {
+      "id": "think",
+      "type": "think",
+      "action": null,
+      "next": null
+    }
+  ],
+  "start_node": "llm"
+}

@@ -379,6 +379,8 @@ def respond_stream(message: str, media: Optional[Any] = None):
     if not manager:
         raise RuntimeError("Manager not initialised")
 
+    logging.debug("[respond_stream] raw message=%r", message)
+
     metadata: Optional[Dict[str, Any]] = None
     if media:
         image_path = _extract_image_path(media)

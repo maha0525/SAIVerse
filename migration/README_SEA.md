@@ -18,6 +18,6 @@ SEA Playbook 永続化のためのテーブル追加案 (まだ適用してい�
   - building: building_id == 現在地のときのみ利用可（将来）
 
 - TODO
-  - alembic など既存の migration 流儀に合わせてスクリプトを作成
+  - `python database/migrate.py --db database/data/saiverse.db` で既存DBに適用
   - save_playbook ツールをファイル保存→DB insert に差し替え
   - Router が DB から permitted playbooks をロードする実装

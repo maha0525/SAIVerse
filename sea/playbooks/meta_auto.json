@@ -1,0 +1,67 @@
+{
+  "name": "meta_auto",
+  "description": "Router -> selected playbook -> think (no user-facing speech)",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "Context or trigger for autonomous step"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "router",
+      "type": "llm",
+      "action": "You are the SEA autonomous router. Choose the best playbook for the current context. Valid playbooks: ['basic_chat','memory_recall']. Respond ONLY with JSON per the schema. Context: {input}",
+      "next": "exec",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "playbook": {
+            "type": "string",
+            "enum": [
+              "basic_chat",
+              "memory_recall"
+            ],
+            "description": "Playbook name to execute"
+          },
+          "args": {
+            "type": "object",
+            "properties": {
+              "input": {
+                "type": "string",
+                "description": "Input text for the selected playbook"
+              }
+            },
+            "additionalProperties": true
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "playbook"
+        ]
+      },
+      "output_key": "router"
+    },
+    {
+      "id": "exec",
+      "type": "tool",
+      "action": "exec",
+      "next": "compose"
+    },
+    {
+      "id": "compose",
+      "type": "llm",
+      "action": "Write a concise first-person Japanese note describing the autonomous step. Base it on the surrounding conversation and any tool outputs already included, but keep it as an internal reflection without mentioning tools explicitly.",
+      "next": "think"
+    },
+    {
+      "id": "think",
+      "type": "think",
+      "action": "{last}",
+      "next": null
+    }
+  ],
+  "start_node": "router"
+}

@@ -1,0 +1,55 @@
+{
+  "name": "memory_recall",
+  "description": "Recall relevant SAIMemory entries and package structured data for meta compose",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "Recall query"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "recall",
+      "type": "tool",
+      "action": "memory_recall",
+      "next": "package"
+    },
+    {
+      "id": "package",
+      "type": "llm",
+      "action": "You are a parser that receives raw SAIMemory recall results. Produce concise JSON only. Include neutral summary text referencing the user query.\nUser query: {input}\nRecall raw text: {last}",
+      "next": "think",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "recalled_text": {
+            "type": "string",
+            "description": "Trimmed recall result"
+          },
+          "summary": {
+            "type": "string",
+            "description": "One or two sentences summarizing the recalled info"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Confidence in relevance (0-1)"
+          }
+        },
+        "required": [
+          "recalled_text",
+          "summary"
+        ]
+      },
+      "output_key": "memory"
+    },
+    {
+      "id": "think",
+      "type": "think",
+      "action": "{last}",
+      "next": null
+    }
+  ],
+  "start_node": "recall"
+}

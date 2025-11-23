@@ -300,6 +300,10 @@ class RuntimeService(
         logging.debug(
             "[runtime] handle_user_input called (metadata_present=%s)", bool(metadata)
         )
+        if not message or not str(message).strip():
+            logging.error("[runtime] handle_user_input got empty message; aborting to avoid corrupt routing")
+            return ['<div class="note-box">入力が空でした。再送してください。</div>']
+
         if not self.state.user_current_building_id:
             return ['<div class="note-box">エラー: ユーザーの現在地が不明です。</div>']
 
@@ -327,9 +331,10 @@ class RuntimeService(
 
         if responding_personas:
             try:
-                responding_personas[0].history_manager.add_to_building_only(
-                    building_id,
+                # ユーザ発話を persona/SAIMemory にも同期させる
+                responding_personas[0].history_manager.add_message(
                     user_entry,
+                    building_id,
                     heard_by=list(self.occupants.get(building_id, [])),
                 )
             except Exception:
@@ -355,9 +360,8 @@ class RuntimeService(
         sea_enabled = getattr(self.manager, "sea_enabled", False)
         for persona in responding_personas:
             if sea_enabled:
-                replies.extend(
-                    self.manager.run_sea_user(persona, building_id, message)
-                )
+                # SEA runtime already emits via gateway; avoid double返却
+                self.manager.run_sea_user(persona, building_id, message)
             elif persona.interaction_mode == "manual":
                 replies.extend(
                     persona.handle_user_input(message, metadata=metadata)
@@ -382,6 +386,10 @@ class RuntimeService(
             "[runtime] handle_user_input_stream called (metadata_present=%s)",
             bool(metadata),
         )
+        if not message or not str(message).strip():
+            logging.error("[runtime] handle_user_input_stream got empty message; aborting to avoid corrupt routing")
+            yield '<div class="note-box">入力が空でした。再送してください。</div>'
+            return
         if not self.state.user_current_building_id:
             yield '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'
             return
@@ -405,9 +413,9 @@ class RuntimeService(
 
         if responding_personas:
             try:
-                responding_personas[0].history_manager.add_to_building_only(
-                    building_id,
+                responding_personas[0].history_manager.add_message(
                     user_entry,
+                    building_id,
                     heard_by=list(self.occupants.get(building_id, [])),
                 )
             except Exception:
@@ -432,8 +440,8 @@ class RuntimeService(
         sea_enabled = getattr(self.manager, "sea_enabled", False)
         for persona in responding_personas:
             if sea_enabled:
-                for reply in self.manager.run_sea_user(persona, building_id, message):
-                    yield reply
+                # SEA runtime pushes to gateway internally; streaming経路では二重出力を避けて返却しない
+                self.manager.run_sea_user(persona, building_id, message)
             elif persona.interaction_mode == "manual":
                 for token in persona.handle_user_input_stream(
                     message, metadata=metadata
@@ -455,6 +463,7 @@ class RuntimeService(
         self._save_building_histories()
         for persona in self.personas.values():
             persona._save_session_metadata()
+
 
     def run_scheduled_prompts(self) -> List[str]:
         replies: List[str] = []

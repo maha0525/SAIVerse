@@ -1,0 +1,19 @@
+{
+  "name": "basic_chat",
+  "description": "Reply briefly to user input",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "User input"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "think",
+      "type": "think",
+      "action": "{input}",
+      "next": null
+    }
+  ],
+  "start_node": "think"
+}

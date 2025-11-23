@@ -18,9 +18,10 @@ except Exception:  # langgraph missing or import error
 def compile_playbook(
     playbook,
     llm_node_factory: Callable[[Any], Callable[[dict], Any]],
-    tool_node_factory: Callable[[str], Callable[[dict], Any]],
+    tool_node_factory: Callable[[Any], Callable[[dict], Any]],
     speak_node: Callable[[dict], Any],
     think_node: Callable[[dict], Any],
+    exec_node_factory: Optional[Callable[[Any], Callable[[dict], Any]]] = None,
 ) -> Optional[Callable[[dict], Any]]:
     """Compile a PlaybookSchema into a LangGraph runnable coroutine.
 
@@ -35,8 +36,10 @@ def compile_playbook(
     graph = StateGraph(dict)
 
     for node_def in playbook.nodes:
-        if node_def.type == NodeType.LLM:
-            graph.add_node(node_def.id, llm_node_factory(node_def.action))
+        if node_def.id == "exec" and exec_node_factory is not None:
+            graph.add_node(node_def.id, exec_node_factory(node_def))
+        elif node_def.type == NodeType.LLM:
+            graph.add_node(node_def.id, llm_node_factory(node_def))
         elif node_def.type == NodeType.TOOL:
             graph.add_node(node_def.id, tool_node_factory(node_def.action))
         elif node_def.type == NodeType.SPEAK:
@@ -53,4 +56,3 @@ def compile_playbook(
 
     compiled = graph.compile()
     return compiled.ainvoke
-
