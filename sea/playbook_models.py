@@ -12,12 +12,15 @@ class NodeType(str, Enum):
     TOOL = "tool"
     SPEAK = "speak"
     THINK = "think"
+    MEMORY = "memorize"
+    SAY = "say"
+    SUBPLAY = "subplay"
 
 
 class LLMNodeDef(BaseModel):
     id: str
     type: Literal[NodeType.LLM]
-    action: str = Field(description="Prompt template. Use {variable_name} placeholders.")
+    action: Optional[str] = Field(default=None, description="Prompt template. Use {variable_name} placeholders.")
     next: Optional[str] = None
     response_schema: Optional[Dict[str, Any]] = Field(
         default=None,
@@ -52,8 +55,40 @@ class ThinkNodeDef(BaseModel):
     next: Optional[str] = None
 
 
-NodeDef = Union[LLMNodeDef, ToolNodeDef, SpeakNodeDef, ThinkNodeDef]
 
+
+
+
+class SayNodeDef(BaseModel):
+    id: str
+    type: Literal[NodeType.SAY]
+    action: Optional[str] = Field(
+        default=None, description="Template for UI output only (no SAIMemory record). Defaults to last message content."
+    )
+    next: Optional[str] = None
+class MemorizeNodeDef(BaseModel):
+    id: str
+    type: Literal[NodeType.MEMORY]
+    action: Optional[str] = Field(
+        default=None, description="Template for the text to store. Defaults to last message content."
+    )
+    role: str = Field(default="assistant", description="Role name to store in SAIMemory.")
+    tags: Optional[List[str]] = Field(default=None, description="Optional tags for SAIMemory metadata.")
+    next: Optional[str] = None
+
+
+
+
+
+class SubPlayNodeDef(BaseModel):
+    id: str
+    type: Literal[NodeType.SUBPLAY]
+    playbook: str = Field(description="Name of the sub-playbook to execute")
+    input_template: Optional[str] = Field(default="{input}", description="Template for the input passed to the sub-playbook")
+    propagate_output: bool = Field(default=False, description="If true, append sub-playbook outputs to parent outputs")
+    next: Optional[str] = None
+
+NodeDef = Union[LLMNodeDef, ToolNodeDef, SpeakNodeDef, ThinkNodeDef, MemorizeNodeDef, SayNodeDef, SubPlayNodeDef]
 
 class InputParam(BaseModel):
     name: str

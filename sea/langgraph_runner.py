@@ -21,6 +21,8 @@ def compile_playbook(
     tool_node_factory: Callable[[Any], Callable[[dict], Any]],
     speak_node: Callable[[dict], Any],
     think_node: Callable[[dict], Any],
+    say_node: Optional[Callable[[dict], Any]] = None,
+    memorize_node_factory: Optional[Callable[[Any], Callable[[dict], Any]]] = None,
     exec_node_factory: Optional[Callable[[Any], Callable[[dict], Any]]] = None,
 ) -> Optional[Callable[[dict], Any]]:
     """Compile a PlaybookSchema into a LangGraph runnable coroutine.
@@ -44,8 +46,12 @@ def compile_playbook(
             graph.add_node(node_def.id, tool_node_factory(node_def.action))
         elif node_def.type == NodeType.SPEAK:
             graph.add_node(node_def.id, speak_node)
+        elif node_def.type == NodeType.SAY and say_node is not None:
+            graph.add_node(node_def.id, say_node)
         elif node_def.type == NodeType.THINK:
             graph.add_node(node_def.id, think_node)
+        elif node_def.type == NodeType.MEMORY and memorize_node_factory is not None:
+            graph.add_node(node_def.id, memorize_node_factory(node_def))
 
     graph.add_edge(START, playbook.start_node)
     for node_def in playbook.nodes:

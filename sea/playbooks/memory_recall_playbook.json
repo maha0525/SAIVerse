@@ -18,7 +18,7 @@
       "id": "package",
       "type": "llm",
       "action": "You are a parser that receives raw SAIMemory recall results. Produce concise JSON only. Include neutral summary text referencing the user query.\nUser query: {input}\nRecall raw text: {last}",
-      "next": "think",
+      "next": "record",
       "response_schema": {
         "type": "object",
         "properties": {
@@ -45,9 +45,14 @@
       "output_key": "memory"
     },
     {
-      "id": "think",
-      "type": "think",
+      "id": "record",
+      "type": "memorize",
       "action": "{last}",
+      "role": "user",
+      "tags": [
+        "tool",
+        "memory_recall"
+      ],
       "next": null
     }
   ],
