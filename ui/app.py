@@ -442,6 +442,8 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
             window.saiverseWorldviewInitialized = false;
             window.saiverseWorldviewPending = false;
             window.saiverseAutoLoadEnabled = window.saiverseAutoLoadEnabled ?? false;
+            window.saiverseWorldEditorInitialized = window.saiverseWorldEditorInitialized ?? false;
+            window.saiverseWorldEditorPending = false;
             const triggerWorldviewLoad = () => {
                 if (!window.saiverseWorldviewPending) {
                     return;
@@ -457,6 +459,23 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                     button.click();
                 } else {
                     requestAnimationFrame(triggerWorldviewLoad);
+                }
+            };
+            const triggerWorldEditorLoad = () => {
+                if (!window.saiverseWorldEditorPending) {
+                    return;
+                }
+                if (window.saiverseWorldEditorInitialized) {
+                    window.saiverseWorldEditorPending = false;
+                    return;
+                }
+                const button = document.querySelector("#world_editor_refresh_btn button, #world_editor_refresh_btn");
+                if (button) {
+                    window.saiverseWorldEditorInitialized = true;
+                    window.saiverseWorldEditorPending = false;
+                    button.click();
+                } else {
+                    requestAnimationFrame(triggerWorldEditorLoad);
                 }
             };
             const setActive = (label) => {
@@ -485,9 +504,18 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                 } else {
                     window.saiverseWorldviewPending = false;
                     window.saiverseAutoLoadEnabled = false;
+                    if (label === "ワールドエディタ") {
+                        if (!window.saiverseWorldEditorInitialized) {
+                            window.saiverseWorldEditorPending = true;
+                            triggerWorldEditorLoad();
+                        }
+                    } else {
+                        window.saiverseWorldEditorPending = false;
+                    }
                 }
             };
             window.saiverseTriggerWorldviewLoad = triggerWorldviewLoad;
+            window.saiverseTriggerWorldEditorLoad = triggerWorldEditorLoad;
             setActive(defaultLabel);
 
             const setupAttachmentControls = () => {

@@ -202,7 +202,7 @@ def create_world_editor_ui():
     tool_choices = list(zip(all_tools_df["TOOLNAME"], all_tools_df["TOOLID"].astype(int))) if not all_tools_df.empty else []
 
     with gr.Row():
-        refresh_editor_btn = gr.Button("🔄 ワールドエディタ全体を更新", variant="secondary")
+        refresh_editor_btn = gr.Button("🔄 ワールドエディタ全体を更新", variant="secondary", elem_id="world_editor_refresh_btn")
 
     def create_city_ui(name, desc, ui_port, api_port, timezone_name):
         if not all([name, ui_port, api_port, timezone_name]):

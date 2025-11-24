@@ -125,7 +125,7 @@ def _empty_thread_table() -> pd.DataFrame:
 
 
 def _empty_message_table() -> pd.DataFrame:
-    return pd.DataFrame(columns=["Idx", "Message ID", "Role", "Timestamp", "Preview"])
+    return pd.DataFrame(columns=["Idx", "Message ID", "Role", "Tags", "Timestamp", "Preview"])
 
 
 def _initial_message_state() -> Dict[str, Any]:
@@ -203,7 +203,7 @@ def _message_noop_response(state: Dict[str, Any], note: str):
     selected_info = state.get("selected_info", "メッセージを選んでね。")
     content = state.get("selected_content", "")
     edit_interactive = bool(state.get("selected_id"))
-    return (
+    result = (
         gr.update(),  # message_table
         state,
         selected_info,
@@ -217,52 +217,42 @@ def _message_noop_response(state: Dict[str, Any], note: str):
         page_size_update,
         go_update,
     )
+    LOGGER.debug(
+        "[memory-settings] message noop",
+        extra={
+            "thread_id": state.get("thread_id"),
+            "note": note,
+            "selected_id": state.get("selected_id"),
+        },
+    )
+    return result
 
 
-def _refresh_threads(manager, persona_id: str):
+def _refresh_threads(manager, persona_id: str, page_size_value: Any):
+    page_size = _sanitize_page_size(page_size_value)
     if not persona_id:
         state = _initial_message_state()
+        LOGGER.debug("[memory-settings] refresh skipped: persona missing")
         return (
             _empty_thread_table(),
-            gr.update(choices=[], value=None, interactive=False),
-            {"threads": []},
+            [],
+            [],
+            gr.update(value=None),
             "ペルソナを選んでから更新してね。",
-            _empty_message_table(),
-            state,
-            state["selected_info"],
-            gr.update(value=""),
-            gr.update(value="", interactive=False),
-            "",
-            gr.update(interactive=False),
-            gr.update(value=1, interactive=False),
-            "メッセージを読み込むと表示するよ。",
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(value=str(DEFAULT_PAGE_SIZE), interactive=False),
-            gr.update(interactive=False),
+            *_message_noop_response(state, "ペルソナを選んでから更新してね。"),
         )
 
     adapter, release_adapter = _acquire_adapter(manager, persona_id)
     if not adapter or not adapter.is_ready():
         state = _initial_message_state()
+        LOGGER.debug("[memory-settings] refresh skipped: adapter unavailable", extra={"persona_id": persona_id})
         return (
             _empty_thread_table(),
-            gr.update(choices=[], value=None, interactive=False),
-            {"threads": []},
+            [],
+            [],
+            None,
             "SAIMemoryが利用できなかったよ。",
-            _empty_message_table(),
-            state,
-            state["selected_info"],
-            gr.update(value=""),
-            gr.update(value="", interactive=False),
-            "",
-            gr.update(interactive=False),
-            gr.update(value=1, interactive=False),
-            "メッセージを読み込むと表示するよ。",
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(value=str(DEFAULT_PAGE_SIZE), interactive=False),
-            gr.update(interactive=False),
+            *_message_noop_response(state, "SAIMemoryが利用できなかったよ。"),
         )
 
     try:
@@ -278,48 +268,72 @@ def _refresh_threads(manager, persona_id: str):
                 LOGGER.debug("Failed to close temporary adapter after listing threads", exc_info=True)
 
     rows: List[List[Any]] = []
-    dropdown_choices: List[tuple[str, str]] = []
+    active_value: Optional[str] = None
     for summary in summaries:
-        suffix = summary.get("suffix") or summary.get("thread_id") or ""
-        label = suffix + (" (active)" if summary.get("active") else "")
-        dropdown_choices.append((label, summary.get("thread_id", suffix)))
+        thread_id = summary.get("thread_id") or summary.get("suffix") or ""
+        suffix = summary.get("suffix") or thread_id
+        if summary.get("active") and not active_value:
+            active_value = thread_id
         rows.append(
             [
-                summary.get("thread_id", ""),
+                thread_id,
                 suffix,
                 "✓" if summary.get("active") else "",
                 summary.get("preview", ""),
             ]
         )
 
+    LOGGER.debug(
+        "[memory-settings] refresh summaries prepared",
+        extra={
+            "persona_id": persona_id,
+            "summary_count": len(summaries),
+            "sample_ids": [rows[0][0]] if rows else [],
+        },
+    )
+
     table = pd.DataFrame(rows, columns=["Thread ID", "Suffix", "Active", "Preview"]) if rows else _empty_thread_table()
     message = f"{len(summaries)}件のスレッドを取得したよ。" if summaries else "スレッドがまだ無いみたい。"
-    state = _initial_message_state()
-    load_button_update = gr.update(interactive=bool(dropdown_choices))
-    page_size_update = gr.update(value=str(DEFAULT_PAGE_SIZE), interactive=bool(dropdown_choices))
-    page_update = gr.update(value=1, interactive=False)
-    prev_update = gr.update(interactive=False)
-    next_update = gr.update(interactive=False)
-    go_update = gr.update(interactive=False)
+    default_value = active_value or (rows[0][0] if rows else None)
+
+    if default_value:
+        LOGGER.debug(
+            "[memory-settings] refresh default thread",
+            extra={"persona_id": persona_id, "thread_id": default_value, "summary_count": len(summaries)},
+        )
+        message_tuple = _load_thread_messages(manager, persona_id, default_value, -1, page_size)
+    else:
+        empty_state = _initial_message_state()
+        LOGGER.debug(
+            "[memory-settings] refresh has no threads",
+            extra={"persona_id": persona_id, "summary_count": len(summaries)},
+        )
+        message_tuple = _message_noop_response(empty_state, "スレッドがまだ無いみたい。")
+
+    table_preview = None
+    try:
+        table_preview = table.head(3).to_dict() if hasattr(table, "head") else None
+    except Exception:
+        table_preview = None
+
+    LOGGER.debug(
+        "[memory-settings] refresh outputs snapshot",
+        extra={
+            "persona_id": persona_id,
+            "table_rows": len(rows),
+            "summary_count": len(summaries),
+            "default_thread": default_value,
+            "message_note": message,
+            "table_preview": table_preview,
+        },
+    )
 
     return (
         table,
-        gr.update(choices=dropdown_choices, value=dropdown_choices[0][1] if dropdown_choices else None, interactive=bool(dropdown_choices)),
-        {"threads": summaries},
+        summaries,
+        default_value,
         message,
-        _empty_message_table(),
-        state,
-        state["selected_info"],
-        gr.update(value=""),
-        gr.update(value="", interactive=False),
-        "",
-        load_button_update,
-        page_update,
-        "メッセージを読み込むと表示するよ。",
-        prev_update,
-        next_update,
-        page_size_update,
-        go_update,
+        *message_tuple,
     )
 
 
@@ -327,16 +341,27 @@ def _load_thread_messages(manager, persona_id: str, thread_id: Optional[str], pa
     if not persona_id or not thread_id:
         state = _initial_message_state()
         state["thread_id"] = thread_id
+        LOGGER.debug(
+            "[memory-settings] load thread skipped",
+            extra={"persona_id": persona_id, "thread_id": thread_id, "reason": "missing persona or thread"},
+        )
         return _message_noop_response(state, "スレッドを先に選んでね。")
 
     adapter, release_adapter = _acquire_adapter(manager, persona_id)
     if not adapter or not adapter.is_ready():
         state = _initial_message_state()
         state["thread_id"] = thread_id
+        LOGGER.debug(
+            "[memory-settings] load thread skipped",
+            extra={"persona_id": persona_id, "thread_id": thread_id, "reason": "adapter unavailable"},
+        )
         return _message_noop_response(state, "SAIMemoryが利用できなかったよ。")
 
     page_size = _sanitize_page_size(page_size_value)
-    page = max(1, int(page or 1))
+    page = int(page if page is not None else 1)
+    load_latest = page <= 0
+    if page < 1:
+        page = 1
     state = _initial_message_state()
     state["thread_id"] = thread_id
     state["page_size"] = page_size
@@ -344,14 +369,21 @@ def _load_thread_messages(manager, persona_id: str, thread_id: Optional[str], pa
     total_count = 0
     total_count = 0
     try:
+        LOGGER.debug(
+            "[memory-settings] loading thread",
+            extra={"persona_id": persona_id, "thread_id": thread_id, "page": page, "page_size": page_size},
+        )
         with adapter._db_lock:  # type: ignore[attr-defined]
             total_count = _count_thread_messages(adapter.conn, thread_id)
             total_pages = max(1, math.ceil(total_count / page_size)) if total_count > 0 else 0
-            if total_pages and page > total_pages:
+            if total_pages and load_latest:
+                page = total_pages
+            elif total_pages and page > total_pages:
                 page = total_pages
             if page < 1:
                 page = 1
-            rows = get_messages_paginated(adapter.conn, thread_id, page=page - 1 if total_count > 0 else 0, page_size=page_size)
+            effective_page = page - 1 if total_count > 0 else 0
+            rows = get_messages_paginated(adapter.conn, thread_id, page=effective_page, page_size=page_size)
 
             messages_map: Dict[str, Dict[str, Any]] = {}
             table_rows: List[List[Any]] = []
@@ -362,8 +394,21 @@ def _load_thread_messages(manager, persona_id: str, thread_id: Optional[str], pa
                 iso = format_datetime(ts)
                 normalized = " ".join(content.split())
                 preview = normalized[:80] + ("…" if len(normalized) > 80 else "")
+                tags_value = "-"
+                raw_tags = None
+                if isinstance(msg.metadata, dict):
+                    raw_tags = msg.metadata.get("tags")
+                elif isinstance(msg.metadata, list):
+                    raw_tags = msg.metadata
+                tag_list: List[str] = []
+                if isinstance(raw_tags, list):
+                    tag_list = [str(tag) for tag in raw_tags if tag]
+                elif isinstance(raw_tags, str):
+                    tag_list = [raw_tags]
+                if tag_list:
+                    tags_value = ", ".join(tag_list)
                 order.append(msg.id)
-                table_rows.append([idx + 1 + (page - 1) * page_size, msg.id, msg.role, iso or "-", preview])
+                table_rows.append([idx + 1 + (page - 1) * page_size, msg.id, msg.role, tags_value, iso or "-", preview])
                 messages_map[msg.id] = {"content": content, "role": msg.role, "timestamp": iso or "-", "thread_id": msg.thread_id}
     except Exception as exc:
         LOGGER.warning("Failed to load messages for thread %s: %s", thread_id, exc, exc_info=True)
@@ -401,8 +446,20 @@ def _load_thread_messages(manager, persona_id: str, thread_id: Optional[str], pa
     state["selected_info"] = selected_info
     state["selected_content"] = selected_content
 
-    table = pd.DataFrame(table_rows, columns=["Idx", "Message ID", "Role", "Timestamp", "Preview"]) if table_rows else _empty_message_table()
+    table = pd.DataFrame(table_rows, columns=["Idx", "Message ID", "Role", "Tags", "Timestamp", "Preview"]) if table_rows else _empty_message_table()
     note = f"{len(order)}件のメッセージを読み込んだよ。" if order else "このスレッドにはメッセージが無いみたい。"
+
+    LOGGER.debug(
+        "[memory-settings] thread messages loaded",
+        extra={
+            "persona_id": persona_id,
+            "thread_id": thread_id,
+            "page": page,
+            "page_size": page_size,
+            "total": total_count,
+            "rows_loaded": len(order),
+        },
+    )
 
     page_update, summary, prev_update, next_update, page_size_update, go_update = _update_page_metadata(state)
     current_update = gr.update(value=selected_content)
@@ -425,12 +482,21 @@ def _load_thread_messages(manager, persona_id: str, thread_id: Optional[str], pa
 
 
 def _on_message_select(select_data: SelectData, _message_table, message_state: Dict[str, Any]):
+    payload = select_data if isinstance(select_data, SelectData) else None
+    LOGGER.debug(
+        "[memory-settings] message select event",
+        extra={
+            "select_payload": _format_select_payload(payload),
+            "state_has_order": bool((message_state or {}).get("order")),
+            "order_len": len((message_state or {}).get("order") or []),
+        },
+    )
     state = dict(message_state or _initial_message_state())
     order = state.get("order") or []
-    if not order or select_data is None or select_data.index is None:
+    if not order or not payload or payload.index is None:
         return state, state.get("selected_info", "メッセージを選んでね。"), gr.update(value=state.get("selected_content", "")), gr.update(value=state.get("selected_content", ""), interactive=bool(state.get("selected_id")))
 
-    idx = select_data.index
+    idx = payload.index
     if isinstance(idx, (list, tuple)):
         row_key = idx[0]
     else:
@@ -454,6 +520,14 @@ def _on_message_select(select_data: SelectData, _message_table, message_state: D
     state["selected_id"] = message_id
     state["selected_info"] = f"選択中: {info['role']} @ {info['timestamp']} (ID: {message_id})"
     state["selected_content"] = info["content"]
+    LOGGER.debug(
+        "[memory-settings] message selected",
+        extra={
+            "message_id": message_id,
+            "order_size": len(order),
+            "row_position": row_pos,
+        },
+    )
     return state, state["selected_info"], gr.update(value=info["content"]), gr.update(value=info["content"], interactive=True)
 
 
@@ -695,16 +769,110 @@ def _import_chatgpt_conversations(
     return f"{header_note}:\n{joined}"
 
 
-def _on_thread_select(select_data: SelectData, thread_table, thread_state: Dict[str, Any]):
-    summaries = (thread_state or {}).get("threads") or []
-    if not summaries or select_data is None or select_data.index is None:
-        return gr.update()
-    idx = select_data.index
+def _coerce_summaries(raw: Any) -> List[Dict[str, Any]]:
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    return []
+
+
+def _format_select_payload(payload: Any) -> Dict[str, Any]:
+    if payload is None:
+        return {"type": None}
+    data = {"type": type(payload).__name__}
+    index = getattr(payload, "index", None)
+    value = getattr(payload, "value", None)
+    data["index"] = index
+    data["value"] = value
+    return data
+
+
+def _format_table_preview(table_value: Any, limit: int = 3) -> Dict[str, Any]:
+    preview: Dict[str, Any] = {"type": type(table_value).__name__}
+    if isinstance(table_value, list):
+        preview["rows"] = table_value[:limit]
+    elif hasattr(table_value, "value"):
+        try:
+            preview["rows"] = table_value.value[:limit]
+        except Exception:
+            preview["rows"] = None
+    else:
+        preview["rows"] = None
+    return preview
+
+
+def _load_selected_thread(manager, select_data: SelectData, summaries: List[Dict[str, Any]], persona_id: str, page_size_value: Any):
+    payload = select_data if isinstance(select_data, SelectData) else None
+    summaries_list = _coerce_summaries(summaries)
+    preview_ids = [item.get("thread_id") for item in summaries_list[:3]]
+    payload_info = _format_select_payload(payload)
+    LOGGER.debug(
+        "[memory-settings] thread select event",
+        extra={
+            "persona_id": persona_id,
+            "page_size": page_size_value,
+            "summary_count": len(summaries_list),
+            "select_payload": payload_info,
+            "known_ids": preview_ids,
+        },
+    )
+    if not payload or payload.index is None:
+        LOGGER.debug(
+            "[memory-settings] thread select ignored",
+            extra={
+                "persona_id": persona_id,
+                "reason": "missing payload/index",
+                "summary_count": len(summaries_list),
+                "select_payload": payload_info,
+            },
+        )
+        state = _initial_message_state()
+        return (None, *_message_noop_response(state, "スレッドを選んでね。"))
+
+    idx = payload.index
     row_index = idx[0] if isinstance(idx, tuple) else idx
-    if not isinstance(row_index, int) or row_index >= len(summaries):
-        return gr.update()
-    thread_id = summaries[row_index].get("thread_id") or summaries[row_index].get("suffix")
-    return gr.update(value=thread_id, interactive=True)
+    if not isinstance(row_index, int) or row_index >= len(summaries_list):
+        LOGGER.debug(
+            "[memory-settings] thread select invalid index",
+            extra={
+                "persona_id": persona_id,
+                "row_index": row_index,
+                "summary_count": len(summaries_list),
+                "select_payload": payload_info,
+            },
+        )
+        state = _initial_message_state()
+        return (None, *_message_noop_response(state, "スレッドを選んでね。"))
+
+    item = summaries_list[row_index]
+    thread_id = item.get("thread_id") or item.get("suffix")
+    if not thread_id:
+        LOGGER.debug(
+            "[memory-settings] thread select missing id",
+            extra={"persona_id": persona_id, "row_index": row_index},
+        )
+        state = _initial_message_state()
+        return (None, *_message_noop_response(state, "スレッドIDを取得できなかったよ。"))
+
+    page_size = _sanitize_page_size(page_size_value)
+    if not persona_id:
+        state = _initial_message_state()
+        state["thread_id"] = thread_id
+        return (thread_id, *_message_noop_response(state, "ペルソナを選んでから更新してね。"))
+
+    LOGGER.debug(
+        "[memory-settings] thread selected",
+        extra={
+            "persona_id": persona_id,
+            "thread_id": thread_id,
+            "row_index": row_index,
+            "summary_count": len(summaries_list),
+        },
+    )
+
+    return (
+        thread_id,
+        *_load_thread_messages(manager, persona_id, thread_id, -1, page_size),
+    )
 
 
 def create_memory_settings_ui(manager) -> None:
@@ -731,84 +899,85 @@ def create_memory_settings_ui(manager) -> None:
         return persona_id, f"対象ペルソナ: {selected_label} ({persona_id})"
 
     persona_status = gr.Markdown(f"対象ペルソナ: {choices[0][0]} ({choices[0][1]})" if choices else "対象ペルソナがまだ無いよ。")
-    persona_dropdown.change(
+    persona_change_event = persona_dropdown.change(
         fn=_update_persona,
         inputs=[persona_dropdown, persona_id_state],
         outputs=[persona_id_state, persona_status],
         show_progress="hidden",
     )
 
-    gr.Markdown("#### ChatGPTエクスポートからのインポート")
-    with gr.Row():
-        chatgpt_file = gr.File(label="conversations.json または ZIP", type="filepath", interactive=bool(choices))
-        preview_slider = gr.Slider(40, 240, value=120, step=10, label="プレビュー文字数", interactive=bool(choices))
-    chatgpt_table = gr.DataFrame(
-        value=_empty_import_table(),
-        interactive=bool(choices),
-        datatype=IMPORT_DATATYPES,
-        type="pandas",
-    )
-    chatgpt_info = gr.Markdown("ファイルを選ぶとここに一覧が出るよ。")
-    export_state = gr.State({"path": None, "count": 0})
+    with gr.Accordion("ChatGPTエクスポートからのインポート", open=False):
+        with gr.Row():
+            chatgpt_file = gr.File(label="conversations.json または ZIP", type="filepath", interactive=bool(choices))
+            preview_slider = gr.Slider(40, 240, value=120, step=10, label="プレビュー文字数", interactive=bool(choices))
+        chatgpt_table = gr.DataFrame(
+            value=_empty_import_table(),
+            interactive=bool(choices),
+            datatype=IMPORT_DATATYPES,
+            type="pandas",
+        )
+        chatgpt_info = gr.Markdown("ファイルを選ぶとここに一覧が出るよ。")
+        export_state = gr.State({"path": None, "count": 0})
 
-    chatgpt_file.change(
-        fn=lambda path, preview: _load_chatgpt_summary(path, int(preview)),
-        inputs=[chatgpt_file, preview_slider],
-        outputs=[chatgpt_table, chatgpt_info, export_state],
-        show_progress=True,
-    )
-    preview_slider.change(
-        fn=lambda preview, state: _load_chatgpt_summary(state.get("path"), int(preview)),
-        inputs=[preview_slider, export_state],
-        outputs=[chatgpt_table, chatgpt_info, export_state],
-        show_progress="hidden",
-    )
+        chatgpt_file.change(
+            fn=lambda path, preview: _load_chatgpt_summary(path, int(preview)),
+            inputs=[chatgpt_file, preview_slider],
+            outputs=[chatgpt_table, chatgpt_info, export_state],
+            show_progress=True,
+        )
+        preview_slider.change(
+            fn=lambda preview, state: _load_chatgpt_summary(state.get("path"), int(preview)),
+            inputs=[preview_slider, export_state],
+            outputs=[chatgpt_table, chatgpt_info, export_state],
+            show_progress="hidden",
+        )
 
-    with gr.Row():
-        roles_box = gr.Textbox(value="user,assistant", label="取得する役割", placeholder="カンマ区切り (空ならすべて)", interactive=bool(choices))
-        thread_suffix_box = gr.Textbox(label="スレッド接尾辞 (任意)", placeholder="空なら会話IDを使うよ", interactive=bool(choices))
-    with gr.Row():
-        header_checkbox = gr.Checkbox(value=True, label="システムヘッダーを追加する", interactive=bool(choices))
-        dry_run_checkbox = gr.Checkbox(value=False, label="dry-run (書き込まない)", interactive=bool(choices))
-    import_feedback = gr.Textbox(label="結果", lines=6, interactive=False)
+        with gr.Row():
+            roles_box = gr.Textbox(value="user,assistant", label="取得する役割", placeholder="カンマ区切り (空ならすべて)", interactive=bool(choices))
+            thread_suffix_box = gr.Textbox(label="スレッド接尾辞 (任意)", placeholder="空なら会話IDを使うよ", interactive=bool(choices))
+        with gr.Row():
+            header_checkbox = gr.Checkbox(value=True, label="システムヘッダーを追加する", interactive=bool(choices))
+            dry_run_checkbox = gr.Checkbox(value=False, label="dry-run (書き込まない)", interactive=bool(choices))
+        import_feedback = gr.Textbox(label="結果", lines=6, interactive=False)
 
-    import_button = gr.Button("チェックした会話をインポート", variant="primary", interactive=bool(choices))
-    import_all_button = gr.Button("全件インポート", variant="secondary", interactive=bool(choices))
+        import_button = gr.Button("チェックした会話をインポート", variant="primary", interactive=bool(choices))
+        import_all_button = gr.Button("全件インポート", variant="secondary", interactive=bool(choices))
 
-    import_button.click(
-        fn=lambda persona_id, state, table, roles, suffix, header, dry_run: _import_chatgpt_conversations(
-            manager,
-            persona_id,
-            state,
-            table,
-            roles,
-            suffix,
-            bool(header),
-            bool(dry_run),
-            False,
-        ),
-        inputs=[persona_id_state, export_state, chatgpt_table, roles_box, thread_suffix_box, header_checkbox, dry_run_checkbox],
-        outputs=import_feedback,
-        show_progress=True,
-    )
-    import_all_button.click(
-        fn=lambda persona_id, state, roles, suffix, header, dry_run: _import_chatgpt_conversations(
-            manager,
-            persona_id,
-            state,
-            None,
-            roles,
-            suffix,
-            bool(header),
-            bool(dry_run),
-            True,
-        ),
-        inputs=[persona_id_state, export_state, roles_box, thread_suffix_box, header_checkbox, dry_run_checkbox],
-        outputs=import_feedback,
-        show_progress=True,
-    )
+        import_button.click(
+            fn=lambda persona_id, state, table, roles, suffix, header, dry_run: _import_chatgpt_conversations(
+                manager,
+                persona_id,
+                state,
+                table,
+                roles,
+                suffix,
+                bool(header),
+                bool(dry_run),
+                False,
+            ),
+            inputs=[persona_id_state, export_state, chatgpt_table, roles_box, thread_suffix_box, header_checkbox, dry_run_checkbox],
+            outputs=import_feedback,
+            show_progress=True,
+        )
+        import_all_button.click(
+            fn=lambda persona_id, state, roles, suffix, header, dry_run: _import_chatgpt_conversations(
+                manager,
+                persona_id,
+                state,
+                None,
+                roles,
+                suffix,
+                bool(header),
+                bool(dry_run),
+                True,
+            ),
+            inputs=[persona_id_state, export_state, roles_box, thread_suffix_box, header_checkbox, dry_run_checkbox],
+            outputs=import_feedback,
+            show_progress=True,
+        )
 
-    thread_state = gr.State({"threads": []})
+    thread_summaries_state = gr.State([])
+    thread_selected_state = gr.State(None)
     message_state = gr.State(_initial_message_state())
 
     gr.Markdown("#### SAIMemoryスレッド管理")
@@ -816,8 +985,6 @@ def create_memory_settings_ui(manager) -> None:
         refresh_threads_btn = gr.Button("スレッド一覧を更新", variant="secondary", interactive=bool(choices))
         thread_feedback = gr.Markdown("")
         thread_table = gr.DataFrame(value=_empty_thread_table(), interactive=False)
-        thread_selector = gr.Dropdown(label="スレッド", choices=[], interactive=False)
-        load_thread_btn = gr.Button("このスレッドを読み込む", interactive=False)
 
         with gr.Row():
             page_number_input = gr.Number(value=1, precision=0, label="ページ", interactive=False)
@@ -842,41 +1009,6 @@ def create_memory_settings_ui(manager) -> None:
             delete_message_btn = gr.Button("メッセージを削除", variant="stop", interactive=bool(choices))
         message_feedback = gr.Markdown("")
 
-    refresh_threads_btn.click(
-        fn=lambda persona_id: _refresh_threads(manager, persona_id),
-        inputs=[persona_id_state],
-        outputs=[
-            thread_table,
-            thread_selector,
-            thread_state,
-            thread_feedback,
-            message_table,
-            message_state,
-            selected_message_info,
-            current_message_box,
-            edit_message_box,
-            message_feedback,
-            load_thread_btn,
-            page_number_input,
-            message_page_summary,
-            prev_page_btn,
-            next_page_btn,
-            page_size_dropdown,
-            go_page_btn,
-        ],
-        show_progress=True,
-    )
-
-    thread_table.select(
-        fn=_on_thread_select,
-        inputs=[thread_table, thread_state],
-        outputs=thread_selector,
-        show_progress="hidden",
-    )
-
-    def _load_thread_initial(persona_id: str, thread_id: Optional[str], page_size_value: Any):
-        return _load_thread_messages(manager, persona_id, thread_id, 1, page_size_value)
-
     load_outputs = [
         message_table,
         message_state,
@@ -892,17 +1024,76 @@ def create_memory_settings_ui(manager) -> None:
         go_page_btn,
     ]
 
-    load_thread_btn.click(
-        fn=_load_thread_initial,
-        inputs=[persona_id_state, thread_selector, page_size_dropdown],
-        outputs=load_outputs,
+    thread_refresh_outputs = [
+        thread_table,
+        thread_summaries_state,
+        thread_selected_state,
+        thread_feedback,
+        message_table,
+        message_state,
+        selected_message_info,
+        current_message_box,
+        edit_message_box,
+        message_feedback,
+        page_number_input,
+        message_page_summary,
+        prev_page_btn,
+        next_page_btn,
+        page_size_dropdown,
+        go_page_btn,
+    ]
+
+    refresh_threads_btn.click(
+        fn=lambda persona_id, page_size: _refresh_threads(manager, persona_id, page_size),
+        inputs=[persona_id_state, page_size_dropdown],
+        outputs=thread_refresh_outputs,
         show_progress=True,
     )
-    thread_selector.change(
-        fn=_load_thread_initial,
-        inputs=[persona_id_state, thread_selector, page_size_dropdown],
-        outputs=load_outputs,
-        show_progress="hidden",
+
+    persona_change_event.then(
+        fn=lambda persona_id, page_size: _refresh_threads(manager, persona_id, page_size),
+        inputs=[persona_id_state, page_size_dropdown],
+        outputs=thread_refresh_outputs,
+        show_progress=True,
+    )
+
+    def _handle_thread_select(*args, **kwargs):
+        if args:
+            select_data = args[0] if len(args) > 0 else None
+            table_value = args[1] if len(args) > 1 else None
+            summaries = args[2] if len(args) > 2 else None
+            persona_id = args[3] if len(args) > 3 else None
+            page_size = args[4] if len(args) > 4 else None
+        else:
+            select_data = kwargs.get("select_data")
+            table_value = kwargs.get("table_value")
+            summaries = kwargs.get("summaries")
+            persona_id = kwargs.get("persona_id")
+            page_size = kwargs.get("page_size")
+
+        table_preview = _format_table_preview(table_value)
+        summaries_type = type(summaries).__name__
+        clean_summaries = _coerce_summaries(summaries)
+
+        LOGGER.debug(
+            "[memory-settings] thread select handler invoked",
+            extra={
+                "summaries_type": summaries_type,
+                "persona_id": persona_id,
+                "page_size_input": page_size,
+                "table_preview": table_preview,
+                "select_payload": _format_select_payload(select_data),
+                "summary_count": len(clean_summaries),
+            },
+        )
+
+        return _load_selected_thread(manager, select_data, clean_summaries, persona_id, page_size)
+
+    thread_table.select(
+        fn=_handle_thread_select,
+        inputs=[thread_table, thread_summaries_state, persona_id_state, page_size_dropdown],
+        outputs=[thread_selected_state, *load_outputs],
+        show_progress=True,
     )
 
     message_table.select(
