@@ -216,6 +216,7 @@ python scripts/memory_topics_ui.py
 - Per-persona logs: `~/.saiverse/personas/<id>/log.json`, `conscious_log.json`
 - Set `SAIVERSE_LOG_LEVEL=DEBUG` in `.env` for verbose output
 - SEA trace: set `SAIVERSE_SEA_TRACE=1` and `SAIVERSE_SEA_DUMP=<filepath>` to capture playbook execution
+- **Debugging tip**: When `LOGGER.debug()` with `extra={}` doesn't show details, use `print()` to output directly to stdout. The logger formatter may not be configured to display `extra` fields.
 
 ### Common Pitfalls
 - **Do not run `database/seed.py` carelessly** - it wipes the database
@@ -223,6 +224,7 @@ python scripts/memory_topics_ui.py
 - **Gemini structured output does not support `additionalProperties`** - keep response schemas simple
 - **Playbook node transitions**: always verify `next` pointers form valid DAGs
 - **When refactoring**: complete the entire change or revert; do not leave codebase in mixed state
+- **Gradio SelectData.index type**: Always check for both `list` and `tuple` with `isinstance(idx, (list, tuple))` before accessing `idx[0]`. Gradio returns `list` type (e.g., `[row, col]`), not `tuple`. Missing this check causes silent failures in table selection handlers.
 
 ## Dependencies
 

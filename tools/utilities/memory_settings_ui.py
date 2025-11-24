@@ -481,19 +481,19 @@ def _load_thread_messages(manager, persona_id: str, thread_id: Optional[str], pa
     )
 
 
-def _on_message_select(select_data: SelectData, _message_table, message_state: Dict[str, Any]):
-    payload = select_data if isinstance(select_data, SelectData) else None
+def _on_message_select(select_data: SelectData, message_state_value: Dict[str, Any]):
     LOGGER.debug(
-        "[memory-settings] message select event",
-        extra={
-            "select_payload": _format_select_payload(payload),
-            "state_has_order": bool((message_state or {}).get("order")),
-            "order_len": len((message_state or {}).get("order") or []),
-        },
+        "[memory-settings] message select handler - type=%s has_order=%s",
+        type(select_data).__name__,
+        bool((message_state_value or {}).get("order")),
     )
-    state = dict(message_state or _initial_message_state())
+
+    payload = select_data if isinstance(select_data, SelectData) else None
+    state = dict(message_state_value or _initial_message_state())
     order = state.get("order") or []
+
     if not order or not payload or payload.index is None:
+
         return state, state.get("selected_info", "メッセージを選んでね。"), gr.update(value=state.get("selected_content", "")), gr.update(value=state.get("selected_content", ""), interactive=bool(state.get("selected_id")))
 
     idx = payload.index
@@ -806,14 +806,9 @@ def _load_selected_thread(manager, select_data: SelectData, summaries: List[Dict
     preview_ids = [item.get("thread_id") for item in summaries_list[:3]]
     payload_info = _format_select_payload(payload)
     LOGGER.debug(
-        "[memory-settings] thread select event",
-        extra={
-            "persona_id": persona_id,
-            "page_size": page_size_value,
-            "summary_count": len(summaries_list),
-            "select_payload": payload_info,
-            "known_ids": preview_ids,
-        },
+        "[memory-settings] _load_selected_thread - persona_id=%s summary_count=%s",
+        persona_id,
+        len(summaries_list),
     )
     if not payload or payload.index is None:
         LOGGER.debug(
@@ -829,7 +824,7 @@ def _load_selected_thread(manager, select_data: SelectData, summaries: List[Dict
         return (None, *_message_noop_response(state, "スレッドを選んでね。"))
 
     idx = payload.index
-    row_index = idx[0] if isinstance(idx, tuple) else idx
+    row_index = idx[0] if isinstance(idx, (tuple, list)) else idx
     if not isinstance(row_index, int) or row_index >= len(summaries_list):
         LOGGER.debug(
             "[memory-settings] thread select invalid index",
@@ -1057,48 +1052,29 @@ def create_memory_settings_ui(manager) -> None:
         show_progress=True,
     )
 
-    def _handle_thread_select(*args, **kwargs):
-        if args:
-            select_data = args[0] if len(args) > 0 else None
-            table_value = args[1] if len(args) > 1 else None
-            summaries = args[2] if len(args) > 2 else None
-            persona_id = args[3] if len(args) > 3 else None
-            page_size = args[4] if len(args) > 4 else None
-        else:
-            select_data = kwargs.get("select_data")
-            table_value = kwargs.get("table_value")
-            summaries = kwargs.get("summaries")
-            persona_id = kwargs.get("persona_id")
-            page_size = kwargs.get("page_size")
-
-        table_preview = _format_table_preview(table_value)
-        summaries_type = type(summaries).__name__
-        clean_summaries = _coerce_summaries(summaries)
-
+    def _handle_thread_select(evt: SelectData, summaries, persona_id, page_size):
         LOGGER.debug(
-            "[memory-settings] thread select handler invoked",
-            extra={
-                "summaries_type": summaries_type,
-                "persona_id": persona_id,
-                "page_size_input": page_size,
-                "table_preview": table_preview,
-                "select_payload": _format_select_payload(select_data),
-                "summary_count": len(clean_summaries),
-            },
+            "[memory-settings] thread select handler - persona_id=%s SelectData=%s summaries_len=%s",
+            persona_id,
+            isinstance(evt, SelectData),
+            len(summaries) if isinstance(summaries, list) else 'N/A',
         )
 
-        return _load_selected_thread(manager, select_data, clean_summaries, persona_id, page_size)
+        clean_summaries = _coerce_summaries(summaries)
+        result = _load_selected_thread(manager, evt, clean_summaries, persona_id, page_size)
 
-    thread_table.select(
+        return result
+
+    thread_select_event = thread_table.select(
         fn=_handle_thread_select,
-        inputs=[thread_table, thread_summaries_state, persona_id_state, page_size_dropdown],
+        inputs=[thread_summaries_state, persona_id_state, page_size_dropdown],
         outputs=[thread_selected_state, *load_outputs],
         show_progress=True,
     )
 
-    message_table.select(
+    message_select_event = message_table.select(
         fn=_on_message_select,
-        inputs=[message_table, message_state],
+        inputs=[message_state],
         outputs=[message_state, selected_message_info, current_message_box, edit_message_box],
         show_progress="hidden",
     )
