@@ -52,6 +52,8 @@ def compile_playbook(
             graph.add_node(node_def.id, think_node)
         elif node_def.type == NodeType.MEMORY and memorize_node_factory is not None:
             graph.add_node(node_def.id, memorize_node_factory(node_def))
+        elif node_def.type == NodeType.PASS:
+            graph.add_node(node_def.id, lambda state: state)
 
     graph.add_edge(START, playbook.start_node)
     for node_def in playbook.nodes:

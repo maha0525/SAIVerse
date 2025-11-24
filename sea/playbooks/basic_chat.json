@@ -1,6 +1,6 @@
 {
   "name": "basic_chat",
-  "description": "Reply briefly to user input",
+  "description": "No-op for simple conversations handled by meta layer",
   "input_schema": [
     {
       "name": "input",
@@ -9,11 +9,10 @@
   ],
   "nodes": [
     {
-      "id": "think",
-      "type": "think",
-      "action": "{input}",
+      "id": "noop",
+      "type": "pass",
       "next": null
     }
   ],
-  "start_node": "think"
+  "start_node": "noop"
 }

@@ -14,6 +14,7 @@ class NodeType(str, Enum):
     THINK = "think"
     MEMORY = "memorize"
     SAY = "say"
+    PASS = "pass"
     SUBPLAY = "subplay"
 
 
@@ -66,6 +67,12 @@ class SayNodeDef(BaseModel):
         default=None, description="Template for UI output only (no SAIMemory record). Defaults to last message content."
     )
     next: Optional[str] = None
+
+
+class PassNodeDef(BaseModel):
+    id: str
+    type: Literal[NodeType.PASS]
+    next: Optional[str] = None
 class MemorizeNodeDef(BaseModel):
     id: str
     type: Literal[NodeType.MEMORY]
@@ -88,7 +95,7 @@ class SubPlayNodeDef(BaseModel):
     propagate_output: bool = Field(default=False, description="If true, append sub-playbook outputs to parent outputs")
     next: Optional[str] = None
 
-NodeDef = Union[LLMNodeDef, ToolNodeDef, SpeakNodeDef, ThinkNodeDef, MemorizeNodeDef, SayNodeDef, SubPlayNodeDef]
+NodeDef = Union[LLMNodeDef, ToolNodeDef, SpeakNodeDef, ThinkNodeDef, MemorizeNodeDef, SayNodeDef, PassNodeDef, SubPlayNodeDef]
 
 class InputParam(BaseModel):
     name: str
