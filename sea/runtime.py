@@ -164,6 +164,12 @@ class SEARuntime:
                 if self._should_collect_memory_output(playbook):
                     outputs.append(memo_text)
 
+            elif current.type == NodeType.PASS:
+                next_val = getattr(current, "next", None)
+                next_id = next_val
+                current = node_map.get(next_id) if next_id else None
+                continue
+
             elif current.type == NodeType.SUBPLAY:
                 last_text = self._run_subplay_node(current, persona, building_id, auto_mode, variables, playbook, outputs)
 
