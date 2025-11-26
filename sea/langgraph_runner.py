@@ -43,7 +43,7 @@ def compile_playbook(
         elif node_def.type == NodeType.LLM:
             graph.add_node(node_def.id, llm_node_factory(node_def))
         elif node_def.type == NodeType.TOOL:
-            graph.add_node(node_def.id, tool_node_factory(node_def.action))
+            graph.add_node(node_def.id, tool_node_factory(node_def))
         elif node_def.type == NodeType.SPEAK:
             graph.add_node(node_def.id, speak_node)
         elif node_def.type == NodeType.SAY and say_node is not None:

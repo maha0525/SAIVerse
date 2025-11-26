@@ -256,35 +256,36 @@ def get_embeddings_for_scope(
     conn: sqlite3.Connection,
     thread_id: Optional[str] = None,
     resource_id: Optional[str] = None,
+    required_tags: Optional[List[str]] = None,
 ) -> List[Tuple[Message, List[float], int]]:
+    # Build tags filter clause
+    tags_clause = ""
+    params = []
+
+    if required_tags:
+        # Add OR condition for each required tag
+        tag_conditions = []
+        for tag in required_tags:
+            tag_conditions.append(
+                "EXISTS (SELECT 1 FROM json_each(m.metadata, '$.tags') WHERE json_each.value = ?)"
+            )
+            params.append(tag)
+        tags_clause = " AND (" + " OR ".join(tag_conditions) + ")"
+
+    base_query = """
+        SELECT m.id, m.thread_id, m.role, m.content, m.resource_id, m.created_at, m.metadata, e.vector, e.chunk_index
+        FROM messages m JOIN message_embeddings e ON m.id = e.message_id
+    """
+
     if thread_id:
-        cur = conn.execute(
-            """
-            SELECT m.id, m.thread_id, m.role, m.content, m.resource_id, m.created_at, m.metadata, e.vector, e.chunk_index
-            FROM messages m JOIN message_embeddings e ON m.id = e.message_id
-            WHERE m.thread_id=?
-            ORDER BY m.created_at ASC, e.chunk_index ASC
-            """,
-            (thread_id,),
-        )
+        query = base_query + f"WHERE m.thread_id=?{tags_clause} ORDER BY m.created_at ASC, e.chunk_index ASC"
+        cur = conn.execute(query, (thread_id, *params))
     elif resource_id:
-        cur = conn.execute(
-            """
-            SELECT m.id, m.thread_id, m.role, m.content, m.resource_id, m.created_at, m.metadata, e.vector, e.chunk_index
-            FROM messages m JOIN message_embeddings e ON m.id = e.message_id
-            WHERE m.resource_id=?
-            ORDER BY m.created_at ASC, e.chunk_index ASC
-            """,
-            (resource_id,),
-        )
+        query = base_query + f"WHERE m.resource_id=?{tags_clause} ORDER BY m.created_at ASC, e.chunk_index ASC"
+        cur = conn.execute(query, (resource_id, *params))
     else:
-        cur = conn.execute(
-            """
-            SELECT m.id, m.thread_id, m.role, m.content, m.resource_id, m.created_at, m.metadata, e.vector, e.chunk_index
-            FROM messages m JOIN message_embeddings e ON m.id = e.message_id
-            ORDER BY m.created_at ASC, e.chunk_index ASC
-            """
-        )
+        query = base_query + f"WHERE 1=1{tags_clause} ORDER BY m.created_at ASC, e.chunk_index ASC"
+        cur = conn.execute(query, tuple(params))
 
     rows = cur.fetchall()
     out: List[Tuple[Message, List[float], int]] = []

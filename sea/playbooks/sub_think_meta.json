@@ -7,6 +7,12 @@
       "description": "Composite context"
     }
   ],
+  "context_requirements": {
+    "history_depth": "full",
+    "inventory": true,
+    "building_items": true,
+    "system_prompt": true
+  },
   "nodes": [
     {
       "id": "compose",

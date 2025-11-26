@@ -189,7 +189,7 @@ python scripts/memory_topics_ui.py
 ### Code Changes
 - **Before making changes**: Review recent session reflections in `docs/session_reflection_*.md` to avoid repeating mistakes
 - **When touching external APIs**: Always check official docs first (especially Gemini structured output limitations)
-- **Playbook modifications**: Validate that `next` node pointers form valid graphs (no accidental loops)
+- **Playbook modifications**: Validate that `next` node pointers form valid graphs (no accidental loops). After editing JSON files in `sea/playbooks/`, always run `python scripts/import_playbook.py --file <path>` to import the changes into the database
 - **Database changes**: Write migration in `database/migrate.py`, test with `--db-file` on copy first
 
 ### Memory and History
@@ -243,7 +243,7 @@ Embeddings models in `sbert/` (e.g., `intfloat/multilingual-e5-base`) are used i
 ## Environment Variables
 
 Critical settings (see `.env.example`):
-- `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OLLAMA_BASE_URL`
+- `OPENAI_API_KEY`, `GEMINI_API_KEY`, `CLAUDE_API_KEY`, `OLLAMA_BASE_URL`
 - `SDS_URL` (default: http://127.0.0.1:8080)
 - `SAIVERSE_LOG_LEVEL` (DEBUG/INFO/WARNING)
 - `SAIMEMORY_EMBED_MODEL` (e.g., intfloat/multilingual-e5-base)
@@ -268,7 +268,7 @@ Critical settings (see `.env.example`):
 
 **Add new tool**: Define in `tools/defs/`, register in `tools/__init__.py`, link to buildings via `BuildingToolLink` or World Editor
 
-**Modify playbook**: Edit JSON in `sea/playbooks/` or use `save_playbook` tool (validates graph before saving)
+**Modify playbook**: Edit JSON in `sea/playbooks/`, then run `python scripts/import_playbook.py --file sea/playbooks/<playbook>.json` to import to database. Alternatively, use `save_playbook` tool (validates graph before saving)
 
 **Debug LLM calls**: Check `raw_llm_responses.txt` or set `SAIVERSE_SEA_DUMP` for playbook traces
 
