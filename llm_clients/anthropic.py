@@ -19,9 +19,9 @@ class AnthropicClient(OpenAIClient):
         config: Optional[Dict[str, Any]] | None = None,
         supports_images: bool = False,
     ) -> None:
-        api_key = os.getenv("ANTHROPIC_API_KEY")
+        api_key = os.getenv("CLAUDE_API_KEY")
         if not api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set.")
+            raise RuntimeError("CLAUDE_API_KEY environment variable is not set.")
 
         base_url = os.getenv("ANTHROPIC_OPENAI_BASE_URL", "https://api.anthropic.com/v1/")
         if not base_url.endswith("/"):

@@ -37,6 +37,14 @@ class ToolNodeDef(BaseModel):
     id: str
     type: Literal[NodeType.TOOL]
     action: str = Field(description="Tool name registered in tools registry.")
+    args_input: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Map of argument names to state keys. E.g. {'query': 'search_query.query'} passes state['search_query.query'] as 'query' arg."
+    )
+    output_key: Optional[str] = Field(
+        default=None,
+        description="Key name to store tool result in state for later nodes."
+    )
     next: Optional[str] = None
 
 
@@ -100,12 +108,31 @@ NodeDef = Union[LLMNodeDef, ToolNodeDef, SpeakNodeDef, ThinkNodeDef, MemorizeNod
 class InputParam(BaseModel):
     name: str
     description: str
+    source: Optional[str] = Field(
+        default=None,
+        description="Optional parent state key (e.g., 'parent.input', 'router.query'). If not specified, defaults to 'input'."
+    )
+
+
+class ContextRequirements(BaseModel):
+    """Defines what context should be loaded when running a playbook."""
+    history_depth: Union[int, str] = Field(
+        default="full",
+        description="History depth: number (character count), 'full' (use persona's context_length), or 0/'none' (no history)"
+    )
+    inventory: bool = Field(default=True, description="Include persona inventory in system prompt")
+    building_items: bool = Field(default=True, description="Include building items in system prompt")
+    system_prompt: bool = Field(default=True, description="Include persona and building system prompts")
 
 
 class PlaybookSchema(BaseModel):
     name: str = Field(..., pattern=r"^[a-z0-9_]+$")
     description: str
     input_schema: List[InputParam]
+    context_requirements: Optional[ContextRequirements] = Field(
+        default=None,
+        description="Context requirements for this playbook. If not specified, uses full context (backward compatible)."
+    )
     nodes: List[NodeDef]
     start_node: str
 

@@ -39,7 +39,7 @@ class TestLLMClients(unittest.TestCase):
         os.environ['OPENAI_API_KEY'] = 'test_openai_key'
         os.environ['GEMINI_API_KEY'] = 'test_gemini_key'
         os.environ['GEMINI_FREE_API_KEY'] = 'test_free_key'
-        os.environ['ANTHROPIC_API_KEY'] = 'test_anthropic_key'
+        os.environ['CLAUDE_API_KEY'] = 'test_anthropic_key'
         os.environ.pop('SAIVERSE_DISABLE_GEMINI_STREAMING', None)
 
     def test_get_llm_client(self):

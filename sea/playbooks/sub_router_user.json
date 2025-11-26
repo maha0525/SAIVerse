@@ -7,6 +7,12 @@
       "description": "User input"
     }
   ],
+  "context_requirements": {
+    "history_depth": 2000,
+    "inventory": false,
+    "building_items": false,
+    "system_prompt": true
+  },
   "nodes": [
     {
       "id": "llm",

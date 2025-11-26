@@ -223,15 +223,16 @@ def semantic_recall(
     range_after: int,
     scope: str,
     exclude_message_ids: set[str] | None = None,
+    required_tags: list[str] | None = None,
 ) -> List[Message]:
     vectors: List[List[float]] = embedder.embed([query_text])
     q = np.array(vectors[0], dtype=np.float32)
     vector_dim = q.shape[0]
 
     if scope == "resource" and resource_id:
-        corpus = get_embeddings_for_scope(conn, thread_id=None, resource_id=resource_id)
+        corpus = get_embeddings_for_scope(conn, thread_id=None, resource_id=resource_id, required_tags=required_tags)
     else:
-        corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None)
+        corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None, required_tags=required_tags)
 
     scored_map: dict[str, Tuple[Message, float, int]] = {}
     for msg, vec, chunk_index in corpus:
@@ -293,6 +294,7 @@ def semantic_recall_groups(
     range_after: int,
     scope: str,
     exclude_message_ids: set[str] | None = None,
+    required_tags: list[str] | None = None,
 ) -> List[Tuple[Message, List[Message], float]]:
     """Return top-k recall groups as (seed, group_messages_sorted, score).
 
@@ -305,9 +307,9 @@ def semantic_recall_groups(
     vector_dim = q.shape[0]
 
     if scope == "resource" and resource_id:
-        corpus = get_embeddings_for_scope(conn, thread_id=None, resource_id=resource_id)
+        corpus = get_embeddings_for_scope(conn, thread_id=None, resource_id=resource_id, required_tags=required_tags)
     else:
-        corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None)
+        corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None, required_tags=required_tags)
 
     scored_map: dict[str, Tuple[Message, float, int]] = {}
     for msg, vec, chunk_index in corpus:

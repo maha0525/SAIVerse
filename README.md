@@ -93,7 +93,7 @@ SAIVerse/
 | `OPENAI_API_KEY` | 任意 | GPT-5/4o/4.1, o3 など OpenAI モデル用 |
 | `GEMINI_API_KEY` | 推奨 | Gemini 2.5 Pro/Flash, 2.0 Flash, 1.5 Flash（有料枠） |
 | `GEMINI_FREE_API_KEY` | 任意 | 無料枠 (rate limit 高め) 用 API キー |
-| `ANTHROPIC_API_KEY` | 任意 | Claude 4.5 Sonnet / Opus 4 など |
+| `CLAUDE_API_KEY` | 任意 | Claude 4.5 Sonnet / Opus 4 など |
 | `OLLAMA_BASE_URL` | 任意 | ローカル Ollama サーバ (無指定で自動プローブ) |
 | `SDS_URL` | 任意 | Directory Service の URL (default `http://127.0.0.1:8080`) |
 | `SAIVERSE_LOG_LEVEL` | 任意 | `DEBUG / INFO / ...` (default INFO) |
@@ -110,7 +110,7 @@ Example `.env`:
 OPENAI_API_KEY=sk-xxxx
 GEMINI_API_KEY=AIzaPaidKey
 GEMINI_FREE_API_KEY=AIzaFreeKey
-ANTHROPIC_API_KEY=sk-ant-xxxx
+CLAUDE_API_KEY=sk-ant-xxxx
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 SDS_URL=http://127.0.0.1:8080
 SAIVERSE_LOG_LEVEL=DEBUG

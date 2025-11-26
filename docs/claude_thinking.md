@@ -23,7 +23,7 @@ Anthropic公式の互換レイヤーは最終回答のみを返す仕様とな�
 - `models.json` のClaudeエントリに `provider`: `anthropic_native` 等を追加し、
   新しいクライアント実装を `llm_clients/` 配下に用意する。
 - `saiverse_manager` や `persona_core` は既存のReasoning表示処理を流用可能。
-- 認証は `ANTHROPIC_API_KEY` をそのまま共有できるが、
+- 認証は `CLAUDE_API_KEY` をそのまま共有できるが、
   ヘッダーの `x-api-key` / `anthropic-version` に注意すること。
 
 参考: [Anthropic公式ドキュメント — Claude API OpenAI互換レイヤー](https://docs.claude.com/en/api/openai-sdk)

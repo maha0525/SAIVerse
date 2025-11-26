@@ -38,6 +38,14 @@ class SEARuntime:
     # ---------------- meta entrypoints -----------------
     def run_meta_user(self, persona, user_input: str, building_id: str) -> List[str]:
         """Router -> subgraph -> speak. Returns spoken strings for gateway/UI."""
+        # Record user input to history before processing
+        if user_input:
+            try:
+                user_msg = {"role": "user", "content": user_input}
+                persona.history_manager.add_message(user_msg, building_id, heard_by=None)
+            except Exception:
+                LOGGER.exception("Failed to record user input to history")
+
         playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
         result = self._run_playbook(playbook, persona, building_id, user_input, auto_mode=False, record_history=True)
         return result
@@ -56,9 +64,10 @@ class SEARuntime:
         user_input: Optional[str],
         auto_mode: bool,
         record_history: bool = True,
+        parent_state: Optional[Dict[str, Any]] = None,
     ) -> List[str]:
         # Prepare shared context (system prompt, history, inventories)
-        base_messages = self._prepare_context(persona, building_id, user_input)
+        base_messages = self._prepare_context(persona, building_id, user_input, playbook.context_requirements)
         conversation_msgs = list(base_messages)
         if user_input:
             conversation_msgs.append({"role": "user", "content": user_input})
@@ -73,14 +82,40 @@ class SEARuntime:
         current = node_map.get(playbook.start_node)
         outputs: List[str] = []
         last_text = user_input or ""
-        variables = {
-            "input": user_input or "",
+
+        # Initialize variables from input_schema
+        variables: Dict[str, Any] = {
             "persona_id": persona.persona_id,
             "persona_name": persona.persona_name,
             "messages": conversation_msgs,
             "context_bundle": [],
             "context_bundle_text": "",
         }
+
+        # Process input_schema to initialize variables from parent_state
+        parent = parent_state or {}
+        for param in playbook.input_schema:
+            param_name = param.name
+            source_key = param.source if param.source else "input"
+
+            # Resolve value from parent_state or fallback
+            if source_key.startswith("parent."):
+                # e.g., "parent.input" -> parent["input"]
+                actual_key = source_key[7:]  # strip "parent."
+                value = parent.get(actual_key, "")
+            elif source_key == "input":
+                # Default: use user_input
+                value = user_input or ""
+            else:
+                # Direct key lookup in parent_state
+                value = parent.get(source_key, "")
+
+            variables[param_name] = value
+
+        # Ensure "input" exists for backward compatibility
+        if "input" not in variables:
+            variables["input"] = user_input or ""
+
         pulse_id = uuid.uuid4().hex
 
         while current:
@@ -95,7 +130,7 @@ class SEARuntime:
                 if not sub_input:
                     sub_input = variables.get("input")
 
-                sub_outputs = self._run_playbook(sub_pb, persona, building_id, sub_input, auto_mode, record_history=True)
+                sub_outputs = self._run_playbook(sub_pb, persona, building_id, sub_input, auto_mode, record_history=True, parent_state=variables)
 
                 ingested = self._ingest_context_from_subplaybook(variables, sub_name, sub_outputs)
                 if ingested:
@@ -146,10 +181,26 @@ class SEARuntime:
                     last_text = f"Tool {tool_name} not found"
                 else:
                     try:
-                        tool_input = variables.get("last") or variables.get("input") or ""
-                        result = tool_func(tool_input) if callable(tool_func) else None
+                        # Check if args_input is specified
+                        args_input = getattr(current, "args_input", None)
+                        if args_input:
+                            # Build kwargs from state keys
+                            kwargs = {}
+                            for arg_name, state_key in args_input.items():
+                                kwargs[arg_name] = variables.get(state_key, "")
+                            result = tool_func(**kwargs) if callable(tool_func) else None
+                        else:
+                            # Legacy: single string input
+                            tool_input = variables.get("last") or variables.get("input") or ""
+                            result = tool_func(tool_input) if callable(tool_func) else None
+
                         last_text = str(result)
                         variables["last"] = last_text
+
+                        # Store result in state if output_key is specified
+                        output_key = getattr(current, "output_key", None)
+                        if output_key:
+                            variables[output_key] = result
                     except Exception as exc:
                         last_text = f"Tool error: {exc}"
                         LOGGER.exception("SEA tool %s failed", tool_name)
@@ -217,7 +268,7 @@ class SEARuntime:
         compiled = compile_playbook(
             playbook,
             llm_node_factory=lambda node_def: self._lg_llm_node(node_def, persona, playbook),
-            tool_node_factory=lambda action: self._lg_tool_node(action),
+            tool_node_factory=lambda node_def: self._lg_tool_node(node_def, persona),
             speak_node=lambda state: self._lg_speak_node(state, persona, building_id, _lg_outputs),
             think_node=lambda state: self._lg_think_node(state, persona, _lg_outputs),
             say_node=lambda state: self._lg_say_node(state, persona, building_id, _lg_outputs),
@@ -431,25 +482,47 @@ class SEARuntime:
         else:
             state["selected_args"] = {"input": state.get("input")}
 
-    def _lg_tool_node(self, tool_name: str):
+    def _lg_tool_node(self, node_def: Any, persona: Any):
         from tools import TOOL_REGISTRY
         from tools.context import persona_context
 
+        tool_name = node_def.action
+        args_input = getattr(node_def, "args_input", None)
+        output_key = getattr(node_def, "output_key", None)
+
         async def node(state: dict):
             tool_func = TOOL_REGISTRY.get(tool_name)
-            last = state.get("last") or state.get("inputs", {}).get("input") or ""
-            persona_obj = state.get("persona_obj")
+            persona_obj = state.get("persona_obj") or persona
             try:
                 persona_dir = getattr(persona_obj, "persona_log_path", None)
                 persona_dir = persona_dir.parent if persona_dir else Path.cwd()
                 persona_id = getattr(persona_obj, "persona_id", None)
                 manager_ref = getattr(persona_obj, "manager_ref", None)
-                if persona_id and persona_dir:
-                    with persona_context(persona_id, persona_dir, manager_ref):
-                        result = tool_func(last) if callable(tool_func) else None
+
+                # Build tool input based on args_input
+                if args_input:
+                    kwargs = {}
+                    for arg_name, state_key in args_input.items():
+                        kwargs[arg_name] = state.get(state_key, "")
+                    if persona_id and persona_dir:
+                        with persona_context(persona_id, persona_dir, manager_ref):
+                            result = tool_func(**kwargs) if callable(tool_func) else None
+                    else:
+                        result = tool_func(**kwargs) if callable(tool_func) else None
                 else:
-                    result = tool_func(last) if callable(tool_func) else None
+                    # Legacy: single string input
+                    last = state.get("last") or state.get("inputs", {}).get("input") or ""
+                    if persona_id and persona_dir:
+                        with persona_context(persona_id, persona_dir, manager_ref):
+                            result = tool_func(last) if callable(tool_func) else None
+                    else:
+                        result = tool_func(last) if callable(tool_func) else None
+
                 state["last"] = str(result)
+
+                # Store result in state if output_key is specified
+                if output_key:
+                    state[output_key] = result
             except Exception as exc:
                 state["last"] = f"Tool error: {exc}"
                 LOGGER.exception("SEA LangGraph tool %s failed", tool_name)
@@ -478,7 +551,7 @@ class SEARuntime:
 
             try:
                 sub_outputs = await asyncio.to_thread(
-                    self._run_playbook, sub_pb, persona, building_id, sub_input, auto_mode, True
+                    self._run_playbook, sub_pb, persona, building_id, sub_input, auto_mode, True, state
                 )
             except Exception as exc:
                 LOGGER.exception("SEA LangGraph exec sub-playbook failed")
@@ -519,7 +592,7 @@ class SEARuntime:
             return msg
         template = getattr(node_def, "input_template", "{input}") or "{input}"
         sub_input = _format(template, {**variables})
-        sub_outputs = self._run_playbook(sub_pb, persona, building_id, sub_input, auto_mode, record_history=True)
+        sub_outputs = self._run_playbook(sub_pb, persona, building_id, sub_input, auto_mode, record_history=True, parent_state=variables)
         last_text = sub_outputs[-1] if sub_outputs else ""
         variables["last"] = last_text
         if getattr(node_def, "propagate_output", False) and sub_outputs:
@@ -727,60 +800,79 @@ class SEARuntime:
         except Exception:
             LOGGER.debug("think message not stored", exc_info=True)
 
-    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str]) -> List[Dict[str, Any]]:
+    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None) -> List[Dict[str, Any]]:
+        from sea.playbook_models import ContextRequirements
+
+        # Use provided requirements or default to full context
+        reqs = requirements if requirements else ContextRequirements()
+
         messages: List[Dict[str, Any]] = []
 
         # ---- system prompt ----
-        system_parts: List[str] = []
-        persona_sys = getattr(persona, "persona_system_instruction", "") or ""
-        if persona_sys:
-            system_parts.append(persona_sys.strip())
+        if reqs.system_prompt:
+            system_parts: List[str] = []
+            persona_sys = getattr(persona, "persona_system_instruction", "") or ""
+            if persona_sys:
+                system_parts.append(persona_sys.strip())
 
-        # building system instruction if available
-        try:
-            building_obj = getattr(persona, "buildings", {}).get(building_id)
-            if building_obj and getattr(building_obj, "system_instruction", None):
-                system_parts.append(str(building_obj.system_instruction).strip())
-        except Exception:
-            pass
-
-        # persona inventory
-        try:
-            inv_builder = getattr(persona, "_inventory_summary_lines", None)
-            inv_lines: List[str] = inv_builder() if callable(inv_builder) else []
-        except Exception:
-            inv_lines = []
-        if inv_lines:
-            system_parts.append("### インベントリ\n" + "\n".join(inv_lines))
-
-        # building inventory (items located in building)
-        try:
-            items_by_building = getattr(self.manager, "items_by_building", {}) or {}
-            item_registry = getattr(self.manager, "item_registry", {}) or {}
-            b_items = items_by_building.get(building_id, [])
-            lines = []
-            for iid in b_items:
-                data = item_registry.get(iid, {})
-                name = data.get("name", iid)
-                desc = (data.get("description") or "").strip() or "(説明なし)"
-                lines.append(f"- [{iid}] {name}: {desc}")
-            if lines:
-                system_parts.append("### 建物内のアイテム\n" + "\n".join(lines))
-        except Exception:
-            pass
-
-        system_text = "\n\n".join([s for s in system_parts if s])
-        if system_text:
-            messages.append({"role": "system", "content": system_text})
-
-        # ---- history ----
-        history_mgr = getattr(persona, "history_manager", None)
-        if history_mgr:
+            # building system instruction if available
             try:
-                recent = history_mgr.get_recent_history(getattr(persona, "context_length", 2000))
-                messages.extend(recent)
+                building_obj = getattr(persona, "buildings", {}).get(building_id)
+                if building_obj and getattr(building_obj, "system_instruction", None):
+                    system_parts.append(str(building_obj.system_instruction).strip())
             except Exception:
                 pass
+
+            # persona inventory
+            if reqs.inventory:
+                try:
+                    inv_builder = getattr(persona, "_inventory_summary_lines", None)
+                    inv_lines: List[str] = inv_builder() if callable(inv_builder) else []
+                except Exception:
+                    inv_lines = []
+                if inv_lines:
+                    system_parts.append("### インベントリ\n" + "\n".join(inv_lines))
+
+            # building inventory (items located in building)
+            if reqs.building_items:
+                try:
+                    items_by_building = getattr(self.manager, "items_by_building", {}) or {}
+                    item_registry = getattr(self.manager, "item_registry", {}) or {}
+                    b_items = items_by_building.get(building_id, [])
+                    lines = []
+                    for iid in b_items:
+                        data = item_registry.get(iid, {})
+                        name = data.get("name", iid)
+                        desc = (data.get("description") or "").strip() or "(説明なし)"
+                        lines.append(f"- [{iid}] {name}: {desc}")
+                    if lines:
+                        system_parts.append("### 建物内のアイテム\n" + "\n".join(lines))
+                except Exception:
+                    pass
+
+            system_text = "\n\n".join([s for s in system_parts if s])
+            if system_text:
+                messages.append({"role": "system", "content": system_text})
+
+        # ---- history ----
+        history_depth = reqs.history_depth
+        if history_depth not in [0, "none"]:
+            history_mgr = getattr(persona, "history_manager", None)
+            if history_mgr:
+                try:
+                    # Determine character count limit
+                    if history_depth == "full":
+                        char_limit = getattr(persona, "context_length", 2000)
+                    else:
+                        try:
+                            char_limit = int(history_depth)
+                        except (ValueError, TypeError):
+                            char_limit = 2000  # fallback
+
+                    recent = history_mgr.get_recent_history(char_limit)
+                    messages.extend(recent)
+                except Exception:
+                    pass
 
         return messages
 
@@ -853,6 +945,9 @@ class SEARuntime:
             if not rec or not self._visible(rec, persona, building_id):
                 return None
             try:
+                # DEBUG: Log the actual DB content for basic_chat
+                if name == "basic_chat":
+                    LOGGER.warning("[DEBUG] Loading basic_chat from DB: nodes_json length=%d, first 500 chars: %s", len(rec.nodes_json), rec.nodes_json[:500])
                 data = json.loads(rec.nodes_json)
                 pb = PlaybookSchema(**data)
                 validate_playbook_graph(pb)
