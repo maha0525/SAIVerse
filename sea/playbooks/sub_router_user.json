@@ -5,6 +5,11 @@
     {
       "name": "input",
       "description": "User input"
+    },
+    {
+      "name": "available_playbooks",
+      "description": "JSON list of available playbooks",
+      "source": "parent.available_playbooks"
     }
   ],
   "context_requirements": {
@@ -17,35 +22,23 @@
     {
       "id": "llm",
       "type": "llm",
-      "action": "You are the SEA router. Choose the best playbook for the user's request. Valid playbooks: ['basic_chat','memory_recall']. Respond ONLY with JSON per the schema. User query: {input}",
+      "action": "You are the SEA router. Choose the best playbook for the user's request.\n\nAvailable playbooks (MUST select from this list):\n{available_playbooks}\n\nIMPORTANT: The 'playbook' field MUST be exactly one of the names from the available playbooks list above. Do NOT invent new playbook names.\n\nRespond ONLY with JSON per the schema.",
       "next": "log",
       "response_schema": {
         "type": "object",
         "properties": {
           "playbook": {
             "type": "string",
-            "enum": [
-              "basic_chat",
-              "memory_recall"
-            ],
-            "description": "Playbook name to execute"
-          },
-          "args": {
-            "type": "object",
-            "properties": {
-              "input": {
-                "type": "string",
-                "description": "Input text for the selected playbook"
-              }
-            },
-            "additionalProperties": true
+            "description": "Playbook name to execute (must be one of the available playbooks)"
           },
           "reason": {
-            "type": "string"
+            "type": "string",
+            "description": "Brief reason for choosing this playbook"
           }
         },
         "required": [
-          "playbook"
+          "playbook",
+          "reason"
         ]
       },
       "output_key": "router"

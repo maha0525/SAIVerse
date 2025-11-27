@@ -66,14 +66,20 @@ class SEARuntime:
         record_history: bool = True,
         parent_state: Optional[Dict[str, Any]] = None,
     ) -> List[str]:
+        # Generate or inherit pulse_id
+        parent = parent_state or {}
+        LOGGER.debug("[sea] _run_playbook called for %s, parent_state keys: %s", playbook.name, list(parent.keys()) if parent else "(none)")
+        if "pulse_id" in parent:
+            pulse_id = str(parent["pulse_id"])
+        else:
+            pulse_id = str(uuid.uuid4())
+
         # Prepare shared context (system prompt, history, inventories)
-        base_messages = self._prepare_context(persona, building_id, user_input, playbook.context_requirements)
+        base_messages = self._prepare_context(persona, building_id, user_input, playbook.context_requirements, pulse_id=pulse_id)
         conversation_msgs = list(base_messages)
-        if user_input:
-            conversation_msgs.append({"role": "user", "content": user_input})
 
         # Try LangGraph path first
-        compiled_ok = self._compile_with_langgraph(playbook, persona, building_id, user_input, auto_mode, conversation_msgs)
+        compiled_ok = self._compile_with_langgraph(playbook, persona, building_id, user_input, auto_mode, conversation_msgs, pulse_id, parent_state=parent)
         if compiled_ok is not None:
             return compiled_ok
 
@@ -90,19 +96,21 @@ class SEARuntime:
             "messages": conversation_msgs,
             "context_bundle": [],
             "context_bundle_text": "",
+            "pulse_id": pulse_id,
         }
 
         # Process input_schema to initialize variables from parent_state
-        parent = parent_state or {}
         for param in playbook.input_schema:
             param_name = param.name
             source_key = param.source if param.source else "input"
+            LOGGER.debug("[sea] Processing input_schema param: name=%s source=%s", param_name, source_key)
 
             # Resolve value from parent_state or fallback
             if source_key.startswith("parent."):
                 # e.g., "parent.input" -> parent["input"]
                 actual_key = source_key[7:]  # strip "parent."
                 value = parent.get(actual_key, "")
+                LOGGER.debug("[sea] Resolved %s from parent.%s: %s", param_name, actual_key, str(value)[:200] if value else "(empty)")
             elif source_key == "input":
                 # Default: use user_input
                 value = user_input or ""
@@ -116,13 +124,18 @@ class SEARuntime:
         if "input" not in variables:
             variables["input"] = user_input or ""
 
-        pulse_id = uuid.uuid4().hex
-
         while current:
             # meta exec: run sub-playbook directly (skip LLM node for exec)
             if playbook.name.startswith("meta_") and current.id == "exec":
                 sub_name = variables.get("selected_playbook") or variables.get("last") or "basic_chat"
-                sub_pb = self._load_playbook_for(str(sub_name).strip(), persona, building_id) or self._basic_chat_playbook()
+                sub_name = str(sub_name).strip()
+
+                # Validate that the selected playbook is available
+                sub_pb = self._load_playbook_for(sub_name, persona, building_id)
+                if not sub_pb:
+                    LOGGER.warning("[sea] Selected playbook '%s' not found or not accessible; falling back to basic_chat", sub_name)
+                    sub_name = "basic_chat"
+                    sub_pb = self._load_playbook_for(sub_name, persona, building_id) or self._basic_chat_playbook()
                 sub_input = None
                 args = variables.get("selected_args") or {}
                 if isinstance(args, dict):
@@ -151,11 +164,17 @@ class SEARuntime:
                         messages = list(msg_base) + [{"role": "user", "content": prompt}]
                     else:
                         messages = list(msg_base)
+
+                    # Dynamically add enum to response_schema if available_playbooks exists
+                    response_schema = getattr(current, "response_schema", None)
+                    if response_schema and "available_playbooks" in variables:
+                        response_schema = self._add_playbook_enum(response_schema, variables.get("available_playbooks"))
+
                     text = persona.llm_client.generate(
                         messages,
                         tools=[],
                         temperature=self._default_temperature(persona),
-                        response_schema=getattr(current, "response_schema", None),
+                        response_schema=response_schema,
                     )
                     self._dump_llm_io(playbook.name, current.id, persona, messages, text)
                     schema_consumed = self._process_structured_output(current, text, variables)
@@ -194,13 +213,22 @@ class SEARuntime:
                             tool_input = variables.get("last") or variables.get("input") or ""
                             result = tool_func(tool_input) if callable(tool_func) else None
 
-                        last_text = str(result)
+                        # Handle tuple results (tool_func returns tuple)
+                        if isinstance(result, tuple):
+                            # Extract first element as primary result
+                            primary_result = result[0] if result else ""
+                            last_text = str(primary_result)
+                        else:
+                            last_text = str(result)
+                            primary_result = result
+
                         variables["last"] = last_text
 
                         # Store result in state if output_key is specified
                         output_key = getattr(current, "output_key", None)
                         if output_key:
-                            variables[output_key] = result
+                            variables[output_key] = primary_result
+                            LOGGER.debug("[sea] Stored tool result in variables[%s]: %s", output_key, str(primary_result)[:200])
                     except Exception as exc:
                         last_text = f"Tool error: {exc}"
                         LOGGER.exception("SEA tool %s failed", tool_name)
@@ -209,7 +237,7 @@ class SEARuntime:
                 memo_text = _format(current.action, {**variables, "last": last_text}) if current.action else last_text
                 role = getattr(current, "role", "assistant") or "assistant"
                 tags = getattr(current, "tags", None)
-                self._store_memory(persona, memo_text, role=role, tags=tags)
+                self._store_memory(persona, memo_text, role=role, tags=tags, pulse_id=pulse_id)
                 last_text = memo_text
                 variables["last"] = memo_text
                 if self._should_collect_memory_output(playbook):
@@ -226,14 +254,14 @@ class SEARuntime:
 
             elif current.type == NodeType.SAY:
                 say_text = _format(current.action, {**variables, "last": last_text}) if current.action else last_text
-                self._emit_say(persona, building_id, say_text)
+                self._emit_say(persona, building_id, say_text, pulse_id=pulse_id)
                 outputs.append(say_text)
                 last_text = say_text
                 variables["last"] = say_text
 
             elif current.type == NodeType.SPEAK:
                 speak_text = _format(current.action, {**variables, "last": last_text}) if current.action else last_text
-                self._emit_speak(persona, building_id, speak_text, record_history=record_history)
+                self._emit_speak(persona, building_id, speak_text, pulse_id=pulse_id, record_history=record_history)
                 outputs.append(speak_text)
                 last_text = speak_text
 
@@ -258,9 +286,12 @@ class SEARuntime:
         user_input: Optional[str],
         auto_mode: bool,
         base_messages: List[Dict[str, Any]],
+        pulse_id: str,
+        parent_state: Optional[Dict[str, Any]] = None,
     ) -> Optional[List[str]]:
         _lg_outputs: List[str] = []
         temperature = self._default_temperature(persona)
+        parent = parent_state or {}
 
         if any(getattr(node, 'type', None) == NodeType.SUBPLAY for node in playbook.nodes):
             return None
@@ -280,6 +311,24 @@ class SEARuntime:
         if not compiled:
             return None
 
+        # Process input_schema to inherit variables from parent_state
+        inherited_vars = {}
+        for param in playbook.input_schema:
+            param_name = param.name
+            source_key = param.source if param.source else "input"
+
+            # Resolve value from parent_state or fallback
+            if source_key.startswith("parent."):
+                actual_key = source_key[7:]  # strip "parent."
+                value = parent.get(actual_key, "")
+                LOGGER.debug("[sea][LangGraph] Resolved %s from parent.%s: %s", param_name, actual_key, str(value)[:200] if value else "(empty)")
+            elif source_key == "input":
+                value = user_input or ""
+            else:
+                value = parent.get(source_key, "")
+
+            inherited_vars[param_name] = value
+
         initial_state = {
             "messages": list(base_messages),
             "inputs": {"input": user_input or ""},
@@ -289,6 +338,8 @@ class SEARuntime:
             "persona_obj": persona,
             "context_bundle": [],
             "context_bundle_text": "",
+            "pulse_id": pulse_id,
+            **inherited_vars,  # Add inherited variables from input_schema
         }
 
         # If already inside a running loop (e.g., async route), fall back to lightweight executor
@@ -310,12 +361,14 @@ class SEARuntime:
 
     def _lg_llm_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema):
         async def node(state: dict):
+            # Merge state into variables for template formatting
             variables = {
                 "input": state.get("inputs", {}).get("input", ""),
                 "last": state.get("last", ""),
                 "persona_id": getattr(persona, "persona_id", None),
                 "persona_name": getattr(persona, "persona_name", None),
                 "context_bundle_text": state.get("context_bundle_text", ""),
+                **{k: v for k, v in state.items() if k not in ["messages", "inputs", "outputs", "persona_obj"]},  # Include all other state variables
             }
             text = ""
             schema_consumed = False
@@ -327,11 +380,17 @@ class SEARuntime:
                     messages = list(base_msgs) + [{"role": "user", "content": prompt}]
                 else:
                     messages = list(base_msgs)
+
+                # Dynamically add enum to response_schema if available_playbooks exists
+                response_schema = getattr(node_def, "response_schema", None)
+                if response_schema and "available_playbooks" in state:
+                    response_schema = self._add_playbook_enum(response_schema, state.get("available_playbooks"))
+
                 text = persona.llm_client.generate(
                     messages,
                     tools=[],
                     temperature=self._default_temperature(persona),
-                    response_schema=getattr(node_def, "response_schema", None),
+                    response_schema=response_schema,
                 )
                 self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                 schema_consumed = self._process_structured_output(node_def, text, state)
@@ -411,6 +470,36 @@ class SEARuntime:
             LOGGER.debug("[sea] playbook loaded: %s", json.dumps(summary, ensure_ascii=False))
         except Exception:
             LOGGER.debug("[sea] playbook debug failed", exc_info=True)
+
+    def _add_playbook_enum(self, schema: Dict[str, Any], available_playbooks_json: str) -> Dict[str, Any]:
+        """Dynamically add enum constraint to playbook field in response_schema."""
+        import json
+        import copy
+
+        try:
+            # Parse available_playbooks JSON
+            playbooks_list = json.loads(available_playbooks_json) if isinstance(available_playbooks_json, str) else available_playbooks_json
+            if not isinstance(playbooks_list, list):
+                return schema
+
+            # Extract playbook names
+            playbook_names = [pb.get("name") for pb in playbooks_list if isinstance(pb, dict) and "name" in pb]
+            if not playbook_names:
+                return schema
+
+            # Deep copy schema to avoid modifying the original
+            schema_copy = copy.deepcopy(schema)
+
+            # Add enum to playbook field if it exists
+            if "properties" in schema_copy and "playbook" in schema_copy["properties"]:
+                schema_copy["properties"]["playbook"]["enum"] = playbook_names
+                LOGGER.debug("[sea] Added dynamic enum to playbook field: %s", playbook_names)
+
+            return schema_copy
+
+        except Exception as exc:
+            LOGGER.warning("[sea] Failed to add playbook enum: %s", exc)
+            return schema
 
     def _process_structured_output(self, node_def: Any, text: str, state: Dict[str, Any]) -> bool:
         schema = getattr(node_def, "response_schema", None)
@@ -613,7 +702,8 @@ class SEARuntime:
             memo_text = _format(getattr(node_def, "action", None) or "{last}", {**variables, "last": variables.get("last", "")})
             role = getattr(node_def, "role", "assistant") or "assistant"
             tags = getattr(node_def, "tags", None)
-            self._store_memory(persona, memo_text, role=role, tags=tags)
+            pulse_id = state.get("pulse_id")
+            self._store_memory(persona, memo_text, role=role, tags=tags, pulse_id=pulse_id)
             state["last"] = memo_text
             if outputs is not None and self._should_collect_memory_output(playbook):
                 outputs.append(memo_text)
@@ -623,22 +713,24 @@ class SEARuntime:
 
     def _lg_speak_node(self, state: dict, persona: Any, building_id: str, outputs: Optional[List[str]] = None):
         text = state.get("last") or ""
-        self._emit_speak(persona, building_id, text)
+        pulse_id = state.get("pulse_id")
+        self._emit_speak(persona, building_id, text, pulse_id=pulse_id)
         if outputs is not None:
             outputs.append(text)
         return state
 
     def _lg_say_node(self, state: dict, persona: Any, building_id: str, outputs: Optional[List[str]] = None):
         text = state.get("last") or ""
-        self._emit_say(persona, building_id, text)
+        pulse_id = state.get("pulse_id")
+        self._emit_say(persona, building_id, text, pulse_id=pulse_id)
         if outputs is not None:
             outputs.append(text)
         return state
 
     def _lg_think_node(self, state: dict, persona: Any, outputs: Optional[List[str]] = None):
         text = state.get("last") or ""
-        pulse = uuid.uuid4().hex
-        self._emit_think(persona, pulse, text)
+        pulse_id = state.get("pulse_id") or str(uuid.uuid4())
+        self._emit_think(persona, pulse_id, text)
         if outputs is not None:
             outputs.append(text)
         return state
@@ -730,6 +822,7 @@ class SEARuntime:
         *,
         role: str = "assistant",
         tags: Optional[List[str]] = None,
+        pulse_id: Optional[str] = None,
     ) -> None:
         if not text:
             return
@@ -738,6 +831,9 @@ class SEARuntime:
             if adapter and adapter.is_ready():
                 message = {"role": role or "assistant", "content": text}
                 clean_tags = [str(tag) for tag in (tags or []) if tag]
+                # Add pulse:uuid tag
+                if pulse_id:
+                    clean_tags.append(f"pulse:{pulse_id}")
                 if clean_tags:
                     message["metadata"] = {"tags": clean_tags}
                 adapter.append_persona_message(message)
@@ -767,8 +863,11 @@ class SEARuntime:
         state["_last_tool_call_id"] = None
 
     # ---------------- helpers -----------------
-    def _emit_speak(self, persona: Any, building_id: str, text: str, record_history: bool = True) -> None:
+    def _emit_speak(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, record_history: bool = True) -> None:
         msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
+        # Add pulse:uuid tag to metadata
+        if pulse_id:
+            msg["metadata"] = {"tags": ["conversation", f"pulse:{pulse_id}"]}
         if record_history:
             try:
                 persona.history_manager.add_message(msg, building_id, heard_by=None)
@@ -776,9 +875,14 @@ class SEARuntime:
             except Exception:
                 LOGGER.exception("Failed to emit speak message")
 
-    def _emit_say(self, persona: Any, building_id: str, text: str) -> None:
+    def _emit_say(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None) -> None:
+        msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
+        # Add pulse:uuid tag to metadata
+        # Note: say nodes don't add to persona history, so no conversation tag
+        if pulse_id:
+            msg["metadata"] = {"tags": [f"pulse:{pulse_id}"]}
         try:
-            persona.history_manager.add_to_building_only(building_id, {"role": "assistant", "content": text, "persona_id": persona.persona_id})
+            persona.history_manager.add_to_building_only(building_id, msg)
             self.manager.gateway_handle_ai_replies(building_id, persona, [text])
         except Exception:
             LOGGER.exception("Failed to emit say message")
@@ -800,7 +904,7 @@ class SEARuntime:
         except Exception:
             LOGGER.debug("think message not stored", exc_info=True)
 
-    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None) -> List[Dict[str, Any]]:
+    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None) -> List[Dict[str, Any]]:
         from sea.playbook_models import ContextRequirements
 
         # Use provided requirements or default to full context
@@ -869,7 +973,12 @@ class SEARuntime:
                         except (ValueError, TypeError):
                             char_limit = 2000  # fallback
 
-                    recent = history_mgr.get_recent_history(char_limit)
+                    # Filter by conversation tag or current pulse_id
+                    recent = history_mgr.get_recent_history(
+                        char_limit,
+                        required_tags=["conversation"],
+                        pulse_id=pulse_id,
+                    )
                     messages.extend(recent)
                 except Exception:
                     pass
@@ -888,23 +997,16 @@ class SEARuntime:
     def _basic_chat_playbook(self) -> PlaybookSchema:
         return PlaybookSchema(
             name="basic_chat",
-            description="Reply based on input",
+            description="No-op fallback for simple conversations handled by meta layer",
             input_schema=[{"name": "input", "description": "User or system input"}],
             nodes=[
                 {
-                    "id": "llm",
-                    "type": "llm",
-                    "action": "You are a helpful persona. Respond briefly to: {input}",
-                    "next": "speak",
-                },
-                {
-                    "id": "speak",
-                    "type": "speak",
-                    "action": None,
+                    "id": "noop",
+                    "type": "pass",
                     "next": None,
                 },
             ],
-            start_node="llm",
+            start_node="noop",
         )
 
     # playbook loading helpers -----------------------------------------
@@ -945,12 +1047,10 @@ class SEARuntime:
             if not rec or not self._visible(rec, persona, building_id):
                 return None
             try:
-                # DEBUG: Log the actual DB content for basic_chat
-                if name == "basic_chat":
-                    LOGGER.warning("[DEBUG] Loading basic_chat from DB: nodes_json length=%d, first 500 chars: %s", len(rec.nodes_json), rec.nodes_json[:500])
                 data = json.loads(rec.nodes_json)
                 pb = PlaybookSchema(**data)
                 validate_playbook_graph(pb)
+                LOGGER.debug("[sea] Loaded playbook '%s' with %d input_schema params: %s", pb.name, len(pb.input_schema), [p.name for p in pb.input_schema])
                 self._debug_playbook(pb, source="db")
                 return pb
             except PlaybookValidationError as exc:

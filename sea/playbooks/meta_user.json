@@ -15,6 +15,14 @@
   },
   "nodes": [
     {
+      "id": "list_playbooks",
+      "type": "tool",
+      "action": "list_available_playbooks",
+      "args_input": {},
+      "output_key": "available_playbooks",
+      "next": "router"
+    },
+    {
       "id": "router",
       "type": "subplay",
       "playbook": "sub_router_user",
@@ -37,5 +45,5 @@
       "next": null
     }
   ],
-  "start_node": "router"
+  "start_node": "list_playbooks"
 }

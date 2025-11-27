@@ -1,5 +1,5 @@
 {
-  "name": "basic_chat",
+  "name": "basic_chat_no_speak",
   "description": "Simple reply without speaking (meta playbook will speak)",
   "input_schema": [
     { "name": "input", "description": "User or system input" }
@@ -14,7 +14,7 @@
     {
       "id": "llm",
       "type": "llm",
-      "action": "You are a helpful persona. Respond briefly to: {input}",
+      "action": null,
       "next": "think"
     },
     {

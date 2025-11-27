@@ -547,14 +547,24 @@ class GeminiClient(LLMClient):
                 raw_logger.debug("Gemini raw:\n%s", resp)
 
                 if not resp.candidates:
-                    continue
+                    # No candidates: return empty string
+                    self._store_reasoning([])
+                    prefix = "\n".join(snippets)
+                    return prefix
+
                 candidate = resp.candidates[0]
                 if not candidate.content or not candidate.content.parts:
-                    continue
+                    # Empty content/parts: return empty string
+                    self._store_reasoning([])
+                    prefix = "\n".join(snippets)
+                    return prefix
 
                 text, reasoning_entries = self._separate_parts(candidate.content.parts)
                 if not text and not candidate.function_call:
-                    continue
+                    # No text and no function call: return empty string
+                    self._store_reasoning(reasoning_entries)
+                    prefix = "\n".join(snippets)
+                    return prefix
 
                 fcall = getattr(candidate, "function_call", None)
                 fcall_name = getattr(fcall, "name", None)
