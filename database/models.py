@@ -134,6 +134,7 @@ class Playbook(Base):
     building_id = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
     schema_json = Column(Text, nullable=False)
     nodes_json = Column(Text, nullable=False)
+    router_callable = Column(Boolean, nullable=False, default=False)  # Can be called from router
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 

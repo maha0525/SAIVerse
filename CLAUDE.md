@@ -222,6 +222,7 @@ python scripts/memory_topics_ui.py
 - **Do not run `database/seed.py` carelessly** - it wipes the database
 - **Inter-city travel is NOT via direct API calls** - it's DB-mediated through VisitingAI table polling
 - **Gemini structured output does not support `additionalProperties`** - keep response schemas simple
+- **Gemini context window is very large (1M+ tokens)** - Do not assume large context is the cause of errors. Gemini handles 100K+ tokens routinely. The system is designed to work with large conversation histories.
 - **Playbook node transitions**: always verify `next` pointers form valid DAGs
 - **When refactoring**: complete the entire change or revert; do not leave codebase in mixed state
 - **Gradio SelectData.index type**: Always check for both `list` and `tuple` with `isinstance(idx, (list, tuple))` before accessing `idx[0]`. Gradio returns `list` type (e.g., `[row, col]`), not `tuple`. Missing this check causes silent failures in table selection handlers.
