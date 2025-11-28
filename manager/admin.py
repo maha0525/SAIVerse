@@ -19,6 +19,7 @@ from database.models import (
     User as UserModel,
     Item as ItemModel,
     ItemLocation as ItemLocationModel,
+    Playbook as PlaybookModel,
 )
 from manager.blueprints import BlueprintMixin
 from manager.history import HistoryMixin
@@ -1024,6 +1025,106 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 .all()
             )
             return [link[0] for link in links]
+        finally:
+            db.close()
+
+    # --- Playbook Management ---
+
+    def get_playbooks_df(self) -> pd.DataFrame:
+        """Get all playbooks as a DataFrame."""
+        db = self.SessionLocal()
+        try:
+            query = db.query(PlaybookModel)
+            df = pd.read_sql(query.statement, query.session.bind)
+            # Add snippet columns for long text fields
+            if not df.empty:
+                df["description_snippet"] = df["description"].str.slice(0, 50) + "..."
+                if "schema_json" in df.columns:
+                    df["schema_snippet"] = df["schema_json"].str.slice(0, 30) + "..."
+                if "nodes_json" in df.columns:
+                    df["nodes_snippet"] = df["nodes_json"].str.slice(0, 30) + "..."
+            return df
+        finally:
+            db.close()
+
+    def get_playbook_details(self, playbook_id: int) -> Optional[Dict[str, Any]]:
+        """Get detailed information for a specific playbook."""
+        db = self.SessionLocal()
+        try:
+            # Convert numpy.int64 to Python int (DataFrames return numpy types)
+            playbook_id = int(playbook_id)
+            playbook = db.query(PlaybookModel).filter(PlaybookModel.id == playbook_id).first()
+            if not playbook:
+                return None
+            return {
+                "id": playbook.id,
+                "name": playbook.name,
+                "description": playbook.description,
+                "scope": playbook.scope,
+                "created_by_persona_id": playbook.created_by_persona_id,
+                "building_id": playbook.building_id,
+                "schema_json": playbook.schema_json,
+                "nodes_json": playbook.nodes_json,
+                "router_callable": playbook.router_callable,
+                "created_at": str(playbook.created_at) if playbook.created_at else "",
+                "updated_at": str(playbook.updated_at) if playbook.updated_at else "",
+            }
+        finally:
+            db.close()
+
+    def update_playbook(
+        self,
+        playbook_id: int,
+        name: str,
+        description: str,
+        scope: str,
+        created_by_persona_id: Optional[str],
+        building_id: Optional[str],
+        schema_json: str,
+        nodes_json: str,
+        router_callable: bool,
+    ) -> str:
+        """Update an existing playbook."""
+        db = self.SessionLocal()
+        try:
+            playbook = db.query(PlaybookModel).filter(PlaybookModel.id == playbook_id).first()
+            if not playbook:
+                return f"Error: Playbook with id {playbook_id} not found."
+
+            playbook.name = name
+            playbook.description = description
+            playbook.scope = scope
+            playbook.created_by_persona_id = created_by_persona_id
+            playbook.building_id = building_id
+            playbook.schema_json = schema_json
+            playbook.nodes_json = nodes_json
+            playbook.router_callable = router_callable
+
+            db.commit()
+            return f"Success: Playbook '{name}' updated successfully."
+        except Exception as exc:
+            db.rollback()
+            logging.error("Failed to update playbook: %s", exc, exc_info=True)
+            return f"Error: Failed to update playbook. {exc}"
+        finally:
+            db.close()
+
+    def delete_playbook(self, playbook_id: int) -> str:
+        """Delete a playbook by ID."""
+        db = self.SessionLocal()
+        try:
+            playbook = db.query(PlaybookModel).filter(PlaybookModel.id == playbook_id).first()
+            if not playbook:
+                return f"Error: Playbook with id {playbook_id} not found."
+
+            name = playbook.name
+            db.delete(playbook)
+            db.commit()
+            return f"Success: Playbook '{name}' deleted successfully."
+        except Exception as exc:
+            db.rollback()
+            logging.error("Failed to delete playbook: %s", exc, exc_info=True)
+            return f"Error: Failed to delete playbook. {exc}"
         finally:
             db.close()
 

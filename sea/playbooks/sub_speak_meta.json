@@ -11,7 +11,8 @@
     "history_depth": "full",
     "inventory": true,
     "building_items": true,
-    "system_prompt": true
+    "system_prompt": true,
+    "available_playbooks": true
   },
   "nodes": [
     {

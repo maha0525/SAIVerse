@@ -1417,3 +1417,36 @@ class SAIVerseManager(
 
     def delete_item(self, item_id: str) -> str:
         return self.admin.delete_item(item_id)
+
+    # --- Playbook Management ---
+
+    def get_playbooks_df(self) -> pd.DataFrame:
+        """Get all playbooks as a DataFrame for the world editor."""
+        return self.admin.get_playbooks_df()
+
+    def get_playbook_details(self, playbook_id: int) -> Optional[Dict[str, Any]]:
+        """Get detailed information for a specific playbook."""
+        return self.admin.get_playbook_details(playbook_id)
+
+    def update_playbook(
+        self,
+        playbook_id: int,
+        name: str,
+        description: str,
+        scope: str,
+        created_by_persona_id: Optional[str],
+        building_id: Optional[str],
+        schema_json: str,
+        nodes_json: str,
+        router_callable: bool,
+    ) -> str:
+        """Update a playbook from the world editor."""
+        return self.admin.update_playbook(
+            playbook_id, name, description, scope,
+            created_by_persona_id, building_id,
+            schema_json, nodes_json, router_callable
+        )
+
+    def delete_playbook(self, playbook_id: int) -> str:
+        """Delete a playbook from the world editor."""
+        return self.admin.delete_playbook(playbook_id)

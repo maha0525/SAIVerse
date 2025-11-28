@@ -23,6 +23,7 @@ def save_playbook(
     created_by_persona_id: Optional[str] = None,
     building_id: Optional[str] = None,
     playbook_json: str = "",
+    router_callable: Optional[bool] = None,
 ) -> Tuple[str, None, None]:
     """Persist a playbook definition to the database.
 
@@ -31,6 +32,7 @@ def save_playbook(
     - created_by_persona_id: owner persona (required for personal scope)
     - building_id: building scope target (required for building scope)
     - playbook_json: full PlaybookSchema JSON string (must include nodes/start_node/input_schema)
+    - router_callable: if True, playbook can be called from router (defaults to value in JSON or False)
     """
 
     scope = (scope or "public").lower()
@@ -68,6 +70,10 @@ def save_playbook(
     nodes_json = json.dumps(normalized_nodes, ensure_ascii=False)
     schema_json = json.dumps(schema_payload, ensure_ascii=False)
 
+    # Determine router_callable: explicit param > JSON value > False
+    if router_callable is None:
+        router_callable = normalized_nodes.get("router_callable", False)
+
     db_path = default_db_path()
     engine = create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
@@ -82,6 +88,7 @@ def save_playbook(
             existing.building_id = building_id
             existing.schema_json = schema_json
             existing.nodes_json = nodes_json
+            existing.router_callable = router_callable
         else:
             record = Playbook(
                 name=name,
@@ -91,6 +98,7 @@ def save_playbook(
                 building_id=building_id,
                 schema_json=schema_json,
                 nodes_json=nodes_json,
+                router_callable=router_callable,
             )
             session.add(record)
         session.commit()
@@ -111,6 +119,7 @@ def schema() -> ToolSchema:
                 "created_by_persona_id": {"type": "string"},
                 "building_id": {"type": "string"},
                 "playbook_json": {"type": "string", "description": "Full PlaybookSchema JSON."},
+                "router_callable": {"type": "boolean", "description": "If true, playbook can be called from router. Defaults to value in JSON or False."},
             },
             "required": ["name", "description", "playbook_json"],
         },

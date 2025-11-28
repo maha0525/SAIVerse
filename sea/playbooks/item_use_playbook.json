@@ -1,5 +1,5 @@
 {
-  "name": "item_use_playbook",
+  "name": "item_use",
   "description": "Use an item from persona's inventory",
   "input_schema": [
     {

@@ -57,7 +57,55 @@ def compile_playbook(
 
     graph.add_edge(START, playbook.start_node)
     for node_def in playbook.nodes:
-        if node_def.next:
+        # Check for conditional_next first (takes precedence over next)
+        conditional_next = getattr(node_def, "conditional_next", None)
+        if conditional_next:
+            # Create routing function that returns path key (not node ID directly)
+            def make_router(cond_next):
+                def router_fn(state: dict) -> str:
+                    import logging
+                    logger = logging.getLogger(__name__)
+
+                    # Resolve field value from state (supports nested keys)
+                    field_path = cond_next.field.split(".")
+                    value = state
+                    for key in field_path:
+                        if isinstance(value, dict):
+                            value = value.get(key)
+                        else:
+                            value = None
+                            break
+
+                    # Convert to string for matching
+                    value_str = str(value) if value is not None else ""
+
+                    logger.debug("[langgraph] conditional_next: field=%s value=%s cases=%s", cond_next.field, value_str, list(cond_next.cases.keys()))
+
+                    # Return the matched case value (not the target node)
+                    if value_str in cond_next.cases:
+                        result = value_str
+                    elif "default" in cond_next.cases:
+                        result = "default"
+                    else:
+                        result = "__end__"
+
+                    logger.debug("[langgraph] conditional_next: selected path=%s -> target=%s", result, cond_next.cases.get(result, "END"))
+                    return result
+                return router_fn
+
+            # Build path_map: case_value -> target_node_or_END
+            path_map = {}
+            for case_value, target_node in conditional_next.cases.items():
+                if target_node is None:
+                    path_map[case_value] = END
+                else:
+                    path_map[case_value] = target_node
+            # Add fallback for unmatched cases
+            if "__end__" not in path_map:
+                path_map["__end__"] = END
+
+            graph.add_conditional_edges(node_def.id, make_router(conditional_next), path_map)
+        elif node_def.next:
             graph.add_edge(node_def.id, node_def.next)
         else:
             graph.add_edge(node_def.id, END)

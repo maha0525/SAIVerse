@@ -3,12 +3,14 @@
 
 Usage:
   python scripts/import_playbook.py --file path/to/playbook.json \
-      [--scope public|personal|building] [--persona-id PERSONA] [--building-id BUILDING]
+      [--scope public|personal|building] [--persona-id PERSONA] [--building-id BUILDING] \
+      [--router-callable | --no-router-callable]
 
 Notes:
 - scope=personal なら persona-id が必要。
 - scope=building なら building-id が必要。
 - description/name は JSON から取るが、--name/--description で上書きも可能。
+- --router-callable: playbookをrouterから呼び出せるようにする。指定しない場合はJSONのrouter_callableフィールドを参照。
 """
 
 from __future__ import annotations
@@ -33,6 +35,9 @@ def main() -> None:
     parser.add_argument("--building-id", dest="building_id", help="Building id (for building scope)")
     parser.add_argument("--name", help="Override playbook name")
     parser.add_argument("--description", help="Override description")
+    parser.add_argument("--router-callable", dest="router_callable", action="store_true", help="Mark playbook as callable from router")
+    parser.add_argument("--no-router-callable", dest="router_callable", action="store_false", help="Mark playbook as not callable from router")
+    parser.set_defaults(router_callable=None)
     args = parser.parse_args()
 
     path = Path(args.file)
@@ -51,8 +56,10 @@ def main() -> None:
         created_by_persona_id=args.persona_id,
         building_id=args.building_id,
         playbook_json=json.dumps(data, ensure_ascii=False),
+        router_callable=args.router_callable,
     )
-    print(f"Imported playbook '{name}' (scope={args.scope}).")
+    router_status = "router-callable" if (args.router_callable if args.router_callable is not None else data.get("router_callable", False)) else "not router-callable"
+    print(f"Imported playbook '{name}' (scope={args.scope}, {router_status}).")
 
 
 if __name__ == "__main__":
