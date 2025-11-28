@@ -105,6 +105,7 @@ class PersonaMixin:
 
                 persona_model = db_ai.DEFAULT_MODEL or self.model
                 persona_context_length = get_context_length(persona_model)
+                persona_lightweight_model = db_ai.LIGHTWEIGHT_MODEL
 
                 persona = PersonaCore(
                     city_name=self.city_name,
@@ -125,6 +126,7 @@ class PersonaMixin:
                     session_factory=self.SessionLocal,
                     start_building_id=private_room_id,
                     model=persona_model,
+                    lightweight_model=persona_lightweight_model,
                     context_length=persona_context_length,
                     user_room_id=self.user_room_id,
                     provider=self.provider,
@@ -299,6 +301,7 @@ class PersonaMixin:
                 session_factory=self.SessionLocal,
                 start_building_id=new_building_id,
                 model=self.model,
+                lightweight_model=None,
                 context_length=self.context_length,
                 user_room_id=self.user_room_id,
                 provider=self.provider,

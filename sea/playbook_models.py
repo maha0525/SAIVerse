@@ -23,6 +23,10 @@ class LLMNodeDef(BaseModel):
     type: Literal[NodeType.LLM]
     action: Optional[str] = Field(default=None, description="Prompt template. Use {variable_name} placeholders.")
     next: Optional[str] = None
+    model_type: Optional[str] = Field(
+        default="normal",
+        description="Which model to use: 'normal' (default) or 'lightweight' for faster/cheaper models."
+    )
     response_schema: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Optional JSON schema to enforce structured output."
@@ -44,6 +48,10 @@ class ToolNodeDef(BaseModel):
     output_key: Optional[str] = Field(
         default=None,
         description="Key name to store tool result in state for later nodes."
+    )
+    output_keys: Optional[list] = Field(
+        default=None,
+        description="List of keys to store tuple results. E.g. ['text', 'snippet', 'file_path'] for multi-value tool returns."
     )
     next: Optional[str] = None
 

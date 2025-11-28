@@ -108,7 +108,7 @@ def on_select_ai(evt: gr.SelectData):
     ai_id = df.iloc[row_index]["AIID"]
     details = manager.get_ai_details(ai_id)
     if not details:
-        return "", "", "", "", None, "", False, "auto", "", "", gr.update(value=None)
+        return "", "", "", "", None, "", "", False, "auto", "", "", gr.update(value=None)
 
     current_location_name = "不明"
     if ai_id in manager.personas:
@@ -123,6 +123,7 @@ def on_select_ai(evt: gr.SelectData):
         details["SYSTEMPROMPT"],
         int(details["HOME_CITYID"]),
         details["DEFAULT_MODEL"],
+        details.get("LIGHTWEIGHT_MODEL") or "",
         details["IS_DISPATCHED"],
         details["INTERACTION_MODE"],
         current_location_name,
@@ -131,7 +132,7 @@ def on_select_ai(evt: gr.SelectData):
     )
 
 
-def update_ai_ui(ai_id: str, name: str, desc: str, sys_prompt: str, home_city_id, model: str, interaction_mode: str, avatar_path: str, avatar_file):
+def update_ai_ui(ai_id: str, name: str, desc: str, sys_prompt: str, home_city_id, model: str, lightweight_model: str, interaction_mode: str, avatar_path: str, avatar_file):
     manager = _require_manager()
     if not ai_id:
         return "Error: Select an AI to update.", gr.update()
@@ -152,7 +153,7 @@ def update_ai_ui(ai_id: str, name: str, desc: str, sys_prompt: str, home_city_id
     else:
         upload_path = avatar_file
 
-    result = manager.update_ai(ai_id, name, desc, sys_prompt, home_city_id, model, interaction_mode, avatar_path, upload_path)
+    result = manager.update_ai(ai_id, name, desc, sys_prompt, home_city_id, model, lightweight_model, interaction_mode, avatar_path, upload_path)
     return result, manager.get_ais_df()
 
 
@@ -335,7 +336,7 @@ def create_world_editor_ui():
         )
         return result, manager.get_items_df()
 
-    with gr.Accordion("City管理", open=True):
+    with gr.Accordion("City管理", open=False):
         with gr.Tabs():
             with gr.TabItem("編集/削除"):
                 city_df = gr.DataFrame(value=None, interactive=False, label="Cities in this World")
@@ -421,6 +422,7 @@ def create_world_editor_ui():
                     ai_name_text = gr.Textbox(label="AI Name")
                     ai_home_city_dropdown = gr.Dropdown(choices=city_choices, label="所属City", type="value")
                     ai_model_dropdown = gr.Dropdown(choices=ui_state.model_choices, label="Default Model", allow_custom_value=True)
+                    ai_lightweight_model_dropdown = gr.Dropdown(choices=ui_state.model_choices, label="Lightweight Model (optional)", allow_custom_value=True)
                     ai_interaction_mode_dropdown = gr.Dropdown(choices=["auto", "manual", "sleep"], label="対話モード", value="auto")
                 ai_desc_text = gr.Textbox(label="Description", lines=2)
                 ai_sys_prompt_text = gr.Textbox(label="System Prompt", lines=8)
@@ -442,8 +444,8 @@ def create_world_editor_ui():
                     move_ai_btn = gr.Button("移動実行", scale=1)
                 move_ai_status_display = gr.Textbox(label="Status", interactive=False)
 
-                ai_df.select(fn=on_select_ai, inputs=None, outputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, is_dispatched_checkbox, ai_interaction_mode_dropdown, ai_current_location_text, ai_avatar_path_text, ai_avatar_upload])
-                save_ai_btn.click(fn=update_ai_ui, inputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, ai_interaction_mode_dropdown, ai_avatar_path_text, ai_avatar_upload], outputs=[ai_status_display, ai_df])
+                ai_df.select(fn=on_select_ai, inputs=None, outputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, ai_lightweight_model_dropdown, is_dispatched_checkbox, ai_interaction_mode_dropdown, ai_current_location_text, ai_avatar_path_text, ai_avatar_upload])
+                save_ai_btn.click(fn=update_ai_ui, inputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, ai_lightweight_model_dropdown, ai_interaction_mode_dropdown, ai_avatar_path_text, ai_avatar_upload], outputs=[ai_status_display, ai_df])
                 delete_ai_confirm_check.change(fn=toggle_delete_button, inputs=delete_ai_confirm_check, outputs=delete_ai_btn)
                 delete_ai_btn.click(fn=delete_ai_ui, inputs=[ai_id_text, delete_ai_confirm_check], outputs=[ai_status_display, ai_df])
                 move_ai_btn.click(fn=move_ai_ui, inputs=[ai_id_text, ai_move_target_dropdown], outputs=[move_ai_status_display, ai_current_location_text])

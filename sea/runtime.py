@@ -17,6 +17,11 @@ from model_configs import get_model_parameter_defaults
 LOGGER = logging.getLogger(__name__)
 
 
+def _get_default_lightweight_model() -> str:
+    """Get the default lightweight model from environment or fallback."""
+    return os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gemini-2.5-flash-lite")
+
+
 def _format(template: str, variables: Dict[str, Any]) -> str:
     try:
         return template.format(**variables)
@@ -170,7 +175,10 @@ class SEARuntime:
                     if response_schema and "available_playbooks" in variables:
                         response_schema = self._add_playbook_enum(response_schema, variables.get("available_playbooks"))
 
-                    text = persona.llm_client.generate(
+                    # Select LLM client based on model_type
+                    llm_client = self._select_llm_client(current, persona)
+
+                    text = llm_client.generate(
                         messages,
                         tools=[],
                         temperature=self._default_temperature(persona),
@@ -213,9 +221,19 @@ class SEARuntime:
                             tool_input = variables.get("last") or variables.get("input") or ""
                             result = tool_func(tool_input) if callable(tool_func) else None
 
-                        # Handle tuple results (tool_func returns tuple)
-                        if isinstance(result, tuple):
-                            # Extract first element as primary result
+                        # Handle tuple results with output_keys (for multi-value returns)
+                        output_keys = getattr(current, "output_keys", None)
+                        if output_keys and isinstance(result, tuple):
+                            # Expand tuple to multiple state variables
+                            for i, key in enumerate(output_keys):
+                                if i < len(result):
+                                    variables[key] = result[i]
+                                    LOGGER.debug("[sea] Stored tuple[%d] in variables[%s]: %s", i, key, str(result[i])[:200])
+                            # Set last to first element (primary result)
+                            last_text = str(result[0]) if result else ""
+                            primary_result = result[0] if result else ""
+                        elif isinstance(result, tuple):
+                            # Legacy: extract first element as primary result
                             primary_result = result[0] if result else ""
                             last_text = str(primary_result)
                         else:
@@ -224,9 +242,9 @@ class SEARuntime:
 
                         variables["last"] = last_text
 
-                        # Store result in state if output_key is specified
+                        # Store result in state if output_key is specified (legacy single-value)
                         output_key = getattr(current, "output_key", None)
-                        if output_key:
+                        if output_key and not output_keys:
                             variables[output_key] = primary_result
                             LOGGER.debug("[sea] Stored tool result in variables[%s]: %s", output_key, str(primary_result)[:200])
                     except Exception as exc:
@@ -386,7 +404,10 @@ class SEARuntime:
                 if response_schema and "available_playbooks" in state:
                     response_schema = self._add_playbook_enum(response_schema, state.get("available_playbooks"))
 
-                text = persona.llm_client.generate(
+                # Select LLM client based on model_type
+                llm_client = self._select_llm_client(node_def, persona)
+
+                text = llm_client.generate(
                     messages,
                     tools=[],
                     temperature=self._default_temperature(persona),
@@ -422,6 +443,37 @@ class SEARuntime:
                 return None
         except Exception:
             return None
+
+    def _select_llm_client(self, node_def: Any, persona: Any) -> Any:
+        """Select the appropriate LLM client based on node's model_type."""
+        model_type = getattr(node_def, "model_type", "normal") or "normal"
+        LOGGER.info("[sea] Node model_type: %s (node_id=%s)", model_type, getattr(node_def, "id", "unknown"))
+
+        if model_type == "lightweight":
+            # Try persona's lightweight_llm_client first
+            lightweight_client = getattr(persona, "lightweight_llm_client", None)
+            LOGGER.info("[sea] lightweight_client exists: %s", lightweight_client is not None)
+            if lightweight_client:
+                LOGGER.info("[sea] Using persona's lightweight_llm_client")
+                return lightweight_client
+
+            # Fallback: create a temporary lightweight client
+            LOGGER.info("[sea] Persona has no lightweight_llm_client; creating temporary client with default model")
+            lightweight_model_name = getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
+            LOGGER.info("[sea] Using lightweight model: %s", lightweight_model_name)
+            try:
+                from llm_clients import get_llm_client
+                from model_configs import get_context_length
+                lw_context = get_context_length(lightweight_model_name)
+                provider = getattr(persona, "provider", "gemini")  # Gemini is default for lightweight
+                return get_llm_client(lightweight_model_name, provider, lw_context)
+            except Exception as exc:
+                LOGGER.warning("[sea] Failed to create lightweight client: %s; falling back to normal client", exc)
+                return persona.llm_client
+        else:
+            # Default: use normal client
+            LOGGER.info("[sea] Using normal llm_client")
+            return persona.llm_client
 
     def _dump_llm_io(
         self,
@@ -578,6 +630,7 @@ class SEARuntime:
         tool_name = node_def.action
         args_input = getattr(node_def, "args_input", None)
         output_key = getattr(node_def, "output_key", None)
+        output_keys = getattr(node_def, "output_keys", None)
 
         async def node(state: dict):
             tool_func = TOOL_REGISTRY.get(tool_name)
@@ -607,10 +660,23 @@ class SEARuntime:
                     else:
                         result = tool_func(last) if callable(tool_func) else None
 
-                state["last"] = str(result)
+                # Handle tuple results with output_keys (for multi-value returns)
+                if output_keys and isinstance(result, tuple):
+                    # Expand tuple to multiple state variables
+                    for i, key in enumerate(output_keys):
+                        if i < len(result):
+                            state[key] = result[i]
+                            LOGGER.debug("[sea][LangGraph] Stored tuple[%d] in state[%s]: %s", i, key, str(result[i])[:200])
+                    # Set last to first element (primary result)
+                    state["last"] = str(result[0]) if result else ""
+                elif isinstance(result, tuple):
+                    # Legacy: extract first element
+                    state["last"] = str(result[0]) if result else ""
+                else:
+                    state["last"] = str(result)
 
-                # Store result in state if output_key is specified
-                if output_key:
+                # Store result in state if output_key is specified (legacy single-value)
+                if output_key and not output_keys:
                     state[output_key] = result
             except Exception as exc:
                 state["last"] = f"Tool error: {exc}"

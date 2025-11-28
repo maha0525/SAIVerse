@@ -40,6 +40,7 @@ class AI(Base):
     INTERACTION_MODE = Column(String(32), default='auto', nullable=False) # auto / user
     IS_DISPATCHED = Column(Boolean, default=False, nullable=False)
     DEFAULT_MODEL = Column(String(255), nullable=True)
+    LIGHTWEIGHT_MODEL = Column(String(255), nullable=True)
     PRIVATE_ROOM_ID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
     PREVIOUS_INTERACTION_MODE = Column(String(32), default='auto', nullable=False)
 

@@ -1,0 +1,54 @@
+{
+  "name": "generate_image_playbook",
+  "description": "Generate an image using Gemini 2.5 Flash Image API",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "User request about what image to generate"
+    }
+  ],
+  "context_requirements": {
+    "history_depth": "full",
+    "inventory": false,
+    "building_items": false,
+    "system_prompt": true
+  },
+  "nodes": [
+    {
+      "id": "decide_prompt",
+      "type": "llm",
+      "action": "ユーザーのリクエストに基づいて、画像生成用のプロンプトを英語で作成してください。詳細で具体的な描写を含めてください。",
+      "next": "generate",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "Detailed image generation prompt in English"
+          }
+        },
+        "required": ["prompt"]
+      },
+      "output_key": "gen_params"
+    },
+    {
+      "id": "generate",
+      "type": "tool",
+      "action": "generate_image",
+      "args_input": {
+        "prompt": "gen_params.prompt"
+      },
+      "output_keys": ["text", "snippet", "file_path", "metadata"],
+      "next": "record"
+    },
+    {
+      "id": "record",
+      "type": "memorize",
+      "action": "{text}",
+      "role": "user",
+      "tags": ["tool", "generate_image"],
+      "next": null
+    }
+  ],
+  "start_node": "decide_prompt"
+}

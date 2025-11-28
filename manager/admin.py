@@ -746,6 +746,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         system_prompt: str,
         home_city_id: int,
         default_model: Optional[str],
+        lightweight_model: Optional[str],
         interaction_mode: str,
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
@@ -842,6 +843,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             ai.SYSTEMPROMPT = system_prompt
             ai.HOME_CITYID = home_city_id
             ai.DEFAULT_MODEL = default_model or None
+            ai.LIGHTWEIGHT_MODEL = lightweight_model or None
             ai.AVATAR_IMAGE = avatar_value
             db.commit()
 
@@ -850,6 +852,32 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 persona.persona_name = name
                 persona.persona_system_instruction = system_prompt
                 persona.interaction_mode = ai.INTERACTION_MODE
+                persona.lightweight_model = lightweight_model
+
+                # Recreate lightweight LLM client if model changed
+                if lightweight_model:
+                    from llm_clients import get_llm_client
+                    from model_configs import get_context_length
+                    try:
+                        lw_context = get_context_length(lightweight_model)
+                        persona.lightweight_llm_client = get_llm_client(
+                            lightweight_model, self.provider, lw_context
+                        )
+                        logging.info(
+                            "Recreated lightweight LLM client for persona '%s' with model '%s'.",
+                            name,
+                            lightweight_model,
+                        )
+                    except Exception as exc:
+                        logging.error(
+                            "Failed to recreate lightweight LLM client for '%s': %s",
+                            name,
+                            exc,
+                        )
+                        persona.lightweight_llm_client = None
+                else:
+                    persona.lightweight_llm_client = None
+
                 logging.info("Updated in-memory persona '%s' with new settings.", name)
             self._set_persona_avatar(ai_id, avatar_value)
 

@@ -22,6 +22,7 @@
     {
       "id": "llm",
       "type": "llm",
+      "model_type": "lightweight",
       "action": "You are the SEA router. Choose the best playbook for the user's request.\n\nAvailable playbooks (MUST select from this list):\n{available_playbooks}\n\nIMPORTANT: The 'playbook' field MUST be exactly one of the names from the available playbooks list above. Do NOT invent new playbook names.\n\nRespond ONLY with JSON per the schema.",
       "next": "log",
       "response_schema": {

@@ -99,6 +99,10 @@ python scripts/memory_topics_ui.py
 - Two meta-playbooks: `meta_user` (handles user input) and `meta_auto` (autonomous pulse)
 - Supports both lightweight fallback executor and LangGraph compilation
 - Playbooks are JSON files in `sea/playbooks/` or stored in DB `playbooks` table
+- **Lightweight model support**: LLM nodes can specify `model_type: "lightweight"` to use a faster, cheaper model for simple tasks (e.g., router decisions)
+  - Each persona has two model settings: `DEFAULT_MODEL` (normal) and `LIGHTWEIGHT_MODEL` (optional)
+  - If `LIGHTWEIGHT_MODEL` is not set, system falls back to environment variable `SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL` or `gemini-2.5-flash-lite`
+  - Use lightweight models for router nodes and simple decision-making; use default models for complex reasoning and tool parameter generation
 
 **OccupancyManager** (`occupancy_manager.py`)
 - Handles all entity movement (users, AI personas, visitors)
@@ -188,6 +192,13 @@ python scripts/memory_topics_ui.py
 
 ### Code Changes
 - **Before making changes**: Review recent session reflections in `docs/session_reflection_*.md` to avoid repeating mistakes
+- **When debugging UI issues**:
+  1. **Listen carefully**: Pay close attention to what the user is actually doing (e.g., "sidebar button" vs "home screen button")
+  2. **Gather observable data first**: Add logging, check terminal output, check browser console BEFORE making changes
+  3. **Understand the working case**: If something works in one scenario but not another, investigate the DIFFERENCE, don't assume the cause
+  4. **One change at a time**: Make focused changes that can be verified, not multiple speculative fixes
+  5. **Verify assumptions**: Don't assume "timing issue" or "selector issue" - confirm with logs
+  6. **Framework behavior**: Understand how the framework works (e.g., Gradio's autoscroll triggers on visibility changes, not just data updates)
 - **When touching external APIs**: Always check official docs first (especially Gemini structured output limitations)
 - **Playbook modifications**: Validate that `next` node pointers form valid graphs (no accidental loops). After editing JSON files in `sea/playbooks/`, always run `python scripts/import_playbook.py --file <path>` to import the changes into the database
 - **Database changes**: Write migration in `database/migrate.py`, test with `--db-file` on copy first
@@ -217,6 +228,7 @@ python scripts/memory_topics_ui.py
 - Set `SAIVERSE_LOG_LEVEL=DEBUG` in `.env` for verbose output
 - SEA trace: set `SAIVERSE_SEA_TRACE=1` and `SAIVERSE_SEA_DUMP=<filepath>` to capture playbook execution
 - **Debugging tip**: When `LOGGER.debug()` with `extra={}` doesn't show details, use `print()` to output directly to stdout. The logger formatter may not be configured to display `extra` fields.
+- **Browser console logging**: JavaScript `console.debug()` is filtered by default in most browsers. Use `console.log()` for debug messages that should always be visible. In Chrome/Edge, open DevTools Console and set log level filter to "Verbose" or "All levels" to see `console.debug()` output.
 
 ### Common Pitfalls
 - **Do not run `database/seed.py` carelessly** - it wipes the database
@@ -226,6 +238,7 @@ python scripts/memory_topics_ui.py
 - **Playbook node transitions**: always verify `next` pointers form valid DAGs
 - **When refactoring**: complete the entire change or revert; do not leave codebase in mixed state
 - **Gradio SelectData.index type**: Always check for both `list` and `tuple` with `isinstance(idx, (list, tuple))` before accessing `idx[0]`. Gradio returns `list` type (e.g., `[row, col]`), not `tuple`. Missing this check causes silent failures in table selection handlers.
+- **Gradio Chatbot autoscroll**: The `autoscroll=True` parameter works, but only triggers when the component becomes visible after being hidden. If updating data while already visible, autoscroll may not activate. To force autoscroll, temporarily hide the component (add CSS class), update data, then show it again. This visibility transition triggers the autoscroll behavior.
 
 ## Dependencies
 
@@ -270,6 +283,20 @@ Critical settings (see `.env.example`):
 **Add new tool**: Define in `tools/defs/`, register in `tools/__init__.py`, link to buildings via `BuildingToolLink` or World Editor
 
 **Modify playbook**: Edit JSON in `sea/playbooks/`, then run `python scripts/import_playbook.py --file sea/playbooks/<playbook>.json` to import to database. Alternatively, use `save_playbook` tool (validates graph before saving)
+
+**Playbook design philosophy**:
+- **Router simplicity**: The router node in meta playbooks is designed to run on lightweight LLMs. It should ONLY select which playbook to execute (enum selection), not decide complex arguments.
+- **Arguments decided inside playbooks**: Each playbook should include an LLM node that decides the tool arguments based on available context (inventory, building items, conversation history, etc.). This approach provides better flexibility and leverages the full context within the playbook.
+- **Reference implementation**: See `memory_recall_playbook.json` for the canonical pattern:
+  1. `generate_query` LLM node with `response_schema` to structure output
+  2. `recall` TOOL node with `args_input` mapping state variables to tool parameters
+  3. `record` MEMORIZE node to save results to SAIMemory
+- **Multi-value tool returns**: Tools returning tuples (e.g., `generate_image`) can use `output_keys` to expand values into multiple state variables. Example: `"output_keys": ["text", "snippet", "file_path", "metadata"]`
+- **Adding new node fields**: When adding new fields to playbook nodes (e.g., `model_type`, `output_keys`):
+  1. **MUST update** `sea/playbook_models.py` node definitions (`LLMNodeDef`, `ToolNodeDef`, etc.) with the new field
+  2. Without this, `save_playbook` tool and `import_playbook.py` will silently drop the field during Pydantic validation
+  3. After updating the schema, **re-import all affected playbooks** using `python scripts/import_playbook.py --file <path>`
+  4. Verify the field is stored in DB: `sqlite3 database/data/saiverse.db "SELECT nodes_json FROM playbooks WHERE name='<playbook_name>'"`
 
 **Debug LLM calls**: Check `raw_llm_responses.txt` or set `SAIVERSE_SEA_DUMP` for playbook traces
 

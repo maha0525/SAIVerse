@@ -1,0 +1,54 @@
+{
+  "name": "item_pickup_playbook",
+  "description": "Pick up an item from the building and add it to persona's inventory",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "User request or context about which item to pick up"
+    }
+  ],
+  "context_requirements": {
+    "history_depth": 0,
+    "inventory": true,
+    "building_items": true,
+    "system_prompt": true
+  },
+  "nodes": [
+    {
+      "id": "decide_item",
+      "type": "llm",
+      "action": "建物内のアイテム一覧を確認し、拾うべきアイテムを決定してください。item_idを指定してください。",
+      "next": "pickup",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "description": "ID of the item to pick up"
+          }
+        },
+        "required": ["item_id"]
+      },
+      "output_key": "pickup_params"
+    },
+    {
+      "id": "pickup",
+      "type": "tool",
+      "action": "item_pickup",
+      "args_input": {
+        "item_id": "pickup_params.item_id"
+      },
+      "output_key": "result",
+      "next": "record"
+    },
+    {
+      "id": "record",
+      "type": "memorize",
+      "action": "{last}",
+      "role": "user",
+      "tags": ["tool", "item_pickup"],
+      "next": null
+    }
+  ],
+  "start_node": "decide_item"
+}
