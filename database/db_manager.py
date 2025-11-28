@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 
 from .models import (
-    User, AI, Building, City, Tool, Blueprint,
+    User, AI, Building, City, Tool, Blueprint, Playbook,
     UserAiLink, AiToolLink, BuildingToolLink, BuildingOccupancyLog,
     ThinkingRequest, VisitingAI
 )
@@ -20,6 +20,7 @@ TABLE_MODEL_MAP = {
     "building": Building,
     "city": City,
     "tool": Tool,
+    "playbooks": Playbook,
     "user_ai_link": UserAiLink,
     "ai_tool_link": AiToolLink,
     "building_tool_link": BuildingToolLink,
@@ -179,6 +180,8 @@ def create_management_tab(model_class, session_factory: sessionmaker):
                     "SYSTEM_INSTRUCTION",
                     "ENTRY_PROMPT",
                     "AUTO_PROMPT",
+                    "schema_json",
+                    "nodes_json",
                 }
                 
                 fk_dropdowns = get_fk_choices(session_factory)
@@ -287,6 +290,8 @@ def create_db_manager_ui(session_factory: sessionmaker):
                 create_management_tab(Blueprint, session_factory)
             with gr.TabItem("Tool"):
                 create_management_tab(Tool, session_factory)
+            with gr.TabItem("Playbook"):
+                create_management_tab(Playbook, session_factory)
             with gr.TabItem("User-AI Link"):
                 create_management_tab(UserAiLink, session_factory)
             with gr.TabItem("AI-Tool Link"):

@@ -607,6 +607,84 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                 return true;
             };
 
+            const setupSidebarSwipeGesture = () => {
+                const sidebar = document.querySelector(".sidebar.saiverse-sidebar");
+                if (!sidebar) {
+                    return false;
+                }
+
+                // すでにイベントが設定済みならスキップ
+                if (sidebar.dataset.swipeHandlerAttached === "true") {
+                    return true;
+                }
+
+                let touchStartX = 0;
+                let touchStartY = 0;
+                let touchStartTime = 0;
+
+                // タッチ開始
+                document.body.addEventListener("touchstart", (e) => {
+                    const isMobile = window.matchMedia("(max-width: 768px)").matches;
+                    if (!isMobile) {
+                        return;
+                    }
+
+                    const touch = e.touches[0];
+                    touchStartX = touch.clientX;
+                    touchStartY = touch.clientY;
+                    touchStartTime = Date.now();
+                }, { passive: true });
+
+                // タッチ終了
+                document.body.addEventListener("touchend", (e) => {
+                    const isMobile = window.matchMedia("(max-width: 768px)").matches;
+                    if (!isMobile) {
+                        return;
+                    }
+
+                    const touch = e.changedTouches[0];
+                    const touchEndX = touch.clientX;
+                    const touchEndY = touch.clientY;
+                    const touchEndTime = Date.now();
+
+                    const deltaX = touchEndX - touchStartX;
+                    const deltaY = touchEndY - touchStartY;
+                    const deltaTime = touchEndTime - touchStartTime;
+
+                    // スワイプ判定条件
+                    const SWIPE_THRESHOLD = 80; // スワイプ距離の閾値（px）
+                    const TIME_THRESHOLD = 500; // スワイプ時間の閾値（ms）
+                    const ANGLE_THRESHOLD = 30; // 角度の閾値（度）
+
+                    const isSwipingRight = deltaX > SWIPE_THRESHOLD;
+                    const isSwipingLeft = deltaX < -SWIPE_THRESHOLD;
+
+                    // スワイプが速すぎないか（ゆっくりすぎるとスクロールと判定）
+                    const isWithinTimeLimit = deltaTime < TIME_THRESHOLD;
+
+                    // 水平方向のスワイプか（垂直スクロールと区別）
+                    const angle = Math.abs(Math.atan2(deltaY, deltaX) * 180 / Math.PI);
+                    const isHorizontal = angle < ANGLE_THRESHOLD || angle > (180 - ANGLE_THRESHOLD);
+
+                    const isSidebarOpen = sidebar.classList.contains("open");
+
+                    // サイドバーが閉じている時: 右スワイプで開く
+                    if (!isSidebarOpen && isSwipingRight && isWithinTimeLimit && isHorizontal) {
+                        sidebar.classList.add("open");
+                        console.log('[ui-js] sidebar opened by swipe gesture');
+                    }
+                    // サイドバーが開いている時: 左スワイプで閉じる
+                    else if (isSidebarOpen && isSwipingLeft && isWithinTimeLimit && isHorizontal) {
+                        sidebar.classList.remove("open");
+                        console.log('[ui-js] sidebar closed by swipe gesture');
+                    }
+                }, { passive: true });
+
+                sidebar.dataset.swipeHandlerAttached = "true";
+                console.log('[ui-js] sidebar swipe gesture handler attached');
+                return true;
+            };
+
             const setupSidebarOverlayDismiss = () => {
                 const sidebar = document.querySelector(".sidebar.saiverse-sidebar");
                 if (!sidebar) {
@@ -699,6 +777,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                         setActive(current);
                     }
                     setupAttachmentControls();
+                    setupSidebarSwipeGesture();
                     setupSidebarOverlayDismiss();
                 }
                 return found;
@@ -727,6 +806,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                 }
                 markSidebars();
                 setupAttachmentControls();
+                setupSidebarSwipeGesture();
             }, 5000);
         }
         """

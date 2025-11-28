@@ -1,5 +1,5 @@
 {
-  "name": "item_place_playbook",
+  "name": "item_place",
   "description": "Place an item from persona's inventory into a building",
   "input_schema": [
     {

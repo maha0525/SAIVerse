@@ -1,5 +1,5 @@
 {
-  "name": "item_pickup_playbook",
+  "name": "item_pickup",
   "description": "Pick up an item from the building and add it to persona's inventory",
   "input_schema": [
     {

@@ -7,6 +7,14 @@ from pydantic import BaseModel, Field
 from typing_extensions import Literal
 
 
+class ConditionalNext(BaseModel):
+    """Conditional edge routing based on state field value."""
+    field: str = Field(description="State key to evaluate (e.g., 'router.playbook'). Supports nested keys with dot notation.")
+    cases: Dict[str, Optional[str]] = Field(
+        description="Mapping of values to next node IDs. Use 'default' key for fallback. Value can be null to end execution."
+    )
+
+
 class NodeType(str, Enum):
     LLM = "llm"
     TOOL = "tool"
@@ -23,6 +31,10 @@ class LLMNodeDef(BaseModel):
     type: Literal[NodeType.LLM]
     action: Optional[str] = Field(default=None, description="Prompt template. Use {variable_name} placeholders.")
     next: Optional[str] = None
+    conditional_next: Optional[ConditionalNext] = Field(
+        default=None,
+        description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
     model_type: Optional[str] = Field(
         default="normal",
         description="Which model to use: 'normal' (default) or 'lightweight' for faster/cheaper models."
@@ -54,6 +66,10 @@ class ToolNodeDef(BaseModel):
         description="List of keys to store tuple results. E.g. ['text', 'snippet', 'file_path'] for multi-value tool returns."
     )
     next: Optional[str] = None
+    conditional_next: Optional[ConditionalNext] = Field(
+        default=None,
+        description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
 
 
 class SpeakNodeDef(BaseModel):
@@ -63,6 +79,10 @@ class SpeakNodeDef(BaseModel):
         default=None, description="Optional template for final output. Defaults to last message content."
     )
     next: Optional[str] = None
+    conditional_next: Optional[ConditionalNext] = Field(
+        default=None,
+        description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
 
 
 class ThinkNodeDef(BaseModel):
@@ -70,6 +90,10 @@ class ThinkNodeDef(BaseModel):
     type: Literal[NodeType.THINK]
     action: Optional[str] = Field(default=None, description="Optional note to store internally.")
     next: Optional[str] = None
+    conditional_next: Optional[ConditionalNext] = Field(
+        default=None,
+        description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
 
 
 
@@ -83,12 +107,21 @@ class SayNodeDef(BaseModel):
         default=None, description="Template for UI output only (no SAIMemory record). Defaults to last message content."
     )
     next: Optional[str] = None
+    conditional_next: Optional[ConditionalNext] = Field(
+        default=None,
+        description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
 
 
 class PassNodeDef(BaseModel):
     id: str
     type: Literal[NodeType.PASS]
     next: Optional[str] = None
+    conditional_next: Optional[ConditionalNext] = Field(
+        default=None,
+        description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
+
 class MemorizeNodeDef(BaseModel):
     id: str
     type: Literal[NodeType.MEMORY]
@@ -98,6 +131,10 @@ class MemorizeNodeDef(BaseModel):
     role: str = Field(default="assistant", description="Role name to store in SAIMemory.")
     tags: Optional[List[str]] = Field(default=None, description="Optional tags for SAIMemory metadata.")
     next: Optional[str] = None
+    conditional_next: Optional[ConditionalNext] = Field(
+        default=None,
+        description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
 
 
 
@@ -110,6 +147,10 @@ class SubPlayNodeDef(BaseModel):
     input_template: Optional[str] = Field(default="{input}", description="Template for the input passed to the sub-playbook")
     propagate_output: bool = Field(default=False, description="If true, append sub-playbook outputs to parent outputs")
     next: Optional[str] = None
+    conditional_next: Optional[ConditionalNext] = Field(
+        default=None,
+        description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
 
 NodeDef = Union[LLMNodeDef, ToolNodeDef, SpeakNodeDef, ThinkNodeDef, MemorizeNodeDef, SayNodeDef, PassNodeDef, SubPlayNodeDef]
 
@@ -131,6 +172,7 @@ class ContextRequirements(BaseModel):
     inventory: bool = Field(default=True, description="Include persona inventory in system prompt")
     building_items: bool = Field(default=True, description="Include building items in system prompt")
     system_prompt: bool = Field(default=True, description="Include persona and building system prompts")
+    available_playbooks: bool = Field(default=False, description="Include available playbooks list in system prompt")
 
 
 class PlaybookSchema(BaseModel):
@@ -140,6 +182,10 @@ class PlaybookSchema(BaseModel):
     context_requirements: Optional[ContextRequirements] = Field(
         default=None,
         description="Context requirements for this playbook. If not specified, uses full context (backward compatible)."
+    )
+    router_callable: bool = Field(
+        default=False,
+        description="If true, this playbook can be called from the router in meta playbooks."
     )
     nodes: List[NodeDef]
     start_node: str
@@ -158,19 +204,45 @@ def validate_playbook_graph(playbook: PlaybookSchema) -> None:
     if start_id not in node_map:
         raise PlaybookValidationError(f"start_node '{start_id}' is not defined in nodes")
 
+    # Collect all edges (including conditional ones)
+    all_edges: Dict[str, List[Optional[str]]] = {}
+    for node in playbook.nodes:
+        edges: List[Optional[str]] = []
+
+        # Check conditional_next first (takes precedence over next)
+        conditional_next = getattr(node, "conditional_next", None)
+        if conditional_next:
+            for target in conditional_next.cases.values():
+                if target is not None and target not in node_map:
+                    raise PlaybookValidationError(
+                        f"Node '{node.id}' conditional_next references missing target '{target}'"
+                    )
+                edges.append(target)
+        else:
+            # Use regular next
+            next_id = getattr(node, "next", None)
+            if next_id is not None:
+                if next_id not in node_map:
+                    raise PlaybookValidationError(
+                        f"Node '{node.id}' references missing next '{next_id}'"
+                    )
+                edges.append(next_id)
+
+        all_edges[node.id] = edges
+
+    # BFS to find all reachable nodes (avoiding cycle check for branching graphs)
     visited: Set[str] = set()
-    current = start_id
-    while current:
+    queue = [start_id]
+
+    while queue:
+        current = queue.pop(0)
         if current in visited:
-            raise PlaybookValidationError(f"Detected cycle involving node '{current}'")
+            continue
         visited.add(current)
-        node = node_map[current]
-        next_id = getattr(node, "next", None)
-        if not next_id:
-            break
-        if next_id not in node_map:
-            raise PlaybookValidationError(f"Node '{current}' references missing next '{next_id}'")
-        current = next_id
+
+        for next_id in all_edges.get(current, []):
+            if next_id is not None and next_id not in visited:
+                queue.append(next_id)
 
     unreachable = [node_id for node_id in node_map.keys() if node_id not in visited]
     if unreachable:

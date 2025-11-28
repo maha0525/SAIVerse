@@ -680,6 +680,139 @@ def create_world_editor_ui():
                     outputs=[create_item_status_display, item_df],
                 )
 
+    with gr.Accordion("Playbook管理", open=False):
+        gr.Markdown("Playbookの一覧表示、編集、削除を行います。新規作成はスクリプト `python scripts/import_playbook.py` を使用してください。")
+
+        playbook_df = gr.DataFrame(
+            value=lambda: manager.get_playbooks_df(),
+            interactive=False,
+            label="Playbooks"
+        )
+
+        with gr.Tabs():
+            with gr.TabItem("編集/削除"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        playbook_id_text = gr.Textbox(label="ID", interactive=False)
+                        playbook_name_text = gr.Textbox(label="Name")
+                        playbook_description_text = gr.Textbox(label="Description", lines=3)
+                        playbook_scope_dropdown = gr.Dropdown(
+                            label="Scope",
+                            choices=["public", "personal", "building"],
+                            value="public"
+                        )
+                        playbook_created_by_text = gr.Textbox(label="Created By Persona ID")
+                        playbook_building_id_text = gr.Textbox(label="Building ID")
+                        playbook_router_callable_check = gr.Checkbox(label="Router Callable", value=False)
+                        playbook_schema_json_text = gr.Textbox(label="Schema JSON", lines=5)
+                        playbook_nodes_json_text = gr.Textbox(label="Nodes JSON", lines=10)
+                        playbook_created_at_text = gr.Textbox(label="Created At", interactive=False)
+                        playbook_updated_at_text = gr.Textbox(label="Updated At", interactive=False)
+
+                        with gr.Row():
+                            update_playbook_btn = gr.Button("更新", variant="primary")
+                            delete_playbook_confirm_check = gr.Checkbox(label="削除を確認", value=False)
+                            delete_playbook_btn = gr.Button("削除", variant="stop", interactive=False)
+
+                        playbook_status_display = gr.Textbox(label="Status", interactive=False)
+
+                def on_select_playbook(evt: gr.SelectData):
+                    manager = _require_manager()
+                    if evt.index is None:
+                        return "", "", "", "public", "", "", False, "", "", "", ""
+                    # Handle both list and tuple index types
+                    if not isinstance(evt.index, (list, tuple)):
+                        return "", "", "", "public", "", "", False, "", "", "", ""
+                    row_index = evt.index[0]
+                    df = manager.get_playbooks_df()
+                    if df.empty or row_index >= len(df):
+                        return "", "", "", "public", "", "", False, "", "", "", ""
+                    playbook_id = df.iloc[row_index]["id"]
+                    details = manager.get_playbook_details(playbook_id)
+                    if not details:
+                        return "", "", "", "public", "", "", False, "", "", "", ""
+                    return (
+                        details["id"],
+                        details["name"],
+                        details["description"],
+                        details["scope"],
+                        details.get("created_by_persona_id") or "",
+                        details.get("building_id") or "",
+                        details["router_callable"],
+                        details["schema_json"],
+                        details["nodes_json"],
+                        details["created_at"],
+                        details["updated_at"],
+                    )
+
+                def update_playbook_ui(
+                    playbook_id_str, name, desc, scope, created_by, building_id,
+                    router_callable, schema_json, nodes_json
+                ):
+                    if not playbook_id_str:
+                        return "Error: Select a playbook to update.", gr.update()
+                    try:
+                        playbook_id = int(playbook_id_str)
+                    except (ValueError, TypeError):
+                        return "Error: Invalid playbook ID.", gr.update()
+
+                    result = manager.update_playbook(
+                        playbook_id, name, desc, scope,
+                        created_by if created_by else None,
+                        building_id if building_id else None,
+                        schema_json, nodes_json, router_callable
+                    )
+                    return result, manager.get_playbooks_df()
+
+                def delete_playbook_ui(playbook_id_str, confirmed):
+                    if not confirmed:
+                        return "Error: Please check the confirmation box to delete.", gr.update()
+                    if not playbook_id_str:
+                        return "Error: Select a playbook to delete.", gr.update()
+                    try:
+                        playbook_id = int(playbook_id_str)
+                    except (ValueError, TypeError):
+                        return "Error: Invalid playbook ID.", gr.update()
+
+                    result = manager.delete_playbook(playbook_id)
+                    return result, manager.get_playbooks_df()
+
+                def toggle_delete_playbook_button(confirmed):
+                    return gr.update(interactive=confirmed)
+
+                playbook_df.select(
+                    fn=on_select_playbook,
+                    inputs=[],
+                    outputs=[
+                        playbook_id_text, playbook_name_text, playbook_description_text,
+                        playbook_scope_dropdown, playbook_created_by_text, playbook_building_id_text,
+                        playbook_router_callable_check, playbook_schema_json_text, playbook_nodes_json_text,
+                        playbook_created_at_text, playbook_updated_at_text
+                    ]
+                )
+
+                update_playbook_btn.click(
+                    fn=update_playbook_ui,
+                    inputs=[
+                        playbook_id_text, playbook_name_text, playbook_description_text,
+                        playbook_scope_dropdown, playbook_created_by_text, playbook_building_id_text,
+                        playbook_router_callable_check, playbook_schema_json_text, playbook_nodes_json_text
+                    ],
+                    outputs=[playbook_status_display, playbook_df]
+                )
+
+                delete_playbook_confirm_check.change(
+                    fn=toggle_delete_playbook_button,
+                    inputs=delete_playbook_confirm_check,
+                    outputs=delete_playbook_btn
+                )
+
+                delete_playbook_btn.click(
+                    fn=delete_playbook_ui,
+                    inputs=[playbook_id_text, delete_playbook_confirm_check],
+                    outputs=[playbook_status_display, playbook_df]
+                )
+
     with gr.Accordion("バックアップ/リストア管理", open=False):
         gr.Markdown("現在のワールドの状態をバックアップしたり、過去のバックアップから復元します。**リストア後はアプリケーションの再起動が必須です。**")
 
@@ -749,6 +882,7 @@ def create_world_editor_ui():
         backups = manager.get_backups()
         tools = manager.get_tools_df()
         items = manager.get_items_df()
+        playbooks = manager.get_playbooks_df()
 
         backup_choices = backups["Backup Name"].tolist() if not backups.empty else []
 
@@ -760,6 +894,7 @@ def create_world_editor_ui():
             backups,
             tools,
             items,
+            playbooks,
             gr.update(choices=backup_choices, value=None),
         )
 
@@ -774,6 +909,7 @@ def create_world_editor_ui():
             backup_df,
             tool_df,
             item_df,
+            playbook_df,
             selected_backup_dropdown,
         ],
     )

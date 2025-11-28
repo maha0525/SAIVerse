@@ -290,7 +290,33 @@ class SEARuntime:
                 variables["last"] = note
                 outputs.append(note)
 
-            next_id = getattr(current, "next", None)
+            # Resolve next node (conditional_next takes precedence over next)
+            conditional_next = getattr(current, "conditional_next", None)
+            if conditional_next:
+                # Resolve field value from variables (supports nested keys like "router.playbook")
+                field_path = conditional_next.field.split(".")
+                value = variables
+                for key in field_path:
+                    if isinstance(value, dict):
+                        value = value.get(key)
+                    else:
+                        value = None
+                        break
+
+                # Convert to string for matching
+                value_str = str(value) if value is not None else ""
+
+                LOGGER.debug("[sea][lightweight] conditional_next: field=%s value=%s cases=%s", conditional_next.field, value_str, list(conditional_next.cases.keys()))
+
+                # Look up target in cases
+                next_id = conditional_next.cases.get(value_str)
+                if next_id is None and "default" in conditional_next.cases:
+                    next_id = conditional_next.cases["default"]
+
+                LOGGER.debug("[sea][lightweight] conditional_next: selected path=%s", next_id or "END")
+            else:
+                next_id = getattr(current, "next", None)
+
             current = node_map.get(next_id) if next_id else None
 
         return outputs
@@ -980,18 +1006,35 @@ class SEARuntime:
 
         # ---- system prompt ----
         if reqs.system_prompt:
-            system_parts: List[str] = []
+            system_sections: List[str] = []
+
+            # 1. Common prompt (world setting, framework explanation)
+            common_prompt_template = getattr(persona, "common_prompt", None)
+            if common_prompt_template:
+                try:
+                    # Get building info for variable expansion
+                    building_obj = getattr(persona, "buildings", {}).get(building_id)
+                    building_name = building_obj.name if building_obj else building_id
+                    city_name = getattr(persona, "current_city_id", "unknown_city")
+
+                    # Expand variables in common prompt
+                    common_text = common_prompt_template.format(
+                        current_persona_name=getattr(persona, "persona_name", "Unknown"),
+                        current_persona_id=getattr(persona, "persona_id", "unknown_id"),
+                        current_building_name=building_name,
+                        current_city_name=city_name,
+                        current_persona_system_instruction=getattr(persona, "persona_system_instruction", ""),
+                        current_building_system_instruction=getattr(building_obj, "system_instruction", "") if building_obj else "",
+                    )
+                    system_sections.append(common_text.strip())
+                except Exception as exc:
+                    LOGGER.debug("Failed to format common prompt: %s", exc)
+
+            # 2. "## あなたについて" section
+            persona_section_parts: List[str] = []
             persona_sys = getattr(persona, "persona_system_instruction", "") or ""
             if persona_sys:
-                system_parts.append(persona_sys.strip())
-
-            # building system instruction if available
-            try:
-                building_obj = getattr(persona, "buildings", {}).get(building_id)
-                if building_obj and getattr(building_obj, "system_instruction", None):
-                    system_parts.append(str(building_obj.system_instruction).strip())
-            except Exception:
-                pass
+                persona_section_parts.append(persona_sys.strip())
 
             # persona inventory
             if reqs.inventory:
@@ -1001,26 +1044,66 @@ class SEARuntime:
                 except Exception:
                     inv_lines = []
                 if inv_lines:
-                    system_parts.append("### インベントリ\n" + "\n".join(inv_lines))
+                    persona_section_parts.append("### インベントリ\n" + "\n".join(inv_lines))
 
-            # building inventory (items located in building)
-            if reqs.building_items:
+            if persona_section_parts:
+                system_sections.append("## あなたについて\n" + "\n\n".join(persona_section_parts))
+
+            # 3. "## {building_name}" section (current location)
+            try:
+                building_obj = getattr(persona, "buildings", {}).get(building_id)
+                if building_obj:
+                    building_section_parts: List[str] = []
+
+                    # Building system instruction
+                    building_sys = getattr(building_obj, "system_instruction", None)
+                    if building_sys:
+                        building_section_parts.append(str(building_sys).strip())
+
+                    # Building items
+                    if reqs.building_items:
+                        try:
+                            items_by_building = getattr(self.manager, "items_by_building", {}) or {}
+                            item_registry = getattr(self.manager, "item_registry", {}) or {}
+                            b_items = items_by_building.get(building_id, [])
+                            lines = []
+                            for iid in b_items:
+                                data = item_registry.get(iid, {})
+                                name = data.get("name", iid)
+                                desc = (data.get("description") or "").strip() or "(説明なし)"
+                                lines.append(f"- [{iid}] {name}: {desc}")
+                            if lines:
+                                building_section_parts.append("### 建物内のアイテム\n" + "\n".join(lines))
+                        except Exception:
+                            pass
+
+                    if building_section_parts:
+                        building_name = getattr(building_obj, "name", building_id)
+                        system_sections.append(f"## {building_name}\n" + "\n\n".join(building_section_parts))
+            except Exception:
+                pass
+
+            # 4. "## 利用可能な能力" section (available playbooks)
+            if reqs.available_playbooks:
                 try:
-                    items_by_building = getattr(self.manager, "items_by_building", {}) or {}
-                    item_registry = getattr(self.manager, "item_registry", {}) or {}
-                    b_items = items_by_building.get(building_id, [])
-                    lines = []
-                    for iid in b_items:
-                        data = item_registry.get(iid, {})
-                        name = data.get("name", iid)
-                        desc = (data.get("description") or "").strip() or "(説明なし)"
-                        lines.append(f"- [{iid}] {name}: {desc}")
-                    if lines:
-                        system_parts.append("### 建物内のアイテム\n" + "\n".join(lines))
-                except Exception:
-                    pass
+                    from tools import TOOL_REGISTRY
+                    list_playbooks_func = TOOL_REGISTRY.get("list_available_playbooks")
+                    if list_playbooks_func:
+                        # Get available playbooks JSON
+                        playbooks_json, _, _ = list_playbooks_func(
+                            persona_id=getattr(persona, "persona_id", None),
+                            building_id=building_id
+                        )
+                        if playbooks_json:
+                            import json
+                            playbooks_list = json.loads(playbooks_json)
+                            if playbooks_list:
+                                playbooks_formatted = json.dumps(playbooks_list, ensure_ascii=False, indent=2)
+                                system_sections.append(f"## 利用可能な能力\n以下のPlaybookを実行できます：\n```json\n{playbooks_formatted}\n```")
+                except Exception as exc:
+                    LOGGER.debug("Failed to add available playbooks section: %s", exc)
 
-            system_text = "\n\n".join([s for s in system_parts if s])
+            system_text = "\n\n---\n\n".join([s for s in system_sections if s])
             if system_text:
                 messages.append({"role": "system", "content": system_text})
 
