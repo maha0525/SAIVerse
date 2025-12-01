@@ -13,6 +13,7 @@
     "building_items": true,
     "system_prompt": true
   },
+  "router_callable": false,
   "nodes": [
     {
       "id": "router",

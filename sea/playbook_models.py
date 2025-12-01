@@ -106,6 +106,9 @@ class SayNodeDef(BaseModel):
     action: Optional[str] = Field(
         default=None, description="Template for UI output only (no SAIMemory record). Defaults to last message content."
     )
+    metadata_key: Optional[str] = Field(
+        default=None, description="State key containing metadata dict to attach to the message."
+    )
     next: Optional[str] = None
     conditional_next: Optional[ConditionalNext] = Field(
         default=None,
@@ -130,6 +133,9 @@ class MemorizeNodeDef(BaseModel):
     )
     role: str = Field(default="assistant", description="Role name to store in SAIMemory.")
     tags: Optional[List[str]] = Field(default=None, description="Optional tags for SAIMemory metadata.")
+    metadata_key: Optional[str] = Field(
+        default=None, description="State key containing metadata dict to attach to the message."
+    )
     next: Optional[str] = None
     conditional_next: Optional[ConditionalNext] = Field(
         default=None,
@@ -179,6 +185,10 @@ class PlaybookSchema(BaseModel):
     name: str = Field(..., pattern=r"^[a-z0-9_]+$")
     description: str
     input_schema: List[InputParam]
+    output_schema: Optional[List[str]] = Field(
+        default=None,
+        description="List of state keys to propagate to parent playbook when this sub-playbook completes."
+    )
     context_requirements: Optional[ContextRequirements] = Field(
         default=None,
         description="Context requirements for this playbook. If not specified, uses full context (backward compatible)."

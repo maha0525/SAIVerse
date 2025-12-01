@@ -41,12 +41,14 @@ class SEARuntime:
         self._trace = bool(os.getenv("SAIVERSE_SEA_TRACE"))
 
     # ---------------- meta entrypoints -----------------
-    def run_meta_user(self, persona, user_input: str, building_id: str) -> List[str]:
+    def run_meta_user(self, persona, user_input: str, building_id: str, metadata: Optional[Dict[str, Any]] = None) -> List[str]:
         """Router -> subgraph -> speak. Returns spoken strings for gateway/UI."""
         # Record user input to history before processing
         if user_input:
             try:
                 user_msg = {"role": "user", "content": user_input}
+                if metadata:
+                    user_msg["metadata"] = metadata
                 persona.history_manager.add_message(user_msg, building_id, heard_by=None)
             except Exception:
                 LOGGER.exception("Failed to record user input to history")
@@ -255,7 +257,9 @@ class SEARuntime:
                 memo_text = _format(current.action, {**variables, "last": last_text}) if current.action else last_text
                 role = getattr(current, "role", "assistant") or "assistant"
                 tags = getattr(current, "tags", None)
-                self._store_memory(persona, memo_text, role=role, tags=tags, pulse_id=pulse_id)
+                metadata_key = getattr(current, "metadata_key", None)
+                metadata = variables.get(metadata_key) if metadata_key else None
+                self._store_memory(persona, memo_text, role=role, tags=tags, pulse_id=pulse_id, metadata=metadata)
                 last_text = memo_text
                 variables["last"] = memo_text
                 if self._should_collect_memory_output(playbook):
@@ -272,7 +276,9 @@ class SEARuntime:
 
             elif current.type == NodeType.SAY:
                 say_text = _format(current.action, {**variables, "last": last_text}) if current.action else last_text
-                self._emit_say(persona, building_id, say_text, pulse_id=pulse_id)
+                metadata_key = getattr(current, "metadata_key", None)
+                metadata = variables.get(metadata_key) if metadata_key else None
+                self._emit_say(persona, building_id, say_text, pulse_id=pulse_id, metadata=metadata)
                 outputs.append(say_text)
                 last_text = say_text
                 variables["last"] = say_text
@@ -319,6 +325,13 @@ class SEARuntime:
 
             current = node_map.get(next_id) if next_id else None
 
+        # Write back state variables to parent_state based on output_schema
+        if parent_state is not None and playbook.output_schema:
+            for key in playbook.output_schema:
+                if key in variables:
+                    parent_state[key] = variables[key]
+                    LOGGER.debug("[sea] Propagated %s to parent_state: %s", key, str(variables[key])[:200])
+
         return outputs
 
     # LangGraph compile wrapper -----------------------------------------
@@ -346,7 +359,7 @@ class SEARuntime:
             tool_node_factory=lambda node_def: self._lg_tool_node(node_def, persona),
             speak_node=lambda state: self._lg_speak_node(state, persona, building_id, _lg_outputs),
             think_node=lambda state: self._lg_think_node(state, persona, _lg_outputs),
-            say_node=lambda state: self._lg_say_node(state, persona, building_id, _lg_outputs),
+            say_node_factory=lambda node_def: self._lg_say_node(node_def, persona, building_id, _lg_outputs),
             memorize_node_factory=lambda node_def: self._lg_memorize_node(node_def, persona, playbook, _lg_outputs),
             exec_node_factory=(lambda node_def: self._lg_exec_node(node_def, playbook, persona, building_id, auto_mode, _lg_outputs))
             if playbook.name.startswith("meta_")
@@ -396,10 +409,18 @@ class SEARuntime:
             return None
 
         try:
-            asyncio.run(compiled(initial_state))
+            final_state = asyncio.run(compiled(initial_state))
         except Exception:
             LOGGER.exception("SEA LangGraph execution failed; falling back to lightweight executor")
             return None
+
+        # Write back state variables to parent_state based on output_schema
+        if parent_state is not None and isinstance(final_state, dict) and playbook.output_schema:
+            for key in playbook.output_schema:
+                if key in final_state:
+                    parent_state[key] = final_state[key]
+                    LOGGER.debug("[sea][LangGraph] Propagated %s to parent_state: %s", key, str(final_state[key])[:200])
+
         # speak/think nodes already emitted; return collected texts for UI consistency
         return list(_lg_outputs)
 
@@ -795,7 +816,9 @@ class SEARuntime:
             role = getattr(node_def, "role", "assistant") or "assistant"
             tags = getattr(node_def, "tags", None)
             pulse_id = state.get("pulse_id")
-            self._store_memory(persona, memo_text, role=role, tags=tags, pulse_id=pulse_id)
+            metadata_key = getattr(node_def, "metadata_key", None)
+            metadata = state.get(metadata_key) if metadata_key else None
+            self._store_memory(persona, memo_text, role=role, tags=tags, pulse_id=pulse_id, metadata=metadata)
             state["last"] = memo_text
             if outputs is not None and self._should_collect_memory_output(playbook):
                 outputs.append(memo_text)
@@ -811,13 +834,17 @@ class SEARuntime:
             outputs.append(text)
         return state
 
-    def _lg_say_node(self, state: dict, persona: Any, building_id: str, outputs: Optional[List[str]] = None):
-        text = state.get("last") or ""
-        pulse_id = state.get("pulse_id")
-        self._emit_say(persona, building_id, text, pulse_id=pulse_id)
-        if outputs is not None:
-            outputs.append(text)
-        return state
+    def _lg_say_node(self, node_def: Any, persona: Any, building_id: str, outputs: Optional[List[str]] = None):
+        async def node(state: dict):
+            text = state.get("last") or ""
+            pulse_id = state.get("pulse_id")
+            metadata_key = getattr(node_def, "metadata_key", None)
+            metadata = state.get(metadata_key) if metadata_key else None
+            self._emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=metadata)
+            if outputs is not None:
+                outputs.append(text)
+            return state
+        return node
 
     def _lg_think_node(self, state: dict, persona: Any, outputs: Optional[List[str]] = None):
         text = state.get("last") or ""
@@ -915,6 +942,7 @@ class SEARuntime:
         role: str = "assistant",
         tags: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         if not text:
             return
@@ -926,8 +954,21 @@ class SEARuntime:
                 # Add pulse:uuid tag
                 if pulse_id:
                     clean_tags.append(f"pulse:{pulse_id}")
+                # Build metadata dict
+                msg_metadata: Dict[str, Any] = {}
                 if clean_tags:
-                    message["metadata"] = {"tags": clean_tags}
+                    msg_metadata["tags"] = clean_tags
+                # Merge additional metadata (e.g., media attachments)
+                if isinstance(metadata, dict):
+                    for key, value in metadata.items():
+                        if key == "tags":
+                            # Merge tags
+                            extra_tags = [str(t) for t in value if t] if isinstance(value, list) else []
+                            msg_metadata.setdefault("tags", []).extend(extra_tags)
+                        else:
+                            msg_metadata[key] = value
+                if msg_metadata:
+                    message["metadata"] = msg_metadata
                 adapter.append_persona_message(message)
         except Exception:
             LOGGER.debug("memorize node not stored", exc_info=True)
@@ -967,12 +1008,23 @@ class SEARuntime:
             except Exception:
                 LOGGER.exception("Failed to emit speak message")
 
-    def _emit_say(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None) -> None:
+    def _emit_say(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> None:
         msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
-        # Add pulse:uuid tag to metadata
-        # Note: say nodes don't add to persona history, so no conversation tag
+        # Build metadata dict
+        msg_metadata: Dict[str, Any] = {}
         if pulse_id:
-            msg["metadata"] = {"tags": [f"pulse:{pulse_id}"]}
+            msg_metadata["tags"] = [f"pulse:{pulse_id}"]
+        # Merge additional metadata (e.g., media attachments)
+        if isinstance(metadata, dict):
+            for key, value in metadata.items():
+                if key == "tags":
+                    # Merge tags
+                    extra_tags = [str(t) for t in value if t] if isinstance(value, list) else []
+                    msg_metadata.setdefault("tags", []).extend(extra_tags)
+                else:
+                    msg_metadata[key] = value
+        if msg_metadata:
+            msg["metadata"] = msg_metadata
         try:
             persona.history_manager.add_to_building_only(building_id, msg)
             self.manager.gateway_handle_ai_replies(building_id, persona, [text])

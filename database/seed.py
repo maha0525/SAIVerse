@@ -7,7 +7,7 @@ from datetime import datetime
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from models import Base, User, City, AI, Building, BuildingOccupancyLog, Blueprint, Tool
+from models import Base, User, City, AI, Building, BuildingOccupancyLog, Blueprint, Tool, Playbook
 
 try:  # pragma: no cover - supports running as script or module
     from .paths import default_db_path, ensure_data_dir
@@ -16,15 +16,115 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def seed_database():
+
+def import_initial_playbooks() -> None:
+    """Import all playbooks from sea/playbooks/public/ directory."""
+    playbooks_dir = Path(__file__).parent.parent / "sea" / "playbooks" / "public"
+    if not playbooks_dir.exists():
+        logging.warning(f"Playbooks directory not found: {playbooks_dir}")
+        return
+
+    db_path = default_db_path()
+    engine = create_engine(f"sqlite:///{db_path}")
+    Session = sessionmaker(bind=engine)
+
+    imported_count = 0
+    with Session() as session:
+        for json_path in sorted(playbooks_dir.glob("*.json")):
+            try:
+                data = json.loads(json_path.read_text(encoding="utf-8"))
+                name = data.get("name")
+                if not name:
+                    logging.warning(f"Skipping {json_path.name}: missing 'name' field")
+                    continue
+
+                # Check if already imported
+                existing = session.query(Playbook).filter(Playbook.name == name).first()
+                if existing:
+                    logging.info(f"Playbook '{name}' already exists, skipping.")
+                    continue
+
+                description = data.get("description", "")
+                router_callable = data.get("router_callable", False)
+                schema_payload = {
+                    "name": name,
+                    "description": description,
+                    "input_schema": data.get("input_schema", []),
+                    "start_node": data.get("start_node"),
+                }
+                nodes_json = json.dumps(data, ensure_ascii=False)
+                schema_json = json.dumps(schema_payload, ensure_ascii=False)
+
+                record = Playbook(
+                    name=name,
+                    description=description,
+                    scope="public",
+                    created_by_persona_id=None,
+                    building_id=None,
+                    schema_json=schema_json,
+                    nodes_json=nodes_json,
+                    router_callable=router_callable,
+                )
+                session.add(record)
+                imported_count += 1
+                logging.info(f"Imported playbook '{name}' (router_callable={router_callable}).")
+            except Exception as exc:
+                logging.error(f"Failed to import {json_path.name}: {exc}")
+
+        session.commit()
+
+    logging.info(f"Playbook import completed: {imported_count} playbooks imported.")
+
+def seed_database(force: bool = False):
     """
     Creates and seeds a new unified database from cities.json and initial data.
+
+    ⚠️  WARNING: This will DELETE your existing database and ALL data! ⚠️
+
+    This includes:
+    - All personas (AI entities)
+    - All conversation history
+    - All building occupancy logs
+    - All playbooks
+    - All items and locations
+
+    Use this ONLY for initial setup or when you want to reset everything.
+    For updating playbooks only, use scripts/import_all_playbooks.py instead.
+
+    Args:
+        force: If True, skip confirmation prompt. Use with extreme caution.
     """
     DB_PATH = default_db_path()
     ensure_data_dir()
 
-    # --- 1. Delete old DB if it exists ---
+    # --- 1. Safety check: warn user about existing DB ---
     if DB_PATH.exists():
+        if not force:
+            print("\n" + "=" * 70)
+            print("⚠️  WARNING: EXISTING DATABASE FOUND ⚠️")
+            print("=" * 70)
+            print(f"Database path: {DB_PATH}")
+            print(f"Database size: {DB_PATH.stat().st_size / 1024:.1f} KB")
+            print("\nThis operation will PERMANENTLY DELETE:")
+            print("  • All personas (AI characters)")
+            print("  • All conversation history")
+            print("  • All playbooks")
+            print("  • All items and locations")
+            print("  • All building occupancy logs")
+            print("\nA backup will be created, but you should manually backup important data.")
+            print("=" * 70)
+
+            response = input("\nType 'DELETE' in ALL CAPS to confirm deletion: ")
+            if response != "DELETE":
+                print("\n✓ Operation cancelled. Database preserved.")
+                return
+
+        # Create backup before deletion
+        backup_path = DB_PATH.parent / f"{DB_PATH.name}_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
+        import shutil
+        shutil.copy2(DB_PATH, backup_path)
+        logging.info(f"Created backup: {backup_path}")
+
         logging.warning(f"Deleting existing database: {DB_PATH}")
         os.remove(DB_PATH)
 
@@ -221,5 +321,30 @@ def seed_database():
     finally:
         db.close()
 
+    # Import initial playbooks after DB seeding
+    try:
+        import_initial_playbooks()
+    except Exception as e:
+        logging.error(f"An error occurred during playbook import: {e}", exc_info=True)
+
 if __name__ == "__main__":
-    seed_database()
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Initialize SAIVerse database (⚠️  DESTRUCTIVE OPERATION ⚠️)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+WARNING: This will delete your existing database and all data!
+
+For safer operations:
+  - To update playbooks only: python scripts/import_all_playbooks.py
+  - To migrate schema: python database/migrate.py --db database/data/saiverse.db
+"""
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip confirmation prompt (USE WITH EXTREME CAUTION)"
+    )
+    args = parser.parse_args()
+
+    seed_database(force=args.force)

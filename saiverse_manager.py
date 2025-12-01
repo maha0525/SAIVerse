@@ -383,11 +383,11 @@ class SAIVerseManager(
             return None
         return None
 
-    def run_sea_user(self, persona, building_id: str, user_input: str) -> List[str]:
+    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None) -> List[str]:
         if not self.sea_runtime:
             return []
         try:
-            return self.sea_runtime.run_meta_user(persona, user_input, building_id)
+            return self.sea_runtime.run_meta_user(persona, user_input, building_id, metadata=metadata)
         except Exception as exc:
             logging.exception("SEA user run failed: %s", exc)
             return []
@@ -686,7 +686,7 @@ class SAIVerseManager(
             if item_id not in self.world_items:
                 self.world_items.append(item_id)
 
-            self.item_locations[item_id] = {
+        self.item_locations[item_id] = {
             "owner_kind": owner_kind,
             "owner_id": owner_id,
             "updated_at": updated_at,
@@ -706,7 +706,7 @@ class SAIVerseManager(
         building_id = persona.current_building_id
         if not building_id:
             raise RuntimeError("現在地が不明なため、アイテムを拾えません。")
-        resolved_id = self._resolve_item_identifier(item_id) or item_id
+        resolved_id = item_id
         item = self.items.get(resolved_id)
         if not item:
             raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
@@ -760,7 +760,7 @@ class SAIVerseManager(
         building_id = building_id or persona.current_building_id
         if not building_id:
             raise RuntimeError("現在地が不明なため、アイテムを置けません。")
-        resolved_id = self._resolve_item_identifier(item_id) or item_id
+        resolved_id = item_id
         item = self.items.get(resolved_id)
         if not item:
             raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
@@ -818,7 +818,7 @@ class SAIVerseManager(
         persona = self.personas.get(persona_id)
         if not persona or getattr(persona, "is_proxy", False):
             raise RuntimeError("このペルソナではアイテムを扱えません。")
-        resolved_id = self._resolve_item_identifier(item_id) or item_id
+        resolved_id = item_id
         item = self.items.get(resolved_id)
         if not item:
             raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")

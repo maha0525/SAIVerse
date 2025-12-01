@@ -13,6 +13,7 @@
     "building_items": false,
     "system_prompt": true
   },
+  "router_callable": true,
   "nodes": [
     {
       "id": "generate_query",

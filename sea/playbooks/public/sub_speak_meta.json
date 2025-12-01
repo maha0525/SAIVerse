@@ -5,6 +5,11 @@
     {
       "name": "input",
       "description": "Composite prompt containing user request and context"
+    },
+    {
+      "name": "metadata",
+      "description": "Optional metadata from tool execution (e.g., media attachments)",
+      "source": "parent.metadata"
     }
   ],
   "context_requirements": {
@@ -14,6 +19,7 @@
     "system_prompt": true,
     "available_playbooks": true
   },
+  "router_callable": false,
   "nodes": [
     {
       "id": "compose",
@@ -29,12 +35,14 @@
       "tags": [
         "conversation"
       ],
+      "metadata_key": "metadata",
       "next": "say"
     },
     {
       "id": "say",
       "type": "say",
       "action": "{last}",
+      "metadata_key": "metadata",
       "next": null
     }
   ],

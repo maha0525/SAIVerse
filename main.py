@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 from saiverse_manager import SAIVerseManager
 from database.paths import default_db_path
+from database.backup import run_startup_backup
 from model_configs import get_model_choices
 from ui import state as ui_state
 from ui.app import build_app
@@ -225,6 +226,9 @@ def main():
     else:
         db_path = default_db_path()
 
+    # Start database backup in background thread
+    threading.Thread(target=run_startup_backup, args=(db_path,), daemon=True).start()
+
     global manager, AUTONOMOUS_BUILDING_CHOICES, AUTONOMOUS_BUILDING_MAP, BUILDING_CHOICES, BUILDING_NAME_TO_ID_MAP, api_server_process
     manager = SAIVerseManager(
         city_name=args.city_name,
@@ -233,7 +237,7 @@ def main():
     )
     if ensure_gateway_runtime:
         ensure_gateway_runtime(manager)
-    
+
     ui_state.bind_manager(manager)
     ui_state.set_model_choices(MODEL_CHOICES)
     ui_state.set_chat_history_limit(CHAT_HISTORY_LIMIT)

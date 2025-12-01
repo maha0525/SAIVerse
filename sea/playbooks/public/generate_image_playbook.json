@@ -7,12 +7,14 @@
       "description": "User request about what image to generate"
     }
   ],
+  "output_schema": ["metadata", "file_path", "snippet", "text"],
   "context_requirements": {
     "history_depth": "full",
     "inventory": false,
     "building_items": false,
     "system_prompt": true
   },
+  "router_callable": true,
   "nodes": [
     {
       "id": "decide_prompt",
@@ -46,7 +48,8 @@
       "type": "memorize",
       "action": "{text}",
       "role": "user",
-      "tags": ["tool", "generate_image"],
+      "tags": ["internal", "tool", "generate_image"],
+      "metadata_key": "metadata",
       "next": null
     }
   ],

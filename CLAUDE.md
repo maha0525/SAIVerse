@@ -22,13 +22,35 @@ SAIVerse is a multi-agent AI system where autonomous AI personas (agents) inhabi
 ## Development Commands
 
 ### Database Setup
-```bash
-# Initialize or reset database (WARNING: destroys existing data)
-python database/seed.py
 
-# Run migrations (for schema changes)
+**⚠️ IMPORTANT: Database Safety ⚠️**
+
+```bash
+# Initialize NEW database (⚠️ DESTROYS existing data - requires confirmation)
+python database/seed.py
+# You will be prompted to type 'DELETE' to confirm
+
+# Force initialization without confirmation (DANGEROUS - use in scripts only)
+python database/seed.py --force
+
+# SAFE: Update playbooks only (does NOT affect personas or other data)
+python scripts/import_all_playbooks.py
+
+# SAFE: Update playbooks with force update
+python scripts/import_all_playbooks.py --force
+
+# SAFE: Preview changes without making them
+python scripts/import_all_playbooks.py --dry-run
+
+# Run migrations (for schema changes - preserves data)
 python database/migrate.py --db database/data/saiverse.db
 ```
+
+**Safety Notes:**
+- `seed.py` will **DELETE ALL DATA** including personas, conversations, and playbooks
+- `import_all_playbooks.py` is **SAFE** - only updates playbooks, preserves everything else
+- `migrate.py` creates automatic backups before schema changes
+- Always manually backup important data before destructive operations
 
 ### Running the System
 ```bash
@@ -56,9 +78,27 @@ python -m pytest tests/test_llm_clients.py
 python -m unittest discover tests
 ```
 
-### Memory Management Scripts
+### Backup and Recovery
+
+**Automatic Backups (Recommended)**
+
+SAIVerse automatically backs up both saiverse.db and persona memory.db files on startup:
+
+- **saiverse.db**: Backed up to `database/data/saiverse.db_backup_YYYYMMDD_HHMMSS_mmm.bak`
+  - Keeps last 10 backups by default (configurable via `SAIVERSE_DB_BACKUP_KEEP`)
+  - Enable/disable: `SAIVERSE_DB_BACKUP_ON_START=true` (enabled by default)
+
+- **memory.db**: Backed up using rdiff-backup to `~/.saiverse/backups/saimemory_rdiff/<persona_id>/`
+  - Incremental backups with full history
+  - Enable/disable: `SAIMEMORY_BACKUP_ON_START=true` (enabled by default)
+
+**Manual Backup Scripts**
+
 ```bash
-# Backup SAIMemory (requires rdiff-backup)
+# Manual saiverse.db backup
+python3 -c "from database.backup import backup_saiverse_db; from database.paths import default_db_path; backup_saiverse_db(default_db_path())"
+
+# Manual persona memory backup (requires rdiff-backup)
 python scripts/backup_saimemory.py persona_id --output-dir ~/.saiverse/backups/
 
 # Import legacy JSON logs to SAIMemory
@@ -262,7 +302,9 @@ Critical settings (see `.env.example`):
 - `SAIVERSE_LOG_LEVEL` (DEBUG/INFO/WARNING)
 - `SAIMEMORY_EMBED_MODEL` (e.g., intfloat/multilingual-e5-base)
 - `QDRANT_LOCATION` (embedded path) or `QDRANT_URL` (remote server)
-- `SAIMEMORY_BACKUP_ON_START=true` (auto-backup on startup)
+- `SAIMEMORY_BACKUP_ON_START=true` (auto-backup persona memory.db on startup)
+- `SAIVERSE_DB_BACKUP_ON_START=true` (auto-backup saiverse.db on startup, **recommended**)
+- `SAIVERSE_DB_BACKUP_KEEP=10` (number of saiverse.db backups to keep)
 - `SAIVERSE_GATEWAY_WS_URL`, `SAIVERSE_GATEWAY_TOKEN` (Discord gateway)
 
 ## Documentation

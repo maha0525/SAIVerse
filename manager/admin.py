@@ -720,6 +720,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "AVATAR_IMAGE": ai.AVATAR_IMAGE,
                 "IS_DISPATCHED": ai.IS_DISPATCHED,
                 "DEFAULT_MODEL": ai.DEFAULT_MODEL,
+                "LIGHTWEIGHT_MODEL": ai.LIGHTWEIGHT_MODEL,
                 "INTERACTION_MODE": ai.INTERACTION_MODE,
             }
         finally:

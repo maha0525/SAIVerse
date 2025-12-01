@@ -18,6 +18,7 @@
     "building_items": false,
     "system_prompt": true
   },
+  "router_callable": false,
   "nodes": [
     {
       "id": "llm",

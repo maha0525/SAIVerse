@@ -1,8 +1,11 @@
 {
-  "name": "basic_chat_no_speak",
-  "description": "Simple reply without speaking (meta playbook will speak)",
+  "name": "sub_think_meta",
+  "description": "Compose internal thought for autonomous step",
   "input_schema": [
-    { "name": "input", "description": "User or system input" }
+    {
+      "name": "input",
+      "description": "Composite context"
+    }
   ],
   "context_requirements": {
     "history_depth": "full",
@@ -10,9 +13,10 @@
     "building_items": true,
     "system_prompt": true
   },
+  "router_callable": false,
   "nodes": [
     {
-      "id": "llm",
+      "id": "compose",
       "type": "llm",
       "action": null,
       "next": "think"
@@ -20,9 +24,9 @@
     {
       "id": "think",
       "type": "think",
-      "action": null,
+      "action": "{last}",
       "next": null
     }
   ],
-  "start_node": "llm"
+  "start_node": "compose"
 }

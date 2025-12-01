@@ -446,7 +446,7 @@ class RuntimeService(
         for persona in responding_personas:
             if sea_enabled:
                 # SEA runtime pushes to gateway internally; streaming経路では二重出力を避けて返却しない
-                self.manager.run_sea_user(persona, building_id, message)
+                self.manager.run_sea_user(persona, building_id, message, metadata=metadata)
             elif persona.interaction_mode == "manual":
                 for token in persona.handle_user_input_stream(
                     message, metadata=metadata
