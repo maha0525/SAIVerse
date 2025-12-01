@@ -11,10 +11,16 @@ from ui.env_settings import create_env_settings_ui
 from ui.chat import (
     call_persona_ui,
     end_conversation_ui,
+    format_building_details,
+    format_execution_states,
     format_location_label,
+    format_persona_details,
     get_autonomous_log,
+    get_building_details,
     get_current_building_history,
     get_current_location_name,
+    get_execution_states,
+    get_persona_details,
     login_ui,
     logout_ui,
     move_user_radio_ui,
@@ -110,115 +116,131 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
             enter_worldview_btn = gr.Button("ワールドビューに入る", variant="primary", elem_id="enter_worldview_btn")
 
         with gr.Column(elem_id="section-worldview", elem_classes=['saiverse-section', 'saiverse-hidden']):
-            with gr.Row(elem_id="chat_header"):
-                user_location_display = gr.Textbox(
-                    # managerから現在地を取得して表示する
-                    value=lambda: manager.building_map.get(manager.user_current_building_id).name if manager.user_current_building_id and manager.user_current_building_id in manager.building_map else "不明な場所",
-                    label="あなたの現在地",
-                    interactive=False,
-                    scale=2,
-                    visible=False
-                )
-                move_building_dropdown = gr.Dropdown(
-                    choices=ui_state.building_choices,
-                    label="移動先の建物",
-                    interactive=True,
-                    scale=2,
-                    visible=False
-                )
-                move_btn = gr.Button("移動", scale=1, visible=False)
+            with gr.Row():
+                # Left column: Chat area
+                with gr.Column(scale=3):
+                    with gr.Row(elem_id="chat_header"):
+                        user_location_display = gr.Textbox(
+                            # managerから現在地を取得して表示する
+                            value=lambda: manager.building_map.get(manager.user_current_building_id).name if manager.user_current_building_id and manager.user_current_building_id in manager.building_map else "不明な場所",
+                            label="あなたの現在地",
+                            interactive=False,
+                            scale=2,
+                            visible=False
+                        )
+                        move_building_dropdown = gr.Dropdown(
+                            choices=ui_state.building_choices,
+                            label="移動先の建物",
+                            interactive=True,
+                            scale=2,
+                            visible=False
+                        )
+                        move_btn = gr.Button("移動", scale=1, visible=False)
 
-                current_location_display = gr.Markdown(
-                    value=lambda: format_location_label(get_current_location_name())
-                )
-            with gr.Group(elem_id="chat_scroll_area"):
-                chatbot = gr.Chatbot(
-                    type="messages",
-                    value=[],
-                    group_consecutive_messages=False,
-                    sanitize_html=False,
-                    elem_id="my_chat",
-                    avatar_images=(None, None),
-                    autoscroll=True,
-                    show_label=False
-                )
-            with gr.Group(elem_id="composer_fixed"):
-                with gr.Row():
-                    with gr.Column(scale=5):
-                        with gr.Row(elem_id="message_input_row", equal_height=True):
-                            txt = gr.Textbox(
-                                placeholder="ここにメッセージを入力...",
-                                lines=3,
-                                elem_id="chat_message_textbox",
-                                show_label=False
-                            )
-                    with gr.Column(scale=1, min_width=0):
-                        submit = gr.Button(value="↑",variant="primary")
-                        image_input = gr.UploadButton(
-                            "📎",
-                            file_types=["image"],
-                            file_count="single",
-                            elem_id="attachment_button"
+                        current_location_display = gr.Markdown(
+                            value=lambda: format_location_label(get_current_location_name())
                         )
-                with gr.Accordion("オプション", open=False):
-                    model_drop = gr.Dropdown(choices=ui_state.model_choices, value="None",label="モデル選択")
-                    with gr.Row():
-                        temperature_slider = gr.Slider(
-                            minimum=0,
-                            maximum=2,
-                            step=0.1,
-                            label="temperature",
-                            visible=False,
-                            interactive=True,
+                    with gr.Group(elem_id="chat_scroll_area"):
+                        chatbot = gr.Chatbot(
+                            type="messages",
+                            value=[],
+                            group_consecutive_messages=False,
+                            sanitize_html=False,
+                            elem_id="my_chat",
+                            avatar_images=(None, None),
+                            autoscroll=True,
+                            show_label=False
                         )
-                        top_p_slider = gr.Slider(
-                            minimum=0,
-                            maximum=1,
-                            step=0.05,
-                            label="top_p",
-                            visible=False,
-                            interactive=True,
-                        )
-                    with gr.Row():
-                        max_tokens_number = gr.Number(
-                            label="max_completion_tokens",
-                            visible=False,
-                            precision=0,
-                            interactive=True,
-                        )
-                        reasoning_dropdown = gr.Dropdown(
-                            label="reasoning_effort",
-                            choices=[],
-                            visible=False,
-                            interactive=True,
-                        )
-                        verbosity_dropdown = gr.Dropdown(
-                            label="verbosity",
-                            choices=[],
-                            visible=False,
-                            interactive=True,
-                        )
-                    refresh_chat_btn = gr.Button("履歴を再読み込み", variant="secondary", elem_id="refresh_chat_btn")
-                    with gr.Row():
-                        with gr.Column():
-                            summon_persona_dropdown = gr.Dropdown(
-                                choices=manager.get_summonable_personas(),
-                                label="呼ぶペルソナを選択",
-                                interactive=True,
-                                scale=3
-                            )
-                            summon_btn = gr.Button("呼ぶ", scale=1)
-                        with gr.Column():
-                            end_conv_persona_dropdown = gr.Dropdown(
-                                choices=manager.get_conversing_personas(),
-                                label="帰ってもらうペルソナを選択",
-                                interactive=True,
-                                scale=3
-                            )
-                            end_conv_btn = gr.Button("帰宅", scale=1)
+                    with gr.Group(elem_id="composer_fixed"):
+                        with gr.Row():
+                            with gr.Column(scale=5):
+                                with gr.Row(elem_id="message_input_row", equal_height=True):
+                                    txt = gr.Textbox(
+                                        placeholder="ここにメッセージを入力...",
+                                        lines=3,
+                                        elem_id="chat_message_textbox",
+                                        show_label=False
+                                    )
+                            with gr.Column(scale=1, min_width=0):
+                                submit = gr.Button(value="↑",variant="primary")
+                                image_input = gr.UploadButton(
+                                    "📎",
+                                    file_types=["image"],
+                                    file_count="single",
+                                    elem_id="attachment_button"
+                                )
+                        with gr.Accordion("オプション", open=False):
+                            model_drop = gr.Dropdown(choices=ui_state.model_choices, value="None",label="モデル選択")
+                            with gr.Row():
+                                temperature_slider = gr.Slider(
+                                    minimum=0,
+                                    maximum=2,
+                                    step=0.1,
+                                    label="temperature",
+                                    visible=False,
+                                    interactive=True,
+                                )
+                                top_p_slider = gr.Slider(
+                                    minimum=0,
+                                    maximum=1,
+                                    step=0.05,
+                                    label="top_p",
+                                    visible=False,
+                                    interactive=True,
+                                )
+                            with gr.Row():
+                                max_tokens_number = gr.Number(
+                                    label="max_completion_tokens",
+                                    visible=False,
+                                    precision=0,
+                                    interactive=True,
+                                )
+                                reasoning_dropdown = gr.Dropdown(
+                                    label="reasoning_effort",
+                                    choices=[],
+                                    visible=False,
+                                    interactive=True,
+                                )
+                                verbosity_dropdown = gr.Dropdown(
+                                    label="verbosity",
+                                    choices=[],
+                                    visible=False,
+                                    interactive=True,
+                                )
+                            refresh_chat_btn = gr.Button("履歴を再読み込み", variant="secondary", elem_id="refresh_chat_btn")
+                            with gr.Row():
+                                with gr.Column():
+                                    summon_persona_dropdown = gr.Dropdown(
+                                        choices=manager.get_summonable_personas(),
+                                        label="呼ぶペルソナを選択",
+                                        interactive=True,
+                                        scale=3
+                                    )
+                                    summon_btn = gr.Button("呼ぶ", scale=1)
+                                with gr.Column():
+                                    end_conv_persona_dropdown = gr.Dropdown(
+                                        choices=manager.get_conversing_personas(),
+                                        label="帰ってもらうペルソナを選択",
+                                        interactive=True,
+                                        scale=3
+                                    )
+                                    end_conv_btn = gr.Button("帰宅", scale=1)
+
+                # Right column: Detail panel
+                with gr.Column(scale=1, elem_id="detail_panel"):
+                    with gr.Tabs():
+                        with gr.Tab("Building"):
+                            building_details_display = gr.Markdown(value="_(読み込み中...)_")
+                        with gr.Tab("ペルソナ"):
+                            persona_details_display = gr.Markdown(value="_(読み込み中...)_")
+                        with gr.Tab("実行状態"):
+                            execution_states_display = gr.Markdown(value="_(読み込み中...)_")
 
             client_location_state = gr.State()
             parameter_state = gr.State({})
+
+            # Timer for detail panel updates
+            detail_update_timer = gr.Timer(value=2.0, active=True)
 
             # --- Event Handlers ---
             submit.click(
@@ -402,6 +424,13 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
             log_building_dropdown.change(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
             log_refresh_btn.click(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
             auto_refresh_log_btn.click(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
+
+            # Detail panel timer update
+            detail_update_timer.tick(
+                fn=lambda: (format_building_details(), format_persona_details(), format_execution_states()),
+                outputs=[building_details_display, persona_details_display, execution_states_display],
+                show_progress="hidden"
+            )
 
 
         with gr.Column(elem_id="section-db-manager", elem_classes=['saiverse-section', 'saiverse-hidden']):
