@@ -1,0 +1,1268 @@
+from __future__ import annotations
+
+import logging
+import os
+import uuid
+import asyncio
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+import json
+import re
+
+from sea.playbook_models import NodeType, PlaybookSchema, PlaybookValidationError, validate_playbook_graph
+from sea.langgraph_runner import compile_playbook
+from database.models import Playbook as PlaybookModel
+from model_configs import get_model_parameter_defaults
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _get_default_lightweight_model() -> str:
+    """Get the default lightweight model from environment or fallback."""
+    return os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gemini-2.5-flash-lite")
+
+
+def _format(template: str, variables: Dict[str, Any]) -> str:
+    try:
+        return template.format(**variables)
+    except Exception:
+        # 安全側でそのまま返す
+        return template
+
+
+class SEARuntime:
+    """Lightweight executor for meta playbooks until full LangGraph port."""
+
+    def __init__(self, manager_ref: Any):
+        self.manager = manager_ref
+        self.playbooks_dir = Path(__file__).parent / "playbooks"
+        self._playbook_cache: Dict[str, PlaybookSchema] = {}
+        self._dump_path = os.getenv("SAIVERSE_SEA_DUMP")  # set to a filepath to capture LLM I/O
+        self._trace = bool(os.getenv("SAIVERSE_SEA_TRACE"))
+
+    # ---------------- meta entrypoints -----------------
+    def run_meta_user(self, persona, user_input: str, building_id: str, metadata: Optional[Dict[str, Any]] = None) -> List[str]:
+        """Router -> subgraph -> speak. Returns spoken strings for gateway/UI."""
+        # Record user input to history before processing
+        if user_input:
+            try:
+                user_msg = {"role": "user", "content": user_input}
+                if metadata:
+                    user_msg["metadata"] = metadata
+                persona.history_manager.add_message(user_msg, building_id, heard_by=None)
+            except Exception:
+                LOGGER.exception("Failed to record user input to history")
+
+        playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
+        result = self._run_playbook(playbook, persona, building_id, user_input, auto_mode=False, record_history=True)
+        return result
+
+    def run_meta_auto(self, persona, building_id: str, occupants: List[str]) -> None:
+        """Router -> subgraph -> think. For autonomous loop, no direct user output."""
+        playbook = self._choose_playbook(kind="auto", persona=persona, building_id=building_id)
+        self._run_playbook(playbook, persona, building_id, user_input=None, auto_mode=True, record_history=True)
+
+    # ---------------- core runner -----------------
+    def _run_playbook(
+        self,
+        playbook: PlaybookSchema,
+        persona: Any,
+        building_id: str,
+        user_input: Optional[str],
+        auto_mode: bool,
+        record_history: bool = True,
+        parent_state: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
+        # Generate or inherit pulse_id
+        parent = parent_state or {}
+        LOGGER.debug("[sea] _run_playbook called for %s, parent_state keys: %s", playbook.name, list(parent.keys()) if parent else "(none)")
+        if "pulse_id" in parent:
+            pulse_id = str(parent["pulse_id"])
+        else:
+            pulse_id = str(uuid.uuid4())
+
+        # Prepare shared context (system prompt, history, inventories)
+        base_messages = self._prepare_context(persona, building_id, user_input, playbook.context_requirements, pulse_id=pulse_id)
+        conversation_msgs = list(base_messages)
+
+        # Try LangGraph path first
+        compiled_ok = self._compile_with_langgraph(playbook, persona, building_id, user_input, auto_mode, conversation_msgs, pulse_id, parent_state=parent)
+        if compiled_ok is not None:
+            return compiled_ok
+
+        # fallback lightweight executor
+        node_map = playbook.node_map()
+        current = node_map.get(playbook.start_node)
+        outputs: List[str] = []
+        last_text = user_input or ""
+
+        # Initialize variables from input_schema
+        variables: Dict[str, Any] = {
+            "persona_id": persona.persona_id,
+            "persona_name": persona.persona_name,
+            "messages": conversation_msgs,
+            "context_bundle": [],
+            "context_bundle_text": "",
+            "pulse_id": pulse_id,
+        }
+
+        # Process input_schema to initialize variables from parent_state
+        for param in playbook.input_schema:
+            param_name = param.name
+            source_key = param.source if param.source else "input"
+            LOGGER.debug("[sea] Processing input_schema param: name=%s source=%s", param_name, source_key)
+
+            # Resolve value from parent_state or fallback
+            if source_key.startswith("parent."):
+                # e.g., "parent.input" -> parent["input"]
+                actual_key = source_key[7:]  # strip "parent."
+                value = parent.get(actual_key, "")
+                LOGGER.debug("[sea] Resolved %s from parent.%s: %s", param_name, actual_key, str(value)[:200] if value else "(empty)")
+            elif source_key == "input":
+                # Default: use user_input
+                value = user_input or ""
+            else:
+                # Direct key lookup in parent_state
+                value = parent.get(source_key, "")
+
+            variables[param_name] = value
+
+        # Ensure "input" exists for backward compatibility
+        if "input" not in variables:
+            variables["input"] = user_input or ""
+
+        while current:
+            # meta exec: run sub-playbook directly (skip LLM node for exec)
+            if playbook.name.startswith("meta_") and current.id == "exec":
+                sub_name = variables.get("selected_playbook") or variables.get("last") or "basic_chat"
+                sub_name = str(sub_name).strip()
+
+                # Validate that the selected playbook is available
+                sub_pb = self._load_playbook_for(sub_name, persona, building_id)
+                if not sub_pb:
+                    LOGGER.warning("[sea] Selected playbook '%s' not found or not accessible; falling back to basic_chat", sub_name)
+                    sub_name = "basic_chat"
+                    sub_pb = self._load_playbook_for(sub_name, persona, building_id) or self._basic_chat_playbook()
+                sub_input = None
+                args = variables.get("selected_args") or {}
+                if isinstance(args, dict):
+                    sub_input = args.get("input") or args.get("query")
+                if not sub_input:
+                    sub_input = variables.get("input")
+
+                sub_outputs = self._run_playbook(sub_pb, persona, building_id, sub_input, auto_mode, record_history=True, parent_state=variables)
+
+                ingested = self._ingest_context_from_subplaybook(variables, sub_name, sub_outputs)
+                if ingested:
+                    last_text = variables.get("context_bundle_text") or last_text
+                elif sub_outputs:
+                    last_text = sub_outputs[-1]
+                variables["last"] = last_text
+                current = node_map.get(current.next) if current.next else None
+                continue
+
+            if current.type == NodeType.LLM:
+                action_template = getattr(current, "action", None)
+                schema_consumed = False
+                try:
+                    msg_base = variables.get("messages", [])
+                    if action_template:
+                        prompt = _format(action_template, variables)
+                        messages = list(msg_base) + [{"role": "user", "content": prompt}]
+                    else:
+                        messages = list(msg_base)
+
+                    # Dynamically add enum to response_schema if available_playbooks exists
+                    response_schema = getattr(current, "response_schema", None)
+                    if response_schema and "available_playbooks" in variables:
+                        response_schema = self._add_playbook_enum(response_schema, variables.get("available_playbooks"))
+
+                    # Select LLM client based on model_type
+                    llm_client = self._select_llm_client(current, persona)
+
+                    text = llm_client.generate(
+                        messages,
+                        tools=[],
+                        temperature=self._default_temperature(persona),
+                        response_schema=response_schema,
+                    )
+                    self._dump_llm_io(playbook.name, current.id, persona, messages, text)
+                    schema_consumed = self._process_structured_output(current, text, variables)
+                    # update conversation history buffer for subsequent nodes
+                    variables["messages"] = messages + [{"role": "assistant", "content": text}]
+                except Exception as exc:
+                    LOGGER.error("SEA LLM node failed: %s", exc)
+                    text = "(error in llm node)"
+                last_text = text
+                variables["last"] = text
+
+                # meta router: interpret selection hint (best-effort)
+                if playbook.name.startswith("meta_") and current.id == "router" and not schema_consumed:
+                    self._update_router_selection(variables, text)
+
+            elif current.type == NodeType.TOOL:
+                from tools import TOOL_REGISTRY  # lazy import
+
+                tool_name = current.action
+                tool_func = TOOL_REGISTRY.get(tool_name)
+                if tool_func is None:
+                    LOGGER.warning("SEA tool %s not found", tool_name)
+                    last_text = f"Tool {tool_name} not found"
+                else:
+                    try:
+                        # Check if args_input is specified
+                        args_input = getattr(current, "args_input", None)
+                        if args_input:
+                            # Build kwargs from state keys
+                            kwargs = {}
+                            for arg_name, state_key in args_input.items():
+                                kwargs[arg_name] = variables.get(state_key, "")
+                            result = tool_func(**kwargs) if callable(tool_func) else None
+                        else:
+                            # Legacy: single string input
+                            tool_input = variables.get("last") or variables.get("input") or ""
+                            result = tool_func(tool_input) if callable(tool_func) else None
+
+                        # Handle tuple results with output_keys (for multi-value returns)
+                        output_keys = getattr(current, "output_keys", None)
+                        if output_keys and isinstance(result, tuple):
+                            # Expand tuple to multiple state variables
+                            for i, key in enumerate(output_keys):
+                                if i < len(result):
+                                    variables[key] = result[i]
+                                    LOGGER.debug("[sea] Stored tuple[%d] in variables[%s]: %s", i, key, str(result[i])[:200])
+                            # Set last to first element (primary result)
+                            last_text = str(result[0]) if result else ""
+                            primary_result = result[0] if result else ""
+                        elif isinstance(result, tuple):
+                            # Legacy: extract first element as primary result
+                            primary_result = result[0] if result else ""
+                            last_text = str(primary_result)
+                        else:
+                            last_text = str(result)
+                            primary_result = result
+
+                        variables["last"] = last_text
+
+                        # Store result in state if output_key is specified (legacy single-value)
+                        output_key = getattr(current, "output_key", None)
+                        if output_key and not output_keys:
+                            variables[output_key] = primary_result
+                            LOGGER.debug("[sea] Stored tool result in variables[%s]: %s", output_key, str(primary_result)[:200])
+                    except Exception as exc:
+                        last_text = f"Tool error: {exc}"
+                        LOGGER.exception("SEA tool %s failed", tool_name)
+
+            elif current.type == NodeType.MEMORY:
+                memo_text = _format(current.action, {**variables, "last": last_text}) if current.action else last_text
+                role = getattr(current, "role", "assistant") or "assistant"
+                tags = getattr(current, "tags", None)
+                metadata_key = getattr(current, "metadata_key", None)
+                metadata = variables.get(metadata_key) if metadata_key else None
+                self._store_memory(persona, memo_text, role=role, tags=tags, pulse_id=pulse_id, metadata=metadata)
+                last_text = memo_text
+                variables["last"] = memo_text
+                if self._should_collect_memory_output(playbook):
+                    outputs.append(memo_text)
+
+            elif current.type == NodeType.PASS:
+                next_val = getattr(current, "next", None)
+                next_id = next_val
+                current = node_map.get(next_id) if next_id else None
+                continue
+
+            elif current.type == NodeType.SUBPLAY:
+                last_text = self._run_subplay_node(current, persona, building_id, auto_mode, variables, playbook, outputs)
+
+            elif current.type == NodeType.SAY:
+                say_text = _format(current.action, {**variables, "last": last_text}) if current.action else last_text
+                metadata_key = getattr(current, "metadata_key", None)
+                metadata = variables.get(metadata_key) if metadata_key else None
+                self._emit_say(persona, building_id, say_text, pulse_id=pulse_id, metadata=metadata)
+                outputs.append(say_text)
+                last_text = say_text
+                variables["last"] = say_text
+
+            elif current.type == NodeType.SPEAK:
+                speak_text = _format(current.action, {**variables, "last": last_text}) if current.action else last_text
+                self._emit_speak(persona, building_id, speak_text, pulse_id=pulse_id, record_history=record_history)
+                outputs.append(speak_text)
+                last_text = speak_text
+
+            elif current.type == NodeType.THINK:
+                note = _format(current.action, {**variables, "last": last_text}) if current.action else last_text
+                self._emit_think(persona, pulse_id, note, record_history=record_history)
+                last_text = note
+                variables["last"] = note
+                outputs.append(note)
+
+            # Resolve next node (conditional_next takes precedence over next)
+            conditional_next = getattr(current, "conditional_next", None)
+            if conditional_next:
+                # Resolve field value from variables (supports nested keys like "router.playbook")
+                field_path = conditional_next.field.split(".")
+                value = variables
+                for key in field_path:
+                    if isinstance(value, dict):
+                        value = value.get(key)
+                    else:
+                        value = None
+                        break
+
+                # Convert to string for matching
+                value_str = str(value) if value is not None else ""
+
+                LOGGER.debug("[sea][lightweight] conditional_next: field=%s value=%s cases=%s", conditional_next.field, value_str, list(conditional_next.cases.keys()))
+
+                # Look up target in cases
+                next_id = conditional_next.cases.get(value_str)
+                if next_id is None and "default" in conditional_next.cases:
+                    next_id = conditional_next.cases["default"]
+
+                LOGGER.debug("[sea][lightweight] conditional_next: selected path=%s", next_id or "END")
+            else:
+                next_id = getattr(current, "next", None)
+
+            current = node_map.get(next_id) if next_id else None
+
+        # Write back state variables to parent_state based on output_schema
+        if parent_state is not None and playbook.output_schema:
+            for key in playbook.output_schema:
+                if key in variables:
+                    parent_state[key] = variables[key]
+                    LOGGER.debug("[sea] Propagated %s to parent_state: %s", key, str(variables[key])[:200])
+
+        return outputs
+
+    # LangGraph compile wrapper -----------------------------------------
+    def _compile_with_langgraph(
+        self,
+        playbook: PlaybookSchema,
+        persona: Any,
+        building_id: str,
+        user_input: Optional[str],
+        auto_mode: bool,
+        base_messages: List[Dict[str, Any]],
+        pulse_id: str,
+        parent_state: Optional[Dict[str, Any]] = None,
+    ) -> Optional[List[str]]:
+        _lg_outputs: List[str] = []
+        temperature = self._default_temperature(persona)
+        parent = parent_state or {}
+
+        if any(getattr(node, 'type', None) == NodeType.SUBPLAY for node in playbook.nodes):
+            return None
+
+        compiled = compile_playbook(
+            playbook,
+            llm_node_factory=lambda node_def: self._lg_llm_node(node_def, persona, playbook),
+            tool_node_factory=lambda node_def: self._lg_tool_node(node_def, persona),
+            speak_node=lambda state: self._lg_speak_node(state, persona, building_id, _lg_outputs),
+            think_node=lambda state: self._lg_think_node(state, persona, _lg_outputs),
+            say_node_factory=lambda node_def: self._lg_say_node(node_def, persona, building_id, _lg_outputs),
+            memorize_node_factory=lambda node_def: self._lg_memorize_node(node_def, persona, playbook, _lg_outputs),
+            exec_node_factory=(lambda node_def: self._lg_exec_node(node_def, playbook, persona, building_id, auto_mode, _lg_outputs))
+            if playbook.name.startswith("meta_")
+            else None,
+        )
+        if not compiled:
+            return None
+
+        # Process input_schema to inherit variables from parent_state
+        inherited_vars = {}
+        for param in playbook.input_schema:
+            param_name = param.name
+            source_key = param.source if param.source else "input"
+
+            # Resolve value from parent_state or fallback
+            if source_key.startswith("parent."):
+                actual_key = source_key[7:]  # strip "parent."
+                value = parent.get(actual_key, "")
+                LOGGER.debug("[sea][LangGraph] Resolved %s from parent.%s: %s", param_name, actual_key, str(value)[:200] if value else "(empty)")
+            elif source_key == "input":
+                value = user_input or ""
+            else:
+                value = parent.get(source_key, "")
+
+            inherited_vars[param_name] = value
+
+        initial_state = {
+            "messages": list(base_messages),
+            "inputs": {"input": user_input or ""},
+            "context": {},
+            "last": user_input or "",
+            "outputs": _lg_outputs,
+            "persona_obj": persona,
+            "context_bundle": [],
+            "context_bundle_text": "",
+            "pulse_id": pulse_id,
+            **inherited_vars,  # Add inherited variables from input_schema
+        }
+
+        # If already inside a running loop (e.g., async route), fall back to lightweight executor
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop and running_loop.is_running():
+            return None
+
+        try:
+            final_state = asyncio.run(compiled(initial_state))
+        except Exception:
+            LOGGER.exception("SEA LangGraph execution failed; falling back to lightweight executor")
+            return None
+
+        # Write back state variables to parent_state based on output_schema
+        if parent_state is not None and isinstance(final_state, dict) and playbook.output_schema:
+            for key in playbook.output_schema:
+                if key in final_state:
+                    parent_state[key] = final_state[key]
+                    LOGGER.debug("[sea][LangGraph] Propagated %s to parent_state: %s", key, str(final_state[key])[:200])
+
+        # speak/think nodes already emitted; return collected texts for UI consistency
+        return list(_lg_outputs)
+
+    def _lg_llm_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema):
+        async def node(state: dict):
+            # Merge state into variables for template formatting
+            variables = {
+                "input": state.get("inputs", {}).get("input", ""),
+                "last": state.get("last", ""),
+                "persona_id": getattr(persona, "persona_id", None),
+                "persona_name": getattr(persona, "persona_name", None),
+                "context_bundle_text": state.get("context_bundle_text", ""),
+                **{k: v for k, v in state.items() if k not in ["messages", "inputs", "outputs", "persona_obj"]},  # Include all other state variables
+            }
+            text = ""
+            schema_consumed = False
+            try:
+                base_msgs = state.get("messages", [])
+                action_template = getattr(node_def, "action", None)
+                if action_template:
+                    prompt = _format(action_template, variables)
+                    messages = list(base_msgs) + [{"role": "user", "content": prompt}]
+                else:
+                    messages = list(base_msgs)
+
+                # Dynamically add enum to response_schema if available_playbooks exists
+                response_schema = getattr(node_def, "response_schema", None)
+                if response_schema and "available_playbooks" in state:
+                    response_schema = self._add_playbook_enum(response_schema, state.get("available_playbooks"))
+
+                # Select LLM client based on model_type
+                llm_client = self._select_llm_client(node_def, persona)
+
+                text = llm_client.generate(
+                    messages,
+                    tools=[],
+                    temperature=self._default_temperature(persona),
+                    response_schema=response_schema,
+                )
+                self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
+                schema_consumed = self._process_structured_output(node_def, text, state)
+            except Exception as exc:
+                LOGGER.error("SEA LangGraph LLM failed: %s", exc)
+                text = "(error in llm node)"
+            state["last"] = text
+            state["messages"] = messages + [{"role": "assistant", "content": text}]
+
+            # meta router handling
+            if playbook.name.startswith("meta_") and getattr(node_def, "id", "") == "router" and not schema_consumed:
+                self._update_router_selection(state, text)
+            return state
+
+        return node
+
+    def _default_temperature(self, persona: Any) -> Optional[float]:
+        try:
+            model_name = getattr(persona, "model", None)
+            if not model_name:
+                return None
+            defaults = get_model_parameter_defaults(model_name)
+            temp = defaults.get("temperature")
+            if temp is None:
+                return None
+            try:
+                return float(temp)
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+    def _select_llm_client(self, node_def: Any, persona: Any) -> Any:
+        """Select the appropriate LLM client based on node's model_type."""
+        model_type = getattr(node_def, "model_type", "normal") or "normal"
+        LOGGER.info("[sea] Node model_type: %s (node_id=%s)", model_type, getattr(node_def, "id", "unknown"))
+
+        if model_type == "lightweight":
+            # Try persona's lightweight_llm_client first
+            lightweight_client = getattr(persona, "lightweight_llm_client", None)
+            LOGGER.info("[sea] lightweight_client exists: %s", lightweight_client is not None)
+            if lightweight_client:
+                LOGGER.info("[sea] Using persona's lightweight_llm_client")
+                return lightweight_client
+
+            # Fallback: create a temporary lightweight client
+            LOGGER.info("[sea] Persona has no lightweight_llm_client; creating temporary client with default model")
+            lightweight_model_name = getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
+            LOGGER.info("[sea] Using lightweight model: %s", lightweight_model_name)
+            try:
+                from llm_clients import get_llm_client
+                from model_configs import get_context_length
+                lw_context = get_context_length(lightweight_model_name)
+                provider = getattr(persona, "provider", "gemini")  # Gemini is default for lightweight
+                return get_llm_client(lightweight_model_name, provider, lw_context)
+            except Exception as exc:
+                LOGGER.warning("[sea] Failed to create lightweight client: %s; falling back to normal client", exc)
+                return persona.llm_client
+        else:
+            # Default: use normal client
+            LOGGER.info("[sea] Using normal llm_client")
+            return persona.llm_client
+
+    def _dump_llm_io(
+        self,
+        playbook_name: str,
+        node_id: str,
+        persona: Any,
+        messages: List[Dict[str, Any]],
+        output_text: str,
+    ) -> None:
+        if not self._dump_path:
+            return
+        try:
+            entry = {
+                "playbook": playbook_name,
+                "node": node_id,
+                "persona_id": getattr(persona, "persona_id", None),
+                "persona_name": getattr(persona, "persona_name", None),
+                "messages": messages,
+                "output": output_text,
+            }
+            Path(self._dump_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(self._dump_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False))
+                f.write("\n")
+        except Exception:
+            LOGGER.debug("failed to dump LLM io", exc_info=True)
+
+    def _debug_playbook(self, pb: PlaybookSchema, source: str) -> None:
+        if not self._trace:
+            return
+        try:
+            summary = {
+                "source": source,
+                "name": pb.name,
+                "start": pb.start_node,
+                "nodes": [
+                    {
+                        "id": n.id,
+                        "type": getattr(n, "type", None),
+                        "next": getattr(n, "next", None),
+                        "action": getattr(n, "action", None),
+                    }
+                    for n in pb.nodes
+                ],
+            }
+            LOGGER.debug("[sea] playbook loaded: %s", json.dumps(summary, ensure_ascii=False))
+        except Exception:
+            LOGGER.debug("[sea] playbook debug failed", exc_info=True)
+
+    def _add_playbook_enum(self, schema: Dict[str, Any], available_playbooks_json: str) -> Dict[str, Any]:
+        """Dynamically add enum constraint to playbook field in response_schema."""
+        import json
+        import copy
+
+        try:
+            # Parse available_playbooks JSON
+            playbooks_list = json.loads(available_playbooks_json) if isinstance(available_playbooks_json, str) else available_playbooks_json
+            if not isinstance(playbooks_list, list):
+                return schema
+
+            # Extract playbook names
+            playbook_names = [pb.get("name") for pb in playbooks_list if isinstance(pb, dict) and "name" in pb]
+            if not playbook_names:
+                return schema
+
+            # Deep copy schema to avoid modifying the original
+            schema_copy = copy.deepcopy(schema)
+
+            # Add enum to playbook field if it exists
+            if "properties" in schema_copy and "playbook" in schema_copy["properties"]:
+                schema_copy["properties"]["playbook"]["enum"] = playbook_names
+                LOGGER.debug("[sea] Added dynamic enum to playbook field: %s", playbook_names)
+
+            return schema_copy
+
+        except Exception as exc:
+            LOGGER.warning("[sea] Failed to add playbook enum: %s", exc)
+            return schema
+
+    def _process_structured_output(self, node_def: Any, text: str, state: Dict[str, Any]) -> bool:
+        schema = getattr(node_def, "response_schema", None)
+        if not schema:
+            return False
+        parsed = self._extract_structured_json(text)
+        if parsed is None:
+            LOGGER.warning("[sea] structured output parse failed for node %s", getattr(node_def, "id", "?"))
+            return False
+        key = getattr(node_def, "output_key", None) or getattr(node_def, "id", "") or "node"
+        self._store_structured_result(state, key, parsed)
+        if getattr(node_def, "id", "") == "router":
+            self._update_router_selection(state, text, parsed)
+            self._append_router_function_call(state, parsed, text)
+        return True
+
+    def _store_structured_result(self, state: Dict[str, Any], key: str, data: Any) -> None:
+        state[key] = data
+        flat = self._flatten_dict(data)
+        for path, value in flat.items():
+            state[f"{key}.{path}"] = value
+
+    def _flatten_dict(self, value: Any, prefix: str = "") -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        if isinstance(value, dict):
+            for k, v in value.items():
+                new_prefix = f"{prefix}.{k}" if prefix else str(k)
+                result.update(self._flatten_dict(v, new_prefix))
+        elif isinstance(value, list):
+            for idx, item in enumerate(value):
+                new_prefix = f"{prefix}[{idx}]" if prefix else f"[{idx}]"
+                result.update(self._flatten_dict(item, new_prefix))
+        else:
+            result[prefix or "value"] = value
+        return result
+
+    def _extract_structured_json(self, text: str) -> Optional[Dict[str, Any]]:
+        candidate = text.strip()
+        if not candidate:
+            return None
+        if candidate.startswith("```"):
+            parts = candidate.split("```")
+            for seg in parts:
+                seg = seg.strip()
+                if seg.startswith("{") and seg.endswith("}"):
+                    candidate = seg
+                    break
+        if not candidate.startswith("{"):
+            match = re.search(r"\{.*\}", candidate, re.DOTALL)
+            if match:
+                candidate = match.group(0)
+        try:
+            return json.loads(candidate)
+        except Exception:
+            return None
+
+    def _update_router_selection(self, state: Dict[str, Any], text: str, parsed: Optional[Dict[str, Any]] = None) -> None:
+        selection = parsed or {}
+        playbook_value = selection.get("playbook") if isinstance(selection, dict) else None
+        if not playbook_value:
+            playbook_value = selection.get("playbook_name") if isinstance(selection, dict) else None
+        if not playbook_value:
+            stripped = str(text).strip()
+            playbook_value = stripped.split()[0] if stripped else "basic_chat"
+        state["selected_playbook"] = playbook_value or "basic_chat"
+        args_obj = selection.get("args") if isinstance(selection, dict) else None
+        if isinstance(args_obj, dict):
+            state["selected_args"] = args_obj
+        else:
+            state["selected_args"] = {"input": state.get("input")}
+
+    def _lg_tool_node(self, node_def: Any, persona: Any):
+        from tools import TOOL_REGISTRY
+        from tools.context import persona_context
+
+        tool_name = node_def.action
+        args_input = getattr(node_def, "args_input", None)
+        output_key = getattr(node_def, "output_key", None)
+        output_keys = getattr(node_def, "output_keys", None)
+
+        async def node(state: dict):
+            tool_func = TOOL_REGISTRY.get(tool_name)
+            persona_obj = state.get("persona_obj") or persona
+            try:
+                persona_dir = getattr(persona_obj, "persona_log_path", None)
+                persona_dir = persona_dir.parent if persona_dir else Path.cwd()
+                persona_id = getattr(persona_obj, "persona_id", None)
+                manager_ref = getattr(persona_obj, "manager_ref", None)
+
+                # Build tool input based on args_input
+                if args_input:
+                    kwargs = {}
+                    for arg_name, state_key in args_input.items():
+                        kwargs[arg_name] = state.get(state_key, "")
+                    if persona_id and persona_dir:
+                        with persona_context(persona_id, persona_dir, manager_ref):
+                            result = tool_func(**kwargs) if callable(tool_func) else None
+                    else:
+                        result = tool_func(**kwargs) if callable(tool_func) else None
+                else:
+                    # Legacy: single string input
+                    last = state.get("last") or state.get("inputs", {}).get("input") or ""
+                    if persona_id and persona_dir:
+                        with persona_context(persona_id, persona_dir, manager_ref):
+                            result = tool_func(last) if callable(tool_func) else None
+                    else:
+                        result = tool_func(last) if callable(tool_func) else None
+
+                # Handle tuple results with output_keys (for multi-value returns)
+                if output_keys and isinstance(result, tuple):
+                    # Expand tuple to multiple state variables
+                    for i, key in enumerate(output_keys):
+                        if i < len(result):
+                            state[key] = result[i]
+                            LOGGER.debug("[sea][LangGraph] Stored tuple[%d] in state[%s]: %s", i, key, str(result[i])[:200])
+                    # Set last to first element (primary result)
+                    state["last"] = str(result[0]) if result else ""
+                elif isinstance(result, tuple):
+                    # Legacy: extract first element
+                    state["last"] = str(result[0]) if result else ""
+                else:
+                    state["last"] = str(result)
+
+                # Store result in state if output_key is specified (legacy single-value)
+                if output_key and not output_keys:
+                    state[output_key] = result
+            except Exception as exc:
+                state["last"] = f"Tool error: {exc}"
+                LOGGER.exception("SEA LangGraph tool %s failed", tool_name)
+            return state
+
+        return node
+
+    def _lg_exec_node(
+        self,
+        node_def: Any,
+        playbook: PlaybookSchema,
+        persona: Any,
+        building_id: str,
+        auto_mode: bool,
+        outputs: Optional[List[str]] = None,
+    ):
+        async def node(state: dict):
+            sub_name = state.get("selected_playbook") or state.get("last") or "basic_chat"
+            sub_pb = self._load_playbook_for(str(sub_name).strip(), persona, building_id) or self._basic_chat_playbook()
+            sub_input = None
+            args = state.get("selected_args") or {}
+            if isinstance(args, dict):
+                sub_input = args.get("input") or args.get("query")
+            if not sub_input:
+                sub_input = state.get("inputs", {}).get("input")
+
+            try:
+                sub_outputs = await asyncio.to_thread(
+                    self._run_playbook, sub_pb, persona, building_id, sub_input, auto_mode, True, state
+                )
+            except Exception as exc:
+                LOGGER.exception("SEA LangGraph exec sub-playbook failed")
+                state["last"] = f"Sub-playbook error: {exc}"
+                if outputs is not None:
+                    outputs.append(state["last"])
+                return state
+
+            ingested = self._ingest_context_from_subplaybook(state, sub_name, sub_outputs)
+            if ingested:
+                state["last"] = state.get("context_bundle_text") or state.get("last")
+            elif sub_outputs:
+                state["last"] = sub_outputs[-1]
+            return state
+
+        return node
+
+
+    def _run_subplay_node(
+        self,
+        node_def: Any,
+        persona: Any,
+        building_id: str,
+        auto_mode: bool,
+        variables: Dict[str, Any],
+        parent_playbook: PlaybookSchema,
+        parent_outputs: List[str],
+    ) -> str:
+        sub_name = getattr(node_def, "playbook", None) or getattr(node_def, "action", None)
+        if not sub_name:
+            msg = "(sub-playbook missing name)"
+            variables["last"] = msg
+            return msg
+        sub_pb = self._load_playbook_for(sub_name, persona, building_id)
+        if not sub_pb:
+            msg = f"Sub-playbook {sub_name} not found"
+            variables["last"] = msg
+            return msg
+        template = getattr(node_def, "input_template", "{input}") or "{input}"
+        sub_input = _format(template, {**variables})
+        sub_outputs = self._run_playbook(sub_pb, persona, building_id, sub_input, auto_mode, record_history=True, parent_state=variables)
+        last_text = sub_outputs[-1] if sub_outputs else ""
+        variables["last"] = last_text
+        if getattr(node_def, "propagate_output", False) and sub_outputs:
+            parent_outputs.extend(sub_outputs)
+        if getattr(node_def, "id", "") == "router":
+            parsed = self._extract_structured_json(last_text)
+            self._update_router_selection(variables, last_text, parsed)
+        return last_text
+
+    def _lg_memorize_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, outputs: Optional[List[str]] = None):
+        async def node(state: dict):
+            variables = {
+                "input": state.get("inputs", {}).get("input", ""),
+                "last": state.get("last", ""),
+                "persona_id": getattr(persona, "persona_id", None),
+                "persona_name": getattr(persona, "persona_name", None),
+            }
+            memo_text = _format(getattr(node_def, "action", None) or "{last}", {**variables, "last": variables.get("last", "")})
+            role = getattr(node_def, "role", "assistant") or "assistant"
+            tags = getattr(node_def, "tags", None)
+            pulse_id = state.get("pulse_id")
+            metadata_key = getattr(node_def, "metadata_key", None)
+            metadata = state.get(metadata_key) if metadata_key else None
+            self._store_memory(persona, memo_text, role=role, tags=tags, pulse_id=pulse_id, metadata=metadata)
+            state["last"] = memo_text
+            if outputs is not None and self._should_collect_memory_output(playbook):
+                outputs.append(memo_text)
+            return state
+
+        return node
+
+    def _lg_speak_node(self, state: dict, persona: Any, building_id: str, outputs: Optional[List[str]] = None):
+        text = state.get("last") or ""
+        pulse_id = state.get("pulse_id")
+        self._emit_speak(persona, building_id, text, pulse_id=pulse_id)
+        if outputs is not None:
+            outputs.append(text)
+        return state
+
+    def _lg_say_node(self, node_def: Any, persona: Any, building_id: str, outputs: Optional[List[str]] = None):
+        async def node(state: dict):
+            text = state.get("last") or ""
+            pulse_id = state.get("pulse_id")
+            metadata_key = getattr(node_def, "metadata_key", None)
+            metadata = state.get(metadata_key) if metadata_key else None
+            self._emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=metadata)
+            if outputs is not None:
+                outputs.append(text)
+            return state
+        return node
+
+    def _lg_think_node(self, state: dict, persona: Any, outputs: Optional[List[str]] = None):
+        text = state.get("last") or ""
+        pulse_id = state.get("pulse_id") or str(uuid.uuid4())
+        self._emit_think(persona, pulse_id, text)
+        if outputs is not None:
+            outputs.append(text)
+        return state
+
+    # ---------------- context helpers -----------------
+    def _append_router_function_call(
+        self,
+        state: Dict[str, Any],
+        selection: Optional[Dict[str, Any]],
+        raw_text: str,
+    ) -> None:
+        payload = selection if isinstance(selection, dict) else None
+        if payload is None:
+            payload = {"raw": raw_text}
+        try:
+            args_text = json.dumps(payload, ensure_ascii=False)
+        except Exception:
+            args_text = json.dumps({"raw": str(raw_text)}, ensure_ascii=False)
+        conv = state.get("messages")
+        if not isinstance(conv, list):
+            conv = []
+        call_id = f"router_call_{uuid.uuid4().hex}"
+        call_msg = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "route_playbook",
+                        "arguments": args_text,
+                    },
+                }
+            ],
+        }
+        if conv and isinstance(conv[-1], dict) and conv[-1].get("role") == "assistant":
+            conv[-1] = call_msg
+        else:
+            conv.append(call_msg)
+        state["messages"] = conv
+        state["_last_tool_call_id"] = call_id
+        state["_last_tool_name"] = payload.get("playbook") or "sub_playbook"
+
+    def _ingest_context_from_subplaybook(
+        self,
+        state: Dict[str, Any],
+        source: str,
+        sub_outputs: Optional[List[str]],
+    ) -> bool:
+        bundle = state.setdefault("context_bundle", [])
+        state.setdefault("context_bundle_text", "")
+        if not sub_outputs:
+            return False
+        joined = "\n".join(str(item).strip() for item in sub_outputs if str(item).strip())
+        if not joined:
+            return False
+        entry: Dict[str, Any] = {"source": source, "raw": joined}
+        parsed = self._extract_structured_json(joined)
+        if parsed is not None:
+            entry["data"] = parsed
+        bundle.append(entry)
+        state["context_bundle_text"] = self._render_context_bundle(bundle)
+        self._append_tool_result_message(state, source, joined)
+        return True
+
+    def _render_context_bundle(self, bundle: List[Dict[str, Any]]) -> str:
+        blocks: List[str] = []
+        for idx, entry in enumerate(bundle, 1):
+            label = entry.get("source") or f"context_{idx}"
+            payload = entry.get("raw") or ""
+            data = entry.get("data")
+            if isinstance(data, (dict, list)):
+                try:
+                    payload = json.dumps(data, ensure_ascii=False)
+                except Exception:
+                    payload = str(data)
+            payload = str(payload).strip()
+            blocks.append(f"[{label}]\n{payload}" if payload else f"[{label}]")
+        return "\n\n".join(blocks)
+
+    def _should_collect_memory_output(self, playbook: PlaybookSchema) -> bool:
+        return not playbook.name.startswith("meta_")
+
+    def _store_memory(
+        self,
+        persona: Any,
+        text: str,
+        *,
+        role: str = "assistant",
+        tags: Optional[List[str]] = None,
+        pulse_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not text:
+            return
+        adapter = getattr(persona, "sai_memory", None)
+        try:
+            if adapter and adapter.is_ready():
+                message = {"role": role or "assistant", "content": text}
+                clean_tags = [str(tag) for tag in (tags or []) if tag]
+                # Add pulse:uuid tag
+                if pulse_id:
+                    clean_tags.append(f"pulse:{pulse_id}")
+                # Build metadata dict
+                msg_metadata: Dict[str, Any] = {}
+                if clean_tags:
+                    msg_metadata["tags"] = clean_tags
+                # Merge additional metadata (e.g., media attachments)
+                if isinstance(metadata, dict):
+                    for key, value in metadata.items():
+                        if key == "tags":
+                            # Merge tags
+                            extra_tags = [str(t) for t in value if t] if isinstance(value, list) else []
+                            msg_metadata.setdefault("tags", []).extend(extra_tags)
+                        else:
+                            msg_metadata[key] = value
+                if msg_metadata:
+                    message["metadata"] = msg_metadata
+                adapter.append_persona_message(message)
+        except Exception:
+            LOGGER.debug("memorize node not stored", exc_info=True)
+
+    def _append_tool_result_message(
+        self,
+        state: Dict[str, Any],
+        source: str,
+        payload: str,
+    ) -> None:
+        call_id = state.get("_last_tool_call_id")
+        if not call_id:
+            return
+        conv = state.get("messages")
+        if not isinstance(conv, list):
+            conv = []
+        message = {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "name": source or state.get("_last_tool_name") or "sub_playbook",
+            "content": payload,
+        }
+        conv.append(message)
+        state["messages"] = conv
+        state["_last_tool_call_id"] = None
+
+    # ---------------- helpers -----------------
+    def _emit_speak(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, record_history: bool = True) -> None:
+        msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
+        # Add pulse:uuid tag to metadata
+        if pulse_id:
+            msg["metadata"] = {"tags": ["conversation", f"pulse:{pulse_id}"]}
+        if record_history:
+            try:
+                persona.history_manager.add_message(msg, building_id, heard_by=None)
+                self.manager.gateway_handle_ai_replies(building_id, persona, [text])
+            except Exception:
+                LOGGER.exception("Failed to emit speak message")
+
+    def _emit_say(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> None:
+        msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
+        # Build metadata dict
+        msg_metadata: Dict[str, Any] = {}
+        if pulse_id:
+            msg_metadata["tags"] = [f"pulse:{pulse_id}"]
+        # Merge additional metadata (e.g., media attachments)
+        if isinstance(metadata, dict):
+            for key, value in metadata.items():
+                if key == "tags":
+                    # Merge tags
+                    extra_tags = [str(t) for t in value if t] if isinstance(value, list) else []
+                    msg_metadata.setdefault("tags", []).extend(extra_tags)
+                else:
+                    msg_metadata[key] = value
+        if msg_metadata:
+            msg["metadata"] = msg_metadata
+        try:
+            persona.history_manager.add_to_building_only(building_id, msg)
+            self.manager.gateway_handle_ai_replies(building_id, persona, [text])
+        except Exception:
+            LOGGER.exception("Failed to emit say message")
+
+    def _emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True) -> None:
+        if not record_history:
+            return
+        adapter = getattr(persona, "sai_memory", None)
+        try:
+            if adapter and adapter.is_ready():
+                adapter.append_persona_message(
+                    {
+                        "role": "assistant",
+                        "content": text,
+                        "metadata": {"tags": ["internal", f"pulse:{pulse_id}"]},
+                        "persona_id": persona.persona_id,
+                    }
+                )
+        except Exception:
+            LOGGER.debug("think message not stored", exc_info=True)
+
+    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        from sea.playbook_models import ContextRequirements
+
+        # Use provided requirements or default to full context
+        reqs = requirements if requirements else ContextRequirements()
+
+        messages: List[Dict[str, Any]] = []
+
+        # ---- system prompt ----
+        if reqs.system_prompt:
+            system_sections: List[str] = []
+
+            # 1. Common prompt (world setting, framework explanation)
+            common_prompt_template = getattr(persona, "common_prompt", None)
+            if common_prompt_template:
+                try:
+                    # Get building info for variable expansion
+                    building_obj = getattr(persona, "buildings", {}).get(building_id)
+                    building_name = building_obj.name if building_obj else building_id
+                    city_name = getattr(persona, "current_city_id", "unknown_city")
+
+                    # Expand variables in common prompt
+                    common_text = common_prompt_template.format(
+                        current_persona_name=getattr(persona, "persona_name", "Unknown"),
+                        current_persona_id=getattr(persona, "persona_id", "unknown_id"),
+                        current_building_name=building_name,
+                        current_city_name=city_name,
+                        current_persona_system_instruction=getattr(persona, "persona_system_instruction", ""),
+                        current_building_system_instruction=getattr(building_obj, "system_instruction", "") if building_obj else "",
+                    )
+                    system_sections.append(common_text.strip())
+                except Exception as exc:
+                    LOGGER.debug("Failed to format common prompt: %s", exc)
+
+            # 2. "## あなたについて" section
+            persona_section_parts: List[str] = []
+            persona_sys = getattr(persona, "persona_system_instruction", "") or ""
+            if persona_sys:
+                persona_section_parts.append(persona_sys.strip())
+
+            # persona inventory
+            if reqs.inventory:
+                try:
+                    inv_builder = getattr(persona, "_inventory_summary_lines", None)
+                    inv_lines: List[str] = inv_builder() if callable(inv_builder) else []
+                except Exception:
+                    inv_lines = []
+                if inv_lines:
+                    persona_section_parts.append("### インベントリ\n" + "\n".join(inv_lines))
+
+            if persona_section_parts:
+                system_sections.append("## あなたについて\n" + "\n\n".join(persona_section_parts))
+
+            # 3. "## {building_name}" section (current location)
+            try:
+                building_obj = getattr(persona, "buildings", {}).get(building_id)
+                if building_obj:
+                    building_section_parts: List[str] = []
+
+                    # Building system instruction
+                    building_sys = getattr(building_obj, "system_instruction", None)
+                    if building_sys:
+                        building_section_parts.append(str(building_sys).strip())
+
+                    # Building items
+                    if reqs.building_items:
+                        try:
+                            items_by_building = getattr(self.manager, "items_by_building", {}) or {}
+                            item_registry = getattr(self.manager, "item_registry", {}) or {}
+                            b_items = items_by_building.get(building_id, [])
+                            lines = []
+                            for iid in b_items:
+                                data = item_registry.get(iid, {})
+                                name = data.get("name", iid)
+                                desc = (data.get("description") or "").strip() or "(説明なし)"
+                                lines.append(f"- [{iid}] {name}: {desc}")
+                            if lines:
+                                building_section_parts.append("### 建物内のアイテム\n" + "\n".join(lines))
+                        except Exception:
+                            pass
+
+                    if building_section_parts:
+                        building_name = getattr(building_obj, "name", building_id)
+                        system_sections.append(f"## {building_name}\n" + "\n\n".join(building_section_parts))
+            except Exception:
+                pass
+
+            # 4. "## 利用可能な能力" section (available playbooks)
+            if reqs.available_playbooks:
+                try:
+                    from tools import TOOL_REGISTRY
+                    list_playbooks_func = TOOL_REGISTRY.get("list_available_playbooks")
+                    if list_playbooks_func:
+                        # Get available playbooks JSON
+                        playbooks_json, _, _ = list_playbooks_func(
+                            persona_id=getattr(persona, "persona_id", None),
+                            building_id=building_id
+                        )
+                        if playbooks_json:
+                            import json
+                            playbooks_list = json.loads(playbooks_json)
+                            if playbooks_list:
+                                playbooks_formatted = json.dumps(playbooks_list, ensure_ascii=False, indent=2)
+                                system_sections.append(f"## 利用可能な能力\n以下のPlaybookを実行できます：\n```json\n{playbooks_formatted}\n```")
+                except Exception as exc:
+                    LOGGER.debug("Failed to add available playbooks section: %s", exc)
+
+            system_text = "\n\n---\n\n".join([s for s in system_sections if s])
+            if system_text:
+                messages.append({"role": "system", "content": system_text})
+
+        # ---- history ----
+        history_depth = reqs.history_depth
+        if history_depth not in [0, "none"]:
+            history_mgr = getattr(persona, "history_manager", None)
+            if history_mgr:
+                try:
+                    # Determine character count limit
+                    if history_depth == "full":
+                        char_limit = getattr(persona, "context_length", 2000)
+                    else:
+                        try:
+                            char_limit = int(history_depth)
+                        except (ValueError, TypeError):
+                            char_limit = 2000  # fallback
+
+                    # Filter by conversation tag or current pulse_id
+                    recent = history_mgr.get_recent_history(
+                        char_limit,
+                        required_tags=["conversation"],
+                        pulse_id=pulse_id,
+                    )
+                    messages.extend(recent)
+                except Exception:
+                    pass
+
+        return messages
+
+    def _choose_playbook(self, kind: str, persona: Any, building_id: str) -> PlaybookSchema:
+        """Resolve playbook by kind with DB→disk→fallback."""
+        candidates = ["meta_user" if kind == "user" else "meta_auto", "basic_chat"]
+        for name in candidates:
+            pb = self._load_playbook_for(name, persona, building_id)
+            if pb:
+                return pb
+        return self._basic_chat_playbook()
+
+    def _basic_chat_playbook(self) -> PlaybookSchema:
+        return PlaybookSchema(
+            name="basic_chat",
+            description="No-op fallback for simple conversations handled by meta layer",
+            input_schema=[{"name": "input", "description": "User or system input"}],
+            nodes=[
+                {
+                    "id": "noop",
+                    "type": "pass",
+                    "next": None,
+                },
+            ],
+            start_node="noop",
+        )
+
+    # playbook loading helpers -----------------------------------------
+    def _load_playbook_for(self, name: str, persona: Any, building_id: str) -> Optional[PlaybookSchema]:
+        pb = self._load_playbook_from_db(name, persona, building_id)
+        if not pb:
+            LOGGER.warning("[sea] playbook '%s' not found in DB (persona=%s building=%s)", name, getattr(persona, "persona_id", None), building_id)
+        return pb
+
+    def _visible(self, model: PlaybookModel, persona: Any, building_id: str) -> bool:
+        scope = (model.scope or "public").lower()
+        if scope == "public":
+            return True
+        if scope == "personal":
+            return model.created_by_persona_id == getattr(persona, "persona_id", None)
+        if scope == "building":
+            return model.building_id == building_id
+        return False
+
+    def _load_playbook_from_db(self, name: str, persona: Any, building_id: str) -> Optional[PlaybookSchema]:
+        session_maker = getattr(self.manager, "SessionLocal", None)
+        if session_maker is None:
+            return None
+        try:
+            session = session_maker()
+        except Exception:
+            return None
+        try:
+            try:
+                rec = (
+                    session.query(PlaybookModel)
+                    .filter(PlaybookModel.name == name)
+                    .first()
+                )
+            except Exception:
+                LOGGER.debug("Playbook table not ready; skipping DB load")
+                return None
+            if not rec or not self._visible(rec, persona, building_id):
+                return None
+            try:
+                data = json.loads(rec.nodes_json)
+                pb = PlaybookSchema(**data)
+                validate_playbook_graph(pb)
+                LOGGER.debug("[sea] Loaded playbook '%s' with %d input_schema params: %s", pb.name, len(pb.input_schema), [p.name for p in pb.input_schema])
+                self._debug_playbook(pb, source="db")
+                return pb
+            except PlaybookValidationError as exc:
+                LOGGER.error("[sea] playbook %s failed validation: %s", name, exc)
+                return None
+            except Exception:
+                LOGGER.exception("Failed to parse playbook %s from DB", name)
+                return None
+        finally:
+            session.close()
+
+    # Disk fallbackを無効化（バグ隠し防止のため）
+    def _load_playbook_from_disk(self, name: str) -> Optional[PlaybookSchema]:
+        return None

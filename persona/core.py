@@ -68,6 +68,7 @@ class PersonaCore(
         create_persona_callback: Optional[Callable[[str, str], Tuple[bool, str]]] = None,
         start_building_id: str = "air_room",
         model: str = "gpt-4o",
+        lightweight_model: Optional[str] = None,
         context_length: int = 120000,
         user_room_id: str = "user_room",
         provider: str = "ollama",
@@ -146,9 +147,29 @@ class PersonaCore(
         self.explore_callback = explore_callback
         self.create_persona_callback = create_persona_callback
         self.model = model
+        self.lightweight_model = lightweight_model
+        self.provider = provider
         self.context_length = context_length
         self.model_supports_images = model_supports_images(model)
         self.llm_client = get_llm_client(model, provider, self.context_length)
+
+        # Initialize lightweight LLM client if lightweight_model is provided
+        if lightweight_model and str(lightweight_model).strip():
+            try:
+                from model_configs import get_context_length
+                lw_context_length = get_context_length(lightweight_model)
+                self.lightweight_llm_client = get_llm_client(lightweight_model, provider, lw_context_length)
+            except Exception as exc:
+                logging.warning(
+                    "Failed to initialize lightweight LLM client for persona '%s' with model '%s': %s",
+                    persona_id,
+                    lightweight_model,
+                    exc,
+                )
+                self.lightweight_llm_client = None
+        else:
+            self.lightweight_llm_client = None
+
         self.emotion_module = EmotionControlModule()
         tz_label = (timezone_name or "UTC").strip() or "UTC"
         if isinstance(timezone_info, str):

@@ -19,6 +19,7 @@ from database.models import (
     User as UserModel,
     Item as ItemModel,
     ItemLocation as ItemLocationModel,
+    Playbook as PlaybookModel,
 )
 from manager.blueprints import BlueprintMixin
 from manager.history import HistoryMixin
@@ -719,6 +720,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "AVATAR_IMAGE": ai.AVATAR_IMAGE,
                 "IS_DISPATCHED": ai.IS_DISPATCHED,
                 "DEFAULT_MODEL": ai.DEFAULT_MODEL,
+                "LIGHTWEIGHT_MODEL": ai.LIGHTWEIGHT_MODEL,
                 "INTERACTION_MODE": ai.INTERACTION_MODE,
             }
         finally:
@@ -746,6 +748,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         system_prompt: str,
         home_city_id: int,
         default_model: Optional[str],
+        lightweight_model: Optional[str],
         interaction_mode: str,
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
@@ -842,6 +845,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             ai.SYSTEMPROMPT = system_prompt
             ai.HOME_CITYID = home_city_id
             ai.DEFAULT_MODEL = default_model or None
+            ai.LIGHTWEIGHT_MODEL = lightweight_model or None
             ai.AVATAR_IMAGE = avatar_value
             db.commit()
 
@@ -850,6 +854,32 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 persona.persona_name = name
                 persona.persona_system_instruction = system_prompt
                 persona.interaction_mode = ai.INTERACTION_MODE
+                persona.lightweight_model = lightweight_model
+
+                # Recreate lightweight LLM client if model changed
+                if lightweight_model:
+                    from llm_clients import get_llm_client
+                    from model_configs import get_context_length
+                    try:
+                        lw_context = get_context_length(lightweight_model)
+                        persona.lightweight_llm_client = get_llm_client(
+                            lightweight_model, self.provider, lw_context
+                        )
+                        logging.info(
+                            "Recreated lightweight LLM client for persona '%s' with model '%s'.",
+                            name,
+                            lightweight_model,
+                        )
+                    except Exception as exc:
+                        logging.error(
+                            "Failed to recreate lightweight LLM client for '%s': %s",
+                            name,
+                            exc,
+                        )
+                        persona.lightweight_llm_client = None
+                else:
+                    persona.lightweight_llm_client = None
+
                 logging.info("Updated in-memory persona '%s' with new settings.", name)
             self._set_persona_avatar(ai_id, avatar_value)
 
@@ -996,6 +1026,106 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 .all()
             )
             return [link[0] for link in links]
+        finally:
+            db.close()
+
+    # --- Playbook Management ---
+
+    def get_playbooks_df(self) -> pd.DataFrame:
+        """Get all playbooks as a DataFrame."""
+        db = self.SessionLocal()
+        try:
+            query = db.query(PlaybookModel)
+            df = pd.read_sql(query.statement, query.session.bind)
+            # Add snippet columns for long text fields
+            if not df.empty:
+                df["description_snippet"] = df["description"].str.slice(0, 50) + "..."
+                if "schema_json" in df.columns:
+                    df["schema_snippet"] = df["schema_json"].str.slice(0, 30) + "..."
+                if "nodes_json" in df.columns:
+                    df["nodes_snippet"] = df["nodes_json"].str.slice(0, 30) + "..."
+            return df
+        finally:
+            db.close()
+
+    def get_playbook_details(self, playbook_id: int) -> Optional[Dict[str, Any]]:
+        """Get detailed information for a specific playbook."""
+        db = self.SessionLocal()
+        try:
+            # Convert numpy.int64 to Python int (DataFrames return numpy types)
+            playbook_id = int(playbook_id)
+            playbook = db.query(PlaybookModel).filter(PlaybookModel.id == playbook_id).first()
+            if not playbook:
+                return None
+            return {
+                "id": playbook.id,
+                "name": playbook.name,
+                "description": playbook.description,
+                "scope": playbook.scope,
+                "created_by_persona_id": playbook.created_by_persona_id,
+                "building_id": playbook.building_id,
+                "schema_json": playbook.schema_json,
+                "nodes_json": playbook.nodes_json,
+                "router_callable": playbook.router_callable,
+                "created_at": str(playbook.created_at) if playbook.created_at else "",
+                "updated_at": str(playbook.updated_at) if playbook.updated_at else "",
+            }
+        finally:
+            db.close()
+
+    def update_playbook(
+        self,
+        playbook_id: int,
+        name: str,
+        description: str,
+        scope: str,
+        created_by_persona_id: Optional[str],
+        building_id: Optional[str],
+        schema_json: str,
+        nodes_json: str,
+        router_callable: bool,
+    ) -> str:
+        """Update an existing playbook."""
+        db = self.SessionLocal()
+        try:
+            playbook = db.query(PlaybookModel).filter(PlaybookModel.id == playbook_id).first()
+            if not playbook:
+                return f"Error: Playbook with id {playbook_id} not found."
+
+            playbook.name = name
+            playbook.description = description
+            playbook.scope = scope
+            playbook.created_by_persona_id = created_by_persona_id
+            playbook.building_id = building_id
+            playbook.schema_json = schema_json
+            playbook.nodes_json = nodes_json
+            playbook.router_callable = router_callable
+
+            db.commit()
+            return f"Success: Playbook '{name}' updated successfully."
+        except Exception as exc:
+            db.rollback()
+            logging.error("Failed to update playbook: %s", exc, exc_info=True)
+            return f"Error: Failed to update playbook. {exc}"
+        finally:
+            db.close()
+
+    def delete_playbook(self, playbook_id: int) -> str:
+        """Delete a playbook by ID."""
+        db = self.SessionLocal()
+        try:
+            playbook = db.query(PlaybookModel).filter(PlaybookModel.id == playbook_id).first()
+            if not playbook:
+                return f"Error: Playbook with id {playbook_id} not found."
+
+            name = playbook.name
+            db.delete(playbook)
+            db.commit()
+            return f"Success: Playbook '{name}' deleted successfully."
+        except Exception as exc:
+            db.rollback()
+            logging.error("Failed to delete playbook: %s", exc, exc_info=True)
+            return f"Error: Failed to delete playbook. {exc}"
         finally:
             db.close()
 

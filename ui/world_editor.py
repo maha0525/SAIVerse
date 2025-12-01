@@ -108,7 +108,7 @@ def on_select_ai(evt: gr.SelectData):
     ai_id = df.iloc[row_index]["AIID"]
     details = manager.get_ai_details(ai_id)
     if not details:
-        return "", "", "", "", None, "", False, "auto", "", "", gr.update(value=None)
+        return "", "", "", "", None, "", "", False, "auto", "", "", gr.update(value=None)
 
     current_location_name = "不明"
     if ai_id in manager.personas:
@@ -123,6 +123,7 @@ def on_select_ai(evt: gr.SelectData):
         details["SYSTEMPROMPT"],
         int(details["HOME_CITYID"]),
         details["DEFAULT_MODEL"],
+        details.get("LIGHTWEIGHT_MODEL") or "",
         details["IS_DISPATCHED"],
         details["INTERACTION_MODE"],
         current_location_name,
@@ -131,7 +132,7 @@ def on_select_ai(evt: gr.SelectData):
     )
 
 
-def update_ai_ui(ai_id: str, name: str, desc: str, sys_prompt: str, home_city_id, model: str, interaction_mode: str, avatar_path: str, avatar_file):
+def update_ai_ui(ai_id: str, name: str, desc: str, sys_prompt: str, home_city_id, model: str, lightweight_model: str, interaction_mode: str, avatar_path: str, avatar_file):
     manager = _require_manager()
     if not ai_id:
         return "Error: Select an AI to update.", gr.update()
@@ -152,7 +153,7 @@ def update_ai_ui(ai_id: str, name: str, desc: str, sys_prompt: str, home_city_id
     else:
         upload_path = avatar_file
 
-    result = manager.update_ai(ai_id, name, desc, sys_prompt, home_city_id, model, interaction_mode, avatar_path, upload_path)
+    result = manager.update_ai(ai_id, name, desc, sys_prompt, home_city_id, model, lightweight_model, interaction_mode, avatar_path, upload_path)
     return result, manager.get_ais_df()
 
 
@@ -202,7 +203,7 @@ def create_world_editor_ui():
     tool_choices = list(zip(all_tools_df["TOOLNAME"], all_tools_df["TOOLID"].astype(int))) if not all_tools_df.empty else []
 
     with gr.Row():
-        refresh_editor_btn = gr.Button("🔄 ワールドエディタ全体を更新", variant="secondary")
+        refresh_editor_btn = gr.Button("🔄 ワールドエディタ全体を更新", variant="secondary", elem_id="world_editor_refresh_btn")
 
     def create_city_ui(name, desc, ui_port, api_port, timezone_name):
         if not all([name, ui_port, api_port, timezone_name]):
@@ -335,7 +336,7 @@ def create_world_editor_ui():
         )
         return result, manager.get_items_df()
 
-    with gr.Accordion("City管理", open=True):
+    with gr.Accordion("City管理", open=False):
         with gr.Tabs():
             with gr.TabItem("編集/削除"):
                 city_df = gr.DataFrame(value=None, interactive=False, label="Cities in this World")
@@ -421,6 +422,7 @@ def create_world_editor_ui():
                     ai_name_text = gr.Textbox(label="AI Name")
                     ai_home_city_dropdown = gr.Dropdown(choices=city_choices, label="所属City", type="value")
                     ai_model_dropdown = gr.Dropdown(choices=ui_state.model_choices, label="Default Model", allow_custom_value=True)
+                    ai_lightweight_model_dropdown = gr.Dropdown(choices=ui_state.model_choices, label="Lightweight Model (optional)", allow_custom_value=True)
                     ai_interaction_mode_dropdown = gr.Dropdown(choices=["auto", "manual", "sleep"], label="対話モード", value="auto")
                 ai_desc_text = gr.Textbox(label="Description", lines=2)
                 ai_sys_prompt_text = gr.Textbox(label="System Prompt", lines=8)
@@ -442,8 +444,8 @@ def create_world_editor_ui():
                     move_ai_btn = gr.Button("移動実行", scale=1)
                 move_ai_status_display = gr.Textbox(label="Status", interactive=False)
 
-                ai_df.select(fn=on_select_ai, inputs=None, outputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, is_dispatched_checkbox, ai_interaction_mode_dropdown, ai_current_location_text, ai_avatar_path_text, ai_avatar_upload])
-                save_ai_btn.click(fn=update_ai_ui, inputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, ai_interaction_mode_dropdown, ai_avatar_path_text, ai_avatar_upload], outputs=[ai_status_display, ai_df])
+                ai_df.select(fn=on_select_ai, inputs=None, outputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, ai_lightweight_model_dropdown, is_dispatched_checkbox, ai_interaction_mode_dropdown, ai_current_location_text, ai_avatar_path_text, ai_avatar_upload])
+                save_ai_btn.click(fn=update_ai_ui, inputs=[ai_id_text, ai_name_text, ai_desc_text, ai_sys_prompt_text, ai_home_city_dropdown, ai_model_dropdown, ai_lightweight_model_dropdown, ai_interaction_mode_dropdown, ai_avatar_path_text, ai_avatar_upload], outputs=[ai_status_display, ai_df])
                 delete_ai_confirm_check.change(fn=toggle_delete_button, inputs=delete_ai_confirm_check, outputs=delete_ai_btn)
                 delete_ai_btn.click(fn=delete_ai_ui, inputs=[ai_id_text, delete_ai_confirm_check], outputs=[ai_status_display, ai_df])
                 move_ai_btn.click(fn=move_ai_ui, inputs=[ai_id_text, ai_move_target_dropdown], outputs=[move_ai_status_display, ai_current_location_text])
@@ -678,6 +680,139 @@ def create_world_editor_ui():
                     outputs=[create_item_status_display, item_df],
                 )
 
+    with gr.Accordion("Playbook管理", open=False):
+        gr.Markdown("Playbookの一覧表示、編集、削除を行います。新規作成はスクリプト `python scripts/import_playbook.py` を使用してください。")
+
+        playbook_df = gr.DataFrame(
+            value=lambda: manager.get_playbooks_df(),
+            interactive=False,
+            label="Playbooks"
+        )
+
+        with gr.Tabs():
+            with gr.TabItem("編集/削除"):
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        playbook_id_text = gr.Textbox(label="ID", interactive=False)
+                        playbook_name_text = gr.Textbox(label="Name")
+                        playbook_description_text = gr.Textbox(label="Description", lines=3)
+                        playbook_scope_dropdown = gr.Dropdown(
+                            label="Scope",
+                            choices=["public", "personal", "building"],
+                            value="public"
+                        )
+                        playbook_created_by_text = gr.Textbox(label="Created By Persona ID")
+                        playbook_building_id_text = gr.Textbox(label="Building ID")
+                        playbook_router_callable_check = gr.Checkbox(label="Router Callable", value=False)
+                        playbook_schema_json_text = gr.Textbox(label="Schema JSON", lines=5)
+                        playbook_nodes_json_text = gr.Textbox(label="Nodes JSON", lines=10)
+                        playbook_created_at_text = gr.Textbox(label="Created At", interactive=False)
+                        playbook_updated_at_text = gr.Textbox(label="Updated At", interactive=False)
+
+                        with gr.Row():
+                            update_playbook_btn = gr.Button("更新", variant="primary")
+                            delete_playbook_confirm_check = gr.Checkbox(label="削除を確認", value=False)
+                            delete_playbook_btn = gr.Button("削除", variant="stop", interactive=False)
+
+                        playbook_status_display = gr.Textbox(label="Status", interactive=False)
+
+                def on_select_playbook(evt: gr.SelectData):
+                    manager = _require_manager()
+                    if evt.index is None:
+                        return "", "", "", "public", "", "", False, "", "", "", ""
+                    # Handle both list and tuple index types
+                    if not isinstance(evt.index, (list, tuple)):
+                        return "", "", "", "public", "", "", False, "", "", "", ""
+                    row_index = evt.index[0]
+                    df = manager.get_playbooks_df()
+                    if df.empty or row_index >= len(df):
+                        return "", "", "", "public", "", "", False, "", "", "", ""
+                    playbook_id = df.iloc[row_index]["id"]
+                    details = manager.get_playbook_details(playbook_id)
+                    if not details:
+                        return "", "", "", "public", "", "", False, "", "", "", ""
+                    return (
+                        details["id"],
+                        details["name"],
+                        details["description"],
+                        details["scope"],
+                        details.get("created_by_persona_id") or "",
+                        details.get("building_id") or "",
+                        details["router_callable"],
+                        details["schema_json"],
+                        details["nodes_json"],
+                        details["created_at"],
+                        details["updated_at"],
+                    )
+
+                def update_playbook_ui(
+                    playbook_id_str, name, desc, scope, created_by, building_id,
+                    router_callable, schema_json, nodes_json
+                ):
+                    if not playbook_id_str:
+                        return "Error: Select a playbook to update.", gr.update()
+                    try:
+                        playbook_id = int(playbook_id_str)
+                    except (ValueError, TypeError):
+                        return "Error: Invalid playbook ID.", gr.update()
+
+                    result = manager.update_playbook(
+                        playbook_id, name, desc, scope,
+                        created_by if created_by else None,
+                        building_id if building_id else None,
+                        schema_json, nodes_json, router_callable
+                    )
+                    return result, manager.get_playbooks_df()
+
+                def delete_playbook_ui(playbook_id_str, confirmed):
+                    if not confirmed:
+                        return "Error: Please check the confirmation box to delete.", gr.update()
+                    if not playbook_id_str:
+                        return "Error: Select a playbook to delete.", gr.update()
+                    try:
+                        playbook_id = int(playbook_id_str)
+                    except (ValueError, TypeError):
+                        return "Error: Invalid playbook ID.", gr.update()
+
+                    result = manager.delete_playbook(playbook_id)
+                    return result, manager.get_playbooks_df()
+
+                def toggle_delete_playbook_button(confirmed):
+                    return gr.update(interactive=confirmed)
+
+                playbook_df.select(
+                    fn=on_select_playbook,
+                    inputs=[],
+                    outputs=[
+                        playbook_id_text, playbook_name_text, playbook_description_text,
+                        playbook_scope_dropdown, playbook_created_by_text, playbook_building_id_text,
+                        playbook_router_callable_check, playbook_schema_json_text, playbook_nodes_json_text,
+                        playbook_created_at_text, playbook_updated_at_text
+                    ]
+                )
+
+                update_playbook_btn.click(
+                    fn=update_playbook_ui,
+                    inputs=[
+                        playbook_id_text, playbook_name_text, playbook_description_text,
+                        playbook_scope_dropdown, playbook_created_by_text, playbook_building_id_text,
+                        playbook_router_callable_check, playbook_schema_json_text, playbook_nodes_json_text
+                    ],
+                    outputs=[playbook_status_display, playbook_df]
+                )
+
+                delete_playbook_confirm_check.change(
+                    fn=toggle_delete_playbook_button,
+                    inputs=delete_playbook_confirm_check,
+                    outputs=delete_playbook_btn
+                )
+
+                delete_playbook_btn.click(
+                    fn=delete_playbook_ui,
+                    inputs=[playbook_id_text, delete_playbook_confirm_check],
+                    outputs=[playbook_status_display, playbook_df]
+                )
+
     with gr.Accordion("バックアップ/リストア管理", open=False):
         gr.Markdown("現在のワールドの状態をバックアップしたり、過去のバックアップから復元します。**リストア後はアプリケーションの再起動が必須です。**")
 
@@ -747,6 +882,7 @@ def create_world_editor_ui():
         backups = manager.get_backups()
         tools = manager.get_tools_df()
         items = manager.get_items_df()
+        playbooks = manager.get_playbooks_df()
 
         backup_choices = backups["Backup Name"].tolist() if not backups.empty else []
 
@@ -758,6 +894,7 @@ def create_world_editor_ui():
             backups,
             tools,
             items,
+            playbooks,
             gr.update(choices=backup_choices, value=None),
         )
 
@@ -772,6 +909,7 @@ def create_world_editor_ui():
             backup_df,
             tool_df,
             item_df,
+            playbook_df,
             selected_backup_dropdown,
         ],
     )

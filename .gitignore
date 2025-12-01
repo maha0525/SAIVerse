@@ -14,6 +14,16 @@ sai_memory/__pycache__/
 database/data/*
 !database/data/.gitkeep
 
+# Temporary files and work-in-progress
+temp/
+!temp/.gitkeep
+
+# Local Claude Code preferences
+CLAUDE.local.md
+
+# User-uploaded assets
+assets/avatars/
+
 #開発用フォルダ
 tests/Nature/*
 tests/tools/*
@@ -28,5 +38,6 @@ __*.*
 !tools/utilities/__init__.py
 !ui/__init__.py
 !ui/handlers/__init__.py
+!sea/__init__.py
 tasks.md
 *.patch

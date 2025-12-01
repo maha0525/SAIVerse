@@ -7,6 +7,7 @@ import gradio as gr
 from database.db_manager import create_db_manager_ui
 from tools.utilities.memory_settings_ui import create_memory_settings_ui
 from ui import state as ui_state
+from ui.env_settings import create_env_settings_ui
 from ui.chat import (
     call_persona_ui,
     end_conversation_ui,
@@ -41,7 +42,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
 
     with gr.Blocks(fill_width=True, head=head_viewport, css=note_css, title=f"SAIVerse City: {city_name}", theme=gr.themes.Soft()) as demo:
         with gr.Sidebar(open=False, width=340, elem_id="sample_sidebar", elem_classes=["saiverse-sidebar"]):
-            with gr.Accordion("セクション切り替え", open=False):
+            with gr.Accordion("セクション切り替え", open=True):
                 gr.HTML("""
                     <div id="saiverse-sidebar-nav">
                         <div class="saiverse-nav-item" data-tab-label="ホーム">ホーム</div>
@@ -51,6 +52,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                         <div class="saiverse-nav-item" data-tab-label="タスクマネージャー">タスクマネージャー</div>
                         <div class="saiverse-nav-item" data-tab-label="メモリー設定">メモリー設定</div>
                         <div class="saiverse-nav-item" data-tab-label="ワールドエディタ">ワールドエディタ</div>
+                        <div class="saiverse-nav-item" data-tab-label="環境設定">⚙️ 環境設定</div>
                     </div>
                     """)
             with gr.Row():
@@ -312,15 +314,6 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                     end_conv_persona_dropdown,
                     client_location_state,
                 ],
-                js="""
-                () => {
-                    const navItem = document.querySelector('#saiverse-sidebar-nav .saiverse-nav-item[data-tab-label="ワールドビュー"]');
-                    if (navItem) {
-                        window.saiverseAutoLoadEnabled = true;
-                        navItem.click();
-                    }
-                }
-                """
             )
             summon_btn.click(fn=call_persona_ui, inputs=[summon_persona_dropdown], outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown])
             refresh_chat_btn.click(
@@ -424,6 +417,9 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
         with gr.Column(elem_id="section-world-editor", elem_classes=['saiverse-section', 'saiverse-hidden']):
             create_world_editor_ui() # This function now contains all editor sections
 
+        with gr.Column(elem_id="section-env-settings", elem_classes=['saiverse-section', 'saiverse-hidden']):
+            create_env_settings_ui()
+
 
         # UIロード時にJavaScriptを実行し、5秒ごとの自動更新タイマーを設定する
         js_auto_refresh = """
@@ -435,28 +431,58 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                 "DB Manager": "#section-db-manager",
                 "タスクマネージャー": "#section-task-manager",
                 "メモリー設定": "#section-memory-settings",
-                "ワールドエディタ": "#section-world-editor"
+                "ワールドエディタ": "#section-world-editor",
+                "環境設定": "#section-env-settings"
             };
             const defaultLabel = "ホーム";
             window.saiverseActiveSection = defaultLabel;
             window.saiverseWorldviewInitialized = false;
             window.saiverseWorldviewPending = false;
             window.saiverseAutoLoadEnabled = window.saiverseAutoLoadEnabled ?? false;
+            window.saiverseWorldEditorInitialized = window.saiverseWorldEditorInitialized ?? false;
+            window.saiverseWorldEditorPending = false;
             const triggerWorldviewLoad = () => {
                 if (!window.saiverseWorldviewPending) {
                     return;
                 }
                 if (!window.saiverseAutoLoadEnabled) {
-                    console.debug('[ui-js] auto load suppressed (disabled)');
                     return;
                 }
                 const button = document.querySelector("#refresh_chat_btn button, #refresh_chat_btn");
                 if (button) {
                     window.saiverseWorldviewInitialized = true;
                     window.saiverseWorldviewPending = false;
-                    button.click();
+
+                    // 一度非表示にしてから表示することでGradioのautoscrollを発動させる
+                    const worldviewSection = document.querySelector("#section-worldview");
+                    if (worldviewSection) {
+                        worldviewSection.classList.add("saiverse-hidden");
+                        button.click();
+                        setTimeout(() => {
+                            worldviewSection.classList.remove("saiverse-hidden");
+                        }, 50);
+                    } else {
+                        button.click();
+                    }
                 } else {
                     requestAnimationFrame(triggerWorldviewLoad);
+                }
+            };
+            const triggerWorldEditorLoad = () => {
+                if (!window.saiverseWorldEditorPending) {
+                    return;
+                }
+                if (window.saiverseWorldEditorInitialized) {
+                    window.saiverseWorldEditorPending = false;
+                    return;
+                }
+                const button = document.querySelector("#world_editor_refresh_btn button, #world_editor_refresh_btn");
+                if (button) {
+                    window.saiverseWorldEditorInitialized = true;
+                    window.saiverseWorldEditorPending = false;
+                    button.click();
+                } else {
+                    requestAnimationFrame(triggerWorldEditorLoad);
                 }
             };
             const setActive = (label) => {
@@ -478,16 +504,27 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                 });
                 window.saiverseActiveSection = label;
                 if (label === "ワールドビュー") {
-                    window.saiverseAutoLoadEnabled = window.saiverseAutoLoadEnabled ?? true;
-                    window.saiverseAutoLoadEnabled = true;
-                    window.saiverseWorldviewPending = true;
-                    triggerWorldviewLoad();
+                    // 初回のみtriggerWorldviewLoadを呼ぶ
+                    if (!window.saiverseWorldviewInitialized) {
+                        window.saiverseAutoLoadEnabled = true;
+                        window.saiverseWorldviewPending = true;
+                        triggerWorldviewLoad();
+                    }
                 } else {
                     window.saiverseWorldviewPending = false;
                     window.saiverseAutoLoadEnabled = false;
+                    if (label === "ワールドエディタ") {
+                        if (!window.saiverseWorldEditorInitialized) {
+                            window.saiverseWorldEditorPending = true;
+                            triggerWorldEditorLoad();
+                        }
+                    } else {
+                        window.saiverseWorldEditorPending = false;
+                    }
                 }
             };
             window.saiverseTriggerWorldviewLoad = triggerWorldviewLoad;
+            window.saiverseTriggerWorldEditorLoad = triggerWorldEditorLoad;
             setActive(defaultLabel);
 
             const setupAttachmentControls = () => {
@@ -570,6 +607,127 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                 return true;
             };
 
+            const setupSidebarSwipeGesture = () => {
+                const sidebar = document.querySelector(".sidebar.saiverse-sidebar");
+                if (!sidebar) {
+                    return false;
+                }
+
+                // すでにイベントが設定済みならスキップ
+                if (sidebar.dataset.swipeHandlerAttached === "true") {
+                    return true;
+                }
+
+                let touchStartX = 0;
+                let touchStartY = 0;
+                let touchStartTime = 0;
+
+                // タッチ開始
+                document.body.addEventListener("touchstart", (e) => {
+                    const isMobile = window.matchMedia("(max-width: 768px)").matches;
+                    if (!isMobile) {
+                        return;
+                    }
+
+                    const touch = e.touches[0];
+                    touchStartX = touch.clientX;
+                    touchStartY = touch.clientY;
+                    touchStartTime = Date.now();
+                }, { passive: true });
+
+                // タッチ終了
+                document.body.addEventListener("touchend", (e) => {
+                    const isMobile = window.matchMedia("(max-width: 768px)").matches;
+                    if (!isMobile) {
+                        return;
+                    }
+
+                    const touch = e.changedTouches[0];
+                    const touchEndX = touch.clientX;
+                    const touchEndY = touch.clientY;
+                    const touchEndTime = Date.now();
+
+                    const deltaX = touchEndX - touchStartX;
+                    const deltaY = touchEndY - touchStartY;
+                    const deltaTime = touchEndTime - touchStartTime;
+
+                    // スワイプ判定条件
+                    const SWIPE_THRESHOLD = 80; // スワイプ距離の閾値（px）
+                    const TIME_THRESHOLD = 500; // スワイプ時間の閾値（ms）
+                    const ANGLE_THRESHOLD = 30; // 角度の閾値（度）
+
+                    const isSwipingRight = deltaX > SWIPE_THRESHOLD;
+                    const isSwipingLeft = deltaX < -SWIPE_THRESHOLD;
+
+                    // スワイプが速すぎないか（ゆっくりすぎるとスクロールと判定）
+                    const isWithinTimeLimit = deltaTime < TIME_THRESHOLD;
+
+                    // 水平方向のスワイプか（垂直スクロールと区別）
+                    const angle = Math.abs(Math.atan2(deltaY, deltaX) * 180 / Math.PI);
+                    const isHorizontal = angle < ANGLE_THRESHOLD || angle > (180 - ANGLE_THRESHOLD);
+
+                    const isSidebarOpen = sidebar.classList.contains("open");
+
+                    // サイドバーが閉じている時: 右スワイプで開く
+                    if (!isSidebarOpen && isSwipingRight && isWithinTimeLimit && isHorizontal) {
+                        sidebar.classList.add("open");
+                        console.log('[ui-js] sidebar opened by swipe gesture');
+                    }
+                    // サイドバーが開いている時: 左スワイプで閉じる
+                    else if (isSidebarOpen && isSwipingLeft && isWithinTimeLimit && isHorizontal) {
+                        sidebar.classList.remove("open");
+                        console.log('[ui-js] sidebar closed by swipe gesture');
+                    }
+                }, { passive: true });
+
+                sidebar.dataset.swipeHandlerAttached = "true";
+                console.log('[ui-js] sidebar swipe gesture handler attached');
+                return true;
+            };
+
+            const setupSidebarOverlayDismiss = () => {
+                const sidebar = document.querySelector(".sidebar.saiverse-sidebar");
+                if (!sidebar) {
+                    return false;
+                }
+
+                // すでにイベントが設定済みならスキップ
+                if (sidebar.dataset.dismissHandlerAttached === "true") {
+                    return true;
+                }
+
+                // body全体でクリックイベントをキャプチャ
+                document.body.addEventListener("click", (e) => {
+                    const isMobile = window.matchMedia("(max-width: 768px)").matches;
+                    if (!isMobile) {
+                        return; // PCでは何もしない
+                    }
+
+                    if (sidebar.classList.contains("open")) {
+                        // サイドバー内部のクリックかどうかを判定
+                        let target = e.target;
+                        let isInsideSidebar = false;
+                        while (target && target !== document.body) {
+                            if (target === sidebar) {
+                                isInsideSidebar = true;
+                                break;
+                            }
+                            target = target.parentElement;
+                        }
+
+                        // サイドバー外をクリックした場合は閉じる
+                        if (!isInsideSidebar) {
+                            sidebar.classList.remove("open");
+                            console.debug('[ui-js] sidebar closed by outside click');
+                        }
+                    }
+                }, true); // キャプチャフェーズで処理
+
+                sidebar.dataset.dismissHandlerAttached = "true";
+                console.debug('[ui-js] sidebar dismiss handler attached');
+                return true;
+            };
+
             const attachNavHandlers = () => {
                 const navItems = document.querySelectorAll("#saiverse-sidebar-nav .saiverse-nav-item");
                 if (!navItems.length) {
@@ -604,6 +762,13 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                         el.style.removeProperty("right");
                         el.style.setProperty("left", offsetValue, "important");
                     }
+                    // PCでは初期表示、モバイルでは非表示
+                    if (!window.saiverseSidebarInitialized) {
+                        if (!isMobile) {
+                            el.classList.add("open");
+                        }
+                        window.saiverseSidebarInitialized = true;
+                    }
                     found = true;
                 });
                 if (found) {
@@ -612,6 +777,8 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                         setActive(current);
                     }
                     setupAttachmentControls();
+                    setupSidebarSwipeGesture();
+                    setupSidebarOverlayDismiss();
                 }
                 return found;
             };
@@ -639,6 +806,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                 }
                 markSidebars();
                 setupAttachmentControls();
+                setupSidebarSwipeGesture();
             }, 5000);
         }
         """

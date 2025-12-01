@@ -1,0 +1,67 @@
+{
+  "name": "sub_router_user",
+  "description": "Route user input to appropriate playbook",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "User input"
+    },
+    {
+      "name": "available_playbooks",
+      "description": "JSON list of available playbooks",
+      "source": "parent.available_playbooks"
+    }
+  ],
+  "context_requirements": {
+    "history_depth": 2000,
+    "inventory": false,
+    "building_items": false,
+    "system_prompt": true
+  },
+  "router_callable": false,
+  "nodes": [
+    {
+      "id": "llm",
+      "type": "llm",
+      "model_type": "lightweight",
+      "action": "You are the SEA router. Choose the best playbook for the user's request.\n\nAvailable playbooks (MUST select from this list):\n{available_playbooks}\n\nIMPORTANT: The 'playbook' field MUST be exactly one of the names from the available playbooks list above. Do NOT invent new playbook names.\n\nRespond ONLY with JSON per the schema.",
+      "next": null,
+      "conditional_next": {
+        "field": "router.playbook",
+        "cases": {
+          "basic_chat": null,
+          "default": "log"
+        }
+      },
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "playbook": {
+            "type": "string",
+            "description": "Playbook name to execute (must be one of the available playbooks)"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Brief reason for choosing this playbook"
+          }
+        },
+        "required": [
+          "playbook",
+          "reason"
+        ]
+      },
+      "output_key": "router"
+    },
+    {
+      "id": "log",
+      "type": "memorize",
+      "action": "{last}",
+      "role": "assistant",
+      "tags": [
+        "router"
+      ],
+      "next": null
+    }
+  ],
+  "start_node": "llm"
+}

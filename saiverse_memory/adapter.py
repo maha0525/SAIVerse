@@ -236,8 +236,8 @@ class SAIMemoryAdapter:
 
     def recall_snippet(
         self,
-        building_id: str,
-        query_text: str,
+        building_id: Optional[str] = None,
+        query_text: str = "",
         *,
         max_chars: int = 800,
         exclude_created_at: Optional[int | List[int]] = None,
@@ -251,7 +251,9 @@ class SAIMemoryAdapter:
             return ""
 
         thread_id = self._thread_id(building_id)
-        resource_id = self.settings.resource_id if self.settings.scope == "resource" else None
+        # Disable both thread_id and resource_id filters to search across all threads
+        search_thread_id = None
+        search_resource_id = None
 
         guard_ids: set[str] = set()
         try:
@@ -268,13 +270,14 @@ class SAIMemoryAdapter:
                     self.conn,
                     self.embedder,
                     query_text,
-                    thread_id=thread_id,
-                    resource_id=resource_id,
+                    thread_id=search_thread_id,
+                    resource_id=search_resource_id,
                     topk=effective_topk,
                     range_before=before,
                     range_after=after,
                     scope=self.settings.scope,
                     exclude_message_ids=guard_ids,
+                    required_tags=["conversation"],
                 )
                 groups = []
                 for seed, bundle, score in groups_raw:

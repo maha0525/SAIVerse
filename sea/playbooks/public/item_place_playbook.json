@@ -1,0 +1,60 @@
+{
+  "name": "item_place",
+  "description": "Place an item from persona's inventory into a building",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "User request or context about which item to place"
+    }
+  ],
+  "context_requirements": {
+    "history_depth": 0,
+    "inventory": true,
+    "building_items": false,
+    "system_prompt": true
+  },
+  "router_callable": true,
+  "nodes": [
+    {
+      "id": "decide_item",
+      "type": "llm",
+      "action": "インベントリを確認し、置くべきアイテムを決定してください。item_idとbuilding_id（省略可）を指定してください。",
+      "next": "place",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "description": "ID of the item to place"
+          },
+          "building_id": {
+            "type": "string",
+            "description": "Optional target building ID"
+          }
+        },
+        "required": ["item_id"]
+      },
+      "output_key": "place_params"
+    },
+    {
+      "id": "place",
+      "type": "tool",
+      "action": "item_place",
+      "args_input": {
+        "item_id": "place_params.item_id",
+        "building_id": "place_params.building_id"
+      },
+      "output_key": "result",
+      "next": "record"
+    },
+    {
+      "id": "record",
+      "type": "memorize",
+      "action": "{last}",
+      "role": "user",
+      "tags": ["tool", "item_place"],
+      "next": null
+    }
+  ],
+  "start_node": "decide_item"
+}

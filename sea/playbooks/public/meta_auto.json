@@ -1,0 +1,42 @@
+{
+  "name": "meta_auto",
+  "description": "Router -> selected playbook -> think (no user-facing speech)",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "Context or trigger for autonomous step"
+    }
+  ],
+  "context_requirements": {
+    "history_depth": "full",
+    "inventory": true,
+    "building_items": true,
+    "system_prompt": true
+  },
+  "router_callable": false,
+  "nodes": [
+    {
+      "id": "router",
+      "type": "subplay",
+      "playbook": "sub_router_user",
+      "input_template": "{input}",
+      "propagate_output": false,
+      "next": "exec"
+    },
+    {
+      "id": "exec",
+      "type": "tool",
+      "action": "exec",
+      "next": "finalize"
+    },
+    {
+      "id": "finalize",
+      "type": "subplay",
+      "playbook": "sub_think_meta",
+      "input_template": "{input}\n\n参考メモ:\n{context_bundle_text}",
+      "propagate_output": true,
+      "next": null
+    }
+  ],
+  "start_node": "router"
+}

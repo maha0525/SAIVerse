@@ -18,6 +18,7 @@ import os
 
 from google.genai import errors
 from buildings import Building
+from sea import SEARuntime
 from persona_core import PersonaCore
 from model_configs import get_model_provider, get_context_length
 from occupancy_manager import OccupancyManager
@@ -303,6 +304,10 @@ class SAIVerseManager(
                     "Failed to initialize Discord gateway integration: %s", exc
                 )
 
+        # SEA runtime (disabled by default unless env set)
+        self.sea_enabled = os.getenv("SAIVERSE_SEA_ENABLED", "0").lower() in {"1", "true", "yes"}
+        self.sea_runtime: Optional[SEARuntime] = SEARuntime(self) if self.sea_enabled else None
+
         self.runtime = RuntimeService(self, self.state)
         self.admin = AdminService(self, self.runtime, self.state)
 
@@ -366,6 +371,26 @@ class SAIVerseManager(
             data = self._load_avatar_data(Path(avatar_path))
         self.host_avatar = data or self.default_avatar
         self.state.host_avatar = self.host_avatar
+
+    # SEA integration helpers -------------------------------------------------
+    def run_sea_auto(self, persona, building_id: str, occupants: List[str]) -> None:
+        if not self.sea_runtime:
+            return None
+        try:
+            self.sea_runtime.run_meta_auto(persona, building_id, occupants)
+        except Exception as exc:
+            logging.exception("SEA auto run failed: %s", exc)
+            return None
+        return None
+
+    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None) -> List[str]:
+        if not self.sea_runtime:
+            return []
+        try:
+            return self.sea_runtime.run_meta_user(persona, user_input, building_id, metadata=metadata)
+        except Exception as exc:
+            logging.exception("SEA user run failed: %s", exc)
+            return []
 
     @property
     def all_personas(self) -> Dict[str, Union[PersonaCore, RemotePersonaProxy]]:
@@ -661,7 +686,7 @@ class SAIVerseManager(
             if item_id not in self.world_items:
                 self.world_items.append(item_id)
 
-            self.item_locations[item_id] = {
+        self.item_locations[item_id] = {
             "owner_kind": owner_kind,
             "owner_id": owner_id,
             "updated_at": updated_at,
@@ -681,7 +706,7 @@ class SAIVerseManager(
         building_id = persona.current_building_id
         if not building_id:
             raise RuntimeError("現在地が不明なため、アイテムを拾えません。")
-        resolved_id = self._resolve_item_identifier(item_id) or item_id
+        resolved_id = item_id
         item = self.items.get(resolved_id)
         if not item:
             raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
@@ -735,7 +760,7 @@ class SAIVerseManager(
         building_id = building_id or persona.current_building_id
         if not building_id:
             raise RuntimeError("現在地が不明なため、アイテムを置けません。")
-        resolved_id = self._resolve_item_identifier(item_id) or item_id
+        resolved_id = item_id
         item = self.items.get(resolved_id)
         if not item:
             raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
@@ -793,7 +818,7 @@ class SAIVerseManager(
         persona = self.personas.get(persona_id)
         if not persona or getattr(persona, "is_proxy", False):
             raise RuntimeError("このペルソナではアイテムを扱えません。")
-        resolved_id = self._resolve_item_identifier(item_id) or item_id
+        resolved_id = item_id
         item = self.items.get(resolved_id)
         if not item:
             raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
@@ -1392,3 +1417,36 @@ class SAIVerseManager(
 
     def delete_item(self, item_id: str) -> str:
         return self.admin.delete_item(item_id)
+
+    # --- Playbook Management ---
+
+    def get_playbooks_df(self) -> pd.DataFrame:
+        """Get all playbooks as a DataFrame for the world editor."""
+        return self.admin.get_playbooks_df()
+
+    def get_playbook_details(self, playbook_id: int) -> Optional[Dict[str, Any]]:
+        """Get detailed information for a specific playbook."""
+        return self.admin.get_playbook_details(playbook_id)
+
+    def update_playbook(
+        self,
+        playbook_id: int,
+        name: str,
+        description: str,
+        scope: str,
+        created_by_persona_id: Optional[str],
+        building_id: Optional[str],
+        schema_json: str,
+        nodes_json: str,
+        router_callable: bool,
+    ) -> str:
+        """Update a playbook from the world editor."""
+        return self.admin.update_playbook(
+            playbook_id, name, description, scope,
+            created_by_persona_id, building_id,
+            schema_json, nodes_json, router_callable
+        )
+
+    def delete_playbook(self, playbook_id: int) -> str:
+        """Delete a playbook from the world editor."""
+        return self.admin.delete_playbook(playbook_id)

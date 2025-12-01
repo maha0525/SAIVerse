@@ -1,0 +1,60 @@
+{
+  "name": "item_use",
+  "description": "Use an item from persona's inventory",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "User request or context about which item to use and how"
+    }
+  ],
+  "context_requirements": {
+    "history_depth": 0,
+    "inventory": true,
+    "building_items": false,
+    "system_prompt": true
+  },
+  "router_callable": true,
+  "nodes": [
+    {
+      "id": "decide_usage",
+      "type": "llm",
+      "action": "インベントリを確認し、使用するアイテムとその使い方を決定してください。item_idとdescription（使用後の状態説明）を指定してください。",
+      "next": "use",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "item_id": {
+            "type": "string",
+            "description": "ID of the item to use"
+          },
+          "description": {
+            "type": "string",
+            "description": "Description of how the item is used or its new state"
+          }
+        },
+        "required": ["item_id", "description"]
+      },
+      "output_key": "use_params"
+    },
+    {
+      "id": "use",
+      "type": "tool",
+      "action": "item_use",
+      "args_input": {
+        "item_id": "use_params.item_id",
+        "description": "use_params.description"
+      },
+      "output_key": "result",
+      "next": "record"
+    },
+    {
+      "id": "record",
+      "type": "memorize",
+      "action": "{last}",
+      "role": "user",
+      "tags": ["tool", "item_use"],
+      "next": null
+    }
+  ],
+  "start_node": "decide_usage"
+}

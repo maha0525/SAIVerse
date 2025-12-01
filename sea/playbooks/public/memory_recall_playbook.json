@@ -1,0 +1,57 @@
+{
+  "name": "memory_recall",
+  "description": "Recall relevant SAIMemory entries and package structured data for meta compose",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "Recall query"
+    }
+  ],
+  "context_requirements": {
+    "history_depth": 0,
+    "inventory": false,
+    "building_items": false,
+    "system_prompt": true
+  },
+  "router_callable": true,
+  "nodes": [
+    {
+      "id": "generate_query",
+      "type": "llm",
+      "action": "memory_recallツールの引数を決定します。思い出したい内容を、web検索のクエリのように入力してください。",
+      "next": "recall",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Optimized search query for memory recall"
+          }
+        },
+        "required": ["query"]
+      },
+      "output_key": "search_query"
+    },
+    {
+      "id": "recall",
+      "type": "tool",
+      "action": "memory_recall",
+      "args_input": {
+        "query": "search_query.query"
+      },
+      "next": "record"
+    },
+    {
+      "id": "record",
+      "type": "memorize",
+      "action": "{last}",
+      "role": "user",
+      "tags": [
+        "tool",
+        "memory_recall"
+      ],
+      "next": null
+    }
+  ],
+  "start_node": "generate_query"
+}

@@ -1,0 +1,32 @@
+{
+  "name": "sub_think_meta",
+  "description": "Compose internal thought for autonomous step",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "Composite context"
+    }
+  ],
+  "context_requirements": {
+    "history_depth": "full",
+    "inventory": true,
+    "building_items": true,
+    "system_prompt": true
+  },
+  "router_callable": false,
+  "nodes": [
+    {
+      "id": "compose",
+      "type": "llm",
+      "action": null,
+      "next": "think"
+    },
+    {
+      "id": "think",
+      "type": "think",
+      "action": "{last}",
+      "next": null
+    }
+  ],
+  "start_node": "compose"
+}

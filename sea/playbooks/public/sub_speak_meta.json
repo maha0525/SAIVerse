@@ -1,0 +1,50 @@
+{
+  "name": "sub_speak_meta",
+  "description": "Compose final response and speak",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "Composite prompt containing user request and context"
+    },
+    {
+      "name": "metadata",
+      "description": "Optional metadata from tool execution (e.g., media attachments)",
+      "source": "parent.metadata"
+    }
+  ],
+  "context_requirements": {
+    "history_depth": "full",
+    "inventory": true,
+    "building_items": true,
+    "system_prompt": true,
+    "available_playbooks": true
+  },
+  "router_callable": false,
+  "nodes": [
+    {
+      "id": "compose",
+      "type": "llm",
+      "action": null,
+      "next": "log"
+    },
+    {
+      "id": "log",
+      "type": "memorize",
+      "action": "{last}",
+      "role": "assistant",
+      "tags": [
+        "conversation"
+      ],
+      "metadata_key": "metadata",
+      "next": "say"
+    },
+    {
+      "id": "say",
+      "type": "say",
+      "action": "{last}",
+      "metadata_key": "metadata",
+      "next": null
+    }
+  ],
+  "start_node": "compose"
+}

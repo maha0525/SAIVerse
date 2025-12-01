@@ -1,0 +1,57 @@
+{
+  "name": "generate_image",
+  "description": "Generate an image using Gemini 2.5 Flash Image API",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "User request about what image to generate"
+    }
+  ],
+  "output_schema": ["metadata", "file_path", "snippet", "text"],
+  "context_requirements": {
+    "history_depth": "full",
+    "inventory": false,
+    "building_items": false,
+    "system_prompt": true
+  },
+  "router_callable": true,
+  "nodes": [
+    {
+      "id": "decide_prompt",
+      "type": "llm",
+      "action": "画像生成用のプロンプトを英語で作成してください。詳細で具体的な描写を含めてください。\n## Sample\n- `A photorealistic close-up portrait of an elderly Japanese ceramicist with deep, sun-etched wrinkles and a warm, knowing smile. He is carefully inspecting a freshly glazed tea bowl. The setting is his rustic, sun-drenched workshop. The scene is illuminated by soft, golden hour light streaming through a window, highlighting the fine texture of the clay. Captured with an 85mm portrait lens, resulting in a soft, blurred background (bokeh). The overall mood is serene and masterful. Vertical portrait orientation.`\n- `A kawaii-style sticker of a happy red panda wearing a tiny bamboo hat. It's munching on a green bamboo leaf. The design features bold, clean outlines, simple cel-shading, and a vibrant color palette. The background must be white.`\n- `Create a modern, minimalist logo for a coffee shop called 'The Daily Grind'. The text should be in a clean, bold, sans-serif font. The color scheme is black and white. Put the logo in a circle. Use a coffee bean in a clever way.`\n-`A high-resolution, studio-lit product photograph of a minimalist ceramic coffee mug in matte black, presented on a polished concrete surface. The lighting is a three-point softbox setup designed to create soft, diffused highlights and eliminate harsh shadows. The camera angle is a slightly elevated 45-degree shot to showcase its clean lines. Ultra-realistic, with sharp focus on the steam rising from the coffee. Square image.`\n- `A minimalist composition featuring a single, delicate red maple leaf positioned in the bottom-right of the frame. The background is a vast, empty off-white canvas, creating significant negative space for text. Soft, diffused lighting from the top left. Square image.`",
+      "next": "generate",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "description": "Detailed image generation prompt in English"
+          }
+        },
+        "required": ["prompt"]
+      },
+      "output_key": "gen_params"
+    },
+    {
+      "id": "generate",
+      "type": "tool",
+      "action": "generate_image",
+      "args_input": {
+        "prompt": "gen_params.prompt"
+      },
+      "output_keys": ["text", "snippet", "file_path", "metadata"],
+      "next": "record"
+    },
+    {
+      "id": "record",
+      "type": "memorize",
+      "action": "{text}",
+      "role": "user",
+      "tags": ["internal", "tool", "generate_image"],
+      "metadata_key": "metadata",
+      "next": null
+    }
+  ],
+  "start_node": "decide_prompt"
+}

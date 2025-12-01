@@ -7,6 +7,7 @@ from sqlalchemy import (
     Boolean,
     UniqueConstraint,
     func,
+    Text,
 )
 from sqlalchemy.orm import declarative_base
 
@@ -39,6 +40,7 @@ class AI(Base):
     INTERACTION_MODE = Column(String(32), default='auto', nullable=False) # auto / user
     IS_DISPATCHED = Column(Boolean, default=False, nullable=False)
     DEFAULT_MODEL = Column(String(255), nullable=True)
+    LIGHTWEIGHT_MODEL = Column(String(255), nullable=True)
     PRIVATE_ROOM_ID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
     PREVIOUS_INTERACTION_MODE = Column(String(32), default='auto', nullable=False)
 
@@ -121,6 +123,21 @@ class VisitingAI(Base):
     reason = Column(String(255)) # 拒否された場合の理由など
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     __table_args__ = (UniqueConstraint('city_id', 'persona_id', name='uq_visiting_city_persona'),)
+
+
+class Playbook(Base):
+    __tablename__ = "playbooks"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), unique=True, nullable=False)
+    description = Column(String(1024), default="", nullable=False)
+    scope = Column(String(32), nullable=False, default="public")  # public/personal/building
+    created_by_persona_id = Column(String(255), ForeignKey("ai.AIID"), nullable=True)
+    building_id = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
+    schema_json = Column(Text, nullable=False)
+    nodes_json = Column(Text, nullable=False)
+    router_callable = Column(Boolean, nullable=False, default=False)  # Can be called from router
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 class Blueprint(Base):
     __tablename__ = "blueprint"
