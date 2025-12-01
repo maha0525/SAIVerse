@@ -763,3 +763,241 @@ def logout_ui():
     if not manager:
         return "未初期化"
     return manager.set_user_login_status(1, False)
+
+
+# ========================================
+# Detail Panel Helper Functions
+# ========================================
+
+def get_building_details(building_id: str = None):
+    """Get building details including occupants, items, and prompt."""
+    manager = ui_state.manager
+    if not manager:
+        return {"occupants": [], "items": [], "prompt": ""}
+
+    if building_id is None:
+        building_id = manager.user_current_building_id
+
+    if not building_id or building_id not in manager.building_map:
+        return {"occupants": [], "items": [], "prompt": ""}
+
+    building = manager.building_map[building_id]
+
+    # Get occupants
+    occupants_list = []
+    if building_id in manager.occupancy_manager.occupants:
+        occupant_ids = manager.occupancy_manager.occupants[building_id]
+        for oid in occupant_ids:
+            if oid in manager.personas:
+                persona = manager.personas[oid]
+                occupants_list.append({
+                    "id": oid,
+                    "name": persona.persona_name,
+                })
+
+    # Get items
+    items_list = []
+    if building_id in manager.items_by_building:
+        item_ids = manager.items_by_building[building_id]
+        for item_id in item_ids:
+            if item_id in manager.item_registry:
+                item_data = manager.item_registry[item_id]
+                items_list.append({
+                    "id": item_id,
+                    "name": item_data.get("name", item_id),
+                    "description": item_data.get("description", ""),
+                })
+
+    # Get prompt
+    prompt = building.system_instruction or ""
+
+    return {
+        "occupants": occupants_list,
+        "items": items_list,
+        "prompt": prompt,
+    }
+
+
+def get_persona_details(persona_id: str = None):
+    """Get persona details including inventory, active thread, and active task."""
+    manager = ui_state.manager
+    if not manager:
+        return {"inventory": [], "thread": "", "task": None}
+
+    # If persona_id not specified, try to get the first persona in current building
+    if persona_id is None:
+        building_id = manager.user_current_building_id
+        if building_id and building_id in manager.occupancy_manager.occupants:
+            occupants = manager.occupancy_manager.occupants[building_id]
+            # Find first persona (not user)
+            for oid in occupants:
+                if oid in manager.personas:
+                    persona_id = oid
+                    break
+
+    if not persona_id or persona_id not in manager.personas:
+        return {"inventory": [], "thread": "", "task": None}
+
+    persona = manager.personas[persona_id]
+
+    # Get inventory
+    inventory_list = []
+    for item_id in persona.inventory_item_ids:
+        if item_id in manager.item_registry:
+            item_data = manager.item_registry[item_id]
+            inventory_list.append({
+                "id": item_id,
+                "name": item_data.get("name", item_id),
+                "description": item_data.get("description", ""),
+            })
+
+    # Get active thread
+    active_thread = ""
+    if hasattr(persona, "sai_memory") and persona.sai_memory:
+        try:
+            active_thread = persona.sai_memory.get_current_thread() or "main"
+        except Exception:
+            active_thread = "main"
+
+    # Get active task
+    active_task = None
+    try:
+        task_info = persona.task_storage.get_active_task()
+        if task_info:
+            active_task = {
+                "id": task_info.get("task_id"),
+                "title": task_info.get("title", ""),
+                "description": task_info.get("description", ""),
+            }
+    except Exception:
+        pass
+
+    return {
+        "persona_id": persona_id,
+        "persona_name": persona.persona_name,
+        "inventory": inventory_list,
+        "thread": active_thread,
+        "task": active_task,
+    }
+
+
+def get_execution_states():
+    """Get execution states for all personas in current building."""
+    manager = ui_state.manager
+    if not manager:
+        return []
+
+    building_id = manager.user_current_building_id
+    if not building_id or building_id not in manager.occupancy_manager.occupants:
+        return []
+
+    states = []
+    occupant_ids = manager.occupancy_manager.occupants[building_id]
+    for oid in occupant_ids:
+        if oid in manager.personas:
+            persona = manager.personas[oid]
+            exec_state = persona.get_execution_state()
+            states.append({
+                "persona_id": oid,
+                "persona_name": persona.persona_name,
+                "playbook": exec_state.get("playbook"),
+                "node": exec_state.get("node"),
+                "status": exec_state.get("status", "idle"),
+            })
+
+    return states
+
+
+def format_building_details():
+    """Format building details for display in UI."""
+    details = get_building_details()
+
+    # Format occupants
+    occupants_md = "### 建物内のペルソナ\n"
+    if details["occupants"]:
+        for occ in details["occupants"]:
+            occupants_md += f"- **{occ['name']}** (`{occ['id']}`)\n"
+    else:
+        occupants_md += "_(誰もいません)_\n"
+
+    # Format items
+    items_md = "\n### 建物内のアイテム\n"
+    if details["items"]:
+        for item in details["items"]:
+            desc = item['description'] or "(説明なし)"
+            items_md += f"- **{item['name']}** (`{item['id']}`): {desc}\n"
+    else:
+        items_md += "_(アイテムがありません)_\n"
+
+    # Format prompt
+    prompt_md = "\n### システムプロンプト\n"
+    if details["prompt"]:
+        prompt_md += f"```\n{details['prompt']}\n```\n"
+    else:
+        prompt_md += "_(プロンプトが設定されていません)_\n"
+
+    return occupants_md + items_md + prompt_md
+
+
+def format_persona_details():
+    """Format persona details for display in UI."""
+    details = get_persona_details()
+
+    if not details.get("persona_id"):
+        return "_(ペルソナが選択されていません)_"
+
+    result = f"## {details['persona_name']}\n\n"
+
+    # Format inventory
+    result += "### インベントリ\n"
+    if details["inventory"]:
+        for item in details["inventory"]:
+            desc = item['description'] or "(説明なし)"
+            result += f"- **{item['name']}** (`{item['id']}`): {desc}\n"
+    else:
+        result += "_(アイテムを持っていません)_\n"
+
+    # Format thread
+    result += f"\n### アクティブスレッド\n`{details['thread']}`\n"
+
+    # Format task
+    result += "\n### アクティブタスク\n"
+    if details["task"]:
+        task = details["task"]
+        result += f"**{task['title']}** (`{task['id']}`)\n"
+        if task['description']:
+            result += f"> {task['description']}\n"
+    else:
+        result += "_(タスクがありません)_\n"
+
+    return result
+
+
+def format_execution_states():
+    """Format execution states for display in UI."""
+    states = get_execution_states()
+
+    if not states:
+        return "_(実行中のペルソナがいません)_"
+
+    result = ""
+    for state in states:
+        status_emoji = {
+            "idle": "⚪",
+            "running": "🔄",
+            "waiting": "⏸️",
+            "completed": "✅"
+        }.get(state["status"], "❓")
+
+        result += f"### {status_emoji} {state['persona_name']}\n"
+
+        if state["status"] == "idle":
+            result += "_(待機中)_\n\n"
+        else:
+            if state["playbook"]:
+                result += f"**Playbook:** `{state['playbook']}`\n"
+            if state["node"]:
+                result += f"**Node:** `{state['node']}`\n"
+            result += f"**Status:** {state['status']}\n\n"
+
+    return result

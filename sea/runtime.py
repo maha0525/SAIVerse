@@ -81,6 +81,12 @@ class SEARuntime:
         else:
             pulse_id = str(uuid.uuid4())
 
+        # Update execution state: playbook started
+        if hasattr(persona, "execution_state"):
+            persona.execution_state["playbook"] = playbook.name
+            persona.execution_state["node"] = playbook.start_node
+            persona.execution_state["status"] = "running"
+
         # Prepare shared context (system prompt, history, inventories)
         base_messages = self._prepare_context(persona, building_id, user_input, playbook.context_requirements, pulse_id=pulse_id)
         conversation_msgs = list(base_messages)
@@ -132,6 +138,10 @@ class SEARuntime:
             variables["input"] = user_input or ""
 
         while current:
+            # Update execution state: current node
+            if hasattr(persona, "execution_state"):
+                persona.execution_state["node"] = current.id
+
             # meta exec: run sub-playbook directly (skip LLM node for exec)
             if playbook.name.startswith("meta_") and current.id == "exec":
                 sub_name = variables.get("selected_playbook") or variables.get("last") or "basic_chat"
@@ -332,6 +342,12 @@ class SEARuntime:
                     parent_state[key] = variables[key]
                     LOGGER.debug("[sea] Propagated %s to parent_state: %s", key, str(variables[key])[:200])
 
+        # Update execution state: playbook completed
+        if hasattr(persona, "execution_state"):
+            persona.execution_state["playbook"] = None
+            persona.execution_state["node"] = None
+            persona.execution_state["status"] = "idle"
+
         return outputs
 
     # LangGraph compile wrapper -----------------------------------------
@@ -353,6 +369,12 @@ class SEARuntime:
         if any(getattr(node, 'type', None) == NodeType.SUBPLAY for node in playbook.nodes):
             return None
 
+        # Update execution state: playbook started (LangGraph path)
+        if hasattr(persona, "execution_state"):
+            persona.execution_state["playbook"] = playbook.name
+            persona.execution_state["node"] = playbook.start_node
+            persona.execution_state["status"] = "running"
+
         compiled = compile_playbook(
             playbook,
             llm_node_factory=lambda node_def: self._lg_llm_node(node_def, persona, playbook),
@@ -366,6 +388,11 @@ class SEARuntime:
             else None,
         )
         if not compiled:
+            # Update execution state: compilation failed, reset to idle
+            if hasattr(persona, "execution_state"):
+                persona.execution_state["playbook"] = None
+                persona.execution_state["node"] = None
+                persona.execution_state["status"] = "idle"
             return None
 
         # Process input_schema to inherit variables from parent_state
@@ -412,6 +439,11 @@ class SEARuntime:
             final_state = asyncio.run(compiled(initial_state))
         except Exception:
             LOGGER.exception("SEA LangGraph execution failed; falling back to lightweight executor")
+            # Update execution state: execution failed, reset to idle
+            if hasattr(persona, "execution_state"):
+                persona.execution_state["playbook"] = None
+                persona.execution_state["node"] = None
+                persona.execution_state["status"] = "idle"
             return None
 
         # Write back state variables to parent_state based on output_schema
@@ -420,6 +452,12 @@ class SEARuntime:
                 if key in final_state:
                     parent_state[key] = final_state[key]
                     LOGGER.debug("[sea][LangGraph] Propagated %s to parent_state: %s", key, str(final_state[key])[:200])
+
+        # Update execution state: playbook completed (LangGraph path)
+        if hasattr(persona, "execution_state"):
+            persona.execution_state["playbook"] = None
+            persona.execution_state["node"] = None
+            persona.execution_state["status"] = "idle"
 
         # speak/think nodes already emitted; return collected texts for UI consistency
         return list(_lg_outputs)

@@ -195,6 +195,13 @@ class PersonaCore(
         self._persona_event_ack = persona_event_ack
         self.manager_ref = manager_ref
 
+        # Execution state tracking for UI display
+        self.execution_state: Dict[str, Any] = {
+            "playbook": None,
+            "node": None,
+            "status": "idle"  # idle, running, waiting, completed
+        }
+
     def set_inventory(self, item_ids: List[str]) -> None:
         self.inventory_item_ids = list(item_ids)
     def set_item_registry(self, registry: Dict[str, Dict[str, Any]]) -> None:
@@ -227,3 +234,7 @@ class PersonaCore(
             self._persona_event_ack(self.persona_id, event_ids)
         except Exception as exc:
             logging.debug("Failed to archive events for %s: %s", self.persona_id, exc)
+
+    def get_execution_state(self) -> Dict[str, Any]:
+        """Get the current playbook execution state for UI display."""
+        return dict(self.execution_state)
