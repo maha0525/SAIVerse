@@ -7,17 +7,26 @@
 #chat_header {
   position: fixed;
   top: 0;
-  left: 0;
+  left: 240px; /* Left sidebar width */
   height: 1.5rem;
   z-index: 100;
   background: var(--body-background-fill);
   border-bottom: 1px solid var(--border-color-primary);
-  width: 100vw;
+  width: calc(100vw - 240px - 400px); /* Subtract both sidebars */
   margin-left: auto;
   margin-right: auto;
   margin-bottom: auto;
   padding-left: 2rem;
   padding-right: 2rem;
+  transition: left 0.3s ease, width 0.3s ease;
+}
+
+/* Mobile: Force full width */
+@media screen and (max-width: 768px) {
+  #chat_header {
+    left: 0 !important;
+    width: 100vw !important;
+  }
 }
 
 /* チャット欄をスクロール領域として分離 */
@@ -25,6 +34,7 @@
 #chat_scroll_area {
   height: calc(100dvh - var(--composer-h));
   overflow-y: auto;
+  overflow-x: hidden;
   transition: height 0.1s;
   padding-bottom: 5rem !important;
   background: transparent;
@@ -33,19 +43,33 @@
 /* 入力欄を画面下部に固定 */
 #composer_fixed {
   position: fixed;
-  left: 0; right: 0; bottom: 0;
+  left: 240px;
+  right: 400px;
+  bottom: 0;
   z-index: 100;
   background: var(--body-background-fill);
   border-top: 1px solid var(--border-color-primary);
   box-shadow: 0 -2px 8px rgba(0,0,0,0.15);
-  max-width: 700px;
-  margin-left: auto;
-  margin-right: auto;
+  max-width: none; /* Remove fixed width to match chatbot area */
+  width: calc(100vw - 240px - 400px); /* Match available space */
+  margin-left: 0;
+  margin-right: 0;
+  transition: left 0.3s ease, right 0.3s ease, width 0.3s ease;
+}
+
+/* Mobile: Full width */
+@media screen and (max-width: 768px) {
+  #composer_fixed {
+    left: 0 !important;
+    right: 0 !important;
+    width: 100vw !important;
+  }
 }
 body { padding-bottom: 0 !important; }
 
 #my_chat {
   height: 100% !important;
+  overflow-x: hidden !important;
 }
 
 .saiverse-home {
@@ -102,7 +126,11 @@ body { padding-bottom: 0 !important; }
   }
 
   /* Markdown クランプ解除（保険） */
-  #my_chat .prose, #my_chat [class*="prose"] { max-width: none !important; }
+  #my_chat .prose, #my_chat [class*="prose"] {
+    max-width: none !important;
+    word-break: break-word !important;
+    overflow-wrap: anywhere !important;
+  }
 
   /* 長文の折返し */
   #my_chat pre { white-space: pre-wrap !important; word-break: break-word !important; }
@@ -154,9 +182,9 @@ html[data-theme='dark'] {
 .message-header { display: flex !important; align-items: center; gap: 12px; width: 100%; }
 .message-header .speaker-name { font-weight: 600; font-size: 0.95rem; color: var(--msg-fg); }
 .message-block.user .message-header .speaker-name { color: var(--user-fg); }
-.message-block .bubble { padding: 12px 16px; background-color: var(--msg-bg); color: var(--msg-fg) !important; border-radius: 12px; font-size: 1rem !important; overflow-wrap: break-word; max-width: min(640px, 90vw); box-shadow: 0 2px 6px rgba(0,0,0,0.08); display: flex; flex-direction: column; gap: 8px; }
+.message-block .bubble { padding: 12px 16px; background-color: var(--msg-bg); color: var(--msg-fg) !important; border-radius: 12px; font-size: 1rem !important; overflow-wrap: break-word; word-break: break-word; max-width: min(640px, 90vw); box-shadow: 0 2px 6px rgba(0,0,0,0.08); display: flex; flex-direction: column; gap: 8px; overflow: hidden; }
 .message-block.user .bubble { background-color: var(--user-bg); color: var(--user-fg) !important; }
-.message-block .bubble .bubble-content { line-height: 1.6; }
+.message-block .bubble .bubble-content { line-height: 1.6; word-break: break-word; overflow-wrap: anywhere; }
 .message-block .bubble .bubble-meta { font-size: 0.75rem; color: var(--timestamp-fg); align-self: flex-end; white-space: nowrap; }
 .message-block.user { align-items: flex-start; text-align: left; }
 .message-block.user .avatar-top { align-self: flex-start; }
@@ -203,10 +231,34 @@ html[data-theme='dark'] {
   background: transparent !important;
   box-shadow: none !important;
   padding: 0 !important;
+  max-width: 100% !important;
+  overflow: hidden !important;
+  word-break: break-word !important;
+}
+
+/* Chatbot内の全要素に強制的な折り返しを適用 */
+#my_chat,
+#my_chat * {
+  word-break: break-word !important;
+  overflow-wrap: anywhere !important;
+}
+
+#my_chat .message,
+#my_chat .message-wrap {
+  max-width: 100% !important;
+  overflow-x: hidden !important;
+}
+
+/* Markdown/Prose要素の幅制限と折り返し（PC/モバイル共通） */
+#my_chat .prose,
+#my_chat [class*="prose"] {
+  max-width: 100% !important;
+  word-break: break-word !important;
+  overflow-wrap: anywhere !important;
 }
 
 /* Notes */
-.note-box { background: var(--note-bg); color: var(--note-fg) !important; border-left: 4px solid #ffbf00; padding: 8px 12px; margin: 0; border-radius: 6px; font-size: .92rem; }
+.note-box { background: var(--note-bg); color: var(--note-fg) !important; border-left: 4px solid #ffbf00; padding: 8px 12px; margin: 0; border-radius: 6px; font-size: .92rem; word-break: break-word; overflow-wrap: anywhere; }
 .note-box b { color: var(--note-fg) !important; }
 
 .saiverse-move-radio .wrap {
@@ -236,14 +288,16 @@ details.saiv-thinking summary:focus { outline: none; }
 #my_chat .saiv-avatar > img { border-radius: 12px !important; margin: 0 !important; width: 100% !important; height: 100% !important; object-fit: cover !important; display: block !important; clip-path: inset(0 round 12px) !important; }
 #my_chat .saiv-avatar > picture > img { border-radius: 12px !important; margin: 0 !important; clip-path: inset(0 round 12px) !important; }
 
-:global(.saiverse-sidebar.sidebar) {
-  width: 20vw !important;
-}
+/* Left sidebar: 240px */
 :global(.saiverse-sidebar.sidebar):not(.right) {
-  left: calc(-1 * 20vw) !important;
+  width: 240px !important;
+  left: -240px !important;
 }
+
+/* Right sidebar: 400px (wider for long system prompts) */
 :global(.saiverse-sidebar.sidebar).right {
-  right: calc(-1 * 20vw) !important;
+  width: 400px !important;
+  right: -400px !important;
 }
 
 /* Sidebar toggle を押しやすく */
@@ -320,14 +374,14 @@ html[data-theme='dark'] .saiv-image-grid img {
 }
 
 @media (max-width: 768px) {
-  :global(.saiverse-sidebar.sidebar) {
-    width: 60vw !important;
-  }
+  /* Mobile: Left sidebar 60vw, right sidebar hidden by CSS above */
   :global(.saiverse-sidebar.sidebar):not(.right) {
+    width: 60vw !important;
     left: -60vw !important;
   }
   :global(.saiverse-sidebar.sidebar).right {
-    right: -60vw !important;
+    width: 70vw !important;
+    right: -70vw !important;
   }
 }
 
@@ -361,3 +415,32 @@ html[data-theme='dark'] .saiv-image-grid img {
   border-color: #2563eb !important;
   box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25);
 }
+
+/* Responsive design for mobile */
+@media screen and (max-width: 768px) {
+  /* Hide right sidebar (detail panel) on mobile */
+  #detail_sidebar {
+    display: none !important;
+  }
+
+  /* Force reset all sidebar adjustments on mobile - highest priority */
+  div.wrap.sidebar-parent[class*="svelte"] {
+    padding-left: 0 !important;
+  }
+
+  body div.wrap.sidebar-parent {
+    padding-left: 0 !important;
+  }
+
+  #chat_header {
+    left: 0 !important;
+    width: 100vw !important;
+  }
+
+  #composer_fixed {
+    left: 0 !important;
+    right: 0 !important;
+  }
+}
+
+/* NOTE: sidebar-parent padding is now handled in main.py HEAD_VIEWPORT to avoid Gradio scoping */
