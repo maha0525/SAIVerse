@@ -787,7 +787,9 @@ def get_building_details(building_id: str = None):
     occupants_list = []
     if building_id in manager.occupancy_manager.occupants:
         occupant_ids = manager.occupancy_manager.occupants[building_id]
-        for oid in occupant_ids:
+        # Sort to ensure stable order
+        sorted_ids = sorted(occupant_ids) if occupant_ids else []
+        for oid in sorted_ids:
             if oid in manager.personas:
                 persona = manager.personas[oid]
                 occupants_list.append({
@@ -799,7 +801,9 @@ def get_building_details(building_id: str = None):
     items_list = []
     if building_id in manager.items_by_building:
         item_ids = manager.items_by_building[building_id]
-        for item_id in item_ids:
+        # Sort to ensure stable order
+        sorted_item_ids = sorted(item_ids) if item_ids else []
+        for item_id in sorted_item_ids:
             if item_id in manager.item_registry:
                 item_data = manager.item_registry[item_id]
                 items_list.append({
@@ -842,9 +846,11 @@ def get_persona_details(persona_id: str = None):
 
     # Get inventory
     inventory_list = []
-    for item_id in persona.inventory_item_ids:
-        if item_id in manager.item_registry:
-            item_data = manager.item_registry[item_id]
+    # Sort to ensure stable order
+    sorted_inventory = sorted(persona.inventory_item_ids) if persona.inventory_item_ids else []
+    for item_id in sorted_inventory:
+        if item_id in manager.items:
+            item_data = manager.items[item_id]
             inventory_list.append({
                 "id": item_id,
                 "name": item_data.get("name", item_id),
@@ -893,7 +899,9 @@ def get_execution_states():
 
     states = []
     occupant_ids = manager.occupancy_manager.occupants[building_id]
-    for oid in occupant_ids:
+    # Sort to ensure stable order
+    sorted_occupants = sorted(occupant_ids) if occupant_ids else []
+    for oid in sorted_occupants:
         if oid in manager.personas:
             persona = manager.personas[oid]
             exec_state = persona.get_execution_state()
@@ -1001,3 +1009,37 @@ def format_execution_states():
             result += f"**Status:** {state['status']}\n\n"
 
     return result
+
+
+# Cache for detail panel updates to reduce flicker
+_detail_cache = {
+    "building": None,
+    "persona": None,
+    "execution": None
+}
+
+def update_detail_panels():
+    """Update detail panels only if content has changed."""
+    import logging
+    global _detail_cache
+
+    LOGGER = logging.getLogger(__name__)
+
+    building = format_building_details()
+    persona = format_persona_details()
+    execution = format_execution_states()
+
+    # Debug logging
+    building_changed = building != _detail_cache["building"]
+    persona_changed = persona != _detail_cache["persona"]
+    execution_changed = execution != _detail_cache["execution"]
+
+    if building_changed or persona_changed or execution_changed:
+        LOGGER.debug(f"[Detail Panel Update] Building changed: {building_changed}, Persona changed: {persona_changed}, Execution changed: {execution_changed}")
+        # Update cache
+        _detail_cache["building"] = building
+        _detail_cache["persona"] = persona
+        _detail_cache["execution"] = execution
+
+    # Always return current values (Gradio will handle rendering optimization)
+    return building, persona, execution

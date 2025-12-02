@@ -46,7 +46,46 @@ MODEL_CHOICES = ["None"] + get_model_choices()
 
 VERSION = time.strftime("%Y%m%d%H%M%S")  # 例: 20251008121530
 
-HEAD_VIEWPORT = '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">'
+HEAD_VIEWPORT = '''<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+/* Critical CSS: Override Gradio sidebar padding and width without scoping */
+div.wrap.sidebar-parent[style] {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+
+/* Left sidebar width */
+.sidebar.saiverse-sidebar:not(.right) {
+  width: 240px !important;
+  left: -240px !important;
+}
+
+/* Right sidebar width */
+.sidebar.saiverse-sidebar.right {
+  width: 400px !important;
+  right: -400px !important;
+}
+
+@media screen and (min-width: 769px) {
+  div.wrap.sidebar-parent[style] {
+    padding-left: 240px !important;
+    padding-right: 400px !important;
+    transition: padding-left 0.3s ease, padding-right 0.3s ease;
+  }
+}
+
+/* Mobile sidebar widths */
+@media (max-width: 768px) {
+  .sidebar.saiverse-sidebar:not(.right) {
+    width: 60vw !important;
+    left: -60vw !important;
+  }
+  .sidebar.saiverse-sidebar.right {
+    width: 70vw !important;
+    right: -70vw !important;
+  }
+}
+</style>'''
 
 
 CSS_PATH = Path("assets/css/chat.css")

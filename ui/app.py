@@ -30,6 +30,7 @@ from ui.chat import (
     start_conversations_ui,
     stop_conversations_ui,
     go_to_user_room_ui,
+    update_detail_panels,
     update_model_parameter,
 )
 from ui.world_editor import create_world_editor_ui
@@ -47,7 +48,8 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
     manager = _require_manager()
 
     with gr.Blocks(fill_width=True, head=head_viewport, css=note_css, title=f"SAIVerse City: {city_name}", theme=gr.themes.Soft()) as demo:
-        with gr.Sidebar(open=False, width=340, elem_id="sample_sidebar", elem_classes=["saiverse-sidebar"]):
+        # Left sidebar
+        with gr.Sidebar(open=False, width=240, elem_id="sample_sidebar", elem_classes=["saiverse-sidebar"]):
             with gr.Accordion("セクション切り替え", open=True):
                 gr.HTML("""
                     <div id="saiverse-sidebar-nav">
@@ -99,6 +101,16 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                     elem_classes=["saiverse-move-radio"],
                     show_label=False
                 )
+
+        # Right sidebar for detail panel
+        with gr.Sidebar(position="right", open=False, width=400, elem_id="detail_sidebar", elem_classes=["saiverse-sidebar", "right"]):
+            with gr.Accordion("🏢 Building", open=True):
+                building_details_display = gr.Markdown(value="_(読み込み中...)_")
+            with gr.Accordion("👤 ペルソナ", open=True):
+                persona_details_display = gr.Markdown(value="_(読み込み中...)_")
+            with gr.Accordion("⚙️ 実行状態", open=True):
+                execution_states_display = gr.Markdown(value="_(読み込み中...)_")
+
         with gr.Column(elem_id="section-home", elem_classes=['saiverse-section', 'saiverse-home']):
             gr.Markdown(
                 f"""
@@ -116,7 +128,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
             enter_worldview_btn = gr.Button("ワールドビューに入る", variant="primary", elem_id="enter_worldview_btn")
 
         with gr.Column(elem_id="section-worldview", elem_classes=['saiverse-section', 'saiverse-hidden']):
-            with gr.Row():
+            with gr.Row(elem_id="worldview-main-row"):
                 # Left column: Chat area
                 with gr.Column(scale=3):
                     with gr.Row(elem_id="chat_header"):
@@ -226,32 +238,26 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                                     )
                                     end_conv_btn = gr.Button("帰宅", scale=1)
 
-                # Right column: Detail panel
-                with gr.Column(scale=1, elem_id="detail_panel"):
-                    with gr.Tabs():
-                        with gr.Tab("Building"):
-                            building_details_display = gr.Markdown(value="_(読み込み中...)_")
-                        with gr.Tab("ペルソナ"):
-                            persona_details_display = gr.Markdown(value="_(読み込み中...)_")
-                        with gr.Tab("実行状態"):
-                            execution_states_display = gr.Markdown(value="_(読み込み中...)_")
-
             client_location_state = gr.State()
             parameter_state = gr.State({})
 
-            # Timer for detail panel updates
-            detail_update_timer = gr.Timer(value=2.0, active=True)
-
             # --- Event Handlers ---
-            submit.click(
+            submit_event = submit.click(
                 respond_stream,
                 [txt, image_input],
                 [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown, image_input],
+            ).then(
+                fn=update_detail_panels,
+                outputs=[building_details_display, persona_details_display, execution_states_display],
             )
-            txt.submit(
+
+            txt_event = txt.submit(
                 respond_stream,
                 [txt, image_input],
                 [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown, image_input],
+            ).then(
+                fn=update_detail_panels,
+                outputs=[building_details_display, persona_details_display, execution_states_display],
             )  # Enter key submission
             move_btn.click(
                 fn=move_user_ui,
@@ -266,6 +272,9 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                     end_conv_persona_dropdown,
                     client_location_state,
                 ],
+            ).then(
+                fn=update_detail_panels,
+                outputs=[building_details_display, persona_details_display, execution_states_display],
             )
             move_radio_event = move_destination_radio.change(
                 fn=move_user_radio_ui,
@@ -322,6 +331,9 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                     }
                 }
                 """
+            ).then(
+                fn=update_detail_panels,
+                outputs=[building_details_display, persona_details_display, execution_states_display],
             )
             enter_worldview_btn.click(
                 fn=go_to_user_room_ui,
@@ -336,20 +348,35 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                     end_conv_persona_dropdown,
                     client_location_state,
                 ],
+            ).then(
+                fn=update_detail_panels,
+                outputs=[building_details_display, persona_details_display, execution_states_display],
             )
-            summon_btn.click(fn=call_persona_ui, inputs=[summon_persona_dropdown], outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown])
+            summon_btn.click(fn=call_persona_ui, inputs=[summon_persona_dropdown], outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown]).then(
+                fn=update_detail_panels,
+                outputs=[building_details_display, persona_details_display, execution_states_display],
+            )
             refresh_chat_btn.click(
                 fn=get_current_building_history,
                 inputs=None,
                 outputs=chatbot,
                 show_progress="hidden",
+            ).then(
+                fn=update_detail_panels,
+                outputs=[building_details_display, persona_details_display, execution_states_display],
             )
             login_btn.click(
                 fn=login_ui,
                 inputs=None,
                 outputs=[login_status_display, summon_persona_dropdown, end_conv_persona_dropdown]
+            ).then(
+                fn=update_detail_panels,
+                outputs=[building_details_display, persona_details_display, execution_states_display],
             )
-            logout_btn.click(fn=logout_ui, inputs=None, outputs=login_status_display)
+            logout_btn.click(fn=logout_ui, inputs=None, outputs=login_status_display).then(
+                fn=update_detail_panels,
+                outputs=[building_details_display, persona_details_display, execution_states_display],
+            )
             model_drop.change(
                 select_model,
                 [model_drop],
@@ -394,6 +421,9 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                 fn=end_conversation_ui,
                 inputs=[end_conv_persona_dropdown],
                 outputs=[chatbot, summon_persona_dropdown, end_conv_persona_dropdown]
+            ).then(
+                fn=update_detail_panels,
+                outputs=[building_details_display, persona_details_display, execution_states_display],
             )
 
 
@@ -425,12 +455,6 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
             log_refresh_btn.click(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
             auto_refresh_log_btn.click(fn=get_autonomous_log, inputs=log_building_dropdown, outputs=log_chatbot, show_progress="hidden")
 
-            # Detail panel timer update
-            detail_update_timer.tick(
-                fn=lambda: (format_building_details(), format_persona_details(), format_execution_states()),
-                outputs=[building_details_display, persona_details_display, execution_states_display],
-                show_progress="hidden"
-            )
 
 
         with gr.Column(elem_id="section-db-manager", elem_classes=['saiverse-section', 'saiverse-hidden']):
@@ -637,19 +661,22 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
             };
 
             const setupSidebarSwipeGesture = () => {
-                const sidebar = document.querySelector(".sidebar.saiverse-sidebar");
-                if (!sidebar) {
+                const leftSidebar = document.querySelector(".sidebar.saiverse-sidebar:not(.right)");
+                const rightSidebar = document.querySelector(".sidebar.saiverse-sidebar.right");
+                if (!leftSidebar) {
                     return false;
                 }
 
                 // すでにイベントが設定済みならスキップ
-                if (sidebar.dataset.swipeHandlerAttached === "true") {
+                if (leftSidebar.dataset.swipeHandlerAttached === "true") {
                     return true;
                 }
 
                 let touchStartX = 0;
                 let touchStartY = 0;
                 let touchStartTime = 0;
+                let leftWasOpenAtStart = false;
+                let rightWasOpenAtStart = false;
 
                 // タッチ開始
                 document.body.addEventListener("touchstart", (e) => {
@@ -662,6 +689,10 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                     touchStartX = touch.clientX;
                     touchStartY = touch.clientY;
                     touchStartTime = Date.now();
+
+                    // タッチ開始時のサイドバー状態を記録
+                    leftWasOpenAtStart = leftSidebar.classList.contains("open");
+                    rightWasOpenAtStart = rightSidebar && rightSidebar.classList.contains("open");
                 }, { passive: true });
 
                 // タッチ終了
@@ -681,41 +712,37 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                     const deltaTime = touchEndTime - touchStartTime;
 
                     // スワイプ判定条件
-                    const SWIPE_THRESHOLD = 80; // スワイプ距離の閾値（px）
-                    const TIME_THRESHOLD = 500; // スワイプ時間の閾値（ms）
-                    const ANGLE_THRESHOLD = 30; // 角度の閾値（度）
+                    const SWIPE_THRESHOLD = 80;
+                    const TIME_THRESHOLD = 500;
+                    const ANGLE_THRESHOLD = 30;
 
                     const isSwipingRight = deltaX > SWIPE_THRESHOLD;
                     const isSwipingLeft = deltaX < -SWIPE_THRESHOLD;
-
-                    // スワイプが速すぎないか（ゆっくりすぎるとスクロールと判定）
                     const isWithinTimeLimit = deltaTime < TIME_THRESHOLD;
 
-                    // 水平方向のスワイプか（垂直スクロールと区別）
                     const angle = Math.abs(Math.atan2(deltaY, deltaX) * 180 / Math.PI);
                     const isHorizontal = angle < ANGLE_THRESHOLD || angle > (180 - ANGLE_THRESHOLD);
 
-                    const isSidebarOpen = sidebar.classList.contains("open");
-
-                    // サイドバーが閉じている時: 右スワイプで開く
-                    if (!isSidebarOpen && isSwipingRight && isWithinTimeLimit && isHorizontal) {
-                        sidebar.classList.add("open");
-                        console.log('[ui-js] sidebar opened by swipe gesture');
+                    // タッチ開始時の状態を使う
+                    // 両方閉じていた時: 右スワイプで左を開く
+                    if (!leftWasOpenAtStart && !rightWasOpenAtStart && isSwipingRight && isWithinTimeLimit && isHorizontal) {
+                        leftSidebar.classList.add("open");
+                        console.log('[ui-js] left sidebar opened by swipe gesture');
                     }
-                    // サイドバーが開いている時: 左スワイプで閉じる
-                    else if (isSidebarOpen && isSwipingLeft && isWithinTimeLimit && isHorizontal) {
-                        sidebar.classList.remove("open");
-                        console.log('[ui-js] sidebar closed by swipe gesture');
+                    // 左が開いていた時: 左スワイプで閉じる
+                    else if (leftWasOpenAtStart && isSwipingLeft && isWithinTimeLimit && isHorizontal) {
+                        leftSidebar.classList.remove("open");
+                        console.log('[ui-js] left sidebar closed by swipe gesture');
                     }
                 }, { passive: true });
 
-                sidebar.dataset.swipeHandlerAttached = "true";
-                console.log('[ui-js] sidebar swipe gesture handler attached');
+                leftSidebar.dataset.swipeHandlerAttached = "true";
+                console.log('[ui-js] left sidebar swipe gesture handler attached');
                 return true;
             };
 
             const setupSidebarOverlayDismiss = () => {
-                const sidebar = document.querySelector(".sidebar.saiverse-sidebar");
+                const sidebar = document.querySelector(".sidebar.saiverse-sidebar:not(.right)");
                 if (!sidebar) {
                     return false;
                 }
@@ -747,13 +774,121 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                         // サイドバー外をクリックした場合は閉じる
                         if (!isInsideSidebar) {
                             sidebar.classList.remove("open");
-                            console.debug('[ui-js] sidebar closed by outside click');
+                            console.debug('[ui-js] left sidebar closed by outside click');
                         }
                     }
                 }, true); // キャプチャフェーズで処理
 
                 sidebar.dataset.dismissHandlerAttached = "true";
-                console.debug('[ui-js] sidebar dismiss handler attached');
+                console.debug('[ui-js] left sidebar dismiss handler attached');
+                return true;
+            };
+
+            const setupRightSidebarGestures = () => {
+                const rightSidebar = document.querySelector(".sidebar.saiverse-sidebar.right");
+                const leftSidebar = document.querySelector(".sidebar.saiverse-sidebar:not(.right)");
+                if (!rightSidebar) {
+                    return false;
+                }
+
+                // すでにイベントが設定済みならスキップ
+                if (rightSidebar.dataset.gestureHandlerAttached === "true") {
+                    return true;
+                }
+
+                let touchStartX = 0;
+                let touchStartY = 0;
+                let touchStartTime = 0;
+                let rightWasOpenAtStart = false;
+                let leftWasOpenAtStart = false;
+
+                // タッチ開始
+                const handleTouchStart = (e) => {
+                    const isMobile = window.matchMedia("(max-width: 768px)").matches;
+                    if (!isMobile) {
+                        return;
+                    }
+
+                    const touch = e.touches[0];
+                    touchStartX = touch.clientX;
+                    touchStartY = touch.clientY;
+                    touchStartTime = Date.now();
+
+                    // タッチ開始時のサイドバー状態を記録
+                    rightWasOpenAtStart = rightSidebar.classList.contains("open");
+                    leftWasOpenAtStart = leftSidebar && leftSidebar.classList.contains("open");
+                };
+
+                // タッチ終了
+                const handleTouchEnd = (e) => {
+                    const isMobile = window.matchMedia("(max-width: 768px)").matches;
+                    if (!isMobile) {
+                        return;
+                    }
+
+                    const touch = e.changedTouches[0];
+                    const touchEndX = touch.clientX;
+                    const touchEndY = touch.clientY;
+                    const touchEndTime = Date.now();
+
+                    const deltaX = touchEndX - touchStartX;
+                    const deltaY = touchEndY - touchStartY;
+                    const deltaTime = touchEndTime - touchStartTime;
+
+                    // スワイプ判定条件
+                    const SWIPE_THRESHOLD = 80;
+                    const TIME_THRESHOLD = 500;
+                    const ANGLE_THRESHOLD = 30;
+
+                    const isSwipingLeft = deltaX < -SWIPE_THRESHOLD;
+                    const isSwipingRight = deltaX > SWIPE_THRESHOLD;
+                    const isWithinTimeLimit = deltaTime < TIME_THRESHOLD;
+
+                    const angle = Math.abs(Math.atan2(deltaY, deltaX) * 180 / Math.PI);
+                    const isHorizontal = angle < ANGLE_THRESHOLD || angle > (180 - ANGLE_THRESHOLD);
+
+                    // 左も右も開いていない状態で、左方向にスワイプしたら右が開く
+                    if (!rightWasOpenAtStart && !leftWasOpenAtStart && isSwipingLeft && isWithinTimeLimit && isHorizontal) {
+                        rightSidebar.classList.add("open");
+                        console.log('[ui-js] right sidebar opened by left swipe gesture');
+                    }
+                    // 右が開いている状態で、右方向にスワイプしたら右が閉じる
+                    else if (rightWasOpenAtStart && isSwipingRight && isWithinTimeLimit && isHorizontal) {
+                        rightSidebar.classList.remove("open");
+                        console.log('[ui-js] right sidebar closed by right swipe gesture');
+                    }
+                };
+
+                document.body.addEventListener("touchstart", handleTouchStart, { passive: true });
+                document.body.addEventListener("touchend", handleTouchEnd, { passive: true });
+
+                // 右サイドバー外タップで閉じる（モバイルのみ）
+                document.body.addEventListener("click", (e) => {
+                    const isMobile = window.matchMedia("(max-width: 768px)").matches;
+                    if (!isMobile) {
+                        return; // PCでは何もしない
+                    }
+
+                    if (rightSidebar.classList.contains("open")) {
+                        let target = e.target;
+                        let isInsideRightSidebar = false;
+                        while (target && target !== document.body) {
+                            if (target === rightSidebar) {
+                                isInsideRightSidebar = true;
+                                break;
+                            }
+                            target = target.parentElement;
+                        }
+
+                        if (!isInsideRightSidebar) {
+                            rightSidebar.classList.remove("open");
+                            console.debug('[ui-js] right sidebar closed by outside click');
+                        }
+                    }
+                }, true);
+
+                rightSidebar.dataset.gestureHandlerAttached = "true";
+                console.log('[ui-js] right sidebar gesture handler attached');
                 return true;
             };
 
@@ -776,11 +911,12 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
 
             const markSidebars = () => {
                 let found = false;
+                const isMobile = window.matchMedia("(max-width: 768px)").matches;
+
                 document.querySelectorAll(".sidebar").forEach((el) => {
                     if (!el.classList.contains("saiverse-sidebar")) {
                         el.classList.add("saiverse-sidebar");
                     }
-                    const isMobile = window.matchMedia("(max-width: 768px)").matches;
                     const widthValue = isMobile ? "80vw" : "20vw";
                     const offsetValue = `calc(-1 * ${widthValue})`;
                     el.style.setProperty("width", widthValue, "important");
@@ -791,15 +927,21 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                         el.style.removeProperty("right");
                         el.style.setProperty("left", offsetValue, "important");
                     }
-                    // PCでは初期表示、モバイルでは非表示
+
+                    // 初期状態の設定：PCでは両方開く
                     if (!window.saiverseSidebarInitialized) {
                         if (!isMobile) {
+                            // PCで両方初期表示
                             el.classList.add("open");
                         }
-                        window.saiverseSidebarInitialized = true;
                     }
                     found = true;
                 });
+
+                if (!window.saiverseSidebarInitialized) {
+                    window.saiverseSidebarInitialized = true;
+                }
+
                 if (found) {
                     if (attachNavHandlers()) {
                         const current = window.saiverseActiveSection || defaultLabel;
@@ -808,6 +950,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                     setupAttachmentControls();
                     setupSidebarSwipeGesture();
                     setupSidebarOverlayDismiss();
+                    setupRightSidebarGestures();
                 }
                 return found;
             };
@@ -836,10 +979,68 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                 markSidebars();
                 setupAttachmentControls();
                 setupSidebarSwipeGesture();
+                setupRightSidebarGestures();
             }, 5000);
         }
         """
         demo.load(fn=get_current_building_history, inputs=None, outputs=[chatbot])
+        demo.load(fn=update_detail_panels, inputs=None, outputs=[building_details_display, persona_details_display, execution_states_display])
+        demo.load(None, None, None, js="""
+        () => {
+            console.log('[SAIVerse] Hijacking Gradio sidebar width setters...');
+
+            function hijackSidebarStyles() {
+                const leftSidebar = document.querySelector('.sidebar.saiverse-sidebar:not(.right)');
+                const rightSidebar = document.querySelector('.sidebar.saiverse-sidebar.right');
+
+                if (leftSidebar) {
+                    const leftStyle = leftSidebar.style;
+                    const originalLeftSet = leftStyle.setProperty.bind(leftStyle);
+
+                    leftStyle.setProperty = function(prop, value, priority) {
+                        if (prop === 'width' && value === '20vw') {
+                            console.log('[SAIVerse] Intercepted left width 20vw -> 240px');
+                            return originalLeftSet('width', '240px', priority);
+                        }
+                        if (prop === 'left' && value.includes('20vw')) {
+                            console.log('[SAIVerse] Intercepted left position calc(-20vw) -> -240px');
+                            return originalLeftSet('left', '-240px', priority);
+                        }
+                        return originalLeftSet(prop, value, priority);
+                    };
+
+                    // Set initial values
+                    leftStyle.setProperty('width', '240px', 'important');
+                    leftStyle.setProperty('left', '-240px', 'important');
+                    console.log('[SAIVerse] Left sidebar hijacked');
+                }
+
+                if (rightSidebar) {
+                    const rightStyle = rightSidebar.style;
+                    const originalRightSet = rightStyle.setProperty.bind(rightStyle);
+
+                    rightStyle.setProperty = function(prop, value, priority) {
+                        if (prop === 'width' && value === '20vw') {
+                            console.log('[SAIVerse] Intercepted right width 20vw -> 400px');
+                            return originalRightSet('width', '400px', priority);
+                        }
+                        if (prop === 'right' && value.includes('20vw')) {
+                            console.log('[SAIVerse] Intercepted right position calc(-20vw) -> -400px');
+                            return originalRightSet('right', '-400px', priority);
+                        }
+                        return originalRightSet(prop, value, priority);
+                    };
+
+                    // Set initial values
+                    rightStyle.setProperty('width', '400px', 'important');
+                    rightStyle.setProperty('right', '-400px', 'important');
+                    console.log('[SAIVerse] Right sidebar hijacked');
+                }
+            }
+
+            setTimeout(hijackSidebarStyles, 500);
+        }
+        """)
         demo.load(None, None, None, js=js_auto_refresh)
 
 
