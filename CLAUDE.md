@@ -279,6 +279,9 @@ python scripts/memory_topics_ui.py
 - **When refactoring**: complete the entire change or revert; do not leave codebase in mixed state
 - **Gradio SelectData.index type**: Always check for both `list` and `tuple` with `isinstance(idx, (list, tuple))` before accessing `idx[0]`. Gradio returns `list` type (e.g., `[row, col]`), not `tuple`. Missing this check causes silent failures in table selection handlers.
 - **Gradio Chatbot autoscroll**: The `autoscroll=True` parameter works, but only triggers when the component becomes visible after being hidden. If updating data while already visible, autoscroll may not activate. To force autoscroll, temporarily hide the component (add CSS class), update data, then show it again. This visibility transition triggers the autoscroll behavior.
+- **Gradio dynamic inline styles**: When Gradio components apply inline styles via JavaScript after page load, CSS rules (even with `!important`) cannot override them. Solution: Use JavaScript monkey patching to hijack `element.style.setProperty()` and replace values before they're applied. See `docs/session_reflection_2025-12-03_sidebar_detail_panel.md` for detailed example.
+- **Asymmetric bugs indicate implementation mismatch**: If a bug occurs in scenario A but not in scenario B (despite similar logic), the cause is usually an implementation difference, not a timing/race condition. Compare code paths side-by-side to find where they diverge.
+- **CSS text wrapping requires multiple layers**: For reliable wrapping of long URLs/strings in CSS, combine: `word-break: break-word`, `overflow-wrap: anywhere`, `max-width: 100%`, and `overflow-x: hidden` on both content and container elements. A single property is often insufficient, especially with frameworks that inject many nested elements.
 
 ## Dependencies
 
@@ -314,6 +317,7 @@ Critical settings (see `.env.example`):
 - `docs/test_manual.md`: manual test scenarios
 - `docs/sea_integration_plan.md`: SEA framework integration roadmap
 - `docs/roadmap.md`: future features
+- `docs/session_reflection_*.md`: lessons learned from development sessions (Gradio UI patterns, debugging approaches, etc.)
 - `README.md`: comprehensive setup and usage guide
 
 ## Quick Reference
