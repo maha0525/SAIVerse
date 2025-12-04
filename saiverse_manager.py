@@ -455,6 +455,7 @@ class SAIVerseManager(
             db.close()
 
         self.items = {}
+        self.item_registry = self.items  # Alias for UI compatibility
         self.item_locations = {}
         self.items_by_building = defaultdict(list)
         self.items_by_persona = defaultdict(list)
@@ -474,6 +475,7 @@ class SAIVerseManager(
                 "name": row.NAME,
                 "type": row.TYPE,
                 "description": row.DESCRIPTION or "",
+                "file_path": row.FILE_PATH,
                 "state": state_payload,
                 "created_at": row.CREATED_AT,
                 "updated_at": row.UPDATED_AT,
@@ -814,7 +816,16 @@ class SAIVerseManager(
         self._append_building_history_note(building_id, note)
         return actor_msg
 
-    def use_item_for_persona(self, persona_id: str, item_id: str, new_description: str) -> str:
+    def use_item_for_persona(self, persona_id: str, item_id: str, action_json: str) -> str:
+        """
+        Use an item to apply effects.
+
+        Args:
+            persona_id: The persona using the item
+            item_id: The item to use
+            action_json: JSON string with action details
+                Schema: {"action_type": "update_description" | "patch_content", "description": "...", "patch": "..."}
+        """
         persona = self.personas.get(persona_id)
         if not persona or getattr(persona, "is_proxy", False):
             raise RuntimeError("このペルソナではアイテムを扱えません。")
@@ -825,43 +836,117 @@ class SAIVerseManager(
         location = self.item_locations.get(resolved_id)
         if not location or location.get("owner_kind") != "persona" or location.get("owner_id") != persona_id:
             raise RuntimeError("このアイテムは現在あなたのインベントリにありません。")
-        if (item.get("type") or "").lower() != "object":
-            raise RuntimeError("このアイテムは use 操作に対応していません。")
-        cleaned = (new_description or "").strip()
+
+        # Parse action JSON
+        try:
+            action_data = json.loads(action_json)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"action_jsonのパースに失敗しました: {exc}") from exc
+
+        action_type = action_data.get("action_type")
+        item_type = (item.get("type") or "").lower()
         timestamp = datetime.utcnow()
 
-        db = self.SessionLocal()
-        try:
-            row = (
-                db.query(ItemModel)
-                .filter(ItemModel.ITEM_ID == resolved_id)
-                .one_or_none()
-            )
-            if row is None:
-                raise RuntimeError("アイテム本体が見つかりません。")
-            row.DESCRIPTION = cleaned
-            row.UPDATED_AT = timestamp
-            db.commit()
-        except Exception as exc:
-            db.rollback()
-            raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
-        finally:
-            db.close()
+        if action_type == "update_description":
+            # object, picture, document全てに対応
+            cleaned = (action_data.get("description") or "").strip()
 
-        item["description"] = cleaned
-        item["updated_at"] = timestamp
-        location_owner_kind = self.item_locations.get(resolved_id, {}).get("owner_kind")
-        location_owner_id = self.item_locations.get(resolved_id, {}).get("owner_id")
-        if location_owner_kind == "building" and location_owner_id:
-            self._refresh_building_system_instruction(location_owner_id)
-        inventory = self.items_by_persona.get(persona_id, [])
-        persona.set_inventory(list(inventory))
+            db = self.SessionLocal()
+            try:
+                row = (
+                    db.query(ItemModel)
+                    .filter(ItemModel.ITEM_ID == resolved_id)
+                    .one_or_none()
+                )
+                if row is None:
+                    raise RuntimeError("アイテム本体が見つかりません。")
+                row.DESCRIPTION = cleaned
+                row.UPDATED_AT = timestamp
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
+            finally:
+                db.close()
 
-        preview = cleaned if cleaned else "(内容未設定)"
-        if len(preview) > 80:
-            preview = preview[:77] + "..."
-        item_name = item.get("name", resolved_id)
-        actor_msg = f"「{item_name}」を使った。内容: {preview}"
+            item["description"] = cleaned
+            item["updated_at"] = timestamp
+            location_owner_kind = self.item_locations.get(resolved_id, {}).get("owner_kind")
+            location_owner_id = self.item_locations.get(resolved_id, {}).get("owner_id")
+            if location_owner_kind == "building" and location_owner_id:
+                self._refresh_building_system_instruction(location_owner_id)
+            inventory = self.items_by_persona.get(persona_id, [])
+            persona.set_inventory(list(inventory))
+
+            preview = cleaned if cleaned else "(内容未設定)"
+            if len(preview) > 80:
+                preview = preview[:77] + "..."
+            item_name = item.get("name", resolved_id)
+            actor_msg = f"「{item_name}」の説明を更新した。内容: {preview}"
+
+        elif action_type == "patch_content":
+            # document専用
+            if item_type != "document":
+                raise RuntimeError("patch_contentはdocumentタイプのアイテムにのみ使用できます。")
+
+            file_path_str = item.get("file_path")
+            if not file_path_str:
+                raise RuntimeError("このdocumentにはファイルパスが設定されていません。")
+
+            from pathlib import Path
+            file_path = Path(file_path_str)
+            if not file_path.exists():
+                raise RuntimeError(f"ファイルが見つかりません: {file_path}")
+
+            # ファイルに追記
+            patch = action_data.get("patch", "")
+            try:
+                current_content = file_path.read_text(encoding="utf-8")
+                new_content = current_content + "\n" + patch
+                file_path.write_text(new_content, encoding="utf-8")
+            except OSError as exc:
+                raise RuntimeError(f"ファイルの更新に失敗しました: {exc}") from exc
+
+            # Summary再生成
+            from media_summary import ensure_document_summary
+            new_summary = ensure_document_summary(file_path)
+
+            # DB更新
+            db = self.SessionLocal()
+            try:
+                row = (
+                    db.query(ItemModel)
+                    .filter(ItemModel.ITEM_ID == resolved_id)
+                    .one_or_none()
+                )
+                if row is None:
+                    raise RuntimeError("アイテム本体が見つかりません。")
+                if new_summary:
+                    row.DESCRIPTION = new_summary
+                row.UPDATED_AT = timestamp
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
+            finally:
+                db.close()
+
+            if new_summary:
+                item["description"] = new_summary
+            item["updated_at"] = timestamp
+            location_owner_kind = self.item_locations.get(resolved_id, {}).get("owner_kind")
+            location_owner_id = self.item_locations.get(resolved_id, {}).get("owner_id")
+            if location_owner_kind == "building" and location_owner_id:
+                self._refresh_building_system_instruction(location_owner_id)
+            inventory = self.items_by_persona.get(persona_id, [])
+            persona.set_inventory(list(inventory))
+
+            item_name = item.get("name", resolved_id)
+            actor_msg = f"「{item_name}」の内容を更新した。"
+
+        else:
+            raise RuntimeError(f"未対応のaction_type: {action_type}")
+
         self.record_persona_event(persona_id, actor_msg)
         building_id = persona.current_building_id
         other_ids = [
@@ -880,6 +965,246 @@ class SAIVerseManager(
             self._append_building_history_note(building_id, note)
         return actor_msg
 
+    def view_item_for_persona(self, persona_id: str, item_id: str) -> str:
+        """
+        View the full content of a picture or document item.
+
+        Args:
+            persona_id: The persona viewing the item
+            item_id: The item to view
+
+        Returns:
+            - picture: File path for display
+            - document: Full text content of the file
+            - object: Error message (not supported)
+        """
+        persona = self.personas.get(persona_id)
+        if not persona or getattr(persona, "is_proxy", False):
+            raise RuntimeError("このペルソナではアイテムを扱えません。")
+
+        resolved_id = item_id
+        item = self.items.get(resolved_id)
+        if not item:
+            raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
+
+        item_type = (item.get("type") or "").lower()
+
+        if item_type == "object":
+            raise RuntimeError("objectタイプのアイテムは閲覧できません。")
+
+        elif item_type == "picture":
+            file_path_str = item.get("file_path")
+            if not file_path_str:
+                raise RuntimeError("この画像にはファイルパスが設定されていません。")
+            from pathlib import Path
+            file_path = Path(file_path_str)
+            if not file_path.exists():
+                raise RuntimeError(f"ファイルが見つかりません: {file_path}")
+            return f"画像ファイル: {file_path}"
+
+        elif item_type == "document":
+            file_path_str = item.get("file_path")
+            if not file_path_str:
+                raise RuntimeError("この文書にはファイルパスが設定されていません。")
+            from pathlib import Path
+            file_path = Path(file_path_str)
+            if not file_path.exists():
+                raise RuntimeError(f"ファイルが見つかりません: {file_path}")
+            try:
+                content = file_path.read_text(encoding="utf-8")
+                return f"文書の内容:\n\n{content}"
+            except OSError as exc:
+                raise RuntimeError(f"ファイルの読み込みに失敗しました: {exc}") from exc
+
+        else:
+            raise RuntimeError(f"未対応のアイテムタイプ: {item_type}")
+
+    def create_document_item(self, persona_id: str, name: str, description: str, content: str) -> str:
+        """
+        Create a new document item and place it in the current building.
+
+        Args:
+            persona_id: The persona creating the document
+            name: Name of the document
+            description: Brief description (initial summary)
+            content: Full text content
+
+        Returns:
+            Success message with item ID
+        """
+        persona = self.personas.get(persona_id)
+        if not persona or getattr(persona, "is_proxy", False):
+            raise RuntimeError("このペルソナでは文書を作成できません。")
+
+        building_id = persona.current_building_id
+        if not building_id:
+            raise RuntimeError("現在地が不明なため、文書を作成できません。")
+
+        # ファイル保存
+        from media_utils import store_document_text
+        try:
+            metadata, file_path = store_document_text(content, source="tool:document_create")
+        except Exception as exc:
+            raise RuntimeError(f"ファイルの保存に失敗しました: {exc}") from exc
+
+        # Summary生成
+        from media_summary import ensure_document_summary
+        summary = ensure_document_summary(file_path)
+        if not summary:
+            summary = description  # フォールバック
+
+        # DBにアイテム作成
+        import uuid
+        item_id = str(uuid.uuid4())
+        timestamp = datetime.utcnow()
+
+        db = self.SessionLocal()
+        try:
+            item_row = ItemModel(
+                ITEM_ID=item_id,
+                NAME=name,
+                TYPE="document",
+                DESCRIPTION=summary,
+                FILE_PATH=str(file_path),
+                CREATED_AT=timestamp,
+                UPDATED_AT=timestamp,
+            )
+            db.add(item_row)
+
+            location_row = ItemLocationModel(
+                ITEM_ID=item_id,
+                OWNER_KIND="building",
+                OWNER_ID=building_id,
+                UPDATED_AT=timestamp,
+            )
+            db.add(location_row)
+
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"データベース登録に失敗しました: {exc}") from exc
+        finally:
+            db.close()
+
+        # キャッシュ更新
+        self.items[item_id] = {
+            "item_id": item_id,
+            "name": name,
+            "type": "document",
+            "description": summary,
+            "file_path": str(file_path),
+            "state": {},
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+        self.item_locations[item_id] = {
+            "owner_kind": "building",
+            "owner_id": building_id,
+            "updated_at": timestamp,
+            "location_id": None,
+        }
+        self.items_by_building[building_id].append(item_id)
+        self._refresh_building_system_instruction(building_id)
+
+        building_name = self.building_map.get(building_id).name if building_id in self.building_map else building_id
+        actor_msg = f"「{name}」という文書を作成し、{building_name}に配置した。"
+        self.record_persona_event(persona_id, actor_msg)
+
+        note = (
+            "<div class=\"note-box\">📄 Document Created:<br>"
+            f"<b>{persona.persona_name}が「{name}」を作成しました（{building_name}）。</b></div>"
+        )
+        self._append_building_history_note(building_id, note)
+
+        return f"文書「{name}」を作成しました。アイテムID: {item_id}"
+
+    def create_picture_item(self, persona_id: str, name: str, description: str, file_path: str, building_id: Optional[str] = None) -> str:
+        """
+        Create a new picture item and place it in the specified building.
+
+        Args:
+            persona_id: The persona creating the picture
+            name: Name of the picture
+            description: Summary of the picture
+            file_path: Path to the image file
+            building_id: Optional target building (defaults to current location)
+
+        Returns:
+            Item ID
+        """
+        persona = self.personas.get(persona_id)
+        if not persona or getattr(persona, "is_proxy", False):
+            raise RuntimeError("このペルソナでは画像を作成できません。")
+
+        if not building_id:
+            building_id = persona.current_building_id
+        if not building_id:
+            raise RuntimeError("現在地が不明なため、画像を配置できません。")
+
+        # DBにアイテム作成
+        import uuid
+        item_id = str(uuid.uuid4())
+        timestamp = datetime.utcnow()
+
+        db = self.SessionLocal()
+        try:
+            item_row = ItemModel(
+                ITEM_ID=item_id,
+                NAME=name,
+                TYPE="picture",
+                DESCRIPTION=description,
+                FILE_PATH=file_path,
+                CREATED_AT=timestamp,
+                UPDATED_AT=timestamp,
+            )
+            db.add(item_row)
+
+            location_row = ItemLocationModel(
+                ITEM_ID=item_id,
+                OWNER_KIND="building",
+                OWNER_ID=building_id,
+                UPDATED_AT=timestamp,
+            )
+            db.add(location_row)
+
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"データベース登録に失敗しました: {exc}") from exc
+        finally:
+            db.close()
+
+        # キャッシュ更新
+        self.items[item_id] = {
+            "item_id": item_id,
+            "name": name,
+            "type": "picture",
+            "description": description,
+            "file_path": file_path,
+            "state": {},
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+        self.item_locations[item_id] = {
+            "owner_kind": "building",
+            "owner_id": building_id,
+            "updated_at": timestamp,
+            "location_id": None,
+        }
+        self.items_by_building[building_id].append(item_id)
+        self._refresh_building_system_instruction(building_id)
+
+        building_name = self.building_map.get(building_id).name if building_id in self.building_map else building_id
+        actor_msg = f"「{name}」という画像を生成し、{building_name}に配置した。"
+        self.record_persona_event(persona_id, actor_msg)
+
+        note = (
+            "<div class=\"note-box\">🖼 Picture Created:<br>"
+            f"<b>{persona.persona_name}が「{name}」を生成しました（{building_name}）。</b></div>"
+        )
+        self._append_building_history_note(building_id, note)
+
+        return item_id
 
     def _explore_city(self, persona_id: str, target_city_id: str):
         self.runtime.explore_city(persona_id, target_city_id)

@@ -91,264 +91,19 @@ class SEARuntime:
         base_messages = self._prepare_context(persona, building_id, user_input, playbook.context_requirements, pulse_id=pulse_id)
         conversation_msgs = list(base_messages)
 
-        # Try LangGraph path first
+        # Execute playbook with LangGraph
         compiled_ok = self._compile_with_langgraph(playbook, persona, building_id, user_input, auto_mode, conversation_msgs, pulse_id, parent_state=parent)
-        if compiled_ok is not None:
-            return compiled_ok
-
-        # fallback lightweight executor
-        node_map = playbook.node_map()
-        current = node_map.get(playbook.start_node)
-        outputs: List[str] = []
-        last_text = user_input or ""
-
-        # Initialize variables from input_schema
-        variables: Dict[str, Any] = {
-            "persona_id": persona.persona_id,
-            "persona_name": persona.persona_name,
-            "messages": conversation_msgs,
-            "context_bundle": [],
-            "context_bundle_text": "",
-            "pulse_id": pulse_id,
-        }
-
-        # Process input_schema to initialize variables from parent_state
-        for param in playbook.input_schema:
-            param_name = param.name
-            source_key = param.source if param.source else "input"
-            LOGGER.debug("[sea] Processing input_schema param: name=%s source=%s", param_name, source_key)
-
-            # Resolve value from parent_state or fallback
-            if source_key.startswith("parent."):
-                # e.g., "parent.input" -> parent["input"]
-                actual_key = source_key[7:]  # strip "parent."
-                value = parent.get(actual_key, "")
-                LOGGER.debug("[sea] Resolved %s from parent.%s: %s", param_name, actual_key, str(value)[:200] if value else "(empty)")
-            elif source_key == "input":
-                # Default: use user_input
-                value = user_input or ""
-            else:
-                # Direct key lookup in parent_state
-                value = parent.get(source_key, "")
-
-            variables[param_name] = value
-
-        # Ensure "input" exists for backward compatibility
-        if "input" not in variables:
-            variables["input"] = user_input or ""
-
-        while current:
-            # Update execution state: current node
+        if compiled_ok is None:
+            # LangGraph compilation failed - this should not happen as all node types are now supported
+            LOGGER.error("LangGraph compilation failed for playbook '%s'. This indicates a configuration or dependency issue.", playbook.name)
+            # Update execution state: playbook failed
             if hasattr(persona, "execution_state"):
-                persona.execution_state["node"] = current.id
+                persona.execution_state["playbook"] = None
+                persona.execution_state["node"] = None
+                persona.execution_state["status"] = "idle"
+            return []
 
-            # meta exec: run sub-playbook directly (skip LLM node for exec)
-            if playbook.name.startswith("meta_") and current.id == "exec":
-                sub_name = variables.get("selected_playbook") or variables.get("last") or "basic_chat"
-                sub_name = str(sub_name).strip()
-
-                # Validate that the selected playbook is available
-                sub_pb = self._load_playbook_for(sub_name, persona, building_id)
-                if not sub_pb:
-                    LOGGER.warning("[sea] Selected playbook '%s' not found or not accessible; falling back to basic_chat", sub_name)
-                    sub_name = "basic_chat"
-                    sub_pb = self._load_playbook_for(sub_name, persona, building_id) or self._basic_chat_playbook()
-                sub_input = None
-                args = variables.get("selected_args") or {}
-                if isinstance(args, dict):
-                    sub_input = args.get("input") or args.get("query")
-                if not sub_input:
-                    sub_input = variables.get("input")
-
-                sub_outputs = self._run_playbook(sub_pb, persona, building_id, sub_input, auto_mode, record_history=True, parent_state=variables)
-
-                ingested = self._ingest_context_from_subplaybook(variables, sub_name, sub_outputs)
-                if ingested:
-                    last_text = variables.get("context_bundle_text") or last_text
-                elif sub_outputs:
-                    last_text = sub_outputs[-1]
-                variables["last"] = last_text
-                current = node_map.get(current.next) if current.next else None
-                continue
-
-            if current.type == NodeType.LLM:
-                action_template = getattr(current, "action", None)
-                schema_consumed = False
-                try:
-                    msg_base = variables.get("messages", [])
-                    if action_template:
-                        prompt = _format(action_template, variables)
-                        messages = list(msg_base) + [{"role": "user", "content": prompt}]
-                    else:
-                        messages = list(msg_base)
-
-                    # Dynamically add enum to response_schema if available_playbooks exists
-                    response_schema = getattr(current, "response_schema", None)
-                    if response_schema and "available_playbooks" in variables:
-                        response_schema = self._add_playbook_enum(response_schema, variables.get("available_playbooks"))
-
-                    # Select LLM client based on model_type
-                    llm_client = self._select_llm_client(current, persona)
-
-                    text = llm_client.generate(
-                        messages,
-                        tools=[],
-                        temperature=self._default_temperature(persona),
-                        response_schema=response_schema,
-                    )
-                    self._dump_llm_io(playbook.name, current.id, persona, messages, text)
-                    schema_consumed = self._process_structured_output(current, text, variables)
-                    # update conversation history buffer for subsequent nodes
-                    variables["messages"] = messages + [{"role": "assistant", "content": text}]
-                except Exception as exc:
-                    LOGGER.error("SEA LLM node failed: %s", exc)
-                    text = "(error in llm node)"
-                last_text = text
-                variables["last"] = text
-
-                # meta router: interpret selection hint (best-effort)
-                if playbook.name.startswith("meta_") and current.id == "router" and not schema_consumed:
-                    self._update_router_selection(variables, text)
-
-            elif current.type == NodeType.TOOL:
-                from tools import TOOL_REGISTRY  # lazy import
-
-                tool_name = current.action
-                tool_func = TOOL_REGISTRY.get(tool_name)
-                if tool_func is None:
-                    LOGGER.warning("SEA tool %s not found", tool_name)
-                    last_text = f"Tool {tool_name} not found"
-                else:
-                    try:
-                        # Check if args_input is specified
-                        args_input = getattr(current, "args_input", None)
-                        if args_input:
-                            # Build kwargs from state keys
-                            kwargs = {}
-                            for arg_name, state_key in args_input.items():
-                                kwargs[arg_name] = variables.get(state_key, "")
-                            result = tool_func(**kwargs) if callable(tool_func) else None
-                        else:
-                            # Legacy: single string input
-                            tool_input = variables.get("last") or variables.get("input") or ""
-                            result = tool_func(tool_input) if callable(tool_func) else None
-
-                        # Handle tuple results with output_keys (for multi-value returns)
-                        output_keys = getattr(current, "output_keys", None)
-                        if output_keys and isinstance(result, tuple):
-                            # Expand tuple to multiple state variables
-                            for i, key in enumerate(output_keys):
-                                if i < len(result):
-                                    variables[key] = result[i]
-                                    LOGGER.debug("[sea] Stored tuple[%d] in variables[%s]: %s", i, key, str(result[i])[:200])
-                            # Set last to first element (primary result)
-                            last_text = str(result[0]) if result else ""
-                            primary_result = result[0] if result else ""
-                        elif isinstance(result, tuple):
-                            # Legacy: extract first element as primary result
-                            primary_result = result[0] if result else ""
-                            last_text = str(primary_result)
-                        else:
-                            last_text = str(result)
-                            primary_result = result
-
-                        variables["last"] = last_text
-
-                        # Store result in state if output_key is specified (legacy single-value)
-                        output_key = getattr(current, "output_key", None)
-                        if output_key and not output_keys:
-                            variables[output_key] = primary_result
-                            LOGGER.debug("[sea] Stored tool result in variables[%s]: %s", output_key, str(primary_result)[:200])
-                    except Exception as exc:
-                        last_text = f"Tool error: {exc}"
-                        LOGGER.exception("SEA tool %s failed", tool_name)
-
-            elif current.type == NodeType.MEMORY:
-                memo_text = _format(current.action, {**variables, "last": last_text}) if current.action else last_text
-                role = getattr(current, "role", "assistant") or "assistant"
-                tags = getattr(current, "tags", None)
-                metadata_key = getattr(current, "metadata_key", None)
-                metadata = variables.get(metadata_key) if metadata_key else None
-                self._store_memory(persona, memo_text, role=role, tags=tags, pulse_id=pulse_id, metadata=metadata)
-                last_text = memo_text
-                variables["last"] = memo_text
-                if self._should_collect_memory_output(playbook):
-                    outputs.append(memo_text)
-
-            elif current.type == NodeType.PASS:
-                next_val = getattr(current, "next", None)
-                next_id = next_val
-                current = node_map.get(next_id) if next_id else None
-                continue
-
-            elif current.type == NodeType.SUBPLAY:
-                last_text = self._run_subplay_node(current, persona, building_id, auto_mode, variables, playbook, outputs)
-
-            elif current.type == NodeType.SAY:
-                say_text = _format(current.action, {**variables, "last": last_text}) if current.action else last_text
-                metadata_key = getattr(current, "metadata_key", None)
-                metadata = variables.get(metadata_key) if metadata_key else None
-                self._emit_say(persona, building_id, say_text, pulse_id=pulse_id, metadata=metadata)
-                outputs.append(say_text)
-                last_text = say_text
-                variables["last"] = say_text
-
-            elif current.type == NodeType.SPEAK:
-                speak_text = _format(current.action, {**variables, "last": last_text}) if current.action else last_text
-                self._emit_speak(persona, building_id, speak_text, pulse_id=pulse_id, record_history=record_history)
-                outputs.append(speak_text)
-                last_text = speak_text
-
-            elif current.type == NodeType.THINK:
-                note = _format(current.action, {**variables, "last": last_text}) if current.action else last_text
-                self._emit_think(persona, pulse_id, note, record_history=record_history)
-                last_text = note
-                variables["last"] = note
-                outputs.append(note)
-
-            # Resolve next node (conditional_next takes precedence over next)
-            conditional_next = getattr(current, "conditional_next", None)
-            if conditional_next:
-                # Resolve field value from variables (supports nested keys like "router.playbook")
-                field_path = conditional_next.field.split(".")
-                value = variables
-                for key in field_path:
-                    if isinstance(value, dict):
-                        value = value.get(key)
-                    else:
-                        value = None
-                        break
-
-                # Convert to string for matching
-                value_str = str(value) if value is not None else ""
-
-                LOGGER.debug("[sea][lightweight] conditional_next: field=%s value=%s cases=%s", conditional_next.field, value_str, list(conditional_next.cases.keys()))
-
-                # Look up target in cases
-                next_id = conditional_next.cases.get(value_str)
-                if next_id is None and "default" in conditional_next.cases:
-                    next_id = conditional_next.cases["default"]
-
-                LOGGER.debug("[sea][lightweight] conditional_next: selected path=%s", next_id or "END")
-            else:
-                next_id = getattr(current, "next", None)
-
-            current = node_map.get(next_id) if next_id else None
-
-        # Write back state variables to parent_state based on output_schema
-        if parent_state is not None and playbook.output_schema:
-            for key in playbook.output_schema:
-                if key in variables:
-                    parent_state[key] = variables[key]
-                    LOGGER.debug("[sea] Propagated %s to parent_state: %s", key, str(variables[key])[:200])
-
-        # Update execution state: playbook completed
-        if hasattr(persona, "execution_state"):
-            persona.execution_state["playbook"] = None
-            persona.execution_state["node"] = None
-            persona.execution_state["status"] = "idle"
-
-        return outputs
+        return compiled_ok
 
     # LangGraph compile wrapper -----------------------------------------
     def _compile_with_langgraph(
@@ -365,9 +120,6 @@ class SEARuntime:
         _lg_outputs: List[str] = []
         temperature = self._default_temperature(persona)
         parent = parent_state or {}
-
-        if any(getattr(node, 'type', None) == NodeType.SUBPLAY for node in playbook.nodes):
-            return None
 
         # Update execution state: playbook started (LangGraph path)
         if hasattr(persona, "execution_state"):
@@ -386,6 +138,7 @@ class SEARuntime:
             exec_node_factory=(lambda node_def: self._lg_exec_node(node_def, playbook, persona, building_id, auto_mode, _lg_outputs))
             if playbook.name.startswith("meta_")
             else None,
+            subplay_node_factory=lambda node_def: self._lg_subplay_node(node_def, persona, building_id, auto_mode, _lg_outputs),
         )
         if not compiled:
             # Update execution state: compilation failed, reset to idle
@@ -426,19 +179,25 @@ class SEARuntime:
             **inherited_vars,  # Add inherited variables from input_schema
         }
 
-        # If already inside a running loop (e.g., async route), fall back to lightweight executor
+        # Execute compiled playbook
         try:
-            running_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            running_loop = None
+            # Check if we're inside an existing event loop
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
 
-        if running_loop and running_loop.is_running():
-            return None
-
-        try:
-            final_state = asyncio.run(compiled(initial_state))
+            if running_loop and running_loop.is_running():
+                # We're inside an existing loop (e.g., Gradio), use run_in_executor
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, compiled(initial_state))
+                    final_state = future.result()
+            else:
+                # No running loop, use asyncio.run directly
+                final_state = asyncio.run(compiled(initial_state))
         except Exception:
-            LOGGER.exception("SEA LangGraph execution failed; falling back to lightweight executor")
+            LOGGER.exception("SEA LangGraph execution failed")
             # Update execution state: execution failed, reset to idle
             if hasattr(persona, "execution_state"):
                 persona.execution_state["playbook"] = None
@@ -810,47 +569,17 @@ class SEARuntime:
         return node
 
 
-    def _run_subplay_node(
-        self,
-        node_def: Any,
-        persona: Any,
-        building_id: str,
-        auto_mode: bool,
-        variables: Dict[str, Any],
-        parent_playbook: PlaybookSchema,
-        parent_outputs: List[str],
-    ) -> str:
-        sub_name = getattr(node_def, "playbook", None) or getattr(node_def, "action", None)
-        if not sub_name:
-            msg = "(sub-playbook missing name)"
-            variables["last"] = msg
-            return msg
-        sub_pb = self._load_playbook_for(sub_name, persona, building_id)
-        if not sub_pb:
-            msg = f"Sub-playbook {sub_name} not found"
-            variables["last"] = msg
-            return msg
-        template = getattr(node_def, "input_template", "{input}") or "{input}"
-        sub_input = _format(template, {**variables})
-        sub_outputs = self._run_playbook(sub_pb, persona, building_id, sub_input, auto_mode, record_history=True, parent_state=variables)
-        last_text = sub_outputs[-1] if sub_outputs else ""
-        variables["last"] = last_text
-        if getattr(node_def, "propagate_output", False) and sub_outputs:
-            parent_outputs.extend(sub_outputs)
-        if getattr(node_def, "id", "") == "router":
-            parsed = self._extract_structured_json(last_text)
-            self._update_router_selection(variables, last_text, parsed)
-        return last_text
-
     def _lg_memorize_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, outputs: Optional[List[str]] = None):
         async def node(state: dict):
-            variables = {
+            # Include all state variables for template expansion (e.g., structured output like document_data.*)
+            variables = dict(state)
+            variables.update({
                 "input": state.get("inputs", {}).get("input", ""),
                 "last": state.get("last", ""),
                 "persona_id": getattr(persona, "persona_id", None),
                 "persona_name": getattr(persona, "persona_name", None),
-            }
-            memo_text = _format(getattr(node_def, "action", None) or "{last}", {**variables, "last": variables.get("last", "")})
+            })
+            memo_text = _format(getattr(node_def, "action", None) or "{last}", variables)
             role = getattr(node_def, "role", "assistant") or "assistant"
             tags = getattr(node_def, "tags", None)
             pulse_id = state.get("pulse_id")
@@ -891,6 +620,49 @@ class SEARuntime:
         if outputs is not None:
             outputs.append(text)
         return state
+
+    def _lg_subplay_node(self, node_def: Any, persona: Any, building_id: str, auto_mode: bool, outputs: Optional[List[str]] = None):
+        async def node(state: dict):
+            # Get subplaybook name
+            sub_name = getattr(node_def, "playbook", None) or getattr(node_def, "action", None)
+            if not sub_name:
+                msg = "(sub-playbook missing name)"
+                state["last"] = msg
+                return state
+
+            # Load subplaybook
+            sub_pb = self._load_playbook_for(sub_name, persona, building_id)
+            if not sub_pb:
+                msg = f"Sub-playbook {sub_name} not found"
+                state["last"] = msg
+                return state
+
+            # Format input template with state variables
+            template = getattr(node_def, "input_template", "{input}") or "{input}"
+            variables = dict(state)
+            variables.update({
+                "input": state.get("inputs", {}).get("input", ""),
+                "last": state.get("last", ""),
+            })
+            sub_input = _format(template, variables)
+
+            # Execute subplaybook
+            sub_outputs = self._run_playbook(sub_pb, persona, building_id, sub_input, auto_mode, record_history=True, parent_state=state)
+            last_text = sub_outputs[-1] if sub_outputs else ""
+            state["last"] = last_text
+
+            # Propagate outputs if requested
+            if getattr(node_def, "propagate_output", False) and sub_outputs and outputs is not None:
+                outputs.extend(sub_outputs)
+
+            # Special handling for router nodes
+            if getattr(node_def, "id", "") == "router":
+                parsed = self._extract_structured_json(last_text)
+                if parsed:
+                    self._update_router_selection(state, last_text, parsed)
+
+            return state
+        return node
 
     # ---------------- context helpers -----------------
     def _append_router_function_call(

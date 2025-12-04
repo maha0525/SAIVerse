@@ -135,9 +135,8 @@ python scripts/memory_topics_ui.py
 - Note: On `sea_framework` branch, conversation flow is being migrated to SEA runtime
 
 **SEARuntime** (`sea/runtime.py`)
-- Executes playbooks (workflow graphs) for conversation routing
+- Executes playbooks (workflow graphs) for conversation routing using LangGraph
 - Two meta-playbooks: `meta_user` (handles user input) and `meta_auto` (autonomous pulse)
-- Supports both lightweight fallback executor and LangGraph compilation
 - Playbooks are JSON files in `sea/playbooks/` or stored in DB `playbooks` table
 - **Lightweight model support**: LLM nodes can specify `model_type: "lightweight"` to use a faster, cheaper model for simple tasks (e.g., router decisions)
   - Each persona has two model settings: `DEFAULT_MODEL` (normal) and `LIGHTWEIGHT_MODEL` (optional)
@@ -251,9 +250,9 @@ python scripts/memory_topics_ui.py
 
 ### Branch Context
 - **Current branch**: `sea_framework`
-- **Status**: SEA runtime and playbook system partially integrated, replacing direct `run_pulse()` calls
+- **Status**: SEA runtime and playbook system fully integrated with LangGraph, replacing direct `run_pulse()` calls
 - **Meta playbooks**: `meta_user.json` (user input flow), `meta_auto.json` (autonomous pulse flow)
-- **Pending work**: Full migration of conversation paths to SEA, playbook DB persistence, building-scoped playbooks
+- **Pending work**: Building-scoped playbooks, advanced playbook features
 
 ### Testing
 - Tests use `unittest` framework (pytest also works)

@@ -15,6 +15,7 @@ except ImportError:  # pragma: no cover
 
 LOGGER = logging.getLogger(__name__)
 IMAGE_URI_PREFIX = "saiverse://image/"
+DOCUMENT_URI_PREFIX = "saiverse://document/"
 SUPPORTED_LLM_IMAGE_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 SUMMARY_SUFFIX = ".summary.txt"
 
@@ -25,16 +26,27 @@ def _ensure_image_dir() -> Path:
     return dest_dir
 
 
+def _ensure_document_dir() -> Path:
+    dest_dir = Path.home() / ".saiverse" / "documents"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    return dest_dir
+
+
 def resolve_media_uri(uri: str) -> Optional[Path]:
     """Resolve a SAIVerse media URI to a local filesystem path."""
     if not isinstance(uri, str):
         return None
-    if not uri.startswith(IMAGE_URI_PREFIX):
-        return None
-    filename = uri[len(IMAGE_URI_PREFIX):].strip()
-    if not filename:
-        return None
-    return _ensure_image_dir() / filename
+    if uri.startswith(IMAGE_URI_PREFIX):
+        filename = uri[len(IMAGE_URI_PREFIX):].strip()
+        if not filename:
+            return None
+        return _ensure_image_dir() / filename
+    elif uri.startswith(DOCUMENT_URI_PREFIX):
+        filename = uri[len(DOCUMENT_URI_PREFIX):].strip()
+        if not filename:
+            return None
+        return _ensure_document_dir() / filename
+    return None
 
 
 def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:
@@ -110,6 +122,25 @@ def store_image_bytes(data: bytes, mime_type: str, *, source: str = "generated")
         "type": "image",
         "uri": f"{IMAGE_URI_PREFIX}{filename}",
         "mime_type": mime_type,
+        "source": source,
+    }
+    return metadata, dest_path
+
+
+def store_document_text(content: str, *, source: str = "generated") -> Tuple[Dict[str, str], Path]:
+    """Store text content as a document file and return metadata and path."""
+    dest_dir = _ensure_document_dir()
+    filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex}.txt"
+    dest_path = dest_dir / filename
+    try:
+        dest_path.write_text(content, encoding="utf-8")
+    except OSError:
+        LOGGER.exception("Failed to write document file: %s", dest_path)
+        raise
+    metadata = {
+        "type": "document",
+        "uri": f"{DOCUMENT_URI_PREFIX}{filename}",
+        "mime_type": "text/plain",
         "source": source,
     }
     return metadata, dest_path
