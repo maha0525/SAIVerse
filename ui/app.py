@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from functools import partial
+import logging
 
 import gradio as gr
+
+LOGGER = logging.getLogger(__name__)
 
 from database.db_manager import create_db_manager_ui
 from tools.utilities.memory_settings_ui import create_memory_settings_ui
@@ -35,6 +38,7 @@ from ui.chat import (
 )
 from ui.world_editor import create_world_editor_ui
 from ui.task_manager import create_task_manager_ui
+from ui.item_modal import ITEM_MODAL_CSS, ITEM_MODAL_JS
 
 
 def _require_manager():
@@ -47,7 +51,16 @@ def _require_manager():
 def build_app(city_name: str, note_css: str, head_viewport: str):
     manager = _require_manager()
 
-    with gr.Blocks(fill_width=True, head=head_viewport, css=note_css, title=f"SAIVerse City: {city_name}", theme=gr.themes.Soft()) as demo:
+    # Verify item modal JS is loaded
+    LOGGER.info("[UI] ===== ITEM_MODAL_JS LOADED =====")
+    LOGGER.info(f"[UI] ITEM_MODAL_JS length: {len(ITEM_MODAL_JS)} characters")
+    LOGGER.info(f"[UI] ITEM_MODAL_JS first 150 chars: {ITEM_MODAL_JS[:150]}")
+    LOGGER.info(f"[UI] ITEM_MODAL_JS contains 'SCRIPT LOADED CHECK': {'SCRIPT LOADED CHECK' in ITEM_MODAL_JS}")
+
+    # Combine CSS with item modal CSS
+    combined_css = note_css + "\n" + ITEM_MODAL_CSS
+
+    with gr.Blocks(fill_width=True, head=head_viewport, css=combined_css, title=f"SAIVerse City: {city_name}", theme=gr.themes.Soft()) as demo:
         # Left sidebar
         with gr.Sidebar(open=False, width=240, elem_id="sample_sidebar", elem_classes=["saiverse-sidebar"]):
             with gr.Accordion("セクション切り替え", open=True):
@@ -105,11 +118,11 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
         # Right sidebar for detail panel
         with gr.Sidebar(position="right", open=False, width=400, elem_id="detail_sidebar", elem_classes=["saiverse-sidebar", "right"]):
             with gr.Accordion("🏢 Building", open=True):
-                building_details_display = gr.Markdown(value="_(読み込み中...)_")
+                building_details_display = gr.HTML(value="<p><em>(読み込み中...)</em></p>")
             with gr.Accordion("👤 ペルソナ", open=True):
-                persona_details_display = gr.Markdown(value="_(読み込み中...)_")
+                persona_details_display = gr.HTML(value="<p><em>(読み込み中...)</em></p>")
             with gr.Accordion("⚙️ 実行状態", open=True):
-                execution_states_display = gr.Markdown(value="_(読み込み中...)_")
+                execution_states_display = gr.HTML(value="<p><em>(読み込み中...)</em></p>")
 
         with gr.Column(elem_id="section-home", elem_classes=['saiverse-section', 'saiverse-home']):
             gr.Markdown(
@@ -1047,7 +1060,94 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
             setTimeout(hijackSidebarStyles, 500);
         }
         """)
+
+        # Load auto-refresh JS
         demo.load(None, None, None, js=js_auto_refresh)
 
+        # Load item modal JS separately
+        LOGGER.info(f"[UI] ===== LOADING ITEM_MODAL_JS =====")
+        LOGGER.info(f"[UI] ITEM_MODAL_JS length: {len(ITEM_MODAL_JS)} characters")
+        LOGGER.info(f"[UI] ITEM_MODAL_JS contains 'SCRIPT LOADED CHECK': {'SCRIPT LOADED CHECK' in ITEM_MODAL_JS}")
+        LOGGER.info(f"[UI] ITEM_MODAL_JS contains 'initItemModal': {'initItemModal' in ITEM_MODAL_JS}")
+        demo.load(None, None, None, js=ITEM_MODAL_JS)
+
+    # Add API endpoint for item view
+    from fastapi.responses import JSONResponse
+    from pathlib import Path
+
+    LOGGER.info("[UI] ===== REGISTERING API ENDPOINT /api/item/view =====")
+    LOGGER.info(f"[UI] demo.app type: {type(demo.app)}")
+    LOGGER.info(f"[UI] demo.app available: {demo.app is not None}")
+
+    @demo.app.get("/api/item/view")
+    async def api_item_view(item_id: str = None):
+        """API endpoint to get item content."""
+        import logging
+        logger = logging.getLogger(__name__)
+        LOGGER.info(f"[API /api/item/view] ===== FUNCTION CALLED =====")
+        LOGGER.info(f"[API /api/item/view] item_id parameter: {item_id}")
+        logger.info(f"[API /api/item/view] Request received for item_id: {item_id}")
+
+        if not item_id:
+            LOGGER.error("[API /api/item/view] No item_id provided")
+            return JSONResponse({"success": False, "error": "item_id is required"}, status_code=400)
+
+        try:
+            manager = ui_state.manager
+            if not manager:
+                logger.error("[API /api/item/view] Manager not initialized")
+                return JSONResponse({"success": False, "error": "Manager not initialized"}, status_code=500)
+
+            # Get item data
+            if item_id not in manager.items:
+                logger.error(f"[API /api/item/view] Item not found: {item_id}")
+                logger.debug(f"[API /api/item/view] Available items: {list(manager.items.keys())[:10]}")
+                return JSONResponse({"success": False, "error": "Item not found"}, status_code=404)
+
+            item_data = manager.items[item_id]
+            item_type = item_data.get("type", "object")
+            file_path = item_data.get("file_path")
+            logger.info(f"[API /api/item/view] Item found: type={item_type}, file_path={file_path}")
+
+            if not file_path:
+                logger.error(f"[API /api/item/view] No file path for item: {item_id}")
+                return JSONResponse({"success": False, "error": "No file path for this item"}, status_code=400)
+
+            file_path_obj = Path(file_path)
+            if not file_path_obj.exists():
+                logger.error(f"[API /api/item/view] File not found: {file_path}")
+                return JSONResponse({"success": False, "error": "File not found"}, status_code=404)
+
+            if item_type == "document":
+                # Read document content
+                content = file_path_obj.read_text(encoding="utf-8")
+                logger.info(f"[API /api/item/view] Document content loaded, length: {len(content)}")
+                return JSONResponse({
+                    "success": True,
+                    "content": content,
+                    "file_path": str(file_path),
+                    "item_type": item_type
+                })
+            elif item_type == "picture":
+                # Return file path for image display
+                logger.info(f"[API /api/item/view] Returning picture path: {file_path}")
+                return JSONResponse({
+                    "success": True,
+                    "file_path": f"file={file_path}",  # Gradio file:// format
+                    "item_type": item_type
+                })
+            else:
+                logger.error(f"[API /api/item/view] Unsupported item type: {item_type}")
+                return JSONResponse({"success": False, "error": "Unsupported item type"}, status_code=400)
+
+        except Exception as e:
+            logger.exception("[API /api/item/view] Unexpected error")
+            return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+    # Debug: List all registered routes
+    LOGGER.info("[UI] ===== REGISTERED ROUTES =====")
+    for route in demo.app.routes:
+        LOGGER.info(f"[UI] Route: {route.path} - {route.methods if hasattr(route, 'methods') else 'N/A'}")
+    LOGGER.info("[UI] ===========================")
 
     return demo

@@ -810,6 +810,8 @@ def get_building_details(building_id: str = None):
                     "id": item_id,
                     "name": item_data.get("name", item_id),
                     "description": item_data.get("description", ""),
+                    "type": item_data.get("type", "object"),
+                    "file_path": item_data.get("file_path"),
                 })
 
     # Get prompt
@@ -855,6 +857,8 @@ def get_persona_details(persona_id: str = None):
                 "id": item_id,
                 "name": item_data.get("name", item_id),
                 "description": item_data.get("description", ""),
+                "type": item_data.get("type", "object"),
+                "file_path": item_data.get("file_path"),
             })
 
     # Get active thread
@@ -917,78 +921,118 @@ def get_execution_states():
 
 
 def format_building_details():
-    """Format building details for display in UI."""
+    """Format building details for display in UI (HTML)."""
+    import html
     details = get_building_details()
 
+    result = "<div class='building-details'>"
+
     # Format occupants
-    occupants_md = "### 建物内のペルソナ\n"
+    result += "<h3>建物内のペルソナ</h3>"
     if details["occupants"]:
+        result += "<ul>"
         for occ in details["occupants"]:
-            occupants_md += f"- **{occ['name']}** (`{occ['id']}`)\n"
+            result += f"<li><strong>{html.escape(occ['name'])}</strong> (<code>{html.escape(occ['id'])}</code>)</li>"
+        result += "</ul>"
     else:
-        occupants_md += "_(誰もいません)_\n"
+        result += "<p><em>(誰もいません)</em></p>"
 
     # Format items
-    items_md = "\n### 建物内のアイテム\n"
+    result += "<h3>建物内のアイテム</h3>"
     if details["items"]:
+        result += "<ul class='item-list'>"
         for item in details["items"]:
             desc = item['description'] or "(説明なし)"
-            items_md += f"- **{item['name']}** (`{item['id']}`): {desc}\n"
+            item_type = item.get('type', 'object')
+            file_path = item.get('file_path', '')
+            # クリッカブル＆ツールチップ付きアイテム
+            result += f"""<li>
+                <span class='item-link'
+                      data-item-id='{html.escape(item['id'])}'
+                      data-item-name='{html.escape(item['name'])}'
+                      data-item-desc='{html.escape(desc)}'
+                      data-item-type='{html.escape(item_type)}'
+                      data-file-path='{html.escape(file_path or "")}'
+                      title='ID: {html.escape(item['id'])}&#10;{html.escape(desc)}'>
+                    {html.escape(item['name'])}
+                </span>
+            </li>"""
+        result += "</ul>"
     else:
-        items_md += "_(アイテムがありません)_\n"
+        result += "<p><em>(アイテムがありません)</em></p>"
 
     # Format prompt
-    prompt_md = "\n### システムプロンプト\n"
+    result += "<h3>システムプロンプト</h3>"
     if details["prompt"]:
-        prompt_md += f"```\n{details['prompt']}\n```\n"
+        result += f"<pre><code>{html.escape(details['prompt'])}</code></pre>"
     else:
-        prompt_md += "_(プロンプトが設定されていません)_\n"
+        result += "<p><em>(プロンプトが設定されていません)</em></p>"
 
-    return occupants_md + items_md + prompt_md
+    result += "</div>"
+    return result
 
 
 def format_persona_details():
-    """Format persona details for display in UI."""
+    """Format persona details for display in UI (HTML)."""
+    import html
     details = get_persona_details()
 
     if not details.get("persona_id"):
-        return "_(ペルソナが選択されていません)_"
+        return "<p><em>(ペルソナが選択されていません)</em></p>"
 
-    result = f"## {details['persona_name']}\n\n"
+    result = "<div class='persona-details'>"
+    result += f"<h2>{html.escape(details['persona_name'])}</h2>"
 
     # Format inventory
-    result += "### インベントリ\n"
+    result += "<h3>インベントリ</h3>"
     if details["inventory"]:
+        result += "<ul class='item-list'>"
         for item in details["inventory"]:
             desc = item['description'] or "(説明なし)"
-            result += f"- **{item['name']}** (`{item['id']}`): {desc}\n"
+            item_type = item.get('type', 'object')
+            file_path = item.get('file_path', '')
+            # クリッカブル＆ツールチップ付きアイテム
+            result += f"""<li>
+                <span class='item-link'
+                      data-item-id='{html.escape(item['id'])}'
+                      data-item-name='{html.escape(item['name'])}'
+                      data-item-desc='{html.escape(desc)}'
+                      data-item-type='{html.escape(item_type)}'
+                      data-file-path='{html.escape(file_path or "")}'
+                      title='ID: {html.escape(item['id'])}&#10;{html.escape(desc)}'>
+                    {html.escape(item['name'])}
+                </span>
+            </li>"""
+        result += "</ul>"
     else:
-        result += "_(アイテムを持っていません)_\n"
+        result += "<p><em>(アイテムを持っていません)</em></p>"
 
     # Format thread
-    result += f"\n### アクティブスレッド\n`{details['thread']}`\n"
+    result += f"<h3>アクティブスレッド</h3><p><code>{html.escape(details['thread'])}</code></p>"
 
     # Format task
-    result += "\n### アクティブタスク\n"
+    result += "<h3>アクティブタスク</h3>"
     if details["task"]:
         task = details["task"]
-        result += f"**{task['title']}** (`{task['id']}`)\n"
+        result += f"<p><strong>{html.escape(task['title'])}</strong> (<code>{html.escape(task['id'])}</code>)</p>"
         if task['description']:
-            result += f"> {task['description']}\n"
+            result += f"<blockquote>{html.escape(task['description'])}</blockquote>"
     else:
-        result += "_(タスクがありません)_\n"
+        result += "<p><em>(タスクがありません)</em></p>"
 
+    result += "</div>"
     return result
 
 
 def format_execution_states():
-    """Format execution states for display in UI."""
+    """Format execution states for display in UI (HTML)."""
+    import html
     states = get_execution_states()
 
     if not states:
-        return "_(実行中のペルソナがいません)_"
+        return "<p><em>(実行中のペルソナがいません)</em></p>"
 
-    result = ""
+    result = "<div class='execution-states'>"
     for state in states:
         status_emoji = {
             "idle": "⚪",
@@ -997,17 +1041,18 @@ def format_execution_states():
             "completed": "✅"
         }.get(state["status"], "❓")
 
-        result += f"### {status_emoji} {state['persona_name']}\n"
+        result += f"<h3>{status_emoji} {html.escape(state['persona_name'])}</h3>"
 
         if state["status"] == "idle":
-            result += "_(待機中)_\n\n"
+            result += "<p><em>(待機中)</em></p>"
         else:
             if state["playbook"]:
-                result += f"**Playbook:** `{state['playbook']}`\n"
+                result += f"<p><strong>Playbook:</strong> <code>{html.escape(state['playbook'])}</code></p>"
             if state["node"]:
-                result += f"**Node:** `{state['node']}`\n"
-            result += f"**Status:** {state['status']}\n\n"
+                result += f"<p><strong>Node:</strong> <code>{html.escape(state['node'])}</code></p>"
+            result += f"<p><strong>Status:</strong> {html.escape(state['status'])}</p>"
 
+    result += "</div>"
     return result
 
 
