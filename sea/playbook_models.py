@@ -197,6 +197,10 @@ class PlaybookSchema(BaseModel):
         default=False,
         description="If true, this playbook can be called from the router in meta playbooks."
     )
+    user_selectable: bool = Field(
+        default=False,
+        description="If true, this meta playbook can be selected by user in the UI."
+    )
     nodes: List[NodeDef]
     start_node: str
 

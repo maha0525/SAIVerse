@@ -383,11 +383,12 @@ class RuntimeService(
         return replies
 
     def handle_user_input_stream(
-        self, message: str, metadata: Optional[Dict[str, Any]] = None
+        self, message: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None
     ) -> Iterator[str]:
         logging.debug(
-            "[runtime] handle_user_input_stream called (metadata_present=%s)",
+            "[runtime] handle_user_input_stream called (metadata_present=%s, meta_playbook=%s)",
             bool(metadata),
+            meta_playbook,
         )
         if not message or not str(message).strip():
             logging.error("[runtime] handle_user_input_stream got empty message; aborting to avoid corrupt routing")
@@ -446,7 +447,7 @@ class RuntimeService(
         for persona in responding_personas:
             if sea_enabled:
                 # SEA runtime pushes to gateway internally; streaming経路では二重出力を避けて返却しない
-                self.manager.run_sea_user(persona, building_id, message, metadata=metadata)
+                self.manager.run_sea_user(persona, building_id, message, metadata=metadata, meta_playbook=meta_playbook)
             elif persona.interaction_mode == "manual":
                 for token in persona.handle_user_input_stream(
                     message, metadata=metadata

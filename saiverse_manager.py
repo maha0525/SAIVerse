@@ -48,6 +48,7 @@ from database.models import (
     Item as ItemModel,
     ItemLocation as ItemLocationModel,
     PersonaEventLog,
+    Playbook,
 )
 
 
@@ -383,11 +384,11 @@ class SAIVerseManager(
             return None
         return None
 
-    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None) -> List[str]:
+    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None) -> List[str]:
         if not self.sea_runtime:
             return []
         try:
-            return self.sea_runtime.run_meta_user(persona, user_input, building_id, metadata=metadata)
+            return self.sea_runtime.run_meta_user(persona, user_input, building_id, metadata=metadata, meta_playbook=meta_playbook)
         except Exception as exc:
             logging.exception("SEA user run failed: %s", exc)
             return []
@@ -1353,9 +1354,9 @@ class SAIVerseManager(
 
 
     def handle_user_input_stream(
-        self, message: str, metadata: Optional[Dict[str, Any]] = None
+        self, message: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None
     ) -> Iterator[str]:
-        yield from self.runtime.handle_user_input_stream(message, metadata=metadata)
+        yield from self.runtime.handle_user_input_stream(message, metadata=metadata, meta_playbook=meta_playbook)
 
     def get_summonable_personas(self) -> List[str]:
         """Returns a list of persona names that can be summoned to the user's current location."""
@@ -1363,6 +1364,20 @@ class SAIVerseManager(
 
     def get_conversing_personas(self) -> List[Tuple[str, str]]:
         return self.runtime.get_conversing_personas()
+
+    def get_selectable_meta_playbooks(self) -> List[Tuple[str, str]]:
+        """Returns a list of (name, description) for user-selectable meta playbooks."""
+        db = self.SessionLocal()
+        try:
+            playbooks = (
+                db.query(Playbook)
+                .filter(Playbook.user_selectable == True)
+                .order_by(Playbook.name)
+                .all()
+            )
+            return [(pb.name, pb.description) for pb in playbooks]
+        finally:
+            db.close()
 
     def summon_persona(self, persona_id: str) -> Tuple[bool, Optional[str]]:
         return self.runtime.summon_persona(persona_id)
