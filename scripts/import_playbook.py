@@ -4,13 +4,14 @@
 Usage:
   python scripts/import_playbook.py --file path/to/playbook.json \
       [--scope public|personal|building] [--persona-id PERSONA] [--building-id BUILDING] \
-      [--router-callable | --no-router-callable]
+      [--router-callable | --no-router-callable] [--user-selectable | --no-user-selectable]
 
 Notes:
 - scope=personal なら persona-id が必要。
 - scope=building なら building-id が必要。
 - description/name は JSON から取るが、--name/--description で上書きも可能。
 - --router-callable: playbookをrouterから呼び出せるようにする。指定しない場合はJSONのrouter_callableフィールドを参照。
+- --user-selectable: meta playbookをUIで選択可能にする。指定しない場合はJSONのuser_selectableフィールドを参照。
 """
 
 from __future__ import annotations
@@ -63,7 +64,9 @@ def main() -> None:
     parser.add_argument("--description", help="Override description")
     parser.add_argument("--router-callable", dest="router_callable", action="store_true", help="Mark playbook as callable from router")
     parser.add_argument("--no-router-callable", dest="router_callable", action="store_false", help="Mark playbook as not callable from router")
-    parser.set_defaults(router_callable=None)
+    parser.add_argument("--user-selectable", dest="user_selectable", action="store_true", help="Mark meta playbook as selectable by user in UI")
+    parser.add_argument("--no-user-selectable", dest="user_selectable", action="store_false", help="Mark meta playbook as not selectable by user in UI")
+    parser.set_defaults(router_callable=None, user_selectable=None)
     args = parser.parse_args()
 
     path = Path(args.file)
@@ -89,9 +92,11 @@ def main() -> None:
         building_id=building_id,
         playbook_json=json.dumps(data, ensure_ascii=False),
         router_callable=args.router_callable,
+        user_selectable=args.user_selectable,
     )
     router_status = "router-callable" if (args.router_callable if args.router_callable is not None else data.get("router_callable", False)) else "not router-callable"
-    print(f"Imported playbook '{name}' (scope={scope}, {router_status}).")
+    user_status = "user-selectable" if (args.user_selectable if args.user_selectable is not None else data.get("user_selectable", False)) else "not user-selectable"
+    print(f"Imported playbook '{name}' (scope={scope}, {router_status}, {user_status}).")
 
 
 if __name__ == "__main__":

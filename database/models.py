@@ -138,6 +138,7 @@ class Playbook(Base):
     schema_json = Column(Text, nullable=False)
     nodes_json = Column(Text, nullable=False)
     router_callable = Column(Boolean, nullable=False, default=False)  # Can be called from router
+    user_selectable = Column(Boolean, nullable=False, default=False)  # Can be selected by user in UI
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 

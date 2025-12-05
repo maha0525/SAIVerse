@@ -27,7 +27,10 @@ class AnthropicClient(OpenAIClient):
         if not base_url.endswith("/"):
             base_url = f"{base_url}/"
 
-        super().__init__(model=model, supports_images=supports_images, api_key=api_key, base_url=base_url)
+        # Anthropic has a 5MB limit for images
+        max_image_bytes = 5 * 1024 * 1024
+
+        super().__init__(model=model, supports_images=supports_images, api_key=api_key, base_url=base_url, max_image_bytes=max_image_bytes)
 
         cfg = config or {}
 

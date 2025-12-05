@@ -20,7 +20,7 @@ from .base import LLMClient, raw_logger
 from .utils import content_to_text, merge_reasoning_strings, obj_to_dict
 
 
-def _prepare_openai_messages(messages: List[Any], supports_images: bool) -> List[Any]:
+def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_image_bytes: Optional[int] = None) -> List[Any]:
     prepared: List[Any] = []
     for msg in messages:
         if not isinstance(msg, dict):
@@ -44,7 +44,7 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool) -> List
             if text:
                 parts.append({"type": "text", "text": text})
             for att in attachments:
-                data, effective_mime = load_image_bytes_for_llm(att["path"], att["mime_type"])
+                data, effective_mime = load_image_bytes_for_llm(att["path"], att["mime_type"], max_bytes=max_image_bytes)
                 if data and effective_mime:
                     b64 = base64.b64encode(data).decode("ascii")
                     parts.append(
@@ -158,6 +158,7 @@ class OpenAIClient(LLMClient):
         base_url: Optional[str] = None,
         api_key_env: Optional[str] = None,
         request_kwargs: Optional[Dict[str, Any]] = None,
+        max_image_bytes: Optional[int] = None,
     ) -> None:
         super().__init__(supports_images=supports_images)
         key_env = api_key_env or "OPENAI_API_KEY"
@@ -172,6 +173,7 @@ class OpenAIClient(LLMClient):
         self.client = OpenAI(**client_kwargs)
         self.model = model
         self._request_kwargs: Dict[str, Any] = dict(request_kwargs or {})
+        self.max_image_bytes = max_image_bytes
 
     def _create_completion(self, **kwargs: Any):
         return self.client.chat.completions.create(**kwargs)
@@ -218,7 +220,7 @@ class OpenAIClient(LLMClient):
             try:
                 resp = self._create_completion(
                     model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images),
+                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes),
                     n=1,
                     **_build_request_kwargs(),
                 )
@@ -262,7 +264,7 @@ class OpenAIClient(LLMClient):
 
                 resp = self._create_completion(
                     model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images),
+                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes),
                     tools=tools_spec,
                     tool_choice=tool_choice,
                     n=1,
@@ -356,7 +358,7 @@ class OpenAIClient(LLMClient):
                     req_kwargs["temperature"] = temperature
                 resp = self._create_completion(
                     model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images),
+                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes),
                     n=1,
                     **req_kwargs,
                 )
@@ -393,7 +395,7 @@ class OpenAIClient(LLMClient):
         try:
             resp = self._create_completion(
                 model=self.model,
-                messages=_prepare_openai_messages(messages, self.supports_images),
+                messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes),
                 tools=tools_spec,
                 tool_choice=force_tool_choice,
                 stream=True,

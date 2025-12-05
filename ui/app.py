@@ -182,6 +182,12 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                                     elem_id="attachment_button"
                                 )
                         with gr.Accordion("オプション", open=False):
+                            meta_playbook_dropdown = gr.Dropdown(
+                                choices=[(f"{name}: {desc}", name) for name, desc in manager.get_selectable_meta_playbooks()],
+                                value=None,
+                                label="メタプレイブック選択（未選択の場合は meta_user）",
+                                interactive=True
+                            )
                             model_drop = gr.Dropdown(choices=ui_state.model_choices, value="None",label="モデル選択")
                             with gr.Row():
                                 temperature_slider = gr.Slider(
@@ -244,7 +250,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
             # --- Event Handlers ---
             submit_event = submit.click(
                 respond_stream,
-                [txt, image_input],
+                [txt, image_input, meta_playbook_dropdown],
                 [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown, image_input],
             ).then(
                 fn=update_detail_panels,
@@ -253,7 +259,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
 
             txt_event = txt.submit(
                 respond_stream,
-                [txt, image_input],
+                [txt, image_input, meta_playbook_dropdown],
                 [chatbot, move_building_dropdown, move_destination_radio, summon_persona_dropdown, end_conv_persona_dropdown, image_input],
             ).then(
                 fn=update_detail_panels,

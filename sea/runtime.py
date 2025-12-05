@@ -41,7 +41,7 @@ class SEARuntime:
         self._trace = bool(os.getenv("SAIVERSE_SEA_TRACE"))
 
     # ---------------- meta entrypoints -----------------
-    def run_meta_user(self, persona, user_input: str, building_id: str, metadata: Optional[Dict[str, Any]] = None) -> List[str]:
+    def run_meta_user(self, persona, user_input: str, building_id: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None) -> List[str]:
         """Router -> subgraph -> speak. Returns spoken strings for gateway/UI."""
         # Record user input to history before processing
         if user_input:
@@ -53,7 +53,14 @@ class SEARuntime:
             except Exception:
                 LOGGER.exception("Failed to record user input to history")
 
-        playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
+        # Use user-selected meta playbook if specified, otherwise choose automatically
+        if meta_playbook:
+            playbook = self._load_playbook_for(meta_playbook, persona, building_id)
+            if playbook is None:
+                LOGGER.warning("Meta playbook '%s' not found, falling back to automatic selection", meta_playbook)
+                playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
+        else:
+            playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
         result = self._run_playbook(playbook, persona, building_id, user_input, auto_mode=False, record_history=True)
         return result
 

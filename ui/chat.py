@@ -374,7 +374,7 @@ def get_current_building_history() -> List[Dict[str, str]]:
     return format_history_for_chatbot(raw_history)
 
 
-def respond_stream(message: str, media: Optional[Any] = None):
+def respond_stream(message: str, media: Optional[Any] = None, meta_playbook: Optional[str] = None):
     manager = ui_state.manager
     if not manager:
         raise RuntimeError("Manager not initialised")
@@ -417,7 +417,7 @@ def respond_stream(message: str, media: Optional[Any] = None):
     history.append(user_display_entry)
 
     ai_message = ""
-    stream = manager.handle_user_input_stream(message, metadata=metadata)
+    stream = manager.handle_user_input_stream(message, metadata=metadata, meta_playbook=meta_playbook)
     for token in stream:
         ai_message += token
         yield (
