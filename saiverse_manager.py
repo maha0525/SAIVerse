@@ -23,6 +23,7 @@ from persona_core import PersonaCore
 from model_configs import get_model_provider, get_context_length
 from occupancy_manager import OccupancyManager
 from conversation_manager import ConversationManager
+from schedule_manager import ScheduleManager
 from sqlalchemy.orm import sessionmaker
 from remote_persona_proxy import RemotePersonaProxy
 from manager.sds import SDSMixin
@@ -267,6 +268,11 @@ class SAIVerseManager(
                 )
                 self.conversation_managers[b_id] = manager
         logging.info(f"Initialized {len(self.conversation_managers)} conversation managers.")
+
+        # スケジュールマネージャーを初期化して起動
+        self.schedule_manager = ScheduleManager(saiverse_manager=self, check_interval=60)
+        self.schedule_manager.start()
+        logging.info("Initialized and started ScheduleManager with 60 second check interval.")
 
         # --- Step 7: Register with SDS and start background tasks ---
         self.sds_url = sds_url
@@ -1342,7 +1348,12 @@ class SAIVerseManager(
         # Stop all conversation managers
         for manager in self.conversation_managers.values():
             manager.stop()
-        
+
+        # Stop schedule manager
+        if hasattr(self, "schedule_manager"):
+            self.schedule_manager.stop()
+            logging.info("ScheduleManager stopped.")
+
         # Save all persona and building states
         for persona in self.personas.values():
             persona._save_session_metadata()

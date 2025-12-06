@@ -8,9 +8,9 @@ import gradio as gr
 LOGGER = logging.getLogger(__name__)
 
 from database.db_manager import create_db_manager_ui
-from tools.utilities.memory_settings_ui import create_memory_settings_ui
 from ui import state as ui_state
 from ui.env_settings import create_env_settings_ui
+from ui.persona_settings import create_persona_settings_ui
 from ui.chat import (
     call_persona_ui,
     end_conversation_ui,
@@ -76,7 +76,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                         <div class="saiverse-nav-item" data-tab-label="自律会話ログ" style="display:none">自律会話ログ</div>
                         <div class="saiverse-nav-item" data-tab-label="DB Manager">DB Manager</div>
                         <div class="saiverse-nav-item" data-tab-label="タスクマネージャー">タスクマネージャー</div>
-                        <div class="saiverse-nav-item" data-tab-label="メモリー設定">メモリー設定</div>
+                        <div class="saiverse-nav-item" data-tab-label="ペルソナ設定">ペルソナ設定</div>
                         <div class="saiverse-nav-item" data-tab-label="ワールドエディタ">ワールドエディタ</div>
                         <div class="saiverse-nav-item" data-tab-label="環境設定">⚙️ 環境設定</div>
                     </div>
@@ -492,8 +492,8 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
         with gr.Column(elem_id="section-task-manager", elem_classes=['saiverse-section', 'saiverse-hidden']):
             create_task_manager_ui(manager)
 
-        with gr.Column(elem_id="section-memory-settings", elem_classes=['saiverse-section', 'saiverse-hidden']):
-            create_memory_settings_ui(manager)
+        with gr.Column(elem_id="section-persona-settings", elem_classes=['saiverse-section', 'saiverse-hidden']):
+            create_persona_settings_ui(manager)
 
 
         with gr.Column(elem_id="section-world-editor", elem_classes=['saiverse-section', 'saiverse-hidden']):
@@ -512,7 +512,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                 "自律会話ログ": "#section-autolog",
                 "DB Manager": "#section-db-manager",
                 "タスクマネージャー": "#section-task-manager",
-                "メモリー設定": "#section-memory-settings",
+                "ペルソナ設定": "#section-persona-settings",
                 "ワールドエディタ": "#section-world-editor",
                 "環境設定": "#section-env-settings"
             };
@@ -1028,11 +1028,9 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
 
                     leftStyle.setProperty = function(prop, value, priority) {
                         if (prop === 'width' && value === '20vw') {
-                            console.log('[SAIVerse] Intercepted left width 20vw -> 240px');
                             return originalLeftSet('width', '240px', priority);
                         }
                         if (prop === 'left' && value.includes('20vw')) {
-                            console.log('[SAIVerse] Intercepted left position calc(-20vw) -> -240px');
                             return originalLeftSet('left', '-240px', priority);
                         }
                         return originalLeftSet(prop, value, priority);
@@ -1050,11 +1048,9 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
 
                     rightStyle.setProperty = function(prop, value, priority) {
                         if (prop === 'width' && value === '20vw') {
-                            console.log('[SAIVerse] Intercepted right width 20vw -> 400px');
                             return originalRightSet('width', '400px', priority);
                         }
                         if (prop === 'right' && value.includes('20vw')) {
-                            console.log('[SAIVerse] Intercepted right position calc(-20vw) -> -400px');
                             return originalRightSet('right', '-400px', priority);
                         }
                         return originalRightSet(prop, value, priority);

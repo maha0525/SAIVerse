@@ -178,6 +178,33 @@ class OpenAIClient(LLMClient):
     def _create_completion(self, **kwargs: Any):
         return self.client.chat.completions.create(**kwargs)
 
+    def _add_additional_properties(self, schema: Dict[str, Any]) -> Dict[str, Any]:
+        """Recursively add additionalProperties: false and complete required array for OpenAI strict mode."""
+        import copy
+        schema = copy.deepcopy(schema)
+
+        def _process(node: Any) -> Any:
+            if isinstance(node, dict):
+                # Add additionalProperties: false to objects
+                if node.get("type") == "object" and "additionalProperties" not in node:
+                    node["additionalProperties"] = False
+
+                # Complete required array to include all properties (OpenAI strict mode requirement)
+                if node.get("type") == "object" and "properties" in node:
+                    all_keys = list(node["properties"].keys())
+                    existing_required = node.get("required", [])
+                    # Add all properties to required if not already present
+                    node["required"] = list(set(existing_required + all_keys))
+
+                # Recursively process all values
+                return {k: _process(v) for k, v in node.items()}
+            elif isinstance(node, list):
+                return [_process(item) for item in node]
+            else:
+                return node
+
+        return _process(schema)
+
     def generate(
         self,
         messages: List[Dict[str, Any]],
@@ -206,11 +233,13 @@ class OpenAIClient(LLMClient):
                 req["temperature"] = temperature
             if response_schema:
                 schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
+                # Add additionalProperties: false recursively for OpenAI strict mode
+                openai_schema = self._add_additional_properties(response_schema)
                 req["response_format"] = {
                     "type": "json_schema",
                     "json_schema": {
                         "name": schema_name or "saiverse_structured_output",
-                        "schema": response_schema,
+                        "schema": openai_schema,
                         "strict": True,
                     },
                 }
