@@ -492,24 +492,18 @@ class SEARuntime:
                 persona_id = getattr(persona_obj, "persona_id", None)
                 manager_ref = getattr(persona_obj, "manager_ref", None)
 
-                # Build tool input based on args_input
+                # Build kwargs from args_input (None or {} = no args)
+                kwargs = {}
                 if args_input:
-                    kwargs = {}
                     for arg_name, state_key in args_input.items():
                         kwargs[arg_name] = state.get(state_key, "")
-                    if persona_id and persona_dir:
-                        with persona_context(persona_id, persona_dir, manager_ref):
-                            result = tool_func(**kwargs) if callable(tool_func) else None
-                    else:
+
+                # Execute tool with persona context
+                if persona_id and persona_dir:
+                    with persona_context(persona_id, persona_dir, manager_ref):
                         result = tool_func(**kwargs) if callable(tool_func) else None
                 else:
-                    # Legacy: single string input
-                    last = state.get("last") or state.get("inputs", {}).get("input") or ""
-                    if persona_id and persona_dir:
-                        with persona_context(persona_id, persona_dir, manager_ref):
-                            result = tool_func(last) if callable(tool_func) else None
-                    else:
-                        result = tool_func(last) if callable(tool_func) else None
+                    result = tool_func(**kwargs) if callable(tool_func) else None
 
                 # Handle tuple results with output_keys (for multi-value returns)
                 if output_keys and isinstance(result, tuple):
@@ -924,10 +918,21 @@ class SEARuntime:
                 if building_obj:
                     building_section_parts: List[str] = []
 
-                    # Building system instruction
+                    # Building system instruction (with variable expansion)
                     building_sys = getattr(building_obj, "system_instruction", None)
                     if building_sys:
-                        building_section_parts.append(str(building_sys).strip())
+                        # Get current time in persona's timezone
+                        from datetime import datetime
+                        now = datetime.now(persona.timezone)
+                        time_vars = {
+                            "current_time": now.strftime("%H:%M"),
+                            "current_date": now.strftime("%Y年%m月%d日"),
+                            "current_datetime": now.strftime("%Y年%m月%d日 %H:%M"),
+                            "current_weekday": ["月", "火", "水", "木", "金", "土", "日"][now.weekday()],
+                        }
+                        # Expand variables in building system instruction
+                        expanded_sys = _format(str(building_sys), time_vars)
+                        building_section_parts.append(expanded_sys.strip())
 
                     # Building items
                     if reqs.building_items:
