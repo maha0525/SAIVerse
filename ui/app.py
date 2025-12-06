@@ -57,8 +57,13 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
     LOGGER.info(f"[UI] ITEM_MODAL_JS first 150 chars: {ITEM_MODAL_JS[:150]}")
     LOGGER.info(f"[UI] ITEM_MODAL_JS contains 'SCRIPT LOADED CHECK': {'SCRIPT LOADED CHECK' in ITEM_MODAL_JS}")
 
-    # Combine CSS with item modal CSS
-    combined_css = note_css + "\n" + ITEM_MODAL_CSS
+    # Combine CSS with item modal CSS and hide API components
+    api_hide_css = """
+    .hidden-api-components {
+        display: none !important;
+    }
+    """
+    combined_css = note_css + "\n" + ITEM_MODAL_CSS + "\n" + api_hide_css
 
     with gr.Blocks(fill_width=True, head=head_viewport, css=combined_css, title=f"SAIVerse City: {city_name}", theme=gr.themes.Soft()) as demo:
         # Left sidebar
@@ -195,12 +200,15 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                                     elem_id="attachment_button"
                                 )
                         with gr.Accordion("オプション", open=False):
-                            meta_playbook_dropdown = gr.Dropdown(
-                                choices=[(f"{name}: {desc}", name) for name, desc in manager.get_selectable_meta_playbooks()],
-                                value=None,
-                                label="メタプレイブック選択（未選択の場合は meta_user）",
-                                interactive=True
-                            )
+                            with gr.Row():
+                                refresh_chat_btn = gr.Button("リロード", variant="secondary", elem_id="refresh_chat_btn",scale=1)
+                                meta_playbook_dropdown = gr.Dropdown(
+                                    choices=[(f"{name}: {desc}", name) for name, desc in manager.get_selectable_meta_playbooks()],
+                                    value=None,
+                                    label="メタプレイブック選択",
+                                    interactive=True,
+                                    scale=5
+                                )
                             model_drop = gr.Dropdown(choices=ui_state.model_choices, value="None",label="モデル選択")
                             with gr.Row():
                                 temperature_slider = gr.Slider(
@@ -238,24 +246,26 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                                     visible=False,
                                     interactive=True,
                                 )
-                            refresh_chat_btn = gr.Button("履歴を再読み込み", variant="secondary", elem_id="refresh_chat_btn")
+
                             with gr.Row():
-                                with gr.Column():
-                                    summon_persona_dropdown = gr.Dropdown(
-                                        choices=manager.get_summonable_personas(),
-                                        label="呼ぶペルソナを選択",
-                                        interactive=True,
-                                        scale=3
-                                    )
-                                    summon_btn = gr.Button("呼ぶ", scale=1)
-                                with gr.Column():
-                                    end_conv_persona_dropdown = gr.Dropdown(
-                                        choices=manager.get_conversing_personas(),
-                                        label="帰ってもらうペルソナを選択",
-                                        interactive=True,
-                                        scale=3
-                                    )
-                                    end_conv_btn = gr.Button("帰宅", scale=1)
+                                with gr.Column(scale=1, min_width=0):
+                                    with gr.Row():
+                                        summon_persona_dropdown = gr.Dropdown(
+                                            choices=manager.get_summonable_personas(),
+                                            show_label=False,
+                                            interactive=True,
+                                            scale=4
+                                        )
+                                        summon_btn = gr.Button("呼ぶ", scale=1)
+                                with gr.Column(scale=1, min_width=0):
+                                    with gr.Row():
+                                        end_conv_persona_dropdown = gr.Dropdown(
+                                            choices=manager.get_conversing_personas(),
+                                            show_label=False,
+                                            interactive=True,
+                                            scale=4
+                                        )
+                                        end_conv_btn = gr.Button("帰宅", scale=1)
 
             client_location_state = gr.State()
             parameter_state = gr.State({})
@@ -1071,22 +1081,151 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
         LOGGER.info(f"[UI] ITEM_MODAL_JS contains 'initItemModal': {'initItemModal' in ITEM_MODAL_JS}")
         demo.load(None, None, None, js=ITEM_MODAL_JS)
 
-    # Add API endpoint for item view
+        # Add hidden button for item view API (Gradio-native approach)
+        from pathlib import Path
+
+        # Use visible=True but hide with CSS (visible=False doesn't add to DOM)
+        with gr.Row(elem_classes=["hidden-api-components"], visible=True):
+            item_view_button = gr.Button("API", elem_id="item_view_button", visible=True)
+            item_id_hidden = gr.Textbox(label="item_id", elem_id="item_id_hidden", visible=True)
+            result_hidden = gr.Textbox(label="result", elem_id="result_hidden", visible=True)
+
+        def get_item_content(item_id: str) -> str:
+            """Get item content using Gradio event system."""
+            import json
+            LOGGER.info(f"[Gradio get_item_content] Called with item_id: {item_id}")
+
+            if not item_id:
+                return json.dumps({"success": False, "error": "item_id is required"})
+
+            try:
+                manager = ui_state.manager
+                if not manager:
+                    return json.dumps({"success": False, "error": "Manager not initialized"})
+
+                if item_id not in manager.items:
+                    LOGGER.error(f"[get_item_content] Item not found: {item_id}")
+                    return json.dumps({"success": False, "error": "Item not found"})
+
+                item_data = manager.items[item_id]
+                item_type = item_data.get("type", "object")
+                file_path = item_data.get("file_path")
+                LOGGER.info(f"[get_item_content] Item found: type={item_type}, file_path={file_path}")
+
+                if not file_path:
+                    return json.dumps({"success": False, "error": "No file path for this item"})
+
+                file_path_obj = Path(file_path)
+                if not file_path_obj.exists():
+                    return json.dumps({"success": False, "error": "File not found"})
+
+                if item_type == "document":
+                    content = file_path_obj.read_text(encoding="utf-8")
+                    LOGGER.info(f"[get_item_content] Document loaded, length: {len(content)}")
+                    return json.dumps({
+                        "success": True,
+                        "content": content,
+                        "file_path": str(file_path),
+                        "item_type": item_type
+                    })
+                elif item_type == "picture":
+                    LOGGER.info(f"[get_item_content] Returning picture path: {file_path}")
+                    return json.dumps({
+                        "success": True,
+                        "file_path": str(file_path),
+                        "item_type": item_type
+                    })
+                else:
+                    return json.dumps({"success": False, "error": "Unsupported item type"})
+
+            except Exception as e:
+                LOGGER.exception("[get_item_content] Unexpected error")
+                return json.dumps({"success": False, "error": str(e)})
+
+        # Create JavaScript function that can be called from window
+        js_create_api_function = """
+        () => {
+            console.log('[Gradio] Creating window.get_item_content_js function');
+
+            window.get_item_content_js = async function(item_id) {
+                console.log('[get_item_content_js] Called with item_id:', item_id);
+
+                // Find the hidden components
+                const button = document.querySelector('#item_view_button');
+                const itemIdInput = document.querySelector('#item_id_hidden textarea');
+
+                if (!button) {
+                    console.error('[get_item_content_js] Button not found!');
+                    console.log('[get_item_content_js] Looking for container:', document.querySelector('#item_view_button'));
+                    throw new Error('API button not found');
+                }
+
+                if (!itemIdInput) {
+                    console.error('[get_item_content_js] item_id_hidden not found!');
+                    throw new Error('item_id_hidden input not found');
+                }
+
+                console.log('[get_item_content_js] Components found, setting item_id and clicking...');
+
+                // Set the item_id in the hidden textbox
+                itemIdInput.value = item_id;
+                itemIdInput.dispatchEvent(new Event('input', {bubbles: true}));
+
+                // Wait for response
+                return new Promise((resolve) => {
+                    window.__item_content_resolver = resolve;
+
+                    // Click the button to trigger Gradio event
+                    setTimeout(() => {
+                        button.click();
+                    }, 50);  // Small delay to ensure input value is propagated
+                });
+            };
+
+            console.log('[Gradio] window.get_item_content_js created successfully');
+        }
+        """
+
+        # Connect the button (components already created above)
+        item_view_button.click(
+            fn=get_item_content,
+            inputs=[item_id_hidden],
+            outputs=[result_hidden]
+        )
+
+        # JavaScript to populate input from global variable
+        result_hidden.change(
+            fn=None,
+            inputs=[result_hidden],
+            outputs=None,
+            js="""
+            (result) => {
+                console.log('[JS result handler] Received:', result ? result.substring(0, 100) : 'null');
+                if (window.__item_content_resolver) {
+                    window.__item_content_resolver(result);
+                    window.__item_content_resolver = null;
+                }
+                return null;
+            }
+            """
+        )
+
+        # Create the API function on page load
+        demo.load(None, None, None, js=js_create_api_function)
+
+        LOGGER.info("[UI] Item view Gradio API function registered")
+
+    # Keep the custom API endpoint as fallback (OUTSIDE of gr.Blocks context)
     from fastapi.responses import JSONResponse
     from pathlib import Path
+    from fastapi import Query
 
-    LOGGER.info("[UI] ===== REGISTERING API ENDPOINT /api/item/view =====")
-    LOGGER.info(f"[UI] demo.app type: {type(demo.app)}")
-    LOGGER.info(f"[UI] demo.app available: {demo.app is not None}")
+    LOGGER.info("[UI] ===== REGISTERING CUSTOM API ENDPOINT (OUTSIDE BLOCKS) =====")
 
-    @demo.app.get("/api/item/view")
-    async def api_item_view(item_id: str = None):
+    async def api_item_view_handler(item_id: str = Query(...)):
         """API endpoint to get item content."""
-        import logging
-        logger = logging.getLogger(__name__)
         LOGGER.info(f"[API /api/item/view] ===== FUNCTION CALLED =====")
         LOGGER.info(f"[API /api/item/view] item_id parameter: {item_id}")
-        logger.info(f"[API /api/item/view] Request received for item_id: {item_id}")
 
         if not item_id:
             LOGGER.error("[API /api/item/view] No item_id provided")
@@ -1095,33 +1234,33 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
         try:
             manager = ui_state.manager
             if not manager:
-                logger.error("[API /api/item/view] Manager not initialized")
+                LOGGER.error("[API /api/item/view] Manager not initialized")
                 return JSONResponse({"success": False, "error": "Manager not initialized"}, status_code=500)
 
             # Get item data
             if item_id not in manager.items:
-                logger.error(f"[API /api/item/view] Item not found: {item_id}")
-                logger.debug(f"[API /api/item/view] Available items: {list(manager.items.keys())[:10]}")
+                LOGGER.error(f"[API /api/item/view] Item not found: {item_id}")
+                LOGGER.debug(f"[API /api/item/view] Available items: {list(manager.items.keys())[:10]}")
                 return JSONResponse({"success": False, "error": "Item not found"}, status_code=404)
 
             item_data = manager.items[item_id]
             item_type = item_data.get("type", "object")
             file_path = item_data.get("file_path")
-            logger.info(f"[API /api/item/view] Item found: type={item_type}, file_path={file_path}")
+            LOGGER.info(f"[API /api/item/view] Item found: type={item_type}, file_path={file_path}")
 
             if not file_path:
-                logger.error(f"[API /api/item/view] No file path for item: {item_id}")
+                LOGGER.error(f"[API /api/item/view] No file path for item: {item_id}")
                 return JSONResponse({"success": False, "error": "No file path for this item"}, status_code=400)
 
             file_path_obj = Path(file_path)
             if not file_path_obj.exists():
-                logger.error(f"[API /api/item/view] File not found: {file_path}")
+                LOGGER.error(f"[API /api/item/view] File not found: {file_path}")
                 return JSONResponse({"success": False, "error": "File not found"}, status_code=404)
 
             if item_type == "document":
                 # Read document content
                 content = file_path_obj.read_text(encoding="utf-8")
-                logger.info(f"[API /api/item/view] Document content loaded, length: {len(content)}")
+                LOGGER.info(f"[API /api/item/view] Document content loaded, length: {len(content)}")
                 return JSONResponse({
                     "success": True,
                     "content": content,
@@ -1130,24 +1269,34 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                 })
             elif item_type == "picture":
                 # Return file path for image display
-                logger.info(f"[API /api/item/view] Returning picture path: {file_path}")
+                LOGGER.info(f"[API /api/item/view] Returning picture path: {file_path}")
                 return JSONResponse({
                     "success": True,
-                    "file_path": f"file={file_path}",  # Gradio file:// format
+                    "file_path": str(file_path),
                     "item_type": item_type
                 })
             else:
-                logger.error(f"[API /api/item/view] Unsupported item type: {item_type}")
+                LOGGER.error(f"[API /api/item/view] Unsupported item type: {item_type}")
                 return JSONResponse({"success": False, "error": "Unsupported item type"}, status_code=400)
 
         except Exception as e:
-            logger.exception("[API /api/item/view] Unexpected error")
+            LOGGER.exception("[API /api/item/view] Unexpected error")
             return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
-    # Debug: List all registered routes
-    LOGGER.info("[UI] ===== REGISTERED ROUTES =====")
+    # Register endpoint on FastAPI app (OUTSIDE Blocks context)
+    demo.app.add_api_route(
+        "/api/item/view",
+        api_item_view_handler,
+        methods=["GET"],
+        name="item_view"
+    )
+    LOGGER.info("[UI] Custom endpoint registered at /api/item/view")
+
+    # Debug: List all routes
+    LOGGER.info("[UI] ===== ALL REGISTERED ROUTES =====")
     for route in demo.app.routes:
-        LOGGER.info(f"[UI] Route: {route.path} - {route.methods if hasattr(route, 'methods') else 'N/A'}")
-    LOGGER.info("[UI] ===========================")
+        if hasattr(route, 'path'):
+            LOGGER.info(f"[UI] Route: {route.path}")
+    LOGGER.info("[UI] =================================")
 
     return demo

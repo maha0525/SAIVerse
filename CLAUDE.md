@@ -231,13 +231,25 @@ python scripts/memory_topics_ui.py
 
 ### Code Changes
 - **Before making changes**: Review recent session reflections in `docs/session_reflection_*.md` to avoid repeating mistakes
+
+- **Debugging mindset (CRITICAL)**:
+  1. **Logs and console output are the PRIMARY source of truth**: Always check terminal logs, browser console, and network tab FIRST before making changes
+  2. **Never guess or assume**: If something doesn't work, identify EXACTLY what doesn't work by checking observable facts (logs, DOM inspection, network requests)
+  3. **One problem at a time**: Don't switch approaches until you understand WHY the current approach failed
+  4. **Ask "What don't I know?"**: If unclear, identify the missing information and how to obtain it (add logging, inspect DOM, check documentation) instead of guessing
+  5. **Avoid speculative fixes**: Don't try multiple approaches hoping one works. Understand the root cause first.
+
 - **When debugging UI issues**:
   1. **Listen carefully**: Pay close attention to what the user is actually doing (e.g., "sidebar button" vs "home screen button")
   2. **Gather observable data first**: Add logging, check terminal output, check browser console BEFORE making changes
   3. **Understand the working case**: If something works in one scenario but not another, investigate the DIFFERENCE, don't assume the cause
   4. **One change at a time**: Make focused changes that can be verified, not multiple speculative fixes
   5. **Verify assumptions**: Don't assume "timing issue" or "selector issue" - confirm with logs
-  6. **Framework behavior**: Understand how the framework works (e.g., Gradio's autoscroll triggers on visibility changes, not just data updates)
+  6. **Use browser DevTools effectively**:
+     - Console: Check for errors, test selectors directly (`document.querySelector('#element')`)
+     - Elements: Inspect actual DOM structure and CSS
+     - Network: Verify request URLs and responses
+  7. **Framework behavior**: Understand how the framework works (e.g., Gradio's autoscroll triggers on visibility changes, not just data updates)
 - **When touching external APIs**: Always check official docs first (especially Gemini structured output limitations)
 - **Playbook modifications**: Validate that `next` node pointers form valid graphs (no accidental loops). After editing JSON files in `sea/playbooks/`, always run `python scripts/import_playbook.py --file <path>` to import the changes into the database
 - **Database changes**: Write migration in `database/migrate.py`, test with `--db-file` on copy first
@@ -276,6 +288,8 @@ python scripts/memory_topics_ui.py
 - **Gemini context window is very large (1M+ tokens)** - Do not assume large context is the cause of errors. Gemini handles 100K+ tokens routinely. The system is designed to work with large conversation histories.
 - **Playbook node transitions**: always verify `next` pointers form valid DAGs
 - **When refactoring**: complete the entire change or revert; do not leave codebase in mixed state
+- **Gradio `visible=False` does NOT add components to DOM**: Components with `visible=False` are not rendered in the HTML. If you need to access them from JavaScript, use `visible=True` with CSS `display: none !important` instead.
+- **Gradio custom API endpoints are unreliable**: Adding custom FastAPI routes via `@demo.app.get()` or `demo.app.add_api_route()` may conflict with Gradio's internal routing. Prefer Gradio's native event system (Button/Textbox + `.click()`) for Python-JavaScript communication.
 - **Gradio SelectData.index type**: Always check for both `list` and `tuple` with `isinstance(idx, (list, tuple))` before accessing `idx[0]`. Gradio returns `list` type (e.g., `[row, col]`), not `tuple`. Missing this check causes silent failures in table selection handlers.
 - **Gradio Chatbot autoscroll**: The `autoscroll=True` parameter works, but only triggers when the component becomes visible after being hidden. If updating data while already visible, autoscroll may not activate. To force autoscroll, temporarily hide the component (add CSS class), update data, then show it again. This visibility transition triggers the autoscroll behavior.
 - **Gradio dynamic inline styles**: When Gradio components apply inline styles via JavaScript after page load, CSS rules (even with `!important`) cannot override them. Solution: Use JavaScript monkey patching to hijack `element.style.setProperty()` and replace values before they're applied. See `docs/session_reflection_2025-12-03_sidebar_detail_panel.md` for detailed example.

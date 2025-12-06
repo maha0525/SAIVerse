@@ -234,54 +234,50 @@ ITEM_MODAL_JS = """
 
         body.innerHTML = metaHtml + '<p><em>読み込み中...</em></p>';
         overlay.classList.add('show');
-        console.log('[ItemModal] Modal displayed, fetching content from API');
+        console.log('[ItemModal] Modal displayed, calling window.get_item_content_js');
 
-        // Fetch item content from API
-        const apiUrl = `/api/item/view?item_id=${encodeURIComponent(itemId)}`;
-        console.log('[ItemModal] Fetching:', apiUrl);
-        console.log('[ItemModal] Full URL:', window.location.origin + apiUrl);
-        console.log('[ItemModal] Item ID:', itemId);
+        // Call the globally exposed JavaScript function
+        if (typeof window.get_item_content_js === 'function') {
+            console.log('[ItemModal] Calling window.get_item_content_js with item_id:', itemId);
+            window.get_item_content_js(itemId).then(result => {
+                console.log('[ItemModal] Received result:', result);
 
-        fetch(apiUrl)
-            .then(response => {
-                console.log('[ItemModal] API response status:', response.status);
-                console.log('[ItemModal] API response ok:', response.ok);
-                console.log('[ItemModal] API response headers:', response.headers);
-                return response.json();
-            })
-            .then(data => {
-                console.log('[ItemModal] API response data:', data);
-                console.log('[ItemModal] data.success:', data.success);
-                console.log('[ItemModal] data.content:', data.content ? `${data.content.substring(0, 100)}...` : 'undefined');
-                console.log('[ItemModal] data.error:', data.error);
+                try {
+                    const data = typeof result === 'string' ? JSON.parse(result) : result;
+                    console.log('[ItemModal] Parsed data:', data);
 
-                if (data.success) {
-                    let contentHtml = metaHtml;
-                    if (itemType === 'picture') {
-                        // Display image
-                        contentHtml += `<img src="${data.file_path}" alt="${itemName}" />`;
-                        console.log('[ItemModal] Displaying image:', data.file_path);
-                    } else if (itemType === 'document') {
-                        // Display document content
-                        if (data.content) {
-                            contentHtml += `<pre>${data.content}</pre>`;
-                            console.log('[ItemModal] Displaying document, content length:', data.content.length);
-                        } else {
-                            contentHtml += `<p style="color: red;">コンテンツが空です</p>`;
-                            console.error('[ItemModal] Document content is undefined or empty');
+                    if (data.success) {
+                        let contentHtml = metaHtml;
+                        if (itemType === 'picture') {
+                            const imgUrl = `/gradio_api/file=${data.file_path}`;
+                            contentHtml += `<img src="${imgUrl}" alt="${itemName}" />`;
+                            console.log('[ItemModal] Displaying image:', imgUrl);
+                        } else if (itemType === 'document') {
+                            if (data.content) {
+                                contentHtml += `<pre>${data.content}</pre>`;
+                                console.log('[ItemModal] Displaying document, content length:', data.content.length);
+                            } else {
+                                contentHtml += '<p style="color: red;">コンテンツが空です</p>';
+                            }
                         }
+                        body.innerHTML = contentHtml;
+                    } else {
+                        console.error('[ItemModal] Error from backend:', data.error);
+                        const errorMsg = data.error || 'Unknown error';
+                        body.innerHTML = metaHtml + `<p style="color: red;">エラー: ${errorMsg}</p>`;
                     }
-                    body.innerHTML = contentHtml;
-                } else {
-                    console.error('[ItemModal] API returned error:', data.error);
-                    const errorMsg = data.error || 'Unknown error';
-                    body.innerHTML = metaHtml + `<p style="color: red;">エラー: ${errorMsg}</p>`;
+                } catch (e) {
+                    console.error('[ItemModal] Failed to parse result:', e);
+                    body.innerHTML = metaHtml + '<p style="color: red;">レスポンスの解析に失敗しました</p>';
                 }
-            })
-            .catch(error => {
-                console.error('[ItemModal] Fetch error:', error);
-                body.innerHTML = metaHtml + `<p style="color: red;">ファイルの読み込みに失敗しました: ${error}</p>`;
+            }).catch(error => {
+                console.error('[ItemModal] Error calling get_item_content_js:', error);
+                body.innerHTML = metaHtml + `<p style="color: red;">エラー: ${error.message}</p>`;
             });
+        } else {
+            console.error('[ItemModal] window.get_item_content_js is not defined!');
+            body.innerHTML = metaHtml + '<p style="color: red;">内部エラー: APIが初期化されていません</p>';
+        }
     }
 
     function closeItemModal() {
