@@ -294,6 +294,7 @@
     "context_length": 32768,
     "base_url": "https://integrate.api.nvidia.com/v1",
     "api_key_env": "NVIDIA_API_KEY",
+    "convert_system_to_user": true,
     "parameters": {
       "temperature": {
         "type": "float",
@@ -329,6 +330,7 @@
     "context_length": 32768,
     "base_url": "https://integrate.api.nvidia.com/v1",
     "api_key_env": "NVIDIA_API_KEY",
+    "convert_system_to_user": true,
     "parameters": {
       "temperature": {
         "type": "float",
@@ -359,11 +361,48 @@
       }
     }
   },
+  "qwen/qwen3-next-80b-a3b-instruct": {
+    "provider": "openai",
+    "context_length": 128000,
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "api_key_env": "NVIDIA_API_KEY",
+    "convert_system_to_user": true,
+    "parameters": {
+      "temperature": {
+        "type": "float",
+        "min": 0,
+        "max": 2,
+        "step": 0.1,
+        "default": 0.6,
+        "label": "Temperature",
+        "description": "Controls randomness."
+      },
+      "top_p": {
+        "type": "float",
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "default": 0.7,
+        "label": "Top P",
+        "description": "Nucleus sampling cutoff."
+      },
+      "max_tokens": {
+        "type": "int",
+        "min": 32,
+        "max": 8192,
+        "step": 1,
+        "default": 4096,
+        "label": "Max tokens",
+        "description": "Upper bound on generated tokens."
+      }
+    }
+  },
   "moonshotai/kimi-k2-instruct-0905": {
     "provider": "openai",
     "context_length": 250000,
     "base_url": "https://integrate.api.nvidia.com/v1",
     "api_key_env": "NVIDIA_API_KEY",
+    "convert_system_to_user": true,
     "parameters": {
       "temperature": {
         "type": "float",
@@ -394,53 +433,19 @@
       }
     }
   },
-  "mistralai/mistral-large-2411": {
-    "provider": "openai",
-    "context_length": 32000,
-    "base_url": "https://openrouter.ai/api/v1",
-    "api_key_env": "OPENROUTER_API_KEY",
-    "parameters": {
-      "temperature": {
-        "type": "float",
-        "min": 0,
-        "max": 2,
-        "step": 0.1,
-        "default": 1,
-        "label": "Temperature",
-        "description": "Controls randomness."
-      },
-      "top_p": {
-        "type": "float",
-        "min": 0,
-        "max": 1,
-        "step": 0.05,
-        "default": 1,
-        "label": "Top P",
-        "description": "Nucleus sampling cutoff."
-      },
-      "max_tokens": {
-        "type": "int",
-        "min": 32,
-        "max": 120000,
-        "step": 1,
-        "default": 8000,
-        "label": "Max tokens",
-        "description": "Upper bound on generated tokens."
-      }
-    }
-  },
-  "mistralai/mistral-large-2512": {
+  "mistralai/mistral-large-3-675b-instruct-2512": {
     "provider": "openai",
     "context_length": 128000,
-    "base_url": "https://openrouter.ai/api/v1",
-    "api_key_env": "OPENROUTER_API_KEY",
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "api_key_env": "NVIDIA_API_KEY",
+    "convert_system_to_user": true,
     "parameters": {
       "temperature": {
         "type": "float",
         "min": 0,
         "max": 2,
-        "step": 0.1,
-        "default": 1,
+        "step": 0.01,
+        "default": 0.2,
         "label": "Temperature",
         "description": "Controls randomness."
       },
@@ -504,6 +509,7 @@
     "context_length": 120000,
     "base_url": "https://integrate.api.nvidia.com/v1",
     "api_key_env": "NVIDIA_API_KEY",
+    "convert_system_to_user": true,
     "parameters": {
       "temperature": {
         "type": "float",
@@ -629,6 +635,7 @@
     "context_length": 120000,
     "base_url": "https://integrate.api.nvidia.com/v1",
     "api_key_env": "NVIDIA_API_KEY",
+    "convert_system_to_user": true,
     "parameters": {
       "temperature": {
         "type": "float",

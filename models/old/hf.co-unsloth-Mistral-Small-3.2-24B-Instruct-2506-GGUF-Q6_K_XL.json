@@ -1,0 +1,6 @@
+{
+  "model": "hf.co/unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF:Q6_K_XL",
+  "display_name": "Mistral Small V3.2 24b 2506 Q6 K Xl",
+  "provider": "ollama",
+  "context_length": 128000
+}

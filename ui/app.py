@@ -13,12 +13,14 @@ from ui.env_settings import create_env_settings_ui
 from ui.persona_settings import create_persona_settings_ui
 from ui.chat import (
     call_persona_ui,
+    check_and_update_unread,
     end_conversation_ui,
     format_building_details,
     format_execution_states,
     format_location_label,
     format_persona_details,
     get_autonomous_log,
+    get_building_choices_with_unread,
     get_building_details,
     get_current_building_history,
     get_current_location_name,
@@ -119,6 +121,9 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                     elem_classes=["saiverse-move-radio"],
                     show_label=False
                 )
+
+        # Timer for checking new messages (runs every 3 seconds)
+        unread_check_timer = gr.Timer(value=3, active=True)
 
         # Right sidebar for detail panel
         with gr.Sidebar(position="right", open=False, width=400, elem_id="detail_sidebar", elem_classes=["saiverse-sidebar", "right"]):
@@ -453,6 +458,87 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
             ).then(
                 fn=update_detail_panels,
                 outputs=[building_details_display, persona_details_display, execution_states_display],
+            )
+
+            # --- Unread message check timer handler ---
+            def on_unread_check_tick():
+                """
+                Called every 3 seconds by the timer.
+                Checks for new messages and returns updates only if there are changes.
+                Returns: (unread_building_names as JSON string, chat_update)
+                """
+                import json
+                has_changes, unread_buildings, current_has_new = check_and_update_unread()
+
+                # Build list of unread building names for JS
+                unread_names = []
+                if ui_state.manager:
+                    for b in ui_state.manager.buildings:
+                        if b.building_id in unread_buildings:
+                            unread_names.append(b.name)
+
+                if current_has_new:
+                    # Current building has new messages - refresh chat
+                    new_history = get_current_building_history()
+                    return json.dumps(unread_names), new_history
+                else:
+                    return json.dumps(unread_names), gr.update()
+
+            # Hidden textbox to pass unread info to JS (visible=True but hidden via CSS)
+            with gr.Row(elem_classes=["hidden-api-components"], visible=True):
+                unread_info_hidden = gr.Textbox(value="[]", elem_id="unread_info_hidden")
+
+            unread_check_timer.tick(
+                fn=on_unread_check_tick,
+                outputs=[unread_info_hidden, chatbot],
+                show_progress="hidden",
+            )
+
+            # JS to update radio labels with unread indicators (without triggering change event)
+            unread_info_hidden.change(
+                fn=None,
+                inputs=[unread_info_hidden],
+                outputs=None,
+                js="""
+                (unreadJson) => {
+                    try {
+                        const unreadNames = JSON.parse(unreadJson || '[]');
+                        const unreadSet = new Set(unreadNames);
+                        console.log('[unread-js] Updating labels, unread buildings:', unreadNames);
+
+                        // Try multiple selectors to find radio labels
+                        const container = document.querySelector('.saiverse-move-radio');
+                        if (!container) {
+                            console.warn('[unread-js] Radio container not found');
+                            return null;
+                        }
+
+                        // Gradio radio uses input[type=radio] + label structure
+                        const labels = container.querySelectorAll('label');
+                        console.log('[unread-js] Found', labels.length, 'labels');
+
+                        labels.forEach(label => {
+                            // Get the text content (might be in span or directly in label)
+                            let textEl = label.querySelector('span') || label;
+                            let text = textEl.textContent || '';
+
+                            // Remove existing indicator
+                            const cleanText = text.startsWith('● ') ? text.substring(2) : text;
+
+                            // Add indicator if unread
+                            if (unreadSet.has(cleanText)) {
+                                textEl.textContent = '● ' + cleanText;
+                                console.log('[unread-js] Added indicator to:', cleanText);
+                            } else if (text !== cleanText) {
+                                textEl.textContent = cleanText;
+                            }
+                        });
+                    } catch (e) {
+                        console.error('[unread-js] Error updating labels:', e);
+                    }
+                    return null;
+                }
+                """
             )
 
 
@@ -1012,7 +1098,13 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
             }, 5000);
         }
         """
-        demo.load(fn=get_current_building_history, inputs=None, outputs=[chatbot])
+
+        # Initialize message counts on load (so existing messages aren't marked as unread)
+        def init_and_get_history():
+            ui_state.initialize_message_counts()
+            return get_current_building_history()
+
+        demo.load(fn=init_and_get_history, inputs=None, outputs=[chatbot])
         demo.load(fn=update_detail_panels, inputs=None, outputs=[building_details_display, persona_details_display, execution_states_display])
         demo.load(None, None, None, js="""
         () => {

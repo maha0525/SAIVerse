@@ -551,6 +551,12 @@ def _perform_user_move(building_name: Optional[str], client_state: Optional[dict
 
     state["value"] = server_location
 
+    # Mark the current building as read when user enters it
+    current_building_id = manager.user_current_building_id
+    if current_building_id:
+        ui_state.mark_building_as_read(current_building_id)
+        logging.debug("[ui] marked building %s as read", current_building_id)
+
     new_history = get_current_building_history()
     new_location_name = get_current_location_name()
     summonable_personas = manager.get_summonable_personas()
@@ -599,6 +605,8 @@ def move_user_ui(building_name: str, client_state: Optional[dict]):
 
 def move_user_radio_ui(building_name: str, client_state: Optional[dict]):
     """Radio handler for moving the user and syncing dropdown."""
+    # Strip unread indicator if present
+    clean_building_name = strip_unread_indicator(building_name) if building_name else building_name
     (
         history,
         new_location_name,
@@ -606,7 +614,7 @@ def move_user_radio_ui(building_name: str, client_state: Optional[dict]):
         summon_update,
         conversing_update,
         client_state,
-    ) = _perform_user_move(building_name, client_state)
+    ) = _perform_user_move(clean_building_name, client_state)
     dropdown_update, radio_update = _prepare_move_component_updates(
         force_dropdown_value=new_location_name,
         force_radio=False,
@@ -1088,3 +1096,66 @@ def update_detail_panels():
 
     # Always return current values (Gradio will handle rendering optimization)
     return building, persona, execution
+
+
+# --- Unread message check functions for Timer ---
+
+def check_and_update_unread():
+    """
+    Check for new messages in all buildings.
+    Returns tuple: (has_changes, unread_building_ids, current_building_has_new)
+
+    This function is called by gr.Timer periodically.
+    It only triggers UI updates when there are actual changes.
+    """
+    manager = ui_state.manager
+    if not manager:
+        return False, set(), False
+
+    # Check for newly unread buildings
+    newly_unread = ui_state.check_for_new_messages()
+    unread_buildings = ui_state.get_unread_buildings()
+
+    # Check if current building has new messages
+    current_building_id = manager.user_current_building_id
+    current_has_new = current_building_id in newly_unread if current_building_id else False
+
+    has_changes = len(newly_unread) > 0
+
+    if has_changes:
+        logging.debug(
+            "[unread] New messages detected: newly_unread=%s, total_unread=%s, current_has_new=%s",
+            newly_unread, unread_buildings, current_has_new
+        )
+
+    return has_changes, unread_buildings, current_has_new
+
+
+def get_building_choices_with_unread():
+    """
+    Get building choices with unread indicators.
+    Returns list of building names with ● prefix for unread buildings.
+    """
+    manager = ui_state.manager
+    if not manager:
+        return []
+
+    unread_buildings = ui_state.get_unread_buildings()
+    choices = []
+
+    for building in manager.buildings:
+        name = building.name
+        if building.building_id in unread_buildings:
+            # Add unread indicator
+            choices.append(f"● {name}")
+        else:
+            choices.append(name)
+
+    return choices
+
+
+def strip_unread_indicator(building_name: str) -> str:
+    """Remove unread indicator from building name."""
+    if building_name and building_name.startswith("● "):
+        return building_name[2:]
+    return building_name

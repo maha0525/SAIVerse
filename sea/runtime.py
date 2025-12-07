@@ -255,20 +255,133 @@ class SEARuntime:
                 if response_schema and "available_playbooks" in state:
                     response_schema = self._add_playbook_enum(response_schema, state.get("available_playbooks"))
 
-                # Select LLM client based on model_type
-                llm_client = self._select_llm_client(node_def, persona)
+                # Select LLM client based on model_type and structured output needs
+                needs_structured_output = response_schema is not None
+                llm_client = self._select_llm_client(node_def, persona, needs_structured_output=needs_structured_output)
 
-                text = llm_client.generate(
-                    messages,
-                    tools=[],
-                    temperature=self._default_temperature(persona),
-                    response_schema=response_schema,
-                )
-                self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
-                schema_consumed = self._process_structured_output(node_def, text, state)
+                # Check if tools are available for this node
+                available_tools = getattr(node_def, "available_tools", None)
+                if available_tools:
+                    # Tool calling mode
+                    tools_spec = self._build_tools_spec(available_tools, llm_client)
+                    result = llm_client.generate_with_tool_detection(
+                        messages,
+                        tools=tools_spec,
+                        temperature=self._default_temperature(persona),
+                    )
+
+                    # Parse output_keys to determine where to store results
+                    output_keys_spec = getattr(node_def, "output_keys", None)
+                    text_key = None
+                    function_call_key = None
+                    thought_key = None
+
+                    if output_keys_spec:
+                        for mapping in output_keys_spec:
+                            if "text" in mapping:
+                                text_key = mapping["text"]
+                            if "function_call" in mapping:
+                                function_call_key = mapping["function_call"]
+                            if "thought" in mapping:
+                                thought_key = mapping["thought"]
+
+                    import json
+
+                    if result["type"] == "tool_call":
+                        # Only tool call, no text
+                        if output_keys_spec:
+                            # New behavior: use explicit output_keys
+                            if function_call_key:
+                                state[f"{function_call_key}.name"] = result["tool_name"]
+                                if isinstance(result["tool_args"], dict):
+                                    for arg_name, arg_value in result["tool_args"].items():
+                                        state[f"{function_call_key}.args.{arg_name}"] = arg_value
+                                        LOGGER.debug("[sea] Stored %s.args.%s = %s", function_call_key, arg_name, arg_value)
+                            # Set conditional_next flags
+                            state["tool_called"] = True
+                            state["has_speak_content"] = False
+                        else:
+                            # Legacy behavior: use predefined keys
+                            state["tool_called"] = True
+                            state["tool_name"] = result["tool_name"]
+                            state["tool_args"] = result["tool_args"]
+                            state["has_speak_content"] = False
+                            # Expand tool_args for legacy args_input (tool_arg_*)
+                            if isinstance(result["tool_args"], dict):
+                                for key, value in result["tool_args"].items():
+                                    state[f"tool_arg_{key}"] = value
+                                    LOGGER.debug("[sea] Expanded tool_arg_%s = %s", key, value)
+
+                        # Format as JSON for logging
+                        text = json.dumps({
+                            "tool": result["tool_name"],
+                            "args": result["tool_args"]
+                        }, ensure_ascii=False)
+                        LOGGER.info("[sea] Tool call detected: %s", text)
+
+                    elif result["type"] == "both":
+                        # Both text and tool call
+                        if output_keys_spec:
+                            # New behavior: use explicit output_keys
+                            if text_key:
+                                state[text_key] = result["content"]
+                                LOGGER.debug("[sea] Stored %s = (text, length=%d)", text_key, len(result["content"]))
+                            if function_call_key:
+                                state[f"{function_call_key}.name"] = result["tool_name"]
+                                if isinstance(result["tool_args"], dict):
+                                    for arg_name, arg_value in result["tool_args"].items():
+                                        state[f"{function_call_key}.args.{arg_name}"] = arg_value
+                                        LOGGER.debug("[sea] Stored %s.args.%s = %s", function_call_key, arg_name, arg_value)
+                            # Set conditional_next flags
+                            state["tool_called"] = True
+                            state["has_speak_content"] = bool(text_key)
+                        else:
+                            # Legacy behavior: use predefined keys
+                            state["tool_called"] = True
+                            state["tool_name"] = result["tool_name"]
+                            state["tool_args"] = result["tool_args"]
+                            state["has_speak_content"] = True
+                            state["speak_content"] = result["content"]
+                            # Expand tool_args for legacy args_input (tool_arg_*)
+                            if isinstance(result["tool_args"], dict):
+                                for key, value in result["tool_args"].items():
+                                    state[f"tool_arg_{key}"] = value
+                                    LOGGER.debug("[sea] Expanded tool_arg_%s = %s", key, value)
+
+                        text = result["content"]
+                        LOGGER.info("[sea] Both text and tool call detected: tool=%s, text_length=%d",
+                                    result["tool_name"], len(text))
+
+                    else:
+                        # Normal text response
+                        if output_keys_spec and text_key:
+                            # New behavior: store in explicit text_key
+                            state[text_key] = result["content"]
+                            LOGGER.debug("[sea] Stored %s = (text, length=%d)", text_key, len(result["content"]))
+                            state["has_speak_content"] = True
+                        else:
+                            # Legacy behavior: no specific text storage (just in "last")
+                            state["has_speak_content"] = True
+
+                        state["tool_called"] = False
+                        text = result["content"]
+
+                    self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
+                else:
+                    # Normal mode (no tools)
+                    state["tool_called"] = False
+                    text = llm_client.generate(
+                        messages,
+                        tools=[],
+                        temperature=self._default_temperature(persona),
+                        response_schema=response_schema,
+                    )
+                    self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
+                    schema_consumed = self._process_structured_output(node_def, text, state)
             except Exception as exc:
                 LOGGER.error("SEA LangGraph LLM failed: %s", exc)
                 text = "(error in llm node)"
+                state["tool_called"] = False
             state["last"] = text
             state["messages"] = messages + [{"role": "assistant", "content": text}]
 
@@ -295,36 +408,114 @@ class SEARuntime:
         except Exception:
             return None
 
-    def _select_llm_client(self, node_def: Any, persona: Any) -> Any:
-        """Select the appropriate LLM client based on node's model_type."""
+    def _select_llm_client(self, node_def: Any, persona: Any, needs_structured_output: bool = False) -> Any:
+        """Select the appropriate LLM client based on node's model_type and structured output needs.
+
+        Args:
+            node_def: Node definition from playbook
+            persona: Persona object
+            needs_structured_output: Whether this node requires structured output
+        """
         model_type = getattr(node_def, "model_type", "normal") or "normal"
         LOGGER.info("[sea] Node model_type: %s (node_id=%s)", model_type, getattr(node_def, "id", "unknown"))
 
+        # First, select base client based on model_type
         if model_type == "lightweight":
             # Try persona's lightweight_llm_client first
             lightweight_client = getattr(persona, "lightweight_llm_client", None)
             LOGGER.info("[sea] lightweight_client exists: %s", lightweight_client is not None)
             if lightweight_client:
                 LOGGER.info("[sea] Using persona's lightweight_llm_client")
-                return lightweight_client
-
-            # Fallback: create a temporary lightweight client
-            LOGGER.info("[sea] Persona has no lightweight_llm_client; creating temporary client with default model")
-            lightweight_model_name = getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
-            LOGGER.info("[sea] Using lightweight model: %s", lightweight_model_name)
-            try:
-                from llm_clients import get_llm_client
-                from model_configs import get_context_length
-                lw_context = get_context_length(lightweight_model_name)
-                provider = getattr(persona, "provider", "gemini")  # Gemini is default for lightweight
-                return get_llm_client(lightweight_model_name, provider, lw_context)
-            except Exception as exc:
-                LOGGER.warning("[sea] Failed to create lightweight client: %s; falling back to normal client", exc)
-                return persona.llm_client
+                base_client = lightweight_client
+                base_model = getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
+            else:
+                # Fallback: create a temporary lightweight client
+                LOGGER.info("[sea] Persona has no lightweight_llm_client; creating temporary client with default model")
+                lightweight_model_name = getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
+                LOGGER.info("[sea] Using lightweight model: %s", lightweight_model_name)
+                try:
+                    from llm_clients import get_llm_client
+                    from model_configs import get_context_length, get_model_provider
+                    lw_context = get_context_length(lightweight_model_name)
+                    provider = get_model_provider(lightweight_model_name)
+                    base_client = get_llm_client(lightweight_model_name, provider, lw_context)
+                    base_model = lightweight_model_name
+                except Exception as exc:
+                    LOGGER.warning("[sea] Failed to create lightweight client: %s; falling back to normal client", exc)
+                    base_client = persona.llm_client
+                    base_model = getattr(persona, "model", "unknown")
         else:
             # Default: use normal client
             LOGGER.info("[sea] Using normal llm_client")
-            return persona.llm_client
+            base_client = persona.llm_client
+            base_model = getattr(persona, "model", "unknown")
+
+        # If structured output is needed, check if the selected model supports it
+        if needs_structured_output:
+            from model_configs import supports_structured_output, get_agentic_model, get_context_length, get_model_provider
+            if not supports_structured_output(base_model):
+                # Model doesn't support structured output, switch to agentic model
+                agentic_model = get_agentic_model()
+                LOGGER.info("[sea] Model '%s' doesn't support structured output, switching to agentic model: %s",
+                           base_model, agentic_model)
+                try:
+                    from llm_clients import get_llm_client
+                    ag_context = get_context_length(agentic_model)
+                    ag_provider = get_model_provider(agentic_model)
+                    return get_llm_client(agentic_model, ag_provider, ag_context)
+                except Exception as exc:
+                    LOGGER.warning("[sea] Failed to create agentic client: %s; using base client", exc)
+                    return base_client
+
+        return base_client
+
+    def _build_tools_spec(self, tool_names: List[str], llm_client: Any) -> List[Any]:
+        """Build tools spec for LLM based on available tool names and llm_client type."""
+        from tools import OPENAI_TOOLS_SPEC, GEMINI_TOOLS_SPEC
+
+        LOGGER.info("[sea] _build_tools_spec called with tool_names: %s", tool_names)
+
+        # Determine provider from llm_client class name
+        client_class_name = type(llm_client).__name__
+        LOGGER.info("[sea] LLM client class: %s", client_class_name)
+
+        if client_class_name in ("OpenAIClient", "AnthropicClient", "OllamaClient", "NvidiaNIMClient"):
+            # Filter OpenAI tools spec (OpenAI-compatible)
+            LOGGER.info("[sea] Using OpenAI-compatible tools format (client: %s)", client_class_name)
+            LOGGER.info("[sea] Filtering from OPENAI_TOOLS_SPEC (total: %d)", len(OPENAI_TOOLS_SPEC))
+            filtered = [
+                tool for tool in OPENAI_TOOLS_SPEC
+                if tool.get("function", {}).get("name") in tool_names
+            ]
+            LOGGER.info("[sea] Built OpenAI tools spec: %d tools", len(filtered))
+            for tool in filtered:
+                LOGGER.info("[sea] - OpenAI tool: %s", tool.get("function", {}).get("name"))
+                LOGGER.info("[sea]   Full spec: %s", tool)
+            return filtered
+        else:
+            # Filter Gemini tools spec - combine all matching declarations into a single Tool
+            LOGGER.info("[sea] Using Gemini tools format (client: %s)", client_class_name)
+            from google.genai import types
+            all_matching_decls = []
+            for tool in GEMINI_TOOLS_SPEC:
+                if hasattr(tool, "function_declarations"):
+                    matching_decls = [
+                        decl for decl in tool.function_declarations
+                        if decl.name in tool_names
+                    ]
+                    all_matching_decls.extend(matching_decls)
+
+            if all_matching_decls:
+                # Gemini requires all function_declarations in a single Tool object
+                filtered = [types.Tool(function_declarations=all_matching_decls)]
+                LOGGER.info("[sea] Built Gemini tools spec: 1 Tool with %d function_declarations", len(all_matching_decls))
+                for decl in all_matching_decls:
+                    LOGGER.info("[sea] - Gemini function_declaration: name=%s, description=%s", decl.name, decl.description[:100] if decl.description else None)
+                    LOGGER.info("[sea]   parameters: %s", decl.parameters)
+            else:
+                filtered = []
+                LOGGER.info("[sea] Built Gemini tools spec: 0 tools")
+            return filtered
 
     def _dump_llm_io(
         self,
@@ -493,10 +684,13 @@ class SEARuntime:
                 manager_ref = getattr(persona_obj, "manager_ref", None)
 
                 # Build kwargs from args_input (None or {} = no args)
+                # Supports nested keys via dot notation (e.g., "tool_call.args.playbook_name")
                 kwargs = {}
                 if args_input:
                     for arg_name, state_key in args_input.items():
-                        kwargs[arg_name] = state.get(state_key, "")
+                        value = state.get(state_key, "")
+                        kwargs[arg_name] = value
+                        LOGGER.debug("[sea][tool] Mapping arg '%s' <- state['%s'] = %s", arg_name, state_key, value)
 
                 # Execute tool with persona context
                 if persona_id and persona_dir:

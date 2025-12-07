@@ -1,0 +1,6 @@
+{
+  "model": "hf.co/unsloth/Qwen3-32B-GGUF:Q4_K_XL",
+  "display_name": "Qwen3 32b Q4 K Xl",
+  "provider": "ollama",
+  "context_length": 32768
+}

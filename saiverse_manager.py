@@ -57,6 +57,11 @@ from database.models import (
 DEFAULT_MODEL = "gemini-2.0-flash"
 
 
+def _get_default_model() -> str:
+    """Resolve the base default model with optional environment override."""
+    return os.getenv("SAIVERSE_DEFAULT_MODEL", DEFAULT_MODEL)
+
+
 class SAIVerseManager(
     VisitorMixin,
     PersonaMixin,
@@ -72,7 +77,7 @@ class SAIVerseManager(
         self,
         city_name: str,
         db_path: str,
-        model: str = DEFAULT_MODEL,
+        model: Optional[str] = None,
         sds_url: str = os.getenv("SDS_URL", "http://127.0.0.1:8080"),
     ):
         # --- Step 0: Database and Configuration Setup ---
@@ -177,9 +182,10 @@ class SAIVerseManager(
                 self.building_histories[b_id] = []
 
         # --- Step 4: Initialize Core Components and State Containers ---
-        self.model = model
-        self.context_length = get_context_length(model)
-        self.provider = get_model_provider(model)
+        resolved_model = model or _get_default_model()
+        self.model = resolved_model
+        self.context_length = get_context_length(resolved_model)
+        self.provider = get_model_provider(resolved_model)
         self.model_parameter_overrides: Dict[str, Any] = {}
 
         self.state = CoreState(
@@ -1411,7 +1417,7 @@ class SAIVerseManager(
                     ai = db.query(AIModel).filter_by(AIID=pid).first()
                     if not ai:
                         continue
-                    m = ai.DEFAULT_MODEL or DEFAULT_MODEL
+                    m = ai.DEFAULT_MODEL or _get_default_model()
                     persona.set_model(m, get_context_length(m), get_model_provider(m))
                 # Reflect no-override state in manager
                 self.model = "None"
@@ -1685,6 +1691,7 @@ class SAIVerseManager(
         system_prompt: str,
         home_city_id: int,
         default_model: Optional[str],
+        lightweight_model: Optional[str],
         interaction_mode: str,
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
@@ -1697,6 +1704,7 @@ class SAIVerseManager(
             system_prompt,
             home_city_id,
             default_model,
+            lightweight_model,
             interaction_mode,
             avatar_path,
             avatar_upload,

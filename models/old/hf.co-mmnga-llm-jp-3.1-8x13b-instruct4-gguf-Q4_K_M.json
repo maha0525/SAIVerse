@@ -1,0 +1,6 @@
+{
+  "model": "hf.co/mmnga/llm-jp-3.1-8x13b-instruct4-gguf:Q4_K_M",
+  "display_name": "Mmnga Llm Jp V3.1 8x13b Instruct4 Q4 K M",
+  "provider": "ollama",
+  "context_length": 4096
+}

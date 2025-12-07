@@ -20,8 +20,41 @@ from .base import LLMClient, raw_logger
 from .utils import content_to_text, merge_reasoning_strings, obj_to_dict
 
 
-def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_image_bytes: Optional[int] = None) -> List[Any]:
+def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_image_bytes: Optional[int] = None, convert_system_to_user: bool = False) -> List[Any]:
+    """
+    Prepare messages for OpenAI API by extracting only allowed fields.
+    Removes SAIMemory-specific fields (id, thread_id, created_at, metadata).
+
+    Args:
+        messages: Raw message list
+        supports_images: Whether the model supports images
+        max_image_bytes: Optional max bytes for images
+        convert_system_to_user: If True, converts system messages (except the first one)
+                                to user messages wrapped in <system></system> tags
+    """
+    # OpenAI API standard fields
+    ALLOWED_FIELDS = {"role", "content", "name", "tool_calls", "tool_call_id"}
+
+    def _is_empty_message(msg: Dict[str, Any]) -> bool:
+        """Check if a message is empty (no content and no tool_calls)."""
+        role = msg.get("role")
+        content = msg.get("content")
+        tool_calls = msg.get("tool_calls")
+
+        # System and user messages with empty content are invalid
+        if role in ("assistant", "system", "user"):
+            # Content is empty if it's None, empty string, or empty list
+            content_empty = not content or (isinstance(content, (list, str)) and len(content) == 0)
+            # Assistant messages must have content OR tool_calls
+            if role == "assistant":
+                return content_empty and not tool_calls
+            # System/user messages must have content
+            return content_empty
+        return False
+
     prepared: List[Any] = []
+    seen_non_system = False  # Track if we've seen any non-system messages
+
     for msg in messages:
         if not isinstance(msg, dict):
             prepared.append(msg)
@@ -29,13 +62,46 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
 
         role = msg.get("role")
         if isinstance(role, str) and role.lower() == "host":
-            msg = msg.copy()
-            msg["role"] = "system"
+            role = "system"
+
+        # Skip empty messages early
+        if _is_empty_message(msg):
+            logging.debug("Skipping empty message with role=%s", role)
+            continue
 
         metadata = msg.get("metadata")
         attachments = iter_image_media(metadata)
+
+        # Extract only allowed fields
+        clean_msg: Dict[str, Any] = {}
+        for field in ALLOWED_FIELDS:
+            if field in msg:
+                clean_msg[field] = msg[field]
+
+        # Override role if it was "host"
+        if role:
+            clean_msg["role"] = role
+
+        # Skip if the cleaned message is also empty
+        if _is_empty_message(clean_msg):
+            logging.debug("Skipping empty cleaned message with role=%s", role)
+            continue
+
+        # Convert system messages to user messages with <system> tags if needed
+        # Only convert system messages that appear after non-system messages
+        if convert_system_to_user and role == "system" and seen_non_system:
+            content = content_to_text(msg.get("content", ""))
+            clean_msg["role"] = "user"
+            clean_msg["content"] = f"<system>\n{content}\n</system>"
+            prepared.append(clean_msg)
+            continue
+
+        # Track if we've seen non-system messages
+        if role != "system":
+            seen_non_system = True
+
         if not attachments:
-            prepared.append(msg.copy())
+            prepared.append(clean_msg)
             continue
 
         text = content_to_text(msg.get("content"))
@@ -55,18 +121,16 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
                     )
                 else:
                     parts.append({"type": "text", "text": f"[画像: {att['uri']}]"})
-            new_msg = msg.copy()
-            new_msg["content"] = parts if parts else text
-            prepared.append(new_msg)
+            clean_msg["content"] = parts if parts else text
+            prepared.append(clean_msg)
         else:
             note_lines: List[str] = []
             if text:
                 note_lines.append(text)
             for att in attachments:
                 note_lines.append(f"[画像: {att['uri']}]")
-            new_msg = msg.copy()
-            new_msg["content"] = "\n".join(note_lines)
-            prepared.append(new_msg)
+            clean_msg["content"] = "\n".join(note_lines)
+            prepared.append(clean_msg)
     return prepared
 
 
@@ -159,6 +223,8 @@ class OpenAIClient(LLMClient):
         api_key_env: Optional[str] = None,
         request_kwargs: Optional[Dict[str, Any]] = None,
         max_image_bytes: Optional[int] = None,
+        convert_system_to_user: bool = False,
+        structured_output_backend: Optional[str] = None,
     ) -> None:
         super().__init__(supports_images=supports_images)
         key_env = api_key_env or "OPENAI_API_KEY"
@@ -174,17 +240,29 @@ class OpenAIClient(LLMClient):
         self.model = model
         self._request_kwargs: Dict[str, Any] = dict(request_kwargs or {})
         self.max_image_bytes = max_image_bytes
+        self.convert_system_to_user = convert_system_to_user
+        self.structured_output_backend = structured_output_backend
 
     def _create_completion(self, **kwargs: Any):
         return self.client.chat.completions.create(**kwargs)
 
     def _add_additional_properties(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Recursively add additionalProperties: false and complete required array for OpenAI strict mode."""
+        """Recursively add additionalProperties: false and normalize schema for OpenAI strict mode."""
         import copy
         schema = copy.deepcopy(schema)
 
         def _process(node: Any) -> Any:
             if isinstance(node, dict):
+                # Normalize type names (int -> integer, bool -> boolean, float -> number)
+                if "type" in node:
+                    type_value = node["type"]
+                    if type_value == "int":
+                        node["type"] = "integer"
+                    elif type_value == "bool":
+                        node["type"] = "boolean"
+                    elif type_value == "float":
+                        node["type"] = "number"
+
                 # Add additionalProperties: false to objects
                 if node.get("type") == "object" and "additionalProperties" not in node:
                     node["additionalProperties"] = False
@@ -235,21 +313,30 @@ class OpenAIClient(LLMClient):
                 schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
                 # Add additionalProperties: false recursively for OpenAI strict mode
                 openai_schema = self._add_additional_properties(response_schema)
-                req["response_format"] = {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": schema_name or "saiverse_structured_output",
-                        "schema": openai_schema,
-                        "strict": True,
-                    },
+                json_schema_config: Dict[str, Any] = {
+                    "name": schema_name or "saiverse_structured_output",
+                    "schema": openai_schema,
+                    "strict": True,
                 }
+                response_format_config: Dict[str, Any] = {
+                    "type": "json_schema",
+                    "json_schema": json_schema_config,
+                }
+                # Add structured output backend if specified (for Nvidia NIM, etc.)
+                # Try both locations: inside json_schema and at response_format level
+                if self.structured_output_backend:
+                    json_schema_config["backend"] = self.structured_output_backend
+                    response_format_config["backend"] = self.structured_output_backend
+                    logging.info("Applying structured_output_backend='%s' to request (both locations)", self.structured_output_backend)
+                req["response_format"] = response_format_config
+                logging.debug("response_format: %s", req["response_format"])
             return req
 
         if not use_tools:
             try:
                 resp = self._create_completion(
                     model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes),
+                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
                     n=1,
                     **_build_request_kwargs(),
                 )
@@ -293,7 +380,7 @@ class OpenAIClient(LLMClient):
 
                 resp = self._create_completion(
                     model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes),
+                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
                     tools=tools_spec,
                     tool_choice=tool_choice,
                     n=1,
@@ -387,7 +474,7 @@ class OpenAIClient(LLMClient):
                     req_kwargs["temperature"] = temperature
                 resp = self._create_completion(
                     model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes),
+                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
                     n=1,
                     **req_kwargs,
                 )
@@ -424,7 +511,7 @@ class OpenAIClient(LLMClient):
         try:
             resp = self._create_completion(
                 model=self.model,
-                messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes),
+                messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
                 tools=tools_spec,
                 tool_choice=force_tool_choice,
                 stream=True,
@@ -579,6 +666,68 @@ class OpenAIClient(LLMClient):
                 self._request_kwargs.pop(key, None)
             else:
                 self._request_kwargs[key] = value
+
+    def generate_with_tool_detection(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Any] | None = None,
+        *,
+        temperature: float | None = None,
+        **_: Any,
+    ) -> Dict[str, Any]:
+        """Generate response with tool call detection (do not execute tools)."""
+        tools_spec = tools or []
+        self._store_reasoning([])
+
+        req_kwargs = dict(self._request_kwargs)
+        if temperature is not None:
+            req_kwargs["temperature"] = temperature
+
+        # Log tools being sent to OpenAI
+        if tools_spec:
+            logging.info("[openai] Sending %d tools to API", len(tools_spec))
+            for i, tool in enumerate(tools_spec):
+                logging.info("[openai] Tool[%d]: %s", i, tool)
+        else:
+            logging.info("[openai] No tools specified")
+
+        try:
+            resp = self._create_completion(
+                model=self.model,
+                messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
+                tools=tools_spec if tools_spec else None,
+                tool_choice="auto" if tools_spec else None,
+                n=1,
+                **req_kwargs,
+            )
+        except Exception:
+            logging.exception("OpenAI call failed in generate_with_tool_detection")
+            return {"type": "text", "content": "エラーが発生しました。"}
+
+        raw_logger.debug("OpenAI raw (tool detection):\n%s", resp.model_dump_json(indent=2))
+        choice = resp.choices[0]
+        tool_calls = getattr(choice.message, "tool_calls", [])
+
+        # Extract reasoning if present
+        text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
+        self._store_reasoning(reasoning_entries)
+
+        if tool_calls and len(tool_calls) > 0:
+            tc = tool_calls[0]
+            try:
+                args = json.loads(tc.function.arguments)
+            except json.JSONDecodeError:
+                logging.warning("Tool call arguments invalid JSON: %s", tc.function.arguments)
+                args = {}
+            return {
+                "type": "tool_call",
+                "tool_name": tc.function.name,
+                "tool_args": args,
+                "raw_message": choice.message,
+            }
+        else:
+            content = text_body or choice.message.content or ""
+            return {"type": "text", "content": content}
 
 
 __all__ = ["OpenAIClient", "OpenAI"]

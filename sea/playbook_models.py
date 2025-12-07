@@ -47,6 +47,16 @@ class LLMNodeDef(BaseModel):
         default=None,
         description="Key name to store structured output for later nodes. Defaults to node id."
     )
+    available_tools: Optional[List[str]] = Field(
+        default=None,
+        description="List of tool names that the LLM can call. If specified, enables tool calling for this node."
+    )
+    output_keys: Optional[List[Dict[str, str]]] = Field(
+        default=None,
+        description="Map output types to state keys. Examples: [{'text': 'speak_content'}, {'function_call': 'tool_call'}]. "
+                    "Supported types: 'text', 'function_call', 'thought'. "
+                    "Function calls are stored as nested keys: '<key>.name', '<key>.args.<arg_name>'."
+    )
 
 
 class ToolNodeDef(BaseModel):

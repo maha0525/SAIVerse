@@ -141,6 +141,7 @@ python scripts/memory_topics_ui.py
 - **Lightweight model support**: LLM nodes can specify `model_type: "lightweight"` to use a faster, cheaper model for simple tasks (e.g., router decisions)
   - Each persona has two model settings: `DEFAULT_MODEL` (normal) and `LIGHTWEIGHT_MODEL` (optional)
   - If `LIGHTWEIGHT_MODEL` is not set, system falls back to environment variable `SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL` or `gemini-2.5-flash-lite`
+  - Persona model priority: chat UI override > persona `DEFAULT_MODEL` (DB) > env `SAIVERSE_DEFAULT_MODEL` > built-in `gemini-2.0-flash`.
   - Use lightweight models for router nodes and simple decision-making; use default models for complex reasoning and tool parameter generation
 
 **OccupancyManager** (`occupancy_manager.py`)
@@ -183,6 +184,45 @@ python scripts/memory_topics_ui.py
 **Task Storage** (`persona/tasks/storage.py`)
 - Per-persona `tasks.db` in `~/.saiverse/personas/<id>/`
 - Stores tasks, steps, and history for task management tools
+
+## Model Configuration
+
+**Model Configuration** (`models/` directory, `model_configs.py`)
+- Model configurations are stored as individual JSON files in `models/` directory
+- Each file represents one model with its provider, context length, and parameters
+- Legacy `models.json` is supported as fallback for backward compatibility
+
+**Model Config Structure**:
+```json
+{
+  "model": "mistralai/mistral-large-3-675b-instruct-2512",
+  "display_name": "Mistral Large 3 (NIM)",
+  "provider": "openai",
+  "context_length": 128000,
+  "base_url": "https://integrate.api.nvidia.com/v1",
+  "api_key_env": "NVIDIA_API_KEY",
+  "convert_system_to_user": true,
+  "structured_output_backend": "xgrammar",
+  "parameters": { ... }
+}
+```
+
+**Key Fields**:
+- `model`: The actual model ID used in API calls (required)
+- `display_name`: Human-readable name shown in UI dropdowns (optional, defaults to model ID)
+- `provider`: LLM provider (`openai`, `anthropic`, `gemini`, `ollama`)
+- `convert_system_to_user`: Wrap system messages in `<system>` tags for compatibility (Nvidia NIM, etc.)
+- `structured_output_backend`: Backend for structured output (`xgrammar`, `outlines` for Nvidia NIM)
+- `parameters`: UI-configurable parameters (temperature, top_p, max_tokens, etc.)
+
+**Adding a New Model**:
+1. Create a JSON file in `models/` (e.g., `models/my-model.json`)
+2. Define `model`, `display_name`, `provider`, and other required fields
+3. Restart the application to load the new config
+4. Model will appear in all model selection dropdowns
+
+**Migration Script**:
+- `scripts/migrate_models_to_directory.py`: Migrates legacy `models.json` to `models/` directory structure
 
 ## Key Files and Patterns
 
@@ -231,6 +271,47 @@ python scripts/memory_topics_ui.py
 
 ### Code Changes
 - **Before making changes**: Review recent session reflections in `docs/session_reflection_*.md` to avoid repeating mistakes
+
+- **⚠️ NEVER GUESS ATTRIBUTE/METHOD NAMES (CRITICAL) ⚠️**:
+  **ALWAYS READ THE ACTUAL CODE BEFORE USING EXISTING OBJECTS' ATTRIBUTES OR METHODS.**
+
+  **DO NOT**:
+  - Assume an object has a `provider` attribute without checking
+  - Guess that a building ID is stored in `building_id` instead of `current_building_id`
+  - Write `persona.some_attribute` without verifying it exists in `persona/core.py`
+  - Call `llm_client.some_method()` without checking `llm_clients/base.py`
+  - Reference `db_model.COLUMN_NAME` without reading `database/models.py`
+
+  **ALWAYS DO**:
+  1. **Read the source code** - Open the file and find the actual definition (5 seconds)
+  2. **Verify attribute names** - Check `__init__` or class definition for exact names
+  3. **Check method signatures** - Read the actual parameters, don't guess
+  4. **Use Grep/Read tools** - Search for existing usage patterns in the codebase
+
+  **Example - WRONG**:
+  ```python
+  # Guessing attribute names without verification
+  provider = persona.provider  # Does this exist?
+  building = persona.building_id  # Or is it current_building_id?
+  ```
+
+  **Example - CORRECT**:
+  ```python
+  # Step 1: Read persona/core.py to verify attributes
+  # Step 2: Found: self.current_building_id (line 116)
+  # Step 3: Use the verified name
+  building = persona.current_building_id
+  ```
+
+  **This rule applies to**:
+  - PersonaCore attributes (`persona/core.py`)
+  - Database model columns (`database/models.py`)
+  - LLM client methods (`llm_clients/base.py`, `llm_clients/*.py`)
+  - Manager methods (`manager/*.py`, `saiverse_manager.py`)
+  - Any existing class or object in the codebase
+
+  **Only guess/invent names for NEW code you are creating.**
+  **For EXISTING code, READ FIRST, then use the exact names you find.**
 
 - **Debugging mindset (CRITICAL)**:
   1. **Logs and console output are the PRIMARY source of truth**: Always check terminal logs, browser console, and network tab FIRST before making changes

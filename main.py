@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - optional dependency
 from saiverse_manager import SAIVerseManager
 from database.paths import default_db_path
 from database.backup import run_startup_backup
-from model_configs import get_model_choices
+from model_configs import get_model_choices, get_model_choices_with_display_names
 from ui import state as ui_state
 from ui.app import build_app
 try:
@@ -42,7 +42,12 @@ try:
 except ValueError:
     _chat_limit_env = 120
 CHAT_HISTORY_LIMIT = max(0, _chat_limit_env)
-MODEL_CHOICES = ["None"] + get_model_choices()
+# Build model choices with display names for UI dropdowns
+# Format: [(display_name, model_id), ...] - Gradio uses (label, value) order
+_model_choices_raw = get_model_choices_with_display_names()
+MODEL_CHOICES = [("None", "None")] + [(display_name, model_id) for model_id, display_name in _model_choices_raw]
+logging.info("Loaded %d model choices with display names", len(MODEL_CHOICES))
+logging.debug("Sample model choices: %s", MODEL_CHOICES[:5])
 
 VERSION = time.strftime("%Y%m%d%H%M%S")  # 例: 20251008121530
 

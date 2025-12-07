@@ -156,9 +156,10 @@ class PersonaCore(
         # Initialize lightweight LLM client if lightweight_model is provided
         if lightweight_model and str(lightweight_model).strip():
             try:
-                from model_configs import get_context_length
+                from model_configs import get_context_length, get_model_provider
                 lw_context_length = get_context_length(lightweight_model)
-                self.lightweight_llm_client = get_llm_client(lightweight_model, provider, lw_context_length)
+                lw_provider = get_model_provider(lightweight_model)  # Get correct provider for lightweight model
+                self.lightweight_llm_client = get_llm_client(lightweight_model, lw_provider, lw_context_length)
             except Exception as exc:
                 logging.warning(
                     "Failed to initialize lightweight LLM client for persona '%s' with model '%s': %s",

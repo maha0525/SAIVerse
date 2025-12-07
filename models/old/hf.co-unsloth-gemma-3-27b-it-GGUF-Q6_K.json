@@ -1,0 +1,6 @@
+{
+  "model": "hf.co/unsloth/gemma-3-27b-it-GGUF:Q6_K",
+  "display_name": "Gemma 3 27b It Q6 K",
+  "provider": "ollama",
+  "context_length": 128000
+}

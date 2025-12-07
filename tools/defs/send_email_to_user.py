@@ -61,7 +61,7 @@ def _format_from_address(base_from: str, persona_name: Optional[str]) -> str:
         # Already formatted as display <addr>; leave as-is.
         return base_from
     if persona_name:
-        return f"{persona_name} <{base_from}>"
+        return f"{persona_name} from SAIVerse <{base_from}>"
     return base_from
 
 
