@@ -152,7 +152,7 @@ class ScheduleManager:
 
         # 現在時刻が目標時刻と一致し、かつ前回チェックから一定時間経過している場合に実行
         if current_time == target_time:
-            if last_check is None or (local_now - last_check).total_seconds() > 60:
+            if last_check is None or (local_now - last_check).total_seconds() >= 60:
                 return True
 
         return False
