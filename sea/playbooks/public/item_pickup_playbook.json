@@ -8,7 +8,7 @@
     }
   ],
   "context_requirements": {
-    "history_depth": 0,
+    "history_depth": "full",
     "inventory": true,
     "building_items": true,
     "system_prompt": true

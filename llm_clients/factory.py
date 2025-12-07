@@ -10,6 +10,7 @@ from .anthropic import AnthropicClient
 from .gemini import GeminiClient
 from .ollama import OllamaClient
 from .openai import OpenAIClient
+from .nvidia_nim import NvidiaNIMClient
 from .base import LLMClient
 
 
@@ -39,7 +40,40 @@ def get_llm_client(model: str, provider: str, context_length: int) -> LLMClient:
             if isinstance(request_kwargs, dict):
                 extra_kwargs["request_kwargs"] = request_kwargs
 
+            # Convert system messages to user messages if needed for compatibility
+            convert_system = config.get("convert_system_to_user")
+            if isinstance(convert_system, bool):
+                extra_kwargs["convert_system_to_user"] = convert_system
+
+            # Structured output backend (for Nvidia NIM, etc.)
+            structured_output_backend = config.get("structured_output_backend")
+            if isinstance(structured_output_backend, str):
+                extra_kwargs["structured_output_backend"] = structured_output_backend
+                logging.info("Using structured_output_backend='%s' for model '%s'", structured_output_backend, model)
+
+        logging.debug("Creating OpenAI client for model '%s' with kwargs: %s", model, extra_kwargs)
         client = OpenAIClient(model, supports_images=supports_images, **extra_kwargs)
+    elif provider == "nvidia_nim":
+        extra_kwargs: Dict[str, object] = {}
+        if isinstance(config, dict):
+            base_url = config.get("base_url")
+            if isinstance(base_url, str) and base_url.strip():
+                extra_kwargs["base_url"] = base_url.strip()
+
+            api_key_env = config.get("api_key_env")
+            if isinstance(api_key_env, str) and api_key_env.strip():
+                extra_kwargs["api_key_env"] = api_key_env.strip()
+
+            request_kwargs = config.get("request_kwargs")
+            if isinstance(request_kwargs, dict):
+                extra_kwargs["request_kwargs"] = request_kwargs
+
+            convert_system = config.get("convert_system_to_user")
+            if isinstance(convert_system, bool):
+                extra_kwargs["convert_system_to_user"] = convert_system
+
+        logging.debug("Creating Nvidia NIM client for model '%s' with kwargs: %s", model, extra_kwargs)
+        client = NvidiaNIMClient(model, supports_images=supports_images, **extra_kwargs)
     elif provider == "anthropic":
         client = AnthropicClient(model, config=config, supports_images=supports_images)
     elif provider == "gemini":

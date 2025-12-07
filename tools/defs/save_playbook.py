@@ -24,6 +24,7 @@ def save_playbook(
     building_id: Optional[str] = None,
     playbook_json: str = "",
     router_callable: Optional[bool] = None,
+    user_selectable: Optional[bool] = None,
 ) -> Tuple[str, None, None]:
     """Persist a playbook definition to the database.
 
@@ -33,6 +34,7 @@ def save_playbook(
     - building_id: building scope target (required for building scope)
     - playbook_json: full PlaybookSchema JSON string (must include nodes/start_node/input_schema)
     - router_callable: if True, playbook can be called from router (defaults to value in JSON or False)
+    - user_selectable: if True, meta playbook can be selected by user in UI (defaults to value in JSON or False)
     """
 
     scope = (scope or "public").lower()
@@ -74,6 +76,10 @@ def save_playbook(
     if router_callable is None:
         router_callable = normalized_nodes.get("router_callable", False)
 
+    # Determine user_selectable: explicit param > JSON value > False
+    if user_selectable is None:
+        user_selectable = normalized_nodes.get("user_selectable", False)
+
     db_path = default_db_path()
     engine = create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
@@ -89,6 +95,7 @@ def save_playbook(
             existing.schema_json = schema_json
             existing.nodes_json = nodes_json
             existing.router_callable = router_callable
+            existing.user_selectable = user_selectable
         else:
             record = Playbook(
                 name=name,
@@ -99,6 +106,7 @@ def save_playbook(
                 schema_json=schema_json,
                 nodes_json=nodes_json,
                 router_callable=router_callable,
+                user_selectable=user_selectable,
             )
             session.add(record)
         session.commit()
@@ -120,6 +128,7 @@ def schema() -> ToolSchema:
                 "building_id": {"type": "string"},
                 "playbook_json": {"type": "string", "description": "Full PlaybookSchema JSON."},
                 "router_callable": {"type": "boolean", "description": "If true, playbook can be called from router. Defaults to value in JSON or False."},
+                "user_selectable": {"type": "boolean", "description": "If true, meta playbook can be selected by user in UI. Defaults to value in JSON or False."},
             },
             "required": ["name", "description", "playbook_json"],
         },

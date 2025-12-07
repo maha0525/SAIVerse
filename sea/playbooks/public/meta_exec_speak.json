@@ -1,0 +1,54 @@
+{
+  "name": "meta_exec_speak",
+  "description": "Execute a playbook and speak the result (used by call_playbook tool)",
+  "input_schema": [],
+  "output_schema": null,
+  "context_requirements": {
+    "history_depth": "full",
+    "inventory": true,
+    "building_items": true,
+    "system_prompt": true,
+    "available_playbooks": false
+  },
+  "router_callable": false,
+  "user_selectable": false,
+  "nodes": [
+    {
+      "id": "exec",
+      "type": "tool",
+      "action": "exec",
+      "args_input": null,
+      "output_key": null,
+      "output_keys": null,
+      "next": "speak",
+      "conditional_next": null
+    },
+    {
+      "id": "speak",
+      "type": "llm",
+      "action": "上記の実行結果を踏まえて、ユーザーに報告する内容を生成してください。\n\n実行結果:\n{context_bundle_text}",
+      "model_type": "normal",
+      "available_tools": [],
+      "next": "log",
+      "conditional_next": null
+    },
+    {
+      "id": "log",
+      "type": "memorize",
+      "action": "{last}",
+      "role": "assistant",
+      "tags": ["conversation"],
+      "metadata_key": "metadata",
+      "next": "say",
+      "conditional_next": null
+    },
+    {
+      "id": "say",
+      "type": "say",
+      "metadata_key": "metadata",
+      "next": null,
+      "conditional_next": null
+    }
+  ],
+  "start_node": "exec"
+}

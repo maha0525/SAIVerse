@@ -374,7 +374,7 @@ def get_current_building_history() -> List[Dict[str, str]]:
     return format_history_for_chatbot(raw_history)
 
 
-def respond_stream(message: str, media: Optional[Any] = None):
+def respond_stream(message: str, media: Optional[Any] = None, meta_playbook: Optional[str] = None):
     manager = ui_state.manager
     if not manager:
         raise RuntimeError("Manager not initialised")
@@ -417,7 +417,7 @@ def respond_stream(message: str, media: Optional[Any] = None):
     history.append(user_display_entry)
 
     ai_message = ""
-    stream = manager.handle_user_input_stream(message, metadata=metadata)
+    stream = manager.handle_user_input_stream(message, metadata=metadata, meta_playbook=meta_playbook)
     for token in stream:
         ai_message += token
         yield (
@@ -551,6 +551,12 @@ def _perform_user_move(building_name: Optional[str], client_state: Optional[dict
 
     state["value"] = server_location
 
+    # Mark the current building as read when user enters it
+    current_building_id = manager.user_current_building_id
+    if current_building_id:
+        ui_state.mark_building_as_read(current_building_id)
+        logging.debug("[ui] marked building %s as read", current_building_id)
+
     new_history = get_current_building_history()
     new_location_name = get_current_location_name()
     summonable_personas = manager.get_summonable_personas()
@@ -599,6 +605,8 @@ def move_user_ui(building_name: str, client_state: Optional[dict]):
 
 def move_user_radio_ui(building_name: str, client_state: Optional[dict]):
     """Radio handler for moving the user and syncing dropdown."""
+    # Strip unread indicator if present
+    clean_building_name = strip_unread_indicator(building_name) if building_name else building_name
     (
         history,
         new_location_name,
@@ -606,7 +614,7 @@ def move_user_radio_ui(building_name: str, client_state: Optional[dict]):
         summon_update,
         conversing_update,
         client_state,
-    ) = _perform_user_move(building_name, client_state)
+    ) = _perform_user_move(clean_building_name, client_state)
     dropdown_update, radio_update = _prepare_move_component_updates(
         force_dropdown_value=new_location_name,
         force_radio=False,
@@ -763,3 +771,391 @@ def logout_ui():
     if not manager:
         return "未初期化"
     return manager.set_user_login_status(1, False)
+
+
+# ========================================
+# Detail Panel Helper Functions
+# ========================================
+
+def get_building_details(building_id: str = None):
+    """Get building details including occupants, items, and prompt."""
+    manager = ui_state.manager
+    if not manager:
+        return {"occupants": [], "items": [], "prompt": ""}
+
+    if building_id is None:
+        building_id = manager.user_current_building_id
+
+    if not building_id or building_id not in manager.building_map:
+        return {"occupants": [], "items": [], "prompt": ""}
+
+    building = manager.building_map[building_id]
+
+    # Get occupants
+    occupants_list = []
+    if building_id in manager.occupancy_manager.occupants:
+        occupant_ids = manager.occupancy_manager.occupants[building_id]
+        # Sort to ensure stable order
+        sorted_ids = sorted(occupant_ids) if occupant_ids else []
+        for oid in sorted_ids:
+            if oid in manager.personas:
+                persona = manager.personas[oid]
+                occupants_list.append({
+                    "id": oid,
+                    "name": persona.persona_name,
+                })
+
+    # Get items
+    items_list = []
+    if building_id in manager.items_by_building:
+        item_ids = manager.items_by_building[building_id]
+        # Sort to ensure stable order
+        sorted_item_ids = sorted(item_ids) if item_ids else []
+        for item_id in sorted_item_ids:
+            if item_id in manager.item_registry:
+                item_data = manager.item_registry[item_id]
+                items_list.append({
+                    "id": item_id,
+                    "name": item_data.get("name", item_id),
+                    "description": item_data.get("description", ""),
+                    "type": item_data.get("type", "object"),
+                    "file_path": item_data.get("file_path"),
+                })
+
+    # Get prompt
+    prompt = building.system_instruction or ""
+
+    return {
+        "occupants": occupants_list,
+        "items": items_list,
+        "prompt": prompt,
+    }
+
+
+def get_persona_details(persona_id: str = None):
+    """Get persona details including inventory, active thread, and active task."""
+    manager = ui_state.manager
+    if not manager:
+        return {"inventory": [], "thread": "", "task": None}
+
+    # If persona_id not specified, try to get the first persona in current building
+    if persona_id is None:
+        building_id = manager.user_current_building_id
+        if building_id and building_id in manager.occupancy_manager.occupants:
+            occupants = manager.occupancy_manager.occupants[building_id]
+            # Find first persona (not user)
+            for oid in occupants:
+                if oid in manager.personas:
+                    persona_id = oid
+                    break
+
+    if not persona_id or persona_id not in manager.personas:
+        return {"inventory": [], "thread": "", "task": None}
+
+    persona = manager.personas[persona_id]
+
+    # Get inventory
+    inventory_list = []
+    # Sort to ensure stable order
+    sorted_inventory = sorted(persona.inventory_item_ids) if persona.inventory_item_ids else []
+    for item_id in sorted_inventory:
+        if item_id in manager.items:
+            item_data = manager.items[item_id]
+            inventory_list.append({
+                "id": item_id,
+                "name": item_data.get("name", item_id),
+                "description": item_data.get("description", ""),
+                "type": item_data.get("type", "object"),
+                "file_path": item_data.get("file_path"),
+            })
+
+    # Get active thread
+    active_thread = ""
+    if hasattr(persona, "sai_memory") and persona.sai_memory:
+        try:
+            active_thread = persona.sai_memory.get_current_thread() or "main"
+        except Exception:
+            active_thread = "main"
+
+    # Get active task
+    active_task = None
+    try:
+        task_info = persona.task_storage.get_active_task()
+        if task_info:
+            active_task = {
+                "id": task_info.get("task_id"),
+                "title": task_info.get("title", ""),
+                "description": task_info.get("description", ""),
+            }
+    except Exception:
+        pass
+
+    return {
+        "persona_id": persona_id,
+        "persona_name": persona.persona_name,
+        "inventory": inventory_list,
+        "thread": active_thread,
+        "task": active_task,
+    }
+
+
+def get_execution_states():
+    """Get execution states for all personas in current building."""
+    manager = ui_state.manager
+    if not manager:
+        return []
+
+    building_id = manager.user_current_building_id
+    if not building_id or building_id not in manager.occupancy_manager.occupants:
+        return []
+
+    states = []
+    occupant_ids = manager.occupancy_manager.occupants[building_id]
+    # Sort to ensure stable order
+    sorted_occupants = sorted(occupant_ids) if occupant_ids else []
+    for oid in sorted_occupants:
+        if oid in manager.personas:
+            persona = manager.personas[oid]
+            exec_state = persona.get_execution_state()
+            states.append({
+                "persona_id": oid,
+                "persona_name": persona.persona_name,
+                "playbook": exec_state.get("playbook"),
+                "node": exec_state.get("node"),
+                "status": exec_state.get("status", "idle"),
+            })
+
+    return states
+
+
+def format_building_details():
+    """Format building details for display in UI (HTML)."""
+    import html
+    details = get_building_details()
+
+    result = "<div class='building-details'>"
+
+    # Format occupants
+    result += "<h3>建物内のペルソナ</h3>"
+    if details["occupants"]:
+        result += "<ul>"
+        for occ in details["occupants"]:
+            result += f"<li><strong>{html.escape(occ['name'])}</strong> (<code>{html.escape(occ['id'])}</code>)</li>"
+        result += "</ul>"
+    else:
+        result += "<p><em>(誰もいません)</em></p>"
+
+    # Format items
+    result += "<h3>建物内のアイテム</h3>"
+    if details["items"]:
+        result += "<ul class='item-list'>"
+        for item in details["items"]:
+            desc = item['description'] or "(説明なし)"
+            item_type = item.get('type', 'object')
+            file_path = item.get('file_path', '')
+            # クリッカブル＆ツールチップ付きアイテム
+            result += f"""<li>
+                <span class='item-link'
+                      data-item-id='{html.escape(item['id'])}'
+                      data-item-name='{html.escape(item['name'])}'
+                      data-item-desc='{html.escape(desc)}'
+                      data-item-type='{html.escape(item_type)}'
+                      data-file-path='{html.escape(file_path or "")}'
+                      title='ID: {html.escape(item['id'])}&#10;{html.escape(desc)}'>
+                    {html.escape(item['name'])}
+                </span>
+            </li>"""
+        result += "</ul>"
+    else:
+        result += "<p><em>(アイテムがありません)</em></p>"
+
+    # Format prompt
+    result += "<h3>システムプロンプト</h3>"
+    if details["prompt"]:
+        result += f"<pre><code>{html.escape(details['prompt'])}</code></pre>"
+    else:
+        result += "<p><em>(プロンプトが設定されていません)</em></p>"
+
+    result += "</div>"
+    return result
+
+
+def format_persona_details():
+    """Format persona details for display in UI (HTML)."""
+    import html
+    details = get_persona_details()
+
+    if not details.get("persona_id"):
+        return "<p><em>(ペルソナが選択されていません)</em></p>"
+
+    result = "<div class='persona-details'>"
+    result += f"<h2>{html.escape(details['persona_name'])}</h2>"
+
+    # Format inventory
+    result += "<h3>インベントリ</h3>"
+    if details["inventory"]:
+        result += "<ul class='item-list'>"
+        for item in details["inventory"]:
+            desc = item['description'] or "(説明なし)"
+            item_type = item.get('type', 'object')
+            file_path = item.get('file_path', '')
+            # クリッカブル＆ツールチップ付きアイテム
+            result += f"""<li>
+                <span class='item-link'
+                      data-item-id='{html.escape(item['id'])}'
+                      data-item-name='{html.escape(item['name'])}'
+                      data-item-desc='{html.escape(desc)}'
+                      data-item-type='{html.escape(item_type)}'
+                      data-file-path='{html.escape(file_path or "")}'
+                      title='ID: {html.escape(item['id'])}&#10;{html.escape(desc)}'>
+                    {html.escape(item['name'])}
+                </span>
+            </li>"""
+        result += "</ul>"
+    else:
+        result += "<p><em>(アイテムを持っていません)</em></p>"
+
+    # Format thread
+    result += f"<h3>アクティブスレッド</h3><p><code>{html.escape(details['thread'])}</code></p>"
+
+    # Format task
+    result += "<h3>アクティブタスク</h3>"
+    if details["task"]:
+        task = details["task"]
+        result += f"<p><strong>{html.escape(task['title'])}</strong> (<code>{html.escape(task['id'])}</code>)</p>"
+        if task['description']:
+            result += f"<blockquote>{html.escape(task['description'])}</blockquote>"
+    else:
+        result += "<p><em>(タスクがありません)</em></p>"
+
+    result += "</div>"
+    return result
+
+
+def format_execution_states():
+    """Format execution states for display in UI (HTML)."""
+    import html
+    states = get_execution_states()
+
+    if not states:
+        return "<p><em>(実行中のペルソナがいません)</em></p>"
+
+    result = "<div class='execution-states'>"
+    for state in states:
+        status_emoji = {
+            "idle": "⚪",
+            "running": "🔄",
+            "waiting": "⏸️",
+            "completed": "✅"
+        }.get(state["status"], "❓")
+
+        result += f"<h3>{status_emoji} {html.escape(state['persona_name'])}</h3>"
+
+        if state["status"] == "idle":
+            result += "<p><em>(待機中)</em></p>"
+        else:
+            if state["playbook"]:
+                result += f"<p><strong>Playbook:</strong> <code>{html.escape(state['playbook'])}</code></p>"
+            if state["node"]:
+                result += f"<p><strong>Node:</strong> <code>{html.escape(state['node'])}</code></p>"
+            result += f"<p><strong>Status:</strong> {html.escape(state['status'])}</p>"
+
+    result += "</div>"
+    return result
+
+
+# Cache for detail panel updates to reduce flicker
+_detail_cache = {
+    "building": None,
+    "persona": None,
+    "execution": None
+}
+
+def update_detail_panels():
+    """Update detail panels only if content has changed."""
+    import logging
+    global _detail_cache
+
+    LOGGER = logging.getLogger(__name__)
+
+    building = format_building_details()
+    persona = format_persona_details()
+    execution = format_execution_states()
+
+    # Debug logging
+    building_changed = building != _detail_cache["building"]
+    persona_changed = persona != _detail_cache["persona"]
+    execution_changed = execution != _detail_cache["execution"]
+
+    if building_changed or persona_changed or execution_changed:
+        LOGGER.debug(f"[Detail Panel Update] Building changed: {building_changed}, Persona changed: {persona_changed}, Execution changed: {execution_changed}")
+        # Update cache
+        _detail_cache["building"] = building
+        _detail_cache["persona"] = persona
+        _detail_cache["execution"] = execution
+
+    # Always return current values (Gradio will handle rendering optimization)
+    return building, persona, execution
+
+
+# --- Unread message check functions for Timer ---
+
+def check_and_update_unread():
+    """
+    Check for new messages in all buildings.
+    Returns tuple: (has_changes, unread_building_ids, current_building_has_new)
+
+    This function is called by gr.Timer periodically.
+    It only triggers UI updates when there are actual changes.
+    """
+    manager = ui_state.manager
+    if not manager:
+        return False, set(), False
+
+    # Check for newly unread buildings
+    newly_unread = ui_state.check_for_new_messages()
+    unread_buildings = ui_state.get_unread_buildings()
+
+    # Check if current building has new messages
+    current_building_id = manager.user_current_building_id
+    current_has_new = current_building_id in newly_unread if current_building_id else False
+
+    has_changes = len(newly_unread) > 0
+
+    if has_changes:
+        logging.debug(
+            "[unread] New messages detected: newly_unread=%s, total_unread=%s, current_has_new=%s",
+            newly_unread, unread_buildings, current_has_new
+        )
+
+    return has_changes, unread_buildings, current_has_new
+
+
+def get_building_choices_with_unread():
+    """
+    Get building choices with unread indicators.
+    Returns list of building names with ● prefix for unread buildings.
+    """
+    manager = ui_state.manager
+    if not manager:
+        return []
+
+    unread_buildings = ui_state.get_unread_buildings()
+    choices = []
+
+    for building in manager.buildings:
+        name = building.name
+        if building.building_id in unread_buildings:
+            # Add unread indicator
+            choices.append(f"● {name}")
+        else:
+            choices.append(name)
+
+    return choices
+
+
+def strip_unread_indicator(building_name: str) -> str:
+    """Remove unread indicator from building name."""
+    if building_name and building_name.startswith("● "):
+        return building_name[2:]
+    return building_name

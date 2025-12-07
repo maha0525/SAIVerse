@@ -8,9 +8,9 @@
     }
   ],
   "context_requirements": {
-    "history_depth": 0,
-    "inventory": false,
-    "building_items": false,
+    "history_depth": "full",
+    "inventory": true,
+    "building_items": true,
     "system_prompt": true
   },
   "router_callable": true,

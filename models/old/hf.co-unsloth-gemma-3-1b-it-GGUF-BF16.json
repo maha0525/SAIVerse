@@ -1,0 +1,6 @@
+{
+  "model": "hf.co/unsloth/gemma-3-1b-it-GGUF:BF16",
+  "display_name": "Gemma 3 1b It Bf16",
+  "provider": "ollama",
+  "context_length": 32768
+}

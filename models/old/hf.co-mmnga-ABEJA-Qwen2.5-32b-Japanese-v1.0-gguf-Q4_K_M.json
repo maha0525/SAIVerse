@@ -1,0 +1,6 @@
+{
+  "model": "hf.co/mmnga/ABEJA-Qwen2.5-32b-Japanese-v1.0-gguf:Q4_K_M",
+  "display_name": "Mmnga Abeja Qwen2.5 32b Japanese V1.0 Q4 K M",
+  "provider": "ollama",
+  "context_length": 32768
+}

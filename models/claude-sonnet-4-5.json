@@ -1,0 +1,9 @@
+{
+  "model": "claude-sonnet-4-5",
+  "display_name": "Claude Sonnet 4 5",
+  "provider": "anthropic",
+  "context_length": 32000,
+  "thinking_type": "enabled",
+  "thinking_budget": 4096,
+  "supports_images": true
+}

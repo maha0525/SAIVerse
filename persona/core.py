@@ -156,9 +156,10 @@ class PersonaCore(
         # Initialize lightweight LLM client if lightweight_model is provided
         if lightweight_model and str(lightweight_model).strip():
             try:
-                from model_configs import get_context_length
+                from model_configs import get_context_length, get_model_provider
                 lw_context_length = get_context_length(lightweight_model)
-                self.lightweight_llm_client = get_llm_client(lightweight_model, provider, lw_context_length)
+                lw_provider = get_model_provider(lightweight_model)  # Get correct provider for lightweight model
+                self.lightweight_llm_client = get_llm_client(lightweight_model, lw_provider, lw_context_length)
             except Exception as exc:
                 logging.warning(
                     "Failed to initialize lightweight LLM client for persona '%s' with model '%s': %s",
@@ -195,6 +196,13 @@ class PersonaCore(
         self._persona_event_ack = persona_event_ack
         self.manager_ref = manager_ref
 
+        # Execution state tracking for UI display
+        self.execution_state: Dict[str, Any] = {
+            "playbook": None,
+            "node": None,
+            "status": "idle"  # idle, running, waiting, completed
+        }
+
     def set_inventory(self, item_ids: List[str]) -> None:
         self.inventory_item_ids = list(item_ids)
     def set_item_registry(self, registry: Dict[str, Dict[str, Any]]) -> None:
@@ -227,3 +235,7 @@ class PersonaCore(
             self._persona_event_ack(self.persona_id, event_ids)
         except Exception as exc:
             logging.debug("Failed to archive events for %s: %s", self.persona_id, exc)
+
+    def get_execution_state(self) -> Dict[str, Any]:
+        """Get the current playbook execution state for UI display."""
+        return dict(self.execution_state)

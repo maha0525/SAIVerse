@@ -15,6 +15,7 @@ except ImportError:  # pragma: no cover
 
 LOGGER = logging.getLogger(__name__)
 IMAGE_URI_PREFIX = "saiverse://image/"
+DOCUMENT_URI_PREFIX = "saiverse://document/"
 SUPPORTED_LLM_IMAGE_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 SUMMARY_SUFFIX = ".summary.txt"
 
@@ -25,16 +26,27 @@ def _ensure_image_dir() -> Path:
     return dest_dir
 
 
+def _ensure_document_dir() -> Path:
+    dest_dir = Path.home() / ".saiverse" / "documents"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    return dest_dir
+
+
 def resolve_media_uri(uri: str) -> Optional[Path]:
     """Resolve a SAIVerse media URI to a local filesystem path."""
     if not isinstance(uri, str):
         return None
-    if not uri.startswith(IMAGE_URI_PREFIX):
-        return None
-    filename = uri[len(IMAGE_URI_PREFIX):].strip()
-    if not filename:
-        return None
-    return _ensure_image_dir() / filename
+    if uri.startswith(IMAGE_URI_PREFIX):
+        filename = uri[len(IMAGE_URI_PREFIX):].strip()
+        if not filename:
+            return None
+        return _ensure_image_dir() / filename
+    elif uri.startswith(DOCUMENT_URI_PREFIX):
+        filename = uri[len(DOCUMENT_URI_PREFIX):].strip()
+        if not filename:
+            return None
+        return _ensure_document_dir() / filename
+    return None
 
 
 def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:
@@ -115,6 +127,25 @@ def store_image_bytes(data: bytes, mime_type: str, *, source: str = "generated")
     return metadata, dest_path
 
 
+def store_document_text(content: str, *, source: str = "generated") -> Tuple[Dict[str, str], Path]:
+    """Store text content as a document file and return metadata and path."""
+    dest_dir = _ensure_document_dir()
+    filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex}.txt"
+    dest_path = dest_dir / filename
+    try:
+        dest_path.write_text(content, encoding="utf-8")
+    except OSError:
+        LOGGER.exception("Failed to write document file: %s", dest_path)
+        raise
+    metadata = {
+        "type": "document",
+        "uri": f"{DOCUMENT_URI_PREFIX}{filename}",
+        "mime_type": "text/plain",
+        "source": source,
+    }
+    return metadata, dest_path
+
+
 @lru_cache(maxsize=256)
 def _cached_path_to_data_url(path: str, mime_type: str, mtime: float) -> Optional[str]:
     """Internal helper to memoize base64 conversions keyed by path + mtime."""
@@ -137,10 +168,72 @@ def path_to_data_url(path: Path, mime_type: str) -> Optional[str]:
     return _cached_path_to_data_url(str(path), mime_type, stat.st_mtime)
 
 
-def load_image_bytes_for_llm(path: Path, mime_type: str) -> Tuple[Optional[bytes], Optional[str]]:
+def resize_image_if_needed(data: bytes, mime_type: str, max_bytes: int) -> Tuple[bytes, str]:
+    """
+    Resize an image if it exceeds max_bytes when base64-encoded.
+    Returns (resized_bytes, effective_mime_type).
+    Base64 encoding increases size by ~33%, so we target max_bytes * 0.75 for raw bytes.
+    """
+    if Image is None:
+        LOGGER.warning("PIL not available; cannot resize image")
+        return data, mime_type
+
+    # Base64 encoding increases size by ~33%, so target 75% of max_bytes
+    target_bytes = int(max_bytes * 0.75)
+
+    if len(data) <= target_bytes:
+        return data, mime_type
+
+    try:
+        img = Image.open(BytesIO(data))
+
+        # Calculate scale factor based on byte size ratio
+        scale = (target_bytes / len(data)) ** 0.5  # Square root for 2D scaling
+        new_width = int(img.width * scale)
+        new_height = int(img.height * scale)
+
+        LOGGER.info(
+            "Resizing image from %dx%d (%d bytes) to %dx%d (target: %d bytes)",
+            img.width, img.height, len(data), new_width, new_height, target_bytes
+        )
+
+        # Resize image
+        resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+        # Save as JPEG with quality adjustment if still too large
+        buf = BytesIO()
+        quality = 85
+        output_mime = "image/jpeg"
+
+        for attempt in range(3):
+            buf.seek(0)
+            buf.truncate()
+            resized.convert("RGB").save(buf, format="JPEG", quality=quality)
+            result_bytes = buf.getvalue()
+
+            if len(result_bytes) <= target_bytes:
+                LOGGER.info("Resized image to %d bytes (quality=%d)", len(result_bytes), quality)
+                return result_bytes, output_mime
+
+            quality -= 15  # Reduce quality for next attempt
+
+        # If still too large, return the best we got
+        LOGGER.warning(
+            "Could not resize image below target (%d bytes > %d bytes); using best effort",
+            len(result_bytes), target_bytes
+        )
+        return result_bytes, output_mime
+
+    except Exception:
+        LOGGER.exception("Failed to resize image; using original")
+        return data, mime_type
+
+
+def load_image_bytes_for_llm(path: Path, mime_type: str, max_bytes: Optional[int] = None) -> Tuple[Optional[bytes], Optional[str]]:
     """
     Return (bytes, effective_mime) for LLM consumption.
     Converts unsupported formats to PNG when Pillow is available.
+    If max_bytes is specified, resizes image to fit within that limit (accounting for base64 encoding).
     """
     target_mime = mime_type.lower()
     if target_mime not in SUPPORTED_LLM_IMAGE_MIME and Image is not None:
@@ -149,14 +242,29 @@ def load_image_bytes_for_llm(path: Path, mime_type: str) -> Tuple[Optional[bytes
                 buf = BytesIO()
                 img.save(buf, format="PNG")
                 LOGGER.debug("Converted image %s to PNG for LLM input", path)
-                return buf.getvalue(), "image/png"
+                data = buf.getvalue()
+                effective_mime = "image/png"
         except Exception:
             LOGGER.exception("Failed to convert image %s to PNG; falling back to raw bytes", path)
-    try:
-        data = path.read_bytes()
-    except OSError:
-        LOGGER.exception("Failed to read image for LLM: %s", path)
-        return None, None
-    if target_mime not in SUPPORTED_LLM_IMAGE_MIME:
+            try:
+                data = path.read_bytes()
+                effective_mime = target_mime
+            except OSError:
+                LOGGER.exception("Failed to read image for LLM: %s", path)
+                return None, None
+    else:
+        try:
+            data = path.read_bytes()
+            effective_mime = target_mime
+        except OSError:
+            LOGGER.exception("Failed to read image for LLM: %s", path)
+            return None, None
+
+    if effective_mime not in SUPPORTED_LLM_IMAGE_MIME:
         LOGGER.warning("Using raw bytes for potentially unsupported mime '%s'", mime_type)
-    return data, target_mime
+
+    # Resize if max_bytes is specified and image is too large
+    if max_bytes is not None:
+        data, effective_mime = resize_image_if_needed(data, effective_mime, max_bytes)
+
+    return data, effective_mime

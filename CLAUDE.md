@@ -135,13 +135,13 @@ python scripts/memory_topics_ui.py
 - Note: On `sea_framework` branch, conversation flow is being migrated to SEA runtime
 
 **SEARuntime** (`sea/runtime.py`)
-- Executes playbooks (workflow graphs) for conversation routing
+- Executes playbooks (workflow graphs) for conversation routing using LangGraph
 - Two meta-playbooks: `meta_user` (handles user input) and `meta_auto` (autonomous pulse)
-- Supports both lightweight fallback executor and LangGraph compilation
 - Playbooks are JSON files in `sea/playbooks/` or stored in DB `playbooks` table
 - **Lightweight model support**: LLM nodes can specify `model_type: "lightweight"` to use a faster, cheaper model for simple tasks (e.g., router decisions)
   - Each persona has two model settings: `DEFAULT_MODEL` (normal) and `LIGHTWEIGHT_MODEL` (optional)
   - If `LIGHTWEIGHT_MODEL` is not set, system falls back to environment variable `SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL` or `gemini-2.5-flash-lite`
+  - Persona model priority: chat UI override > persona `DEFAULT_MODEL` (DB) > env `SAIVERSE_DEFAULT_MODEL` > built-in `gemini-2.0-flash`.
   - Use lightweight models for router nodes and simple decision-making; use default models for complex reasoning and tool parameter generation
 
 **OccupancyManager** (`occupancy_manager.py`)
@@ -184,6 +184,45 @@ python scripts/memory_topics_ui.py
 **Task Storage** (`persona/tasks/storage.py`)
 - Per-persona `tasks.db` in `~/.saiverse/personas/<id>/`
 - Stores tasks, steps, and history for task management tools
+
+## Model Configuration
+
+**Model Configuration** (`models/` directory, `model_configs.py`)
+- Model configurations are stored as individual JSON files in `models/` directory
+- Each file represents one model with its provider, context length, and parameters
+- Legacy `models.json` is supported as fallback for backward compatibility
+
+**Model Config Structure**:
+```json
+{
+  "model": "mistralai/mistral-large-3-675b-instruct-2512",
+  "display_name": "Mistral Large 3 (NIM)",
+  "provider": "openai",
+  "context_length": 128000,
+  "base_url": "https://integrate.api.nvidia.com/v1",
+  "api_key_env": "NVIDIA_API_KEY",
+  "convert_system_to_user": true,
+  "structured_output_backend": "xgrammar",
+  "parameters": { ... }
+}
+```
+
+**Key Fields**:
+- `model`: The actual model ID used in API calls (required)
+- `display_name`: Human-readable name shown in UI dropdowns (optional, defaults to model ID)
+- `provider`: LLM provider (`openai`, `anthropic`, `gemini`, `ollama`)
+- `convert_system_to_user`: Wrap system messages in `<system>` tags for compatibility (Nvidia NIM, etc.)
+- `structured_output_backend`: Backend for structured output (`xgrammar`, `outlines` for Nvidia NIM)
+- `parameters`: UI-configurable parameters (temperature, top_p, max_tokens, etc.)
+
+**Adding a New Model**:
+1. Create a JSON file in `models/` (e.g., `models/my-model.json`)
+2. Define `model`, `display_name`, `provider`, and other required fields
+3. Restart the application to load the new config
+4. Model will appear in all model selection dropdowns
+
+**Migration Script**:
+- `scripts/migrate_models_to_directory.py`: Migrates legacy `models.json` to `models/` directory structure
 
 ## Key Files and Patterns
 
@@ -232,13 +271,66 @@ python scripts/memory_topics_ui.py
 
 ### Code Changes
 - **Before making changes**: Review recent session reflections in `docs/session_reflection_*.md` to avoid repeating mistakes
+
+- **⚠️ NEVER GUESS ATTRIBUTE/METHOD NAMES (CRITICAL) ⚠️**:
+  **ALWAYS READ THE ACTUAL CODE BEFORE USING EXISTING OBJECTS' ATTRIBUTES OR METHODS.**
+
+  **DO NOT**:
+  - Assume an object has a `provider` attribute without checking
+  - Guess that a building ID is stored in `building_id` instead of `current_building_id`
+  - Write `persona.some_attribute` without verifying it exists in `persona/core.py`
+  - Call `llm_client.some_method()` without checking `llm_clients/base.py`
+  - Reference `db_model.COLUMN_NAME` without reading `database/models.py`
+
+  **ALWAYS DO**:
+  1. **Read the source code** - Open the file and find the actual definition (5 seconds)
+  2. **Verify attribute names** - Check `__init__` or class definition for exact names
+  3. **Check method signatures** - Read the actual parameters, don't guess
+  4. **Use Grep/Read tools** - Search for existing usage patterns in the codebase
+
+  **Example - WRONG**:
+  ```python
+  # Guessing attribute names without verification
+  provider = persona.provider  # Does this exist?
+  building = persona.building_id  # Or is it current_building_id?
+  ```
+
+  **Example - CORRECT**:
+  ```python
+  # Step 1: Read persona/core.py to verify attributes
+  # Step 2: Found: self.current_building_id (line 116)
+  # Step 3: Use the verified name
+  building = persona.current_building_id
+  ```
+
+  **This rule applies to**:
+  - PersonaCore attributes (`persona/core.py`)
+  - Database model columns (`database/models.py`)
+  - LLM client methods (`llm_clients/base.py`, `llm_clients/*.py`)
+  - Manager methods (`manager/*.py`, `saiverse_manager.py`)
+  - Any existing class or object in the codebase
+
+  **Only guess/invent names for NEW code you are creating.**
+  **For EXISTING code, READ FIRST, then use the exact names you find.**
+
+- **Debugging mindset (CRITICAL)**:
+  1. **Logs and console output are the PRIMARY source of truth**: Always check terminal logs, browser console, and network tab FIRST before making changes
+  2. **Never guess or assume**: If something doesn't work, identify EXACTLY what doesn't work by checking observable facts (logs, DOM inspection, network requests)
+  3. **One problem at a time**: Don't switch approaches until you understand WHY the current approach failed
+  4. **Ask "What don't I know?"**: If unclear, identify the missing information and how to obtain it (add logging, inspect DOM, check documentation) instead of guessing
+  5. **Avoid speculative fixes**: Don't try multiple approaches hoping one works. Understand the root cause first.
+
 - **When debugging UI issues**:
   1. **Listen carefully**: Pay close attention to what the user is actually doing (e.g., "sidebar button" vs "home screen button")
   2. **Gather observable data first**: Add logging, check terminal output, check browser console BEFORE making changes
   3. **Understand the working case**: If something works in one scenario but not another, investigate the DIFFERENCE, don't assume the cause
   4. **One change at a time**: Make focused changes that can be verified, not multiple speculative fixes
   5. **Verify assumptions**: Don't assume "timing issue" or "selector issue" - confirm with logs
-  6. **Framework behavior**: Understand how the framework works (e.g., Gradio's autoscroll triggers on visibility changes, not just data updates)
+  6. **Use browser DevTools effectively**:
+     - Console: Check for errors, test selectors directly (`document.querySelector('#element')`)
+     - Elements: Inspect actual DOM structure and CSS
+     - Network: Verify request URLs and responses
+  7. **Framework behavior**: Understand how the framework works (e.g., Gradio's autoscroll triggers on visibility changes, not just data updates)
 - **When touching external APIs**: Always check official docs first (especially Gemini structured output limitations)
 - **Playbook modifications**: Validate that `next` node pointers form valid graphs (no accidental loops). After editing JSON files in `sea/playbooks/`, always run `python scripts/import_playbook.py --file <path>` to import the changes into the database
 - **Database changes**: Write migration in `database/migrate.py`, test with `--db-file` on copy first
@@ -251,9 +343,9 @@ python scripts/memory_topics_ui.py
 
 ### Branch Context
 - **Current branch**: `sea_framework`
-- **Status**: SEA runtime and playbook system partially integrated, replacing direct `run_pulse()` calls
+- **Status**: SEA runtime and playbook system fully integrated with LangGraph, replacing direct `run_pulse()` calls
 - **Meta playbooks**: `meta_user.json` (user input flow), `meta_auto.json` (autonomous pulse flow)
-- **Pending work**: Full migration of conversation paths to SEA, playbook DB persistence, building-scoped playbooks
+- **Pending work**: Building-scoped playbooks, advanced playbook features
 
 ### Testing
 - Tests use `unittest` framework (pytest also works)
@@ -277,8 +369,13 @@ python scripts/memory_topics_ui.py
 - **Gemini context window is very large (1M+ tokens)** - Do not assume large context is the cause of errors. Gemini handles 100K+ tokens routinely. The system is designed to work with large conversation histories.
 - **Playbook node transitions**: always verify `next` pointers form valid DAGs
 - **When refactoring**: complete the entire change or revert; do not leave codebase in mixed state
+- **Gradio `visible=False` does NOT add components to DOM**: Components with `visible=False` are not rendered in the HTML. If you need to access them from JavaScript, use `visible=True` with CSS `display: none !important` instead.
+- **Gradio custom API endpoints are unreliable**: Adding custom FastAPI routes via `@demo.app.get()` or `demo.app.add_api_route()` may conflict with Gradio's internal routing. Prefer Gradio's native event system (Button/Textbox + `.click()`) for Python-JavaScript communication.
 - **Gradio SelectData.index type**: Always check for both `list` and `tuple` with `isinstance(idx, (list, tuple))` before accessing `idx[0]`. Gradio returns `list` type (e.g., `[row, col]`), not `tuple`. Missing this check causes silent failures in table selection handlers.
 - **Gradio Chatbot autoscroll**: The `autoscroll=True` parameter works, but only triggers when the component becomes visible after being hidden. If updating data while already visible, autoscroll may not activate. To force autoscroll, temporarily hide the component (add CSS class), update data, then show it again. This visibility transition triggers the autoscroll behavior.
+- **Gradio dynamic inline styles**: When Gradio components apply inline styles via JavaScript after page load, CSS rules (even with `!important`) cannot override them. Solution: Use JavaScript monkey patching to hijack `element.style.setProperty()` and replace values before they're applied. See `docs/session_reflection_2025-12-03_sidebar_detail_panel.md` for detailed example.
+- **Asymmetric bugs indicate implementation mismatch**: If a bug occurs in scenario A but not in scenario B (despite similar logic), the cause is usually an implementation difference, not a timing/race condition. Compare code paths side-by-side to find where they diverge.
+- **CSS text wrapping requires multiple layers**: For reliable wrapping of long URLs/strings in CSS, combine: `word-break: break-word`, `overflow-wrap: anywhere`, `max-width: 100%`, and `overflow-x: hidden` on both content and container elements. A single property is often insufficient, especially with frameworks that inject many nested elements.
 
 ## Dependencies
 
@@ -314,6 +411,7 @@ Critical settings (see `.env.example`):
 - `docs/test_manual.md`: manual test scenarios
 - `docs/sea_integration_plan.md`: SEA framework integration roadmap
 - `docs/roadmap.md`: future features
+- `docs/session_reflection_*.md`: lessons learned from development sessions (Gradio UI patterns, debugging approaches, etc.)
 - `README.md`: comprehensive setup and usage guide
 
 ## Quick Reference

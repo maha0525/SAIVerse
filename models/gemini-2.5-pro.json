@@ -1,0 +1,7 @@
+{
+  "model": "gemini-2.5-pro",
+  "display_name": "Gemini V2.5 Pro",
+  "provider": "gemini",
+  "context_length": 128000,
+  "supports_images": true
+}

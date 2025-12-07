@@ -1,0 +1,39 @@
+{
+  "model": "qwen/qwen3-next-80b-a3b-instruct",
+  "display_name": "Qwen Qwen3 Next 80b A3b",
+  "provider": "nvidia_nim",
+  "supports_structured_output": false,
+  "context_length": 128000,
+  "base_url": "https://integrate.api.nvidia.com/v1",
+  "api_key_env": "NVIDIA_API_KEY",
+  "convert_system_to_user": true,
+  "parameters": {
+    "temperature": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.1,
+      "default": 0.6,
+      "label": "Temperature",
+      "description": "Controls randomness."
+    },
+    "top_p": {
+      "type": "float",
+      "min": 0,
+      "max": 1,
+      "step": 0.05,
+      "default": 0.7,
+      "label": "Top P",
+      "description": "Nucleus sampling cutoff."
+    },
+    "max_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 8192,
+      "step": 1,
+      "default": 4096,
+      "label": "Max tokens",
+      "description": "Upper bound on generated tokens."
+    }
+  }
+}
