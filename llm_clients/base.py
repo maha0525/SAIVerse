@@ -50,6 +50,22 @@ class LLMClient:
     ) -> Iterator[str]:
         raise NotImplementedError
 
+    def generate_with_tool_detection(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Any] | None = None,
+        *,
+        temperature: float | None = None,
+        **_: Any,
+    ) -> Dict[str, Any]:
+        """Generate response with tool call detection (do not execute tools).
+
+        Returns:
+            {"type": "text", "content": str} if no tool call
+            {"type": "tool_call", "tool_name": str, "tool_args": dict} if tool call detected
+        """
+        raise NotImplementedError
+
     def _store_reasoning(self, entries: List[Dict[str, str]] | None) -> None:
         self._latest_reasoning = entries or []
 

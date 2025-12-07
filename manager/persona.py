@@ -17,7 +17,7 @@ from database.models import (
     BuildingToolLink,
 )
 from persona_core import PersonaCore
-from model_configs import get_context_length
+from model_configs import get_context_length, get_model_provider
 
 
 class PersonaMixin:
@@ -105,6 +105,7 @@ class PersonaMixin:
 
                 persona_model = db_ai.DEFAULT_MODEL or self.model
                 persona_context_length = get_context_length(persona_model)
+                persona_provider = get_model_provider(persona_model)  # Get provider for persona's model
                 persona_lightweight_model = db_ai.LIGHTWEIGHT_MODEL
 
                 persona = PersonaCore(
@@ -129,7 +130,7 @@ class PersonaMixin:
                     lightweight_model=persona_lightweight_model,
                     context_length=persona_context_length,
                     user_room_id=self.user_room_id,
-                    provider=self.provider,
+                    provider=persona_provider,  # Use provider for persona's model
                     interaction_mode=(db_ai.INTERACTION_MODE or "auto"),
                     is_dispatched=db_ai.IS_DISPATCHED,
                     timezone_info=self.timezone_info,
@@ -282,6 +283,10 @@ class PersonaMixin:
             )
             self.building_histories[new_building_id] = []
 
+            new_persona_model = self.model
+            new_persona_provider = get_model_provider(new_persona_model)  # Get provider for model
+            new_persona_context_length = get_context_length(new_persona_model)
+
             new_persona_core = PersonaCore(
                 city_name=self.city_name,
                 persona_id=new_ai_id,
@@ -300,11 +305,11 @@ class PersonaMixin:
                 create_persona_callback=self._create_persona,
                 session_factory=self.SessionLocal,
                 start_building_id=new_building_id,
-                model=self.model,
+                model=new_persona_model,
                 lightweight_model=None,
-                context_length=self.context_length,
+                context_length=new_persona_context_length,
                 user_room_id=self.user_room_id,
-                provider=self.provider,
+                provider=new_persona_provider,  # Use provider for model
                 is_dispatched=False,
                 timezone_info=self.timezone_info,
                 timezone_name=self.timezone_name,

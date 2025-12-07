@@ -1,0 +1,29 @@
+{
+  "model": "o3",
+  "display_name": "O3",
+  "provider": "openai",
+  "context_length": 200000,
+  "parameters": {
+    "reasoning_effort": {
+      "type": "enum",
+      "options": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": "medium",
+      "label": "Reasoning Effort",
+      "description": "Controls how much time the reasoning model spends thinking."
+    },
+    "max_completion_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 4096,
+      "step": 1,
+      "default": 4096,
+      "label": "Max completion tokens",
+      "description": "Upper bound on generated tokens."
+    }
+  }
+}

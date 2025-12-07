@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - optional dependency
 from saiverse_manager import SAIVerseManager
 from database.paths import default_db_path
 from database.backup import run_startup_backup
-from model_configs import get_model_choices
+from model_configs import get_model_choices, get_model_choices_with_display_names
 from ui import state as ui_state
 from ui.app import build_app
 try:
@@ -42,11 +42,55 @@ try:
 except ValueError:
     _chat_limit_env = 120
 CHAT_HISTORY_LIMIT = max(0, _chat_limit_env)
-MODEL_CHOICES = ["None"] + get_model_choices()
+# Build model choices with display names for UI dropdowns
+# Format: [(display_name, model_id), ...] - Gradio uses (label, value) order
+_model_choices_raw = get_model_choices_with_display_names()
+MODEL_CHOICES = [("None", "None")] + [(display_name, model_id) for model_id, display_name in _model_choices_raw]
+logging.info("Loaded %d model choices with display names", len(MODEL_CHOICES))
+logging.debug("Sample model choices: %s", MODEL_CHOICES[:5])
 
 VERSION = time.strftime("%Y%m%d%H%M%S")  # 例: 20251008121530
 
-HEAD_VIEWPORT = '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">'
+HEAD_VIEWPORT = '''<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+/* Critical CSS: Override Gradio sidebar padding and width without scoping */
+div.wrap.sidebar-parent[style] {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+
+/* Left sidebar width */
+.sidebar.saiverse-sidebar:not(.right) {
+  width: 240px !important;
+  left: -240px !important;
+}
+
+/* Right sidebar width */
+.sidebar.saiverse-sidebar.right {
+  width: 400px !important;
+  right: -400px !important;
+}
+
+@media screen and (min-width: 769px) {
+  div.wrap.sidebar-parent[style] {
+    padding-left: 240px !important;
+    padding-right: 400px !important;
+    transition: padding-left 0.3s ease, padding-right 0.3s ease;
+  }
+}
+
+/* Mobile sidebar widths */
+@media (max-width: 768px) {
+  .sidebar.saiverse-sidebar:not(.right) {
+    width: 60vw !important;
+    left: -60vw !important;
+  }
+  .sidebar.saiverse-sidebar.right {
+    width: 70vw !important;
+    right: -70vw !important;
+  }
+}
+</style>'''
 
 
 CSS_PATH = Path("assets/css/chat.css")

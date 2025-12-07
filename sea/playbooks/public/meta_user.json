@@ -14,6 +14,7 @@
     "system_prompt": true
   },
   "router_callable": false,
+  "user_selectable": true,
   "nodes": [
     {
       "id": "list_playbooks",

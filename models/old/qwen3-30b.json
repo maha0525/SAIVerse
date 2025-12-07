@@ -1,0 +1,6 @@
+{
+  "model": "qwen3:30b",
+  "display_name": "Qwen3 30b",
+  "provider": "ollama",
+  "context_length": 32768
+}

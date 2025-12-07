@@ -1,0 +1,6 @@
+{
+  "model": "hf.co/mradermacher/shisa-v2-llama3.3-70b-i1-GGUF:Q4_K_M",
+  "display_name": "Mradermacher Shisa V2 Llama3.3 70b I1 Q4 K M",
+  "provider": "ollama",
+  "context_length": 32768
+}

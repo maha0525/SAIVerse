@@ -1,0 +1,39 @@
+{
+  "model": "moonshotai/kimi-k2-instruct-0905",
+  "display_name": "Moonshotai Kimi K2 0905",
+  "provider": "nvidia_nim",
+  "supports_structured_output": false,
+  "context_length": 250000,
+  "base_url": "https://integrate.api.nvidia.com/v1",
+  "api_key_env": "NVIDIA_API_KEY",
+  "convert_system_to_user": true,
+  "parameters": {
+    "temperature": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.1,
+      "default": 1,
+      "label": "Temperature",
+      "description": "Controls randomness."
+    },
+    "top_p": {
+      "type": "float",
+      "min": 0,
+      "max": 1,
+      "step": 0.05,
+      "default": 1,
+      "label": "Top P",
+      "description": "Nucleus sampling cutoff."
+    },
+    "max_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 4096,
+      "step": 1,
+      "default": 4096,
+      "label": "Max tokens",
+      "description": "Upper bound on generated tokens."
+    }
+  }
+}

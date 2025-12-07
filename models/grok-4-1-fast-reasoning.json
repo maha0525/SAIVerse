@@ -1,0 +1,37 @@
+{
+  "model": "grok-4-1-fast-reasoning",
+  "display_name": "Grok 4 1 Fast Reasoning",
+  "provider": "openai",
+  "context_length": 128000,
+  "base_url": "https://api.x.ai/v1",
+  "api_key_env": "XAI_API_KEY",
+  "parameters": {
+    "temperature": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.1,
+      "default": 1,
+      "label": "Temperature",
+      "description": "Controls randomness."
+    },
+    "top_p": {
+      "type": "float",
+      "min": 0,
+      "max": 1,
+      "step": 0.05,
+      "default": 1,
+      "label": "Top P",
+      "description": "Nucleus sampling cutoff."
+    },
+    "max_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 2048,
+      "step": 1,
+      "default": 2048,
+      "label": "Max tokens",
+      "description": "Upper bound on generated tokens."
+    }
+  }
+}

@@ -17,6 +17,7 @@ from database.models import (
 )
 from persona_core import PersonaCore
 from buildings import Building
+from model_configs import get_context_length, get_model_provider
 
 
 class BlueprintMixin:
@@ -264,6 +265,10 @@ class BlueprintMixin:
                 self.building_histories[private_room_id] = []
 
             if blueprint.CITYID == self.city_id:
+                blueprint_model = self.model
+                blueprint_provider = get_model_provider(blueprint_model)  # Get provider for model
+                blueprint_context_length = get_context_length(blueprint_model)
+
                 new_persona_core = PersonaCore(
                     city_name=self.city_name,
                     persona_id=new_ai_id,
@@ -282,10 +287,10 @@ class BlueprintMixin:
                     create_persona_callback=self._create_persona,
                 session_factory=self.SessionLocal,
                 start_building_id=target_building_id,
-                model=self.model,
-                context_length=self.context_length,
+                model=blueprint_model,
+                context_length=blueprint_context_length,
                 user_room_id=self.user_room_id,
-                provider=self.provider,
+                provider=blueprint_provider,  # Use provider for model
                 is_dispatched=False,
                 timezone_info=self.timezone_info,
                 timezone_name=self.timezone_name,

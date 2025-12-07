@@ -41,6 +41,8 @@ class AI(Base):
     IS_DISPATCHED = Column(Boolean, default=False, nullable=False)
     DEFAULT_MODEL = Column(String(255), nullable=True)
     LIGHTWEIGHT_MODEL = Column(String(255), nullable=True)
+    LIGHTWEIGHT_VISION_MODEL = Column(String(255), nullable=True)
+    VISION_MODEL = Column(String(255), nullable=True)
     PRIVATE_ROOM_ID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
     PREVIOUS_INTERACTION_MODE = Column(String(32), default='auto', nullable=False)
 
@@ -136,6 +138,7 @@ class Playbook(Base):
     schema_json = Column(Text, nullable=False)
     nodes_json = Column(Text, nullable=False)
     router_callable = Column(Boolean, nullable=False, default=False)  # Can be called from router
+    user_selectable = Column(Boolean, nullable=False, default=False)  # Can be selected by user in UI
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -157,6 +160,7 @@ class Item(Base):
     NAME = Column(String(255), nullable=False)
     TYPE = Column(String(64), nullable=False, default="object")
     DESCRIPTION = Column(String(2048), default="", nullable=False)
+    FILE_PATH = Column(String(512), nullable=True)
     STATE_JSON = Column(String, nullable=True)
     CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
     UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
@@ -181,3 +185,29 @@ class PersonaEventLog(Base):
     CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
     CONTENT = Column(String, nullable=False)
     STATUS = Column(String(32), default="pending", nullable=False)  # pending / archived
+
+
+class PersonaSchedule(Base):
+    __tablename__ = "persona_schedule"
+    SCHEDULE_ID = Column(Integer, primary_key=True, autoincrement=True)
+    PERSONA_ID = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
+    SCHEDULE_TYPE = Column(String(32), nullable=False)  # "periodic", "oneshot", "interval"
+    META_PLAYBOOK = Column(String(255), nullable=False)  # メタプレイブック名
+    ENABLED = Column(Boolean, default=True, nullable=False)
+    DESCRIPTION = Column(String(512), default="", nullable=False)
+    PRIORITY = Column(Integer, default=0, nullable=False)  # 優先度（大きいほど優先）
+
+    # 定期スケジュール用 (periodic)
+    DAYS_OF_WEEK = Column(String(255), nullable=True)  # JSON: [0,1,2,3,4,5,6] or null (毎日)
+    TIME_OF_DAY = Column(String(8), nullable=True)  # "09:00" 形式
+
+    # 単発スケジュール用 (oneshot)
+    SCHEDULED_DATETIME = Column(DateTime, nullable=True)
+    COMPLETED = Column(Boolean, default=False, nullable=False)
+
+    # 恒常スケジュール用 (interval)
+    INTERVAL_SECONDS = Column(Integer, nullable=True)
+    LAST_EXECUTED_AT = Column(DateTime, nullable=True)
+
+    CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
+    UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)

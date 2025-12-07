@@ -967,6 +967,146 @@ class GeminiClient(LLMClient):
 
         self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
 
+    def generate_with_tool_detection(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Any] | None = None,
+        *,
+        temperature: float | None = None,
+        **_: Any,
+    ) -> Dict[str, Any]:
+        """Generate response with tool call detection (do not execute tools)."""
+        tools_spec = tools or []
+        self._store_reasoning([])
+
+        active_client = self.client
+        sys_msg, contents = self._convert_messages(messages)
+        cfg_kwargs: Dict[str, Any] = {
+            "system_instruction": sys_msg,
+            "safety_settings": GEMINI_SAFETY_CONFIG,
+        }
+        if temperature is not None:
+            cfg_kwargs["temperature"] = temperature
+        if tools_spec:
+            merged_tools = merge_tools_for_gemini(tools_spec)
+            cfg_kwargs["tools"] = merged_tools
+            cfg_kwargs["tool_config"] = types.ToolConfig(
+                functionCallingConfig=types.FunctionCallingConfig(mode="AUTO")
+            )
+            # Log tool schemas being sent to Gemini
+            logging.info("[gemini] Sending %d Tool objects to API", len(merged_tools))
+            for i, tool in enumerate(merged_tools):
+                if hasattr(tool, "function_declarations"):
+                    logging.info("[gemini] Tool[%d]: %d function_declarations", i, len(tool.function_declarations))
+                    for decl in tool.function_declarations:
+                        logging.info("[gemini]   - %s: %s", decl.name, decl.description[:80] if decl.description else "")
+        if self._thinking_config is not None:
+            cfg_kwargs["thinking_config"] = self._thinking_config
+
+        try:
+            resp = active_client.models.generate_content(
+                model=self.model,
+                contents=contents,
+                config=types.GenerateContentConfig(**cfg_kwargs),
+            )
+        except Exception as exc:
+            if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
+                logging.info("Retrying with paid Gemini API key due to rate limit")
+                active_client = self.paid_client
+                try:
+                    resp = active_client.models.generate_content(
+                        model=self.model,
+                        contents=contents,
+                        config=types.GenerateContentConfig(**cfg_kwargs),
+                    )
+                except Exception:
+                    logging.exception("Gemini call failed in generate_with_tool_detection")
+                    return {"type": "text", "content": "エラーが発生しました。"}
+            else:
+                logging.exception("Gemini call failed in generate_with_tool_detection")
+                return {"type": "text", "content": "エラーが発生しました。"}
+
+        raw_logger.debug("Gemini raw (tool detection):\n%s", resp)
+
+        if not resp.candidates:
+            logging.warning("[gemini] No candidates in response")
+            return {"type": "text", "content": ""}
+
+        candidate = resp.candidates[0]
+        finish_reason = getattr(candidate, "finish_reason", None)
+        logging.info("[gemini] Tool detection finish_reason: %s", finish_reason)
+
+        if not candidate.content or not candidate.content.parts:
+            logging.warning("[gemini] No content or parts in candidate")
+            return {"type": "text", "content": ""}
+
+        # Extract text, reasoning, and function calls from parts
+        text_parts = []
+        reasoning_entries = []
+        function_call_part = None
+
+        for part in candidate.content.parts:
+            # Check for function call in parts
+            part_fcall = getattr(part, "function_call", None)
+            if part_fcall:
+                function_call_part = part_fcall
+                fcall_name = getattr(part_fcall, "name", None)
+                fcall_args = getattr(part_fcall, "args", None)
+                logging.info("[gemini] Function call detected in parts: name=%s, args=%s", fcall_name, fcall_args)
+                continue
+
+            # Extract text
+            is_thought = is_truthy_flag(getattr(part, "thought", None))
+            part_text = getattr(part, "text", None)
+            if not part_text:
+                continue
+
+            if is_thought:
+                reasoning_entries.append({"title": "Thought", "text": part_text.strip()})
+            else:
+                text_parts.append(part_text)
+
+        text = "".join(text_parts)
+        self._store_reasoning(reasoning_entries)
+
+        # Also check candidate-level function_call for backwards compatibility
+        if not function_call_part:
+            function_call_part = getattr(candidate, "function_call", None)
+
+        # Determine return type based on what we found
+        if function_call_part:
+            fcall_name = getattr(function_call_part, "name", None)
+            fcall_args = getattr(function_call_part, "args", {}) or {}
+
+            if finish_reason and "MALFORMED" in str(finish_reason):
+                logging.error("[gemini] MALFORMED_FUNCTION_CALL: name=%s, args=%s", fcall_name, fcall_args)
+                logging.error("[gemini] Raw fcall object: %s", function_call_part)
+
+            if fcall_name and isinstance(fcall_name, str):
+                if text:
+                    # Both text and tool call
+                    logging.info("[gemini] Returning both: text + tool_call (%s)", fcall_name)
+                    return {
+                        "type": "both",
+                        "content": text,
+                        "tool_name": fcall_name,
+                        "tool_args": dict(fcall_args),
+                        "raw_function_call": function_call_part,
+                    }
+                else:
+                    # Only tool call
+                    logging.info("[gemini] Returning tool_call: %s", fcall_name)
+                    return {
+                        "type": "tool_call",
+                        "tool_name": fcall_name,
+                        "tool_args": dict(fcall_args),
+                        "raw_function_call": function_call_part,
+                    }
+
+        # Only text
+        logging.info("[gemini] Returning text response")
+        return {"type": "text", "content": text}
+
 
 __all__ = [
     "GeminiClient",

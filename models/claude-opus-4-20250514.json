@@ -1,0 +1,9 @@
+{
+  "model": "claude-opus-4-20250514",
+  "display_name": "Claude Opus 4 20250514",
+  "provider": "anthropic",
+  "context_length": 32000,
+  "thinking_type": "enabled",
+  "thinking_budget": 8192,
+  "supports_images": true
+}
