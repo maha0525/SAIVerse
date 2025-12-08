@@ -1,0 +1,77 @@
+{
+  "name": "searxng_search",
+  "description": "SearXNGでウェブ検索を実行し、結果を取得するためのPlaybook",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "検索したいトピックや質問"
+    }
+  ],
+  "context_requirements": {
+    "history_depth": "short",
+    "inventory": false,
+    "building_items": false,
+    "system_prompt": true
+  },
+  "router_callable": true,
+  "nodes": [
+    {
+      "id": "build_query",
+      "type": "llm",
+      "action": "SearXNG検索に渡すクエリとオプションを決定してください。ユーザーの意図を短い検索クエリに要約し、必要なら件数や言語を指定します。",
+      "next": "search",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "検索クエリ"
+          },
+          "max_results": {
+            "type": "integer",
+            "description": "取得件数の上限（1-20、未指定ならデフォルト）"
+          },
+          "engines": {
+            "type": "string",
+            "description": "必要に応じて使用するエンジンをカンマ区切りで指定"
+          },
+          "language": {
+            "type": "string",
+            "description": "検索言語（例: ja, en）"
+          },
+          "safe": {
+            "type": "integer",
+            "description": "セーフサーチレベル (0:無効,1:中,2:強)"
+          }
+        },
+        "required": ["query"]
+      },
+      "output_key": "search_args"
+    },
+    {
+      "id": "search",
+      "type": "tool",
+      "action": "searxng_search",
+      "args_input": {
+        "query": "search_args.query",
+        "max_results": "search_args.max_results",
+        "engines": "search_args.engines",
+        "language": "search_args.language",
+        "safe": "search_args.safe"
+      },
+      "next": "record"
+    },
+    {
+      "id": "record",
+      "type": "memorize",
+      "action": "{last}",
+      "role": "user",
+      "tags": [
+        "tool",
+        "searxng_search"
+      ],
+      "next": null
+    }
+  ],
+  "start_node": "build_query"
+}
