@@ -30,10 +30,21 @@ setup_source() {
 
 setup_venv() {
   if [[ -x "${VENV_DIR}/bin/python" ]]; then
-    return
+    if "${VENV_DIR}/bin/python" - <<'PY'
+import importlib.util
+import sys
+
+sys.exit(0 if importlib.util.find_spec("searx") else 1)
+PY
+    then
+      return
+    fi
+    echo "[INFO] Existing virtualenv found but SearXNG is not installed. Reinstalling..." >&2
+  else
+    echo "[INFO] Creating virtualenv at ${VENV_DIR}" >&2
+    python -m venv "${VENV_DIR}"
   fi
-  echo "[INFO] Creating virtualenv at ${VENV_DIR}" >&2
-  python -m venv "${VENV_DIR}"
+
   "${VENV_DIR}/bin/pip" install --upgrade pip setuptools wheel
   echo "[INFO] Installing SearXNG runtime dependencies" >&2
   "${VENV_DIR}/bin/pip" install -r "${SRC_DIR}/requirements.txt"
