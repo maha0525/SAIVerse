@@ -23,7 +23,7 @@ SAIVerse から SearXNG 互換の検索を使うために、Docker なしで実�
 - `SEARXNG_SETTINGS_PATH` : 設定ファイルのパス（デフォルト `scripts/searxng_settings.yml`）。初回起動時に upstream の `searx/settings.yml` をコピーし、JSON 出力を有効化したものが生成されます。
 - `SEARXNG_SECRET_KEY` : SearXNG の `server.secret_key` に利用する値。未指定の場合、初回起動時にランダムな値が自動生成され、設定ファイルに保存されます。
 - `SEARXNG_SRC_DIR`, `SEARXNG_VENV_DIR` : ソースと venv の保存先ディレクトリ。
-- `SEARXNG_LIMITER_PATH` : レートリミット設定 (limiter.toml) の配置先。未指定なら upstream の `searx/limiter.toml` をコピーし、古いテンプレート（[limiter] セクションや botdetection.enabled を含むもの）は自動で置き換えます。
+- `SEARXNG_LIMITER_PATH` : レートリミット設定 (limiter.toml) の配置先。未指定なら upstream の `searx/limiter.toml` を毎回コピーして上書きします（古いテンプレートの残骸を確実に排除します）。
 
 > ローカルで余分なエラーが出ないよう、初回起動時に `ahmia` / `torch` / `wikidata` / `radio browser` の各エンジンを無効化しています。追加エンジンを使いたい場合は、生成済みの `searxng_settings.yml` を直接編集してください。
 

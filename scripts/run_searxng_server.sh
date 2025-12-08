@@ -109,39 +109,65 @@ prepare_limiter() {
   local limiter_path=${SEARXNG_LIMITER_PATH:-scripts/limiter.toml}
   local template_path="${SRC_DIR}/searx/limiter.toml"
 
-  local regenerate=0
-  if [[ ! -f "${limiter_path}" ]]; then
-    regenerate=1
-  elif grep -Eq "botdetection\\.enabled|^\\[limiter\\]" "${limiter_path}"; then
-    echo "[INFO] Detected deprecated limiter configuration at ${limiter_path}; regenerating from template" >&2
-    regenerate=1
-  fi
+  echo "[INFO] Regenerating limiter configuration at ${limiter_path}" >&2
 
-  if [[ ${regenerate} -eq 0 ]]; then
+  if [[ -f "${template_path}" ]]; then
+    cp "${template_path}" "${limiter_path}"
     return
   fi
 
-  if [[ -f "${template_path}" ]]; then
-    echo "[INFO] Writing limiter configuration from ${template_path} to ${limiter_path}" >&2
-    cp "${template_path}" "${limiter_path}"
-  else
-    echo "[WARN] Limiter template not found at ${template_path}; writing minimal default" >&2
-    cat >"${limiter_path}" <<'EOF'
+  echo "[WARN] Limiter template not found at ${template_path}; writing minimal default" >&2
+  cat >"${limiter_path}" <<'EOF'
 [botdetection]
+
+# The prefix defines the number of leading bits in an address that are compared
+# to determine whether or not an address is part of a (client) network.
+
 ipv4_prefix = 32
 ipv6_prefix = 48
-trusted_proxies = ['127.0.0.0/8', '::1']
+
+# If the request IP is in trusted_proxies list, the client IP address is
+# extracted from the X-Forwarded-For and X-Real-IP headers. This should be
+# used if SearXNG is behind a reverse proxy or load balancer.
+
+trusted_proxies = [
+  '127.0.0.0/8',
+  '::1',
+  # '192.168.0.0/16',
+  # '172.16.0.0/12',
+  # '10.0.0.0/8',
+  # 'fd00::/8',
+]
 
 [botdetection.ip_limit]
+
+# To get unlimited access in a local network, by default link-local addresses
+# (networks) are not monitored by the ip_limit
 filter_link_local = false
+
+# activate link_token method in the ip_limit method
 link_token = false
 
 [botdetection.ip_lists]
-block_ip = []
-pass_ip = []
+
+# In the limiter, the ip_lists method has priority over all other methods -> if
+# an IP is in the pass_ip list, it has unrestricted access and it is also not
+# checked if e.g. the "user agent" suggests a bot (e.g. curl).
+
+block_ip = [
+  # '93.184.216.34',  # IPv4 of example.org
+  # '257.1.1.1',      # invalid IP --> will be ignored, logged in ERROR class
+]
+
+pass_ip = [
+  # '192.168.0.0/16',      # IPv4 private network
+  # 'fe80::/10'            # IPv6 linklocal / wins over botdetection.ip_limit.filter_link_local
+]
+
+# Activate passlist of (hardcoded) IPs from the SearXNG organization,
+# e.g. `check.searx.space`.
 pass_searxng_org = true
 EOF
-  fi
 }
 
 run_server() {
