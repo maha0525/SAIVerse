@@ -34,7 +34,7 @@ setup_venv() {
   fi
   echo "[INFO] Creating virtualenv at ${VENV_DIR}" >&2
   python -m venv "${VENV_DIR}"
-  "${VENV_DIR}/bin/pip" install --upgrade pip
+  "${VENV_DIR}/bin/pip" install --upgrade pip setuptools wheel
   echo "[INFO] Installing SearXNG runtime dependencies" >&2
   "${VENV_DIR}/bin/pip" install -r "${SRC_DIR}/requirements.txt"
   "${VENV_DIR}/bin/pip" install --no-build-isolation -e "${SRC_DIR}"
