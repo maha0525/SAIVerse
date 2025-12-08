@@ -107,67 +107,40 @@ PY
 
 prepare_limiter() {
   local limiter_path=${SEARXNG_LIMITER_PATH:-scripts/limiter.toml}
-  local template_path="${SRC_DIR}/searx/limiter.toml"
-
   echo "[INFO] Regenerating limiter configuration at ${limiter_path}" >&2
 
-  if [[ -f "${template_path}" ]]; then
-    cp "${template_path}" "${limiter_path}"
-    return
-  fi
+  "$(python_bin)" - "${limiter_path}" "${SRC_DIR}" <<'PY'
+import sys
+from pathlib import Path
+import shutil
+import importlib.resources as resources
 
-  echo "[WARN] Limiter template not found at ${template_path}; writing minimal default" >&2
-  cat >"${limiter_path}" <<'EOF'
-[botdetection]
+dest = Path(sys.argv[1])
+src_dir = Path(sys.argv[2])
+dest.parent.mkdir(parents=True, exist_ok=True)
 
-# The prefix defines the number of leading bits in an address that are compared
-# to determine whether or not an address is part of a (client) network.
+def copy_candidate(path: Path) -> bool:
+    if path.is_file():
+        shutil.copyfile(path, dest)
+        return True
+    return False
 
-ipv4_prefix = 32
-ipv6_prefix = 48
+# Prefer the installed package template to match the runtime schema exactly.
+try:
+    package_template = resources.files("searx").joinpath("limiter.toml")
+except Exception:
+    package_template = None
 
-# If the request IP is in trusted_proxies list, the client IP address is
-# extracted from the X-Forwarded-For and X-Real-IP headers. This should be
-# used if SearXNG is behind a reverse proxy or load balancer.
+if package_template and copy_candidate(Path(package_template)):
+    sys.exit(0)
 
-trusted_proxies = [
-  '127.0.0.0/8',
-  '::1',
-  # '192.168.0.0/16',
-  # '172.16.0.0/12',
-  # '10.0.0.0/8',
-  # 'fd00::/8',
-]
+# Fallback to the cloned source tree if available.
+if copy_candidate(src_dir / "searx" / "limiter.toml"):
+    sys.exit(0)
 
-[botdetection.ip_limit]
-
-# To get unlimited access in a local network, by default link-local addresses
-# (networks) are not monitored by the ip_limit
-filter_link_local = false
-
-# activate link_token method in the ip_limit method
-link_token = false
-
-[botdetection.ip_lists]
-
-# In the limiter, the ip_lists method has priority over all other methods -> if
-# an IP is in the pass_ip list, it has unrestricted access and it is also not
-# checked if e.g. the "user agent" suggests a bot (e.g. curl).
-
-block_ip = [
-  # '93.184.216.34',  # IPv4 of example.org
-  # '257.1.1.1',      # invalid IP --> will be ignored, logged in ERROR class
-]
-
-pass_ip = [
-  # '192.168.0.0/16',      # IPv4 private network
-  # 'fe80::/10'            # IPv6 linklocal / wins over botdetection.ip_limit.filter_link_local
-]
-
-# Activate passlist of (hardcoded) IPs from the SearXNG organization,
-# e.g. `check.searx.space`.
-pass_searxng_org = true
-EOF
+# Last resort: minimal valid config matching the current schema.
+dest.write_text("""[botdetection]\n\nipv4_prefix = 32\nipv6_prefix = 48\n\ntrusted_proxies = [\n  '127.0.0.0/8',\n  '::1',\n]\n\n[botdetection.ip_limit]\nfilter_link_local = false\nlink_token = false\n\n[botdetection.ip_lists]\nblock_ip = [\n]\npass_ip = [\n]\npass_searxng_org = true\n""", encoding="utf-8")
+PY
 }
 
 run_server() {
