@@ -57,6 +57,7 @@ class NvidiaNIMClient(OpenAIClient):
         messages: List[Dict[str, Any]],
         response_schema: Dict[str, Any],
         temperature: Optional[float],
+        max_retries: int = 2,
     ) -> str:
         """
         Get structured output from Nvidia NIM using forced function calling.
@@ -67,9 +68,16 @@ class NvidiaNIMClient(OpenAIClient):
         2. Force the model to call that tool via tool_choice
         3. Extract the tool arguments as the structured output
 
+        Args:
+            messages: The messages to send to the model.
+            response_schema: The JSON schema for the expected output.
+            temperature: The temperature for generation.
+            max_retries: Maximum number of retry attempts for transient errors (default: 2).
+
         Returns the JSON string of the structured output.
         """
         import httpx
+        import time
 
         url = f"{self._nim_base_url}/chat/completions"
 
@@ -117,10 +125,42 @@ class NvidiaNIMClient(OpenAIClient):
         logging.info("Using forced function calling for structured output (tool: _structured_output)")
         logging.debug("NIM structured output schema: %s", dummy_tool["function"]["parameters"])
 
-        with httpx.Client(timeout=120.0) as client:
-            response = client.post(url, json=body, headers=headers)
-            response.raise_for_status()
-            resp_json = response.json()
+        # Retry logic for transient errors (timeouts, connection errors, 5xx)
+        last_exception: Optional[Exception] = None
+        for attempt in range(max_retries + 1):
+            try:
+                with httpx.Client(timeout=120.0) as client:
+                    response = client.post(url, json=body, headers=headers)
+                    response.raise_for_status()
+                    resp_json = response.json()
+                break  # Success, exit retry loop
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                last_exception = e
+                if attempt < max_retries:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s
+                    logging.warning(
+                        "NIM structured output request failed (attempt %d/%d): %s. Retrying in %ds...",
+                        attempt + 1, max_retries + 1, type(e).__name__, wait_time
+                    )
+                    time.sleep(wait_time)
+                else:
+                    logging.error(
+                        "NIM structured output request failed after %d attempts: %s",
+                        max_retries + 1, e
+                    )
+                    raise
+            except httpx.HTTPStatusError as e:
+                last_exception = e
+                # Retry on 5xx server errors
+                if e.response.status_code >= 500 and attempt < max_retries:
+                    wait_time = 2 ** attempt
+                    logging.warning(
+                        "NIM structured output request failed with %d (attempt %d/%d). Retrying in %ds...",
+                        e.response.status_code, attempt + 1, max_retries + 1, wait_time
+                    )
+                    time.sleep(wait_time)
+                else:
+                    raise
 
         from .base import raw_logger
         raw_logger.debug("Nvidia NIM raw:\n%s", json.dumps(resp_json, indent=2, ensure_ascii=False))

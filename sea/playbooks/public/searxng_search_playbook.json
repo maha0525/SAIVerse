@@ -8,9 +8,9 @@
     }
   ],
   "context_requirements": {
-    "history_depth": "short",
-    "inventory": false,
-    "building_items": false,
+    "history_depth": "full",
+    "inventory": true,
+    "building_items": true,
     "system_prompt": true
   },
   "router_callable": true,
@@ -18,7 +18,7 @@
     {
       "id": "build_query",
       "type": "llm",
-      "action": "SearXNG検索に渡すクエリとオプションを決定してください。ユーザーの意図を短い検索クエリに要約し、必要なら件数や言語を指定します。",
+      "action": "SearXNG検索に渡すクエリとオプションを決定してください。検索したい対象を短い検索クエリに要約し、必要なら件数や言語を指定すること。",
       "next": "search",
       "response_schema": {
         "type": "object",
@@ -29,7 +29,7 @@
           },
           "max_results": {
             "type": "integer",
-            "description": "取得件数の上限（1-20、未指定ならデフォルト）"
+            "description": "取得件数の上限（1-20、デフォルト5件）"
           },
           "engines": {
             "type": "string",
@@ -64,7 +64,7 @@
     {
       "id": "record",
       "type": "memorize",
-      "action": "{last}",
+      "action": "<system>```{last}```\n\nこれらの情報はユーザーには見えていません。結果を解釈し、あなたの言葉で表現することを勧めます。なお、コンテキストの圧縮のため検索結果は記憶に残りません。覚えておきたい情報は発言するようにしてください。</system>",
       "role": "user",
       "tags": [
         "tool",

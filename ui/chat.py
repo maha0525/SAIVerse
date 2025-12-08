@@ -814,9 +814,11 @@ def get_building_details(building_id: str = None):
         for item_id in sorted_item_ids:
             if item_id in manager.item_registry:
                 item_data = manager.item_registry[item_id]
+                raw_name = item_data.get("name", "") or ""
+                display_name = raw_name.strip() if raw_name.strip() else "(名前なし)"
                 items_list.append({
                     "id": item_id,
-                    "name": item_data.get("name", item_id),
+                    "name": display_name,
                     "description": item_data.get("description", ""),
                     "type": item_data.get("type", "object"),
                     "file_path": item_data.get("file_path"),
@@ -861,9 +863,11 @@ def get_persona_details(persona_id: str = None):
     for item_id in sorted_inventory:
         if item_id in manager.items:
             item_data = manager.items[item_id]
+            raw_name = item_data.get("name", "") or ""
+            display_name = raw_name.strip() if raw_name.strip() else "(名前なし)"
             inventory_list.append({
                 "id": item_id,
-                "name": item_data.get("name", item_id),
+                "name": display_name,
                 "description": item_data.get("description", ""),
                 "type": item_data.get("type", "object"),
                 "file_path": item_data.get("file_path"),
