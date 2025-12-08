@@ -63,6 +63,7 @@ import yaml
 from pathlib import Path
 import os
 import secrets
+import re
 
 path = Path(sys.argv[1])
 data = yaml.safe_load(path.read_text())
@@ -88,9 +89,16 @@ elif not server.get("secret_key") or server.get("secret_key") == default_secret:
     server["secret_key"] = secrets.token_hex(32)
 
 # disable engines that frequently fail without extra deps or network access
-problematic_engines = {"ahmia", "torch", "wikidata", "radio browser"}
+problematic_engines = {"ahmia", "torch", "wikidata", "radiobrowser"}
+
+def normalize(name: str) -> str:
+    return re.sub(r"[\s_-]+", "", name.lower())
+
 for engine in data.get("engines", []):
-    if engine.get("name") in problematic_engines:
+    name = engine.get("name")
+    if not name:
+        continue
+    if normalize(name) in problematic_engines:
         engine["disabled"] = True
 
 path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
@@ -110,7 +118,7 @@ enabled = false
 
 [limiter]
 backend = "memory"
-; Customize limits in your own file if needed.
+# Customize limits in your own file if needed.
 EOF
 }
 
