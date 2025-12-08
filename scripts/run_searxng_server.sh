@@ -45,13 +45,16 @@ prepare_settings() {
     return
   fi
   echo "[INFO] Preparing settings from ${SRC_DIR}/searx/settings.yml" >&2
+  "${VENV_DIR}/bin/pip" show PyYAML >/dev/null 2>&1 || "${VENV_DIR}/bin/pip" install pyyaml
   cp "${SRC_DIR}/searx/settings.yml" "${SETTINGS_PATH}"
-  "$(python_bin)" - <<'PY'
+  "$(python_bin)" - "${SETTINGS_PATH}" <<'PY'
 import sys
 import yaml
 from pathlib import Path
+
 path = Path(sys.argv[1])
 data = yaml.safe_load(path.read_text())
+
 # allow JSON output by default
 search = data.setdefault("search", {})
 formats = search.get("formats") or []
@@ -59,13 +62,14 @@ if "json" not in formats:
     formats.append("json")
 search["formats"] = formats
 search.setdefault("safe_search", 1)
+
 # bind on all interfaces for local network use
 server = data.setdefault("server", {})
 if server.get("bind_address") == "127.0.0.1":
     server["bind_address"] = "0.0.0.0"
+
 path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 PY
-  "${VENV_DIR}/bin/pip" show PyYAML >/dev/null 2>&1 || "${VENV_DIR}/bin/pip" install pyyaml
 }
 
 run_server() {
