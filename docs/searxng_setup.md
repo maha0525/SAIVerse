@@ -21,6 +21,7 @@ SAIVerse から SearXNG 互換の検索を使うために、Docker なしで実�
 - `SEARXNG_BIND_ADDRESS` : バインドアドレス（デフォルト `0.0.0.0`）。
 - `SEARXNG_REF` : 取得する SearXNG のブランチ / タグ（デフォルト `master`）。
 - `SEARXNG_SETTINGS_PATH` : 設定ファイルのパス（デフォルト `scripts/searxng_settings.yml`）。初回起動時に upstream の `searx/settings.yml` をコピーし、JSON 出力を有効化したものが生成されます。
+- `SEARXNG_SECRET_KEY` : SearXNG の `server.secret_key` に利用する値。未指定の場合、初回起動時にランダムな値が自動生成され、設定ファイルに保存されます。
 - `SEARXNG_SRC_DIR`, `SEARXNG_VENV_DIR` : ソースと venv の保存先ディレクトリ。
 
 例）ポートを 8888、bind を 127.0.0.1 にする場合:
