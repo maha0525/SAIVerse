@@ -40,4 +40,8 @@ __*.*
 !ui/handlers/__init__.py
 !sea/__init__.py
 tasks.md
+scripts/.searxng-src/
+scripts/.searxng-venv/
+scripts/searxng_settings.yml
+scripts/limiter.toml
 *.patch

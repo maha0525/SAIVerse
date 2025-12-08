@@ -1137,7 +1137,8 @@ class SEARuntime:
                             lines = []
                             for iid in b_items:
                                 data = item_registry.get(iid, {})
-                                name = data.get("name", iid)
+                                raw_name = data.get("name", "") or ""
+                                name = raw_name.strip() if raw_name.strip() else "(名前なし)"
                                 desc = (data.get("description") or "").strip() or "(説明なし)"
                                 lines.append(f"- [{iid}] {name}: {desc}")
                             if lines:

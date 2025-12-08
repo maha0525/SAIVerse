@@ -1771,8 +1771,9 @@ class SAIVerseManager(
         owner_kind: str,
         owner_id: Optional[str],
         state_json: Optional[str],
+        file_path: Optional[str] = None,
     ) -> str:
-        return self.admin.update_item(item_id, name, item_type, description, owner_kind, owner_id, state_json)
+        return self.admin.update_item(item_id, name, item_type, description, owner_kind, owner_id, state_json, file_path)
 
     def delete_item(self, item_id: str) -> str:
         return self.admin.delete_item(item_id)

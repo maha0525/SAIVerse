@@ -2,7 +2,7 @@
   "model": "qwen/qwen3-next-80b-a3b-instruct",
   "display_name": "Qwen Qwen3 Next 80b A3b",
   "provider": "nvidia_nim",
-  "supports_structured_output": false,
+  "supports_structured_output": true,
   "context_length": 128000,
   "base_url": "https://integrate.api.nvidia.com/v1",
   "api_key_env": "NVIDIA_API_KEY",

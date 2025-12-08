@@ -531,6 +531,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "NAME": item.NAME,
                 "TYPE": item.TYPE,
                 "DESCRIPTION": item.DESCRIPTION or "",
+                "FILE_PATH": item.FILE_PATH or "",
                 "STATE_JSON": item.STATE_JSON or "",
                 "OWNER_KIND": location.OWNER_KIND if location else "world",
                 "OWNER_ID": location.OWNER_ID if location else "",
@@ -603,6 +604,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         owner_kind: str,
         owner_id: Optional[str],
         state_json: Optional[str],
+        file_path: Optional[str] = None,
     ) -> str:
         normalized_kind = (owner_kind or "world").strip().lower()
         owner_id = (owner_id or "").strip()
@@ -630,6 +632,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             item.TYPE = item_type or "object"
             item.DESCRIPTION = description or ""
             item.STATE_JSON = state_payload
+            item.FILE_PATH = (file_path or "").strip() or None
             location = (
                 db.query(ItemLocationModel)
                 .filter(ItemLocationModel.ITEM_ID == item_id)

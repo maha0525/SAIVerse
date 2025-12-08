@@ -272,29 +272,31 @@ def create_world_editor_ui():
     def on_select_item(evt: gr.SelectData):
         manager = _require_manager()
         if evt.index is None:
-            return "", "", "object", "", "world", "", ""
+            return "", "", "object", "", "", "world", "", ""
         row_index = evt.index[0]
         df = manager.get_items_df()
         if df.empty or row_index >= len(df):
-            return "", "", "object", "", "world", "", ""
+            return "", "", "object", "", "", "world", "", ""
         item_id = df.iloc[row_index]["ITEM_ID"]
         details = manager.get_item_details(item_id)
         if not details:
-            return "", "", "object", "", "world", "", ""
+            return "", "", "object", "", "", "world", "", ""
         owner_kind = (details.get("OWNER_KIND") or "world").strip() or "world"
         owner_id = details.get("OWNER_ID") or ""
         state_json = details.get("STATE_JSON") or ""
+        file_path = details.get("FILE_PATH") or ""
         return (
             details["ITEM_ID"],
             details["NAME"],
             details["TYPE"],
             details["DESCRIPTION"],
+            file_path,
             owner_kind,
             owner_id,
             state_json,
         )
 
-    def update_item_ui(item_id, name, item_type, description, owner_kind, owner_id, state_json):
+    def update_item_ui(item_id, name, item_type, description, file_path, owner_kind, owner_id, state_json):
         if not item_id:
             return "Error: Select an item to update.", gr.update()
         manager = _require_manager()
@@ -308,6 +310,7 @@ def create_world_editor_ui():
             normalized_kind,
             owner_value,
             state_json or "",
+            file_path or "",
         )
         return result, manager.get_items_df()
 
@@ -595,6 +598,7 @@ def create_world_editor_ui():
                 item_name_text = gr.Textbox(label="Name")
                 item_type_text = gr.Textbox(label="Type", value="object")
                 item_desc_text = gr.Textbox(label="Description", lines=3)
+                item_file_path_text = gr.Textbox(label="File Path", placeholder="例: /path/to/file.txt（ドキュメント・画像タイプで使用）")
                 item_state_text = gr.Textbox(label="State JSON", lines=3, placeholder="任意。追加情報をJSONで記述。")
                 with gr.Row():
                     owner_kind_dropdown = gr.Dropdown(
@@ -620,6 +624,7 @@ def create_world_editor_ui():
                         item_name_text,
                         item_type_text,
                         item_desc_text,
+                        item_file_path_text,
                         owner_kind_dropdown,
                         owner_id_text,
                         item_state_text,
@@ -632,6 +637,7 @@ def create_world_editor_ui():
                         item_name_text,
                         item_type_text,
                         item_desc_text,
+                        item_file_path_text,
                         owner_kind_dropdown,
                         owner_id_text,
                         item_state_text,
