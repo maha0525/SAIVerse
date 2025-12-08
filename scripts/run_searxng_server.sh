@@ -88,18 +88,22 @@ if env_secret:
 elif not server.get("secret_key") or server.get("secret_key") == default_secret:
     server["secret_key"] = secrets.token_hex(32)
 
-# disable engines that frequently fail without extra deps or network access
+# disable engines that frequently fail without extra deps or network access.
+# 一部のエンジンは disabled フラグだけではロード時にエラーログを出すため、
+# 設定ファイルから丸ごと取り除く。
 problematic_engines = {"ahmia", "torch", "wikidata", "radiobrowser"}
 
 def normalize(name: str) -> str:
     return re.sub(r"[\s_-]+", "", name.lower())
 
+engines = []
 for engine in data.get("engines", []):
-    name = engine.get("name")
-    if not name:
-        continue
+    name = engine.get("name") or ""
     if normalize(name) in problematic_engines:
-        engine["disabled"] = True
+        continue
+    engines.append(engine)
+
+data["engines"] = engines
 
 path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
 PY
@@ -147,6 +151,7 @@ run_server() {
   export SEARXNG_SETTINGS_PATH="${SETTINGS_PATH}"
   export SEARXNG_PORT="${PORT}"
   export SEARXNG_BIND_ADDRESS="${BIND_ADDRESS}"
+  export FLASK_SKIP_DOTENV=1
   echo "[INFO] Starting SearXNG at http://${BIND_ADDRESS}:${PORT}" >&2
   exec "$(python_bin)" -m searx.webapp
 }
