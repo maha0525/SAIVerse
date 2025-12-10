@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from threading import RLock
 from typing import Any, Dict, List, Tuple
@@ -21,17 +22,27 @@ from sai_memory.memory.storage import (
 
 
 _REGISTERED_MODELS: set[tuple[str, str]] = set()
-_EMBEDDING_MODEL_CACHE: dict[tuple[str, str | None, int | None], TextEmbedding] = {}
+_EMBEDDING_MODEL_CACHE: dict[tuple[str, str | None, int | None, bool], TextEmbedding] = {}
 _EMBEDDING_MODEL_CACHE_LOCK = RLock()
+
+
+def _check_cuda_available() -> bool:
+    """Check if CUDA is available for ONNX Runtime."""
+    try:
+        import onnxruntime as ort
+        return "CUDAExecutionProvider" in ort.get_available_providers()
+    except Exception:
+        return False
 
 
 class Embedder:
     def __init__(
         self,
-        model: str = "BAAI/bge-small-en-v1.5",
+        model: str = "BAAI/bge-m3",
         *,
         local_model_path: str | None = None,
         model_dim: int | None = None,
+        cuda: bool | None = None,
     ):
         self.model_name = model
         logger = logging.getLogger(__name__)
@@ -39,7 +50,19 @@ class Embedder:
         if local_model_path:
             resolved_local_path = str(Path(local_model_path).expanduser().resolve())
 
-        cache_key = (self.model_name.lower(), resolved_local_path, model_dim)
+        # Auto-detect CUDA if not specified
+        # Note: Even if CUDAExecutionProvider is listed, it may fail at runtime
+        # if CUDA libraries (cuBLAS, cuDNN) are not properly installed.
+        # Set SAIMEMORY_EMBED_CUDA=1 to enable GPU, SAIMEMORY_EMBED_CUDA=0 to force CPU.
+        cuda_env = os.getenv("SAIMEMORY_EMBED_CUDA")
+        if cuda_env is not None:
+            use_cuda = cuda_env.strip().lower() in {"1", "true", "yes", "on"}
+        elif cuda is not None:
+            use_cuda = cuda
+        else:
+            use_cuda = _check_cuda_available()
+
+        cache_key = (self.model_name.lower(), resolved_local_path, model_dim, use_cuda)
 
         with _EMBEDDING_MODEL_CACHE_LOCK:
             cached = _EMBEDDING_MODEL_CACHE.get(cache_key)
@@ -61,11 +84,40 @@ class Embedder:
                         "Embedder using remote model '%s' without local override.",
                         self.model_name,
                     )
+                if use_cuda:
+                    kwargs["cuda"] = True
+                    logger.info("Embedder using CUDA for model '%s'.", self.model_name)
                 cached = TextEmbedding(model_name=self.model_name, **kwargs)
                 _EMBEDDING_MODEL_CACHE[cache_key] = cached
             self.model = cached
 
-    def embed(self, texts: List[str]) -> List[List[float]]:
+    def embed(self, texts: List[str], *, is_query: bool = False) -> List[List[float]]:
+        """
+        is_query=True の場合はクエリ用のプレフィックス/タスクを適用する
+        """
+        # モデルごとのプレフィックス処理
+        prefix = ""
+        
+        # E5系の場合
+        if "e5" in self.model_name.lower():
+            prefix = "query: " if is_query else "passage: "
+        
+        # Sarashina (v2) の場合 (sentence-transformers等で使う場合)
+        # ※Sarashinaは「指示文」を入れるとより良いが、シンプルには query: / passage: でも機能する
+        # elif "sarashina" in self.model_name.lower():
+        #     prefix = "クエリ: " if is_query else "文章: "
+
+        # テキストにプレフィックスを結合
+        if prefix:
+            texts = [prefix + t for t in texts]
+
+        # Jina v3の場合は fastembed の task パラメータを使う必要がある
+        # fastembed >= 0.3.0
+        # kwargs = {}
+        # if "jina-embeddings-v3" in self.model_name.lower():
+        #     kwargs["task"] = "retrieval.query" if is_query else "retrieval.passage"
+        # vectors = list(self.model.embed(texts, **kwargs))
+
         vectors = list(self.model.embed(texts))
         return [list(map(float, v)) for v in vectors]
 
@@ -225,7 +277,7 @@ def semantic_recall(
     exclude_message_ids: set[str] | None = None,
     required_tags: list[str] | None = None,
 ) -> List[Message]:
-    vectors: List[List[float]] = embedder.embed([query_text])
+    vectors: List[List[float]] = embedder.embed([query_text], is_query=True)
     q = np.array(vectors[0], dtype=np.float32)
     vector_dim = q.shape[0]
 
@@ -302,7 +354,7 @@ def semantic_recall_groups(
     - group_messages_sorted: [before..., seed, after...] ordered by created_at
     - score: cosine similarity for the seed
     """
-    vectors: List[List[float]] = embedder.embed([query_text])
+    vectors: List[List[float]] = embedder.embed([query_text], is_query=True)
     q = np.array(vectors[0], dtype=np.float32)
     vector_dim = q.shape[0]
 

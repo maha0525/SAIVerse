@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Tuple, Optional
+from typing import Optional
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -12,10 +12,10 @@ from tools.context import get_active_persona_id, get_active_manager
 from tools.defs import ToolSchema
 
 
-def list_available_playbooks(persona_id: Optional[str] = None, building_id: Optional[str] = None) -> Tuple[str, None, None]:
+def list_available_playbooks(persona_id: Optional[str] = None, building_id: Optional[str] = None) -> str:
     """List playbooks available for router selection.
 
-    Returns router_callable=True playbooks that the persona has access to based on scope.
+    Returns router_callable=True playbooks that the persona has access to based on scope as a JSON string.
     """
     # Get context if not provided
     if not persona_id:
@@ -72,7 +72,7 @@ def list_available_playbooks(persona_id: Optional[str] = None, building_id: Opti
         available.sort(key=lambda x: x["name"])
 
         result = json.dumps(available, ensure_ascii=False)
-        return result, None, None
+        return result
 
 
 def schema() -> ToolSchema:

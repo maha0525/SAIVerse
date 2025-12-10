@@ -1810,3 +1810,11 @@ class SAIVerseManager(
     def delete_playbook(self, playbook_id: int) -> str:
         """Delete a playbook from the world editor."""
         return self.admin.delete_playbook(playbook_id)
+
+    def import_playbook_from_file(self, file_path: str) -> str:
+        """Import a playbook JSON file from the world editor."""
+        return self.admin.import_playbook_from_file(file_path)
+
+    def reimport_all_playbooks(self, base_dir: Optional[str] = None) -> str:
+        """Re-import all playbooks under sea/playbooks or a custom directory."""
+        return self.admin.reimport_all_playbooks(base_dir)

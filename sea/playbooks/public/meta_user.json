@@ -34,8 +34,9 @@
     },
     {
       "id": "exec",
-      "type": "tool",
-      "action": "exec",
+      "type": "exec",
+      "playbook_source": "selected_playbook",
+      "args_source": "selected_args",
       "next": "finalize"
     },
     {

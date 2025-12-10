@@ -18,8 +18,9 @@
     {
       "id": "generate_query",
       "type": "llm",
-      "action": "memory_recallツールの引数を決定します。思い出したい内容を、web検索のクエリのように入力してください。",
-      "next": "recall",
+      "model_type": "lightweight",
+      "action": "memory_recallツールの引数を決定します。思い出したい内容を、web検索のクエリのようにスペース区切り等で入力してください。",
+      "next": "log",
       "response_schema": {
         "type": "object",
         "properties": {
@@ -33,18 +34,31 @@
       "output_key": "search_query"
     },
     {
+      "id": "log",
+      "type": "memorize",
+      "action": "{last}",
+      "role": "assistant",
+      "tags": [
+        "tool",
+        "memory_recall"
+      ],
+      "next": "recall"
+    },
+    {
       "id": "recall",
       "type": "tool",
       "action": "memory_recall",
       "args_input": {
-        "query": "search_query.query"
+        "query": "search_query.query",
+        "max_chars": 10000,
+        "topk": 5
       },
       "next": "record"
     },
     {
       "id": "record",
       "type": "memorize",
-      "action": "{last}",
+      "action": "<system>{last}</system>",
       "role": "user",
       "tags": [
         "tool",

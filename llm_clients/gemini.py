@@ -201,9 +201,10 @@ class GeminiClient(LLMClient):
         supports_images: bool = True,
     ) -> None:
         super().__init__(supports_images=supports_images)
-        self.free_client, self.paid_client, self.client = build_gemini_clients()
-        self.model = model
         cfg = config or {}
+        prefer_paid = cfg.get("prefer_paid", False)
+        self.free_client, self.paid_client, self.client = build_gemini_clients(prefer_paid=prefer_paid)
+        self.model = model
         include_thoughts = cfg.get("include_thoughts")
         if include_thoughts is None:
             include_thoughts = "2.5" in (model or "").lower()

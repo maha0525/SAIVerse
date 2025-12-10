@@ -481,7 +481,7 @@ class SAIMemoryAdapter:
                     )
                     payload = [c.strip() for c in chunks if c and c.strip()]
                     if payload:
-                        vectors = self.embedder.embed(payload)
+                        vectors = self.embedder.embed(payload, is_query=False)
                         replace_message_embeddings(self.conn, mid, vectors)
             LOGGER.debug(
                 "SAIMemory upserted message=%s thread=%s role=%s", mid, thread_id, role

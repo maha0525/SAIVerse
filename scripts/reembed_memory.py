@@ -13,6 +13,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from dotenv import load_dotenv
+
+load_dotenv(PROJECT_ROOT / ".env")
+
 from sai_memory.config import load_settings
 from sai_memory.memory.chunking import chunk_text
 from sai_memory.memory.recall import Embedder
@@ -56,6 +60,7 @@ def _reembed_persona(
     expected_dim: int,
     chunk_min: int,
     chunk_max: int,
+    force: bool = False,
 ) -> None:
     db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
     if not db_path.exists():
@@ -73,37 +78,51 @@ def _reembed_persona(
         return
 
     try:
-        bad_ids: set[str] = set()
-        highest_dim = 0
-        for mid, _, vec_json in conn.execute(
-            "SELECT message_id, chunk_index, vector FROM message_embeddings"
-        ):
-            try:
-                vec = json.loads(vec_json)
-            except json.JSONDecodeError:
-                bad_ids.add(mid)
-                continue
-            vec_len = len(vec)
-            if vec_len > highest_dim:
-                highest_dim = vec_len
-            if vec_len != expected_dim:
-                bad_ids.add(mid)
+        # Collect target message IDs
+        if force:
+            # Force mode: re-embed all messages
+            all_ids: set[str] = set()
+            for (mid,) in conn.execute("SELECT DISTINCT id FROM messages"):
+                all_ids.add(mid)
+            target_ids = all_ids
+            if not target_ids:
+                print(f"[ok] {persona_id}: no messages found.")
+                return
+            print(f"[force] {persona_id}: re-embedding all {len(target_ids)} messages...")
+        else:
+            # Normal mode: only re-embed mismatched dimensions
+            bad_ids: set[str] = set()
+            highest_dim = 0
+            for mid, _, vec_json in conn.execute(
+                "SELECT message_id, chunk_index, vector FROM message_embeddings"
+            ):
+                try:
+                    vec = json.loads(vec_json)
+                except json.JSONDecodeError:
+                    bad_ids.add(mid)
+                    continue
+                vec_len = len(vec)
+                if vec_len > highest_dim:
+                    highest_dim = vec_len
+                if vec_len != expected_dim:
+                    bad_ids.add(mid)
 
-        if bad_ids and highest_dim > expected_dim:
-            print(
-                f"[error] {persona_id}: existing embeddings up to dimension {highest_dim}, "
-                f"but the selected model provides dimension {expected_dim}. "
-                "Refusing to re-embed to a smaller dimension.",
-                file=sys.stderr,
-            )
-            return
+            if bad_ids and highest_dim > expected_dim:
+                print(
+                    f"[error] {persona_id}: existing embeddings up to dimension {highest_dim}, "
+                    f"but the selected model provides dimension {expected_dim}. "
+                    "Refusing to re-embed to a smaller dimension.",
+                    file=sys.stderr,
+                )
+                return
 
-        if not bad_ids:
-            print(f"[ok] {persona_id}: no mismatched embeddings detected.")
-            return
+            if not bad_ids:
+                print(f"[ok] {persona_id}: no mismatched embeddings detected.")
+                return
+            target_ids = bad_ids
 
         fixed = 0
-        for mid in bad_ids:
+        for mid in target_ids:
             msg = get_message(conn, mid)
             if msg is None or not msg.content:
                 continue
@@ -117,7 +136,7 @@ def _reembed_persona(
                 payload = [msg.content.strip()]
             if not payload:
                 continue
-            vectors = embedder.embed(payload)
+            vectors = embedder.embed(payload, is_query=False)
             replace_message_embeddings(conn, mid, vectors)
             fixed += 1
 
@@ -145,6 +164,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         help="Explicit embedding dimension override if the model metadata is unavailable.",
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force re-embed all messages regardless of dimension match. "
+        "Use this when changing embedding prefixes or model settings.",
+    )
+    parser.add_argument(
         "personas",
         nargs="+",
         help="Persona IDs whose memory.db should be scanned and re-embedded.",
@@ -165,6 +190,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             expected_dim=expected_dim,
             chunk_min=settings.chunk_min_chars,
             chunk_max=settings.chunk_max_chars,
+            force=args.force,
         )
     return 0
 

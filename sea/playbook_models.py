@@ -10,8 +10,13 @@ from typing_extensions import Literal
 class ConditionalNext(BaseModel):
     """Conditional edge routing based on state field value."""
     field: str = Field(description="State key to evaluate (e.g., 'router.playbook'). Supports nested keys with dot notation.")
+    operator: Optional[str] = Field(
+        default="eq",
+        description="Comparison operator: 'eq' (default, exact match), 'gte' (>=), 'gt' (>), 'lte' (<=), 'lt' (<), 'ne' (!=)"
+    )
     cases: Dict[str, Optional[str]] = Field(
-        description="Mapping of values to next node IDs. Use 'default' key for fallback. Value can be null to end execution."
+        description="Mapping of values to next node IDs. Use 'default' key for fallback. Value can be null to end execution. "
+                    "For numeric operators (gte/gt/lte/lt), use numeric string keys like '5' and they will be compared numerically."
     )
 
 
@@ -24,6 +29,8 @@ class NodeType(str, Enum):
     SAY = "say"
     PASS = "pass"
     SUBPLAY = "subplay"
+    SET = "set"
+    EXEC = "exec"
 
 
 class LLMNodeDef(BaseModel):
@@ -47,6 +54,12 @@ class LLMNodeDef(BaseModel):
         default=None,
         description="Key name to store structured output for later nodes. Defaults to node id."
     )
+    output_mapping: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Map structured output fields to state variables. "
+                    "Example: {'router.playbook': 'selected_playbook', 'router.args': 'selected_args'}. "
+                    "Keys are dot-notated paths in the structured output, values are target state variable names."
+    )
     available_tools: Optional[List[str]] = Field(
         default=None,
         description="List of tool names that the LLM can call. If specified, enables tool calling for this node."
@@ -63,9 +76,9 @@ class ToolNodeDef(BaseModel):
     id: str
     type: Literal[NodeType.TOOL]
     action: str = Field(description="Tool name registered in tools registry.")
-    args_input: Optional[Dict[str, str]] = Field(
+    args_input: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="Map of argument names to state keys. E.g. {'query': 'search_query.query'} passes state['search_query.query'] as 'query' arg."
+        description="Map of argument names to state keys or literal values. Strings are treated as state keys (e.g. {'query': 'search_query.query'}). Non-string values (int/float/bool) are passed as-is to the tool."
     )
     output_key: Optional[str] = Field(
         default=None,
@@ -168,7 +181,45 @@ class SubPlayNodeDef(BaseModel):
         description="Conditional routing based on state field. If specified, overrides 'next'."
     )
 
-NodeDef = Union[LLMNodeDef, ToolNodeDef, SpeakNodeDef, ThinkNodeDef, MemorizeNodeDef, SayNodeDef, PassNodeDef, SubPlayNodeDef]
+
+class SetNodeDef(BaseModel):
+    """Node that sets or modifies state variables."""
+    id: str
+    type: Literal[NodeType.SET]
+    assignments: Dict[str, Any] = Field(
+        description="Mapping of state keys to values. Values can be: "
+                    "- Literal values (number, string, bool): {\"count\": 0, \"name\": \"test\"} "
+                    "- Template strings with {var} placeholders: {\"greeting\": \"Hello {name}\"} "
+                    "- Arithmetic expressions: {\"count\": \"{count} + 1\"}, {\"total\": \"{a} * {b}\"}"
+    )
+    next: Optional[str] = None
+    conditional_next: Optional[ConditionalNext] = Field(
+        default=None,
+        description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
+
+
+class ExecNodeDef(BaseModel):
+    """Node that executes a dynamically selected sub-playbook."""
+    id: str
+    type: Literal[NodeType.EXEC]
+    playbook_source: str = Field(
+        default="selected_playbook",
+        description="State variable name containing the playbook name to execute."
+    )
+    args_source: Optional[str] = Field(
+        default="selected_args",
+        description="State variable name containing args dict for the sub-playbook. "
+                    "The 'input' or 'query' key from this dict is passed as sub_input."
+    )
+    next: Optional[str] = None
+    conditional_next: Optional[ConditionalNext] = Field(
+        default=None,
+        description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
+
+
+NodeDef = Union[LLMNodeDef, ToolNodeDef, SpeakNodeDef, ThinkNodeDef, MemorizeNodeDef, SayNodeDef, PassNodeDef, SubPlayNodeDef, SetNodeDef, ExecNodeDef]
 
 class InputParam(BaseModel):
     name: str

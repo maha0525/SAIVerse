@@ -118,9 +118,45 @@ def _backup_once(snapshot_dir: Path, repo_dir: Path, rdiff_exec: str) -> tuple[i
 
 
 
+def _is_process_alive(pid: int) -> bool:
+    """Check if a process with the given PID is still running."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _check_stale_lock() -> bool:
+    """Check if the lock file is stale (holder process is dead). Returns True if stale and cleaned up."""
+    if not GLOBAL_LOCK_PATH.exists():
+        return False
+    try:
+        content = GLOBAL_LOCK_PATH.read_text().strip()
+        # Parse pid=XXXXX from lock file
+        for part in content.split():
+            if part.startswith("pid="):
+                pid = int(part.split("=")[1])
+                if not _is_process_alive(pid):
+                    LOGGER.warning(
+                        "Removing stale backup lock (holder pid=%d is dead): %s",
+                        pid,
+                        GLOBAL_LOCK_PATH,
+                    )
+                    GLOBAL_LOCK_PATH.unlink(missing_ok=True)
+                    return True
+                break
+    except Exception as exc:
+        LOGGER.debug("Failed to check stale lock: %s", exc)
+    return False
+
+
 @contextlib.contextmanager
 def _global_backup_lock(timeout: int = LOCK_WAIT_SEC):
     """Best-effort global lock to avoid concurrent rdiff-backup runs."""
+
+    # Clean up stale lock from crashed processes
+    _check_stale_lock()
 
     GLOBAL_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(GLOBAL_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o600)
@@ -135,6 +171,9 @@ def _global_backup_lock(timeout: int = LOCK_WAIT_SEC):
                 os.write(fd, f"pid={os.getpid()} ts={datetime.now(timezone.utc).isoformat()}".encode())
                 break
             except BlockingIOError:
+                # Check for stale lock on each retry
+                if _check_stale_lock():
+                    continue
                 if time.monotonic() - start > timeout:
                     raise BackupError("Another SAIMemory backup appears to be running; timed out waiting for lock.")
                 time.sleep(0.25)

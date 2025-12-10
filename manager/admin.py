@@ -25,7 +25,8 @@ from manager.blueprints import BlueprintMixin
 from manager.history import HistoryMixin
 from manager.persona import PersonaMixin
 from manager.state import CoreState
-
+from scripts.import_playbook import infer_scope_from_path
+from tools.defs.save_playbook import save_playbook
 
 class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
     """Administrative operations for world editing and CRUD."""
@@ -1131,6 +1132,84 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             return f"Error: Failed to delete playbook. {exc}"
         finally:
             db.close()
+
+    def import_playbook_from_file(self, file_path: str) -> str:
+        """Import a playbook JSON file and save/update it in the database."""
+        try:
+            path = Path(file_path)
+            if not path.exists():
+                return f"Error: File not found: {file_path}"
+            if path.is_dir():
+                return "Error: Please select a JSON file, not a directory."
+
+            data = json.loads(path.read_text(encoding="utf-8"))
+            scope, persona_id, building_id = infer_scope_from_path(path)
+            name = data.get("name")
+            if not name:
+                return f"Error: Playbook name is missing in {path.name}."
+            description = data.get("description", "")
+
+            save_playbook(
+                name=name,
+                description=description,
+                scope=scope,
+                created_by_persona_id=persona_id,
+                building_id=building_id,
+                playbook_json=json.dumps(data, ensure_ascii=False),
+                router_callable=None,
+                user_selectable=None,
+            )
+            return f"Success: Imported playbook '{name}' (scope={scope})."
+        except Exception as exc:
+            logging.error("Failed to import playbook from %s: %s", file_path, exc, exc_info=True)
+            return f"Error: Failed to import playbook. {exc}"
+
+    def reimport_all_playbooks(self, base_dir: Optional[str] = None) -> str:
+        """Re-import all playbooks under sea/playbooks (or a custom directory)."""
+        try:
+            root = Path(base_dir) if base_dir else Path(__file__).resolve().parents[1] / "sea" / "playbooks"
+            if not root.is_absolute():
+                root = Path(__file__).resolve().parents[1] / root
+            if not root.exists():
+                return f"Error: Directory not found: {root}"
+
+            json_files = sorted(p for p in root.rglob("*.json") if p.is_file())
+            if not json_files:
+                return f"Warning: No JSON files found under {root}."
+
+            imported = 0
+            failed = 0
+
+            for json_path in json_files:
+                try:
+                    data = json.loads(json_path.read_text(encoding="utf-8"))
+                    name = data.get("name")
+                    if not name:
+                        logging.warning("Skipping %s: missing 'name' field", json_path)
+                        failed += 1
+                        continue
+
+                    scope, persona_id, building_id = infer_scope_from_path(json_path)
+                    save_playbook(
+                        name=name,
+                        description=data.get("description", ""),
+                        scope=scope,
+                        created_by_persona_id=persona_id,
+                        building_id=building_id,
+                        playbook_json=json.dumps(data, ensure_ascii=False),
+                        router_callable=None,
+                        user_selectable=None,
+                    )
+                    imported += 1
+                except Exception as inner_exc:
+                    failed += 1
+                    logging.error("Failed to import %s: %s", json_path, inner_exc, exc_info=True)
+
+            total = len(json_files)
+            return f"Reimport finished: imported={imported}, failed={failed}, scanned={total} under {root}."
+        except Exception as exc:
+            logging.error("Failed to reimport playbooks: %s", exc, exc_info=True)
+            return f"Error: Failed to reimport playbooks. {exc}"
 
     # --- Helpers ---
 

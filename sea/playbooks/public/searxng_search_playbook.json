@@ -18,8 +18,8 @@
     {
       "id": "build_query",
       "type": "llm",
-      "action": "SearXNG検索に渡すクエリとオプションを決定してください。検索したい対象を短い検索クエリに要約し、必要なら件数や言語を指定すること。",
-      "next": "search",
+      "action": "<system>SearXNG検索に渡すクエリとオプションを決定してください。検索したい対象を短い検索クエリに要約し、必要なら件数や言語を指定すること。</system>",
+      "next": "log",
       "response_schema": {
         "type": "object",
         "properties": {
@@ -47,6 +47,17 @@
         "required": ["query"]
       },
       "output_key": "search_args"
+    },
+    {
+      "id": "log",
+      "type": "memorize",
+      "action": "{last}",
+      "role": "assistant",
+      "tags": [
+        "tool",
+        "searxng_search"
+      ],
+      "next": "search"
     },
     {
       "id": "search",

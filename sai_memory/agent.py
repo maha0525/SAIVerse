@@ -111,7 +111,7 @@ class Agent:
                     )
                     payload = [c.strip() for c in chunks if c and c.strip()]
                     if payload:
-                        vectors = self.embedder.embed(payload)
+                        vectors = self.embedder.embed(payload, is_query=False)
                         replace_message_embeddings(self.db, mid, vectors)
             except Exception:
                 pass

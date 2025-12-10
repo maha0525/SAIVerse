@@ -579,7 +579,7 @@ def _update_message(manager, persona_id: str, message_state: Dict[str, Any], new
                 )
                 payload = [chunk.strip() for chunk in chunks if chunk and chunk.strip()]
                 if payload:
-                    vectors = adapter.embedder.embed(payload)
+                    vectors = adapter.embedder.embed(payload, is_query=False)
                     replace_message_embeddings(adapter.conn, message_id, vectors)
             adapter.conn.commit()
             note = "メッセージを更新したよ。"
@@ -1116,3 +1116,75 @@ def create_memory_settings_ui(manager) -> None:
         outputs=load_outputs,
         show_progress=True,
     )
+
+    # Memory Recall テストセクション
+    gr.Markdown("#### Memory Recall テスト")
+    with gr.Accordion("memory_recall ツールを実行してみる", open=False):
+        gr.Markdown(
+            "memory_recall ツールと同じロジックでペルソナの長期記憶を検索できるよ。"
+            "結果を確認してデバッグに使ってね。"
+        )
+        recall_query_box = gr.Textbox(
+            label="検索クエリ",
+            placeholder="検索したい内容を入力してね",
+            interactive=bool(choices),
+        )
+        with gr.Row():
+            recall_topk_slider = gr.Slider(
+                minimum=1,
+                maximum=20,
+                value=4,
+                step=1,
+                label="topk (取得するシード数)",
+                interactive=bool(choices),
+            )
+            recall_max_chars_slider = gr.Slider(
+                minimum=100,
+                maximum=10000,
+                value=1200,
+                step=100,
+                label="max_chars (出力文字数上限)",
+                interactive=bool(choices),
+            )
+        recall_execute_btn = gr.Button("Memory Recall を実行", variant="primary", interactive=bool(choices))
+        recall_result_box = gr.Textbox(
+            label="実行結果",
+            lines=15,
+            interactive=False,
+            show_copy_button=True,
+        )
+
+        def _execute_memory_recall(persona_id: str, query: str, topk: int, max_chars: int) -> str:
+            if not persona_id:
+                return "ペルソナを先に選んでね。"
+            if not query or not query.strip():
+                return "検索クエリを入力してね。"
+
+            adapter, release_adapter = _acquire_adapter(manager, persona_id)
+            if not adapter or not adapter.is_ready():
+                return "SAIMemoryが利用できなかったよ。"
+
+            try:
+                result = adapter.recall_snippet(
+                    None,
+                    query_text=query.strip(),
+                    max_chars=int(max_chars),
+                    topk=int(topk),
+                )
+                return result or "(no relevant memory)"
+            except Exception as exc:
+                LOGGER.warning("Memory recall failed for %s: %s", persona_id, exc, exc_info=True)
+                return f"エラーが発生したよ: {exc}"
+            finally:
+                if release_adapter and adapter:
+                    try:
+                        adapter.close()
+                    except Exception:
+                        LOGGER.debug("Failed to close temporary adapter after recall", exc_info=True)
+
+        recall_execute_btn.click(
+            fn=_execute_memory_recall,
+            inputs=[persona_id_state, recall_query_box, recall_topk_slider, recall_max_chars_slider],
+            outputs=recall_result_box,
+            show_progress=True,
+        )

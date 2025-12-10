@@ -25,6 +25,7 @@ def compile_playbook(
     memorize_node_factory: Optional[Callable[[Any], Callable[[dict], Any]]] = None,
     exec_node_factory: Optional[Callable[[Any], Callable[[dict], Any]]] = None,
     subplay_node_factory: Optional[Callable[[Any], Callable[[dict], Any]]] = None,
+    set_node_factory: Optional[Callable[[Any], Callable[[dict], Any]]] = None,
 ) -> Optional[Callable[[dict], Any]]:
     """Compile a PlaybookSchema into a LangGraph runnable coroutine.
 
@@ -46,8 +47,11 @@ def compile_playbook(
             logger.debug("[langgraph] Adding node '%s' (type=%s) to playbook '%s'",
                         node_def.id, node_def.type, playbook.name)
 
-            if node_def.id == "exec" and exec_node_factory is not None:
+            if node_def.type == NodeType.EXEC and exec_node_factory is not None:
                 graph.add_node(node_def.id, exec_node_factory(node_def))
+            elif node_def.type == NodeType.EXEC and exec_node_factory is None:
+                logger.error("[langgraph] Cannot add EXEC node '%s': exec_node_factory is None", node_def.id)
+                return None
             elif node_def.type == NodeType.LLM:
                 graph.add_node(node_def.id, llm_node_factory(node_def))
             elif node_def.type == NodeType.TOOL:
@@ -70,6 +74,11 @@ def compile_playbook(
                 graph.add_node(node_def.id, subplay_node_factory(node_def))
             elif node_def.type == NodeType.SUBPLAY and subplay_node_factory is None:
                 logger.error("[langgraph] Cannot add SUBPLAY node '%s': subplay_node_factory is None", node_def.id)
+                return None
+            elif node_def.type == NodeType.SET and set_node_factory is not None:
+                graph.add_node(node_def.id, set_node_factory(node_def))
+            elif node_def.type == NodeType.SET and set_node_factory is None:
+                logger.error("[langgraph] Cannot add SET node '%s': set_node_factory is None", node_def.id)
                 return None
             elif node_def.type == NodeType.PASS:
                 graph.add_node(node_def.id, lambda state: state)
@@ -108,12 +117,55 @@ def compile_playbook(
                                 value = None
                                 break
 
-                        # Convert to string for matching
+                        # Get operator (default: eq for exact match)
+                        operator = getattr(cond_next, "operator", "eq") or "eq"
+
+                        logger.debug("[langgraph] conditional_next: field=%s value=%s operator=%s cases=%s",
+                                    cond_next.field, value, operator, list(cond_next.cases.keys()))
+
+                        # Handle numeric comparison operators
+                        if operator in ("gte", "gt", "lte", "lt", "ne"):
+                            try:
+                                num_value = float(value) if value is not None else 0
+                            except (ValueError, TypeError):
+                                num_value = 0
+
+                            # Find matching case by numeric comparison
+                            # Cases are checked in order, first match wins
+                            for case_key in cond_next.cases.keys():
+                                if case_key == "default":
+                                    continue
+                                try:
+                                    case_num = float(case_key)
+                                    matched = False
+                                    if operator == "gte" and num_value >= case_num:
+                                        matched = True
+                                    elif operator == "gt" and num_value > case_num:
+                                        matched = True
+                                    elif operator == "lte" and num_value <= case_num:
+                                        matched = True
+                                    elif operator == "lt" and num_value < case_num:
+                                        matched = True
+                                    elif operator == "ne" and num_value != case_num:
+                                        matched = True
+
+                                    if matched:
+                                        logger.debug("[langgraph] conditional_next: numeric match %s %s %s -> %s",
+                                                    num_value, operator, case_num, case_key)
+                                        return case_key
+                                except (ValueError, TypeError):
+                                    continue
+
+                            # No numeric match, try default
+                            if "default" in cond_next.cases:
+                                logger.debug("[langgraph] conditional_next: no numeric match, using default")
+                                return "default"
+                            logger.debug("[langgraph] conditional_next: no match, ending")
+                            return "__end__"
+
+                        # Default: exact string match (eq operator)
                         value_str = str(value) if value is not None else ""
 
-                        logger.debug("[langgraph] conditional_next: field=%s value=%s cases=%s", cond_next.field, value_str, list(cond_next.cases.keys()))
-
-                        # Return the matched case value (not the target node)
                         if value_str in cond_next.cases:
                             result = value_str
                         elif "default" in cond_next.cases:
