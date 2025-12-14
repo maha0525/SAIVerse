@@ -296,21 +296,63 @@ def main():
     )
 
     # --- アプリケーション終了時のクリーンアップ ---
+    shutdown_called = False
+
     def shutdown_everything():
+        nonlocal shutdown_called
+        if shutdown_called:
+            return
+        shutdown_called = True
         shutdown_subprocess(api_server_process, "API Server")
         if manager:
             manager.shutdown()
 
+    def handle_sigterm(signum, frame):
+        """SIGTERMを受け取ったときにクリーンアップを実行してから終了"""
+        logging.info("Received SIGTERM, initiating graceful shutdown...")
+        shutdown_everything()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
     atexit.register(shutdown_everything)
 
     # --- FastAPIとGradioの統合 ---
-    # 3. Gradio UIを作成
+    # --- FastAPIとGradioの統合 ---
+    
+    # 1. FastAPIの作成
+    from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
+    import uvicorn
+    
+    app = FastAPI()
+
+    # CORS settings (Allow frontend access)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Development only: allow all
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # 2. Gradio UIを作成
+    # NOTE: Mount at /gradio to allow new UI at root or /api
+    import gradio as gr
     demo = build_app(args.city_name, NOTE_CSS, HEAD_VIEWPORT)
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=manager.ui_port,
-        debug=False,
-        share=False,
+    app = gr.mount_gradio_app(app, demo, path="/gradio")
+
+    # 3. Mount API Routes
+    from api.main import api_router
+    app.include_router(api_router, prefix="/api")
+
+    logging.info(f"Starting SAIVerse on http://0.0.0.0:{manager.ui_port}")
+    logging.info(f"Old UI available at http://0.0.0.0:{manager.ui_port}/gradio")
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=manager.ui_port,
+        log_level="info"
     )
 
 

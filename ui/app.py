@@ -40,6 +40,7 @@ from ui.chat import (
 )
 from ui.world_editor import create_world_editor_ui
 from ui.task_manager import create_task_manager_ui
+from ui.memopedia import create_memopedia_ui
 from ui.item_modal import ITEM_MODAL_CSS, ITEM_MODAL_JS
 
 
@@ -79,6 +80,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                         <div class="saiverse-nav-item" data-tab-label="DB Manager">DB Manager</div>
                         <div class="saiverse-nav-item" data-tab-label="タスクマネージャー">タスクマネージャー</div>
                         <div class="saiverse-nav-item" data-tab-label="ペルソナ設定">ペルソナ設定</div>
+                        <div class="saiverse-nav-item" data-tab-label="Memopedia">Memopedia</div>
                         <div class="saiverse-nav-item" data-tab-label="ワールドエディタ">ワールドエディタ</div>
                         <div class="saiverse-nav-item" data-tab-label="環境設定">⚙️ 環境設定</div>
                     </div>
@@ -581,6 +583,8 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
         with gr.Column(elem_id="section-persona-settings", elem_classes=['saiverse-section', 'saiverse-hidden']):
             create_persona_settings_ui(manager)
 
+        with gr.Column(elem_id="section-memopedia", elem_classes=['saiverse-section', 'saiverse-hidden']):
+            create_memopedia_ui(manager)
 
         with gr.Column(elem_id="section-world-editor", elem_classes=['saiverse-section', 'saiverse-hidden']):
             create_world_editor_ui() # This function now contains all editor sections
@@ -599,6 +603,7 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                 "DB Manager": "#section-db-manager",
                 "タスクマネージャー": "#section-task-manager",
                 "ペルソナ設定": "#section-persona-settings",
+                "Memopedia": "#section-memopedia",
                 "ワールドエディタ": "#section-world-editor",
                 "環境設定": "#section-env-settings"
             };

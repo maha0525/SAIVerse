@@ -117,6 +117,53 @@ def supports_structured_output(model: str) -> bool:
     return config.get("supports_structured_output", True)
 
 
+def find_model_config(query: str) -> tuple[str, Dict]:
+    """Find model config by model ID or filename.
+
+    Searches in order:
+    1. Exact match on model ID
+    2. Exact match on filename (without .json)
+    3. Partial match on model ID (e.g., "qwen3-coder" matches "qwen/qwen3-coder-480b...")
+
+    Args:
+        query: Model ID, filename, or partial match
+
+    Returns:
+        Tuple of (model_id, config) or ("", {}) if not found
+    """
+    # 1. Exact match on model ID
+    if query in MODEL_CONFIGS:
+        return query, MODEL_CONFIGS[query]
+
+    # 2. Build filename -> model_id mapping
+    filename_to_model: Dict[str, str] = {}
+    if MODELS_DIR.exists() and MODELS_DIR.is_dir():
+        for config_file in MODELS_DIR.glob("*.json"):
+            filename = config_file.stem  # filename without .json
+            try:
+                config_data = json.loads(config_file.read_text(encoding="utf-8"))
+                model_id = config_data.get("model", "")
+                if model_id:
+                    filename_to_model[filename] = model_id
+            except Exception:
+                pass
+
+    # Check exact filename match
+    if query in filename_to_model:
+        model_id = filename_to_model[query]
+        return model_id, MODEL_CONFIGS.get(model_id, {})
+
+    # 3. Partial match on model ID (query is suffix or contains)
+    for model_id, config in MODEL_CONFIGS.items():
+        # Check if query matches the part after "/" (e.g., "qwen3-coder-480b" matches "qwen/qwen3-coder-480b")
+        if "/" in model_id:
+            suffix = model_id.split("/", 1)[1]
+            if query == suffix or suffix.startswith(query):
+                return model_id, config
+
+    return "", {}
+
+
 def get_agentic_model() -> str:
     """Get the default model for agentic tasks requiring structured output.
 

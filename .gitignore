@@ -45,3 +45,14 @@ scripts/.searxng-venv/
 scripts/searxng_settings.yml
 scripts/limiter.toml
 *.patch
+
+# Frontend (Next.js)
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.DS_Store
+frontend/*.log
+
+# Root dependencies
+node_modules/

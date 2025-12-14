@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
 import contextlib
-import fcntl
 import logging
 import os
 import shutil
@@ -157,6 +161,12 @@ def _global_backup_lock(timeout: int = LOCK_WAIT_SEC):
 
     # Clean up stale lock from crashed processes
     _check_stale_lock()
+    
+    if fcntl is None:
+        # Windows or other non-Unix systems: skip file locking
+        LOGGER.warning("File locking (fcntl) not available, skipping backup lock.")
+        yield
+        return
 
     GLOBAL_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(GLOBAL_LOCK_PATH, os.O_CREAT | os.O_RDWR, 0o600)
