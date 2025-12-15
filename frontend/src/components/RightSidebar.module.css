@@ -1,0 +1,242 @@
+.sidebar {
+    width: 350px;
+    background: #111827;
+    border-left: 1px solid #374151;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    padding: 1rem;
+    gap: 1.5rem;
+    height: 100%;
+    transition: transform 0.3s ease, margin-right 0.3s ease;
+}
+
+/* Desktop: If closed, hide it? Or assume page.tsx unmounts it? 
+   Previous logic relied on parent flex container?
+   Let's assume parent handles layout for desktop, but for mobile we need translation.
+   Actually, if isOpen=false on desktop, we might want to hide it too. 
+   Let's add a .closed class if needed, or rely on page.tsx conditional rendering.
+   BUT, for mobile swipe transition, we need it MOUNTED but TRANSLATED.
+*/
+
+.section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+}
+
+.heading {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #9ca3af;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin: 0;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #374151;
+}
+
+.content {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.buildingName {
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: #f3f4f6;
+}
+
+.description {
+    font-size: 0.9rem;
+    color: #9ca3af;
+    line-height: 1.5;
+}
+
+.occupantList {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.occupant {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    padding: 0.5rem;
+    background: #1f2937;
+    border-radius: 6px;
+    border: 1px solid #374151;
+    transition: all 0.2s;
+}
+
+.clickable {
+    cursor: pointer;
+}
+
+.clickable:hover {
+    background: #374151;
+    border-color: #60a5fa;
+    transform: translateY(-1px);
+}
+
+.occupantAvatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 4px;
+    overflow: hidden;
+    background: #000;
+}
+
+.occupantAvatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.occupantName {
+    font-weight: 500;
+    color: #e5e7eb;
+    font-size: 0.95rem;
+}
+
+.empty {
+    font-size: 0.9rem;
+    color: #6b7280;
+    font-style: italic;
+}
+
+/* Item Grid */
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 0.8rem;
+}
+
+.card {
+    background: #1f2937;
+    border: 1px solid #374151;
+    border-radius: 8px;
+    padding: 0.8rem;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    position: relative;
+    overflow: hidden;
+}
+
+.card:hover {
+    background: #374151;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+    border-color: #60a5fa;
+}
+
+.cardIcon {
+    font-size: 1.5rem;
+}
+
+.cardInfo {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.cardName {
+    font-weight: 600;
+    color: #e5e7eb;
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.cardDesc {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    line-height: 1.3;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.card.picture {
+    border-left: 3px solid #f472b6;
+}
+
+.card.document {
+    border-left: 3px solid #60a5fa;
+}
+
+/* Mobile Overlay Styles */
+.overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 40;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+}
+
+.overlay.visible {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+@media (min-width: 769px) {
+    .overlay {
+        display: none !important;
+    }
+}
+
+/* Mobile Responsive */
+@media (max-width: 768px) {
+    .sidebar {
+        position: fixed;
+        right: 0;
+        top: 0;
+        bottom: 0;
+        width: 85vw;
+        max-width: 350px;
+        z-index: 50;
+        box-shadow: -4px 0 24px rgba(0, 0, 0, 0.5);
+        border-left: 1px solid #374151;
+        transform: translateX(100%);
+        /* Hidden by default */
+    }
+
+    .sidebar.open {
+        transform: translateX(0);
+    }
+}
+
+/* Desktop Logic for Open/Close handling if needed by classes */
+@media (min-width: 769px) {
+    .sidebar {
+        /* If !isOpen, what happens on desktop? 
+           Usually React unmounts it or sets display:none. 
+           But if we now render it always to support transition, we need to handle it.
+        */
+    }
+
+    .sidebar:not(.open) {
+        display: none;
+        /* Or we can use negative margin? 
+           Let's stick to display: none for desktop toggle for now if that's what page logic implies. 
+           But wait, isOpen is passed prop.
+           If simple display:none breaks transition, that's fine for desktop toggle.
+        */
+        display: none;
+    }
+}

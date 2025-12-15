@@ -1,0 +1,201 @@
+"use client";
+
+import { useEffect, useState, useRef } from 'react';
+import styles from './Sidebar.module.css';
+import { Settings } from 'lucide-react';
+import GlobalSettingsModal from './GlobalSettingsModal';
+import UserProfileModal from './UserProfileModal';
+
+interface UserStatus {
+    is_online: boolean;
+    current_building_id: string | null;
+    avatar: string | null;
+    display_name: string;
+}
+
+interface Building {
+    id: string;
+    name: string;
+}
+
+interface SidebarProps {
+    onMove?: () => void;
+    isOpen: boolean;
+    onOpen: () => void;
+    onClose: () => void;
+}
+
+export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProps) {
+    const [status, setStatus] = useState<UserStatus | null>(null);
+    const [buildings, setBuildings] = useState<Building[]>([]);
+    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+    const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+
+    // Swipe Logic for Control
+    const startX = useRef<number | null>(null);
+
+    const refreshData = async () => {
+        try {
+            const [statusRes, buildingsRes] = await Promise.all([
+                fetch('/api/user/status'),
+                fetch('/api/user/buildings')
+            ]);
+            if (statusRes.ok) setStatus(await statusRes.json());
+            if (buildingsRes.ok) {
+                const data = await buildingsRes.json();
+                setBuildings(data.buildings || []);
+            }
+        } catch (err) {
+            console.error("Sidebar fetch error", err);
+        }
+    };
+
+    useEffect(() => {
+        refreshData();
+
+        // Global Touch Handlers for swipe-to-open
+        const handleTouchStart = (e: TouchEvent) => {
+            startX.current = e.touches[0].clientX;
+        };
+
+        const handleTouchMove = (e: TouchEvent) => {
+            if (startX.current === null) return;
+            const currentX = e.touches[0].clientX;
+            const diff = currentX - startX.current;
+
+            // If swiped right > 100px, open
+            if (diff > 100) {
+                onOpen();
+                startX.current = null; // Reset
+            }
+        };
+
+        window.addEventListener('touchstart', handleTouchStart);
+        window.addEventListener('touchmove', handleTouchMove);
+
+        return () => {
+            window.removeEventListener('touchstart', handleTouchStart);
+            window.removeEventListener('touchmove', handleTouchMove);
+        };
+    }, [onOpen]); // Depend on onOpen
+
+    const handleMove = async (buildingId: string) => {
+        if (!status || status.current_building_id === buildingId) return;
+
+        try {
+            const res = await fetch('/api/user/move', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ target_building_id: buildingId })
+            });
+            if (res.ok) {
+                const data = await res.json();
+                if (data.success) {
+                    refreshData();
+                    if (onMove) onMove();
+                    onClose(); // Close sidebar on nav
+                }
+            }
+        } catch (err) {
+            console.error("Move error", err);
+        }
+    };
+
+    // Handler for closing swipe (on the sidebar itself)
+    const handleSidebarTouchStart = (e: React.TouchEvent) => {
+        e.stopPropagation();
+        startX.current = e.touches[0].clientX;
+    };
+
+    const handleSidebarTouchMove = (e: React.TouchEvent) => {
+        e.stopPropagation();
+        if (startX.current === null) return;
+        const currentX = e.touches[0].clientX;
+        const diff = currentX - startX.current;
+        // Swipe Left <- (-50px)
+        if (diff < -50) {
+            onClose();
+            startX.current = null;
+        }
+    };
+
+    return (
+        <>
+            {/* Mobile Overlay */}
+            <div
+                className={`${styles.overlay} ${isOpen ? styles.visible : ''}`}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    onClose();
+                }}
+                onTouchStart={handleSidebarTouchStart} // Allow swipe-to-close on overlay
+                onTouchMove={handleSidebarTouchMove}
+            />
+
+            <aside
+                className={`${styles.sidebar} ${isOpen ? styles.open : ''}`}
+                onTouchStart={handleSidebarTouchStart}
+                onTouchMove={handleSidebarTouchMove}
+            >
+                {/* Profile Section */}
+                <div
+                    className={styles.profileSection}
+                    onClick={() => setIsProfileModalOpen(true)}
+                    style={{ cursor: 'pointer' }}
+                >
+                    <img
+                        src={status?.avatar || "/api/static/icons/user.png"}
+                        alt="User"
+                        className={styles.avatar}
+                        onError={(e) => { e.currentTarget.src = "https://placehold.co/48x48?text=U"; }}
+                    />
+                    <div className={styles.userInfo}>
+                        <span className={styles.userName}>{status?.display_name || "Guest"}</span>
+                        <div className={`${styles.userStatus} ${status?.is_online ? '' : styles.offline}`}>
+                            <span style={{ fontSize: '1.2em' }}>•</span>
+                            {status?.is_online ? "Online" : "Offline"}
+                        </div>
+                    </div>
+                </div>
+
+                {/* Navigation */}
+                <div className={styles.sectionTitle}>Locations</div>
+                <div className={styles.buildingList}>
+                    {buildings.map(b => (
+                        <div
+                            key={b.id}
+                            className={`${styles.buildingItem} ${status?.current_building_id === b.id ? styles.active : ''}`}
+                            onClick={() => handleMove(b.id)}
+                        >
+                            <span>{b.name}</span>
+                            {status?.current_building_id === b.id && <span>📍</span>}
+                        </div>
+                    ))}
+                </div>
+
+                {/* Global Settings Trigger */}
+                <div className={styles.settingsFooter}>
+                    <button
+                        onClick={() => setIsSettingsOpen(true)}
+                        className={styles.settingsBtn}
+                    >
+                        <Settings size={18} /> Settings
+                    </button>
+                </div>
+
+                <GlobalSettingsModal
+                    isOpen={isSettingsOpen}
+                    onClose={() => setIsSettingsOpen(false)}
+                />
+
+                <UserProfileModal
+                    isOpen={isProfileModalOpen}
+                    onClose={() => setIsProfileModalOpen(false)}
+                    currentName={status?.display_name || ""}
+                    currentAvatar={status?.avatar}
+                    onSaveSuccess={refreshData}
+                />
+            </aside>
+        </>
+    );
+}

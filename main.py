@@ -335,6 +335,11 @@ def main():
         allow_headers=["*"],
     )
 
+    from fastapi.staticfiles import StaticFiles
+    # Mount assets directory for static files (e.g. default avatars)
+    # Access via /api/static/icons/user.png
+    app.mount("/api/static", StaticFiles(directory="assets"), name="static")
+
     # 2. Gradio UIを作成
     # NOTE: Mount at /gradio to allow new UI at root or /api
     import gradio as gr

@@ -6,3 +6,5 @@ def get_manager(request: Request):
     if not manager:
         raise RuntimeError("Manager not initialized")
     return manager
+
+from database.session import get_db

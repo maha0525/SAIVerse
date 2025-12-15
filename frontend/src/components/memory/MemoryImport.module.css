@@ -1,0 +1,109 @@
+.container {
+    padding: 2rem;
+    color: #e0e0e0;
+    height: 100%;
+    overflow-y: auto;
+}
+
+.title {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-bottom: 1.5rem;
+}
+
+.subTabs {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 2rem;
+    border-bottom: 1px solid #333;
+    padding-bottom: 1rem;
+}
+
+.subTab {
+    background: none;
+    border: none;
+    color: #888;
+    font-size: 1rem;
+    cursor: pointer;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    transition: all 0.2s;
+}
+
+.subTab:hover {
+    color: #ccc;
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.subTab.active {
+    color: #4dabf7;
+    background-color: rgba(77, 171, 247, 0.1);
+}
+
+.uploadArea {
+    border: 2px dashed #444;
+    border-radius: 8px;
+    padding: 3rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    background-color: #1a1b1e;
+    margin-bottom: 1.5rem;
+}
+
+.uploadArea:hover {
+    border-color: #4dabf7;
+    background-color: rgba(77, 171, 247, 0.05);
+}
+
+.uploadIcon {
+    color: #4dabf7;
+    margin-bottom: 1rem;
+}
+
+.uploadText {
+    font-size: 1.1rem;
+    font-weight: 500;
+    margin-bottom: 0.5rem;
+}
+
+.uploadSubtext {
+    color: #888;
+    font-size: 0.9rem;
+}
+
+.fileInput {
+    display: none;
+}
+
+.result {
+    margin-top: 1.5rem;
+    padding: 1rem;
+    border-radius: 8px;
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+}
+
+.result.success {
+    background-color: rgba(43, 138, 62, 0.1);
+    border: 1px solid #2b8a3e;
+    color: #d3f9d8;
+}
+
+.result.error {
+    background-color: rgba(250, 82, 82, 0.1);
+    border: 1px solid #fa5252;
+    color: #ffc9c9;
+}
+
+.loading {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #4dabf7;
+    margin-top: 1rem;
+}

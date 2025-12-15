@@ -234,6 +234,90 @@ class SAIMemoryAdapter:
             LOGGER.warning("Failed to list threads for persona %s: %s", self.persona_id, exc)
             return []
 
+    def get_thread_messages(self, thread_id: str, page: int = 0, page_size: int = 100) -> List[dict]:
+        if not self._ready:
+            return []
+        try:
+            with self._db_lock:
+                msgs = get_messages_paginated(self.conn, thread_id, page=page, page_size=page_size)  # type: ignore[arg-type]
+                return [self._payload_from_message_locked(msg) for msg in msgs]
+        except Exception as exc:
+            LOGGER.warning("Failed to get messages for thread %s: %s", thread_id, exc)
+            return []
+
+    def count_thread_messages(self, thread_id: str) -> int:
+        if not self._ready:
+            return 0
+        try:
+            with self._db_lock:
+                cur = self.conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id=?", (thread_id,))  # type: ignore[attr-defined]
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+        except Exception as exc:
+            LOGGER.warning("Failed to count messages for thread %s: %s", thread_id, exc)
+            return 0
+
+    def update_message_content(self, message_id: str, new_content: str) -> bool:
+        if not self._ready:
+            return False
+        try:
+            with self._db_lock:
+                # 1. Update content
+                cur = self.conn.execute("SELECT metadata FROM messages WHERE id=?", (message_id,))  # type: ignore[attr-defined]
+                row = cur.fetchone()
+                if row is None:
+                    return False
+                    
+                # We don't change metadata structure, just update content
+                self.conn.execute(  # type: ignore[attr-defined]
+                    "UPDATE messages SET content=? WHERE id=?",
+                    (new_content, message_id),
+                )
+                
+                # 2. Update embeddings
+                self.conn.execute("DELETE FROM message_embeddings WHERE message_id=?", (message_id,))  # type: ignore[attr-defined]
+                content_strip = new_content.strip()
+                if content_strip and self.embedder is not None:
+                    chunks = chunk_text(
+                        content_strip,
+                        min_chars=self.settings.chunk_min_chars,
+                        max_chars=self.settings.chunk_max_chars,
+                    )
+                    payload = [chunk.strip() for chunk in chunks if chunk and chunk.strip()]
+                    if payload:
+                        vectors = self.embedder.embed(payload, is_query=False)
+                        replace_message_embeddings(self.conn, message_id, vectors)   # type: ignore[attr-defined]
+                
+                self.conn.commit()  # type: ignore[attr-defined]
+                return True
+        except Exception as exc:
+            LOGGER.warning("Failed to update message %s: %s", message_id, exc)
+            return False
+
+    def delete_message(self, message_id: str) -> bool:
+        if not self._ready:
+            return False
+        try:
+            with self._db_lock:
+                self.conn.execute("DELETE FROM message_embeddings WHERE message_id=?", (message_id,))  # type: ignore[attr-defined]
+                self.conn.execute("DELETE FROM messages WHERE id=?", (message_id,))  # type: ignore[attr-defined]
+                self.conn.commit()  # type: ignore[attr-defined]
+                return True
+        except Exception as exc:
+            LOGGER.warning("Failed to delete message %s: %s", message_id, exc)
+            return False
+
+    def delete_thread(self, thread_id: str) -> bool:
+        if not self._ready:
+            return False
+        from sai_memory.memory.storage import delete_thread
+        try:
+            with self._db_lock:
+                return delete_thread(self.conn, thread_id)
+        except Exception as exc:
+            LOGGER.warning("Failed to delete thread %s: %s", thread_id, exc)
+            return False
+
     def recall_snippet(
         self,
         building_id: Optional[str] = None,
