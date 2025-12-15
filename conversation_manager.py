@@ -1,6 +1,7 @@
 import threading
 import time
 import logging
+from datetime import datetime
 from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
@@ -137,7 +138,8 @@ class ConversationManager:
                     self.saiverse_manager.building_histories.setdefault(self.building_id, []).append({
                         "role": "assistant",
                         "persona_id": speaker_id,
-                        "content": say
+                        "content": say,
+                        "timestamp": datetime.now().isoformat()
                     })
                 # 履歴をファイルに保存
                 self.saiverse_manager._save_building_histories()

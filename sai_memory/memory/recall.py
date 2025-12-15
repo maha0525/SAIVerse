@@ -87,7 +87,18 @@ class Embedder:
                 if use_cuda:
                     kwargs["cuda"] = True
                     logger.info("Embedder using CUDA for model '%s'.", self.model_name)
-                cached = TextEmbedding(model_name=self.model_name, **kwargs)
+                
+                try:
+                    cached = TextEmbedding(model_name=self.model_name, **kwargs)
+                except ValueError as e:
+                    # Fallback to CPU if CUDA fails (common on Windows with partial CUDA setup)
+                    if use_cuda:
+                        logger.warning("CUDA initialization failed (%s); falling back to CPU.", e)
+                        kwargs.pop("cuda", None)
+                        cached = TextEmbedding(model_name=self.model_name, **kwargs)
+                    else:
+                        raise
+
                 _EMBEDDING_MODEL_CACHE[cache_key] = cached
             self.model = cached
 

@@ -654,7 +654,11 @@ class SAIVerseManager(
         if not building_id:
             return
         history = self.building_histories.setdefault(building_id, [])
-        history.append({"role": "host", "content": content})
+        history.append({
+        "role": "host", 
+        "content": content,
+        "timestamp": datetime.now().isoformat()
+    })
         try:
             self._save_building_histories([building_id])
         except Exception:

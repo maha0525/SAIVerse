@@ -39,6 +39,7 @@ __*.*
 !ui/__init__.py
 !ui/handlers/__init__.py
 !sea/__init__.py
+!sai_memory/memopedia/__init__.py
 tasks.md
 scripts/.searxng-src/
 scripts/.searxng-venv/
