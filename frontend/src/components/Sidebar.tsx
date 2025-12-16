@@ -11,6 +11,7 @@ interface UserStatus {
     current_building_id: string | null;
     avatar: string | null;
     display_name: string;
+    email?: string | null;
 }
 
 interface Building {
@@ -193,6 +194,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
                     onClose={() => setIsProfileModalOpen(false)}
                     currentName={status?.display_name || ""}
                     currentAvatar={status?.avatar}
+                    currentEmail={status?.email}
                     onSaveSuccess={refreshData}
                 />
             </aside>

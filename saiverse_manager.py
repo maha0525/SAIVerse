@@ -7,7 +7,7 @@ import requests
 import logging
 from pathlib import Path
 import mimetypes
-from typing import Dict, List, Optional, Tuple, Iterator, Union, Any
+from typing import Dict, List, Optional, Tuple, Iterator, Union, Any, Callable
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import pandas as pd
@@ -396,11 +396,11 @@ class SAIVerseManager(
             return None
         return None
 
-    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None) -> List[str]:
+    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[str]:
         if not self.sea_runtime:
             return []
         try:
-            return self.sea_runtime.run_meta_user(persona, user_input, building_id, metadata=metadata, meta_playbook=meta_playbook)
+            return self.sea_runtime.run_meta_user(persona, user_input, building_id, metadata=metadata, meta_playbook=meta_playbook, event_callback=event_callback)
         except Exception as exc:
             logging.exception("SEA user run failed: %s", exc)
             return []

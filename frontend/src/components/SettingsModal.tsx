@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Save, Loader2, Settings } from 'lucide-react';
 import styles from './SettingsModal.module.css';
+import ImageUpload from './common/ImageUpload';
 
 interface SettingsModalProps {
     isOpen: boolean;
@@ -195,13 +196,15 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>Avatar Path</label>
-                                <input
-                                    className={styles.input}
+                                <label className={styles.label}>Avatar</label>
+                                <ImageUpload
                                     value={avatarPath}
-                                    onChange={(e) => setAvatarPath(e.target.value)}
-                                    placeholder="assets/avatars/..."
+                                    onChange={setAvatarPath}
+                                    circle={true}
                                 />
+                                <div className={styles.description}>
+                                    Upload a new avatar image.
+                                </div>
                             </div>
 
                             <div className={styles.fieldGroup}>

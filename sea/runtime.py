@@ -5,7 +5,7 @@ import os
 import uuid
 import asyncio
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Callable
 import json
 import re
 
@@ -41,7 +41,7 @@ class SEARuntime:
         self._trace = bool(os.getenv("SAIVERSE_SEA_TRACE"))
 
     # ---------------- meta entrypoints -----------------
-    def run_meta_user(self, persona, user_input: str, building_id: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None) -> List[str]:
+    def run_meta_user(self, persona, user_input: str, building_id: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[str]:
         """Router -> subgraph -> speak. Returns spoken strings for gateway/UI."""
         # Record user input to history before processing
         if user_input:
@@ -61,7 +61,7 @@ class SEARuntime:
                 playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
         else:
             playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
-        result = self._run_playbook(playbook, persona, building_id, user_input, auto_mode=False, record_history=True)
+        result = self._run_playbook(playbook, persona, building_id, user_input, auto_mode=False, record_history=True, event_callback=event_callback)
         return result
 
     def run_meta_auto(self, persona, building_id: str, occupants: List[str]) -> None:
@@ -79,6 +79,7 @@ class SEARuntime:
         auto_mode: bool,
         record_history: bool = True,
         parent_state: Optional[Dict[str, Any]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> List[str]:
         # Generate or inherit pulse_id
         parent = parent_state or {}
@@ -104,7 +105,7 @@ class SEARuntime:
         conversation_msgs = list(base_messages)
 
         # Execute playbook with LangGraph
-        compiled_ok = self._compile_with_langgraph(playbook, persona, building_id, user_input, auto_mode, conversation_msgs, pulse_id, parent_state=parent)
+        compiled_ok = self._compile_with_langgraph(playbook, persona, building_id, user_input, auto_mode, conversation_msgs, pulse_id, parent_state=parent, event_callback=event_callback)
         if compiled_ok is None:
             # LangGraph compilation failed - this should not happen as all node types are now supported
             LOGGER.error("LangGraph compilation failed for playbook '%s'. This indicates a configuration or dependency issue.", playbook.name)
@@ -128,6 +129,7 @@ class SEARuntime:
         base_messages: List[Dict[str, Any]],
         pulse_id: str,
         parent_state: Optional[Dict[str, Any]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Optional[List[str]]:
         _lg_outputs: List[str] = []
         temperature = self._default_temperature(persona)
@@ -143,12 +145,12 @@ class SEARuntime:
             playbook,
             llm_node_factory=lambda node_def: self._lg_llm_node(node_def, persona, playbook),
             tool_node_factory=lambda node_def: self._lg_tool_node(node_def, persona),
-            speak_node=lambda state: self._lg_speak_node(state, persona, building_id, _lg_outputs),
-            think_node=lambda state: self._lg_think_node(state, persona, _lg_outputs),
-            say_node_factory=lambda node_def: self._lg_say_node(node_def, persona, building_id, _lg_outputs),
+            speak_node=lambda state: self._lg_speak_node(state, persona, building_id, _lg_outputs, event_callback),
+            think_node=lambda state: self._lg_think_node(state, persona, _lg_outputs, event_callback),
+            say_node_factory=lambda node_def: self._lg_say_node(node_def, persona, building_id, _lg_outputs, event_callback),
             memorize_node_factory=lambda node_def: self._lg_memorize_node(node_def, persona, playbook, _lg_outputs),
-            exec_node_factory=lambda node_def: self._lg_exec_node(node_def, playbook, persona, building_id, auto_mode, _lg_outputs),
-            subplay_node_factory=lambda node_def: self._lg_subplay_node(node_def, persona, building_id, auto_mode, _lg_outputs),
+            exec_node_factory=lambda node_def: self._lg_exec_node(node_def, playbook, persona, building_id, auto_mode, _lg_outputs, event_callback),
+            subplay_node_factory=lambda node_def: self._lg_subplay_node(node_def, persona, building_id, auto_mode, _lg_outputs, event_callback),
             set_node_factory=lambda node_def: self._lg_set_node(node_def),
         )
         if not compiled:
@@ -797,6 +799,7 @@ class SEARuntime:
         building_id: str,
         auto_mode: bool,
         outputs: Optional[List[str]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         # Get source variable names from node definition (with defaults for backward compatibility)
         playbook_source = getattr(node_def, "playbook_source", "selected_playbook") or "selected_playbook"
@@ -814,7 +817,7 @@ class SEARuntime:
 
             try:
                 sub_outputs = await asyncio.to_thread(
-                    self._run_playbook, sub_pb, persona, building_id, sub_input, auto_mode, True, state
+                    self._run_playbook, sub_pb, persona, building_id, sub_input, auto_mode, True, state, event_callback
                 )
             except Exception as exc:
                 LOGGER.exception("SEA LangGraph exec sub-playbook failed")
@@ -863,15 +866,17 @@ class SEARuntime:
 
         return node
 
-    def _lg_speak_node(self, state: dict, persona: Any, building_id: str, outputs: Optional[List[str]] = None):
+    def _lg_speak_node(self, state: dict, persona: Any, building_id: str, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         text = state.get("last") or ""
         pulse_id = state.get("pulse_id")
         self._emit_speak(persona, building_id, text, pulse_id=pulse_id)
         if outputs is not None:
             outputs.append(text)
+        if event_callback:
+            event_callback({"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None)})
         return state
 
-    def _lg_say_node(self, node_def: Any, persona: Any, building_id: str, outputs: Optional[List[str]] = None):
+    def _lg_say_node(self, node_def: Any, persona: Any, building_id: str, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         async def node(state: dict):
             text = state.get("last") or ""
             pulse_id = state.get("pulse_id")
@@ -880,18 +885,22 @@ class SEARuntime:
             self._emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=metadata)
             if outputs is not None:
                 outputs.append(text)
+            if event_callback:
+                event_callback({"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None), "metadata": metadata})
             return state
         return node
 
-    def _lg_think_node(self, state: dict, persona: Any, outputs: Optional[List[str]] = None):
+    def _lg_think_node(self, state: dict, persona: Any, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         text = state.get("last") or ""
         pulse_id = state.get("pulse_id") or str(uuid.uuid4())
         self._emit_think(persona, pulse_id, text)
         if outputs is not None:
             outputs.append(text)
+        if event_callback:
+            event_callback({"type": "think", "content": text, "persona_id": getattr(persona, "persona_id", None)})
         return state
 
-    def _lg_subplay_node(self, node_def: Any, persona: Any, building_id: str, auto_mode: bool, outputs: Optional[List[str]] = None):
+    def _lg_subplay_node(self, node_def: Any, persona: Any, building_id: str, auto_mode: bool, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         async def node(state: dict):
             # Get subplaybook name
             sub_name = getattr(node_def, "playbook", None) or getattr(node_def, "action", None)
@@ -921,7 +930,7 @@ class SEARuntime:
             # SQLite connections on the same thread. _run_playbook handles its own
             # async/sync boundary internally via ThreadPoolExecutor.
             try:
-                sub_outputs = self._run_playbook(sub_pb, persona, building_id, sub_input, auto_mode, True, state)
+                sub_outputs = self._run_playbook(sub_pb, persona, building_id, sub_input, auto_mode, True, state, event_callback)
             except Exception as exc:
                 LOGGER.exception("[sea][subplay] Failed to execute subplaybook '%s'", sub_name)
                 state["last"] = f"Sub-playbook error: {exc}"
