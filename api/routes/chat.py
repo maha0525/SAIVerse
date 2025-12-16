@@ -59,7 +59,7 @@ def get_chat_history(manager = Depends(get_manager)):
         
         if role == "user":
             sender = manager.user_display_name or "User"
-            avatar = "/api/static/icons/user.png" # Frontend public asset
+            avatar = manager.state.user_avatar_data or "/api/static/icons/user.png"
         elif role == "assistant":
             pid = msg.get("persona_id")
             if pid:
