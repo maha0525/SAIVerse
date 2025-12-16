@@ -446,54 +446,49 @@ class RuntimeService(
                         **({"metadata": metadata} if metadata else {}),
                     }
                 )
-        
-        if sea_enabled:
-            # Threaded execution for real-time streaming
-            response_queue = queue.Queue()
-            
-            def event_callback(event):
-                response_queue.put(event)
 
-            def worker():
+        if sea_enabled:
+            # SEAモード: タイムアウト回避のためのスレッド実行とKeep-Alive
+            response_queue = queue.Queue()
+
+            def backend_worker():
                 try:
                     for persona in responding_personas:
-                        self.manager.run_sea_user(
+                         # SEA実行。イベントはコールバック経由でキューに送る
+                         self.manager.run_sea_user(
                             persona, building_id, message, 
                             metadata=metadata, 
-                            meta_playbook=meta_playbook,
-                            event_callback=event_callback
+                            meta_playbook=meta_playbook, 
+                            event_callback=response_queue.put
                         )
                 except Exception as e:
-                    logging.error("SEA worker thread failed", exc_info=True)
+                    logging.error("SEA worker error", exc_info=True)
                     response_queue.put({"type": "error", "content": str(e)})
                 finally:
-                    response_queue.put(None) # Sentinel
+                    response_queue.put(None) # 番兵
 
-            threading.Thread(target=worker, daemon=True).start()
+            threading.Thread(target=backend_worker, daemon=True).start()
 
+            # メインスレッド: キューを監視してクライアントに送信
             while True:
-                item = response_queue.get()
-                if item is None:
-                    break
-                # Yield formatted JSON string for NDJSON stream
-                yield json.dumps(item, ensure_ascii=False) + "\n"
+                try:
+                    # 2.0秒待機（Keep-Aliveのため）
+                    item = response_queue.get(timeout=2.0)
+                    if item is None:
+                        break
+                    yield json.dumps(item, ensure_ascii=False) + "\n"
+                except queue.Empty:
+                    # プロキシ等のタイムアウトを防ぐためのPing
+                    yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
+
         else:
-            # Legacy/Manual mode
+            # レガシーモード: 従来の同期実行
             for persona in responding_personas:
                 if persona.interaction_mode == "manual":
                     for token in persona.handle_user_input_stream(
                         message, metadata=metadata
                     ):
-                        # Wrapper for pure token stream (legacy manual)
-                        # Manual mostly yields tokens of the final text.
-                        # We'll treat them as a single "say" stream? 
-                        # Or partial updates?
-                        # Manual mode is rare/deprecated, let's just wrap straightforwardly.
-                        # Actually 'handle_user_input_stream' in persona returns tokens (strings).
-                        # Let's wrap as partial 'say' content?
-                        # For simplicity, let's buffer or just assume chunks.
-                        # The UI expects structured events now.
-                        yield json.dumps({"type": "say_partial", "content": token, "persona_id": persona.persona_id}, ensure_ascii=False) + "\n"
+                        yield token
                 else:
                     occupants = self.occupants.get(building_id, [])
                     pulse_responses = persona.run_pulse(occupants=occupants, user_online=True)
@@ -504,9 +499,7 @@ class RuntimeService(
                         )
                         pulse_responses = []
                     for reply in pulse_responses:
-                        yield json.dumps({"type": "say", "content": reply, "persona_id": persona.persona_id}, ensure_ascii=False) + "\n"
-        
-        logging.debug("[runtime] handle_user_input_stream completed")
+                        yield reply
 
         self._save_building_histories()
         for persona in self.personas.values():

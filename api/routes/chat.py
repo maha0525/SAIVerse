@@ -172,11 +172,10 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
         import json
         import logging
 
-        async def response_generator():
-            # Yield an initial status event to flush headers
-            yield json.dumps({"type": "status", "content": "processing"}, ensure_ascii=False) + "\n"
+        def response_generator():
+            # Yield an initial status event to flush headers (with padding for buffering)
+            yield json.dumps({"type": "status", "content": "processing"}, ensure_ascii=False) + " " * 2048 + "\n"
             
-            nonlocal req
             stream = manager.handle_user_input_stream(
                 req.message, 
                 metadata=metadata, 
