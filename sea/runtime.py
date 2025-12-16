@@ -89,6 +89,26 @@ class SEARuntime:
         else:
             pulse_id = str(uuid.uuid4())
 
+        # Build playbook chain for status display (e.g., "meta_user/exec > basic_chat/generate")
+        parent_chain = parent.get("_playbook_chain", "")
+        if parent_chain:
+            current_chain = f"{parent_chain} > {playbook.name}"
+        else:
+            current_chain = playbook.name
+
+        # Store chain in parent_state for sub-playbooks to inherit
+        parent["_playbook_chain"] = current_chain
+
+        # Wrap event_callback to include playbook chain in status events
+        def wrapped_event_callback(event: Dict[str, Any]) -> None:
+            if event_callback:
+                if event.get("type") == "status":
+                    # Replace playbook name with full chain
+                    node = event.get("node", "")
+                    event["content"] = f"{current_chain} / {node}"
+                    event["playbook_chain"] = current_chain
+                event_callback(event)
+
         # Update execution state: playbook started
         if hasattr(persona, "execution_state"):
             persona.execution_state["playbook"] = playbook.name
@@ -104,8 +124,8 @@ class SEARuntime:
         LOGGER.info("[sea][run-playbook] %s: _prepare_context returned %d messages", playbook.name, len(base_messages))
         conversation_msgs = list(base_messages)
 
-        # Execute playbook with LangGraph
-        compiled_ok = self._compile_with_langgraph(playbook, persona, building_id, user_input, auto_mode, conversation_msgs, pulse_id, parent_state=parent, event_callback=event_callback)
+        # Execute playbook with LangGraph (use wrapped callback)
+        compiled_ok = self._compile_with_langgraph(playbook, persona, building_id, user_input, auto_mode, conversation_msgs, pulse_id, parent_state=parent, event_callback=wrapped_event_callback)
         if compiled_ok is None:
             # LangGraph compilation failed - this should not happen as all node types are now supported
             LOGGER.error("LangGraph compilation failed for playbook '%s'. This indicates a configuration or dependency issue.", playbook.name)

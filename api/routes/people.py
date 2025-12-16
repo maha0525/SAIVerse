@@ -747,6 +747,93 @@ def toggle_schedule(
     finally:
         session.close()
 
+class UpdateScheduleRequest(BaseModel):
+    schedule_type: Optional[str] = None
+    meta_playbook: Optional[str] = None
+    description: Optional[str] = None
+    priority: Optional[int] = None
+    enabled: Optional[bool] = None
+    days_of_week: Optional[List[int]] = None
+    time_of_day: Optional[str] = None
+    scheduled_datetime: Optional[str] = None  # "YYYY-MM-DD HH:MM" (in persona TZ)
+    interval_seconds: Optional[int] = None
+
+@router.put("/{persona_id}/schedules/{schedule_id}")
+def update_schedule(
+    persona_id: str,
+    schedule_id: int,
+    req: UpdateScheduleRequest,
+    manager = Depends(get_manager)
+):
+    """Update an existing schedule."""
+    session = manager.SessionLocal()
+    try:
+        schedule = session.query(PersonaSchedule).filter(
+            PersonaSchedule.SCHEDULE_ID == schedule_id,
+            PersonaSchedule.PERSONA_ID == persona_id
+        ).first()
+        if not schedule:
+            raise HTTPException(status_code=404, detail="Schedule not found")
+
+        # Update basic fields if provided
+        if req.schedule_type is not None:
+            schedule.SCHEDULE_TYPE = req.schedule_type
+        if req.meta_playbook is not None:
+            schedule.META_PLAYBOOK = req.meta_playbook
+        if req.description is not None:
+            schedule.DESCRIPTION = req.description
+        if req.priority is not None:
+            schedule.PRIORITY = req.priority
+        if req.enabled is not None:
+            schedule.ENABLED = req.enabled
+
+        # Update type-specific fields based on schedule type
+        schedule_type = req.schedule_type if req.schedule_type is not None else schedule.SCHEDULE_TYPE
+
+        if schedule_type == "periodic":
+            if req.days_of_week is not None:
+                schedule.DAYS_OF_WEEK = json.dumps(req.days_of_week) if req.days_of_week else None
+            if req.time_of_day is not None:
+                schedule.TIME_OF_DAY = req.time_of_day
+            # Clear non-periodic fields
+            schedule.SCHEDULED_DATETIME = None
+            schedule.INTERVAL_SECONDS = None
+            schedule.COMPLETED = False
+
+        elif schedule_type == "oneshot":
+            if req.scheduled_datetime is not None:
+                try:
+                    tz = _get_persona_timezone(manager, persona_id)
+                    dt_naive = datetime.strptime(req.scheduled_datetime, "%Y-%m-%d %H:%M")
+                    dt_local = dt_naive.replace(tzinfo=tz)
+                    dt_utc = dt_local.astimezone(timezone.utc)
+                    schedule.SCHEDULED_DATETIME = dt_utc
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid datetime format: YYYY-MM-DD HH:MM")
+            # Clear non-oneshot fields
+            schedule.DAYS_OF_WEEK = None
+            schedule.TIME_OF_DAY = None
+            schedule.INTERVAL_SECONDS = None
+
+        elif schedule_type == "interval":
+            if req.interval_seconds is not None:
+                schedule.INTERVAL_SECONDS = req.interval_seconds
+            # Clear non-interval fields
+            schedule.DAYS_OF_WEEK = None
+            schedule.TIME_OF_DAY = None
+            schedule.SCHEDULED_DATETIME = None
+            schedule.COMPLETED = False
+
+        session.commit()
+        return {"success": True, "schedule_id": schedule.SCHEDULE_ID}
+    except HTTPException:
+        raise
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
+
 @router.delete("/{persona_id}/schedules/{schedule_id}")
 def delete_schedule(
     persona_id: str,
@@ -762,7 +849,7 @@ def delete_schedule(
         ).first()
         if not schedule:
             raise HTTPException(status_code=404, detail="Schedule not found")
-        
+
         session.delete(schedule)
         session.commit()
         return {"success": True}

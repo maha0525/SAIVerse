@@ -136,6 +136,15 @@
     color: #fff;
 }
 
+.editBtn {
+    background-color: #40c057;
+    color: #fff;
+}
+
+.editBtn:hover {
+    background-color: #2f9e44;
+}
+
 .formGrid {
     display: grid;
     grid-template-columns: 1fr 1fr;

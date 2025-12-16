@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Calendar, Play, Clock, Repeat, Trash2, Power, Plus } from 'lucide-react';
+import { X, Calendar, Play, Clock, Repeat, Trash2, Power, Plus, Edit2 } from 'lucide-react';
 import styles from './ScheduleModal.module.css';
 
 interface ScheduleItem {
@@ -26,6 +26,9 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
     const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
     const [playbooks, setPlaybooks] = useState<string[]>([]);
     const [loading, setLoading] = useState(false);
+
+    // Edit mode state
+    const [editingId, setEditingId] = useState<number | null>(null);
 
     // Form State
     const [formType, setFormType] = useState<'periodic' | 'oneshot' | 'interval'>('periodic');
@@ -78,7 +81,49 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
         }
     };
 
-    const handleCreate = async () => {
+    const resetForm = () => {
+        setEditingId(null);
+        setFormType('periodic');
+        setFormPlaybook(playbooks.length > 0 ? playbooks[0] : '');
+        setFormDesc('');
+        setFormPriority(0);
+        setFormEnabled(true);
+        setFormDays([]);
+        setFormTime('09:00');
+        setFormDateTime('');
+        setFormInterval(600);
+    };
+
+    const handleEdit = (s: ScheduleItem) => {
+        setEditingId(s.schedule_id);
+        setFormType(s.schedule_type as 'periodic' | 'oneshot' | 'interval');
+        setFormPlaybook(s.meta_playbook);
+        setFormDesc(s.description || '');
+        setFormPriority(s.priority);
+        setFormEnabled(s.enabled);
+        setFormDays(s.days_of_week || []);
+        setFormTime(s.time_of_day || '09:00');
+        setFormInterval(s.interval_seconds || 600);
+
+        // Convert UTC datetime to local format for oneshot
+        if (s.scheduled_datetime) {
+            try {
+                const dt = new Date(s.scheduled_datetime);
+                const year = dt.getFullYear();
+                const month = String(dt.getMonth() + 1).padStart(2, '0');
+                const day = String(dt.getDate()).padStart(2, '0');
+                const hours = String(dt.getHours()).padStart(2, '0');
+                const minutes = String(dt.getMinutes()).padStart(2, '0');
+                setFormDateTime(`${year}-${month}-${day} ${hours}:${minutes}`);
+            } catch {
+                setFormDateTime('');
+            }
+        } else {
+            setFormDateTime('');
+        }
+    };
+
+    const handleSave = async () => {
         const payload: any = {
             schedule_type: formType,
             meta_playbook: formPlaybook,
@@ -97,17 +142,23 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
         }
 
         try {
-            const res = await fetch(`/api/people/${personaId}/schedules`, {
-                method: 'POST',
+            const isEdit = editingId !== null;
+            const url = isEdit
+                ? `/api/people/${personaId}/schedules/${editingId}`
+                : `/api/people/${personaId}/schedules`;
+            const method = isEdit ? 'PUT' : 'POST';
+
+            const res = await fetch(url, {
+                method,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
             if (res.ok) {
                 loadSchedules();
-                // Reset basic fields?
-                setFormDesc('');
+                resetForm();
             } else {
-                alert('Failed to create schedule');
+                const errorData = await res.json().catch(() => ({}));
+                alert(errorData.detail || `Failed to ${isEdit ? 'update' : 'create'} schedule`);
             }
         } catch (e) {
             console.error(e);
@@ -195,10 +246,13 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                                                 </td>
                                                 <td>
                                                     <div className={styles.actions}>
-                                                        <button className={`${styles.actionBtn} ${styles.toggleBtn}`} onClick={() => handleToggle(s.schedule_id)}>
+                                                        <button className={`${styles.actionBtn} ${styles.editBtn}`} onClick={() => handleEdit(s)} title="Edit">
+                                                            <Edit2 size={14} />
+                                                        </button>
+                                                        <button className={`${styles.actionBtn} ${styles.toggleBtn}`} onClick={() => handleToggle(s.schedule_id)} title="Toggle">
                                                             <Power size={14} />
                                                         </button>
-                                                        <button className={`${styles.actionBtn} ${styles.deleteBtn}`} onClick={() => handleDelete(s.schedule_id)}>
+                                                        <button className={`${styles.actionBtn} ${styles.deleteBtn}`} onClick={() => handleDelete(s.schedule_id)} title="Delete">
                                                             <Trash2 size={14} />
                                                         </button>
                                                     </div>
@@ -213,7 +267,17 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
                     {/* Form Section */}
                     <div className={styles.formSection}>
-                        <div className={styles.sectionTitle}>Add New Schedule</div>
+                        <div className={styles.sectionTitle}>
+                            {editingId !== null ? 'Edit Schedule' : 'Add New Schedule'}
+                            {editingId !== null && (
+                                <button
+                                    onClick={resetForm}
+                                    style={{ marginLeft: '10px', background: 'none', border: 'none', color: '#868e96', cursor: 'pointer', fontSize: '0.9em' }}
+                                >
+                                    (Cancel)
+                                </button>
+                            )}
+                        </div>
                         <div className={styles.formGrid}>
                             <div className={styles.formGroup}>
                                 <label className={styles.label}>Schedule Type</label>
@@ -316,8 +380,8 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                             </div>
                         </div>
 
-                        <button className={styles.submitBtn} onClick={handleCreate}>
-                            Add Schedule
+                        <button className={styles.submitBtn} onClick={handleSave}>
+                            {editingId !== null ? 'Update Schedule' : 'Add Schedule'}
                         </button>
                     </div>
                 </div>
