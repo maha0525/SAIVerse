@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, KeyboardEvent, ChangeEvent } from 'react';
+import { useState, useRef, useEffect, KeyboardEvent, ChangeEvent, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import styles from './page.module.css';
 import Sidebar from '@/components/Sidebar';
@@ -31,16 +31,52 @@ export default function Home() {
     const [moveTrigger, setMoveTrigger] = useState(0); // To trigger RightSidebar refresh
 
     useEffect(() => {
+        // Detect mobile device (touch-based or narrow screen)
+        const checkMobile = () => {
+            const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+            const isNarrowScreen = window.innerWidth < 768;
+            setIsMobile(isTouchDevice || isNarrowScreen);
+        };
+        checkMobile();
+        window.addEventListener('resize', checkMobile);
+
         // Open Info sidebar by default on Desktop
         if (window.innerWidth >= 768) {
             setIsInfoOpen(true);
         }
+
+        return () => window.removeEventListener('resize', checkMobile);
     }, []);
+
+    // Auto-resize textarea based on content (max 10 lines)
+    const adjustTextareaHeight = useCallback(() => {
+        const textarea = textareaRef.current;
+        if (!textarea) return;
+
+        // Reset height to calculate scrollHeight correctly
+        textarea.style.height = 'auto';
+
+        // Calculate line height (approximately 1.5 * font-size of 0.95rem ≈ 22.8px)
+        const lineHeight = 24; // px, approximate
+        const maxLines = 10;
+        const maxHeight = lineHeight * maxLines;
+
+        // Set new height (capped at max)
+        const newHeight = Math.min(textarea.scrollHeight, maxHeight);
+        textarea.style.height = `${newHeight}px`;
+    }, []);
+
+    // Adjust height when input value changes
+    useEffect(() => {
+        adjustTextareaHeight();
+    }, [inputValue, adjustTextareaHeight]);
     const [isPeopleModalOpen, setIsPeopleModalOpen] = useState(false);
     const [selectedPlaybook, setSelectedPlaybook] = useState<string | null>(null);
     const [attachment, setAttachment] = useState<string | null>(null); // Base64
     const [attachmentName, setAttachmentName] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const [isMobile, setIsMobile] = useState(false);
     const swipeStartX = useRef<number | null>(null);
     const swipeStartY = useRef<number | null>(null);
     const swipeStartTime = useRef<number | null>(null);
@@ -203,9 +239,20 @@ export default function Home() {
     };
 
     const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            handleSendMessage();
+        // Mobile: only send button sends (Enter = newline)
+        // PC: Ctrl+Enter sends (Enter = newline)
+        if (e.key === 'Enter') {
+            if (isMobile) {
+                // On mobile, Enter always inserts newline (default behavior)
+                return;
+            } else {
+                // On PC, Ctrl+Enter sends, regular Enter inserts newline
+                if (e.ctrlKey || e.metaKey) {
+                    e.preventDefault();
+                    handleSendMessage();
+                }
+                // Regular Enter: let default behavior insert newline
+            }
         }
     };
 
@@ -341,6 +388,7 @@ export default function Home() {
                             onChange={handleFileUpload}
                         />
                         <textarea
+                            ref={textareaRef}
                             value={inputValue}
                             onChange={(e) => setInputValue(e.target.value)}
                             onKeyDown={handleKeyDown}
