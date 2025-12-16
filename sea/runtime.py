@@ -143,15 +143,15 @@ class SEARuntime:
 
         compiled = compile_playbook(
             playbook,
-            llm_node_factory=lambda node_def: self._lg_llm_node(node_def, persona, playbook),
-            tool_node_factory=lambda node_def: self._lg_tool_node(node_def, persona),
-            speak_node=lambda state: self._lg_speak_node(state, persona, building_id, _lg_outputs, event_callback),
-            think_node=lambda state: self._lg_think_node(state, persona, _lg_outputs, event_callback),
-            say_node_factory=lambda node_def: self._lg_say_node(node_def, persona, building_id, _lg_outputs, event_callback),
-            memorize_node_factory=lambda node_def: self._lg_memorize_node(node_def, persona, playbook, _lg_outputs),
+            llm_node_factory=lambda node_def: self._lg_llm_node(node_def, persona, playbook, event_callback),
+            tool_node_factory=lambda node_def: self._lg_tool_node(node_def, persona, playbook, event_callback),
+            speak_node=lambda state: self._lg_speak_node(state, persona, building_id, playbook, _lg_outputs, event_callback),
+            think_node=lambda state: self._lg_think_node(state, persona, playbook, _lg_outputs, event_callback),
+            say_node_factory=lambda node_def: self._lg_say_node(node_def, persona, building_id, playbook, _lg_outputs, event_callback),
+            memorize_node_factory=lambda node_def: self._lg_memorize_node(node_def, persona, playbook, _lg_outputs, event_callback),
             exec_node_factory=lambda node_def: self._lg_exec_node(node_def, playbook, persona, building_id, auto_mode, _lg_outputs, event_callback),
-            subplay_node_factory=lambda node_def: self._lg_subplay_node(node_def, persona, building_id, auto_mode, _lg_outputs, event_callback),
-            set_node_factory=lambda node_def: self._lg_set_node(node_def),
+            subplay_node_factory=lambda node_def: self._lg_subplay_node(node_def, persona, building_id, playbook, auto_mode, _lg_outputs, event_callback),
+            set_node_factory=lambda node_def: self._lg_set_node(node_def, playbook, event_callback),
         )
         if not compiled:
             # Update execution state: compilation failed, reset to idle
@@ -237,8 +237,12 @@ class SEARuntime:
         # speak/think nodes already emitted; return collected texts for UI consistency
         return list(_lg_outputs)
 
-    def _lg_llm_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema):
+    def _lg_llm_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         async def node(state: dict):
+            # Send status event for node execution
+            node_id = getattr(node_def, "id", "llm")
+            if event_callback:
+                event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             # Merge state into variables for template formatting
             if playbook.name == 'sub_router_user':
                 action_dbg = getattr(node_def, 'action', None)
@@ -728,7 +732,7 @@ class SEARuntime:
         else:
             state["selected_args"] = {"input": state.get("input")}
 
-    def _lg_tool_node(self, node_def: Any, persona: Any):
+    def _lg_tool_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         from tools import TOOL_REGISTRY
         from tools.context import persona_context
 
@@ -738,6 +742,10 @@ class SEARuntime:
         output_keys = getattr(node_def, "output_keys", None)
 
         async def node(state: dict):
+            # Send status event for node execution
+            node_id = getattr(node_def, "id", "tool")
+            if event_callback:
+                event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             tool_func = TOOL_REGISTRY.get(tool_name)
             persona_obj = state.get("persona_obj") or persona
             try:
@@ -806,6 +814,10 @@ class SEARuntime:
         args_source = getattr(node_def, "args_source", "selected_args") or "selected_args"
 
         async def node(state: dict):
+            # Send status event for node execution
+            node_id = getattr(node_def, "id", "exec")
+            if event_callback:
+                event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             sub_name = state.get(playbook_source) or state.get("last") or "basic_chat"
             sub_pb = self._load_playbook_for(str(sub_name).strip(), persona, building_id) or self._basic_chat_playbook()
             sub_input = None
@@ -842,8 +854,12 @@ class SEARuntime:
         return node
 
 
-    def _lg_memorize_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, outputs: Optional[List[str]] = None):
+    def _lg_memorize_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         async def node(state: dict):
+            # Send status event for node execution
+            node_id = getattr(node_def, "id", "memorize")
+            if event_callback:
+                event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             # Include all state variables for template expansion (e.g., structured output like document_data.*)
             variables = dict(state)
             variables.update({
@@ -866,7 +882,10 @@ class SEARuntime:
 
         return node
 
-    def _lg_speak_node(self, state: dict, persona: Any, building_id: str, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
+    def _lg_speak_node(self, state: dict, persona: Any, building_id: str, playbook: PlaybookSchema, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
+        # Send status event for node execution
+        if event_callback:
+            event_callback({"type": "status", "content": f"{playbook.name} / speak", "playbook": playbook.name, "node": "speak"})
         text = state.get("last") or ""
         pulse_id = state.get("pulse_id")
         self._emit_speak(persona, building_id, text, pulse_id=pulse_id)
@@ -876,8 +895,12 @@ class SEARuntime:
             event_callback({"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None)})
         return state
 
-    def _lg_say_node(self, node_def: Any, persona: Any, building_id: str, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
+    def _lg_say_node(self, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         async def node(state: dict):
+            # Send status event for node execution
+            node_id = getattr(node_def, "id", "say")
+            if event_callback:
+                event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             text = state.get("last") or ""
             pulse_id = state.get("pulse_id")
             metadata_key = getattr(node_def, "metadata_key", None)
@@ -890,7 +913,10 @@ class SEARuntime:
             return state
         return node
 
-    def _lg_think_node(self, state: dict, persona: Any, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
+    def _lg_think_node(self, state: dict, persona: Any, playbook: PlaybookSchema, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
+        # Send status event for node execution
+        if event_callback:
+            event_callback({"type": "status", "content": f"{playbook.name} / think", "playbook": playbook.name, "node": "think"})
         text = state.get("last") or ""
         pulse_id = state.get("pulse_id") or str(uuid.uuid4())
         self._emit_think(persona, pulse_id, text)
@@ -900,8 +926,12 @@ class SEARuntime:
             event_callback({"type": "think", "content": text, "persona_id": getattr(persona, "persona_id", None)})
         return state
 
-    def _lg_subplay_node(self, node_def: Any, persona: Any, building_id: str, auto_mode: bool, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
+    def _lg_subplay_node(self, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, auto_mode: bool, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         async def node(state: dict):
+            # Send status event for node execution
+            node_id = getattr(node_def, "id", "subplay")
+            if event_callback:
+                event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             # Get subplaybook name
             sub_name = getattr(node_def, "playbook", None) or getattr(node_def, "action", None)
             if not sub_name:
@@ -948,11 +978,15 @@ class SEARuntime:
             return state
         return node
 
-    def _lg_set_node(self, node_def: Any):
+    def _lg_set_node(self, node_def: Any, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         """Create a node that sets/modifies state variables."""
         assignments = getattr(node_def, "assignments", {}) or {}
 
         async def node(state: dict):
+            # Send status event for node execution
+            node_id = getattr(node_def, "id", "set")
+            if event_callback:
+                event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             for key, value_template in assignments.items():
                 resolved_value = self._resolve_set_value(value_template, state)
                 state[key] = resolved_value
