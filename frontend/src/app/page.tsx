@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, KeyboardEvent, ChangeEvent } from 'react';
+import ReactMarkdown from 'react-markdown';
 import styles from './page.module.css';
 import Sidebar from '@/components/Sidebar';
 import ChatOptions from '@/components/ChatOptions';
@@ -294,9 +295,7 @@ export default function Home() {
                                     <span className={styles.sender}>{msg.sender || (msg.role === 'user' ? 'You' : 'Assistant')}</span>
                                 </div>
                                 <div className={styles.cardBody}>
-                                    {msg.content.split('\n').map((line, i) => (
-                                        <span key={i}>{line}<br /></span>
-                                    ))}
+                                    <ReactMarkdown>{msg.content}</ReactMarkdown>
                                 </div>
                                 {msg.timestamp && (
                                     <div className={styles.cardFooter}>

@@ -155,8 +155,96 @@
 .cardBody {
     font-size: 0.95rem;
     line-height: 1.6;
-    white-space: pre-wrap;
     word-break: break-word;
+}
+
+/* Markdown styles */
+.cardBody p {
+    margin: 0 0 0.5em 0;
+}
+
+.cardBody p:last-child {
+    margin-bottom: 0;
+}
+
+.cardBody ul,
+.cardBody ol {
+    margin: 0.5em 0;
+    padding-left: 1.5em;
+}
+
+.cardBody li {
+    margin: 0.25em 0;
+}
+
+.cardBody code {
+    background: rgba(0, 0, 0, 0.2);
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: 0.9em;
+}
+
+.cardBody pre {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 0.8em;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 0.5em 0;
+}
+
+.cardBody pre code {
+    background: none;
+    padding: 0;
+    font-size: 0.85em;
+}
+
+.cardBody blockquote {
+    border-left: 3px solid rgba(255, 255, 255, 0.3);
+    margin: 0.5em 0;
+    padding-left: 1em;
+    opacity: 0.9;
+}
+
+.cardBody h1,
+.cardBody h2,
+.cardBody h3,
+.cardBody h4 {
+    margin: 0.5em 0 0.3em 0;
+    font-weight: 600;
+}
+
+.cardBody h1 { font-size: 1.3em; }
+.cardBody h2 { font-size: 1.2em; }
+.cardBody h3 { font-size: 1.1em; }
+.cardBody h4 { font-size: 1em; }
+
+.cardBody a {
+    color: #60a5fa;
+    text-decoration: underline;
+}
+
+.cardBody hr {
+    border: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.2);
+    margin: 1em 0;
+}
+
+.cardBody table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 0.5em 0;
+}
+
+.cardBody th,
+.cardBody td {
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    padding: 0.4em 0.6em;
+    text-align: left;
+}
+
+.cardBody th {
+    background: rgba(0, 0, 0, 0.2);
 }
 
 .cardFooter {
@@ -191,6 +279,36 @@
         background: #ffffff;
         color: #1f2937;
         border: 1px solid #e5e7eb;
+    }
+
+    /* Light mode markdown styles */
+    .cardBody code {
+        background: rgba(0, 0, 0, 0.08);
+    }
+
+    .cardBody pre {
+        background: #f3f4f6;
+    }
+
+    .cardBody blockquote {
+        border-left-color: rgba(0, 0, 0, 0.2);
+    }
+
+    .cardBody a {
+        color: #2563eb;
+    }
+
+    .cardBody hr {
+        border-top-color: rgba(0, 0, 0, 0.1);
+    }
+
+    .cardBody th,
+    .cardBody td {
+        border-color: rgba(0, 0, 0, 0.15);
+    }
+
+    .cardBody th {
+        background: rgba(0, 0, 0, 0.05);
     }
 }
 
