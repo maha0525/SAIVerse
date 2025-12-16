@@ -168,19 +168,26 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
     # For V1, we will consume the stream and return the full response.
     # Future improvement: Use StreamingResponse
     try:
-        stream = manager.handle_user_input_stream(
-            req.message, 
-            metadata=metadata, 
-            meta_playbook=req.meta_playbook
-        )
-        
-        full_response = ""
-        for token in stream:
-            full_response += token
-        
+        from fastapi.responses import StreamingResponse
+        import json
         import logging
-        logging.info(f"API Response (len={len(full_response)}): {full_response[:100]}...")
-        return {"response": full_response}
+
+        async def response_generator():
+            # Yield an initial status event to flush headers
+            yield json.dumps({"type": "status", "content": "processing"}, ensure_ascii=False) + "\n"
+            
+            nonlocal req
+            stream = manager.handle_user_input_stream(
+                req.message, 
+                metadata=metadata, 
+                meta_playbook=req.meta_playbook
+            )
+            
+            for chunk in stream:
+                yield chunk
+
+        return StreamingResponse(response_generator(), media_type="application/x-ndjson")
+
     except Exception as e:
         import logging
         logging.error(f"Error sending message: {e}", exc_info=True)

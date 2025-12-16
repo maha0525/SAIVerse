@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle } from 'lucide-react';
+import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X } from 'lucide-react';
 import styles from './MemoryBrowser.module.css';
 
 interface ThreadSummary {
@@ -30,6 +30,10 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
     const [totalMessages, setTotalMessages] = useState(0);
     const pageSize = 50;
 
+    // Edit state
+    const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
+    const [editContent, setEditContent] = useState("");
+
     // Load threads on mount
     useEffect(() => {
         loadThreads();
@@ -54,8 +58,8 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                 // Select active thread by default if no selection
                 if (!selectedThreadId) {
                     const active = data.find((t: any) => t.active);
-                    if (active) setSelectedThreadId(active.thread_id);
-                    else if (data.length > 0) setSelectedThreadId(data[0].thread_id);
+                    if (active) handleThreadSelect(active.thread_id); // Use handleThreadSelect to trigger page -1
+                    else if (data.length > 0) handleThreadSelect(data[0].thread_id);
                 }
             }
         } catch (error) {
@@ -73,6 +77,10 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                 const data = await res.json();
                 setMessages(data.items);
                 setTotalMessages(data.total);
+                // If we requested page -1, backend returns the actual last page number in response (if updated backend logic supports it, else we assume data.page)
+                if (pageNum === -1 && data.page) {
+                    setPage(data.page);
+                }
             }
         } catch (error) {
             console.error("Failed to load messages", error);
@@ -112,7 +120,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
 
     const handleThreadSelect = (threadId: string) => {
         setSelectedThreadId(threadId);
-        setPage(1); // Reset page on thread change
+        setPage(-1); // Default to last page (latest messages)
         setShowList(false); // Mobile: go to details
     };
 
@@ -120,6 +128,55 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
         if (!ts) return "";
         return new Date(ts * 1000).toLocaleString();
     };
+
+    // Message Actions
+    const handleEditStart = (msg: MessageItem) => {
+        setEditingMsgId(msg.id);
+        setEditContent(msg.content);
+    };
+
+    const handleEditCancel = () => {
+        setEditingMsgId(null);
+        setEditContent("");
+    };
+
+    const handleEditSave = async (msgId: string) => {
+        try {
+            const res = await fetch(`/api/people/${personaId}/messages/${msgId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: editContent })
+            });
+            if (res.ok) {
+                setEditingMsgId(null);
+                // Refresh current page
+                if (selectedThreadId) loadMessages(selectedThreadId, page);
+            } else {
+                alert("Failed to update message");
+            }
+        } catch (e) {
+            alert("Error updating message");
+        }
+    };
+
+    const handleDeleteMessage = async (msgId: string) => {
+        if (!confirm("Delete this message?")) return;
+        try {
+            const res = await fetch(`/api/people/${personaId}/messages/${msgId}`, {
+                method: 'DELETE'
+            });
+            if (res.ok) {
+                // Refresh current page
+                if (selectedThreadId) loadMessages(selectedThreadId, page);
+            } else {
+                alert("Failed to delete message");
+            }
+        } catch (e) {
+            alert("Error deleting message");
+        }
+    };
+
+    const totalPages = Math.ceil(totalMessages / pageSize);
 
     return (
         <div className={styles.container}>
@@ -194,10 +251,40 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                     <span className={`${styles.role} ${styles[msg.role.toLowerCase()] || ''}`}>
                                         {msg.role}
                                     </span>
-                                    <span className={styles.timestamp}>{formatTime(msg.created_at)}</span>
+                                    <div className={styles.msgHeaderRight}>
+                                        <span className={styles.timestamp}>{formatTime(msg.created_at)}</span>
+                                        {!editingMsgId && (
+                                            <div className={styles.msgActions}>
+                                                <button onClick={() => handleEditStart(msg)} title="Edit">
+                                                    <Edit2 size={14} />
+                                                </button>
+                                                <button onClick={() => handleDeleteMessage(msg.id)} title="Delete" className={styles.deleteBtn}>
+                                                    <Trash2 size={14} />
+                                                </button>
+                                            </div>
+                                        )}
+                                    </div>
                                 </div>
                                 <div className={styles.content}>
-                                    {msg.content}
+                                    {editingMsgId === msg.id ? (
+                                        <div className={styles.editInterface}>
+                                            <textarea
+                                                className={styles.editTextarea}
+                                                value={editContent}
+                                                onChange={(e) => setEditContent(e.target.value)}
+                                            />
+                                            <div className={styles.editButtons}>
+                                                <button onClick={() => handleEditSave(msg.id)} className={styles.saveBtn}>
+                                                    <Save size={14} /> Save
+                                                </button>
+                                                <button onClick={handleEditCancel} className={styles.cancelBtn}>
+                                                    <X size={14} /> Cancel
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        msg.content
+                                    )}
                                 </div>
                             </div>
                         ))
@@ -210,17 +297,39 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                         <button
                             className={styles.pageButton}
                             disabled={page === 1 || isLoadingMessages}
-                            onClick={() => setPage(p => Math.max(1, p - 1))}
+                            onClick={() => setPage(1)}
+                            title="First Page"
                         >
-                            <ChevronLeft size={16} /> Previous
+                            <ChevronsLeft size={16} />
                         </button>
-                        <span>Page {page} of {Math.ceil(totalMessages / pageSize)}</span>
                         <button
                             className={styles.pageButton}
-                            disabled={page * pageSize >= totalMessages || isLoadingMessages}
-                            onClick={() => setPage(p => p + 1)}
+                            disabled={page === 1 || isLoadingMessages}
+                            onClick={() => setPage(p => Math.max(1, p - 1))}
+                            title="Previous Page"
                         >
-                            Next <ChevronRight size={16} />
+                            <ChevronLeft size={16} />
+                        </button>
+
+                        <span className={styles.pageInfo}>
+                            Page {page} of {totalPages}
+                        </span>
+
+                        <button
+                            className={styles.pageButton}
+                            disabled={page >= totalPages || isLoadingMessages}
+                            onClick={() => setPage(p => p + 1)}
+                            title="Next Page"
+                        >
+                            <ChevronRight size={16} />
+                        </button>
+                        <button
+                            className={styles.pageButton}
+                            disabled={page >= totalPages || isLoadingMessages}
+                            onClick={() => setPage(-1)} // Request last page
+                            title="Last Page"
+                        >
+                            <ChevronsRight size={16} />
                         </button>
                     </div>
                 )}

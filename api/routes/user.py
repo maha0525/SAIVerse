@@ -27,12 +27,24 @@ class BuildingsResponse(BaseModel):
 
 @router.get("/status", response_model=UserStatusResponse)
 def get_user_status(manager = Depends(get_manager)):
-    # manager.state holds the latest user state
+    # Fetch email from DB for completeness (User ID 1)
+    email = None
+    try:
+        from database.models import User
+        session = manager.SessionLocal()
+        user_db = session.query(User).filter(User.USERID == 1).first()
+        if user_db:
+            email = user_db.MAILADDRESS
+        session.close()
+    except:
+        pass
+
     return {
         "is_online": manager.state.user_is_online,
         "current_building_id": manager.state.user_current_building_id,
         "avatar": manager.state.user_avatar_data,
-        "display_name": manager.state.user_display_name
+        "display_name": manager.state.user_display_name,
+        "email": email
     }
 
 @router.post("/move", response_model=MoveResponse)
@@ -54,6 +66,7 @@ def get_buildings(manager = Depends(get_manager)):
 class UpdateProfileRequest(BaseModel):
     display_name: str
     avatar: Optional[str] = None
+    email: Optional[str] = None
 
 @router.patch("/me")
 def update_user_profile(req: UpdateProfileRequest, manager = Depends(get_manager)):
@@ -71,6 +84,7 @@ def update_user_profile(req: UpdateProfileRequest, manager = Depends(get_manager
         
         user.USERNAME = req.display_name
         user.AVATAR_IMAGE = req.avatar
+        user.MAILADDRESS = req.email
         session.commit()
         
         # Update Runtime Manager State so UI reflects it immediately via status polling

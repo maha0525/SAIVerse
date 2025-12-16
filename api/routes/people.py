@@ -167,7 +167,6 @@ def list_thread_messages(
     manager = Depends(get_manager)
 ):
     """List messages in a thread with pagination."""
-    if page < 1: page = 1
     
     # Logic to acquire adapter (deduplicate later if needed)
     persona = manager.personas.get(persona_id)
@@ -186,7 +185,14 @@ def list_thread_messages(
         # Check total count first
         total = adapter.count_thread_messages(thread_id)
         if total == 0:
-            return MessagesResponse(items=[], total=0, page=page, page_size=page_size)
+            return MessagesResponse(items=[], total=0, page=1, page_size=page_size)
+
+        # Handle page=-1 (Last Page)
+        if page == -1:
+            import math
+            page = math.ceil(total / page_size)
+        
+        if page < 1: page = 1
 
         # 0-indexed page for adapter
         offset_page = page - 1

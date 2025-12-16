@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import requests
+import threading
+import queue
 from google.genai import errors
 
 from discord_gateway.translator import GatewayCommand
@@ -444,29 +446,66 @@ class RuntimeService(
                         **({"metadata": metadata} if metadata else {}),
                     }
                 )
-        for persona in responding_personas:
-            if sea_enabled:
-                # SEA runtime pushes to gateway internally;
-                # For API compatibility, we MUST yield the response content here.
-                replies = self.manager.run_sea_user(persona, building_id, message, metadata=metadata, meta_playbook=meta_playbook)
-                for reply in replies:
-                    yield reply
-            elif persona.interaction_mode == "manual":
-                for token in persona.handle_user_input_stream(
-                    message, metadata=metadata
-                ):
-                    yield token
-            else:
-                occupants = self.occupants.get(building_id, [])
-                pulse_responses = persona.run_pulse(occupants=occupants, user_online=True)
-                if pulse_responses is None:
-                    logging.warning(
-                        "[runtime] persona %s returned no responses from run_pulse; defaulting to empty list",
-                        getattr(persona, "persona_id", "unknown"),
-                    )
-                    pulse_responses = []
-                for reply in pulse_responses:
-                    yield reply
+        
+        if sea_enabled:
+            # Threaded execution for real-time streaming
+            response_queue = queue.Queue()
+            
+            def event_callback(event):
+                response_queue.put(event)
+
+            def worker():
+                try:
+                    for persona in responding_personas:
+                        self.manager.run_sea_user(
+                            persona, building_id, message, 
+                            metadata=metadata, 
+                            meta_playbook=meta_playbook,
+                            event_callback=event_callback
+                        )
+                except Exception as e:
+                    logging.error("SEA worker thread failed", exc_info=True)
+                    response_queue.put({"type": "error", "content": str(e)})
+                finally:
+                    response_queue.put(None) # Sentinel
+
+            threading.Thread(target=worker, daemon=True).start()
+
+            while True:
+                item = response_queue.get()
+                if item is None:
+                    break
+                # Yield formatted JSON string for NDJSON stream
+                yield json.dumps(item, ensure_ascii=False) + "\n"
+        else:
+            # Legacy/Manual mode
+            for persona in responding_personas:
+                if persona.interaction_mode == "manual":
+                    for token in persona.handle_user_input_stream(
+                        message, metadata=metadata
+                    ):
+                        # Wrapper for pure token stream (legacy manual)
+                        # Manual mostly yields tokens of the final text.
+                        # We'll treat them as a single "say" stream? 
+                        # Or partial updates?
+                        # Manual mode is rare/deprecated, let's just wrap straightforwardly.
+                        # Actually 'handle_user_input_stream' in persona returns tokens (strings).
+                        # Let's wrap as partial 'say' content?
+                        # For simplicity, let's buffer or just assume chunks.
+                        # The UI expects structured events now.
+                        yield json.dumps({"type": "say_partial", "content": token, "persona_id": persona.persona_id}, ensure_ascii=False) + "\n"
+                else:
+                    occupants = self.occupants.get(building_id, [])
+                    pulse_responses = persona.run_pulse(occupants=occupants, user_online=True)
+                    if pulse_responses is None:
+                        logging.warning(
+                            "[runtime] persona %s returned no responses from run_pulse; defaulting to empty list",
+                            getattr(persona, "persona_id", "unknown"),
+                        )
+                        pulse_responses = []
+                    for reply in pulse_responses:
+                        yield json.dumps({"type": "say", "content": reply, "persona_id": persona.persona_id}, ensure_ascii=False) + "\n"
+        
         logging.debug("[runtime] handle_user_input_stream completed")
 
         self._save_building_histories()

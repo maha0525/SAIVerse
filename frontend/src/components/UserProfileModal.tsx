@@ -1,18 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import { X, Save, User as UserIcon, AlertCircle } from 'lucide-react';
 import styles from './UserProfileModal.module.css';
+import ImageUpload from './common/ImageUpload';
 
 interface UserProfileModalProps {
     isOpen: boolean;
     onClose: () => void;
     currentName: string;
     currentAvatar: string | null;
+    currentEmail?: string | null;
     onSaveSuccess: () => void;
 }
 
-export default function UserProfileModal({ isOpen, onClose, currentName, currentAvatar, onSaveSuccess }: UserProfileModalProps) {
+export default function UserProfileModal({ isOpen, onClose, currentName, currentAvatar, currentEmail, onSaveSuccess }: UserProfileModalProps) {
     const [name, setName] = useState(currentName);
     const [avatar, setAvatar] = useState(currentAvatar || "");
+    const [email, setEmail] = useState(currentEmail || "");
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
@@ -20,9 +23,10 @@ export default function UserProfileModal({ isOpen, onClose, currentName, current
         if (isOpen) {
             setName(currentName);
             setAvatar(currentAvatar || "");
+            setEmail(currentEmail || "");
             setError(null);
         }
-    }, [isOpen, currentName, currentAvatar]);
+    }, [isOpen, currentName, currentAvatar, currentEmail]);
 
     if (!isOpen) return null;
 
@@ -40,7 +44,8 @@ export default function UserProfileModal({ isOpen, onClose, currentName, current
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     display_name: name,
-                    avatar: avatar || null
+                    avatar: avatar || null,
+                    email: email || null
                 })
             });
 
@@ -76,11 +81,12 @@ export default function UserProfileModal({ isOpen, onClose, currentName, current
 
                 <div className={styles.content}>
                     <div className={styles.avatarPreview}>
-                        <img
-                            src={avatar || "/api/static/icons/user.png"}
-                            alt="Avatar Preview"
-                            className={styles.avatarImg}
-                            onError={(e) => { e.currentTarget.src = "https://placehold.co/96x96?text=?"; }}
+                        <ImageUpload
+                            value={avatar}
+                            onChange={setAvatar}
+                            circle={true}
+                            width={110}
+                            height={110}
                         />
                     </div>
 
@@ -96,16 +102,13 @@ export default function UserProfileModal({ isOpen, onClose, currentName, current
                     </div>
 
                     <div className={styles.formGroup}>
-                        <label className={styles.label}>
-                            Avatar URL
-                            <span className={styles.hint}> (Optional)</span>
-                        </label>
+                        <label className={styles.label}>Email Address</label>
                         <input
-                            type="text"
+                            type="email"
                             className={styles.input}
-                            value={avatar}
-                            onChange={(e) => setAvatar(e.target.value)}
-                            placeholder="https://..."
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
+                            placeholder="user@example.com"
                         />
                     </div>
 

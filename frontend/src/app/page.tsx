@@ -19,7 +19,7 @@ interface Message {
 export default function Home() {
     const [messages, setMessages] = useState<Message[]>([]);
     const [inputValue, setInputValue] = useState('');
-    const [isLoading, setIsLoading] = useState(false);
+    const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const [isHistoryLoaded, setIsHistoryLoaded] = useState(false);
 
@@ -114,12 +114,12 @@ export default function Home() {
     }, []);
 
     const handleSendMessage = async () => {
-        if ((!inputValue.trim() && !attachment) || isLoading) return;
+        if ((!inputValue.trim() && !attachment) || loadingStatus) return;
 
         const userMsg: Message = { role: 'user', content: inputValue };
         setMessages(prev => [...prev, userMsg]);
         setInputValue('');
-        setIsLoading(true);
+        setLoadingStatus('Thinking...');
 
         const currentAttachment = attachment;
         const currentPlaybook = selectedPlaybook;
@@ -139,20 +139,65 @@ export default function Home() {
             });
 
             if (!res.ok) {
-                throw new Error('Failed to send message');
+                let errorDetails = `Status: ${res.status} ${res.statusText}`;
+                try {
+                    const errorText = await res.text();
+                    errorDetails += ` - Body: ${errorText}`;
+                } catch (e) { }
+                throw new Error(`Failed to send message. ${errorDetails}`);
             }
 
-            const data = await res.json();
-            if (data.response) {
-                setMessages(prev => [...prev, { role: 'assistant', content: data.response }]);
-            } else {
-                await fetchHistory();
+            if (!res.body) throw new Error("No response body");
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || ''; // Keep the last partial line
+
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    try {
+                        const event = JSON.parse(line);
+
+                        if (event.type === 'status') {
+                            setLoadingStatus(event.content === 'processing' ? 'Processing...' : event.content);
+                        } else if (event.type === 'think') {
+                            setLoadingStatus(`Thinking: ${event.content.substring(0, 50)}${event.content.length > 50 ? '...' : ''}`);
+                        } else if (event.type === 'say') {
+                            const avatarUrl = event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined;
+
+                            setMessages(prev => [...prev, {
+                                role: 'assistant',
+                                content: event.content,
+                                sender: event.persona_name || 'Assistant',
+                                avatar: avatarUrl,
+                                timestamp: new Date().toISOString()
+                            }]);
+                            setLoadingStatus('Thinking...');
+                        } else if (event.type === 'error') {
+                            setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${event.content}` }]);
+                        } else if (event.response) {
+                            setMessages(prev => [...prev, { role: 'assistant', content: event.response }]);
+                        }
+
+                    } catch (e) {
+                        console.error("Error parsing NDJSON line", e, line);
+                    }
+                }
             }
+
         } catch (error) {
             console.error(error);
             setMessages(prev => [...prev, { role: 'assistant', content: "Error: Failed to send message." }]);
         } finally {
-            setIsLoading(false);
+            setLoadingStatus(null);
+            fetchHistory(); // Sync final state (avatars, names etc)
         }
     };
 
@@ -261,7 +306,7 @@ export default function Home() {
                             </div>
                         </div>
                     ))}
-                    {isLoading && <div className={styles.loading}>Thinking...</div>}
+                    {loadingStatus && <div className={styles.loading}>{loadingStatus}</div>}
                     <div ref={messagesEndRef} />
                 </div>
 
@@ -306,7 +351,7 @@ export default function Home() {
                         <button
                             className={styles.sendBtn}
                             onClick={handleSendMessage}
-                            disabled={isLoading || (!inputValue.trim() && !attachment)}
+                            disabled={!!loadingStatus || (!inputValue.trim() && !attachment)}
                         >
                             <Send size={20} />
                         </button>

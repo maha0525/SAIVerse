@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import styles from './WorldEditor.module.css';
 import { Layers, MapPin, Cpu, Box, FileText, Wrench, ArrowRight } from 'lucide-react';
+import ImageUpload from '../common/ImageUpload';
 
 interface City {
     CITYID: number;
@@ -282,7 +283,13 @@ export default function WorldEditor() {
                                 <Field label="Interaction Mode"><Select value={formData.interaction_mode || 'auto'} onChange={(e: any) => setFormData({ ...formData, interaction_mode: e.target.value })}>
                                     <option value="auto">Auto</option><option value="manual">Manual</option><option value="sleep">Sleep</option>
                                 </Select></Field>
-                                <Field label="Avatar Path"><Input value={formData.avatar_path || ''} onChange={(e: any) => setFormData({ ...formData, avatar_path: e.target.value })} /></Field>
+                                <Field label="Avatar">
+                                    <ImageUpload
+                                        value={formData.avatar_path || ''}
+                                        onChange={(url: string) => setFormData({ ...formData, avatar_path: url })}
+                                        circle={true}
+                                    />
+                                </Field>
                             </>}
                             <Field label="System Prompt"><TextArea style={{ minHeight: 200 }} value={formData.system_prompt || ''} onChange={(e: any) => setFormData({ ...formData, system_prompt: e.target.value })} /></Field>
                             <Field label="Description"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
