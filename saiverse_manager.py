@@ -1409,10 +1409,10 @@ class SAIVerseManager(
     def set_model(self, model: str, parameters: Optional[Dict[str, Any]] = None) -> None:
         """
         Update LLM model override for all active personas in memory.
-        - If model == "None": clear the override and reset each persona to its DB-defined default model.
+        - If model is "None" or empty: clear the override and reset each persona to its DB-defined default model.
         - Otherwise: set the given model for all personas (temporary, not persisted).
         """
-        if model == "None":
+        if model == "None" or not model or not model.strip():
             logging.info("Clearing global model override; restoring each persona's DB default model.")
             self.model_parameter_overrides = {}
             db = self.SessionLocal()
