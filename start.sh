@@ -28,17 +28,25 @@ SEARXNG_PID=$!
 # SearXNG の起動を少し待つ
 sleep 3
 
-echo "[INFO] Starting SAIVerse (${CITY_NAME})..."
+echo "[INFO] Starting SAIVerse Backend (${CITY_NAME})..."
 python main.py "$CITY_NAME" &
 SAIVERSE_PID=$!
 
+# Wait a bit for backend to initialize
+sleep 2
+
+echo "[INFO] Starting SAIVerse Frontend..."
+(cd frontend && npm run dev) &
+FRONTEND_PID=$!
+
 echo ""
 echo "========================================"
-echo "  SearXNG PID: $SEARXNG_PID"
-echo "  SAIVerse PID: $SAIVERSE_PID"
+echo "  SearXNG PID:  $SEARXNG_PID"
+echo "  Backend PID:  $SAIVERSE_PID"
+echo "  Frontend PID: $FRONTEND_PID"
 echo "  Press Ctrl+C to stop all services"
 echo "========================================"
 echo ""
 
-# どちらかが終了するまで待機
+# 3つのうちどれかが終了するまで待機
 wait -n 2>/dev/null || wait
