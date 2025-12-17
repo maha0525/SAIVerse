@@ -418,7 +418,7 @@ class SEARuntime:
                     self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                     schema_consumed = self._process_structured_output(node_def, text, state)
             except Exception as exc:
-                LOGGER.error("SEA LangGraph LLM failed: %s", exc)
+                LOGGER.error("SEA LangGraph LLM failed: %s: %s", type(exc).__name__, exc)
                 text = "(error in llm node)"
                 state["tool_called"] = False
             state["last"] = text
@@ -487,6 +487,7 @@ class SEARuntime:
             LOGGER.info("[sea] Using normal llm_client")
             base_client = persona.llm_client
             base_model = getattr(persona, "model", "unknown")
+            LOGGER.info("[sea] persona.model=%s, llm_client type=%s", base_model, type(base_client).__name__)
 
         # If structured output is needed, check if the selected model supports it
         if needs_structured_output:
