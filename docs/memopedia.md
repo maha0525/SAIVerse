@@ -33,6 +33,8 @@ memopedia_pages (
   summary TEXT,             -- 概要（常にペルソナに渡す部分）
   content TEXT,             -- 本文（Markdown形式）
   category TEXT NOT NULL,   -- "people" / "events" / "plans"
+  keywords TEXT,            -- キーワード（JSON配列）
+  is_deleted INTEGER,       -- ソフトデリートフラグ
   created_at INTEGER,
   updated_at INTEGER
 )
@@ -52,6 +54,18 @@ memopedia_update_log (
   last_message_id TEXT,
   last_message_created_at INTEGER,
   processed_at INTEGER NOT NULL
+)
+
+-- 編集履歴（ページ変更の追跡・参照メッセージ範囲記録）
+memopedia_page_edit_history (
+  id TEXT PRIMARY KEY,
+  page_id TEXT NOT NULL,
+  edited_at INTEGER NOT NULL,
+  diff_text TEXT NOT NULL,         -- unified diff形式
+  ref_start_message_id TEXT,       -- 参照範囲の開始メッセージID
+  ref_end_message_id TEXT,         -- 参照範囲の終了メッセージID
+  edit_type TEXT NOT NULL,         -- 'create' / 'update' / 'append' / 'delete'
+  edit_source TEXT                 -- 編集経路: 'ai_conversation', 'manual', 'api' など
 )
 ```
 
@@ -101,11 +115,15 @@ python scripts/build_memopedia.py <persona_id> --batch-size 10
 
 ### UIで確認
 
-SAIVerseを起動後、サイドバーの「Memopedia」をクリック：
+SAIVerseを起動後、サイドバーから「Memory & Knowledge」→「Memopedia」タブを選択：
 
-- **ツリービュー**: ページの階層構造を表示。開いているページは`[OPEN]`、閉じているページは`[-]`でマーク
-- **ページ一覧**: テーブル形式でページを一覧表示。行をクリックすると右側に詳細を表示
-- **全ページエクスポート**: すべてのページを1つのMarkdownドキュメントとして表示
+- **Knowledge Tree**: ページの階層構造を表示（初期状態で全展開）
+  - `>`マークをクリックで展開/格納を切り替え
+  - ページ名をクリックで右側に内容を表示
+- **履歴ボタン**: ページ選択時に表示される。編集履歴を確認可能
+  - 編集タイプ（作成/更新/追記/削除）、日時、編集経路を表示
+  - 参照メッセージ範囲（どのメッセージを見て編集したか）を表示
+  - クリックでdiff（差分）を展開表示
 
 ### ツール（Persona用）
 
@@ -136,19 +154,42 @@ tree = memopedia.get_tree(thread_id="main")
 # Markdown形式でツリーを取得
 markdown = memopedia.get_tree_markdown(thread_id="main")
 
-# ページを作成
+# ページを作成（参照メッセージ範囲を記録）
 page = memopedia.create_page(
     parent_id="root_people",
     title="まはー",
     summary="SAIVerseの開発者",
-    content="## 基本情報\n\n- 名前: まはー\n- 役割: 開発者"
+    content="## 基本情報\n\n- 名前: まはー\n- 役割: 開発者",
+    ref_start_message_id="msg_001",  # 参照した最初のメッセージ
+    ref_end_message_id="msg_020",    # 参照した最後のメッセージ
+    edit_source="ai_conversation"     # 編集経路
 )
 
-# ページを更新
-memopedia.update_page(page.id, content="更新された内容")
+# ページを更新（同様に参照範囲を記録可能）
+memopedia.update_page(
+    page.id,
+    content="更新された内容",
+    ref_start_message_id="msg_021",
+    ref_end_message_id="msg_030",
+    edit_source="ai_conversation"
+)
 
 # ページに追記
-memopedia.append_to_content(page.id, "\n\n## 追加情報\n\n新しい内容")
+memopedia.append_to_content(
+    page.id,
+    "\n\n## 追加情報\n\n新しい内容",
+    ref_start_message_id="msg_031",
+    ref_end_message_id="msg_040",
+    edit_source="manual"
+)
+
+# 編集履歴を取得
+history = memopedia.get_page_edit_history(page.id)
+for h in history:
+    print(f"{h.edit_type} at {h.edited_at}")
+    print(f"  refs: {h.ref_start_message_id} -> {h.ref_end_message_id}")
+    print(f"  source: {h.edit_source}")
+    print(f"  diff: {h.diff_text[:100]}...")
 
 # ページを開く（セッション単位）
 result = memopedia.open_page(thread_id="main", page_id=page.id)
@@ -158,6 +199,14 @@ content = memopedia.get_open_pages_content(thread_id="main")
 
 # ページを閉じる
 memopedia.close_page(thread_id="main", page_id=page.id)
+
+# ページを削除（ソフトデリート、履歴は保持）
+memopedia.delete_page(
+    page.id,
+    ref_start_message_id="msg_050",
+    ref_end_message_id="msg_055",
+    edit_source="manual"
+)
 
 # 全ページをMarkdownでエクスポート
 full_export = memopedia.export_all_markdown()
@@ -174,12 +223,23 @@ full_export = memopedia.export_all_markdown()
 
 - `get_page(page_id)` - ページを取得
 - `get_page_full(page_id)` - ページと子ページ一覧を取得
-- `create_page(parent_id, title, summary, content)` - 新規ページ作成
-- `update_page(page_id, title=None, summary=None, content=None)` - ページ更新
-- `append_to_content(page_id, text)` - ページに内容を追記
-- `delete_page(page_id)` - ページ削除（ルートページは削除不可）
+- `create_page(parent_id, title, summary, content, ref_start_message_id=None, ref_end_message_id=None, edit_source=None)` - 新規ページ作成
+- `update_page(page_id, title=None, summary=None, content=None, ref_start_message_id=None, ref_end_message_id=None, edit_source=None)` - ページ更新
+- `append_to_content(page_id, text, ref_start_message_id=None, ref_end_message_id=None, edit_source=None)` - ページに内容を追記
+- `delete_page(page_id, ref_start_message_id=None, ref_end_message_id=None, edit_source=None)` - ページ削除（ソフトデリート、ルートページは削除不可）
 - `find_by_title(title, category=None)` - タイトルでページ検索
 - `search(query, limit=10)` - タイトル/概要/内容で検索
+
+#### 編集履歴操作
+
+- `get_page_edit_history(page_id, limit=50)` - ページの編集履歴を取得（新しい順）
+
+各履歴エントリには以下の情報が含まれる：
+- `edit_type`: 編集タイプ（create/update/append/delete）
+- `edited_at`: 編集日時（Unixタイムスタンプ）
+- `diff_text`: 変更差分（unified diff形式）
+- `ref_start_message_id`, `ref_end_message_id`: 参照メッセージ範囲
+- `edit_source`: 編集経路
 
 #### 開閉状態操作
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import sqlite3
 import time
@@ -81,6 +82,20 @@ class PageState:
     opened_at: Optional[int]
 
 
+@dataclass
+class PageEditHistory:
+    """Represents a single edit history entry for a page."""
+
+    id: str
+    page_id: str
+    edited_at: int
+    diff_text: str
+    ref_start_message_id: Optional[str]
+    ref_end_message_id: Optional[str]
+    edit_type: str  # 'create', 'update', 'append', 'delete'
+    edit_source: Optional[str]  # 'ai_conversation', 'manual', 'api', etc.
+
+
 def init_memopedia_tables(conn: sqlite3.Connection) -> None:
     """Initialize Memopedia tables and seed root pages if needed."""
     conn.execute(
@@ -112,6 +127,12 @@ def init_memopedia_tables(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE memopedia_pages ADD COLUMN keywords TEXT DEFAULT '[]'")
 
+    # Migration: add is_deleted column for soft delete
+    try:
+        conn.execute("SELECT is_deleted FROM memopedia_pages LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE memopedia_pages ADD COLUMN is_deleted INTEGER DEFAULT 0")
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS memopedia_page_states (
@@ -134,6 +155,25 @@ def init_memopedia_tables(conn: sqlite3.Connection) -> None:
             processed_at INTEGER NOT NULL
         )
         """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memopedia_page_edit_history (
+            id TEXT PRIMARY KEY,
+            page_id TEXT NOT NULL,
+            edited_at INTEGER NOT NULL,
+            diff_text TEXT NOT NULL,
+            ref_start_message_id TEXT,
+            ref_end_message_id TEXT,
+            edit_type TEXT NOT NULL,
+            edit_source TEXT,
+            FOREIGN KEY (page_id) REFERENCES memopedia_pages(id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memopedia_edit_history_page ON memopedia_page_edit_history(page_id)"
     )
 
     conn.commit()
@@ -477,3 +517,103 @@ def search_pages(conn: sqlite3.Connection, query: str, limit: int = 10) -> List[
         (pattern, pattern, pattern, limit),
     )
     return [_row_to_page(row) for row in cur.fetchall()]
+
+
+# ----- Edit history operations -----
+
+
+def generate_diff(old_content: str, new_content: str, context_lines: int = 3) -> str:
+    """Generate a unified diff between old and new content."""
+    old_lines = old_content.splitlines(keepends=True)
+    new_lines = new_content.splitlines(keepends=True)
+    diff = difflib.unified_diff(
+        old_lines,
+        new_lines,
+        fromfile="before",
+        tofile="after",
+        lineterm="",
+        n=context_lines,
+    )
+    return "".join(diff)
+
+
+def record_page_edit(
+    conn: sqlite3.Connection,
+    *,
+    page_id: str,
+    diff_text: str,
+    edit_type: str,
+    ref_start_message_id: Optional[str] = None,
+    ref_end_message_id: Optional[str] = None,
+    edit_source: Optional[str] = None,
+) -> str:
+    """Record an edit history entry for a page."""
+    edit_id = str(uuid.uuid4())
+    now = int(time.time())
+    conn.execute(
+        """
+        INSERT INTO memopedia_page_edit_history
+        (id, page_id, edited_at, diff_text, ref_start_message_id, ref_end_message_id, edit_type, edit_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (edit_id, page_id, now, diff_text, ref_start_message_id, ref_end_message_id, edit_type, edit_source),
+    )
+    conn.commit()
+    return edit_id
+
+
+def get_page_edit_history(
+    conn: sqlite3.Connection,
+    page_id: str,
+    limit: int = 50,
+) -> List[PageEditHistory]:
+    """Get the edit history for a page, ordered by most recent first."""
+    cur = conn.execute(
+        """
+        SELECT id, page_id, edited_at, diff_text, ref_start_message_id, ref_end_message_id, edit_type, edit_source
+        FROM memopedia_page_edit_history
+        WHERE page_id = ?
+        ORDER BY edited_at DESC
+        LIMIT ?
+        """,
+        (page_id, limit),
+    )
+    return [
+        PageEditHistory(
+            id=row[0],
+            page_id=row[1],
+            edited_at=row[2],
+            diff_text=row[3],
+            ref_start_message_id=row[4],
+            ref_end_message_id=row[5],
+            edit_type=row[6],
+            edit_source=row[7],
+        )
+        for row in cur.fetchall()
+    ]
+
+
+def get_edit_by_id(conn: sqlite3.Connection, edit_id: str) -> Optional[PageEditHistory]:
+    """Get a single edit history entry by ID."""
+    cur = conn.execute(
+        """
+        SELECT id, page_id, edited_at, diff_text, ref_start_message_id, ref_end_message_id, edit_type, edit_source
+        FROM memopedia_page_edit_history
+        WHERE id = ?
+        """,
+        (edit_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    return PageEditHistory(
+        id=row[0],
+        page_id=row[1],
+        edited_at=row[2],
+        diff_text=row[3],
+        ref_start_message_id=row[4],
+        ref_end_message_id=row[5],
+        edit_type=row[6],
+        edit_source=row[7],
+    )
+
