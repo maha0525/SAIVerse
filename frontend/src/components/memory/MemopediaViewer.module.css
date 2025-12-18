@@ -64,6 +64,22 @@
     padding-left: 4px;
 }
 
+.chevron {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    margin-right: 4px;
+    cursor: pointer;
+    border-radius: 3px;
+    transition: background-color 0.1s;
+}
+
+.chevron:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
 .contentArea {
     flex: 1;
     overflow-y: auto;
@@ -192,4 +208,146 @@
         height: calc(100% - 200px);
         padding: 1rem;
     }
+}
+
+/* Content Header */
+.contentHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+}
+
+/* History Button */
+.historyButton {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: rgba(77, 171, 247, 0.1);
+    border: 1px solid rgba(77, 171, 247, 0.3);
+    color: #4dabf7;
+    cursor: pointer;
+    font-size: 0.85rem;
+    padding: 0.4rem 0.8rem;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.historyButton:hover {
+    background: rgba(77, 171, 247, 0.2);
+    border-color: rgba(77, 171, 247, 0.5);
+}
+
+.historyButton.active {
+    background: rgba(77, 171, 247, 0.25);
+    border-color: #4dabf7;
+}
+
+/* History Container */
+.historyContainer {
+    height: 100%;
+    overflow-y: auto;
+}
+
+.historyTitle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #e0e0e0;
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #333;
+}
+
+.historyList {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+/* History Entry */
+.historyEntry {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.historyEntry:hover {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: #444;
+}
+
+.historyEntry.selected {
+    background: rgba(77, 171, 247, 0.1);
+    border-color: rgba(77, 171, 247, 0.3);
+}
+
+.historyEntryHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.25rem;
+}
+
+.editType {
+    font-weight: 500;
+    color: #e0e0e0;
+}
+
+.editDate {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.8rem;
+    color: #888;
+}
+
+.editSource {
+    font-size: 0.75rem;
+    color: #666;
+    font-style: italic;
+}
+
+.refRange {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.5rem;
+    padding: 0.4rem 0.6rem;
+    background: rgba(139, 233, 253, 0.08);
+    border-radius: 4px;
+    font-size: 0.8rem;
+    color: #8be9fd;
+}
+
+/* Diff View */
+.diffView {
+    margin-top: 0.75rem;
+    border-top: 1px solid #333;
+    padding-top: 0.75rem;
+}
+
+.diffHeader {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    color: #888;
+    margin-bottom: 0.5rem;
+}
+
+.diffContent {
+    background: #1e1f23;
+    padding: 0.75rem;
+    border-radius: 6px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: #b0b0b0;
+    max-height: 300px;
+    overflow-y: auto;
 }

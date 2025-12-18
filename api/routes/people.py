@@ -595,6 +595,46 @@ def get_memopedia_page(persona_id: str, page_id: str, manager = Depends(get_mana
         if should_close and adapter:
             adapter.close()
 
+@router.get("/{persona_id}/memopedia/pages/{page_id}/history")
+def get_memopedia_page_history(persona_id: str, page_id: str, limit: int = 50, manager = Depends(get_manager)):
+    """Get the edit history for a Memopedia page."""
+    persona = manager.personas.get(persona_id)
+    adapter = getattr(persona, "sai_memory", None) if persona else None
+    should_close = False
+    
+    if not adapter or not adapter.is_ready():
+        from saiverse_memory import SAIMemoryAdapter
+        try:
+            adapter = SAIMemoryAdapter(persona_id)
+            should_close = True
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to access memory: {e}")
+
+    try:
+        from sai_memory.memopedia import Memopedia
+        memopedia = Memopedia(adapter.conn)
+        history = memopedia.get_page_edit_history(page_id, limit=limit)
+        return {
+            "history": [
+                {
+                    "id": h.id,
+                    "page_id": h.page_id,
+                    "edited_at": h.edited_at,
+                    "diff_text": h.diff_text,
+                    "ref_start_message_id": h.ref_start_message_id,
+                    "ref_end_message_id": h.ref_end_message_id,
+                    "edit_type": h.edit_type,
+                    "edit_source": h.edit_source,
+                }
+                for h in history
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Memopedia error: {e}")
+    finally:
+        if should_close and adapter:
+            adapter.close()
+
 # -----------------------------------------------------------------------------
 # Schedule APIs
 # -----------------------------------------------------------------------------

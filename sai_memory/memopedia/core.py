@@ -11,6 +11,7 @@ from sai_memory.memopedia.storage import (
     init_memopedia_tables,
     MemopediaPage,
     PageState,
+    PageEditHistory,
     CATEGORY_PEOPLE,
     CATEGORY_EVENTS,
     CATEGORY_PLANS,
@@ -27,6 +28,10 @@ from sai_memory.memopedia.storage import (
     record_update_log,
     find_page_by_title,
     search_pages,
+    generate_diff,
+    record_page_edit,
+    get_page_edit_history as storage_get_page_edit_history,
+    get_edit_by_id,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -156,17 +161,30 @@ class Memopedia:
         summary: str = "",
         content: str = "",
         keywords: Optional[List[str]] = None,
+        ref_start_message_id: Optional[str] = None,
+        ref_end_message_id: Optional[str] = None,
+        edit_source: Optional[str] = None,
     ) -> MemopediaPage:
         """
         Create a new page under an existing parent.
 
         The category is inherited from the parent page.
+
+        Args:
+            parent_id: ID of the parent page
+            title: Page title
+            summary: Page summary
+            content: Page content
+            keywords: List of keywords
+            ref_start_message_id: Start of message reference range
+            ref_end_message_id: End of message reference range
+            edit_source: Source of this edit (e.g., 'ai_conversation', 'manual')
         """
         with self._lock:
             parent = get_page(self.conn, parent_id)
             if parent is None:
                 raise ValueError(f"Parent page not found: {parent_id}")
-            return create_page(
+            page = create_page(
                 self.conn,
                 parent_id=parent_id,
                 title=title,
@@ -175,6 +193,19 @@ class Memopedia:
                 category=parent.category,
                 keywords=keywords,
             )
+            # Record edit history for create
+            full_content = f"title: {title}\nsummary: {summary}\ncontent:\n{content}"
+            diff_text = generate_diff("", full_content)
+            record_page_edit(
+                self.conn,
+                page_id=page.id,
+                diff_text=diff_text,
+                edit_type="create",
+                ref_start_message_id=ref_start_message_id,
+                ref_end_message_id=ref_end_message_id,
+                edit_source=edit_source,
+            )
+            return page
 
     def update_page(
         self,
@@ -184,10 +215,19 @@ class Memopedia:
         summary: Optional[str] = None,
         content: Optional[str] = None,
         keywords: Optional[List[str]] = None,
+        ref_start_message_id: Optional[str] = None,
+        ref_end_message_id: Optional[str] = None,
+        edit_source: Optional[str] = None,
     ) -> Optional[MemopediaPage]:
         """Update a page's title, summary, content, or keywords."""
         with self._lock:
-            return update_page(
+            # Get old page for diff
+            old_page = get_page(self.conn, page_id)
+            if old_page is None:
+                return None
+            old_content = f"title: {old_page.title}\nsummary: {old_page.summary}\ncontent:\n{old_page.content}"
+
+            result = update_page(
                 self.conn,
                 page_id,
                 title=title,
@@ -196,23 +236,92 @@ class Memopedia:
                 keywords=keywords,
             )
 
-    def append_to_content(self, page_id: str, text: str) -> Optional[MemopediaPage]:
+            if result:
+                new_content = f"title: {result.title}\nsummary: {result.summary}\ncontent:\n{result.content}"
+                diff_text = generate_diff(old_content, new_content)
+                if diff_text:  # Only record if there's an actual change
+                    record_page_edit(
+                        self.conn,
+                        page_id=page_id,
+                        diff_text=diff_text,
+                        edit_type="update",
+                        ref_start_message_id=ref_start_message_id,
+                        ref_end_message_id=ref_end_message_id,
+                        edit_source=edit_source,
+                    )
+            return result
+
+    def append_to_content(
+        self,
+        page_id: str,
+        text: str,
+        ref_start_message_id: Optional[str] = None,
+        ref_end_message_id: Optional[str] = None,
+        edit_source: Optional[str] = None,
+    ) -> Optional[MemopediaPage]:
         """Append text to a page's content."""
         with self._lock:
             page = get_page(self.conn, page_id)
             if page is None:
                 return None
+            old_content = page.content
             new_content = page.content + "\n\n" + text if page.content else text
-            return update_page(self.conn, page_id, content=new_content)
+            result = update_page(self.conn, page_id, content=new_content)
 
-    def delete_page(self, page_id: str) -> bool:
-        """Delete a page and all its children."""
+            if result:
+                diff_text = generate_diff(old_content, new_content)
+                record_page_edit(
+                    self.conn,
+                    page_id=page_id,
+                    diff_text=diff_text,
+                    edit_type="append",
+                    ref_start_message_id=ref_start_message_id,
+                    ref_end_message_id=ref_end_message_id,
+                    edit_source=edit_source,
+                )
+            return result
+
+    def delete_page(
+        self,
+        page_id: str,
+        ref_start_message_id: Optional[str] = None,
+        ref_end_message_id: Optional[str] = None,
+        edit_source: Optional[str] = None,
+    ) -> bool:
+        """
+        Soft-delete a page (mark as deleted but keep in DB).
+
+        The page and its edit history are preserved for reference.
+        """
         # Prevent deleting root pages
         if page_id.startswith("root_"):
             LOGGER.warning("Cannot delete root page: %s", page_id)
             return False
         with self._lock:
-            return delete_page(self.conn, page_id)
+            page = get_page(self.conn, page_id)
+            if page is None:
+                return False
+
+            # Record delete in edit history
+            full_content = f"title: {page.title}\nsummary: {page.summary}\ncontent:\n{page.content}"
+            diff_text = generate_diff(full_content, "")
+            record_page_edit(
+                self.conn,
+                page_id=page_id,
+                diff_text=diff_text,
+                edit_type="delete",
+                ref_start_message_id=ref_start_message_id,
+                ref_end_message_id=ref_end_message_id,
+                edit_source=edit_source,
+            )
+
+            # Soft delete: mark as deleted instead of removing
+            self.conn.execute(
+                "UPDATE memopedia_pages SET is_deleted = 1 WHERE id = ?",
+                (page_id,),
+            )
+            self.conn.commit()
+            return True
 
     def find_by_title(self, title: str, category: Optional[str] = None) -> Optional[MemopediaPage]:
         """Find a page by exact title match."""
@@ -223,6 +332,18 @@ class Memopedia:
         """Search pages by title, summary, or content."""
         with self._lock:
             return search_pages(self.conn, query, limit)
+
+    # ----- Edit history operations -----
+
+    def get_page_edit_history(self, page_id: str, limit: int = 50) -> List[PageEditHistory]:
+        """
+        Get the edit history for a page.
+
+        Returns list of edits ordered by most recent first.
+        Each entry contains the diff, reference message range, and edit source.
+        """
+        with self._lock:
+            return storage_get_page_edit_history(self.conn, page_id, limit)
 
     # ----- Page state operations (for thread/session) -----
 
