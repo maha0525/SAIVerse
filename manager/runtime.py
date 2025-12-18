@@ -151,14 +151,26 @@ class RuntimeService(
             db.close()
 
     def move_user(self, target_building_id: str) -> Tuple[bool, str]:
+        # DEBUG LOGGING
+        debug_log_path = r"c:\Users\shuhe\workspace\SAIVerse\debug_chat.log"
+        from datetime import datetime
+        def log_debug(msg):
+             with open(debug_log_path, "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now()}: [MANAGER_MOVE] {msg}\n")
+        
+        log_debug(f"Attempting move to {target_building_id}. Current: {self.state.user_current_building_id}")
+
         if target_building_id not in self.building_map:
-            return False, f"移動失敗: 建物 '{target_building_id}' が見つかりません。"
+            log_debug(f"Target {target_building_id} invalid.")
+            return False, "Invalid building ID"
 
         from_building_id = self.state.user_current_building_id
         if not from_building_id:
+            log_debug("Current building unknown.")
             return False, "移動失敗: 現在地が不明です。"
         if from_building_id == target_building_id:
             return True, "同じ場所にいます。"
+            
         logging.debug(
             "[runtime] move_user requested %s -> %s",
             from_building_id,
@@ -174,8 +186,10 @@ class RuntimeService(
         if success:
             self.state.user_current_building_id = target_building_id
             logging.debug("[runtime] move_user success: now %s", target_building_id)
+            log_debug(f"Move success. New state bid: {self.state.user_current_building_id}")
         else:
             logging.debug("[runtime] move_user failed: %s", message)
+            log_debug(f"Move failed: {message}")
         return success, message
 
     def _move_persona(

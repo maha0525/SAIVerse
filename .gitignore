@@ -54,6 +54,7 @@ frontend/out/
 frontend/build/
 frontend/.DS_Store
 frontend/*.log
+*.tsbuildinfo
 
 # Root dependencies
 node_modules/

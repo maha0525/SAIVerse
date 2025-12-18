@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X } from 'lucide-react';
+import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash } from 'lucide-react';
 import styles from './MemoryBrowser.module.css';
 
 interface ThreadSummary {
@@ -33,6 +33,10 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
     // Edit state
     const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
     const [editContent, setEditContent] = useState("");
+
+    // Selection state for bulk delete
+    const [selectionMode, setSelectionMode] = useState(false);
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
     // Load threads on mount
     useEffect(() => {
@@ -166,14 +170,64 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                 method: 'DELETE'
             });
             if (res.ok) {
-                // Refresh current page
-                if (selectedThreadId) loadMessages(selectedThreadId, page);
+                // Update local state instead of reloading to preserve scroll position
+                setMessages(prev => prev.filter(m => m.id !== msgId));
+                setTotalMessages(prev => Math.max(0, prev - 1));
+                setSelectedIds(prev => {
+                    const next = new Set(prev);
+                    next.delete(msgId);
+                    return next;
+                });
             } else {
                 alert("Failed to delete message");
             }
         } catch (e) {
             alert("Error deleting message");
         }
+    };
+
+    const handleToggleSelection = (msgId: string) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(msgId)) {
+                next.delete(msgId);
+            } else {
+                next.add(msgId);
+            }
+            return next;
+        });
+    };
+
+    const handleDeleteSelected = async () => {
+        if (selectedIds.size === 0) return;
+        if (!confirm(`Delete ${selectedIds.size} messages?`)) return;
+
+        const idsToDelete = Array.from(selectedIds);
+        let deletedCount = 0;
+
+        for (const msgId of idsToDelete) {
+            try {
+                const res = await fetch(`/api/people/${personaId}/messages/${msgId}`, {
+                    method: 'DELETE'
+                });
+                if (res.ok) {
+                    deletedCount++;
+                }
+            } catch (e) {
+                console.error(`Failed to delete message ${msgId}`, e);
+            }
+        }
+
+        // Update local state
+        setMessages(prev => prev.filter(m => !selectedIds.has(m.id)));
+        setTotalMessages(prev => Math.max(0, prev - deletedCount));
+        setSelectedIds(new Set());
+        setSelectionMode(false);
+    };
+
+    const handleExitSelectionMode = () => {
+        setSelectionMode(false);
+        setSelectedIds(new Set());
     };
 
     const totalPages = Math.ceil(totalMessages / pageSize);
@@ -231,7 +285,37 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                     <span className={styles.headerTitle}>
                         {selectedThreadId || "Select a thread"}
                     </span>
-                    <span>{totalMessages} msgs</span>
+                    <div className={styles.headerActions}>
+                        {selectionMode ? (
+                            <>
+                                <span className={styles.selectedCount}>{selectedIds.size} selected</span>
+                                <button
+                                    className={styles.deleteSelectedBtn}
+                                    onClick={handleDeleteSelected}
+                                    disabled={selectedIds.size === 0}
+                                    title="Delete selected"
+                                >
+                                    <Trash size={16} />
+                                </button>
+                                <button
+                                    className={styles.exitSelectBtn}
+                                    onClick={handleExitSelectionMode}
+                                    title="Exit selection mode"
+                                >
+                                    <X size={16} />
+                                </button>
+                            </>
+                        ) : (
+                            <button
+                                className={styles.selectModeBtn}
+                                onClick={() => setSelectionMode(true)}
+                                title="Select messages"
+                            >
+                                <CheckSquare size={16} />
+                            </button>
+                        )}
+                        <span className={styles.msgCount}>{totalMessages} msgs</span>
+                    </div>
                 </div>
 
                 <div className={styles.messageList}>
@@ -246,8 +330,16 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                         </div>
                     ) : (
                         messages.map((msg) => (
-                            <div key={msg.id} className={styles.message}>
+                            <div key={msg.id} className={`${styles.message} ${selectedIds.has(msg.id) ? styles.selected : ''}`}>
                                 <div className={styles.messageHeader}>
+                                    {selectionMode && (
+                                        <button
+                                            className={styles.checkbox}
+                                            onClick={() => handleToggleSelection(msg.id)}
+                                        >
+                                            {selectedIds.has(msg.id) ? <CheckSquare size={18} /> : <Square size={18} />}
+                                        </button>
+                                    )}
                                     <span className={`${styles.role} ${styles[msg.role.toLowerCase()] || ''}`}>
                                         {msg.role}
                                     </span>

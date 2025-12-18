@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 import os
 
 class ChatMessage(BaseModel):
+    id: Optional[str] = None
     role: str
     content: str
     timestamp: Optional[str] = None
@@ -36,26 +37,107 @@ def get_persona_avatar(persona_id: str, manager = Depends(get_manager)):
         return FileResponse(path)
     return FileResponse("assets/icons/host.png")
 
+import logging
+import hashlib
+
 @router.get("/history", response_model=ChatHistoryResponse)
-def get_chat_history(manager = Depends(get_manager)):
-    if not manager.user_current_building_id:
+def get_chat_history(
+    limit: int = 20, 
+    before: Optional[str] = None, 
+    manager = Depends(get_manager)
+):
+    # DEBUG LOGGING SETUP
+    debug_log_path = r"c:\Users\shuhe\workspace\SAIVerse\debug_chat.log"
+    def log_debug(msg):
+        with open(debug_log_path, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now()}: {msg}\n")
+
+    current_bid = manager.user_current_building_id
+    log_debug(f"Request: limit={limit}, before={before}, current_bid={current_bid}")
+    
+    if not current_bid:
+        logging.warning("get_chat_history: No user_current_building_id")
+        log_debug("ERROR: No user_current_building_id")
         return {"history": []}
         
-    raw_history = manager.building_histories.get(manager.user_current_building_id, [])
-    enriched_history = []
+    raw_history = manager.building_histories.get(current_bid, [])
     
-    for msg in raw_history:
+    # Filter out note-box messages before pagination to ensure consistent counts
+    raw_history = [msg for msg in raw_history if '<div class="note-box">' not in str(msg.get("content", ""))]
+    
+    log_debug(f"Found history items (after note-box filter): {len(raw_history)}")
+    if len(raw_history) == 0:
+        log_debug(f"Available building keys: {list(manager.building_histories.keys())}")
+    
+    # 1. Enrich/Normalize history with IDs
+    # We must do this dynamically to support legacy messages without IDs
+    # and ensure pagination works consistently.
+    enriched_history_objects = []
+    
+    for idx, msg in enumerate(raw_history):
+        # Determine ID
+        msg_id = msg.get("message_id")
+        if not msg_id:
+            # Generate stable ID for legacy messages
+            # Use content + timestamp + role + index to ensure uniqueness and stability
+            # Index is risky if history changes (e.g. deletion), but better than random
+            content_str = str(msg.get("content", ""))
+            timestamp = str(msg.get("timestamp", ""))
+            role = str(msg.get("role", ""))
+            # Use timestamp+role+content for stable ID (no index dependency)
+            unique_str = f"{current_bid}:{timestamp}:{role}:{content_str[:100]}" 
+            msg_id = hashlib.md5(unique_str.encode()).hexdigest()
+        
+        # Create temp object for pagination logic
+        enriched_history_objects.append({
+            **msg,
+            "virtual_id": str(msg_id)
+        })
+
+    # 2. Pagination Logic
+    start_index = 0
+    end_index = len(enriched_history_objects)
+
+    if before:
+        # Find the index of the message with ID 'before'
+        found_index = -1
+        # Search backwards
+        for i in range(len(enriched_history_objects) - 1, -1, -1):
+            if enriched_history_objects[i]["virtual_id"] == before:
+                found_index = i
+                break
+        
+        if found_index != -1:
+            end_index = found_index
+        else:
+            # ID not found - ID mismatch due to history changes
+            # Return empty; client interprets <20 results as "no more history"
+            logging.warning(f"get_chat_history: 'before' ID {before} not found in history for {current_bid}")
+            log_debug(f"WARN: 'before' ID {before} NOT FOUND (ID mismatch). IDs available (first 5): {[x['virtual_id'] for x in enriched_history_objects[:5]]}")
+            return {"history": []}
+
+    # Slice
+    start_index = max(0, end_index - limit)
+    slice_history = enriched_history_objects[start_index:end_index]
+    
+    log_debug(f"Slice calc: start={start_index}, end={end_index}, limit={limit}. Returning {len(slice_history)} items.")
+    logging.info(f"get_chat_history: bid={current_bid} total={len(raw_history)} limit={limit} before={before} returned={len(slice_history)}")
+
+    final_response = []
+    
+    for msg in slice_history:
         role = msg.get("role")
         content = msg.get("content")
         
-        # Filter out "User Action" logs (Gradio legacy)
-        if content and '<div class="note-box">' in content:
+        # note-box messages already filtered out above
+        if not content:
             continue
             
         timestamp = msg.get("timestamp", "")
+        message_id = msg["virtual_id"] # Use the robust ID
         
         sender = "Unknown"
-        avatar = "/api/static/icons/host.png" # Default
+        avatar = "/api/static/icons/host.png" 
         
         if role == "user":
             sender = manager.user_display_name or "User"
@@ -66,7 +148,6 @@ def get_chat_history(manager = Depends(get_manager)):
                 persona = manager.personas.get(pid)
                 if persona:
                     sender = persona.persona_name
-                    # Use our new endpoint
                     avatar = f"/api/chat/persona/{pid}/avatar"
             else:
                 sender = "Assistant"
@@ -74,7 +155,8 @@ def get_chat_history(manager = Depends(get_manager)):
             sender = "System"
             avatar = "/api/static/icons/host.png"
             
-        enriched_history.append(ChatMessage(
+        final_response.append(ChatMessage(
+            id=message_id,
             role=role,
             content=content,
             timestamp=timestamp,
@@ -82,7 +164,7 @@ def get_chat_history(manager = Depends(get_manager)):
             avatar=avatar
         ))
         
-    return {"history": enriched_history}
+    return {"history": final_response}
 
 import shutil
 import mimetypes

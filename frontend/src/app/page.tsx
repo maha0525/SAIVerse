@@ -10,6 +10,7 @@ import PeopleModal from '@/components/PeopleModal';
 import { Send, Paperclip, MapPin, Settings, X, Info, Users, Menu } from 'lucide-react';
 
 interface Message {
+    id?: string;
     role: 'user' | 'assistant';
     content: string;
     timestamp?: string; // ISO string
@@ -22,7 +23,14 @@ export default function Home() {
     const [inputValue, setInputValue] = useState('');
     const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const chatAreaRef = useRef<HTMLDivElement>(null); // Ref for the scrollable area
     const [isHistoryLoaded, setIsHistoryLoaded] = useState(false);
+
+    // Pagination State
+    const [hasMore, setHasMore] = useState(true);
+    const [isLoadingMore, setIsLoadingMore] = useState(false);
+    const previousScrollHeightRef = useRef<number>(0);
+    const prevNewestIdRef = useRef<string | undefined>(undefined); // Track newest message ID
 
     // New States
     const [isLeftOpen, setIsLeftOpen] = useState(false);
@@ -121,28 +129,132 @@ export default function Home() {
         }
     };
 
-    // Scroll to bottom
+    // Scroll manipulation effect
     useEffect(() => {
-        if (messages.length > 0) {
+        // Initial load scroll to bottom
+        if (messages.length > 0 && !isLoadingMore && isHistoryLoaded) {
+            // Only scroll to bottom if we are NOT loading more (i.e. new usage or initial load)
+            // Check if we are near bottom or if it's a fresh load?
+            // Simplest: if isHistoryLoaded just became true (initial load) OR we just sent a message.
+            // But 'isHistoryLoaded' is true after initial fetch.
+            // We can check if previousScrollHeightRef is 0 (initial)
             messagesEndRef.current?.scrollIntoView({
-                behavior: isHistoryLoaded ? 'smooth' : 'auto',
+                behavior: 'auto', // Intial load instant
                 block: 'end'
             });
         }
-    }, [messages, isHistoryLoaded]);
+    }, [isHistoryLoaded]); // Only on initial history ready
 
-    const fetchHistory = async () => {
+    // Scroll to bottom on NEW user/assistant messages (append)
+    useEffect(() => {
+        const currentNewestId = messages[messages.length - 1]?.id;
+        const prevNewestId = prevNewestIdRef.current;
+
+        // Update ref
+        prevNewestIdRef.current = currentNewestId;
+
+        // If newest ID didn't change, old history was prepended - don't scroll
+        if (prevNewestId !== undefined && currentNewestId === prevNewestId) {
+            return;
+        }
+
+        if (messages.length > 0 && !isLoadingMore && isHistoryLoaded) {
+            messagesEndRef.current?.scrollIntoView({
+                behavior: 'smooth',
+                block: 'end'
+            });
+        }
+    }, [messages.length, isLoadingMore, isHistoryLoaded]);
+
+
+    // Restore scroll position after loading previous history
+    useEffect(() => {
+        if (isLoadingMore && chatAreaRef.current) {
+            const newScrollHeight = chatAreaRef.current.scrollHeight;
+            const diff = newScrollHeight - previousScrollHeightRef.current;
+            if (diff > 0) {
+                chatAreaRef.current.scrollTop = diff;
+            }
+            setIsLoadingMore(false);
+        }
+    }, [messages, isLoadingMore]);
+
+
+    const fetchHistory = async (beforeId?: string) => {
         try {
-            setIsHistoryLoaded(false);
-            const res = await fetch('/api/chat/history');
+            if (!beforeId) {
+                setIsHistoryLoaded(false);
+                setHasMore(true);
+            } else {
+                setIsLoadingMore(true);
+                if (chatAreaRef.current) {
+                    previousScrollHeightRef.current = chatAreaRef.current.scrollHeight;
+                }
+            }
+
+            const params = new URLSearchParams({ limit: '20' });
+            if (beforeId) params.append('before', beforeId);
+
+            console.log(`[DEBUG] Fetching history: before=${beforeId}`);
+
+            const res = await fetch(`/api/chat/history?${params.toString()}`);
             if (res.ok) {
                 const data = await res.json();
-                setMessages(data.history || []);
-                setTimeout(() => setIsHistoryLoaded(true), 100);
+                const newMessages: Message[] = data.history || [];
+                console.log(`[DEBUG] Fetched ${newMessages.length} items`);
+
+                if (newMessages.length < 20) {
+                    setHasMore(false);
+                }
+
+                if (beforeId) {
+                    setMessages(prev => {
+                        // Deduplicate
+                        const existingIds = new Set(prev.map(m => m.id));
+                        const filtered = newMessages.filter(m => !m.id || !existingIds.has(m.id));
+                        if (filtered.length === 0) return prev;
+                        return [...filtered, ...prev];
+                    });
+                } else {
+                    setMessages(newMessages);
+                    setTimeout(() => setIsHistoryLoaded(true), 150);
+                }
+            } else {
+                console.error("[DEBUG] Fetch failed", res.status);
+                if (!beforeId) setMessages([]);
             }
         } catch (err) {
             console.error("Failed to load history", err);
-            setIsHistoryLoaded(true);
+            if (!beforeId) setIsHistoryLoaded(true);
+        } finally {
+            setIsLoadingMore(false);
+        }
+    };
+
+    // Scroll Restoration Logic
+    // Runs when messages change. If we were loading more, adjust scroll.
+    useEffect(() => {
+        if (isLoadingMore && chatAreaRef.current && previousScrollHeightRef.current > 0) {
+            const newScrollHeight = chatAreaRef.current.scrollHeight;
+            const diff = newScrollHeight - previousScrollHeightRef.current;
+            if (diff > 0) {
+                chatAreaRef.current.scrollTop = diff;
+                console.log(`[DEBUG] Restored scroll: +${diff}px`);
+            }
+        }
+    }, [messages, isLoadingMore]);
+
+    const handleScroll = () => {
+        if (chatAreaRef.current) {
+            const { scrollTop } = chatAreaRef.current;
+            // Use a threshold (e.g. 10px) to catch scrolls near the top
+            if (scrollTop < 10 && hasMore && !isLoadingMore && messages.length > 0 && isHistoryLoaded) {
+                // Determine the oldest message ID
+                const oldestId = messages[0].id;
+                if (oldestId) {
+                    fetchHistory(oldestId);
+                }
+            }
         }
     };
 
@@ -153,7 +265,10 @@ export default function Home() {
     const handleSendMessage = async () => {
         if ((!inputValue.trim() && !attachment) || loadingStatus) return;
 
-        const userMsg: Message = { role: 'user', content: inputValue };
+        // Optimistic update
+        // Temporary ID for key prop until refreshed
+        const tempId = `temp-${Date.now()}`;
+        const userMsg: Message = { id: tempId, role: 'user', content: inputValue };
         setMessages(prev => [...prev, userMsg]);
         setInputValue('');
         setLoadingStatus('Thinking...');
@@ -282,6 +397,7 @@ export default function Home() {
         >
             <Sidebar
                 onMove={() => {
+                    setMessages([]);
                     setIsHistoryLoaded(false);
                     fetchHistory();
                     setMoveTrigger(prev => prev + 1);
@@ -329,9 +445,14 @@ export default function Home() {
                     </div>
                 </header>
 
-                <div className={styles.chatArea}>
+                <div
+                    className={styles.chatArea}
+                    ref={chatAreaRef}
+                    onScroll={handleScroll}
+                >
+                    {isLoadingMore && <div style={{ textAlign: 'center', padding: '10px', color: '#666' }}>Loading history...</div>}
                     {messages.map((msg, idx) => (
-                        <div key={idx} className={`${styles.message} ${styles[msg.role]}`}>
+                        <div key={msg.id || idx} className={`${styles.message} ${styles[msg.role]}`}>
                             <div className={styles.card}>
                                 <div className={styles.cardHeader}>
                                     <img

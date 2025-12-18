@@ -119,6 +119,80 @@
 .headerTitle {
     color: #e0e0e0;
     font-weight: 600;
+    flex: 1;
+}
+
+.headerActions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.selectModeBtn,
+.deleteSelectedBtn,
+.exitSelectBtn {
+    background: none;
+    border: none;
+    color: #888;
+    padding: 6px;
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    transition: color 0.2s, background-color 0.2s;
+}
+
+.selectModeBtn:hover {
+    color: #4dabf7;
+    background-color: rgba(77, 171, 247, 0.1);
+}
+
+.deleteSelectedBtn {
+    color: #fa5252;
+}
+
+.deleteSelectedBtn:hover:not(:disabled) {
+    background-color: rgba(250, 82, 82, 0.15);
+}
+
+.deleteSelectedBtn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.exitSelectBtn:hover {
+    color: #e0e0e0;
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+.selectedCount {
+    font-size: 0.8rem;
+    color: #4dabf7;
+}
+
+.msgCount {
+    font-size: 0.85rem;
+    color: #888;
+}
+
+.checkbox {
+    background: none;
+    border: none;
+    color: #666;
+    padding: 0;
+    margin-right: 8px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+}
+
+.checkbox:hover {
+    color: #4dabf7;
+}
+
+.message.selected {
+    border-color: #4dabf7;
+    background-color: rgba(77, 171, 247, 0.08);
 }
 
 .messageList {
