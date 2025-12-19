@@ -37,6 +37,7 @@ os.environ["SAIVERSE_SKIP_TOOL_IMPORTS"] = "1"
 
 from sai_memory.memory.storage import init_db
 from sai_memory.memopedia import Memopedia
+from sai_memory.memopedia.storage import get_children, update_page as storage_update_page
 from model_configs import find_model_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -60,23 +61,35 @@ def get_persona_db_path(persona_id: str) -> Path:
     return Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
 
 
+def get_all_descendant_ids(memopedia: Memopedia, page_id: str) -> set:
+    """Get all descendant page IDs (children, grandchildren, etc.) of a page."""
+    descendants = set()
+    children = get_children(memopedia.conn, page_id)
+    for child in children:
+        descendants.add(child.id)
+        descendants.update(get_all_descendant_ids(memopedia, child.id))
+    return descendants
+
+
 def format_page_list(memopedia: Memopedia) -> str:
-    """Format page tree as a simple list for LLM."""
+    """Format page tree as a hierarchical list for LLM with parent-child relationships."""
     tree = memopedia.get_tree()
     lines: List[str] = []
     
-    def _list_pages(pages: List[Dict], category: str) -> None:
+    def _list_pages(pages: List[Dict], category: str, depth: int = 0, parent_id: Optional[str] = None) -> None:
         for page in pages:
             if page["id"].startswith("root_"):
                 # Skip root pages but still process their children
                 for child in page.get("children", []):
-                    _list_pages([child], category)
+                    _list_pages([child], category, depth, None)
                 continue
             keywords = page.get("keywords", [])
             kw_str = f" [キーワード: {', '.join(keywords)}]" if keywords else ""
-            lines.append(f"- id={page['id']} | {category} | {page['title']}: {page['summary']}{kw_str}")
+            indent = "  " * depth
+            parent_str = f" (親: {parent_id})" if parent_id else ""
+            lines.append(f"{indent}- id={page['id']} | {category} | {page['title']}: {page['summary']}{kw_str}{parent_str}")
             for child in page.get("children", []):
-                _list_pages([child], category)
+                _list_pages([child], category, depth + 1, page["id"])
     
     for category in ["people", "events", "plans"]:
         _list_pages(tree.get(category, []), category)
@@ -351,6 +364,23 @@ def run_merge_similar(
         "required": ["merge_pairs"],
     }
     
+    # Build a set of all pages and their descendants for validation
+    all_pages_descendants: Dict[str, set] = {}
+    
+    def _collect_descendants(pages: List[Dict]) -> None:
+        for page in pages:
+            if page["id"].startswith("root_"):
+                for child in page.get("children", []):
+                    _collect_descendants([child])
+                continue
+            all_pages_descendants[page["id"]] = get_all_descendant_ids(memopedia, page["id"])
+            for child in page.get("children", []):
+                _collect_descendants([child])
+    
+    tree = memopedia.get_tree()
+    for category in ["people", "events", "plans"]:
+        _collect_descendants(tree.get(category, []))
+    
     find_prompt = f"""以下はMemopediaのページ一覧です。
 
 {page_list}
@@ -415,6 +445,17 @@ def run_merge_similar(
                 LOGGER.warning(f"Could not find pages: {pair['page_id_1']}, {pair['page_id_2']}")
                 continue
             
+            # Skip if one is a descendant of the other
+            page1_descendants = all_pages_descendants.get(page1.id, set())
+            page2_descendants = all_pages_descendants.get(page2.id, set())
+            
+            if page2.id in page1_descendants:
+                LOGGER.warning(f"Skipping merge: '{page2.title}' is a descendant of '{page1.title}'")
+                continue
+            if page1.id in page2_descendants:
+                LOGGER.warning(f"Skipping merge: '{page1.title}' is a descendant of '{page2.title}'")
+                continue
+            
             LOGGER.info(f"Merging: '{page1.title}' + '{page2.title}' - {pair.get('reason', '')}")
             
             if dry_run:
@@ -472,7 +513,19 @@ def run_merge_similar(
                     edit_source="auto_maintenance",
                 )
                 
-                # Delete page2
+                # Transfer children of page2 to page1 before deleting
+                page2_children = get_children(memopedia.conn, page2.id)
+                if page2_children:
+                    LOGGER.info(f"Transferring {len(page2_children)} children from '{page2.title}' to '{page1.title}'")
+                    for child in page2_children:
+                        storage_update_page(
+                            memopedia.conn,
+                            child.id,
+                            parent_id=page1.id,
+                        )
+                        LOGGER.info(f"  - Transferred child: {child.title}")
+                
+                # Delete page2 (now without children, so they won't be deleted)
                 memopedia.delete_page(
                     page2.id,
                     edit_source="auto_maintenance",
@@ -566,17 +619,18 @@ def main():
     }
 
     # Run operations
-    if args.auto or args.fix_markdown:
-        LOGGER.info("=== Fix Markdown ===")
-        results["markdown_fixed"] = run_fix_markdown(memopedia, dry_run=args.dry_run)
+    # Note: markdown is fixed LAST because merge/split may break markdown formatting
+    if args.auto or args.merge_similar:
+        LOGGER.info("=== Merge Similar Pages ===")
+        results["pages_merged"] = run_merge_similar(memopedia, client, dry_run=args.dry_run)
 
     if args.auto or args.split_large:
         LOGGER.info("=== Split Large Pages ===")
         results["pages_split"] = run_split_large(memopedia, client, dry_run=args.dry_run)
 
-    if args.auto or args.merge_similar:
-        LOGGER.info("=== Merge Similar Pages ===")
-        results["pages_merged"] = run_merge_similar(memopedia, client, dry_run=args.dry_run)
+    if args.auto or args.fix_markdown:
+        LOGGER.info("=== Fix Markdown ===")
+        results["markdown_fixed"] = run_fix_markdown(memopedia, dry_run=args.dry_run)
 
     # Summary
     LOGGER.info("\n" + "=" * 60)
