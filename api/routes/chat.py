@@ -43,7 +43,8 @@ import hashlib
 @router.get("/history", response_model=ChatHistoryResponse)
 def get_chat_history(
     limit: int = 20, 
-    before: Optional[str] = None, 
+    before: Optional[str] = None,
+    after: Optional[str] = None,
     manager = Depends(get_manager)
 ):
     # DEBUG LOGGING SETUP
@@ -116,8 +117,27 @@ def get_chat_history(
             log_debug(f"WARN: 'before' ID {before} NOT FOUND (ID mismatch). IDs available (first 5): {[x['virtual_id'] for x in enriched_history_objects[:5]]}")
             return {"history": []}
 
+    if after:
+        # Find the index of the message with ID 'after' and return messages after it
+        found_index = -1
+        for i in range(len(enriched_history_objects)):
+            if enriched_history_objects[i]["virtual_id"] == after:
+                found_index = i
+                break
+        
+        if found_index != -1:
+            start_index = found_index + 1  # Start after the found message
+            # For polling, we want newest messages (no need for limit typically, but cap at limit)
+            end_index = min(start_index + limit, len(enriched_history_objects))
+        else:
+            # ID not found - maybe history was cleared or rolled over
+            # Return empty for safety (client will need to refresh)
+            logging.warning(f"get_chat_history: 'after' ID {after} not found in history for {current_bid}")
+            log_debug(f"WARN: 'after' ID {after} NOT FOUND. Returning empty for polling.")
+            return {"history": []}
+
     # Slice
-    start_index = max(0, end_index - limit)
+    start_index = max(0, end_index - limit) if not after else start_index
     slice_history = enriched_history_objects[start_index:end_index]
     
     log_debug(f"Slice calc: start={start_index}, end={end_index}, limit={limit}. Returning {len(slice_history)} items.")

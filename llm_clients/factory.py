@@ -20,9 +20,17 @@ def _supports_images(provider: str, config: Dict | None) -> bool:
     return provider == "gemini"
 
 
-def get_llm_client(model: str, provider: str, context_length: int) -> LLMClient:
-    """Factory function to get the appropriate LLM client."""
-    config = get_model_config(model)
+def get_llm_client(model: str, provider: str, context_length: int, config: Dict | None = None) -> LLMClient:
+    """Factory function to get the appropriate LLM client.
+    
+    Args:
+        model: Model ID to use
+        provider: Provider name (openai, anthropic, gemini, ollama, nvidia_nim)
+        context_length: Context length for the model
+        config: Optional model config dict. If not provided, will be looked up by model ID.
+    """
+    if config is None:
+        config = get_model_config(model)
     supports_images = _supports_images(provider, config if isinstance(config, dict) else None)
     client: LLMClient
     if provider == "openai":

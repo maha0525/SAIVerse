@@ -262,6 +262,49 @@ export default function Home() {
         fetchHistory();
     }, []);
 
+    // Polling for new messages (schedule-triggered persona speech, etc.)
+    const latestMessageIdRef = useRef<string | undefined>(undefined);
+
+    // Keep ref updated with latest message ID
+    useEffect(() => {
+        const newestId = messages[messages.length - 1]?.id;
+        if (newestId && !newestId.startsWith('temp-')) {
+            latestMessageIdRef.current = newestId;
+        }
+    }, [messages]);
+
+    useEffect(() => {
+        if (!isHistoryLoaded) return; // Don't poll until initial load is done
+
+        const pollInterval = setInterval(async () => {
+            const newestId = latestMessageIdRef.current;
+            if (!newestId) return; // Skip if no real ID
+
+            try {
+                const res = await fetch(`/api/chat/history?after=${newestId}&limit=50`);
+                if (res.ok) {
+                    const data = await res.json();
+                    const newMessages: Message[] = data.history || [];
+
+                    if (newMessages.length > 0) {
+                        console.log(`[Polling] Found ${newMessages.length} new message(s)`);
+                        setMessages(prev => {
+                            // Deduplicate
+                            const existingIds = new Set(prev.map(m => m.id));
+                            const filtered = newMessages.filter(m => !m.id || !existingIds.has(m.id));
+                            if (filtered.length === 0) return prev;
+                            return [...prev, ...filtered];
+                        });
+                    }
+                }
+            } catch (err) {
+                console.error("[Polling] Failed to check for new messages", err);
+            }
+        }, 5000); // Poll every 5 seconds
+
+        return () => clearInterval(pollInterval);
+    }, [isHistoryLoaded]);
+
     const handleSendMessage = async () => {
         if ((!inputValue.trim() && !attachment) || loadingStatus) return;
 

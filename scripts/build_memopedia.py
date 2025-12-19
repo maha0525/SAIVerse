@@ -66,30 +66,50 @@ def get_persona_db_path(persona_id: str) -> Path:
     return Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
 
 
-def fetch_messages(db_path: Path, limit: int = 100) -> List[Message]:
-    """Fetch messages from the database."""
+def fetch_messages(db_path: Path, limit: int = 100, offset: int = 0, thread_id: str | None = None) -> List[Message]:
+    """Fetch messages from the database.
+    
+    Args:
+        db_path: Path to the memory.db file
+        limit: Maximum number of messages to return
+        offset: Number of messages to skip from the beginning
+        thread_id: If specified, only fetch from this thread. Otherwise fetch from all threads.
+    """
     conn = init_db(str(db_path), check_same_thread=False)
 
-    # Get all threads
-    cur = conn.execute("SELECT id FROM threads ORDER BY id ASC")
-    threads = [row[0] for row in cur.fetchall()]
+    # Get threads to process
+    if thread_id:
+        threads = [thread_id]
+    else:
+        # Order threads by their earliest message timestamp
+        cur = conn.execute("""
+            SELECT t.id, MIN(m.created_at) as first_msg_ts
+            FROM threads t
+            LEFT JOIN messages m ON t.id = m.thread_id
+            GROUP BY t.id
+            ORDER BY first_msg_ts ASC NULLS LAST
+        """)
+        threads = [row[0] for row in cur.fetchall()]
 
     all_messages: List[Message] = []
-    for thread_id in threads:
+    total_to_fetch = offset + limit  # Need to fetch offset+limit then slice
+    
+    for tid in threads:
         page = 0
-        while len(all_messages) < limit:
-            batch = get_messages_paginated(conn, thread_id, page=page, page_size=100)
+        while len(all_messages) < total_to_fetch:
+            batch = get_messages_paginated(conn, tid, page=page, page_size=100)
             if not batch:
                 break
             all_messages.extend(batch)
             page += 1
-            if len(all_messages) >= limit:
+            if len(all_messages) >= total_to_fetch:
                 break
-        if len(all_messages) >= limit:
+        if len(all_messages) >= total_to_fetch:
             break
 
     conn.close()
-    return all_messages[:limit]
+    # Apply offset and limit
+    return all_messages[offset:offset + limit]
 
 
 def format_messages_for_prompt(messages: List[Message]) -> str:
@@ -655,6 +675,8 @@ def main():
     parser.add_argument("--export", type=str, metavar="FILE", help="Export Memopedia to JSON file and exit")
     parser.add_argument("--import", type=str, metavar="FILE", dest="import_file", help="Import Memopedia from JSON file")
     parser.add_argument("--clear", action="store_true", help="Clear all existing pages (can be used alone or with --import)")
+    parser.add_argument("--offset", type=int, default=0, help="Number of messages to skip (for resuming, e.g., --offset 100 to skip first 100)")
+    parser.add_argument("--thread", type=str, metavar="THREAD_ID", help="Process only messages from this thread ID")
 
     args = parser.parse_args()
 
@@ -718,7 +740,8 @@ def main():
         # Found a matching config
         if resolved_model_id != args.model:
             LOGGER.info(f"Resolved model '{args.model}' -> '{resolved_model_id}'")
-        actual_model_id = resolved_model_id
+        # Use the "model" field from config for actual API calls (may differ from filename)
+        actual_model_id = model_config.get("model", resolved_model_id)
         context_length = model_config.get("context_length", 128000)
         auto_provider = model_config.get("provider", "gemini")
     else:
@@ -737,7 +760,7 @@ def main():
     # Import factory directly to avoid circular import
     # (llm_clients/__init__.py imports tools which imports persona which imports llm_clients)
     from llm_clients.factory import get_llm_client
-    client = get_llm_client(actual_model_id, provider, context_length)
+    client = get_llm_client(actual_model_id, provider, context_length, config=model_config)
 
     # Process system prompt first if provided
     if args.system_prompt:
@@ -763,8 +786,8 @@ def main():
             )
 
     # Fetch messages
-    LOGGER.info("Fetching messages...")
-    messages = fetch_messages(db_path, limit=args.limit)
+    LOGGER.info(f"Fetching messages (offset={args.offset}, limit={args.limit}, thread={args.thread or 'all'})...")
+    messages = fetch_messages(db_path, limit=args.limit, offset=args.offset, thread_id=args.thread)
     LOGGER.info(f"Fetched {len(messages)} messages")
 
     if not messages and not args.system_prompt:
