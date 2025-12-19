@@ -73,17 +73,16 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
         setCurrentModel(modelId);
         // Save immediately
         try {
-            await fetch('/api/config/model', {
+            const res = await fetch('/api/config/model', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ model: modelId })
             });
-            // Refresh config to get new params
-            const res = await fetch('/api/config/config');
             if (res.ok) {
-                const config = await res.json();
-                setParamSpecs(config.parameters || {});
-                setParams(config.current_values || {});
+                // Use inline parameters from response (no separate fetch needed)
+                const data = await res.json();
+                setParamSpecs(data.parameters || {});
+                setParams(data.current_values || {});
             }
         } catch (e) {
             console.error("Failed to set model", e);

@@ -335,9 +335,9 @@ def get_children(conn: sqlite3.Connection, parent_id: Optional[str]) -> List[Mem
 
 
 def get_all_pages(conn: sqlite3.Connection) -> List[MemopediaPage]:
-    """Get all pages."""
+    """Get all non-deleted pages."""
     cur = conn.execute(
-        "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords FROM memopedia_pages ORDER BY category, title"
+        "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords FROM memopedia_pages WHERE is_deleted = 0 OR is_deleted IS NULL ORDER BY category, title"
     )
     return [_row_to_page(row) for row in cur.fetchall()]
 

@@ -182,10 +182,13 @@ class SAIVerseManager(
                 self.building_histories[b_id] = []
 
         # --- Step 4: Initialize Core Components and State Containers ---
-        resolved_model = model or _get_default_model()
-        self.model = resolved_model
-        self.context_length = get_context_length(resolved_model)
-        self.provider = get_model_provider(resolved_model)
+        # Resolve base model (for internal fallbacks), but start with no global override
+        # so that Chat Options shows "(Default)" on startup.
+        base_model = model or _get_default_model()
+        self.model = "None"  # No global override by default
+        self.context_length = get_context_length(base_model)
+        self.provider = get_model_provider(base_model)
+        self._base_model = base_model  # Internal fallback for personas without DB default
         self.model_parameter_overrides: Dict[str, Any] = {}
 
         self.state = CoreState(
@@ -1421,7 +1424,7 @@ class SAIVerseManager(
                     ai = db.query(AIModel).filter_by(AIID=pid).first()
                     if not ai:
                         continue
-                    m = ai.DEFAULT_MODEL or _get_default_model()
+                    m = ai.DEFAULT_MODEL or getattr(self, '_base_model', None) or _get_default_model()
                     persona.set_model(m, get_context_length(m), get_model_provider(m))
                 # Reflect no-override state in manager
                 self.model = "None"

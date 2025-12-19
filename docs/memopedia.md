@@ -100,7 +100,57 @@ python scripts/build_memopedia.py --list-models
 
 # バッチサイズを調整（1回のLLMコールで処理するメッセージ数）
 python scripts/build_memopedia.py <persona_id> --batch-size 10
+
+# システムプロンプトから知識を抽出（メッセージ処理の前に実行）
+python scripts/build_memopedia.py <persona_id> --system-prompt persona_prompt.txt
+
+# 2段階書き込みモード（既存ページを読んでから自然に追記）
+python scripts/build_memopedia.py <persona_id> --refine-writes
 ```
+
+### エクスポート/インポート
+
+```bash
+# JSONエクスポート
+python scripts/build_memopedia.py <persona_id> --export memopedia_backup.json
+
+# JSONインポート
+python scripts/build_memopedia.py <persona_id> --import memopedia_backup.json
+
+# 既存ページをクリアしてからインポート
+python scripts/build_memopedia.py <persona_id> --import memopedia_backup.json --clear
+
+# ページのクリアのみ（ルートカテゴリは保持）
+python scripts/build_memopedia.py <persona_id> --clear
+```
+
+### メンテナンス（自動最適化）
+
+`maintain_memopedia.py`でナレッジベースを自動最適化できる：
+
+```bash
+# 全自動メンテナンス（推奨）
+python scripts/maintain_memopedia.py <persona_id> --auto
+
+# 個別実行
+python scripts/maintain_memopedia.py <persona_id> --fix-markdown    # Markdown整形
+python scripts/maintain_memopedia.py <persona_id> --split-large     # 5000文字超を分割
+python scripts/maintain_memopedia.py <persona_id> --merge-similar   # 重複ページ統合
+
+# ドライラン（変更せずに対象を表示）
+python scripts/maintain_memopedia.py <persona_id> --auto --dry-run
+
+# モデル指定
+python scripts/maintain_memopedia.py <persona_id> --auto --model gemini-3-flash-preview-paid
+```
+
+| オプション | 説明 |
+|---|---|
+| `--auto` | 全メンテナンス操作を実行 |
+| `--fix-markdown` | リテラル`\n`など構文問題を修正 |
+| `--split-large` | 5000文字超のページを子ページに分割 |
+| `--merge-similar` | LLMが重複ページを特定し統合 |
+| `--dry-run` | 変更せずに対象ページ名を表示 |
 
 #### オプション一覧
 
@@ -112,6 +162,11 @@ python scripts/build_memopedia.py <persona_id> --batch-size 10
 | `--batch-size N` | 20 | 1回のLLMコールで処理するメッセージ数 |
 | `--dry-run` | - | DBに書き込まずプレビューのみ |
 | `--list-models` | - | 利用可能なモデル一覧を表示 |
+| `--system-prompt FILE` | - | 指定したテキストファイルから最初に知識を抽出 |
+| `--refine-writes` | - | 既存ページに追記する際、LLMで内容を自然に統合 |
+| `--export FILE` | - | MemopediaをJSONファイルにエクスポート |
+| `--import FILE` | - | JSONファイルからMemopediaをインポート |
+| `--clear` | - | 既存ページをすべて削除（単独または`--import`と併用） |
 
 ### UIで確認
 

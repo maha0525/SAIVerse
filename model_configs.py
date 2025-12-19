@@ -122,7 +122,7 @@ def find_model_config(query: str) -> tuple[str, Dict]:
 
     Searches in order:
     1. Exact match on model ID
-    2. Exact match on filename (without .json)
+    2. Exact match on filename (without .json) - loads config directly from file
     3. Partial match on model ID (e.g., "qwen3-coder" matches "qwen/qwen3-coder-480b...")
 
     Args:
@@ -135,23 +135,18 @@ def find_model_config(query: str) -> tuple[str, Dict]:
     if query in MODEL_CONFIGS:
         return query, MODEL_CONFIGS[query]
 
-    # 2. Build filename -> model_id mapping
-    filename_to_model: Dict[str, str] = {}
+    # 2. Check exact filename match - load config directly from file
     if MODELS_DIR.exists() and MODELS_DIR.is_dir():
-        for config_file in MODELS_DIR.glob("*.json"):
-            filename = config_file.stem  # filename without .json
+        config_file = MODELS_DIR / f"{query}.json"
+        if config_file.exists():
             try:
                 config_data = json.loads(config_file.read_text(encoding="utf-8"))
-                model_id = config_data.get("model", "")
-                if model_id:
-                    filename_to_model[filename] = model_id
+                model_id = config_data.get("model", query)
+                # Return the query (filename) as the resolved ID so caller knows which file was used
+                # But include the actual model ID in the config for API calls
+                return query, config_data
             except Exception:
                 pass
-
-    # Check exact filename match
-    if query in filename_to_model:
-        model_id = filename_to_model[query]
-        return model_id, MODEL_CONFIGS.get(model_id, {})
 
     # 3. Partial match on model ID (query is suffix or contains)
     for model_id, config in MODEL_CONFIGS.items():

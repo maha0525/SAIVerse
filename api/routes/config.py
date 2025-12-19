@@ -134,9 +134,63 @@ def get_current_config(manager = Depends(get_manager)):
 
 @router.post("/model")
 def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
-    """Set the global model override."""
+    """Set the global model override and return updated config."""
     manager.set_model(req.model, req.parameters)
-    return {"success": True, "model": req.model}
+    
+    # Return full config inline to avoid a separate /config fetch
+    current_model = manager.model if manager.model != "None" else None
+    
+    if not current_model:
+        return {
+            "success": True,
+            "model": req.model,
+            "current_model": None,
+            "parameters": {},
+            "current_values": {}
+        }
+    
+    # Get param specs
+    raw_specs = get_model_parameters(current_model)
+    specs = {}
+    
+    for key, val in raw_specs.items():
+        if not isinstance(val, dict):
+            continue
+        scopes = val.get("client_support")
+        if scopes and "chat" not in (scopes if isinstance(scopes, list) else [scopes]):
+            continue
+            
+        spec_type = "text"
+        if "options" in val:
+            spec_type = "dropdown"
+        elif "min" in val and "max" in val:
+            spec_type = "slider"
+        elif val.get("type", "") in ["int", "float"]:
+            spec_type = "number"
+            
+        specs[key] = {
+            "label": val.get("label", key),
+            "type": spec_type,
+            "default": val.get("default"),
+            "min": val.get("min"),
+            "max": val.get("max"),
+            "step": val.get("step"),
+            "options": val.get("options"),
+            "description": val.get("description")
+        }
+
+    # Get current values
+    current_values = dict(get_model_parameter_defaults(current_model))
+    if manager.model_parameter_overrides:
+        current_values.update(manager.model_parameter_overrides)
+
+    return {
+        "success": True,
+        "model": req.model,
+        "current_model": current_model,
+        "parameters": specs,
+        "current_values": current_values
+    }
 
 @router.post("/parameters")
 def set_parameters(req: UpdateParametersRequest, manager = Depends(get_manager)):
