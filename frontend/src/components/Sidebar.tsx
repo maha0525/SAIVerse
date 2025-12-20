@@ -193,7 +193,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
                     isOpen={isProfileModalOpen}
                     onClose={() => setIsProfileModalOpen(false)}
                     currentName={status?.display_name || ""}
-                    currentAvatar={status?.avatar}
+                    currentAvatar={status?.avatar ?? null}
                     currentEmail={status?.email}
                     onSaveSuccess={refreshData}
                 />

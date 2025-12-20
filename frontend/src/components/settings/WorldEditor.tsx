@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import styles from './WorldEditor.module.css';
-import { Layers, MapPin, Cpu, Box, FileText, Wrench, ArrowRight } from 'lucide-react';
+import { Layers, MapPin, Cpu, Box, FileText, Wrench, ArrowRight, BookOpen } from 'lucide-react';
 import ImageUpload from '../common/ImageUpload';
 
 interface City {
@@ -69,6 +69,17 @@ interface Blueprint {
     BASE_SYSTEM_PROMPT: string;
 }
 
+interface Playbook {
+    id: number;
+    name: string;
+    description: string;
+    scope: string;
+    router_callable: boolean;
+    user_selectable: boolean;
+    nodes_json?: string;
+    schema_json?: string;
+}
+
 interface ModelChoice {
     id: string;
     name: string;
@@ -86,6 +97,7 @@ export default function WorldEditor() {
     const [items, setItems] = useState<Item[]>([]); // Note: pure items
     const [blueprints, setBlueprints] = useState<Blueprint[]>([]);
     const [modelChoices, setModelChoices] = useState<ModelChoice[]>([]);
+    const [playbooks, setPlaybooks] = useState<Playbook[]>([]);
 
     // Selection State
     const [selectedCity, setSelectedCity] = useState<City | null>(null);
@@ -94,6 +106,7 @@ export default function WorldEditor() {
     const [selectedItem, setSelectedItem] = useState<Item | null>(null);
     const [selectedBlueprint, setSelectedBlueprint] = useState<Blueprint | null>(null);
     const [selectedTool, setSelectedTool] = useState<Tool | null>(null);
+    const [selectedPlaybook, setSelectedPlaybook] = useState<Playbook | null>(null);
 
     // Form & Action State
     const [formData, setFormData] = useState<any>({});
@@ -106,6 +119,7 @@ export default function WorldEditor() {
         if (subTab === 'item') { loadItems(); }
         if (subTab === 'blueprint') { loadBlueprints(); loadBuildings(); } // Buildings for spawn
         if (subTab === 'tool') { loadTools(); }
+        if (subTab === 'playbook') { loadPlaybooks(); }
     }, [subTab]);
 
     const loadCities = async () => { try { const res = await fetch('/api/db/tables/city'); if (res.ok) setCities(await res.json()); } catch (e) { } };
@@ -115,6 +129,7 @@ export default function WorldEditor() {
     const loadItems = async () => { try { const res = await fetch('/api/db/tables/item'); if (res.ok) setItems(await res.json()); } catch (e) { } };
     const loadBlueprints = async () => { try { const res = await fetch('/api/db/tables/blueprint'); if (res.ok) setBlueprints(await res.json()); } catch (e) { } };
     const loadModels = async () => { try { const res = await fetch('/api/info/models'); if (res.ok) setModelChoices(await res.json()); } catch (e) { } };
+    const loadPlaybooks = async () => { try { const res = await fetch('/api/world/playbooks'); if (res.ok) setPlaybooks(await res.json()); } catch (e) { } };
 
     // --- City Handlers ---
     const handleCitySelect = (city: City) => {
@@ -186,6 +201,42 @@ export default function WorldEditor() {
     const handleUpdateItem = async () => { await fetch(`/api/world/items/${selectedItem!.ITEM_ID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadItems(); };
     const handleDeleteItem = async () => { if (confirm("Are you sure?")) { await fetch(`/api/world/items/${selectedItem!.ITEM_ID}`, { method: 'DELETE' }); setSelectedItem(null); setFormData({}); loadItems(); } };
 
+    // --- Playbook Handlers ---
+    const handlePlaybookSelect = async (pb: Playbook) => {
+        // Fetch full details
+        try {
+            const res = await fetch(`/api/world/playbooks/${pb.id}`);
+            if (res.ok) {
+                const detail = await res.json();
+                setSelectedPlaybook(detail);
+                setFormData({
+                    name: detail.name,
+                    description: detail.description,
+                    scope: detail.scope,
+                    router_callable: detail.router_callable,
+                    user_selectable: detail.user_selectable,
+                    nodes_json: detail.nodes_json,
+                    schema_json: detail.schema_json,
+                });
+            }
+        } catch (e) { }
+    };
+    const handleCreatePlaybook = async () => {
+        try {
+            const res = await fetch('/api/world/playbooks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) });
+            if (!res.ok) { const err = await res.json(); alert(err.detail || 'Error'); return; }
+            loadPlaybooks(); setFormData({}); setSelectedPlaybook(null);
+        } catch (e) { }
+    };
+    const handleUpdatePlaybook = async () => {
+        try {
+            const res = await fetch(`/api/world/playbooks/${selectedPlaybook!.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) });
+            if (!res.ok) { const err = await res.json(); alert(err.detail || 'Error'); return; }
+            loadPlaybooks();
+        } catch (e) { }
+    };
+    const handleDeletePlaybook = async () => { if (confirm("Are you sure?")) { await fetch(`/api/world/playbooks/${selectedPlaybook!.id}`, { method: 'DELETE' }); setSelectedPlaybook(null); setFormData({}); loadPlaybooks(); } };
+
 
     // Helper for Form Fields
     const Field = ({ label, children }: any) => <div className={styles.field}><label>{label}</label>{children}</div>;
@@ -210,6 +261,7 @@ export default function WorldEditor() {
                 <button className={`${styles.tab} ${subTab === 'blueprint' ? styles.active : ''}`} onClick={() => { setSubTab('blueprint'); setSelectedBlueprint(null); setFormData({}); }}><FileText size={16} /> Blueprints</button>
                 <button className={`${styles.tab} ${subTab === 'tool' ? styles.active : ''}`} onClick={() => { setSubTab('tool'); setSelectedTool(null); setFormData({}); }}><Wrench size={16} /> Tools</button>
                 <button className={`${styles.tab} ${subTab === 'item' ? styles.active : ''}`} onClick={() => { setSubTab('item'); setSelectedItem(null); setFormData({}); }}><Box size={16} /> Items</button>
+                <button className={`${styles.tab} ${subTab === 'playbook' ? styles.active : ''}`} onClick={() => { setSubTab('playbook'); setSelectedPlaybook(null); setFormData({}); }}><BookOpen size={16} /> Playbooks</button>
             </div>
 
             <div className={styles.content}>
@@ -377,6 +429,33 @@ export default function WorldEditor() {
                             <Field label="Description"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
                             <Field label="State JSON"><TextArea value={formData.state_json || ''} onChange={(e: any) => setFormData({ ...formData, state_json: e.target.value })} /></Field>
                             {renderFormActions(selectedItem, handleCreateItem, handleUpdateItem, handleDeleteItem)}
+                        </div>
+                    </div>
+                )}
+
+                {subTab === 'playbook' && (
+                    <div className={styles.pane}>
+                        <div className={styles.list}>
+                            <h3>Playbooks</h3>
+                            {playbooks.map(pb => <div key={pb.id} className={`${styles.item} ${selectedPlaybook?.id === pb.id ? styles.selected : ''}`} onClick={() => handlePlaybookSelect(pb)}>{pb.name}</div>)}
+                            <button className={styles.newBtn} onClick={() => { setSelectedPlaybook(null); setFormData({ scope: 'public', router_callable: false, user_selectable: false, nodes_json: '[]', schema_json: '{"input_schema": [], "start_node": "start"}' }); }}>+ New Playbook</button>
+                        </div>
+                        <div className={styles.form}>
+                            <h3>{selectedPlaybook ? `Edit Playbook` : 'New Playbook'}</h3>
+                            <Field label="Name (lowercase, underscore)"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            <Field label="Description"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
+                            <div className={styles.row}>
+                                <Field label="Scope"><Select value={formData.scope || 'public'} onChange={(e: any) => setFormData({ ...formData, scope: e.target.value })}>
+                                    <option value="public">Public</option><option value="personal">Personal</option><option value="building">Building</option>
+                                </Select></Field>
+                            </div>
+                            <div className={styles.row}>
+                                <label><input type="checkbox" checked={formData.router_callable || false} onChange={(e: any) => setFormData({ ...formData, router_callable: e.target.checked })} /> Router Callable</label>
+                                <label style={{ marginLeft: '1rem' }}><input type="checkbox" checked={formData.user_selectable || false} onChange={(e: any) => setFormData({ ...formData, user_selectable: e.target.checked })} /> User Selectable</label>
+                            </div>
+                            <Field label="Schema JSON (input_schema, start_node, etc.)"><TextArea style={{ minHeight: 120, fontFamily: 'monospace' }} value={formData.schema_json || ''} onChange={(e: any) => setFormData({ ...formData, schema_json: e.target.value })} /></Field>
+                            <Field label="Nodes JSON"><TextArea style={{ minHeight: 200, fontFamily: 'monospace' }} value={formData.nodes_json || ''} onChange={(e: any) => setFormData({ ...formData, nodes_json: e.target.value })} /></Field>
+                            {renderFormActions(selectedPlaybook, handleCreatePlaybook, handleUpdatePlaybook, handleDeletePlaybook)}
                         </div>
                     </div>
                 )}
