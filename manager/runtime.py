@@ -105,7 +105,8 @@ class RuntimeService(
                 .first()
             )
             if user:
-                self.state.user_is_online = user.LOGGED_IN
+                # Map DB boolean to presence status string
+                self.state.user_presence_status = "online" if user.LOGGED_IN else "offline"
                 self.state.user_current_city_id = user.CURRENT_CITYID
                 self.state.user_current_building_id = user.CURRENT_BUILDINGID
                 self.state.user_display_name = (
@@ -120,7 +121,7 @@ class RuntimeService(
                 )
                 logging.info(
                     "Loaded user state: %s at %s",
-                    "Online" if self.state.user_is_online else "Offline",
+                    self.state.user_presence_status,
                     self.state.user_current_building_id,
                 )
             else:
@@ -128,7 +129,7 @@ class RuntimeService(
                     "User with USERID=%s not found. Defaulting to Offline.",
                     self.state.user_id,
                 )
-                self.state.user_is_online = False
+                self.state.user_presence_status = "offline"
                 self.state.user_current_building_id = None
                 self.state.user_current_city_id = None
                 self.state.user_display_name = "ユーザー"
@@ -140,7 +141,7 @@ class RuntimeService(
             logging.error(
                 "Failed to load user status from DB: %s", exc, exc_info=True
             )
-            self.state.user_is_online = False
+            self.state.user_presence_status = "offline"
             self.state.user_current_building_id = None
             self.state.user_display_name = "ユーザー"
             self.state.user_avatar_data = self.manager.default_avatar

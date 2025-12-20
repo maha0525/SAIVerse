@@ -25,16 +25,23 @@ interface ModelChoice {
 }
 
 const INTERACTION_MODES = [
-    { value: 'auto', label: 'Auto (Autonomous)' },
-    { value: 'manual', label: 'Manual (User Triggered)' },
-    { value: 'sleep', label: 'Sleep (Disabled)' },
+    { value: 'auto', label: '🟢 Auto - Speaks autonomously' },
+    { value: 'manual', label: '🟡 Manual - Only responds to user' },
+    { value: 'sleep', label: '🔴 Sleep - Currently inactive' },
 ];
+
+interface AutonomousStatus {
+    interaction_mode: string;
+    system_running: boolean;
+    is_active: boolean;
+}
 
 export default function SettingsModal({ isOpen, onClose, personaId }: SettingsModalProps) {
     const [config, setConfig] = useState<AIConfig | null>(null);
     const [availableModels, setAvailableModels] = useState<ModelChoice[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
+    const [autonomousStatus, setAutonomousStatus] = useState<AutonomousStatus | null>(null);
 
     // Form state
     const [description, setDescription] = useState('');
@@ -84,12 +91,20 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
             } else {
                 console.error("Failed to load config");
             }
+
+            // Also load autonomous status
+            const statusRes = await fetch(`/api/people/${personaId}/autonomous/status`);
+            if (statusRes.ok) {
+                const statusData = await statusRes.json();
+                setAutonomousStatus(statusData);
+            }
         } catch (error) {
             console.error(error);
         } finally {
             setIsLoading(false);
         }
     };
+
 
     const handleSave = async () => {
         setIsSaving(true);
@@ -193,6 +208,22 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         <option key={m.value} value={m.value}>{m.label}</option>
                                     ))}
                                 </select>
+                                {autonomousStatus && (
+                                    <div className={styles.description} style={{
+                                        marginTop: '0.5rem',
+                                        padding: '0.5rem',
+                                        background: autonomousStatus.is_active ? 'rgba(0, 200, 0, 0.1)' : 'rgba(100, 100, 100, 0.1)',
+                                        borderRadius: '4px'
+                                    }}>
+                                        {autonomousStatus.is_active ? (
+                                            <span>✅ <strong>Autonomous mode active</strong> - This persona will speak on its own.</span>
+                                        ) : autonomousStatus.system_running ? (
+                                            <span>⏸️ Autonomous system is running, but this persona is in {interactionMode} mode.</span>
+                                        ) : (
+                                            <span>⚠️ Autonomous system is not running.</span>
+                                        )}
+                                    </div>
+                                )}
                             </div>
 
                             <div className={styles.fieldGroup}>
