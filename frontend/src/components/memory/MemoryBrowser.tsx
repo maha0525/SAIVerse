@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash } from 'lucide-react';
+import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag } from 'lucide-react';
 import styles from './MemoryBrowser.module.css';
 
 interface ThreadSummary {
@@ -14,6 +14,7 @@ interface MessageItem {
     role: string;
     content: string;
     created_at: number;
+    metadata?: { tags?: string[] };
 }
 
 interface MemoryBrowserProps {
@@ -343,6 +344,14 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                     <span className={`${styles.role} ${styles[msg.role.toLowerCase()] || ''}`}>
                                         {msg.role}
                                     </span>
+                                    {msg.metadata?.tags && msg.metadata.tags.length > 0 && (
+                                        <div className={styles.tagsContainer}>
+                                            <Tag size={12} className={styles.tagIcon} />
+                                            {msg.metadata.tags.map((tag, idx) => (
+                                                <span key={idx} className={styles.tag}>{tag}</span>
+                                            ))}
+                                        </div>
+                                    )}
                                     <div className={styles.msgHeaderRight}>
                                         <span className={styles.timestamp}>{formatTime(msg.created_at)}</span>
                                         {!editingMsgId && (

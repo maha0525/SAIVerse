@@ -86,8 +86,14 @@ def build_app(city_name: str, note_css: str, head_viewport: str):
                     </div>
                     """)
             with gr.Row():
+                # Map presence_status to Japanese display
+                presence_label = {
+                    "online": "オンライン",
+                    "away": "退席中",
+                    "offline": "オフライン"
+                }.get(getattr(manager, "user_presence_status", "offline"), "オフライン")
                 login_status_display = gr.Textbox(
-                    value="オンライン" if manager.user_is_online else "オフライン",
+                    value=presence_label,
                     label="ログイン状態",
                     interactive=False,
                     scale=1

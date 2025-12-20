@@ -8,6 +8,7 @@ import ChatOptions from '@/components/ChatOptions';
 import RightSidebar from '@/components/RightSidebar';
 import PeopleModal from '@/components/PeopleModal';
 import { Send, Paperclip, MapPin, Settings, X, Info, Users, Menu } from 'lucide-react';
+import { useActivityTracker } from '@/hooks/useActivityTracker';
 
 interface Message {
     id?: string;
@@ -19,6 +20,9 @@ interface Message {
 }
 
 export default function Home() {
+    // Enable user presence tracking (heartbeat + visibility)
+    useActivityTracker();
+
     const [messages, setMessages] = useState<Message[]>([]);
     const [inputValue, setInputValue] = useState('');
     const [loadingStatus, setLoadingStatus] = useState<string | null>(null);

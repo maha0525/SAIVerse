@@ -111,9 +111,10 @@ def get_situation_snapshot(building_id: Optional[str] = None) -> str:
         occupant_names.append(name)
     occupants_display = ", ".join(occupant_names) if occupant_names else "(自分のみ)"
 
-    # User online status
-    user_online = getattr(manager, "user_online", False)
-    user_state = "オンライン" if user_online else "オフライン"
+    # User online status (3-state: online, away, offline)
+    presence_status = getattr(manager, "user_presence_status", "offline")
+    user_state_map = {"online": "オンライン", "away": "退席中", "offline": "オフライン"}
+    user_state = user_state_map.get(presence_status, "オフライン")
 
     # Build snapshot
     lines = [

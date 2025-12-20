@@ -7,7 +7,8 @@ import GlobalSettingsModal from './GlobalSettingsModal';
 import UserProfileModal from './UserProfileModal';
 
 interface UserStatus {
-    is_online: boolean;
+    is_online: boolean;  // Backward compatibility
+    presence_status?: string;  // "online", "away", "offline"
     current_building_id: string | null;
     avatar: string | null;
     display_name: string;
@@ -152,9 +153,10 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
                     />
                     <div className={styles.userInfo}>
                         <span className={styles.userName}>{status?.display_name || "Guest"}</span>
-                        <div className={`${styles.userStatus} ${status?.is_online ? '' : styles.offline}`}>
+                        <div className={`${styles.userStatus} ${styles[status?.presence_status || 'offline']}`}>
                             <span style={{ fontSize: '1.2em' }}>•</span>
-                            {status?.is_online ? "Online" : "Offline"}
+                            {status?.presence_status === 'online' ? 'Online' :
+                                status?.presence_status === 'away' ? 'Away' : 'Offline'}
                         </div>
                     </div>
                 </div>

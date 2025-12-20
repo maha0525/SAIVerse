@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -43,7 +44,8 @@ class CoreState:
 
     user_id: int = 1
     user_display_name: str = "ユーザー"
-    user_is_online: bool = False
+    user_presence_status: str = "offline"  # "online", "away", "offline"
+    user_last_activity_time: Optional[datetime] = None
     user_current_building_id: Optional[str] = None
     user_current_city_id: Optional[int] = None
     user_avatar_data: str = ""

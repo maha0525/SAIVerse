@@ -1,3 +1,4 @@
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
@@ -6,7 +7,8 @@ from api.deps import get_manager
 router = APIRouter()
 
 class UserStatusResponse(BaseModel):
-    is_online: bool
+    is_online: bool  # Backward compatibility
+    presence_status: str  # "online", "away", "offline"
     current_building_id: Optional[str]
     avatar: Optional[str]
     display_name: str
@@ -39,8 +41,12 @@ def get_user_status(manager = Depends(get_manager)):
     except:
         pass
 
+    presence_status = manager.state.user_presence_status
+    is_online = presence_status != "offline"
+
     return {
-        "is_online": manager.state.user_is_online,
+        "is_online": is_online,
+        "presence_status": presence_status,
         "current_building_id": manager.state.user_current_building_id,
         "avatar": manager.state.user_avatar_data,
         "display_name": manager.state.user_display_name,
@@ -107,3 +113,30 @@ def update_user_profile(req: UpdateProfileRequest, manager = Depends(get_manager
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         session.close()
+
+
+# --- User Presence Endpoints ---
+
+class HeartbeatRequest(BaseModel):
+    last_interaction: Optional[datetime] = None
+
+@router.post("/heartbeat")
+def heartbeat(req: HeartbeatRequest, manager = Depends(get_manager)):
+    """Update user presence based on frontend activity heartbeat."""
+    manager.state.user_presence_status = "online"
+    manager.state.user_last_activity_time = req.last_interaction or datetime.now()
+    return {"status": "ok", "presence_status": "online"}
+
+
+class VisibilityRequest(BaseModel):
+    visible: bool
+
+@router.post("/visibility")
+def visibility(req: VisibilityRequest, manager = Depends(get_manager)):
+    """Update presence based on browser visibility (tab focus/blur)."""
+    if not req.visible:
+        manager.state.user_presence_status = "offline"
+    else:
+        manager.state.user_presence_status = "online"
+        manager.state.user_last_activity_time = datetime.now()
+    return {"status": "ok", "presence_status": manager.state.user_presence_status}

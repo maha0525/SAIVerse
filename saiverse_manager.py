@@ -334,6 +334,10 @@ class SAIVerseManager(
         )
         self.db_polling_thread.start()
 
+        # Auto-start autonomous conversation managers for personas with mode=auto
+        logging.info("Auto-starting autonomous conversation managers...")
+        self.start_autonomous_conversations()
+
     def _update_timezone_cache(self, tz_name: Optional[str]) -> None:
         """Update cached timezone information for this manager."""
         name = (tz_name or "UTC").strip() or "UTC"
@@ -362,7 +366,8 @@ class SAIVerseManager(
 
     def _refresh_user_state_cache(self) -> None:
         """Mirror CoreState's user info onto the manager-level attributes."""
-        self.user_is_online = self.state.user_is_online
+        self.user_presence_status = self.state.user_presence_status
+        self.user_is_online = self.state.user_presence_status != "offline"  # Backward compat
         self.user_display_name = self.state.user_display_name
         self.user_current_building_id = self.state.user_current_building_id
         self.user_current_city_id = self.state.user_current_city_id
@@ -1241,7 +1246,8 @@ class SAIVerseManager(
                     .first()
                 )
                 if user:
-                    self.state.user_is_online = user.LOGGED_IN
+                    # Map DB boolean to presence status string
+                    self.state.user_presence_status = "online" if user.LOGGED_IN else "offline"
                     self.state.user_current_city_id = user.CURRENT_CITYID
                     self.state.user_current_building_id = user.CURRENT_BUILDINGID
                     self.state.user_display_name = (
@@ -1255,7 +1261,8 @@ class SAIVerseManager(
                         self.state.user_display_name
                     )
                 else:
-                    self.state.user_is_online = False
+                    self.state.user_presence_status = "offline"
+                    self.state.user_current_building_id = None
                     self.state.user_current_building_id = None
                     self.state.user_current_city_id = None
                     self.state.user_display_name = "ユーザー"
@@ -1267,7 +1274,7 @@ class SAIVerseManager(
                 logging.error(
                     "Failed to load user status from DB: %s", exc, exc_info=True
                 )
-                self.state.user_is_online = False
+                self.state.user_presence_status = "offline"
                 self.state.user_current_building_id = None
                 self.state.user_current_city_id = None
                 self.state.user_display_name = "ユーザー"
@@ -1290,9 +1297,10 @@ class SAIVerseManager(
             if user:
                 user.LOGGED_IN = status
                 db.commit()
-                self.state.user_is_online = status
+                self.state.user_presence_status = "online" if status else "offline"
                 self.state.user_display_name = (user.USERNAME or "ユーザー").strip() or "ユーザー"
-                self.user_is_online = self.state.user_is_online
+                self.user_is_online = status  # Backward compat
+                self.user_presence_status = self.state.user_presence_status
                 self.user_display_name = self.state.user_display_name
                 self.id_to_name_map[str(self.user_id)] = self.user_display_name
                 status_text = "オンライン" if status else "オフライン"
@@ -1342,7 +1350,7 @@ class SAIVerseManager(
             self.gateway_runtime = None
 
         # --- ★ アプリケーション終了時にユーザーをログアウトさせる ---
-        if self.state.user_is_online:
+        if self.state.user_presence_status != "offline":
             logging.info("Setting user to offline as part of shutdown.")
             self.set_user_login_status(self.user_id, False)
 
