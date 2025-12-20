@@ -1,0 +1,62 @@
+{
+  "name": "meta_auto",
+  "description": "Autonomous pulse: perceive -> route -> execute -> think",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "Trigger input (usually empty)"
+    }
+  ],
+  "output_schema": null,
+  "context_requirements": {
+    "history_depth": 0,
+    "system_prompt": false,
+    "inventory": false,
+    "building_items": false,
+    "available_playbooks": false
+  },
+  "router_callable": false,
+  "user_selectable": false,
+  "nodes": [
+    {
+      "id": "perceive",
+      "type": "subplay",
+      "playbook": "sub_perceive",
+      "input_template": "{input}",
+      "propagate_output": false,
+      "next": "list_playbooks"
+    },
+    {
+      "id": "list_playbooks",
+      "type": "tool",
+      "action": "list_available_playbooks",
+      "args_input": {},
+      "output_key": "available_playbooks",
+      "next": "router"
+    },
+    {
+      "id": "router",
+      "type": "subplay",
+      "playbook": "sub_router_auto",
+      "input_template": "{input}",
+      "propagate_output": false,
+      "next": "exec"
+    },
+    {
+      "id": "exec",
+      "type": "exec",
+      "playbook_source": "selected_playbook",
+      "args_source": "selected_args",
+      "next": "finalize"
+    },
+    {
+      "id": "finalize",
+      "type": "subplay",
+      "playbook": "sub_think_meta",
+      "input_template": "{input}\n\n参考情報:\n{context_bundle_text}",
+      "propagate_output": true,
+      "next": null
+    }
+  ],
+  "start_node": "perceive"
+}

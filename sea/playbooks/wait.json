@@ -1,0 +1,28 @@
+{
+  "name": "wait",
+  "description": "Do nothing - choose to wait and observe",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "Reason for waiting (optional)"
+    }
+  ],
+  "output_schema": [],
+  "context_requirements": {
+    "history_depth": 0,
+    "system_prompt": false
+  },
+  "router_callable": true,
+  "user_selectable": false,
+  "nodes": [
+    {
+      "id": "record",
+      "type": "memorize",
+      "action": "(待機を選択)",
+      "role": "assistant",
+      "tags": ["internal", "wait"],
+      "next": null
+    }
+  ],
+  "start_node": "record"
+}
