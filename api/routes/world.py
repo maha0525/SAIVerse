@@ -203,3 +203,160 @@ def update_item(item_id: str, i: ItemUpdate, manager: SAIVerseManager = Depends(
 @router.delete("/items/{item_id}")
 def delete_item(item_id: str, manager: SAIVerseManager = Depends(get_manager)):
     return manager.delete_item(item_id)
+
+
+# --- Playbook ---
+from api.deps import get_db
+from database.models import Playbook as PlaybookModel
+from sea.playbook_models import PlaybookSchema, validate_playbook_graph, PlaybookValidationError
+import json
+
+class PlaybookCreate(BaseModel):
+    name: str
+    description: str
+    scope: str = "public"
+    router_callable: bool = False
+    user_selectable: bool = False
+    nodes_json: str  # JSON string
+    schema_json: str  # JSON string (input_schema, start_node, etc.)
+
+class PlaybookUpdate(BaseModel):
+    name: str
+    description: str
+    scope: str
+    router_callable: bool
+    user_selectable: bool
+    nodes_json: str
+    schema_json: str
+
+class PlaybookListItem(BaseModel):
+    id: int
+    name: str
+    description: str
+    scope: str
+    router_callable: bool
+    user_selectable: bool
+
+class PlaybookDetail(PlaybookListItem):
+    nodes_json: str
+    schema_json: str
+
+@router.get("/playbooks", response_model=List[PlaybookListItem])
+def list_playbooks(db = Depends(get_db)):
+    """List all playbooks."""
+    playbooks = db.query(PlaybookModel).all()
+    return [
+        {
+            "id": p.id,
+            "name": p.name,
+            "description": p.description,
+            "scope": p.scope,
+            "router_callable": p.router_callable,
+            "user_selectable": p.user_selectable,
+        }
+        for p in playbooks
+    ]
+
+@router.get("/playbooks/{playbook_id}", response_model=PlaybookDetail)
+def get_playbook(playbook_id: int, db = Depends(get_db)):
+    """Get playbook details including nodes."""
+    playbook = db.query(PlaybookModel).filter(PlaybookModel.id == playbook_id).first()
+    if not playbook:
+        raise HTTPException(status_code=404, detail="Playbook not found")
+    return {
+        "id": playbook.id,
+        "name": playbook.name,
+        "description": playbook.description,
+        "scope": playbook.scope,
+        "router_callable": playbook.router_callable,
+        "user_selectable": playbook.user_selectable,
+        "nodes_json": playbook.nodes_json,
+        "schema_json": playbook.schema_json,
+    }
+
+def _validate_playbook_data(name: str, description: str, nodes_json: str, schema_json: str):
+    """Validate playbook schema and graph."""
+    try:
+        nodes = json.loads(nodes_json)
+        schema = json.loads(schema_json)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+    
+    # Build full playbook for validation
+    full_playbook = {
+        "name": name,
+        "description": description,
+        "nodes": nodes,
+        **schema
+    }
+    
+    try:
+        playbook_schema = PlaybookSchema(**full_playbook)
+        validate_playbook_graph(playbook_schema)
+    except PlaybookValidationError as e:
+        raise HTTPException(status_code=400, detail=f"Graph validation error: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Schema validation error: {e}")
+
+@router.post("/playbooks")
+def create_playbook(pb: PlaybookCreate, db = Depends(get_db)):
+    """Create a new playbook."""
+    # Check name uniqueness
+    existing = db.query(PlaybookModel).filter(PlaybookModel.name == pb.name).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Playbook with this name already exists")
+    
+    # Validate
+    _validate_playbook_data(pb.name, pb.description, pb.nodes_json, pb.schema_json)
+    
+    playbook = PlaybookModel(
+        name=pb.name,
+        description=pb.description,
+        scope=pb.scope,
+        router_callable=pb.router_callable,
+        user_selectable=pb.user_selectable,
+        nodes_json=pb.nodes_json,
+        schema_json=pb.schema_json,
+    )
+    db.add(playbook)
+    db.commit()
+    db.refresh(playbook)
+    return {"success": True, "id": playbook.id}
+
+@router.put("/playbooks/{playbook_id}")
+def update_playbook(playbook_id: int, pb: PlaybookUpdate, db = Depends(get_db)):
+    """Update an existing playbook."""
+    playbook = db.query(PlaybookModel).filter(PlaybookModel.id == playbook_id).first()
+    if not playbook:
+        raise HTTPException(status_code=404, detail="Playbook not found")
+    
+    # Check name uniqueness if changed
+    if pb.name != playbook.name:
+        existing = db.query(PlaybookModel).filter(PlaybookModel.name == pb.name).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Playbook with this name already exists")
+    
+    # Validate
+    _validate_playbook_data(pb.name, pb.description, pb.nodes_json, pb.schema_json)
+    
+    playbook.name = pb.name
+    playbook.description = pb.description
+    playbook.scope = pb.scope
+    playbook.router_callable = pb.router_callable
+    playbook.user_selectable = pb.user_selectable
+    playbook.nodes_json = pb.nodes_json
+    playbook.schema_json = pb.schema_json
+    db.commit()
+    return {"success": True}
+
+@router.delete("/playbooks/{playbook_id}")
+def delete_playbook(playbook_id: int, db = Depends(get_db)):
+    """Delete a playbook."""
+    playbook = db.query(PlaybookModel).filter(PlaybookModel.id == playbook_id).first()
+    if not playbook:
+        raise HTTPException(status_code=404, detail="Playbook not found")
+    
+    db.delete(playbook)
+    db.commit()
+    return {"success": True}
+
