@@ -320,9 +320,8 @@ class SAIVerseManager(
                     "Failed to initialize Discord gateway integration: %s", exc
                 )
 
-        # SEA runtime (disabled by default unless env set)
-        self.sea_enabled = os.getenv("SAIVERSE_SEA_ENABLED", "0").lower() in {"1", "true", "yes"}
-        self.sea_runtime: Optional[SEARuntime] = SEARuntime(self) if self.sea_enabled else None
+        # SEA runtime (always enabled)
+        self.sea_runtime: SEARuntime = SEARuntime(self)
 
         self.runtime = RuntimeService(self, self.state)
         self.admin = AdminService(self, self.runtime, self.state)
@@ -395,18 +394,12 @@ class SAIVerseManager(
 
     # SEA integration helpers -------------------------------------------------
     def run_sea_auto(self, persona, building_id: str, occupants: List[str]) -> None:
-        if not self.sea_runtime:
-            return None
         try:
             self.sea_runtime.run_meta_auto(persona, building_id, occupants)
         except Exception as exc:
             logging.exception("SEA auto run failed: %s", exc)
-            return None
-        return None
 
     def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[str]:
-        if not self.sea_runtime:
-            return []
         try:
             return self.sea_runtime.run_meta_user(persona, user_input, building_id, metadata=metadata, meta_playbook=meta_playbook, event_callback=event_callback)
         except Exception as exc:

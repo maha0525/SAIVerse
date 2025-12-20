@@ -1,7 +1,6 @@
 import threading
 import time
 import logging
-from datetime import datetime
 from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
@@ -120,33 +119,9 @@ class ConversationManager:
                 self._current_speaker_index = (self._current_speaker_index + 1) % len(ai_occupants)
                 return
 
-            # PersonaCoreのrun_pulseを呼び出す
-            # これにより、ペルソナは自ら状況を判断して発話するかどうかを決める
-            logging.info(f"[ConvManager] Triggering pulse for '{speaker_persona.persona_name}' (mode={mode}, proxy={getattr(speaker_persona,'is_proxy',False)}) in '{self.building_id}'.")
-            # SEA 有効時は meta_auto を介して実行（発話は内部で処理される）
-            if getattr(self.saiverse_manager, "sea_enabled", False):
-                self.saiverse_manager.run_sea_auto(speaker_persona, self.building_id, all_occupants)
-                replies = []
-            else:
-                # AIが周囲を認識できるよう、run_pulseにはユーザーを含む全員のリストを渡す
-                replies = speaker_persona.run_pulse(occupants=all_occupants, user_online=self.saiverse_manager.user_is_online)
-
-            # RemotePersonaProxyからの返信の場合、ここで履歴を保存する
-            # (PersonaCoreはrun_pulse内部で履歴を保存するため、二重保存を防ぐ)
-            if getattr(speaker_persona, 'is_proxy', False) and replies:
-                for say in replies:
-                    self.saiverse_manager.building_histories.setdefault(self.building_id, []).append({
-                        "role": "assistant",
-                        "persona_id": speaker_id,
-                        "content": say,
-                        "timestamp": datetime.now().isoformat()
-                    })
-                # 履歴をファイルに保存
-                self.saiverse_manager._save_building_histories()
-                logging.info(f"[ConvManager] Proxy '{speaker_persona.persona_name}' spoke in '{self.building_id}'.")
-
-            if replies:
-                self.saiverse_manager.gateway_handle_ai_replies(self.building_id, speaker_persona, replies)
+            # SEA経由で自律パルスを実行（履歴保存はSEA内部で行われる）
+            logging.info(f"[ConvManager] Triggering SEA auto for '{speaker_persona.persona_name}' (mode={mode}, proxy={getattr(speaker_persona,'is_proxy',False)}) in '{self.building_id}'.")
+            self.saiverse_manager.run_sea_auto(speaker_persona, self.building_id, all_occupants)
 
             # 次の発話者のためにインデックスを進める
             self._current_speaker_index = (self._current_speaker_index + 1) % len(ai_occupants)

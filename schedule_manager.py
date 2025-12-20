@@ -282,32 +282,22 @@ class ScheduleManager:
 
         # メタプレイブックを実行
         try:
-            sea_enabled = hasattr(self.manager, "sea_enabled") and self.manager.sea_enabled
-            LOGGER.debug(
-                "[ScheduleManager] SEA framework check: sea_enabled=%s, has_sea_runtime=%s",
-                sea_enabled,
-                hasattr(self.manager, "sea_runtime"),
+            # SEA runtime経由で実行
+            occupants = self.manager.occupants.get(building_id, [])
+            LOGGER.info(
+                "[ScheduleManager] Calling sea_runtime.run_meta_user with playbook=%s, building=%s, prompt_length=%d",
+                meta_playbook,
+                building_id,
+                len(user_input),
             )
-
-            if sea_enabled:
-                # SEA有効時はrun_meta_userを使用
-                occupants = self.manager.occupants.get(building_id, [])
-                LOGGER.info(
-                    "[ScheduleManager] Calling sea_runtime.run_meta_user with playbook=%s, building=%s, prompt_length=%d",
-                    meta_playbook,
-                    building_id,
-                    len(user_input),
-                )
-                self.manager.sea_runtime.run_meta_user(
-                    persona=persona,
-                    user_input=user_input,
-                    building_id=building_id,
-                    metadata={"schedule_id": schedule.SCHEDULE_ID, "schedule_type": schedule.SCHEDULE_TYPE},
-                    meta_playbook=meta_playbook,
-                )
-                LOGGER.info("[ScheduleManager] sea_runtime.run_meta_user completed")
-            else:
-                LOGGER.warning("[ScheduleManager] SEA framework not enabled, schedule execution skipped")
+            self.manager.sea_runtime.run_meta_user(
+                persona=persona,
+                user_input=user_input,
+                building_id=building_id,
+                metadata={"schedule_id": schedule.SCHEDULE_ID, "schedule_type": schedule.SCHEDULE_TYPE},
+                meta_playbook=meta_playbook,
+            )
+            LOGGER.info("[ScheduleManager] sea_runtime.run_meta_user completed")
 
             # 実行後の状態更新
             self._update_schedule_after_execution(schedule, session)

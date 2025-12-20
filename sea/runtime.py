@@ -4,6 +4,7 @@ import logging
 import os
 import uuid
 import asyncio
+from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Callable
 import json
@@ -66,6 +67,8 @@ class SEARuntime:
 
     def run_meta_auto(self, persona, building_id: str, occupants: List[str]) -> None:
         """Router -> subgraph -> think. For autonomous loop, no direct user output."""
+        # Update last pulse time for get_situation_snapshot
+        persona._last_conscious_prompt_time_utc = datetime.now(dt_timezone.utc)
         playbook = self._choose_playbook(kind="auto", persona=persona, building_id=building_id)
         self._run_playbook(playbook, persona, building_id, user_input=None, auto_mode=True, record_history=True)
 

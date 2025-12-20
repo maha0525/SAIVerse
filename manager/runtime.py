@@ -346,52 +346,11 @@ class RuntimeService(
                 "[runtime] received metadata with keys=%s", list(metadata.keys())
             )
 
-        # Check if SEA is enabled before recording user message
         # SEA runtime handles history recording internally
-        sea_enabled = getattr(self.manager, "sea_enabled", False)
-
-        if responding_personas and not sea_enabled:
-            try:
-                # ユーザ発話を persona/SAIMemory にも同期させる
-                responding_personas[0].history_manager.add_message(
-                    user_entry,
-                    building_id,
-                    heard_by=list(self.occupants.get(building_id, [])),
-                )
-            except Exception:
-                hist = self.building_histories.setdefault(building_id, [])
-                next_seq = 1
-                if hist:
-                    try:
-                        next_seq = int(hist[-1].get("seq", len(hist))) + 1
-                    except (TypeError, ValueError):
-                        next_seq = len(hist) + 1
-                hist.append(
-                    {
-                        "role": "user",
-                        "content": message,
-                        "seq": next_seq,
-                        "message_id": f"{building_id}:{next_seq}",
-                        "heard_by": list(self.occupants.get(building_id, [])),
-                        **({"metadata": metadata} if metadata else {}),
-                    }
-                )
-
         replies: List[str] = []
         for persona in responding_personas:
-            if sea_enabled:
-                # SEA runtime already emits via gateway; avoid double返却
-                self.manager.run_sea_user(persona, building_id, message)
-            elif persona.interaction_mode == "manual":
-                replies.extend(
-                    persona.handle_user_input(message, metadata=metadata)
-                )
-            else:
-                replies.extend(
-                    persona.run_pulse(
-                        occupants=self.occupants.get(building_id, []), user_online=True
-                    )
-                )
+            # SEA経由でユーザー入力を処理
+            self.manager.run_sea_user(persona, building_id, message)
         logging.debug("[runtime] handle_user_input collected %d replies", len(replies))
 
         self._save_building_histories()
@@ -432,89 +391,39 @@ class RuntimeService(
         if metadata:
             user_entry["metadata"] = metadata
 
-        # Check if SEA is enabled before recording user message
         # SEA runtime handles history recording internally
-        sea_enabled = getattr(self.manager, "sea_enabled", False)
+        # SEAモード: タイムアウト回避のためのスレッド実行とKeep-Alive
+        response_queue = queue.Queue()
 
-        if responding_personas and not sea_enabled:
+        def backend_worker():
             try:
-                responding_personas[0].history_manager.add_to_building_only(
-                    building_id,
-                    user_entry,
-                    heard_by=list(self.occupants.get(building_id, [])),
-                )
-            except Exception:
-                hist = self.building_histories.setdefault(building_id, [])
-                next_seq = 1
-                if hist:
-                    try:
-                        next_seq = int(hist[-1].get("seq", len(hist))) + 1
-                    except (TypeError, ValueError):
-                        next_seq = len(hist) + 1
-                hist.append(
-                    {
-                        "role": "user",
-                        "content": message,
-                        "seq": next_seq,
-                        "message_id": f"{building_id}:{next_seq}",
-                        "heard_by": list(self.occupants.get(building_id, [])),
-                        **({"metadata": metadata} if metadata else {}),
-                    }
-                )
+                for persona in responding_personas:
+                    # SEA実行。イベントはコールバック経由でキューに送る
+                    self.manager.run_sea_user(
+                        persona, building_id, message,
+                        metadata=metadata,
+                        meta_playbook=meta_playbook,
+                        event_callback=response_queue.put
+                    )
+            except Exception as e:
+                logging.error("SEA worker error", exc_info=True)
+                response_queue.put({"type": "error", "content": str(e)})
+            finally:
+                response_queue.put(None)  # 番兵
 
-        if sea_enabled:
-            # SEAモード: タイムアウト回避のためのスレッド実行とKeep-Alive
-            response_queue = queue.Queue()
+        threading.Thread(target=backend_worker, daemon=True).start()
 
-            def backend_worker():
-                try:
-                    for persona in responding_personas:
-                         # SEA実行。イベントはコールバック経由でキューに送る
-                         self.manager.run_sea_user(
-                            persona, building_id, message, 
-                            metadata=metadata, 
-                            meta_playbook=meta_playbook, 
-                            event_callback=response_queue.put
-                        )
-                except Exception as e:
-                    logging.error("SEA worker error", exc_info=True)
-                    response_queue.put({"type": "error", "content": str(e)})
-                finally:
-                    response_queue.put(None) # 番兵
-
-            threading.Thread(target=backend_worker, daemon=True).start()
-
-            # メインスレッド: キューを監視してクライアントに送信
-            while True:
-                try:
-                    # 2.0秒待機（Keep-Aliveのため）
-                    item = response_queue.get(timeout=2.0)
-                    if item is None:
-                        break
-                    yield json.dumps(item, ensure_ascii=False) + "\n"
-                except queue.Empty:
-                    # プロキシ等のタイムアウトを防ぐためのPing
-                    yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
-
-        else:
-            # レガシーモード: 従来の同期実行
-            for persona in responding_personas:
-                if persona.interaction_mode == "manual":
-                    for token in persona.handle_user_input_stream(
-                        message, metadata=metadata
-                    ):
-                        yield token
-                else:
-                    occupants = self.occupants.get(building_id, [])
-                    pulse_responses = persona.run_pulse(occupants=occupants, user_online=True)
-                    if pulse_responses is None:
-                        logging.warning(
-                            "[runtime] persona %s returned no responses from run_pulse; defaulting to empty list",
-                            getattr(persona, "persona_id", "unknown"),
-                        )
-                        pulse_responses = []
-                    for reply in pulse_responses:
-                        yield reply
+        # メインスレッド: キューを監視してクライアントに送信
+        while True:
+            try:
+                # 2.0秒待機（Keep-Aliveのため）
+                item = response_queue.get(timeout=2.0)
+                if item is None:
+                    break
+                yield json.dumps(item, ensure_ascii=False) + "\n"
+            except queue.Empty:
+                # プロキシ等のタイムアウトを防ぐためのPing
+                yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
 
         self._save_building_histories()
         for persona in self.personas.values():
