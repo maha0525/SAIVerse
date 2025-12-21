@@ -17,6 +17,7 @@ def get_history(
     include_inventory: bool = True,
     include_building_items: bool = True,
     balanced: bool = False,
+    include_internal: bool = False,
 ) -> List[Dict[str, str]]:
     """Get conversation history as messages array for LLM context.
 
@@ -32,6 +33,7 @@ def get_history(
         include_building_items: Include building items in system prompt.
         balanced: If True, balance history across conversation partners
                   (user + other personas in the building).
+        include_internal: If True, include internal thoughts (wait decisions, etc.).
 
     Returns a list of message dicts with 'role' and 'content' keys.
     """
@@ -73,6 +75,11 @@ def get_history(
     history_manager = getattr(persona, "history_manager", None)
     if history_manager:
         try:
+            # Determine which tags to include
+            required_tags = ["conversation"]
+            if include_internal:
+                required_tags.append("internal")
+
             if balanced:
                 # Determine conversation partners
                 participant_ids = ["user"]  # Always include user
@@ -80,17 +87,18 @@ def get_history(
                 for oid in occupants:
                     if oid != persona_id:
                         participant_ids.append(oid)
-                LOGGER.debug("get_history: balancing across participants: %s", participant_ids)
+                LOGGER.debug("get_history: balancing across participants: %s, tags: %s", participant_ids, required_tags)
                 recent = history_manager.get_recent_history_balanced(
                     max_chars,
                     participant_ids,
-                    required_tags=["conversation"],
+                    required_tags=required_tags,
                     pulse_id=None,
                 )
             else:
+                LOGGER.debug("get_history: fetching with tags: %s", required_tags)
                 recent = history_manager.get_recent_history(
                     max_chars,
-                    required_tags=["conversation"],
+                    required_tags=required_tags,
                     pulse_id=None,
                 )
             messages.extend(recent)
@@ -135,6 +143,11 @@ def schema() -> ToolSchema:
                 "balanced": {
                     "type": "boolean",
                     "description": "Balance history across conversation partners (user + other personas). Default: false.",
+                    "default": False
+                },
+                "include_internal": {
+                    "type": "boolean",
+                    "description": "Include internal thoughts (wait decisions, autonomous reasoning). Default: false.",
                     "default": False
                 }
             },
