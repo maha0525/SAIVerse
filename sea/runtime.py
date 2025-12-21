@@ -1459,7 +1459,12 @@ class SEARuntime:
                         except (ValueError, TypeError):
                             char_limit = 2000  # fallback
 
-                    LOGGER.debug("[sea][prepare-context] Fetching history: char_limit=%d, pulse_id=%s, balanced=%s", char_limit, pulse_id, reqs.history_balanced)
+                    # Determine which tags to include
+                    required_tags = ["conversation"]
+                    if reqs.include_internal:
+                        required_tags.append("internal")
+
+                    LOGGER.debug("[sea][prepare-context] Fetching history: char_limit=%d, pulse_id=%s, balanced=%s, tags=%s", char_limit, pulse_id, reqs.history_balanced, required_tags)
 
                     if reqs.history_balanced:
                         # Get conversation partners for balanced retrieval
@@ -1473,14 +1478,14 @@ class SEARuntime:
                         recent = history_mgr.get_recent_history_balanced(
                             char_limit,
                             participant_ids,
-                            required_tags=["conversation"],
+                            required_tags=required_tags,
                             pulse_id=pulse_id,
                         )
                     else:
-                        # Filter by conversation tag or current pulse_id
+                        # Filter by required tags or current pulse_id
                         recent = history_mgr.get_recent_history(
                             char_limit,
-                            required_tags=["conversation"],
+                            required_tags=required_tags,
                             pulse_id=pulse_id,
                         )
                     LOGGER.debug("[sea][prepare-context] Got %d history messages", len(recent))
