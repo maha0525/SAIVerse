@@ -251,6 +251,52 @@ class HistoryManager:
             selected.append(msg)
         return list(reversed(selected))
 
+    def get_recent_history_balanced(
+        self,
+        max_chars: int,
+        participant_ids: List[str],
+        *,
+        required_tags: Optional[List[str]] = None,
+        pulse_id: Optional[str] = None,
+    ) -> List[Dict[str, str]]:
+        """Retrieves recent messages balanced across conversation partners.
+
+        Args:
+            max_chars: Total character budget
+            participant_ids: List of partner IDs to balance (e.g., ["user", "persona_b"])
+            required_tags: Only include messages with these tags
+            pulse_id: Always include messages with this pulse ID
+
+        Returns:
+            List of messages balanced across participants
+        """
+        if self.memory_adapter is not None and self.memory_adapter.is_ready():
+            LOGGER.debug(
+                "Fetching balanced persona history from SAIMemory for %s (max_chars=%d, participants=%s)",
+                self.persona_id,
+                max_chars,
+                participant_ids,
+            )
+            msgs = self.memory_adapter.recent_persona_messages_balanced(
+                max_chars,
+                participant_ids,
+                required_tags=required_tags,
+                pulse_id=pulse_id,
+            )
+            LOGGER.debug(
+                "SAIMemory returned %d balanced messages for %s",
+                len(msgs),
+                self.persona_id,
+            )
+            return msgs
+
+        # Fallback: just return recent messages without balancing
+        return self.get_recent_history(
+            max_chars,
+            required_tags=required_tags,
+            pulse_id=pulse_id,
+        )
+
     def get_last_user_message(self) -> Optional[str]:
         if self.memory_adapter is not None:
             if not self.memory_adapter.is_ready():

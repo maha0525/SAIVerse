@@ -236,6 +236,10 @@ class ContextRequirements(BaseModel):
         default="full",
         description="History depth: number (character count), 'full' (use persona's context_length), or 0/'none' (no history)"
     )
+    history_balanced: bool = Field(
+        default=False,
+        description="If True, balance history across conversation partners (user + other personas)"
+    )
     inventory: bool = Field(default=True, description="Include persona inventory in system prompt")
     building_items: bool = Field(default=True, description="Include building items in system prompt")
     system_prompt: bool = Field(default=True, description="Include persona and building system prompts")

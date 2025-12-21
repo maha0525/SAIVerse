@@ -16,12 +16,22 @@ def get_history(
     include_system_prompt: bool = True,
     include_inventory: bool = True,
     include_building_items: bool = True,
+    balanced: bool = False,
 ) -> List[Dict[str, str]]:
     """Get conversation history as messages array for LLM context.
 
     Builds a messages array containing:
     - System prompt (optional)
     - Persona conversation history
+
+    Args:
+        building_id: Building ID. Defaults to current building.
+        max_chars: Maximum characters of history to include.
+        include_system_prompt: Include system prompt.
+        include_inventory: Include persona inventory in system prompt.
+        include_building_items: Include building items in system prompt.
+        balanced: If True, balance history across conversation partners
+                  (user + other personas in the building).
 
     Returns a list of message dicts with 'role' and 'content' keys.
     """
@@ -63,11 +73,26 @@ def get_history(
     history_manager = getattr(persona, "history_manager", None)
     if history_manager:
         try:
-            recent = history_manager.get_recent_history(
-                max_chars,
-                required_tags=["conversation"],
-                pulse_id=None,
-            )
+            if balanced:
+                # Determine conversation partners
+                participant_ids = ["user"]  # Always include user
+                occupants = manager.occupants.get(building_id, [])
+                for oid in occupants:
+                    if oid != persona_id:
+                        participant_ids.append(oid)
+                LOGGER.debug("get_history: balancing across participants: %s", participant_ids)
+                recent = history_manager.get_recent_history_balanced(
+                    max_chars,
+                    participant_ids,
+                    required_tags=["conversation"],
+                    pulse_id=None,
+                )
+            else:
+                recent = history_manager.get_recent_history(
+                    max_chars,
+                    required_tags=["conversation"],
+                    pulse_id=None,
+                )
             messages.extend(recent)
             LOGGER.debug("get_history: added %d messages from history", len(recent))
         except Exception as exc:
@@ -106,6 +131,11 @@ def schema() -> ToolSchema:
                     "type": "boolean",
                     "description": "Include building items in system prompt. Default: true.",
                     "default": True
+                },
+                "balanced": {
+                    "type": "boolean",
+                    "description": "Balance history across conversation partners (user + other personas). Default: false.",
+                    "default": False
                 }
             },
             "required": [],

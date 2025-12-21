@@ -200,6 +200,103 @@ class SAIMemoryAdapter:
             selected.insert(0, payload)
         return selected
 
+    def recent_persona_messages_balanced(
+        self,
+        max_chars: int,
+        participant_ids: List[str],
+        *,
+        required_tags: Optional[List[str]] = None,
+        pulse_id: Optional[str] = None,
+    ) -> List[dict]:
+        """Get recent messages balanced across conversation partners.
+
+        Allocates max_chars equally among participants, retrieving recent
+        messages from each partner's conversations.
+
+        Args:
+            max_chars: Total character budget
+            participant_ids: List of partner IDs to balance (e.g., ["user", "persona_b"])
+            required_tags: Only include messages with these tags
+            pulse_id: Always include messages with this pulse ID
+
+        Returns:
+            List of messages, sorted by timestamp, balanced across participants
+        """
+        if not self._ready or not participant_ids:
+            return []
+
+        thread_id = self._thread_id(None)
+        try:
+            with self._db_lock:
+                all_rows = _fetch_all_messages(self.conn, thread_id)
+                payloads = [self._payload_from_message_locked(msg) for msg in all_rows]
+        except Exception as exc:
+            LOGGER.warning("Failed to fetch persona messages for balancing: %s", exc)
+            return []
+
+        required_tags = required_tags or []
+        pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
+
+        # Group messages by participant
+        # Key: participant_id, Value: list of (index, payload) tuples
+        participant_groups: Dict[str, List[tuple]] = {pid: [] for pid in participant_ids}
+        other_messages: List[tuple] = []  # Messages without "with" or with unknown participants
+
+        for idx, payload in enumerate(payloads):
+            metadata = payload.get("metadata") or {}
+            tags = metadata.get("tags", [])
+            with_list = metadata.get("with", [])
+
+            # Check if message matches required tags
+            include = True
+            if required_tags:
+                include = any(tag in tags for tag in required_tags)
+            if pulse_tag and pulse_tag in tags:
+                include = True
+            if not include:
+                continue
+
+            # Assign to participant groups
+            if with_list:
+                for partner in with_list:
+                    if partner in participant_groups:
+                        participant_groups[partner].append((idx, payload))
+            else:
+                # Messages without "with" go to other
+                other_messages.append((idx, payload))
+
+        # Calculate per-participant budget
+        num_participants = len(participant_ids)
+        per_participant_chars = max_chars // num_participants if num_participants > 0 else max_chars
+
+        # Select messages from each participant (most recent first)
+        selected_with_idx: List[tuple] = []
+
+        for pid in participant_ids:
+            group = participant_groups.get(pid, [])
+            consumed = 0
+            for idx, payload in reversed(group):
+                text = payload.get("content", "") or ""
+                if consumed + len(text) > per_participant_chars:
+                    break
+                consumed += len(text)
+                selected_with_idx.append((idx, payload))
+
+        # Add some "other" messages if there's remaining budget
+        total_consumed = sum(len(p.get("content", "") or "") for _, p in selected_with_idx)
+        remaining = max_chars - total_consumed
+        if remaining > 0 and other_messages:
+            for idx, payload in reversed(other_messages):
+                text = payload.get("content", "") or ""
+                if len(text) > remaining:
+                    break
+                remaining -= len(text)
+                selected_with_idx.append((idx, payload))
+
+        # Sort by original index to maintain chronological order
+        selected_with_idx.sort(key=lambda x: x[0])
+        return [payload for _, payload in selected_with_idx]
+
     def list_thread_summaries(self, max_preview_chars: int = 120) -> List[Dict[str, Any]]:
         if not self._ready:
             return []

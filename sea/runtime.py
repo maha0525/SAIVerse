@@ -47,9 +47,12 @@ class SEARuntime:
         # Record user input to history before processing
         if user_input:
             try:
-                user_msg = {"role": "user", "content": user_input}
+                user_msg: Dict[str, Any] = {"role": "user", "content": user_input}
+                # Build metadata with "with" field for user messages
+                msg_metadata: Dict[str, Any] = {"with": ["user"]}
                 if metadata:
-                    user_msg["metadata"] = metadata
+                    msg_metadata.update(metadata)
+                user_msg["metadata"] = msg_metadata
                 persona.history_manager.add_message(user_msg, building_id, heard_by=None)
             except Exception:
                 LOGGER.exception("Failed to record user input to history")
@@ -1242,9 +1245,23 @@ class SEARuntime:
     # ---------------- helpers -----------------
     def _emit_speak(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, record_history: bool = True) -> None:
         msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
-        # Add pulse:uuid tag to metadata
+        # Build metadata with tags and conversation partners
+        metadata: Dict[str, Any] = {"tags": ["conversation"]}
         if pulse_id:
-            msg["metadata"] = {"tags": ["conversation", f"pulse:{pulse_id}"]}
+            metadata["tags"].append(f"pulse:{pulse_id}")
+        # Add conversation partners to "with" field
+        partners = []
+        occupants = self.manager.occupants.get(building_id, [])
+        for oid in occupants:
+            if oid != persona.persona_id:
+                partners.append(oid)
+        # Add user if online/away
+        presence = getattr(self.manager, "user_presence_status", "offline")
+        if presence in ("online", "away"):
+            partners.append("user")
+        if partners:
+            metadata["with"] = partners
+        msg["metadata"] = metadata
         if record_history:
             try:
                 persona.history_manager.add_message(msg, building_id, heard_by=None)
@@ -1267,6 +1284,17 @@ class SEARuntime:
                     msg_metadata.setdefault("tags", []).extend(extra_tags)
                 else:
                     msg_metadata[key] = value
+        # Add conversation partners to "with" field
+        partners = []
+        occupants = self.manager.occupants.get(building_id, [])
+        for oid in occupants:
+            if oid != persona.persona_id:
+                partners.append(oid)
+        presence = getattr(self.manager, "user_presence_status", "offline")
+        if presence in ("online", "away"):
+            partners.append("user")
+        if partners:
+            msg_metadata["with"] = partners
         if msg_metadata:
             msg["metadata"] = msg_metadata
         try:
@@ -1431,13 +1459,30 @@ class SEARuntime:
                         except (ValueError, TypeError):
                             char_limit = 2000  # fallback
 
-                    LOGGER.debug("[sea][prepare-context] Fetching history: char_limit=%d, pulse_id=%s", char_limit, pulse_id)
-                    # Filter by conversation tag or current pulse_id
-                    recent = history_mgr.get_recent_history(
-                        char_limit,
-                        required_tags=["conversation"],
-                        pulse_id=pulse_id,
-                    )
+                    LOGGER.debug("[sea][prepare-context] Fetching history: char_limit=%d, pulse_id=%s, balanced=%s", char_limit, pulse_id, reqs.history_balanced)
+
+                    if reqs.history_balanced:
+                        # Get conversation partners for balanced retrieval
+                        participant_ids = ["user"]
+                        occupants = self.manager.occupants.get(building_id, [])
+                        persona_id = getattr(persona, "persona_id", None)
+                        for oid in occupants:
+                            if oid != persona_id:
+                                participant_ids.append(oid)
+                        LOGGER.debug("[sea][prepare-context] Balancing across: %s", participant_ids)
+                        recent = history_mgr.get_recent_history_balanced(
+                            char_limit,
+                            participant_ids,
+                            required_tags=["conversation"],
+                            pulse_id=pulse_id,
+                        )
+                    else:
+                        # Filter by conversation tag or current pulse_id
+                        recent = history_mgr.get_recent_history(
+                            char_limit,
+                            required_tags=["conversation"],
+                            pulse_id=pulse_id,
+                        )
                     LOGGER.debug("[sea][prepare-context] Got %d history messages", len(recent))
                     messages.extend(recent)
                 except Exception as exc:

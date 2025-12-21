@@ -116,10 +116,14 @@ def get_building_messages(building_id: Optional[str] = None) -> str:
                     "role": "user",
                     "content": f"{speaker}: {content}"
                 }
-                # Copy metadata if present
+                # Copy metadata if present, add "with" field
                 metadata = m.get("metadata")
                 if isinstance(metadata, dict):
                     entry["metadata"] = copy.deepcopy(metadata)
+                else:
+                    entry["metadata"] = {}
+                # Add conversation partner to "with" field
+                entry["metadata"]["with"] = [pid]
                 # Copy timestamp
                 ts_value = m.get("timestamp")
                 if isinstance(ts_value, str):
@@ -136,9 +140,14 @@ def get_building_messages(building_id: Optional[str] = None) -> str:
                     "role": "user",
                     "content": content
                 }
+                # Copy metadata if present, add "with" field
                 metadata = m.get("metadata")
                 if isinstance(metadata, dict):
                     entry["metadata"] = copy.deepcopy(metadata)
+                else:
+                    entry["metadata"] = {}
+                # Mark as conversation with user
+                entry["metadata"]["with"] = ["user"]
                 ts_value = m.get("timestamp")
                 if isinstance(ts_value, str):
                     entry["timestamp"] = ts_value
