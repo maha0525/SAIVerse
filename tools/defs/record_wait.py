@@ -42,23 +42,38 @@ def record_wait(reason: Optional[str] = None) -> str:
     now = datetime.now(dt_timezone.utc)
     now_iso = now.isoformat()
 
-    # Check if last message was a wait
+    # Check if the LAST message (of any type) was a wait
     try:
-        recent = adapter.recent_persona_messages(max_chars=500, required_tags=["wait"])
-        last_wait = recent[0] if recent else None
+        # Get recent messages of all types (conversation + internal)
+        recent_all = adapter.recent_persona_messages(
+            max_chars=1000,
+            required_tags=["conversation", "internal"]
+        )
+        last_msg = recent_all[-1] if recent_all else None
+
+        # Check if last message has wait tag
+        last_wait = None
+        if last_msg:
+            tags = last_msg.get("metadata", {}).get("tags", [])
+            if "wait" in tags:
+                last_wait = last_msg
     except Exception:
         last_wait = None
 
-    if last_wait and _is_recent_wait(last_wait, now):
+    if last_wait:
         # Consolidate with previous wait
         prev_metadata = last_wait.get("metadata", {})
         wait_started = prev_metadata.get("wait_started", last_wait.get("timestamp", now_iso))
         wait_count = prev_metadata.get("wait_count", 1) + 1
 
-        # Build consolidated message
-        content = f"(待機中: {wait_count}回目)"
+        # Format timestamps for content (human-readable)
+        started_str = _format_timestamp(wait_started)
+        latest_str = _format_timestamp(now_iso)
+
+        # Build consolidated message with timestamps in content
+        content = f"(待機中: 開始 {started_str}, 最新 {latest_str}, {wait_count}回目)"
         if reason:
-            content = f"(待機中: {wait_count}回目 - {reason})"
+            content = f"(待機中: 開始 {started_str}, 最新 {latest_str}, {wait_count}回目 - {reason})"
 
         new_msg = {
             "role": "assistant",
@@ -72,20 +87,20 @@ def record_wait(reason: Optional[str] = None) -> str:
         }
 
         # Remove old wait and add new one
-        try:
-            _remove_last_wait(adapter, last_wait)
-        except Exception as exc:
-            LOGGER.debug("Failed to remove old wait: %s", exc)
+        deleted = _remove_last_wait(adapter, last_wait)
+        if not deleted:
+            LOGGER.debug("Failed to remove old wait message")
 
         adapter.append_persona_message(new_msg)
         LOGGER.debug("[record_wait] Consolidated wait #%d", wait_count)
         return f"待機継続 ({wait_count}回目)"
 
     else:
-        # New wait
-        content = "(待機を選択)"
+        # New wait - include start timestamp
+        started_str = _format_timestamp(now_iso)
+        content = f"(待機開始: {started_str})"
         if reason:
-            content = f"(待機を選択 - {reason})"
+            content = f"(待機開始: {started_str} - {reason})"
 
         new_msg = {
             "role": "assistant",
@@ -103,38 +118,40 @@ def record_wait(reason: Optional[str] = None) -> str:
         return "待機を選択"
 
 
-def _is_recent_wait(msg: dict, now: datetime) -> bool:
-    """Check if message is a recent wait (within last hour)."""
-    metadata = msg.get("metadata", {})
-    tags = metadata.get("tags", [])
-
-    if "wait" not in tags:
-        return False
-
-    # Check if it's recent (within 1 hour)
+def _format_timestamp(iso_str: str) -> str:
+    """Format ISO timestamp to human-readable HH:MM:SS format."""
     try:
-        ts_str = metadata.get("wait_latest") or msg.get("timestamp")
-        if ts_str:
-            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=dt_timezone.utc)
-            diff = (now - ts).total_seconds()
-            return diff < 3600  # Within 1 hour
+        ts = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        # Convert to local time for display
+        local_ts = ts.astimezone()
+        return local_ts.strftime("%H:%M:%S")
     except Exception:
-        pass
-
-    return True  # If can't determine, assume recent
+        return iso_str[:19]  # Fallback to raw timestamp
 
 
-def _remove_last_wait(adapter, msg: dict) -> None:
+def _remove_last_wait(adapter, msg: dict) -> bool:
     """Remove the last wait message from SAIMemory.
 
-    This is a best-effort operation - if deletion fails, we still add the new one.
+    Args:
+        adapter: SAIMemoryAdapter instance
+        msg: Message dict containing 'id' field
+
+    Returns:
+        True if deletion succeeded, False otherwise
     """
-    # SAIMemory doesn't have a direct delete API, but we can mark as superseded
-    # For now, we leave the old message and let the new one replace it conceptually
-    # The consolidation info is in the new message, so old one becomes obsolete
-    pass
+    message_id = msg.get("id")
+    if not message_id:
+        LOGGER.debug("No message ID found in wait message, cannot delete")
+        return False
+
+    try:
+        result = adapter.delete_message(message_id)
+        if result:
+            LOGGER.debug("[record_wait] Deleted old wait message: %s", message_id)
+        return result
+    except Exception as exc:
+        LOGGER.warning("Failed to delete wait message %s: %s", message_id, exc)
+        return False
 
 
 def schema() -> ToolSchema:
