@@ -1,26 +1,30 @@
 {
   "name": "wait",
-  "description": "Do nothing - choose to wait and observe",
+  "description": "Do nothing - choose to wait and observe. Consecutive waits are consolidated.",
   "input_schema": [
     {
       "name": "input",
-      "description": "Reason for waiting (optional)"
+      "description": "Reason for waiting (optional)",
+      "source": null
     }
   ],
   "output_schema": [],
   "context_requirements": {
     "history_depth": 0,
-    "system_prompt": false
+    "inventory": false,
+    "building_items": false,
+    "system_prompt": false,
+    "available_playbooks": false
   },
   "router_callable": true,
   "user_selectable": false,
   "nodes": [
     {
       "id": "record",
-      "type": "memorize",
-      "action": "(待機を選択)",
-      "role": "assistant",
-      "tags": ["internal", "wait"],
+      "type": "tool",
+      "action": "record_wait",
+      "args": {},
+      "output_key": "_wait_result",
       "next": null
     }
   ],

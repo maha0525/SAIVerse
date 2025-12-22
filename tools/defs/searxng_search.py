@@ -8,7 +8,7 @@ import requests
 from tools.defs import ToolResult, ToolSchema
 
 DEFAULT_BASE_URL = os.getenv("SEARXNG_URL") or os.getenv("SEARXNG_BASE_URL") or "http://localhost:8080"
-DEFAULT_SAFESEARCH = os.getenv("SEARXNG_SAFESEARCH", "1")
+DEFAULT_SAFESEARCH = os.getenv("SEARXNG_SAFESEARCH") or "1"
 DEFAULT_LANGUAGE = os.getenv("SEARXNG_LANGUAGE", "ja")
 DEFAULT_LIMIT = int(os.getenv("SEARXNG_LIMIT", "5"))
 

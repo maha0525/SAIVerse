@@ -50,7 +50,7 @@ export function useActivityTracker() {
             try {
                 navigator.sendBeacon(
                     '/api/user/visibility',
-                    JSON.stringify({ visible: false })
+                    new Blob([JSON.stringify({ visible: false })], { type: 'application/json' })
                 );
             } catch {
                 // Fallback to fetch if sendBeacon fails
@@ -101,7 +101,7 @@ export function useActivityTracker() {
             try {
                 navigator.sendBeacon(
                     '/api/user/visibility',
-                    JSON.stringify({ visible: false })
+                    new Blob([JSON.stringify({ visible: false })], { type: 'application/json' })
                 );
             } catch {
                 // Best effort

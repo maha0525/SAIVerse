@@ -280,24 +280,22 @@ class ScheduleManager:
         # スケジュール実行用のプロンプトを生成
         user_input = self._generate_schedule_prompt(schedule, session, persona_id)
 
-        # メタプレイブックを実行
+        # メタプレイブックを実行（PulseController経由）
         try:
-            # SEA runtime経由で実行
-            occupants = self.manager.occupants.get(building_id, [])
             LOGGER.info(
-                "[ScheduleManager] Calling sea_runtime.run_meta_user with playbook=%s, building=%s, prompt_length=%d",
+                "[ScheduleManager] Submitting schedule via PulseController: playbook=%s, building=%s, prompt_length=%d",
                 meta_playbook,
                 building_id,
                 len(user_input),
             )
-            self.manager.sea_runtime.run_meta_user(
-                persona=persona,
-                user_input=user_input,
+            self.manager.pulse_controller.submit_schedule(
+                persona_id=persona_id,
                 building_id=building_id,
+                user_input=user_input,
                 metadata={"schedule_id": schedule.SCHEDULE_ID, "schedule_type": schedule.SCHEDULE_TYPE},
                 meta_playbook=meta_playbook,
             )
-            LOGGER.info("[ScheduleManager] sea_runtime.run_meta_user completed")
+            LOGGER.info("[ScheduleManager] Schedule submitted to PulseController")
 
             # 実行後の状態更新
             self._update_schedule_after_execution(schedule, session)

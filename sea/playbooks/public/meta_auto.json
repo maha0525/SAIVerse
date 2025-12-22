@@ -1,62 +1,158 @@
 {
   "name": "meta_auto",
-  "description": "Autonomous pulse: perceive -> route -> execute -> think",
+  "description": "Autonomous pulse: task-driven with speak/think/wait finalization",
   "input_schema": [
     {
       "name": "input",
-      "description": "Trigger input (usually empty)"
+      "description": "Trigger input (usually empty)",
+      "source": null
     }
   ],
   "output_schema": null,
   "context_requirements": {
     "history_depth": 0,
-    "system_prompt": false,
     "inventory": false,
     "building_items": false,
+    "system_prompt": false,
     "available_playbooks": false
   },
   "router_callable": false,
   "user_selectable": false,
   "nodes": [
     {
+      "id": "check_task",
+      "type": "tool",
+      "action": "get_task_summary",
+      "args": {
+        "limit": 1
+      },
+      "output_key": "task_summary",
+      "next": "branch_task"
+    },
+    {
+      "id": "branch_task",
+      "type": "llm",
+      "action": "タスク情報:\n{task_summary}\n\nアクティブなタスクがあるかどうかを判定してください。\n- has_active_task: true/false",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "has_active_task": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "has_active_task"
+        ]
+      },
+      "output_key": "task_check",
+      "next": "route_task"
+    },
+    {
+      "id": "route_task",
+      "type": "branch",
+      "condition_source": "task_check.has_active_task",
+      "branches": {
+        "true": "execute_phase",
+        "false": "perceive"
+      },
+      "fallback": "perceive",
+      "next": null
+    },
+    {
+      "id": "execute_phase",
+      "type": "subplay",
+      "playbook": "sub_execute_phase",
+      "input_template": "",
+      "propagate_output": false,
+      "next": "finalize"
+    },
+    {
       "id": "perceive",
       "type": "subplay",
       "playbook": "sub_perceive",
       "input_template": "{input}",
       "propagate_output": false,
-      "next": "list_playbooks"
+      "next": "react_check"
     },
     {
-      "id": "list_playbooks",
-      "type": "tool",
-      "action": "list_available_playbooks",
-      "args_input": {},
-      "output_key": "available_playbooks",
-      "next": "router"
+      "id": "react_check",
+      "type": "llm",
+      "action": "状況を踏まえて、今すぐリアクション（発言や行動）すべき外部刺激があるか判定してください。\n\n例:\n- 他のペルソナから話しかけられた → should_react: true\n- 重要なイベント通知を受けた → should_react: true\n- 特に何もない → should_react: false",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "should_react": {
+            "type": "boolean"
+          },
+          "reaction_trigger": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "should_react"
+        ]
+      },
+      "output_key": "react_decision",
+      "next": "route_react"
     },
     {
-      "id": "router",
+      "id": "route_react",
+      "type": "branch",
+      "condition_source": "react_decision.should_react",
+      "branches": {
+        "true": "reaction",
+        "false": "generate_want"
+      },
+      "fallback": "generate_want",
+      "next": null
+    },
+    {
+      "id": "reaction",
       "type": "subplay",
-      "playbook": "sub_router_auto",
-      "input_template": "{input}",
+      "playbook": "sub_reaction",
+      "input_template": "",
       "propagate_output": false,
-      "next": "exec"
+      "next": "finalize"
     },
     {
-      "id": "exec",
-      "type": "exec",
-      "playbook_source": "selected_playbook",
-      "args_source": "selected_args",
+      "id": "generate_want",
+      "type": "subplay",
+      "playbook": "sub_generate_want",
+      "input_template": "",
+      "propagate_output": false,
+      "next": "route_want"
+    },
+    {
+      "id": "route_want",
+      "type": "branch",
+      "condition_source": "has_want",
+      "branches": {
+        "true": "start_task",
+        "false": "finalize"
+      },
+      "fallback": "finalize",
+      "next": null
+    },
+    {
+      "id": "start_task",
+      "type": "tool",
+      "action": "task_request_creation",
+      "args": {
+        "title": "{want_name}",
+        "goal": "{want_description}",
+        "steps": "{phases}"
+      },
+      "output_key": "new_task",
       "next": "finalize"
     },
     {
       "id": "finalize",
       "type": "subplay",
-      "playbook": "sub_think_meta",
-      "input_template": "{input}\n\n参考情報:\n{context_bundle_text}",
-      "propagate_output": true,
+      "playbook": "sub_finalize_auto",
+      "input_template": "",
+      "propagate_output": false,
       "next": null
     }
   ],
-  "start_node": "perceive"
+  "start_node": "check_task"
 }

@@ -52,7 +52,8 @@ def get_situation_snapshot(building_id: Optional[str] = None) -> str:
     Includes:
     - Current local time
     - Timezone
-    - Elapsed time since last pulse
+    - Pulse type (user/schedule/auto)
+    - Elapsed time since last AI message
     - Current building
     - Personas in the building
     - User online status
@@ -87,13 +88,17 @@ def get_situation_snapshot(building_id: Optional[str] = None) -> str:
     current_datetime_str = now_local.strftime("%Y年%m月%d日 %H:%M:%S")
     timezone_display = f"{timezone_name} ({_format_timezone_offset(now_local)})"
 
-    # Elapsed since last pulse
-    last_pulse_time = getattr(persona, "_last_conscious_prompt_time_utc", None)
-    if last_pulse_time is not None:
-        elapsed = now_utc - last_pulse_time
-        elapsed_label = _format_elapsed(elapsed)
-    else:
-        elapsed_label = "初回実行"
+    # Pulse type
+    pulse_type = getattr(persona, "_current_pulse_type", None)
+    pulse_type_map = {
+        "user": "ユーザー応答",
+        "schedule": "スケジュール実行",
+        "auto": "自律稼働",
+    }
+    pulse_type_display = pulse_type_map.get(pulse_type, "不明")
+
+    # Last AI message time from history
+    last_ai_message_label = _get_last_ai_message_elapsed(persona, building_id, now_utc)
 
     # Building info
     buildings = getattr(persona, "buildings", {})
@@ -120,13 +125,58 @@ def get_situation_snapshot(building_id: Optional[str] = None) -> str:
     lines = [
         f"- 現地時刻: {current_datetime_str}",
         f"- タイムゾーン: {timezone_display}",
-        f"- 前回のパルスからの経過: {elapsed_label}",
+        f"- パルス種別: {pulse_type_display}",
+        f"- 最後の発言からの経過: {last_ai_message_label}",
         f"- 現在のBuilding: {building_name}",
         f"- Building内の他のペルソナ: {occupants_display}",
         f"- ユーザーオンライン状態: {user_state}",
     ]
 
     return "\n".join(lines)
+
+
+def _get_last_ai_message_elapsed(persona, building_id: str, now_utc: datetime) -> str:
+    """Get elapsed time since last AI (assistant) message in history."""
+    try:
+        history_manager = getattr(persona, "history_manager", None)
+        if not history_manager:
+            return "不明"
+        
+        # Get recent history and find last assistant message
+        # Use get_recent_history with a reasonable char limit
+        messages = history_manager.get_recent_history(max_chars=50000)
+        last_ai_time = None
+        
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant":
+                # Try created_at first (from SAIMemory, UNIX timestamp)
+                created_at = msg.get("created_at")
+                if created_at:
+                    try:
+                        last_ai_time = datetime.fromtimestamp(created_at, tz=dt_timezone.utc)
+                        break
+                    except (TypeError, ValueError):
+                        pass
+                
+                # Fallback to timestamp field (ISO format string, top-level)
+                timestamp = msg.get("timestamp")
+                if timestamp:
+                    try:
+                        last_ai_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                        if last_ai_time.tzinfo is None:
+                            last_ai_time = last_ai_time.replace(tzinfo=dt_timezone.utc)
+                        break
+                    except (TypeError, ValueError):
+                        pass
+        
+        if last_ai_time is None:
+            return "履歴なし"
+        
+        elapsed = now_utc - last_ai_time
+        return _format_elapsed(elapsed)
+    except Exception as e:
+        LOGGER.warning("Failed to get last AI message time: %s", e)
+        return "不明"
 
 
 def schema() -> ToolSchema:

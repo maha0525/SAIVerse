@@ -52,10 +52,13 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
         }
     };
 
+    // Fetch data only once on mount
     useEffect(() => {
         refreshData();
+    }, []);
 
-        // Global Touch Handlers for swipe-to-open
+    // Global Touch Handlers for swipe-to-open (separate effect to avoid re-fetching on onOpen change)
+    useEffect(() => {
         const handleTouchStart = (e: TouchEvent) => {
             startX.current = e.touches[0].clientX;
         };
@@ -79,7 +82,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
             window.removeEventListener('touchstart', handleTouchStart);
             window.removeEventListener('touchmove', handleTouchMove);
         };
-    }, [onOpen]); // Depend on onOpen
+    }, [onOpen]);
 
     const handleMove = async (buildingId: string) => {
         if (!status || status.current_building_id === buildingId) return;

@@ -19,6 +19,7 @@ import os
 from google.genai import errors
 from buildings import Building
 from sea import SEARuntime
+from sea.pulse_controller import PulseController
 from persona_core import PersonaCore
 from model_configs import get_model_provider, get_context_length
 from occupancy_manager import OccupancyManager
@@ -322,6 +323,9 @@ class SAIVerseManager(
 
         # SEA runtime (always enabled)
         self.sea_runtime: SEARuntime = SEARuntime(self)
+        
+        # Pulse controller for managing concurrent playbook executions
+        self.pulse_controller: PulseController = PulseController(self.sea_runtime)
 
         self.runtime = RuntimeService(self, self.state)
         self.admin = AdminService(self, self.runtime, self.state)
@@ -394,14 +398,27 @@ class SAIVerseManager(
 
     # SEA integration helpers -------------------------------------------------
     def run_sea_auto(self, persona, building_id: str, occupants: List[str]) -> None:
+        """Run autonomous pulse via PulseController."""
         try:
-            self.sea_runtime.run_meta_auto(persona, building_id, occupants)
+            self.pulse_controller.submit_auto(
+                persona_id=persona.persona_id,
+                building_id=building_id,
+            )
         except Exception as exc:
             logging.exception("SEA auto run failed: %s", exc)
 
     def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[str]:
+        """Run user input via PulseController."""
         try:
-            return self.sea_runtime.run_meta_user(persona, user_input, building_id, metadata=metadata, meta_playbook=meta_playbook, event_callback=event_callback)
+            result = self.pulse_controller.submit_user(
+                persona_id=persona.persona_id,
+                building_id=building_id,
+                user_input=user_input,
+                metadata=metadata,
+                meta_playbook=meta_playbook,
+                event_callback=event_callback,
+            )
+            return result if result else []
         except Exception as exc:
             logging.exception("SEA user run failed: %s", exc)
             return []

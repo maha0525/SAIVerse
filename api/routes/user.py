@@ -125,6 +125,8 @@ def heartbeat(req: HeartbeatRequest, manager = Depends(get_manager)):
     """Update user presence based on frontend activity heartbeat."""
     manager.state.user_presence_status = "online"
     manager.state.user_last_activity_time = req.last_interaction or datetime.now()
+    # Sync manager-level cache so SEA runtime sees the updated status
+    manager._refresh_user_state_cache()
     return {"status": "ok", "presence_status": "online"}
 
 
@@ -139,4 +141,6 @@ def visibility(req: VisibilityRequest, manager = Depends(get_manager)):
     else:
         manager.state.user_presence_status = "online"
         manager.state.user_last_activity_time = datetime.now()
+    # Sync manager-level cache so SEA runtime sees the updated status
+    manager._refresh_user_state_cache()
     return {"status": "ok", "presence_status": manager.state.user_presence_status}

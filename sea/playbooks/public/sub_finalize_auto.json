@@ -1,0 +1,95 @@
+{
+    "name": "sub_finalize_auto",
+    "description": "自律パルスの最終出力を決定する（speak/think/wait）",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "これまでの処理結果",
+            "source": "parent.last"
+        }
+    ],
+    "context_requirements": {
+        "history_depth": "full",
+        "inventory": false,
+        "building_items": false,
+        "system_prompt": true
+    },
+    "router_callable": false,
+    "user_selectable": false,
+    "nodes": [
+        {
+            "id": "decide_output",
+            "type": "llm",
+            "action": "自律パルスの最終段階です。これまでの処理を踏まえて、以下のいずれかを選択してください:\n\n1. **speak** - Building内で発言する（他のペルソナやユーザーに伝えたいことがある場合）\n2. **think** - 内部で思考を記録する（発言するほどではないが記録しておきたい場合）\n3. **wait** - 何かを待つ（相手の返答待ち、時間待ちなど）\n\n選択基準:\n- 重要な情報や会話がある → speak\n- 分析結果や気づきを残したい → think\n- 次のアクションが他者に依存する → wait\n- 特に何もない → think で簡潔な状況報告",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "output_type": {
+                        "type": "string",
+                        "enum": [
+                            "speak",
+                            "think",
+                            "wait"
+                        ],
+                        "description": "出力タイプ"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "発言・思考・待機の内容"
+                    },
+                    "waiting_for": {
+                        "type": "string",
+                        "description": "waitの場合のみ: 何を待っているか"
+                    }
+                },
+                "required": [
+                    "output_type",
+                    "content"
+                ]
+            },
+            "output_key": "finalize_output",
+            "next": "branch_output"
+        },
+        {
+            "id": "branch_output",
+            "type": "branch",
+            "condition_source": "finalize_output.output_type",
+            "branches": {
+                "speak": "do_speak",
+                "think": "do_think",
+                "wait": "do_wait"
+            },
+            "fallback": "do_think",
+            "next": null
+        },
+        {
+            "id": "do_speak",
+            "type": "say",
+            "content_source": "finalize_output.content",
+            "next": null
+        },
+        {
+            "id": "do_think",
+            "type": "memorize",
+            "content_source": "finalize_output.content",
+            "tags": [
+                "think",
+                "internal",
+                "auto"
+            ],
+            "next": null
+        },
+        {
+            "id": "do_wait",
+            "type": "memorize",
+            "content_source": "finalize_output.content",
+            "tags": [
+                "wait",
+                "internal",
+                "auto"
+            ],
+            "next": null
+        }
+    ],
+    "start_node": "decide_output"
+}
