@@ -20,6 +20,8 @@
     position: relative;
     height: 100%;
     overflow: hidden;
+    max-width: 900px;
+    margin: 0 auto;
 }
 
 .header {
@@ -214,10 +216,21 @@
     font-weight: 600;
 }
 
-.cardBody h1 { font-size: 1.3em; }
-.cardBody h2 { font-size: 1.2em; }
-.cardBody h3 { font-size: 1.1em; }
-.cardBody h4 { font-size: 1em; }
+.cardBody h1 {
+    font-size: 1.3em;
+}
+
+.cardBody h2 {
+    font-size: 1.2em;
+}
+
+.cardBody h3 {
+    font-size: 1.1em;
+}
+
+.cardBody h4 {
+    font-size: 1em;
+}
 
 .cardBody a {
     color: #60a5fa;
@@ -363,8 +376,10 @@
     font-family: inherit;
     font-size: 0.95rem;
     line-height: 1.5;
-    max-height: 240px; /* 10 lines * 24px line-height */
-    min-height: 24px; /* 1 line */
+    max-height: 240px;
+    /* 10 lines * 24px line-height */
+    min-height: 24px;
+    /* 1 line */
     padding: 0.2rem 0;
     overflow-y: auto;
 }

@@ -4,15 +4,17 @@
   "input_schema": [
     {
       "name": "input",
-      "description": "Trigger input (usually empty for autonomous mode)"
+      "description": "Trigger input (usually empty for autonomous mode)",
+      "source": null
     }
   ],
   "output_schema": ["messages", "situation_snapshot", "task_summary", "perception_summary"],
   "context_requirements": {
     "history_depth": 0,
-    "system_prompt": false,
     "inventory": false,
-    "building_items": false
+    "building_items": false,
+    "system_prompt": false,
+    "available_playbooks": false
   },
   "router_callable": false,
   "user_selectable": false,
@@ -21,7 +23,7 @@
       "id": "get_messages",
       "type": "tool",
       "action": "get_building_messages",
-      "args_input": {},
+      "args": {},
       "output_key": "perception_summary",
       "next": "get_snapshot"
     },
@@ -29,7 +31,7 @@
       "id": "get_snapshot",
       "type": "tool",
       "action": "get_situation_snapshot",
-      "args_input": {},
+      "args": {},
       "output_key": "situation_snapshot",
       "next": "get_tasks"
     },
@@ -37,7 +39,7 @@
       "id": "get_tasks",
       "type": "tool",
       "action": "get_task_summary",
-      "args_input": {},
+      "args": {},
       "output_key": "task_summary",
       "next": "build_context"
     },
@@ -45,7 +47,9 @@
       "id": "build_context",
       "type": "tool",
       "action": "get_history",
-      "args_input": {},
+      "args": {
+        "include_internal": true
+      },
       "output_key": "messages",
       "next": null
     }

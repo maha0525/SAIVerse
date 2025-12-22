@@ -12,6 +12,7 @@ import re
 
 from sea.playbook_models import NodeType, PlaybookSchema, PlaybookValidationError, validate_playbook_graph
 from sea.langgraph_runner import compile_playbook
+from sea.cancellation import CancellationToken, ExecutionCancelledException
 from database.models import Playbook as PlaybookModel
 from model_configs import get_model_parameter_defaults
 
@@ -42,8 +43,25 @@ class SEARuntime:
         self._trace = bool(os.getenv("SAIVERSE_SEA_TRACE"))
 
     # ---------------- meta entrypoints -----------------
-    def run_meta_user(self, persona, user_input: str, building_id: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[str]:
+    def run_meta_user(
+        self,
+        persona,
+        user_input: str,
+        building_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        meta_playbook: Optional[str] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+        pulse_type: str = "user",
+    ) -> List[str]:
         """Router -> subgraph -> speak. Returns spoken strings for gateway/UI."""
+        # Check for cancellation before starting
+        if cancellation_token:
+            cancellation_token.raise_if_cancelled()
+        
+        # Store pulse_type in persona for tools to access
+        persona._current_pulse_type = pulse_type
+        
         # Record user input to history before processing
         if user_input:
             try:
@@ -65,15 +83,37 @@ class SEARuntime:
                 playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
         else:
             playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
-        result = self._run_playbook(playbook, persona, building_id, user_input, auto_mode=False, record_history=True, event_callback=event_callback)
+        result = self._run_playbook(
+            playbook, persona, building_id, user_input,
+            auto_mode=False, record_history=True, event_callback=event_callback,
+            cancellation_token=cancellation_token, pulse_type=pulse_type,
+        )
         return result
 
-    def run_meta_auto(self, persona, building_id: str, occupants: List[str]) -> None:
+    def run_meta_auto(
+        self,
+        persona,
+        building_id: str,
+        occupants: List[str],
+        cancellation_token: Optional[CancellationToken] = None,
+        pulse_type: str = "auto",
+    ) -> None:
         """Router -> subgraph -> think. For autonomous loop, no direct user output."""
+        # Check for cancellation before starting
+        if cancellation_token:
+            cancellation_token.raise_if_cancelled()
+        
+        # Store pulse_type in persona for tools to access
+        persona._current_pulse_type = pulse_type
+        
         # Update last pulse time for get_situation_snapshot
         persona._last_conscious_prompt_time_utc = datetime.now(dt_timezone.utc)
         playbook = self._choose_playbook(kind="auto", persona=persona, building_id=building_id)
-        self._run_playbook(playbook, persona, building_id, user_input=None, auto_mode=True, record_history=True)
+        self._run_playbook(
+            playbook, persona, building_id, user_input=None,
+            auto_mode=True, record_history=True,
+            cancellation_token=cancellation_token, pulse_type=pulse_type,
+        )
 
     # ---------------- core runner -----------------
     def _run_playbook(
@@ -86,7 +126,13 @@ class SEARuntime:
         record_history: bool = True,
         parent_state: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+        pulse_type: Optional[str] = None,
     ) -> List[str]:
+        # Check for cancellation at start
+        if cancellation_token:
+            cancellation_token.raise_if_cancelled()
+        
         # Generate or inherit pulse_id
         parent = parent_state or {}
         LOGGER.debug("[sea] _run_playbook called for %s, parent_state keys: %s", playbook.name, list(parent.keys()) if parent else "(none)")
@@ -104,6 +150,10 @@ class SEARuntime:
 
         # Store chain in parent_state for sub-playbooks to inherit
         parent["_playbook_chain"] = current_chain
+        
+        # Store cancellation token in parent_state for propagation
+        if cancellation_token:
+            parent["_cancellation_token"] = cancellation_token
 
         # Wrap event_callback to include playbook chain in status events
         def wrapped_event_callback(event: Dict[str, Any]) -> None:
@@ -131,7 +181,13 @@ class SEARuntime:
         conversation_msgs = list(base_messages)
 
         # Execute playbook with LangGraph (use wrapped callback)
-        compiled_ok = self._compile_with_langgraph(playbook, persona, building_id, user_input, auto_mode, conversation_msgs, pulse_id, parent_state=parent, event_callback=wrapped_event_callback)
+        compiled_ok = self._compile_with_langgraph(
+            playbook, persona, building_id, user_input, auto_mode,
+            conversation_msgs, pulse_id, parent_state=parent,
+            event_callback=wrapped_event_callback,
+            cancellation_token=cancellation_token,
+            pulse_type=pulse_type,
+        )
         if compiled_ok is None:
             # LangGraph compilation failed - this should not happen as all node types are now supported
             LOGGER.error("LangGraph compilation failed for playbook '%s'. This indicates a configuration or dependency issue.", playbook.name)
@@ -156,6 +212,8 @@ class SEARuntime:
         pulse_id: str,
         parent_state: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+        pulse_type: Optional[str] = None,
     ) -> Optional[List[str]]:
         _lg_outputs: List[str] = []
         temperature = self._default_temperature(persona)
@@ -215,6 +273,8 @@ class SEARuntime:
             "context_bundle": [],
             "context_bundle_text": "",
             "pulse_id": pulse_id,
+            "pulse_type": pulse_type,  # user/schedule/auto
+            "_cancellation_token": cancellation_token,  # For node-level cancellation checks
             **inherited_vars,  # Add inherited variables from input_schema
         }
 
@@ -223,6 +283,10 @@ class SEARuntime:
         langgraph_config = {"recursion_limit": 100}
 
         try:
+            # Check cancellation before starting execution
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
+            
             # Check if we're inside an existing event loop
             try:
                 running_loop = asyncio.get_running_loop()
@@ -238,6 +302,9 @@ class SEARuntime:
             else:
                 # No running loop, use asyncio.run directly
                 final_state = asyncio.run(compiled(initial_state, langgraph_config))
+        except ExecutionCancelledException:
+            # Re-raise cancellation exceptions
+            raise
         except Exception:
             LOGGER.exception("SEA LangGraph execution failed")
             # Update execution state: execution failed, reset to idle
@@ -265,6 +332,11 @@ class SEARuntime:
 
     def _lg_llm_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         async def node(state: dict):
+            # Check for cancellation at start of node
+            cancellation_token = state.get("_cancellation_token")
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
+            
             # Send status event for node execution
             node_id = getattr(node_def, "id", "llm")
             if event_callback:
@@ -282,7 +354,7 @@ class SEARuntime:
                 "persona_id": getattr(persona, "persona_id", None),
                 "persona_name": getattr(persona, "persona_name", None),
                 "context_bundle_text": state.get("context_bundle_text", ""),
-                **{k: v for k, v in state.items() if k not in ["messages", "inputs", "outputs", "persona_obj"]},  # Include all other state variables
+                **{k: v for k, v in state.items() if k not in ["messages", "inputs", "outputs", "persona_obj", "_cancellation_token"]},  # Include all other state variables
             }
             text = ""
             schema_consumed = False
@@ -769,6 +841,11 @@ class SEARuntime:
         output_keys = getattr(node_def, "output_keys", None)
 
         async def node(state: dict):
+            # Check for cancellation at start of node
+            cancellation_token = state.get("_cancellation_token")
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
+            
             # Send status event for node execution
             node_id = getattr(node_def, "id", "tool")
             if event_callback:
@@ -841,6 +918,11 @@ class SEARuntime:
         args_source = getattr(node_def, "args_source", "selected_args") or "selected_args"
 
         async def node(state: dict):
+            # Check for cancellation at start of node
+            cancellation_token = state.get("_cancellation_token")
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
+            
             # Send status event for node execution
             node_id = getattr(node_def, "id", "exec")
             if event_callback:
@@ -955,6 +1037,11 @@ class SEARuntime:
 
     def _lg_subplay_node(self, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, auto_mode: bool, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         async def node(state: dict):
+            # Check for cancellation at start of node
+            cancellation_token = state.get("_cancellation_token")
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
+            
             # Send status event for node execution
             node_id = getattr(node_def, "id", "subplay")
             if event_callback:
