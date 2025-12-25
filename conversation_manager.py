@@ -58,6 +58,11 @@ class ConversationManager:
                 break
 
             try:
+                # Skip if global auto mode is disabled
+                if not getattr(self.saiverse_manager, 'state', None) or \
+                   not self.saiverse_manager.state.global_auto_enabled:
+                    continue
+
                 self.trigger_next_turn()
             except Exception as e:
                 logging.error(f"[ConvManager] Error in conversation loop for {self.building_id}: {e}", exc_info=True)

@@ -336,6 +336,13 @@ def main():
     )
 
     from fastapi.staticfiles import StaticFiles
+    
+    # Mount uploads directory for user-attached images FIRST (more specific path)
+    # Access via /api/static/uploads/filename.png
+    uploads_dir = Path.home() / ".saiverse" / "image"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/api/static/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
+    
     # Mount assets directory for static files (e.g. default avatars)
     # Access via /api/static/icons/user.png
     app.mount("/api/static", StaticFiles(directory="assets"), name="static")

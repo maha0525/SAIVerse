@@ -57,6 +57,21 @@
     line-height: 1.5;
 }
 
+.buildingImage {
+    border-radius: 8px;
+    overflow: hidden;
+    background: #1f2937;
+    border: 1px solid #374151;
+}
+
+.buildingImage img {
+    width: 100%;
+    height: auto;
+    display: block;
+    object-fit: cover;
+    max-height: 200px;
+}
+
 .occupantList {
     display: flex;
     flex-direction: column;

@@ -37,6 +37,7 @@ interface BuildingDetails {
     id: string;
     name: string;
     description: string;
+    image_path?: string | null;  // Building interior image
     occupants: Occupant[];
     items: Item[];
 }
@@ -159,6 +160,24 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
                                 </div>
                             </div>
                         </div>
+
+                        {/* Building Interior Image */}
+                        {details.image_path && (
+                            <div className={styles.section}>
+                                <h3 className={styles.heading}>
+                                    <ImageIcon size={16} /> Interior
+                                </h3>
+                                <div className={styles.buildingImage}>
+                                    <img
+                                        src={details.image_path}
+                                        alt={`${details.name} interior`}
+                                        onError={(e) => {
+                                            e.currentTarget.style.display = 'none';
+                                        }}
+                                    />
+                                </div>
+                            </div>
+                        )}
 
                         <div className={styles.section}>
                             <h3 className={styles.heading}>

@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
-import { X, MessageSquare, Upload, Book } from 'lucide-react';
+import { X, MessageSquare, Upload, Book, Search } from 'lucide-react';
 import styles from './MemoryModal.module.css';
 import MemoryBrowser from './memory/MemoryBrowser';
 import MemoryImport from './memory/MemoryImport';
 import MemopediaViewer from './memory/MemopediaViewer';
+import MemoryRecall from './memory/MemoryRecall';
 
 interface MemoryModalProps {
     isOpen: boolean;
@@ -11,7 +12,7 @@ interface MemoryModalProps {
     personaId: string;
 }
 
-type Tab = 'browser' | 'import' | 'memopedia';
+type Tab = 'browser' | 'import' | 'memopedia' | 'recall';
 
 export default function MemoryModal({ isOpen, onClose, personaId }: MemoryModalProps) {
     const [activeTab, setActiveTab] = useState<Tab>('browser');
@@ -55,14 +56,23 @@ export default function MemoryModal({ isOpen, onClose, personaId }: MemoryModalP
                         <Book size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
                         Memopedia
                     </button>
+                    <button
+                        className={`${styles.tab} ${activeTab === 'recall' ? styles.activeTab : ''}`}
+                        onClick={() => setActiveTab('recall')}
+                    >
+                        <Search size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
+                        Recall Test
+                    </button>
                 </div>
 
                 <div className={styles.content}>
                     {activeTab === 'browser' && <MemoryBrowser personaId={personaId} />}
                     {activeTab === 'import' && <MemoryImport personaId={personaId} />}
                     {activeTab === 'memopedia' && <MemopediaViewer personaId={personaId} />}
+                    {activeTab === 'recall' && <MemoryRecall personaId={personaId} />}
                 </div>
             </div>
         </div>
     );
 }
+

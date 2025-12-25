@@ -1531,6 +1531,22 @@ class SEARuntime:
             if system_text:
                 messages.append({"role": "system", "content": system_text})
 
+        # ---- visual context (Building / Persona images) ----
+        # Inserted right after system prompt but before conversation history
+        if reqs.visual_context:
+            try:
+                from tools.defs.get_visual_context import get_visual_context
+                from tools.context import persona_context, get_active_manager
+                persona_id = getattr(persona, "persona_id", None)
+                persona_dir = getattr(persona, "persona_dir", None)
+                with persona_context(persona_id, persona_dir, self.manager):
+                    visual_messages = get_visual_context(building_id=building_id)
+                if visual_messages:
+                    messages.extend(visual_messages)
+                    LOGGER.debug("[sea][prepare-context] Added %d visual context messages", len(visual_messages))
+            except Exception as exc:
+                LOGGER.debug("[sea][prepare-context] Failed to get visual context: %s", exc)
+
         # ---- history ----
         history_depth = reqs.history_depth
         if history_depth not in [0, "none"]:

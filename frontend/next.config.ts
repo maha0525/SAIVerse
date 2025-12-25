@@ -10,6 +10,13 @@ const nextConfig: NextConfig = {
         ];
     },
     devIndicators: false as any,
+    // Allow larger file uploads for ChatGPT export import
+    experimental: {
+        serverActions: {
+            bodySizeLimit: '100mb',
+        },
+        proxyClientMaxBodySize: '100mb',
+    },
 };
 
 export default nextConfig;

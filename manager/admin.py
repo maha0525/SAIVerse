@@ -350,6 +350,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         capacity: int,
         system_instruction: str,
         city_id: int,
+        building_id: Optional[str] = None,
     ) -> str:
         db = self.SessionLocal()
         try:
@@ -359,10 +360,16 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 return f"Error: A building named '{name}' already exists in that city."
 
             city = db.query(CityModel).filter_by(CITYID=city_id).first()
-            building_id = f"{name.lower().replace(' ', '_')}_{city.CITYNAME}"
+            
+            # Use custom ID if provided, otherwise generate
+            if building_id and building_id.strip():
+                building_id = building_id.strip()
+            else:
+                building_id = f"{name.lower().replace(' ', '_')}_{city.CITYNAME}"
+            
             if db.query(BuildingModel).filter_by(BUILDINGID=building_id).first():
                 return (
-                    f"Error: A building with the generated ID '{building_id}' "
+                    f"Error: A building with the ID '{building_id}' "
                     "already exists."
                 )
 
@@ -376,9 +383,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             )
             db.add(new_building)
             db.commit()
-            logging.info("Created new building '%s' in city %s.", name, city_id)
+            logging.info("Created new building '%s' (ID: %s) in city %s.", name, building_id, city_id)
             return (
-                f"Building '{name}' created successfully. "
+                f"Building '{name}' (ID: {building_id}) created successfully. "
                 "A restart is required for it to be usable."
             )
         except Exception as exc:
@@ -431,6 +438,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         city_id: int,
         tool_ids: List[int],
         interval: int,
+        image_path: Optional[str] = None,
     ) -> str:
         db = self.SessionLocal()
         try:
@@ -455,6 +463,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             building.SYSTEM_INSTRUCTION = system_instruction
             building.AUTO_INTERVAL_SEC = interval
             building.CITYID = city_id
+            # Update image path if provided (allow clearing by passing empty string)
+            if image_path is not None:
+                building.IMAGE_PATH = image_path.strip() if image_path.strip() else None
 
             db.query(BuildingToolLink).filter_by(BUILDINGID=building_id).delete(
                 synchronize_session=False
@@ -722,6 +733,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "SYSTEMPROMPT": ai.SYSTEMPROMPT,
                 "DESCRIPTION": ai.DESCRIPTION,
                 "AVATAR_IMAGE": ai.AVATAR_IMAGE,
+                "APPEARANCE_IMAGE_PATH": ai.APPEARANCE_IMAGE_PATH,
                 "IS_DISPATCHED": ai.IS_DISPATCHED,
                 "DEFAULT_MODEL": ai.DEFAULT_MODEL,
                 "LIGHTWEIGHT_MODEL": ai.LIGHTWEIGHT_MODEL,
@@ -756,6 +768,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         interaction_mode: str,
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
+        appearance_image_path: Optional[str] = None,
     ) -> str:
         db = self.SessionLocal()
         try:
@@ -851,6 +864,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             ai.DEFAULT_MODEL = default_model or None
             ai.LIGHTWEIGHT_MODEL = lightweight_model or None
             ai.AVATAR_IMAGE = avatar_value
+            # Update appearance image path if provided
+            if appearance_image_path is not None:
+                ai.APPEARANCE_IMAGE_PATH = appearance_image_path.strip() if appearance_image_path.strip() else None
             db.commit()
 
             if ai_id in self.personas:

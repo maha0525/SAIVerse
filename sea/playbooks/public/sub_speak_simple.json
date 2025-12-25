@@ -1,6 +1,6 @@
 {
-    "name": "sub_speak_meta",
-    "description": "Compose final response and speak",
+    "name": "sub_speak_simple",
+    "description": "Compose final response and speak (no tools)",
     "input_schema": [
         {
             "name": "input",
@@ -26,15 +26,9 @@
             "id": "compose",
             "type": "llm",
             "action": null,
-            "available_tools": [
-                "call_playbook"
-            ],
             "output_keys": [
                 {
                     "text": "speak_content"
-                },
-                {
-                    "function_call": "tool_call"
                 }
             ],
             "next": "log",
@@ -49,50 +43,14 @@
                 "conversation"
             ],
             "metadata_key": "metadata",
-            "next": null,
-            "conditional_next": {
-                "field": "has_speak_content",
-                "cases": {
-                    "True": "say",
-                    "False": "check_tool"
-                }
-            }
+            "next": "say",
+            "conditional_next": null
         },
         {
             "id": "say",
             "type": "say",
             "action": "{speak_content}",
             "metadata_key": "metadata",
-            "next": null,
-            "conditional_next": {
-                "field": "tool_called",
-                "cases": {
-                    "True": "execute_tool",
-                    "False": null
-                }
-            }
-        },
-        {
-            "id": "check_tool",
-            "type": "pass",
-            "next": null,
-            "conditional_next": {
-                "field": "tool_called",
-                "cases": {
-                    "True": "execute_tool",
-                    "False": null
-                }
-            }
-        },
-        {
-            "id": "execute_tool",
-            "type": "tool",
-            "action": "call_playbook",
-            "args_input": {
-                "playbook_name": "tool_call.args.playbook_name"
-            },
-            "output_key": null,
-            "output_keys": null,
             "next": null,
             "conditional_next": null
         }

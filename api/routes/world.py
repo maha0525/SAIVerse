@@ -33,6 +33,7 @@ class BuildingCreate(BaseModel):
     capacity: int
     system_instruction: str
     city_id: int
+    building_id: Optional[str] = None  # Custom ID (optional, auto-generated if not provided)
 
 class BuildingUpdate(BaseModel):
     name: str
@@ -42,6 +43,7 @@ class BuildingUpdate(BaseModel):
     city_id: int
     tool_ids: List[int]
     auto_interval: int
+    image_path: Optional[str] = None  # Building interior image for LLM visual context
 
 class AICreate(BaseModel):
     name: str
@@ -57,6 +59,7 @@ class AIUpdate(BaseModel):
     lightweight_model: Optional[str]
     interaction_mode: str
     avatar_path: Optional[str]
+    appearance_image_path: Optional[str] = None  # Persona appearance image for LLM visual context
 
 class AIMove(BaseModel):
     target_building_name: str
@@ -114,11 +117,11 @@ def delete_city(city_id: int, manager: SAIVerseManager = Depends(get_manager)):
 # Building
 @router.post("/buildings")
 def create_building(b: BuildingCreate, manager: SAIVerseManager = Depends(get_manager)):
-    return manager.create_building(b.name, b.description, b.capacity, b.system_instruction, b.city_id)
+    return manager.create_building(b.name, b.description, b.capacity, b.system_instruction, b.city_id, b.building_id)
 
 @router.put("/buildings/{building_id}")
 def update_building(building_id: str, b: BuildingUpdate, manager: SAIVerseManager = Depends(get_manager)):
-    return manager.update_building(building_id, b.name, b.capacity, b.description, b.system_instruction, b.city_id, b.tool_ids, b.auto_interval)
+    return manager.update_building(building_id, b.name, b.capacity, b.description, b.system_instruction, b.city_id, b.tool_ids, b.auto_interval, b.image_path)
 
 @router.delete("/buildings/{building_id}")
 def delete_building(building_id: str, manager: SAIVerseManager = Depends(get_manager)):
@@ -131,7 +134,7 @@ def create_ai(ai: AICreate, manager: SAIVerseManager = Depends(get_manager)):
 
 @router.put("/ais/{ai_id}")
 def update_ai(ai_id: str, ai: AIUpdate, manager: SAIVerseManager = Depends(get_manager)):
-    return manager.update_ai(ai_id, ai.name, ai.description, ai.system_prompt, ai.home_city_id, ai.default_model, ai.lightweight_model, ai.interaction_mode, ai.avatar_path, None)
+    return manager.update_ai(ai_id, ai.name, ai.description, ai.system_prompt, ai.home_city_id, ai.default_model, ai.lightweight_model, ai.interaction_mode, ai.avatar_path, None, ai.appearance_image_path)
 
 @router.delete("/ais/{ai_id}")
 def delete_ai(ai_id: str, manager: SAIVerseManager = Depends(get_manager)):

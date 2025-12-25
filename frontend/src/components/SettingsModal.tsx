@@ -17,6 +17,7 @@ interface AIConfig {
     lightweight_model: string | null;
     interaction_mode: string;
     avatar_path: string | null;
+    appearance_image_path: string | null;  // Visual context appearance image
 }
 
 interface ModelChoice {
@@ -50,6 +51,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [lightweightModel, setLightweightModel] = useState<string>('');
     const [interactionMode, setInteractionMode] = useState<string>('auto');
     const [avatarPath, setAvatarPath] = useState('');
+    const [appearanceImagePath, setAppearanceImagePath] = useState('');
 
     useEffect(() => {
         if (isOpen) {
@@ -88,6 +90,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setLightweightModel(data.lightweight_model || '');
                 setInteractionMode(data.interaction_mode || 'auto');
                 setAvatarPath(data.avatar_path || '');
+                setAppearanceImagePath(data.appearance_image_path || '');
             } else {
                 console.error("Failed to load config");
             }
@@ -118,7 +121,8 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     default_model: defaultModel || null,
                     lightweight_model: lightweightModel || null,
                     interaction_mode: interactionMode,
-                    avatar_path: avatarPath || null
+                    avatar_path: avatarPath || null,
+                    appearance_image_path: appearanceImagePath || null
                 })
             });
 
@@ -235,6 +239,17 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                 />
                                 <div className={styles.description}>
                                     Upload a new avatar image.
+                                </div>
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>Appearance Image (Visual Context)</label>
+                                <ImageUpload
+                                    value={appearanceImagePath}
+                                    onChange={setAppearanceImagePath}
+                                />
+                                <div className={styles.description}>
+                                    Detailed appearance image for LLM visual context. Separate from avatar.
                                 </div>
                             </div>
 

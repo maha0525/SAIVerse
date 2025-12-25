@@ -8,6 +8,10 @@ router = APIRouter()
 from fastapi.responses import FileResponse
 import os
 
+class ChatMessageImage(BaseModel):
+    url: str  # URL to access the image
+    mime_type: Optional[str] = None
+
 class ChatMessage(BaseModel):
     id: Optional[str] = None
     role: str
@@ -15,6 +19,7 @@ class ChatMessage(BaseModel):
     timestamp: Optional[str] = None
     sender: Optional[str] = None
     avatar: Optional[str] = None
+    images: Optional[List[ChatMessageImage]] = None
 
 class ChatHistoryResponse(BaseModel):
     history: List[ChatMessage]
@@ -175,13 +180,29 @@ def get_chat_history(
             sender = "System"
             avatar = "/api/static/icons/host.png"
             
+        # Extract images from metadata
+        images_list = None
+        metadata = msg.get("metadata", {})
+        if metadata and "images" in metadata:
+            images_list = []
+            for img in metadata["images"]:
+                # Convert path to URL
+                img_path = img.get("path", "")
+                if img_path:
+                    # Serve via static endpoint
+                    images_list.append(ChatMessageImage(
+                        url=f"/api/static/uploads/{Path(img_path).name}",
+                        mime_type=img.get("mime_type")
+                    ))
+        
         final_response.append(ChatMessage(
             id=message_id,
             role=role,
             content=content,
             timestamp=timestamp,
             sender=sender,
-            avatar=avatar
+            avatar=avatar,
+            images=images_list
         ))
         
     return {"history": final_response}
@@ -264,7 +285,7 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
             # Let's check manager.runtime logic. It mostly passes metadata through.
             # ui/chat.py passes: {"path": path, "mime_type": mime}
             metadata["images"] = [
-                {"path": attachment_info["path"], "mime_type": attachment_info["mime_type"]}
+                {"uri": attachment_info["uri"], "path": attachment_info["path"], "mime_type": attachment_info["mime_type"]}
             ]
     
     # For V1, we will consume the stream and return the full response.

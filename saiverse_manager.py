@@ -1681,10 +1681,10 @@ class SAIVerseManager(
         return self.admin.delete_city(city_id)
 
     def create_building(
-        self, name: str, description: str, capacity: int, system_instruction: str, city_id: int
+        self, name: str, description: str, capacity: int, system_instruction: str, city_id: int, building_id: str = None
     ) -> str:
         """Creates a new building in a specified city."""
-        return self.admin.create_building(name, description, capacity, system_instruction, city_id)
+        return self.admin.create_building(name, description, capacity, system_instruction, city_id, building_id)
 
     def delete_building(self, building_id: str) -> str:
         """Deletes a building after checking for occupants."""
@@ -1720,6 +1720,7 @@ class SAIVerseManager(
         interaction_mode: str,
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
+        appearance_image_path: Optional[str] = None,
     ) -> str:
         """ワールドエディタからAIの設定を更新する"""
         return self.admin.update_ai(
@@ -1733,6 +1734,7 @@ class SAIVerseManager(
             interaction_mode,
             avatar_path,
             avatar_upload,
+            appearance_image_path,
         )
 
     def delete_ai(self, ai_id: str) -> str:
@@ -1757,6 +1759,7 @@ class SAIVerseManager(
         city_id: int,
         tool_ids: List[int],
         interval: int,
+        image_path: Optional[str] = None,
     ) -> str:
         """ワールドエディタからBuildingの設定を更新する"""
         return self.admin.update_building(
@@ -1768,6 +1771,7 @@ class SAIVerseManager(
             city_id,
             tool_ids,
             interval,
+            image_path,
         )
 
     def get_items_df(self) -> pd.DataFrame:

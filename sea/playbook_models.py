@@ -248,6 +248,7 @@ class ContextRequirements(BaseModel):
     building_items: bool = Field(default=True, description="Include building items in system prompt")
     system_prompt: bool = Field(default=True, description="Include persona and building system prompts")
     available_playbooks: bool = Field(default=False, description="Include available playbooks list in system prompt")
+    visual_context: bool = Field(default=False, description="Include visual context (Building/Persona images) after system prompt")
 
 
 class PlaybookSchema(BaseModel):

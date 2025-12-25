@@ -3,6 +3,15 @@ import styles from './WorldEditor.module.css';
 import { Layers, MapPin, Cpu, Box, FileText, Wrench, ArrowRight, BookOpen } from 'lucide-react';
 import ImageUpload from '../common/ImageUpload';
 
+// Helper Form Components - defined outside component to prevent re-creation on each render
+const Field = ({ label, children }: { label: string; children: React.ReactNode }) => (
+    <div className={styles.field}><label>{label}</label>{children}</div>
+);
+const Input = (props: React.InputHTMLAttributes<HTMLInputElement>) => <input type="text" {...props} />;
+const NumInput = (props: React.InputHTMLAttributes<HTMLInputElement>) => <input type="number" {...props} />;
+const TextArea = (props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) => <textarea {...props} />;
+const Select = ({ children, ...props }: React.SelectHTMLAttributes<HTMLSelectElement>) => <select {...props}>{children}</select>;
+
 interface City {
     CITYID: number;
     CITYNAME: string;
@@ -21,6 +30,7 @@ interface Building {
     SYSTEM_INSTRUCTION: string;
     CITYID: number;
     AUTO_INTERVAL_SEC: number;
+    IMAGE_PATH?: string;  // Building interior image for visual context
 }
 
 interface Tool {
@@ -41,6 +51,7 @@ interface AI {
     LIGHTWEIGHT_MODEL: string;
     INTERACTION_MODE: string;
     AVATAR_IMAGE: string;
+    APPEARANCE_IMAGE_PATH?: string;  // Persona appearance image for visual context
     IS_DISPATCHED: boolean;
 }
 
@@ -146,10 +157,10 @@ export default function WorldEditor() {
         // Fetch tools ... (simplified for now to empty list or need separate fetch)
         fetch(`/api/db/tables/building_tool_link`).then(r => r.json()).then(links => {
             const ids = links.filter((l: any) => l.BUILDINGID === b.BUILDINGID).map((l: any) => l.TOOLID);
-            setFormData({ name: b.BUILDINGNAME, description: b.DESCRIPTION, capacity: b.CAPACITY, system_instruction: b.SYSTEM_INSTRUCTION, city_id: b.CITYID, auto_interval: b.AUTO_INTERVAL_SEC, tool_ids: ids });
+            setFormData({ name: b.BUILDINGNAME, description: b.DESCRIPTION, capacity: b.CAPACITY, system_instruction: b.SYSTEM_INSTRUCTION, city_id: b.CITYID, auto_interval: b.AUTO_INTERVAL_SEC, tool_ids: ids, image_path: b.IMAGE_PATH || '' });
         });
     };
-    const handleCreateBuilding = async () => { try { await fetch('/api/world/buildings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, description: formData.description || "", capacity: formData.capacity || 1, system_instruction: formData.system_instruction || "", city_id: formData.city_id }) }); loadBuildings(); setFormData({}); } catch (e) { } };
+    const handleCreateBuilding = async () => { try { await fetch('/api/world/buildings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, description: formData.description || "", capacity: formData.capacity || 1, system_instruction: formData.system_instruction || "", city_id: formData.city_id, building_id: formData.building_id || null }) }); loadBuildings(); setFormData({}); } catch (e) { } };
     const handleUpdateBuilding = async () => { try { await fetch(`/api/world/buildings/${selectedBuilding!.BUILDINGID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...formData, tool_ids: formData.tool_ids || [] }) }); loadBuildings(); } catch (e) { } };
     const handleDeleteBuilding = async () => { if (confirm("Are you sure?")) { await fetch(`/api/world/buildings/${selectedBuilding!.BUILDINGID}`, { method: 'DELETE' }); setSelectedBuilding(null); setFormData({}); loadBuildings(); } };
 
@@ -159,7 +170,8 @@ export default function WorldEditor() {
         setFormData({
             name: ai.AINAME, description: ai.DESCRIPTION, system_prompt: ai.SYSTEMPROMPT,
             home_city_id: ai.HOME_CITYID, default_model: ai.DEFAULT_MODEL, lightweight_model: ai.LIGHTWEIGHT_MODEL,
-            interaction_mode: ai.INTERACTION_MODE, avatar_path: ai.AVATAR_IMAGE
+            interaction_mode: ai.INTERACTION_MODE, avatar_path: ai.AVATAR_IMAGE,
+            appearance_image_path: ai.APPEARANCE_IMAGE_PATH || ''
         });
     };
     const handleCreateAI = async () => { try { await fetch('/api/world/ais', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, system_prompt: formData.system_prompt, home_city_id: formData.home_city_id }) }); loadAIs(); setFormData({}); } catch (e) { } };
@@ -238,12 +250,7 @@ export default function WorldEditor() {
     const handleDeletePlaybook = async () => { if (confirm("Are you sure?")) { await fetch(`/api/world/playbooks/${selectedPlaybook!.id}`, { method: 'DELETE' }); setSelectedPlaybook(null); setFormData({}); loadPlaybooks(); } };
 
 
-    // Helper for Form Fields
-    const Field = ({ label, children }: any) => <div className={styles.field}><label>{label}</label>{children}</div>;
-    const Input = (props: any) => <input type="text" {...props} />;
-    const NumInput = (props: any) => <input type="number" {...props} />;
-    const TextArea = (props: any) => <textarea {...props} />;
-    const Select = ({ children, ...props }: any) => <select {...props}>{children}</select>;
+
 
     const renderFormActions = (selected: any, create: any, update: any, remove: any) => (
         <div className={styles.actions}>
@@ -297,6 +304,10 @@ export default function WorldEditor() {
                         <div className={styles.form}>
                             <h3>{selectedBuilding ? `Edit Building` : 'New Building'}</h3>
                             <Field label="Name"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            {selectedBuilding
+                                ? <Field label="ID"><Input value={selectedBuilding.BUILDINGID} disabled style={{ opacity: 0.7, cursor: 'not-allowed' }} /></Field>
+                                : <Field label="ID (optional)"><Input value={formData.building_id || ''} placeholder="Leave empty to auto-generate" onChange={(e: any) => setFormData({ ...formData, building_id: e.target.value })} /></Field>
+                            }
                             <Field label="City"><Select value={formData.city_id || ''} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
                                 <option value="">Select City...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME}</option>)}
                             </Select></Field>
@@ -306,6 +317,13 @@ export default function WorldEditor() {
                             </div>
                             <Field label="Description"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
                             <Field label="System Instruction"><TextArea style={{ minHeight: 150 }} value={formData.system_instruction || ''} onChange={(e: any) => setFormData({ ...formData, system_instruction: e.target.value })} /></Field>
+                            {selectedBuilding && <Field label="Interior Image (Visual Context)">
+                                <ImageUpload
+                                    value={formData.image_path || ''}
+                                    onChange={(url: string) => setFormData({ ...formData, image_path: url })}
+                                />
+                                <small style={{ color: '#666', fontSize: '0.8rem' }}>Building interior image for LLM visual context</small>
+                            </Field>}
                             {selectedBuilding && <div className={styles.field}><label>Tools</label><div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>{tools.map(t => (<label key={t.TOOLID} style={{ background: '#f1f5f9', padding: '0.25rem' }}><input type="checkbox" checked={(formData.tool_ids || []).includes(t.TOOLID)} onChange={e => { const c = formData.tool_ids || []; if (e.target.checked) setFormData({ ...formData, tool_ids: [...c, t.TOOLID] }); else setFormData({ ...formData, tool_ids: c.filter((id: any) => id !== t.TOOLID) }); }} /> {t.TOOLNAME}</label>))}</div></div>}
                             {renderFormActions(selectedBuilding, handleCreateBuilding, handleUpdateBuilding, handleDeleteBuilding)}
                         </div>
@@ -341,6 +359,13 @@ export default function WorldEditor() {
                                         onChange={(url: string) => setFormData({ ...formData, avatar_path: url })}
                                         circle={true}
                                     />
+                                </Field>
+                                <Field label="Appearance Image (Visual Context)">
+                                    <ImageUpload
+                                        value={formData.appearance_image_path || ''}
+                                        onChange={(url: string) => setFormData({ ...formData, appearance_image_path: url })}
+                                    />
+                                    <small style={{ color: '#666', fontSize: '0.8rem' }}>Detailed persona appearance image for LLM visual context (separate from avatar)</small>
                                 </Field>
                             </>}
                             <Field label="System Prompt"><TextArea style={{ minHeight: 200 }} value={formData.system_prompt || ''} onChange={(e: any) => setFormData({ ...formData, system_prompt: e.target.value })} /></Field>

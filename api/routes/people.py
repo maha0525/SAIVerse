@@ -304,6 +304,64 @@ def delete_thread(
             adapter.close()
 
 # -----------------------------------------------------------------------------
+# Memory Recall API
+# -----------------------------------------------------------------------------
+
+class MemoryRecallRequest(BaseModel):
+    query: str
+    topk: int = 4
+    max_chars: int = 1200
+
+class MemoryRecallResponse(BaseModel):
+    query: str
+    result: str
+    topk: int
+    max_chars: int
+
+@router.post("/{persona_id}/recall", response_model=MemoryRecallResponse)
+def memory_recall(
+    persona_id: str,
+    request: MemoryRecallRequest,
+    manager = Depends(get_manager)
+):
+    """Execute memory recall, similar to the memory_recall tool."""
+    query = request.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query is required")
+    
+    # Acquire adapter
+    persona = manager.personas.get(persona_id)
+    adapter = getattr(persona, "sai_memory", None) if persona else None
+    should_close = False
+    
+    if not adapter or not adapter.is_ready():
+        from saiverse_memory import SAIMemoryAdapter
+        try:
+            adapter = SAIMemoryAdapter(persona_id)
+            should_close = True
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to access memory: {e}")
+
+    try:
+        result = adapter.recall_snippet(
+            None,
+            query_text=query,
+            max_chars=request.max_chars,
+            topk=request.topk,
+        )
+        return MemoryRecallResponse(
+            query=query,
+            result=result or "(no relevant memory)",
+            topk=request.topk,
+            max_chars=request.max_chars,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Memory recall failed: {e}")
+    finally:
+        if should_close and adapter:
+            adapter.close()
+
+# -----------------------------------------------------------------------------
 # Configuration APIs
 # -----------------------------------------------------------------------------
 
@@ -315,6 +373,7 @@ class AIConfigResponse(BaseModel):
     lightweight_model: Optional[str] = None
     interaction_mode: str
     avatar_path: Optional[str] = None
+    appearance_image_path: Optional[str] = None  # Visual context appearance image
     home_city_id: int
 
 class UpdateAIConfigRequest(BaseModel):
@@ -324,6 +383,7 @@ class UpdateAIConfigRequest(BaseModel):
     lightweight_model: Optional[str] = None
     interaction_mode: Optional[str] = None
     avatar_path: Optional[str] = None
+    appearance_image_path: Optional[str] = None  # Visual context appearance image
 
 @router.get("/{persona_id}/config", response_model=AIConfigResponse)
 def get_persona_config(persona_id: str, manager = Depends(get_manager)):
@@ -340,6 +400,7 @@ def get_persona_config(persona_id: str, manager = Depends(get_manager)):
         lightweight_model=details.get("LIGHTWEIGHT_MODEL"),
         interaction_mode=details["INTERACTION_MODE"],
         avatar_path=details.get("AVATAR_IMAGE"),
+        appearance_image_path=details.get("APPEARANCE_IMAGE_PATH"),
         home_city_id=details["HOME_CITYID"]
     )
 
@@ -363,6 +424,7 @@ def update_persona_config(
     new_lightweight_model = req.lightweight_model if req.lightweight_model is not None else current.get("LIGHTWEIGHT_MODEL")
     new_mode = req.interaction_mode if req.interaction_mode is not None else current["INTERACTION_MODE"]
     new_avatar = req.avatar_path if req.avatar_path is not None else current.get("AVATAR_IMAGE")
+    new_appearance = req.appearance_image_path if req.appearance_image_path is not None else current.get("APPEARANCE_IMAGE_PATH")
     
     # Ensure strings
     new_desc = new_desc or ""
@@ -378,7 +440,8 @@ def update_persona_config(
         lightweight_model=new_lightweight_model,
         interaction_mode=new_mode,
         avatar_path=new_avatar, 
-        avatar_upload=None
+        avatar_upload=None,
+        appearance_image_path=new_appearance,
     )
     
     if result.startswith("Error:"):
@@ -421,21 +484,40 @@ def get_autonomous_status(persona_id: str, manager = Depends(get_manager)):
 
 
 # -----------------------------------------------------------------------------
-# Import APIs
-# -----------------------------------------------------------------------------
 
 import shutil
 import tempfile
 from pathlib import Path
-from fastapi import UploadFile, File
+from fastapi import UploadFile, File, Form
+from typing import Optional, List as TypingList
 
-@router.post("/{persona_id}/import/official")
-def import_official_chatgpt(
+# Store parsed exports temporarily (in-memory cache for preview -> import flow)
+_chatgpt_export_cache: dict = {}
+
+class ConversationSummary(BaseModel):
+    idx: int
+    id: str
+    conversation_id: Optional[str]
+    title: str
+    create_time: Optional[str]
+    update_time: Optional[str]
+    message_count: int
+    preview: Optional[str]
+
+class PreviewResponse(BaseModel):
+    conversations: TypingList[ConversationSummary]
+    cache_key: str
+    total_count: int
+
+@router.post("/{persona_id}/import/official/preview", response_model=PreviewResponse)
+def preview_official_chatgpt(
     persona_id: str,
     file: UploadFile = File(...),
     manager = Depends(get_manager)
 ):
-    """Import official ChatGPT conversations.json or ZIP export."""
+    """Preview ChatGPT export file and return conversation list for selection."""
+    import uuid
+    
     # 1. Save upload to temp file
     suffix = Path(file.filename).suffix if file.filename else ".tmp"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -445,71 +527,160 @@ def import_official_chatgpt(
     try:
         # 2. Parse using ChatGPTExport
         from tools.utilities.chatgpt_importer import ChatGPTExport
-        # This will raise if file is invalid
         export = ChatGPTExport(tmp_path)
         records = export.conversations
+        
         if not records:
-            return {"count": 0, "message": "No conversations found in file."}
+            return PreviewResponse(conversations=[], cache_key="", total_count=0)
 
-        # 3. acquire adapter
-        persona = manager.personas.get(persona_id)
-        adapter = getattr(persona, "sai_memory", None) if persona else None
-        should_close = False
-        adapter_ready = adapter and adapter.is_ready()
+        # 3. Build summaries
+        summaries = []
+        for idx, record in enumerate(records):
+            summary_dict = record.to_summary_dict(preview_chars=120)
+            summaries.append(ConversationSummary(
+                idx=idx,
+                id=summary_dict.get("id", "")[:12],
+                conversation_id=summary_dict.get("conversation_id"),
+                title=summary_dict.get("title", "")[:50],
+                create_time=summary_dict.get("create_time"),
+                update_time=summary_dict.get("update_time"),
+                message_count=summary_dict.get("message_count", 0),
+                preview=summary_dict.get("first_user_preview", "")[:100],
+            ))
         
-        if not adapter_ready:
-            from saiverse_memory import SAIMemoryAdapter
-            try:
-                adapter = SAIMemoryAdapter(persona_id)
-                should_close = True
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Failed to access memory: {e}")
-
-        # 4. Import All
-        imported_count = 0
-        msg_count = 0
-        
-        try:
-            for record in records:
-                # Default logic from import_chatgpt_conversations.py
-                payloads = list(record.iter_memory_payloads(include_roles=["user", "assistant"]))
-                # Use conversation_id as suffix mostly
-                thread_suffix = record.conversation_id or record.identifier
-                
-                # Insert header? (Skipping for API simplicity or default to True)
-                # Let's simple append messages
-                for payload in payloads:
-                    # Fix tags/metadata as per script
-                    meta = payload.get("metadata", {})
-                    tags = meta.get("tags", [])
-                    if "conversation" not in tags:
-                        tags.append("conversation")
-                    meta["tags"] = tags
-                    payload["metadata"] = meta
-                    
-                    adapter.append_persona_message(payload, thread_suffix=thread_suffix)
-                    msg_count += 1
-                imported_count += 1
-        finally:
-            if should_close and adapter:
-                adapter.close()
-                
-        return {
-            "success": True, 
-            "conversations": imported_count, 
-            "messages": msg_count,
-            "message": f"Imported {imported_count} conversations ({msg_count} messages)."
+        # 4. Cache the export for later import
+        cache_key = str(uuid.uuid4())
+        _chatgpt_export_cache[cache_key] = {
+            "export": export,
+            "tmp_path": tmp_path,
+            "persona_id": persona_id,
         }
+        
+        return PreviewResponse(
+            conversations=summaries,
+            cache_key=cache_key,
+            total_count=len(records),
+        )
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Import failed: {str(e)}")
-    finally:
-        # Cleanup temp file
+        # Cleanup on error
         if tmp_path.exists():
             try:
                 tmp_path.unlink()
             except:
                 pass
+        raise HTTPException(status_code=400, detail=f"Preview failed: {str(e)}")
+
+
+class ImportRequest(BaseModel):
+    cache_key: str
+    conversation_ids: TypingList[str]  # List of conversation_id or idx as string
+    skip_embedding: bool = False
+
+@router.post("/{persona_id}/import/official")
+def import_official_chatgpt(
+    persona_id: str,
+    request: ImportRequest,
+    manager = Depends(get_manager)
+):
+    """Import selected ChatGPT conversations from a previously previewed export."""
+    cache_key = request.cache_key
+    conversation_ids = request.conversation_ids
+    skip_embedding = request.skip_embedding
+    
+    # 1. Retrieve cached export
+    cached = _chatgpt_export_cache.get(cache_key)
+    if not cached:
+        raise HTTPException(status_code=400, detail="Preview expired or invalid. Please upload the file again.")
+    
+    export = cached["export"]
+    tmp_path = cached["tmp_path"]
+    
+    # Verify persona matches
+    if cached["persona_id"] != persona_id:
+        raise HTTPException(status_code=400, detail="Persona ID mismatch")
+    
+    # 2. Validate selection
+    if not conversation_ids:
+        raise HTTPException(status_code=400, detail="No conversations selected for import.")
+    
+    records = export.conversations
+    
+    # 3. Resolve selected records (by index or conversation_id)
+    selected_records = []
+    for selector in conversation_ids:
+        # Try as index first
+        try:
+            idx = int(selector)
+            if 0 <= idx < len(records):
+                selected_records.append(records[idx])
+                continue
+        except ValueError:
+            pass
+        # Try as conversation_id
+        for record in records:
+            if record.conversation_id == selector or record.identifier == selector:
+                selected_records.append(record)
+                break
+    
+    if not selected_records:
+        raise HTTPException(status_code=400, detail="No valid conversations found for the given selection.")
+    
+    # 4. Acquire adapter
+    persona = manager.personas.get(persona_id)
+    adapter = getattr(persona, "sai_memory", None) if persona else None
+    should_close = False
+    adapter_ready = adapter and adapter.is_ready()
+    
+    if not adapter_ready:
+        from saiverse_memory import SAIMemoryAdapter
+        try:
+            adapter = SAIMemoryAdapter(persona_id)
+            should_close = True
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to access memory: {e}")
+
+    # 5. Import selected conversations
+    imported_count = 0
+    msg_count = 0
+    
+    try:
+        for record in selected_records:
+            payloads = list(record.iter_memory_payloads(include_roles=["user", "assistant"]))
+            thread_suffix = record.conversation_id or record.identifier
+            
+            for payload in payloads:
+                meta = payload.get("metadata", {})
+                tags = meta.get("tags", [])
+                if "conversation" not in tags:
+                    tags.append("conversation")
+                meta["tags"] = tags
+                if skip_embedding:
+                    payload["embedding_chunks"] = 0
+                payload["metadata"] = meta
+                
+                adapter.append_persona_message(payload, thread_suffix=thread_suffix)
+                msg_count += 1
+            imported_count += 1
+    finally:
+        if should_close and adapter:
+            adapter.close()
+        
+        # Clean up cache and temp file
+        if cache_key in _chatgpt_export_cache:
+            del _chatgpt_export_cache[cache_key]
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except:
+                pass
+            
+    return {
+        "success": True, 
+        "conversations": imported_count, 
+        "messages": msg_count,
+        "message": f"Imported {imported_count} conversations ({msg_count} messages)."
+    }
 
 @router.post("/{persona_id}/import/extension")
 def import_extension_export(
@@ -571,6 +742,163 @@ def import_extension_export(
                 tmp_path.unlink()
             except:
                 pass
+
+# -----------------------------------------------------------------------------
+# Re-embed API
+# -----------------------------------------------------------------------------
+
+from fastapi import BackgroundTasks
+import threading
+
+# Track re-embed status per persona
+_reembed_status: dict = {}
+_reembed_lock = threading.Lock()
+
+class ReembedRequest(BaseModel):
+    force: bool = False  # If true, re-embed all messages regardless of current status
+
+class ReembedStatusResponse(BaseModel):
+    running: bool
+    progress: Optional[int] = None
+    total: Optional[int] = None
+    message: Optional[str] = None
+
+def _run_reembed_task(persona_id: str, force: bool):
+    """Background task to run re-embedding."""
+    from pathlib import Path
+    from sai_memory.config import load_settings
+    from sai_memory.memory.chunking import chunk_text
+    from sai_memory.memory.recall import Embedder
+    from sai_memory.memory.storage import get_message, init_db, replace_message_embeddings
+    import json
+    import logging
+    
+    with _reembed_lock:
+        _reembed_status[persona_id] = {"running": True, "progress": 0, "total": 0, "message": "Starting..."}
+    
+    try:
+        db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+        if not db_path.exists():
+            with _reembed_lock:
+                _reembed_status[persona_id] = {"running": False, "message": "Database not found"}
+            return
+        
+        settings = load_settings()
+        embedder = Embedder(
+            model=settings.embed_model or "",
+            local_model_path=str(Path(settings.embed_model_path).expanduser().resolve()) if settings.embed_model_path else None,
+            model_dim=settings.embed_model_dim,
+        )
+        expected_dim = embedder.model.embedding_size
+        
+        conn = init_db(str(db_path), check_same_thread=False)
+        
+        try:
+            if force:
+                target_ids = set()
+                for (mid,) in conn.execute("SELECT DISTINCT id FROM messages"):
+                    target_ids.add(mid)
+            else:
+                all_message_ids = set()
+                for (mid,) in conn.execute("SELECT DISTINCT id FROM messages"):
+                    all_message_ids.add(mid)
+                
+                embedded_ids = set()
+                bad_ids = set()
+                for mid, _, vec_json in conn.execute(
+                    "SELECT message_id, chunk_index, vector FROM message_embeddings"
+                ):
+                    embedded_ids.add(mid)
+                    try:
+                        vec = json.loads(vec_json)
+                        if len(vec) != expected_dim:
+                            bad_ids.add(mid)
+                    except json.JSONDecodeError:
+                        bad_ids.add(mid)
+                
+                missing_ids = all_message_ids - embedded_ids
+                target_ids = missing_ids | bad_ids
+            
+            if not target_ids:
+                with _reembed_lock:
+                    _reembed_status[persona_id] = {"running": False, "progress": 0, "total": 0, "message": "No messages need re-embedding."}
+                return
+            
+            target_list = list(target_ids)
+            total = len(target_list)
+            with _reembed_lock:
+                _reembed_status[persona_id] = {"running": True, "progress": 0, "total": total, "message": f"Processing 0/{total}..."}
+            
+            fixed = 0
+            for i, mid in enumerate(target_list):
+                msg = get_message(conn, mid)
+                if msg is None or not msg.content:
+                    continue
+                chunks = chunk_text(
+                    msg.content,
+                    min_chars=settings.chunk_min_chars,
+                    max_chars=settings.chunk_max_chars,
+                )
+                payload = [c.strip() for c in chunks if c and c.strip()]
+                if not payload:
+                    payload = [msg.content.strip()]
+                if not payload:
+                    continue
+                vectors = embedder.embed(payload, is_query=False)
+                replace_message_embeddings(conn, mid, vectors)
+                fixed += 1
+                
+                # Update progress every 10 messages
+                if fixed % 10 == 0:
+                    with _reembed_lock:
+                        _reembed_status[persona_id] = {"running": True, "progress": fixed, "total": total, "message": f"Processing {fixed}/{total}..."}
+            
+            with _reembed_lock:
+                _reembed_status[persona_id] = {"running": False, "progress": fixed, "total": total, "message": f"Re-embedded {fixed} messages."}
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        logging.exception("Re-embed task failed for %s", persona_id)
+        with _reembed_lock:
+            _reembed_status[persona_id] = {"running": False, "message": f"Error: {str(e)}"}
+
+@router.post("/{persona_id}/reembed")
+def reembed_persona_memory(
+    persona_id: str,
+    request: ReembedRequest,
+    background_tasks: BackgroundTasks,
+    manager = Depends(get_manager)
+):
+    """Start re-embedding messages in the background."""
+    from pathlib import Path
+    
+    # Check if already running
+    with _reembed_lock:
+        status = _reembed_status.get(persona_id, {})
+        if status.get("running"):
+            return {"success": False, "message": "Re-embed already in progress.", "status": status}
+    
+    # Verify database exists
+    db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    if not db_path.exists():
+        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+    
+    # Start background task
+    background_tasks.add_task(_run_reembed_task, persona_id, request.force)
+    
+    return {
+        "success": True, 
+        "message": "Re-embed task started. Check status endpoint for progress.",
+        "status": {"running": True, "progress": 0, "total": 0, "message": "Starting..."}
+    }
+
+@router.get("/{persona_id}/reembed/status", response_model=ReembedStatusResponse)
+def get_reembed_status(persona_id: str, manager = Depends(get_manager)):
+    """Get the status of the re-embed task."""
+    with _reembed_lock:
+        status = _reembed_status.get(persona_id, {"running": False, "message": "No task has been run."})
+    return ReembedStatusResponse(**status)
 
 # -----------------------------------------------------------------------------
 # Memopedia APIs

@@ -197,3 +197,21 @@ def set_parameters(req: UpdateParametersRequest, manager = Depends(get_manager))
     """Update global model parameter overrides."""
     manager.set_model_parameters(req.parameters)
     return {"success": True}
+
+
+class GlobalAutoRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/global-auto")
+def get_global_auto(manager = Depends(get_manager)):
+    """Get global autonomous mode status."""
+    return {"enabled": manager.state.global_auto_enabled}
+
+
+@router.post("/global-auto")
+def set_global_auto(req: GlobalAutoRequest, manager = Depends(get_manager)):
+    """Set global autonomous mode status."""
+    manager.state.global_auto_enabled = req.enabled
+    return {"success": True, "enabled": req.enabled}
+

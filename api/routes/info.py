@@ -23,6 +23,7 @@ class BuildingDetailsResponse(BaseModel):
     id: str
     name: str
     description: str = ""
+    image_path: Optional[str] = None  # Building interior image for visual context
     occupants: List[OccupantInfo]
     items: List[ItemInfo]
 
@@ -87,10 +88,26 @@ def get_building_details(manager = Depends(get_manager)):
                     "file_path": data.get("file_path"),
                 })
 
+    # Get Building image path from database
+    building_image_path = None
+    try:
+        from database.session import SessionLocal
+        from database.models import Building as BuildingModel
+        session = SessionLocal()
+        try:
+            db_building = session.query(BuildingModel).filter(BuildingModel.BUILDINGID == building_id).first()
+            if db_building and db_building.IMAGE_PATH:
+                building_image_path = db_building.IMAGE_PATH
+        finally:
+            session.close()
+    except Exception as e:
+        print(f"Failed to get building image: {e}")
+
     return {
         "id": building_id,
         "name": building.name,
-        "description": building.description or "", # specific to building obj usually
+        "description": building.description or "",
+        "image_path": building_image_path,
         "occupants": occupants_list,
         "items": items_list
     }

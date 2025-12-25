@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Settings, Database, Globe, Layers, Save, RefreshCw, Power } from 'lucide-react';
+import { X, Settings, Database, Globe, Layers, Save, RefreshCw, Power, Play, Pause } from 'lucide-react';
 import styles from './GlobalSettingsModal.module.css';
 import WorldEditor from './settings/WorldEditor';
 
@@ -35,14 +35,46 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const [tableData, setTableData] = useState<any[]>([]);
     const [dbLoading, setDbLoading] = useState(false);
 
+    // Global Auto Mode
+    const [globalAutoEnabled, setGlobalAutoEnabled] = useState(true);
+
     useEffect(() => {
         if (isOpen && activeTab === 'env') {
             loadEnvVars();
+            loadGlobalAutoState();
         }
         if (isOpen && activeTab === 'db') {
             loadTables();
         }
     }, [isOpen, activeTab]);
+
+    const loadGlobalAutoState = async () => {
+        try {
+            const res = await fetch('/api/config/global-auto');
+            if (res.ok) {
+                const data = await res.json();
+                setGlobalAutoEnabled(data.enabled);
+            }
+        } catch (e) {
+            console.error("Failed to load global auto state", e);
+        }
+    };
+
+    const toggleGlobalAuto = async () => {
+        const newState = !globalAutoEnabled;
+        try {
+            const res = await fetch('/api/config/global-auto', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: newState })
+            });
+            if (res.ok) {
+                setGlobalAutoEnabled(newState);
+            }
+        } catch (e) {
+            console.error("Failed to toggle global auto", e);
+        }
+    };
 
     const loadTables = async () => {
         try {
@@ -176,6 +208,23 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                     <div className={styles.mainPanel}>
                         {activeTab === 'env' && (
                             <div className={styles.envContainer}>
+                                {/* Global Auto Mode Toggle */}
+                                <div className={styles.toggleContainer}>
+                                    <div>
+                                        <div className={styles.toggleLabel}>
+                                            {globalAutoEnabled ? <Play size={18} /> : <Pause size={18} />}
+                                            自律会話モード
+                                        </div>
+                                        <div className={styles.toggleDescription}>
+                                            OFFにするとConversationManagerのポーリングを停止し、ログ出力を抑制します
+                                        </div>
+                                    </div>
+                                    <div
+                                        className={`${styles.toggle} ${globalAutoEnabled ? styles.active : ''}`}
+                                        onClick={toggleGlobalAuto}
+                                    />
+                                </div>
+
                                 <div className={styles.sectionHeader}>
                                     <h3>Server Environment Variables (.env)</h3>
                                     <button className={styles.restartBtn} onClick={restartServer}>

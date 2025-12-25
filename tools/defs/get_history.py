@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from tools.context import get_active_persona_id, get_active_manager
 from tools.defs import ToolSchema
@@ -18,7 +18,8 @@ def get_history(
     include_building_items: bool = True,
     balanced: bool = False,
     include_internal: bool = False,
-) -> List[Dict[str, str]]:
+    include_visual_context: bool = False,
+) -> List[Dict[str, Any]]:
     """Get conversation history as messages array for LLM context.
 
     Builds a messages array containing:
@@ -34,8 +35,10 @@ def get_history(
         balanced: If True, balance history across conversation partners
                   (user + other personas in the building).
         include_internal: If True, include internal thoughts (wait decisions, etc.).
+        include_visual_context: If True, insert visual context messages (Building/Persona images)
+                                after the system prompt.
 
-    Returns a list of message dicts with 'role' and 'content' keys.
+    Returns a list of message dicts with 'role', 'content', and optionally 'metadata' keys.
     """
     persona_id = get_active_persona_id()
     if not persona_id:
@@ -70,6 +73,17 @@ def get_history(
                 messages.append({"role": "system", "content": system_prompt})
         except Exception as exc:
             LOGGER.warning("Failed to get system prompt: %s", exc)
+
+    # 1.5. Add visual context (Building/Persona images) right after system prompt
+    if include_visual_context:
+        try:
+            from tools.defs.get_visual_context import get_visual_context
+            visual_context_messages = get_visual_context(building_id=building_id)
+            if visual_context_messages:
+                messages.extend(visual_context_messages)
+                LOGGER.debug("get_history: Added %d visual context messages", len(visual_context_messages))
+        except Exception as exc:
+            LOGGER.warning("Failed to get visual context: %s", exc)
 
     # 2. Add conversation history from persona
     history_manager = getattr(persona, "history_manager", None)
@@ -148,6 +162,11 @@ def schema() -> ToolSchema:
                 "include_internal": {
                     "type": "boolean",
                     "description": "Include internal thoughts (wait decisions, autonomous reasoning). Default: false.",
+                    "default": False
+                },
+                "include_visual_context": {
+                    "type": "boolean",
+                    "description": "Include visual context messages (Building/Persona images) after system prompt. Default: false.",
                     "default": False
                 }
             },

@@ -33,7 +33,8 @@ class AI(Base):
     AINAME = Column(String(32), nullable=False)
     SYSTEMPROMPT = Column(String(4096), default="", nullable=False)
     DESCRIPTION = Column(String(1024), default="", nullable=False)
-    AVATAR_IMAGE = Column(String(255))
+    AVATAR_IMAGE = Column(String(255))  # UI icon
+    APPEARANCE_IMAGE_PATH = Column(String(512), nullable=True)  # Persona appearance image for LLM visual context
     EMOTION = Column(String(1024))  # JSON形式で保存
     AUTO_COUNT = Column(Integer, default=0, nullable=False)
     LAST_AUTO_PROMPT_TIMES = Column(String(2048)) # JSON形式で保存
@@ -57,6 +58,7 @@ class Building(Base):
     AUTO_PROMPT = Column(String(4096), default="", nullable=False)
     DESCRIPTION = Column(String(1024), default="", nullable=False)
     AUTO_INTERVAL_SEC = Column(Integer, default=10, nullable=False)
+    IMAGE_PATH = Column(String(512), nullable=True)  # Building interior image for LLM visual context
     __table_args__ = (UniqueConstraint('CITYID', 'BUILDINGNAME', name='uq_city_building_name'),)
 
 class City(Base):

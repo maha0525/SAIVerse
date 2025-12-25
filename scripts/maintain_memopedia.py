@@ -544,6 +544,224 @@ def run_merge_similar(
 
 
 # =============================================================================
+# Group Shallow Pages
+# =============================================================================
+
+# Minimum number of pages in a category to trigger grouping
+GROUP_SHALLOW_THRESHOLD = 10
+
+
+def get_depth1_pages_by_category(memopedia: Memopedia) -> Dict[str, List[Dict]]:
+    """Get all depth-1 pages (direct children of root categories) organized by category."""
+    tree = memopedia.get_tree()
+    result: Dict[str, List[Dict]] = {}
+    
+    for category in ["people", "events", "plans"]:
+        pages = []
+        for root_page in tree.get(category, []):
+            if not root_page["id"].startswith("root_"):
+                continue
+            # Get direct children of root
+            for child in root_page.get("children", []):
+                child_count = len(child.get("children", []))
+                pages.append({
+                    "id": child["id"],
+                    "title": child["title"],
+                    "summary": child.get("summary", ""),
+                    "keywords": child.get("keywords", []),
+                    "child_count": child_count,
+                })
+        result[category] = pages
+    
+    return result
+
+
+def format_pages_for_grouping(pages: List[Dict]) -> str:
+    """Format a list of pages for LLM grouping analysis."""
+    lines = []
+    for p in pages:
+        kw = f" [キーワード: {', '.join(p['keywords'])}]" if p.get("keywords") else ""
+        child_str = f" (子ページ: {p['child_count']})" if p.get("child_count", 0) > 0 else ""
+        lines.append(f"- id={p['id']} | {p['title']}: {p['summary']}{kw}{child_str}")
+    return "\n".join(lines)
+
+
+def run_group_shallow(
+    memopedia: Memopedia,
+    client,
+    dry_run: bool = False,
+    threshold: int = GROUP_SHALLOW_THRESHOLD,
+) -> List[Dict]:
+    """Group shallow (depth-1) pages into new parent pages.
+    
+    LLM analyzes pages directly under root categories and suggests groupings
+    by theme. New parent pages are created and pages are moved underneath.
+    
+    Returns:
+        List of grouping operations performed: [{"parent_title": str, "children": [str]}]
+    """
+    grouped: List[Dict] = []
+    
+    depth1_by_category = get_depth1_pages_by_category(memopedia)
+    
+    # Response schema for grouping suggestion
+    response_schema = {
+        "type": "object",
+        "properties": {
+            "groups": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "parent_title": {"type": "string"},
+                        "parent_summary": {"type": "string"},
+                        "page_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["parent_title", "parent_summary", "page_ids", "reason"],
+                },
+            },
+        },
+        "required": ["groups"],
+    }
+    
+    for category, pages in depth1_by_category.items():
+        if len(pages) < threshold:
+            LOGGER.info(f"Category '{category}' has {len(pages)} pages (< {threshold}), skipping grouping")
+            continue
+        
+        LOGGER.info(f"Analyzing '{category}' with {len(pages)} depth-1 pages for grouping...")
+        
+        # Get the root page ID for this category
+        root_id = f"root_{category}"
+        
+        page_list = format_pages_for_grouping(pages)
+        
+        prompt = f"""以下は「{category}」カテゴリの直下にあるMemopediaページの一覧です。
+現在{len(pages)}ページが同じ階層にフラットに並んでいます。
+
+{page_list}
+
+## 指示
+これらのページを意味的なグループに分類し、新しい親ページを作成してその下に移動させる提案をしてください。
+
+注意:
+- 1つのグループには最低2ページ以上を含めること
+- すべてのページをグループに入れる必要はない（単独で残すべきページは残してよい）
+- グループ名は抽象的すぎず、具体的すぎず、適切な粒度で
+- 明確な共通テーマがあるページのみをグループ化する
+- すでに子ページを持っているページ（child_count > 0）は、他のページの子にはしないこと
+- 類似したトピックを扱うページをまとめるのであって、マージするわけではない
+- グループにできるものがなければ、groups を空配列で返す
+
+例えば：
+- 複数のChatbotUI関連ページ → 「ChatbotUI」親ページの下へ
+- 複数のGoogle Drive API関連ページ → 「Google Drive API連携」親ページの下へ
+- 複数のAI人格・意識関連ページ → 「AI人格と意識」親ページの下へ
+"""
+        
+        try:
+            LOGGER.info("Calling LLM for grouping analysis...")
+            response_text = client.generate(
+                messages=[{"role": "user", "content": prompt}],
+                tools=[],
+                response_schema=response_schema,
+            )
+            
+            if not response_text:
+                LOGGER.warning(f"Empty response for category {category}")
+                continue
+            
+            # Parse JSON
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0]
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0]
+            
+            data = json.loads(response_text.strip())
+            groups = data.get("groups", [])
+            
+            if not groups:
+                LOGGER.info(f"LLM found no suitable groupings for '{category}'")
+                continue
+            
+            LOGGER.info(f"LLM suggested {len(groups)} groupings for '{category}'")
+            
+            # Build a set of valid page IDs for validation
+            valid_page_ids = {p["id"] for p in pages}
+            
+            # Build a set of pages that already have children
+            pages_with_children = {p["id"] for p in pages if p.get("child_count", 0) > 0}
+            
+            for group in groups:
+                parent_title = group["parent_title"]
+                parent_summary = group["parent_summary"]
+                page_ids = group["page_ids"]
+                reason = group.get("reason", "")
+                
+                # Validate page IDs
+                valid_ids = [pid for pid in page_ids if pid in valid_page_ids]
+                
+                # Exclude pages that already have children
+                valid_ids = [pid for pid in valid_ids if pid not in pages_with_children]
+                
+                if len(valid_ids) < 2:
+                    LOGGER.warning(f"Group '{parent_title}' has fewer than 2 valid pages after filtering, skipping")
+                    continue
+                
+                # Get titles for logging
+                page_titles = [p["title"] for p in pages if p["id"] in valid_ids]
+                
+                if dry_run:
+                    LOGGER.info(f"[DRY RUN] Would create group '{parent_title}' with {len(valid_ids)} pages:")
+                    for title in page_titles[:5]:
+                        LOGGER.info(f"  - {title}")
+                    if len(page_titles) > 5:
+                        LOGGER.info(f"  ... and {len(page_titles) - 5} more")
+                    grouped.append({
+                        "parent_title": parent_title,
+                        "children": page_titles,
+                        "category": category,
+                    })
+                else:
+                    # Create the new parent page
+                    new_parent = memopedia.create_page(
+                        parent_id=root_id,
+                        title=parent_title,
+                        summary=parent_summary,
+                        content=f"このページは関連するトピックをグループ化したものです。\n\n{reason}",
+                        edit_source="auto_maintenance",
+                    )
+                    LOGGER.info(f"Created parent page: {parent_title} (id: {new_parent.id})")
+                    
+                    # Move pages under the new parent
+                    for page_id in valid_ids:
+                        storage_update_page(
+                            memopedia.conn,
+                            page_id,
+                            parent_id=new_parent.id,
+                        )
+                    
+                    LOGGER.info(f"Moved {len(valid_ids)} pages under '{parent_title}'")
+                    
+                    grouped.append({
+                        "parent_title": parent_title,
+                        "children": page_titles,
+                        "category": category,
+                    })
+        
+        except Exception as e:
+            LOGGER.error(f"Error grouping pages in category '{category}': {e}")
+            import traceback
+            traceback.print_exc()
+    
+    return grouped
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -559,6 +777,7 @@ def main():
   # 個別実行
   python scripts/maintain_memopedia.py air_city_a --merge-similar
   python scripts/maintain_memopedia.py air_city_a --split-large
+  python scripts/maintain_memopedia.py air_city_a --group-shallow
   python scripts/maintain_memopedia.py air_city_a --fix-markdown
 
   # ドライラン（変更せずに対象を表示）
@@ -569,6 +788,7 @@ def main():
     parser.add_argument("--auto", action="store_true", help="Run all maintenance tasks")
     parser.add_argument("--merge-similar", action="store_true", help="Find and merge similar/redundant pages")
     parser.add_argument("--split-large", action="store_true", help=f"Split pages exceeding {SPLIT_THRESHOLD} characters")
+    parser.add_argument("--group-shallow", action="store_true", help="Group shallow pages into parent pages by theme")
     parser.add_argument("--fix-markdown", action="store_true", help="Fix markdown formatting issues")
     parser.add_argument("--dry-run", action="store_true", help="Preview changes without applying")
     parser.add_argument("--model", default="gemini-2.0-flash", help="Model for LLM operations")
@@ -577,8 +797,8 @@ def main():
     args = parser.parse_args()
 
     # Check if any operation is specified
-    if not any([args.auto, args.merge_similar, args.split_large, args.fix_markdown]):
-        parser.error("Specify at least one operation: --auto, --merge-similar, --split-large, or --fix-markdown")
+    if not any([args.auto, args.merge_similar, args.split_large, args.group_shallow, args.fix_markdown]):
+        parser.error("Specify at least one operation: --auto, --merge-similar, --split-large, --group-shallow, or --fix-markdown")
 
     # Check if persona exists
     db_path = get_persona_db_path(args.persona_id)
@@ -595,7 +815,7 @@ def main():
 
     # Initialize LLM client if needed
     client = None
-    if args.auto or args.merge_similar or args.split_large:
+    if args.auto or args.merge_similar or args.split_large or args.group_shallow:
         resolved_model_id, model_config = find_model_config(args.model)
         if resolved_model_id:
             actual_model_id = model_config.get("model", resolved_model_id)
@@ -616,6 +836,7 @@ def main():
         "markdown_fixed": [],
         "pages_split": [],
         "pages_merged": [],
+        "pages_grouped": [],
     }
 
     # Run operations
@@ -627,6 +848,10 @@ def main():
     if args.auto or args.split_large:
         LOGGER.info("=== Split Large Pages ===")
         results["pages_split"] = run_split_large(memopedia, client, dry_run=args.dry_run)
+
+    if args.auto or args.group_shallow:
+        LOGGER.info("=== Group Shallow Pages ===")
+        results["pages_grouped"] = run_group_shallow(memopedia, client, dry_run=args.dry_run)
 
     if args.auto or args.fix_markdown:
         LOGGER.info("=== Fix Markdown ===")
@@ -657,6 +882,13 @@ def main():
             LOGGER.info(f"  - {t1} + {t2}")
     else:
         LOGGER.info("Pages merged: 0")
+
+    if results["pages_grouped"]:
+        LOGGER.info(f"Pages grouped ({len(results['pages_grouped'])}):")
+        for g in results["pages_grouped"]:
+            LOGGER.info(f"  - {g['parent_title']} ({len(g['children'])} children)")
+    else:
+        LOGGER.info("Pages grouped: 0")
 
     conn.close()
     LOGGER.info("Done!")

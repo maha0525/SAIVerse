@@ -267,6 +267,28 @@
     margin-top: 0.2rem;
 }
 
+/* Message Images */
+.messageImages {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.messageImage {
+    max-width: 200px;
+    max-height: 200px;
+    border-radius: 8px;
+    cursor: pointer;
+    object-fit: cover;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.messageImage:hover {
+    transform: scale(1.02);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
 /* User Card Styles */
 .user .card {
     background: #4b5563;

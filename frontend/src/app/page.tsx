@@ -10,6 +10,11 @@ import PeopleModal from '@/components/PeopleModal';
 import { Send, Paperclip, MapPin, Settings, X, Info, Users, Menu } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
 
+interface MessageImage {
+    url: string;
+    mime_type?: string;
+}
+
 interface Message {
     id?: string;
     role: 'user' | 'assistant';
@@ -17,6 +22,7 @@ interface Message {
     timestamp?: string; // ISO string
     avatar?: string;
     sender?: string;
+    images?: MessageImage[];
 }
 
 export default function Home() {
@@ -510,6 +516,19 @@ export default function Home() {
                                     <span className={styles.sender}>{msg.sender || (msg.role === 'user' ? 'You' : 'Assistant')}</span>
                                 </div>
                                 <div className={styles.cardBody}>
+                                    {msg.images && msg.images.length > 0 && (
+                                        <div className={styles.messageImages}>
+                                            {msg.images.map((img, imgIdx) => (
+                                                <img
+                                                    key={imgIdx}
+                                                    src={img.url}
+                                                    alt={`Attachment ${imgIdx + 1}`}
+                                                    className={styles.messageImage}
+                                                    onClick={() => window.open(img.url, '_blank')}
+                                                />
+                                            ))}
+                                        </div>
+                                    )}
                                     <ReactMarkdown>{msg.content}</ReactMarkdown>
                                 </div>
                                 {msg.timestamp && (

@@ -3,14 +3,14 @@ from fastapi.responses import FileResponse
 from pathlib import Path
 import shutil
 import mimetypes
-from media_utils import resize_image_if_needed, _ensure_image_dir, IMAGE_URI_PREFIX
+from media_utils import resize_image_if_needed, resize_image_for_llm_context, _ensure_image_dir, IMAGE_URI_PREFIX
 
 router = APIRouter()
 
 @router.post("/upload")
 async def upload_image(file: UploadFile = File(...)):
     """
-    Upload an image file. Resizes internally if needed.
+    Upload an image file. Resizes to max 768px long edge for LLM optimization.
     Returns: {"url": "/api/media/images/..."}
     """
     if not file.content_type.startswith("image/"):
@@ -19,12 +19,13 @@ async def upload_image(file: UploadFile = File(...)):
     try:
         content = await file.read()
         
-        # Resize logic (Limit to ~500KB raw bytes to ensure smooth UI)
-        # 500KB is generous for avatars.
-        # media_utils.resize_image_if_needed takes bytes, mime, max_bytes
-        # Note: max_bytes in that function is a bit loose (base64 target), but good enough.
-        # Let's say 500KB = 500 * 1024
-        resized_content, mime_type = resize_image_if_needed(content, file.content_type, 500 * 1024)
+        # Step 1: Resize for LLM context (max long edge = 768px for optimal tokenization)
+        resized_content, mime_type = resize_image_for_llm_context(
+            content, file.content_type, max_long_edge=768
+        )
+        
+        # Step 2: Further compress if still too large (~500KB limit for avatars/general use)
+        resized_content, mime_type = resize_image_if_needed(resized_content, mime_type, 500 * 1024)
         
         dest_dir = _ensure_image_dir()
         

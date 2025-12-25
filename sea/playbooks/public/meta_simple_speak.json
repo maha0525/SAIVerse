@@ -19,7 +19,7 @@
     {
       "id": "speak",
       "type": "subplay",
-      "playbook": "sub_speak_meta",
+      "playbook": "sub_speak_simple",
       "input_template": "{input}",
       "propagate_output": true,
       "next": null
