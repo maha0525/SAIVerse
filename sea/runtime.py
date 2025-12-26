@@ -25,8 +25,23 @@ def _get_default_lightweight_model() -> str:
 
 
 def _format(template: str, variables: Dict[str, Any]) -> str:
+    """Format template with variables, supporting dot notation keys.
+    
+    Python's .format() interprets {a.b} as attribute access on 'a'.
+    This function first replaces dot-notation keys manually, then falls back to .format().
+    """
     try:
-        return template.format(**variables)
+        result = template
+        # First pass: replace dot-notation keys manually (e.g., {finalize_output.content})
+        # Sort by key length descending to replace longer keys first
+        dot_keys = sorted([k for k in variables.keys() if '.' in str(k)], key=len, reverse=True)
+        for key in dot_keys:
+            placeholder = "{" + str(key) + "}"
+            if placeholder in result:
+                value = variables[key]
+                result = result.replace(placeholder, str(value) if value is not None else "")
+        # Second pass: use .format() for remaining simple keys
+        return result.format(**variables)
     except Exception:
         # 安全側でそのまま返す
         return template
@@ -971,13 +986,24 @@ class SEARuntime:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             # Include all state variables for template expansion (e.g., structured output like document_data.*)
             variables = dict(state)
+            # Flatten nested dicts/lists for dot notation access (e.g., finalize_output.content)
+            for key, value in list(state.items()):
+                if isinstance(value, dict):
+                    flat = self._flatten_dict(value)
+                    for path, val in flat.items():
+                        variables[f"{key}.{path}"] = val
             variables.update({
                 "input": state.get("inputs", {}).get("input", ""),
                 "last": state.get("last", ""),
                 "persona_id": getattr(persona, "persona_id", None),
                 "persona_name": getattr(persona, "persona_name", None),
             })
-            memo_text = _format(getattr(node_def, "action", None) or "{last}", variables)
+            action_template = getattr(node_def, "action", None) or "{last}"
+            LOGGER.debug("[memorize] action_template=%s", action_template)
+            LOGGER.debug("[memorize] available variables containing 'finalize': %s", 
+                        {k: v for k, v in variables.items() if 'finalize' in str(k).lower()})
+            memo_text = _format(action_template, variables)
+            LOGGER.debug("[memorize] memo_text=%s", memo_text[:100] if memo_text else None)
             role = getattr(node_def, "role", "assistant") or "assistant"
             tags = getattr(node_def, "tags", None)
             pulse_id = state.get("pulse_id")
@@ -1526,6 +1552,20 @@ class SEARuntime:
                                 system_sections.append(f"## 利用可能な能力\n以下のPlaybookを実行できます：\n```json\n{playbooks_formatted}\n```")
                 except Exception as exc:
                     LOGGER.debug("Failed to add available playbooks section: %s", exc)
+
+            # 5. "## 現在の状況" section (working memory)
+            if reqs.working_memory:
+                try:
+                    sai_mem = getattr(persona, "sai_memory", None)
+                    if sai_mem and sai_mem.is_ready():
+                        wm_data = sai_mem.load_working_memory()
+                        if wm_data:
+                            import json as json_mod
+                            wm_text = json_mod.dumps(wm_data, ensure_ascii=False, indent=2)
+                            system_sections.append(f"## 現在の状況\n```json\n{wm_text}\n```")
+                            LOGGER.debug("[sea][prepare-context] Added working_memory section")
+                except Exception as exc:
+                    LOGGER.debug("Failed to add working_memory section: %s", exc)
 
             system_text = "\n\n---\n\n".join([s for s in system_sections if s])
             if system_text:

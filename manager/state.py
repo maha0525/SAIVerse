@@ -59,4 +59,4 @@ class CoreState:
     ui_port: int = 0
     api_port: int = 0
     autonomous_conversation_running: bool = False
-    global_auto_enabled: bool = True  # Global ON/OFF for ConversationManager
+    global_auto_enabled: bool = False  # Global ON/OFF for ConversationManager

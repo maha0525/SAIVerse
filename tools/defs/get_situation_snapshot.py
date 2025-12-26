@@ -1,14 +1,18 @@
-"""Get current situation snapshot for the active persona."""
+"""Get current situation snapshot for the active persona with optional change detection."""
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone as dt_timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from tools.context import get_active_persona_id, get_active_manager
 from tools.defs import ToolSchema
 
 LOGGER = logging.getLogger(__name__)
+
+# Fields to track for change detection
+TRACKED_FIELDS = ["building_id", "building_occupants", "user_presence"]
 
 
 def _format_elapsed(td) -> str:
@@ -46,7 +50,10 @@ def _format_timezone_offset(dt) -> str:
     return f"{sign}{hours:02d}:{minutes:02d}"
 
 
-def get_situation_snapshot(building_id: Optional[str] = None) -> str:
+def get_situation_snapshot(
+    building_id: Optional[str] = None,
+    detect_changes: bool = False,
+) -> Tuple[str, Dict[str, Any]]:
     """Get current situation snapshot for the active persona.
 
     Includes:
@@ -58,7 +65,20 @@ def get_situation_snapshot(building_id: Optional[str] = None) -> str:
     - Personas in the building
     - User online status
 
-    Returns formatted snapshot text.
+    Args:
+        building_id: Building ID. Defaults to current building.
+        detect_changes: If True, compare with working memory and detect changes.
+                       Also updates working memory and records changes to SAIMemory.
+
+    Returns:
+        Tuple of (snapshot_text, change_info)
+        - snapshot_text: Human-readable snapshot
+        - change_info: {
+            "has_change": bool,
+            "changes": list of changed field names,
+            "change_summary": human-readable summary,
+            "snapshot_data": structured snapshot data
+          }
     """
     persona_id = get_active_persona_id()
     if not persona_id:
@@ -105,15 +125,11 @@ def get_situation_snapshot(building_id: Optional[str] = None) -> str:
     building_obj = buildings.get(building_id)
     building_name = building_obj.name if building_obj else building_id
 
-    # Occupants
+    # Occupants (sorted for consistent comparison)
     occupants = manager.occupants.get(building_id, [])
     id_to_name_map = getattr(persona, "id_to_name_map", {})
-    occupant_names = []
-    for oid in occupants:
-        if oid == persona_id:
-            continue  # Skip self
-        name = id_to_name_map.get(oid, oid)
-        occupant_names.append(name)
+    occupant_ids = sorted([oid for oid in occupants if oid != persona_id])
+    occupant_names = [id_to_name_map.get(oid, oid) for oid in occupant_ids]
     occupants_display = ", ".join(occupant_names) if occupant_names else "(自分のみ)"
 
     # User online status (3-state: online, away, offline)
@@ -121,7 +137,7 @@ def get_situation_snapshot(building_id: Optional[str] = None) -> str:
     user_state_map = {"online": "オンライン", "away": "退席中", "offline": "オフライン"}
     user_state = user_state_map.get(presence_status, "オフライン")
 
-    # Build snapshot
+    # Build snapshot text
     lines = [
         f"- 現地時刻: {current_datetime_str}",
         f"- タイムゾーン: {timezone_display}",
@@ -131,8 +147,142 @@ def get_situation_snapshot(building_id: Optional[str] = None) -> str:
         f"- Building内の他のペルソナ: {occupants_display}",
         f"- ユーザーオンライン状態: {user_state}",
     ]
+    snapshot_text = "\n".join(lines)
 
-    return "\n".join(lines)
+    # Build structured snapshot data (for change detection)
+    snapshot_data = {
+        "building_id": building_id,
+        "building_name": building_name,
+        "building_occupants": occupant_ids,  # IDs for reliable comparison
+        "building_occupant_names": occupant_names,  # Names for display
+        "user_presence": presence_status,
+        "pulse_type": pulse_type,
+        "current_time": current_datetime_str,
+        "timezone": timezone_display,
+    }
+
+    # Change detection
+    change_info: Dict[str, Any] = {
+        "has_change": False,
+        "changes": [],
+        "change_summary": "",
+        "snapshot_data": snapshot_data,
+    }
+
+    if detect_changes:
+        change_info = _detect_and_record_changes(persona, snapshot_data, id_to_name_map)
+        change_info["snapshot_data"] = snapshot_data
+
+    return snapshot_text, change_info
+
+
+def _detect_and_record_changes(
+    persona: Any,
+    current_snapshot: Dict[str, Any],
+    id_to_name_map: Dict[str, str],
+) -> Dict[str, Any]:
+    """Compare current snapshot with working memory and detect changes.
+    
+    Updates working memory and records changes to SAIMemory if detected.
+    """
+    sai_mem = getattr(persona, "sai_memory", None)
+    if not sai_mem or not sai_mem.is_ready():
+        return {"has_change": False, "changes": [], "change_summary": ""}
+
+    # Load previous snapshot from working memory
+    working_mem = sai_mem.load_working_memory()
+    prev_snapshot = working_mem.get("situation_snapshot", {})
+
+    # Detect changes in tracked fields
+    changes: List[str] = []
+    change_descriptions: List[str] = []
+
+    for field in TRACKED_FIELDS:
+        prev_value = prev_snapshot.get(field)
+        curr_value = current_snapshot.get(field)
+
+        if prev_value != curr_value:
+            changes.append(field)
+            desc = _describe_change(field, prev_value, curr_value, prev_snapshot, current_snapshot, id_to_name_map)
+            if desc:
+                change_descriptions.append(desc)
+
+    has_change = len(changes) > 0
+    change_summary = "、".join(change_descriptions) if change_descriptions else ""
+
+    # Update working memory
+    working_mem["situation_snapshot"] = current_snapshot
+    sai_mem.save_working_memory(working_mem)
+
+    # Record changes to SAIMemory if any
+    if has_change and change_summary:
+        _record_change_to_memory(persona, change_summary)
+
+    return {
+        "has_change": has_change,
+        "changes": changes,
+        "change_summary": change_summary,
+    }
+
+
+def _describe_change(
+    field: str,
+    prev_value: Any,
+    curr_value: Any,
+    prev_snapshot: Dict[str, Any],
+    current_snapshot: Dict[str, Any],
+    id_to_name_map: Dict[str, str],
+) -> str:
+    """Generate human-readable description of a change."""
+    if field == "building_id":
+        prev_name = prev_snapshot.get("building_name") or prev_value or "(なし)"
+        curr_name = current_snapshot.get("building_name", curr_value)
+        return f"Building移動: {prev_name} → {curr_name}"
+
+    elif field == "building_occupants":
+        prev_set = set(prev_value) if prev_value else set()
+        curr_set = set(curr_value) if curr_value else set()
+
+        arrived = curr_set - prev_set
+        left = prev_set - curr_set
+
+        parts = []
+        for oid in arrived:
+            name = id_to_name_map.get(oid, oid)
+            parts.append(f"{name}が入室")
+        for oid in left:
+            name = id_to_name_map.get(oid, oid)
+            parts.append(f"{name}が退室")
+
+        return "、".join(parts) if parts else ""
+
+    elif field == "user_presence":
+        state_map = {"online": "オンライン", "away": "退席中", "offline": "オフライン"}
+        prev_disp = state_map.get(prev_value, prev_value or "不明")
+        curr_disp = state_map.get(curr_value, curr_value or "不明")
+        return f"ユーザー: {prev_disp} → {curr_disp}"
+
+    return ""
+
+
+def _record_change_to_memory(persona: Any, change_summary: str) -> None:
+    """Record situation change to SAIMemory."""
+    sai_mem = getattr(persona, "sai_memory", None)
+    if not sai_mem or not sai_mem.is_ready():
+        return
+
+    message = {
+        "role": "user",
+        "content": f"<system>【状況変化】{change_summary}</system>",
+        "metadata": {
+            "tags": ["internal", "situation_change"],
+        },
+    }
+    try:
+        sai_mem.append_persona_message(message)
+        LOGGER.info("[situation_snapshot] Recorded change: %s", change_summary)
+    except Exception as exc:
+        LOGGER.warning("Failed to record situation change: %s", exc)
 
 
 def _get_last_ai_message_elapsed(persona, building_id: str, now_utc: datetime) -> str:
@@ -182,16 +332,21 @@ def _get_last_ai_message_elapsed(persona, building_id: str, now_utc: datetime) -
 def schema() -> ToolSchema:
     return ToolSchema(
         name="get_situation_snapshot",
-        description="Get current situation snapshot including time, location, and who is present.",
+        description="Get current situation snapshot including time, location, and who is present. Optionally detect and record changes.",
         parameters={
             "type": "object",
             "properties": {
                 "building_id": {
                     "type": "string",
                     "description": "Building ID. Defaults to current building."
+                },
+                "detect_changes": {
+                    "type": "boolean",
+                    "description": "If true, compare with previous snapshot, detect changes, update working memory, and record changes to SAIMemory.",
+                    "default": False
                 }
             },
             "required": [],
         },
-        result_type="string",
+        result_type="tuple",
     )

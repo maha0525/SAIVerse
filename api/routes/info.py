@@ -18,6 +18,7 @@ class ItemInfo(BaseModel):
     description: str
     type: str # 'object', 'document', 'picture'
     file_path: Optional[str] = None
+    is_open: bool = False  # Whether item content is included in visual context
 
 class BuildingDetailsResponse(BaseModel):
     id: str
@@ -86,6 +87,7 @@ def get_building_details(manager = Depends(get_manager)):
                     "description": data.get("description", ""),
                     "type": data.get("type", "object"),
                     "file_path": data.get("file_path"),
+                    "is_open": data.get("state", {}).get("is_open", False) if isinstance(data.get("state"), dict) else False,
                 })
 
     # Get Building image path from database
@@ -150,35 +152,54 @@ def get_item_content(item_id: str, manager = Depends(get_manager)):
     print(f"DEBUG: Checking path: {path}")
     
     if not path.exists():
-        # Attempt recovery for legacy/WSL paths
-        # The DB might contain /home/maha/.saiverse/... paths
+        # Attempt recovery for legacy/WSL paths or relative paths
+        # The DB might contain:
+        # - New format: relative paths like "image/filename.png" or "documents/filename.txt"
+        # - Legacy format: /home/maha/.saiverse/... paths from WSL
         # We try to find the file relative to current manager.saiverse_home
         if hasattr(manager, 'saiverse_home'):
             home = manager.saiverse_home
             parts = path.parts
             
-            # Strategy 1: strict 'documents' match
-            if 'documents' in parts:
+            # Strategy 0: Handle relative paths (new format)
+            # If path is relative (e.g., "image/filename.png"), join with saiverse_home
+            if not path.is_absolute():
+                candidate = home / file_path
+                if candidate.exists():
+                    print(f"DEBUG: Recovered path (strategy 0 - relative path): {candidate}")
+                    path = candidate
+            
+            # Strategy 1a: strict 'documents' match (legacy WSL paths)
+            if not path.exists() and 'documents' in parts:
                 idx = parts.index('documents')
                 rel = Path(*parts[idx:])
                 candidate = home / rel
                 if candidate.exists():
-                    print(f"DEBUG: Recovered path (strategy 1): {candidate}")
+                    print(f"DEBUG: Recovered path (strategy 1a - documents): {candidate}")
                     path = candidate
             
-            # Strategy 2: just filename in documents (fallback)
+            # Strategy 1b: strict 'image' match (legacy WSL paths for picture items)
+            if not path.exists() and 'image' in parts:
+                idx = parts.index('image')
+                rel = Path(*parts[idx:])
+                candidate = home / rel
+                if candidate.exists():
+                    print(f"DEBUG: Recovered path (strategy 1b - image): {candidate}")
+                    path = candidate
+            
+            # Strategy 2a: just filename in documents (fallback)
             if not path.exists():
                 candidate = home / "documents" / path.name
                 if candidate.exists():
-                    print(f"DEBUG: Recovered path (strategy 2): {candidate}")
+                    print(f"DEBUG: Recovered path (strategy 2a - documents filename): {candidate}")
                     path = candidate
-
-            # Strategy 3: relative path rebasing
-            if not path.exists() and not path.is_absolute():
-                 candidate = home / file_path
-                 if candidate.exists():
-                     print(f"DEBUG: Recovered path (strategy 3): {candidate}")
-                     path = candidate
+            
+            # Strategy 2b: just filename in image (fallback for picture items)
+            if not path.exists():
+                candidate = home / "image" / path.name
+                if candidate.exists():
+                    print(f"DEBUG: Recovered path (strategy 2b - image filename): {candidate}")
+                    path = candidate
     
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"File not found on server: {path}")
@@ -215,3 +236,19 @@ def list_available_models():
     choices = get_model_choices_with_display_names()
     return [{"id": mid, "name": name} for mid, name in choices]
 
+
+@router.post("/item/{item_id}/toggle-open")
+def toggle_item_open(item_id: str, manager = Depends(get_manager)):
+    """Toggle the open/close state of an item.
+    
+    When an item is open, its content is included in the AI's visual context.
+    - Picture items: Added as images
+    - Document items: Added as text in prompt
+    """
+    try:
+        new_state = manager.toggle_item_open_state(item_id)
+        return {"success": True, "is_open": new_state, "item_id": item_id}
+    except RuntimeError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
