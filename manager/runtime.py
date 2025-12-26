@@ -241,37 +241,42 @@ class RuntimeService(
         if not persona:
             return False, "Persona not found."
 
+        # Move to user's CURRENT building, not just user_room_id
+        target_building_id = self.state.user_current_building_id
+        if not target_building_id:
+            return False, "User's current building is unknown."
+
         prev = persona.current_building_id
-        if prev == self.user_room_id:
+        if prev == target_building_id:
             return True, None
 
         allowed, reason = True, None
         if self._move_persona:
             allowed, reason = self._move_persona(
-                persona.persona_id, prev, self.user_room_id
+                persona.persona_id, prev, target_building_id
             )
         if not allowed:
             persona.history_manager.add_to_building_only(
-                self.user_room_id,
+                target_building_id,
                 {
                     "role": "assistant",
                     "content": f'<div class="note-box">移動できませんでした。{reason}</div>',
                 },
-                heard_by=self._occupants_snapshot(self.user_room_id),
+                heard_by=self._occupants_snapshot(target_building_id),
             )
             persona._save_session_metadata()
             return False, reason
 
-        persona.current_building_id = self.user_room_id
+        persona.current_building_id = target_building_id
         persona.auto_count = 0
-        persona._mark_entry(self.user_room_id)
+        persona._mark_entry(target_building_id)
         persona.history_manager.add_to_building_only(
-            self.user_room_id,
+            target_building_id,
             {
                 "role": "assistant",
                 "content": f'<div class="note-box">🏢 Building:<br><b>{persona.persona_name}が入室しました</b></div>',
             },
-            heard_by=self._occupants_snapshot(self.user_room_id),
+            heard_by=self._occupants_snapshot(target_building_id),
         )
         persona._save_session_metadata()
         persona.run_auto_conversation(initial=True)
@@ -282,8 +287,13 @@ class RuntimeService(
         if not persona:
             return f"Error: Persona with ID '{persona_id}' not found."
 
-        if persona.current_building_id != self.user_room_id:
-            return f"{persona.persona_name} is not in the user room."
+        # Check if persona is in the same building as the user (not just user_room_id)
+        current_user_building = self.state.user_current_building_id
+        if not current_user_building:
+            return "Error: User's current building is unknown."
+        
+        if persona.current_building_id != current_user_building:
+            return f"{persona.persona_name} is not in the current building."
 
         private_room_id = getattr(persona, "private_room_id", None)
         if not private_room_id:
@@ -292,19 +302,19 @@ class RuntimeService(
             return "Error: Private room not found for this persona."
 
         success, reason = self._move_persona(
-            persona_id, self.user_room_id, private_room_id
+            persona_id, current_user_building, private_room_id
         )
         if not success:
             return f"Error: Failed to move: {reason}"
 
         persona.current_building_id = private_room_id
         persona.history_manager.add_to_building_only(
-            self.user_room_id,
+            current_user_building,
             {
                 "role": "assistant",
                 "content": f'<div class="note-box">🏢 Building:<br><b>{persona.persona_name}が退室しました</b></div>',
             },
-            heard_by=self._occupants_snapshot(self.user_room_id),
+            heard_by=self._occupants_snapshot(current_user_building),
         )
         persona._save_session_metadata()
         return f"Conversation with '{persona.persona_name}' ended."

@@ -1054,6 +1054,76 @@ class SAIVerseManager(
         else:
             raise RuntimeError(f"未対応のアイテムタイプ: {item_type}")
 
+    def toggle_item_open_state(self, item_id: str) -> bool:
+        """
+        Toggle the open/close state of an item.
+        
+        When an item is "open", its content will be included in the visual context
+        for AI conversations.
+        
+        Args:
+            item_id: The item to toggle
+            
+        Returns:
+            The new is_open state (True = open, False = closed)
+        """
+        item = self.items.get(item_id)
+        if not item:
+            raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
+        
+        # Get current state
+        state = item.get("state", {})
+        if not isinstance(state, dict):
+            state = {}
+        
+        # Toggle is_open
+        current_is_open = state.get("is_open", False)
+        new_is_open = not current_is_open
+        state["is_open"] = new_is_open
+        
+        # Update memory cache
+        item["state"] = state
+        
+        # Update database
+        timestamp = datetime.utcnow()
+        db = self.SessionLocal()
+        try:
+            row = db.query(ItemModel).filter(ItemModel.ITEM_ID == item_id).one_or_none()
+            if row:
+                row.STATE_JSON = json.dumps(state)
+                row.UPDATED_AT = timestamp
+                db.commit()
+        except Exception as exc:
+            db.rollback()
+            logging.error(f"Failed to update item state in DB: {exc}")
+            raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
+        finally:
+            db.close()
+        
+        item["updated_at"] = timestamp
+        logging.info(f"Item {item_id} is_open toggled to {new_is_open}")
+        return new_is_open
+
+    def get_open_items_in_building(self, building_id: str) -> list:
+        """
+        Get all items in a building that have is_open = True.
+        
+        Args:
+            building_id: The building to check
+            
+        Returns:
+            List of item dicts that are open
+        """
+        open_items = []
+        item_ids = self.items_by_building.get(building_id, [])
+        for item_id in item_ids:
+            item = self.items.get(item_id)
+            if item:
+                state = item.get("state", {})
+                if isinstance(state, dict) and state.get("is_open", False):
+                    open_items.append(item)
+        return open_items
+
     def create_document_item(self, persona_id: str, name: str, description: str, content: str) -> str:
         """
         Create a new document item and place it in the current building.
@@ -1095,12 +1165,14 @@ class SAIVerseManager(
 
         db = self.SessionLocal()
         try:
+            # Store relative path for cross-platform compatibility
+            relative_path = str(file_path.relative_to(self.saiverse_home))
             item_row = ItemModel(
                 ITEM_ID=item_id,
                 NAME=name,
                 TYPE="document",
                 DESCRIPTION=summary,
-                FILE_PATH=str(file_path),
+                FILE_PATH=relative_path,
                 CREATED_AT=timestamp,
                 UPDATED_AT=timestamp,
             )
@@ -1127,7 +1199,7 @@ class SAIVerseManager(
             "name": name,
             "type": "document",
             "description": summary,
-            "file_path": str(file_path),
+            "file_path": relative_path,
             "state": {},
             "created_at": timestamp,
             "updated_at": timestamp,
@@ -1181,6 +1253,17 @@ class SAIVerseManager(
         item_id = str(uuid.uuid4())
         timestamp = datetime.utcnow()
 
+        # Convert to relative path if it's an absolute path under saiverse_home
+        file_path_obj = Path(file_path)
+        if file_path_obj.is_absolute():
+            try:
+                relative_path = str(file_path_obj.relative_to(self.saiverse_home))
+            except ValueError:
+                # Path is not under saiverse_home, keep as-is
+                relative_path = file_path
+        else:
+            relative_path = file_path
+
         db = self.SessionLocal()
         try:
             item_row = ItemModel(
@@ -1188,7 +1271,7 @@ class SAIVerseManager(
                 NAME=name,
                 TYPE="picture",
                 DESCRIPTION=description,
-                FILE_PATH=file_path,
+                FILE_PATH=relative_path,
                 CREATED_AT=timestamp,
                 UPDATED_AT=timestamp,
             )
@@ -1215,7 +1298,7 @@ class SAIVerseManager(
             "name": name,
             "type": "picture",
             "description": description,
-            "file_path": file_path,
+            "file_path": relative_path,
             "state": {},
             "created_at": timestamp,
             "updated_at": timestamp,

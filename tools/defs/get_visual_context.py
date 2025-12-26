@@ -48,6 +48,55 @@ def _resolve_image_path(path_or_url: Optional[str]) -> Optional[str]:
     return path_or_url
 
 
+def _resolve_item_file_path(manager, file_path_str: str) -> Optional[str]:
+    """
+    Resolve an item file path to an actual filesystem path.
+    
+    Handles:
+    - Relative paths (e.g., "image/filename.png") -> saiverse_home / relative_path
+    - Legacy WSL absolute paths (e.g., "/home/maha/.saiverse/image/...") -> extract and remap
+    """
+    from pathlib import Path
+    
+    if not file_path_str:
+        return None
+    
+    path = Path(file_path_str)
+    
+    # If path exists as-is, return it
+    if path.exists():
+        return str(path)
+    
+    # Try recovery strategies using saiverse_home
+    home = getattr(manager, 'saiverse_home', None)
+    if not home:
+        home = Path.home() / ".saiverse"
+    
+    # Strategy 0: Relative path (new format)
+    if not path.is_absolute():
+        candidate = home / file_path_str
+        if candidate.exists():
+            return str(candidate)
+    
+    # Strategy 1: Extract from legacy paths containing 'image' or 'documents'
+    parts = path.parts
+    for folder in ['image', 'documents']:
+        if folder in parts:
+            idx = parts.index(folder)
+            rel = Path(*parts[idx:])
+            candidate = home / rel
+            if candidate.exists():
+                return str(candidate)
+    
+    # Strategy 2: Just filename fallback
+    for folder in ['image', 'documents']:
+        candidate = home / folder / path.name
+        if candidate.exists():
+            return str(candidate)
+    
+    return None
+
+
 def get_visual_context(
     building_id: Optional[str] = None,
     include_self: bool = True,
@@ -154,15 +203,74 @@ def get_visual_context(
                 })
                 LOGGER.debug("get_visual_context: Added other persona image: %s (%s)", other_id, other_image_path)
 
-    if not image_items:
-        LOGGER.debug("get_visual_context: No images available")
+    # 4. Open items in the building (pictures and documents)
+    document_items: List[Dict[str, str]] = []  # For document content
+    if hasattr(manager, 'get_open_items_in_building'):
+        open_items = manager.get_open_items_in_building(building_id)
+        for item in open_items:
+            item_type = (item.get("type") or "").lower()
+            item_name = item.get("name", "不明なアイテム")
+            file_path_str = item.get("file_path")
+            
+            if not file_path_str:
+                LOGGER.debug("get_visual_context: Open item %s has no file_path", item.get("item_id"))
+                continue
+            
+            # Resolve path (handle relative paths and legacy WSL paths)
+            resolved_path = _resolve_item_file_path(manager, file_path_str)
+            if not resolved_path or not os.path.exists(resolved_path):
+                LOGGER.debug("get_visual_context: Open item %s file not found: %s", item.get("item_id"), file_path_str)
+                continue
+            
+            if item_type == "picture":
+                image_items.append({
+                    "path": resolved_path,
+                    "label": f"開かれたアイテム「{item_name}」",
+                    "filename": os.path.basename(resolved_path),
+                    "type": "open_item_picture",
+                })
+                LOGGER.debug("get_visual_context: Added open picture item: %s", item_name)
+            
+            elif item_type == "document":
+                try:
+                    from pathlib import Path
+                    content = Path(resolved_path).read_text(encoding="utf-8")
+                    # Truncate if too long
+                    if len(content) > 8000:
+                        content = content[:8000] + "\n... (以下省略)"
+                    document_items.append({
+                        "name": item_name,
+                        "content": content,
+                    })
+                    LOGGER.debug("get_visual_context: Added open document item: %s (%d chars)", item_name, len(content))
+                except Exception as exc:
+                    LOGGER.warning("get_visual_context: Failed to read document %s: %s", item_name, exc)
+
+    if not image_items and not document_items:
+        LOGGER.debug("get_visual_context: No images or documents available")
         return []
 
     # Build message content and metadata
     import mimetypes
-    text_parts = ["<system>", "[ビジュアルコンテキスト] 以下は現在の状況を視覚的に示す画像です。"]
-    for item in image_items:
-        text_parts.append(f"- {item['label']} (file: {item['filename']})")
+    text_parts = ["<system>", "[ビジュアルコンテキスト] 以下は現在の状況を視覚的に示す情報です。"]
+    
+    # Image descriptions
+    if image_items:
+        text_parts.append("")
+        text_parts.append("【画像】")
+        for item in image_items:
+            text_parts.append(f"- {item['label']} (file: {item['filename']})")
+    
+    # Document contents
+    if document_items:
+        text_parts.append("")
+        text_parts.append("【開かれた文書】")
+        for doc in document_items:
+            text_parts.append(f"\n[文書: {doc['name']}]")
+            text_parts.append("```")
+            text_parts.append(doc["content"])
+            text_parts.append("```")
+    
     text_parts.append("</system>")
 
     media_list = []
@@ -187,7 +295,7 @@ def get_visual_context(
         },
     ]
 
-    LOGGER.info("get_visual_context: Generated %d images in visual context", len(image_items))
+    LOGGER.info("get_visual_context: Generated %d images, %d documents in visual context", len(image_items), len(document_items))
     return messages
 
 

@@ -5,14 +5,15 @@
         {
             "name": "trigger",
             "description": "リアクションのトリガー情報",
-            "source": "parent.reaction_trigger"
+            "source": "parent.react_decision.reaction_trigger"
         }
     ],
     "context_requirements": {
         "history_depth": "full",
         "inventory": true,
         "building_items": true,
-        "system_prompt": true
+        "system_prompt": true,
+        "working_memory": true
     },
     "router_callable": false,
     "user_selectable": false,

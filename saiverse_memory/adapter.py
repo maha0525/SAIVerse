@@ -68,6 +68,15 @@ class SAIMemoryAdapter:
 
         try:
             self.conn = init_db(self.settings.db_path, check_same_thread=False)
+            # Create working_memory table if not exists
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS working_memory (
+                    persona_id TEXT PRIMARY KEY,
+                    data TEXT,
+                    updated_at REAL
+                )
+            """)
+            self.conn.commit()
         except Exception as exc:
             LOGGER.exception("Failed to initialise SAIMemory DB at %s", self.settings.db_path)
             self.conn = None
@@ -98,6 +107,53 @@ class SAIMemoryAdapter:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def load_working_memory(self) -> Dict[str, Any]:
+        """Load working memory from DB.
+
+        Returns:
+            Dict containing working memory data, or empty dict if not found.
+        """
+        if not self._ready:
+            return {}
+        try:
+            with self._db_lock:
+                cur = self.conn.execute(
+                    "SELECT data FROM working_memory WHERE persona_id = ?",
+                    (self.persona_id,)
+                )
+                row = cur.fetchone()
+                if row and row[0]:
+                    return json.loads(row[0])
+                return {}
+        except Exception as exc:
+            LOGGER.warning("Failed to load working_memory for %s: %s", self.persona_id, exc)
+            return {}
+
+    def save_working_memory(self, data: Dict[str, Any]) -> None:
+        """Save working memory to DB.
+
+        Args:
+            data: Dict to persist as working memory.
+        """
+        if not self._ready:
+            return
+        try:
+            with self._db_lock:
+                json_data = json.dumps(data, ensure_ascii=False)
+                updated_at = time.time()
+                self.conn.execute(
+                    """
+                    INSERT INTO working_memory (persona_id, data, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(persona_id) DO UPDATE SET data = ?, updated_at = ?
+                    """,
+                    (self.persona_id, json_data, updated_at, json_data, updated_at)
+                )
+                self.conn.commit()
+                LOGGER.debug("Saved working_memory for %s", self.persona_id)
+        except Exception as exc:
+            LOGGER.warning("Failed to save working_memory for %s: %s", self.persona_id, exc)
+
     def append_building_message(
         self,
         building_id: str,

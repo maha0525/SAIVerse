@@ -4,7 +4,9 @@ import {
     Users,
     FileText,
     Image as ImageIcon,
-    File
+    File,
+    Eye,
+    EyeOff
 } from 'lucide-react';
 import ItemModal from './ItemModal';
 import PersonaMenu from './PersonaMenu';
@@ -31,6 +33,7 @@ interface Item {
     name: string;
     type: 'document' | 'picture' | 'other';
     description?: string;
+    is_open?: boolean;  // Whether item content is included in visual context
 }
 
 interface BuildingDetails {
@@ -74,6 +77,21 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
             }
         } catch (err) {
             console.error("Failed to fetch building details", err);
+        }
+    };
+
+    const handleToggleOpen = async (e: React.MouseEvent, item: Item) => {
+        e.stopPropagation(); // Don't open the item modal
+        try {
+            const res = await fetch(`/api/info/item/${item.id}/toggle-open`, {
+                method: 'POST'
+            });
+            if (res.ok) {
+                // Refresh to get updated state
+                fetchDetails();
+            }
+        } catch (err) {
+            console.error("Failed to toggle item open state", err);
         }
     };
 
@@ -216,7 +234,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
                                     details.items.map(item => (
                                         <div
                                             key={item.id}
-                                            className={`${styles.card} ${styles[item.type]}`}
+                                            className={`${styles.card} ${styles[item.type]} ${item.is_open ? styles.itemOpen : ''}`}
                                             onClick={() => setSelectedItem(item)}
                                         >
                                             <div className={styles.cardIcon}>
@@ -228,6 +246,15 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
                                                     <div className={styles.cardDesc}>{item.description}</div>
                                                 )}
                                             </div>
+                                            {(item.type === 'picture' || item.type === 'document') && (
+                                                <button
+                                                    className={`${styles.toggleOpenBtn} ${item.is_open ? styles.isOpen : ''}`}
+                                                    onClick={(e) => handleToggleOpen(e, item)}
+                                                    title={item.is_open ? 'AIコンテキストから除外' : 'AIコンテキストに含める'}
+                                                >
+                                                    {item.is_open ? <Eye size={16} /> : <EyeOff size={16} />}
+                                                </button>
+                                            )}
                                         </div>
                                     ))
                                 ) : (
