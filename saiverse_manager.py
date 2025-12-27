@@ -1871,8 +1871,9 @@ class SAIVerseManager(
         owner_kind: str,
         owner_id: Optional[str],
         state_json: Optional[str],
+        file_path: Optional[str] = None,
     ) -> str:
-        return self.admin.create_item(name, item_type, description, owner_kind, owner_id, state_json)
+        return self.admin.create_item(name, item_type, description, owner_kind, owner_id, state_json, file_path)
 
     def update_item(
         self,

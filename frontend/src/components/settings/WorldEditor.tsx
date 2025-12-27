@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import styles from './WorldEditor.module.css';
 import { Layers, MapPin, Cpu, Box, FileText, Wrench, ArrowRight, BookOpen } from 'lucide-react';
 import ImageUpload from '../common/ImageUpload';
+import FileUpload from '../common/FileUpload';
 
 // Helper Form Components - defined outside component to prevent re-creation on each render
 const Field = ({ label, children }: { label: string; children: React.ReactNode }) => (
@@ -127,7 +128,7 @@ export default function WorldEditor() {
         loadCities(); // Always load cities as they are needed for ID resolution
         if (subTab === 'building') { loadBuildings(); loadTools(); }
         if (subTab === 'ai') { loadBuildings(); loadAIs(); loadModels(); }
-        if (subTab === 'item') { loadItems(); }
+        if (subTab === 'item') { loadItems(); loadBuildings(); loadAIs(); }
         if (subTab === 'blueprint') { loadBlueprints(); loadBuildings(); } // Buildings for spawn
         if (subTab === 'tool') { loadTools(); }
         if (subTab === 'playbook') { loadPlaybooks(); }
@@ -438,20 +439,62 @@ export default function WorldEditor() {
                         <div className={styles.list}>
                             <h3>Items</h3>
                             {items.map(i => <div key={i.ITEM_ID} className={`${styles.item} ${selectedItem?.ITEM_ID === i.ITEM_ID ? styles.selected : ''}`} onClick={() => handleItemSelect(i)}>{i.NAME}</div>)}
-                            <button className={styles.newBtn} onClick={() => { setSelectedItem(null); setFormData({ item_type: 'object', owner_kind: 'world' }); }}>+ New Item</button>
+                            <button className={styles.newBtn} onClick={() => { setSelectedItem(null); setFormData({ item_type: 'picture', owner_kind: 'world' }); }}>+ New Item</button>
                         </div>
                         <div className={styles.form}>
                             <h3>{selectedItem ? `Edit Item` : 'New Item'}</h3>
                             <Field label="Name"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
-                            <Field label="Type"><Input value={formData.item_type || 'object'} onChange={(e: any) => setFormData({ ...formData, item_type: e.target.value })} /></Field>
+                            <Field label="Type"><Select value={formData.item_type || 'object'} onChange={(e: any) => setFormData({ ...formData, item_type: e.target.value })}>
+                                <option value="picture">Picture </option>
+                                <option value="document">Document </option>
+                                <option value="object">Object (no file)</option>
+                            </Select></Field>
                             <div className={styles.row}>
-                                <Field label="Owner Kind"><Select value={formData.owner_kind || 'world'} onChange={(e: any) => setFormData({ ...formData, owner_kind: e.target.value })}>
-                                    <option value="world">World</option><option value="building">Building</option><option value="persona">Persona</option>
-                                </Select></Field>
-                                <Field label="Owner ID"><Input value={formData.owner_id || ''} placeholder="Leave empty for World" onChange={(e: any) => setFormData({ ...formData, owner_id: e.target.value })} /></Field>
+                                <Field label="Owner">
+                                    <Select value={formData.owner_kind || 'world'} onChange={(e: any) => setFormData({ ...formData, owner_kind: e.target.value, owner_id: '' })}>
+                                        <option value="world">World (Global)</option>
+                                        <option value="building">Building</option>
+                                        <option value="persona">Persona</option>
+                                    </Select>
+                                </Field>
+                                {formData.owner_kind === 'building' && (
+                                    <Field label="Building">
+                                        <Select value={formData.owner_id || ''} onChange={(e: any) => setFormData({ ...formData, owner_id: e.target.value })}>
+                                            <option value="">Select Building...</option>
+                                            {buildings.map(b => <option key={b.BUILDINGID} value={b.BUILDINGID}>{b.BUILDINGNAME}</option>)}
+                                        </Select>
+                                    </Field>
+                                )}
+                                {formData.owner_kind === 'persona' && (
+                                    <Field label="Persona">
+                                        <Select value={formData.owner_id || ''} onChange={(e: any) => setFormData({ ...formData, owner_id: e.target.value })}>
+                                            <option value="">Select Persona...</option>
+                                            {ais.map(a => <option key={a.AIID} value={a.AIID}>{a.AINAME}</option>)}
+                                        </Select>
+                                    </Field>
+                                )}
                             </div>
-                            <Field label="File Path"><Input value={formData.file_path || ''} onChange={(e: any) => setFormData({ ...formData, file_path: e.target.value })} /></Field>
-                            <Field label="Description"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
+                            {(formData.item_type === 'picture' || formData.item_type === 'document') && (
+                                <Field label="File">
+                                    <FileUpload
+                                        value={formData.file_path || null}
+                                        onChange={(path, type) => {
+                                            setFormData({ ...formData, file_path: path });
+                                        }}
+                                        onClear={() => setFormData({ ...formData, file_path: '' })}
+                                        acceptImages={formData.item_type === 'picture'}
+                                        acceptDocuments={formData.item_type === 'document'}
+                                        placeholder={formData.item_type === 'picture' ? 'Select Image' : 'Select Text File'}
+                                    />
+                                </Field>
+                            )}
+                            <Field label="Description (AI要約)">
+                                <TextArea
+                                    value={formData.description || ''}
+                                    onChange={(e: any) => setFormData({ ...formData, description: e.target.value })}
+                                    placeholder="空のままでOKファイルから自動生成"
+                                />
+                            </Field>
                             <Field label="State JSON"><TextArea value={formData.state_json || ''} onChange={(e: any) => setFormData({ ...formData, state_json: e.target.value })} /></Field>
                             {renderFormActions(selectedItem, handleCreateItem, handleUpdateItem, handleDeleteItem)}
                         </div>

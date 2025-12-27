@@ -84,10 +84,11 @@ class ToolCreate(BaseModel):
 class ItemCreate(BaseModel):
     name: str
     item_type: str
-    description: str
+    description: str = ""  # Optional - auto-generated if empty for picture/document
     owner_kind: str
-    owner_id: Optional[str]
-    state_json: str
+    owner_id: Optional[str] = None
+    state_json: str = "{}"
+    file_path: Optional[str] = None  # Relative path to file (for picture/document items)
 
 class ItemUpdate(BaseModel):
     name: str
@@ -197,7 +198,38 @@ def delete_tool(tool_id: int, manager: SAIVerseManager = Depends(get_manager)):
 # Item
 @router.post("/items")
 def create_item(i: ItemCreate, manager: SAIVerseManager = Depends(get_manager)):
-    return manager.create_item(i.name, i.item_type, i.description, i.owner_kind, i.owner_id, i.state_json)
+    description = i.description
+    file_path = i.file_path
+    
+    # Auto-generate description if empty and file_path is provided
+    if not description.strip() and file_path:
+        try:
+            from pathlib import Path
+            saiverse_home = getattr(manager, 'saiverse_home', None)
+            if saiverse_home:
+                full_path = saiverse_home / file_path
+            else:
+                full_path = Path.home() / ".saiverse" / file_path
+            
+            if full_path.exists():
+                item_type = i.item_type.lower()
+                if item_type == "picture":
+                    from media_summary import ensure_image_summary
+                    import mimetypes
+                    mime_type = mimetypes.guess_type(str(full_path))[0] or "image/png"
+                    summary = ensure_image_summary(full_path, mime_type)
+                    if summary:
+                        description = summary
+                elif item_type == "document":
+                    from media_summary import ensure_document_summary
+                    summary = ensure_document_summary(full_path)
+                    if summary:
+                        description = summary
+        except Exception as e:
+            import logging
+            logging.warning(f"Failed to auto-generate description for item: {e}")
+    
+    return manager.create_item(i.name, i.item_type, description, i.owner_kind, i.owner_id, i.state_json, file_path)
 
 @router.put("/items/{item_id}")
 def update_item(item_id: str, i: ItemUpdate, manager: SAIVerseManager = Depends(get_manager)):

@@ -559,6 +559,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         owner_kind: str,
         owner_id: Optional[str],
         state_json: Optional[str],
+        file_path: Optional[str] = None,
     ) -> str:
         normalized_kind = (owner_kind or "world").strip().lower()
         owner_id = (owner_id or "").strip()
@@ -586,6 +587,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 TYPE=item_type or "object",
                 DESCRIPTION=description or "",
                 STATE_JSON=state_payload,
+                FILE_PATH=(file_path or "").strip() or None,
             )
             db.add(new_item)
             if normalized_kind != "world":
