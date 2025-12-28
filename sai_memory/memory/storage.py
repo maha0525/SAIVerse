@@ -464,6 +464,38 @@ def count_messages(conn: sqlite3.Connection) -> int:
     return int(cur.fetchone()[0])
 
 
-def count_embeddings(conn: sqlite3.Connection) -> int:
-    cur = conn.execute("SELECT COUNT(*) FROM embeddings")
     return int(cur.fetchone()[0])
+
+
+def delete_thread(conn: sqlite3.Connection, thread_id: str) -> bool:
+    """Delete a thread and all its messages + embeddings."""
+    try:
+        # 1. Get message IDs to delete embeddings
+        cur = conn.execute("SELECT id FROM messages WHERE thread_id=?", (thread_id,))
+        msg_ids = [row[0] for row in cur.fetchall()]
+        
+        if not msg_ids:
+            # Maybe just thread record exists
+            conn.execute("DELETE FROM threads WHERE id=?", (thread_id,))
+            conn.commit()
+            return True
+
+        # 2. Delete embeddings
+        # optimizing by not using executemany for ids if list is huge, but here it's fine or use explicit loop
+        # SQLite limit is usually high, but let's be safe
+        placeholders = ",".join("?" * len(msg_ids))
+        conn.execute(f"DELETE FROM message_embeddings WHERE message_id IN ({placeholders})", msg_ids)
+        conn.execute(f"DELETE FROM embeddings WHERE message_id IN ({placeholders})", msg_ids)
+
+        # 3. Delete messages
+        conn.execute("DELETE FROM messages WHERE thread_id=?", (thread_id,))
+        
+        # 4. Delete thread record
+        conn.execute("DELETE FROM threads WHERE id=?", (thread_id,))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        debug(f"Error deleting thread {thread_id}: {e}")
+        return False
+

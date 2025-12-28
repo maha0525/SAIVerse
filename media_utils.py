@@ -229,6 +229,82 @@ def resize_image_if_needed(data: bytes, mime_type: str, max_bytes: int) -> Tuple
         return data, mime_type
 
 
+def resize_image_for_llm_context(
+    data: bytes,
+    mime_type: str,
+    max_long_edge: int = 768,
+    quality: int = 85,
+) -> Tuple[bytes, str]:
+    """
+    Resize an image so that its longest edge does not exceed max_long_edge pixels.
+    This is optimized for LLM visual context to minimize token usage while preserving quality.
+    
+    For Gemini 2.5/3: Images ≤768px fit in 1 tile = 258 tokens.
+    For OpenAI: Low detail = 85 tokens per 512px tile.
+    For Claude 4: ~(width * height / 750) tokens.
+    
+    Args:
+        data: Raw image bytes.
+        mime_type: MIME type of the image.
+        max_long_edge: Maximum length for the longest edge (default: 768px for Gemini optimization).
+        quality: JPEG quality for output (default: 85).
+    
+    Returns:
+        Tuple of (resized_bytes, effective_mime_type).
+    """
+    if Image is None:
+        LOGGER.warning("PIL not available; cannot resize image for LLM context")
+        return data, mime_type
+
+    try:
+        img = Image.open(BytesIO(data))
+        original_width, original_height = img.size
+        
+        # Check if resize is needed
+        long_edge = max(original_width, original_height)
+        if long_edge <= max_long_edge:
+            LOGGER.debug(
+                "Image %dx%d already within %dpx limit; no resize needed",
+                original_width, original_height, max_long_edge
+            )
+            return data, mime_type
+        
+        # Calculate new dimensions preserving aspect ratio
+        scale = max_long_edge / long_edge
+        new_width = int(original_width * scale)
+        new_height = int(original_height * scale)
+        
+        LOGGER.info(
+            "Resizing image for LLM context: %dx%d -> %dx%d (max_long_edge=%d)",
+            original_width, original_height, new_width, new_height, max_long_edge
+        )
+        
+        # Resize with high-quality resampling
+        resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        
+        # Convert to JPEG for efficient storage (unless PNG with transparency is needed)
+        buf = BytesIO()
+        if img.mode in ("RGBA", "P") and mime_type == "image/png":
+            # Preserve PNG for images with transparency
+            resized.save(buf, format="PNG", optimize=True)
+            output_mime = "image/png"
+        else:
+            # Use JPEG for most images
+            resized.convert("RGB").save(buf, format="JPEG", quality=quality)
+            output_mime = "image/jpeg"
+        
+        result_bytes = buf.getvalue()
+        LOGGER.info(
+            "Resized image: %d bytes -> %d bytes",
+            len(data), len(result_bytes)
+        )
+        return result_bytes, output_mime
+        
+    except Exception:
+        LOGGER.exception("Failed to resize image for LLM context; using original")
+        return data, mime_type
+
+
 def load_image_bytes_for_llm(path: Path, mime_type: str, max_bytes: Optional[int] = None) -> Tuple[Optional[bytes], Optional[str]]:
     """
     Return (bytes, effective_mime) for LLM consumption.

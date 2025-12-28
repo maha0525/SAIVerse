@@ -15,11 +15,8 @@
   "nodes": [
     {
       "id": "exec",
-      "type": "tool",
-      "action": "exec",
-      "args_input": null,
-      "output_key": null,
-      "output_keys": null,
+      "type": "exec",
+      "action": null,
       "next": "speak",
       "conditional_next": null
     },

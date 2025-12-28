@@ -22,6 +22,11 @@ from scripts.import_chatgpt_conversations import (
     resolve_selection,
     resolve_thread_suffix,
 )
+from tools.utilities.chatlog_exporter_importer import (
+    detect_exporter_source,
+    parse_exporter_file,
+    ExporterConversation,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -579,7 +584,7 @@ def _update_message(manager, persona_id: str, message_state: Dict[str, Any], new
                 )
                 payload = [chunk.strip() for chunk in chunks if chunk and chunk.strip()]
                 if payload:
-                    vectors = adapter.embedder.embed(payload)
+                    vectors = adapter.embedder.embed(payload, is_query=False)
                     replace_message_embeddings(adapter.conn, message_id, vectors)
             adapter.conn.commit()
             note = "メッセージを更新したよ。"
@@ -767,6 +772,174 @@ def _import_chatgpt_conversations(
     header_note = "実際には書き込んでいないよ (dry-run)" if dry_run else "SAIMemoryに書き込んだよ"
     joined = "\n".join(results)
     return f"{header_note}:\n{joined}"
+
+
+def _load_exporter_file(
+    file_path: Optional[str],
+) -> tuple[str, str, Dict[str, Any]]:
+    """Load and preview an exporter file (ChatGPT/Gemini/Claude Exporter)."""
+    if not file_path:
+        return "", "ファイルを選んでね。", {"path": None, "source": None}
+
+    try:
+        source = detect_exporter_source(file_path)
+        conv = parse_exporter_file(file_path)
+    except Exception as exc:
+        LOGGER.warning("Failed to load exporter file: %s", exc, exc_info=True)
+        return "", f"読み込みでエラーが出たよ: {exc}", {"path": None, "source": None}
+
+    source_labels = {
+        "chatgpt": "ChatGPT Exporter",
+        "gemini": "Gemini Exporter",
+        "claude": "Claude Exporter",
+        "unknown": "不明",
+    }
+    source_label = source_labels.get(source, "不明")
+
+    # Build preview
+    preview_lines = [
+        f"**タイトル**: {conv.title}",
+        f"**ソース**: {source_label}",
+        f"**メッセージ数**: {len(conv.messages)}件",
+    ]
+    if conv.created_at:
+        preview_lines.append(f"**作成日時**: {format_datetime(conv.created_at)}")
+    if conv.updated_at:
+        preview_lines.append(f"**更新日時**: {format_datetime(conv.updated_at)}")
+    if conv.link:
+        preview_lines.append(f"**リンク**: {conv.link}")
+
+    # Message preview
+    preview_lines.append("")
+    preview_lines.append("**メッセージプレビュー**:")
+    for i, msg in enumerate(conv.messages[:5]):
+        role_label = "ユーザー" if msg.role == "user" else "AI"
+        content_preview = msg.content[:80].replace("\n", " ")
+        if len(msg.content) > 80:
+            content_preview += "..."
+        ts_info = ""
+        if msg.timestamp:
+            ts_info = f" ({format_datetime(msg.timestamp)})"
+        preview_lines.append(f"{i+1}. [{role_label}]{ts_info}: {content_preview}")
+    if len(conv.messages) > 5:
+        preview_lines.append(f"... 他 {len(conv.messages) - 5}件")
+
+    preview_text = "\n".join(preview_lines)
+
+    # Determine if Gemini (needs start time input)
+    needs_start_time = source == "gemini"
+    info_msg = "ファイルを読み込んだよ。"
+    if needs_start_time:
+        info_msg += " Gemini形式なので開始日時を入力してね。"
+
+    return preview_text, info_msg, {"path": file_path, "source": source, "title": conv.title}
+
+
+def _import_exporter_conversation(
+    manager,
+    persona_id: str,
+    file_info: Dict[str, Any],
+    thread_suffix_override: str,
+    gemini_start_datetime_str: str,
+    include_header: bool,
+    dry_run: bool,
+) -> str:
+    """Import an exporter file into SAIMemory."""
+    file_path = file_info.get("path") if isinstance(file_info, dict) else None
+    source = file_info.get("source") if isinstance(file_info, dict) else None
+
+    if not persona_id:
+        return "先にペルソナを選んでね。"
+    if not file_path:
+        return "ファイルを先に読み込んでね。"
+
+    # Parse Gemini start time if provided
+    gemini_start_time: Optional[datetime] = None
+    if source == "gemini" and gemini_start_datetime_str:
+        try:
+            dt = datetime.strptime(gemini_start_datetime_str.strip(), "%Y-%m-%d %H:%M")
+            gemini_start_time = dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return "開始日時の形式が正しくないよ (YYYY-MM-DD HH:MM)"
+
+    try:
+        conv = parse_exporter_file(file_path, gemini_start_time=gemini_start_time)
+    except Exception as exc:
+        LOGGER.warning("Failed to parse exporter file: %s", exc, exc_info=True)
+        return f"ファイルの解析に失敗したよ: {exc}"
+
+    if not conv.messages:
+        return "メッセージが見つからなかったよ。"
+
+    # Determine thread suffix
+    thread_suffix = thread_suffix_override.strip() if thread_suffix_override else conv.identifier
+
+    # Prepare payloads
+    payloads = list(conv.iter_memory_payloads())
+
+    # Add header if requested
+    if include_header:
+        header_ts = conv.created_at or conv.updated_at or datetime.now(tz=timezone.utc)
+        source_labels = {
+            "chatgpt": "ChatGPT",
+            "gemini": "Gemini",
+            "claude": "Claude",
+            "unknown": "Unknown",
+        }
+        source_label = source_labels.get(conv.source, "Unknown")
+        header_text = (
+            f"[Imported {source_label} conversation \"{conv.title}\" "
+            f"({conv.identifier}) created {format_datetime(header_ts)}]"
+        )
+        header_payload = {
+            "role": "system",
+            "content": header_text,
+            "timestamp": format_datetime(header_ts),
+            "metadata": {"tags": ["conversation"]},
+        }
+        payloads.insert(0, header_payload)
+
+    if dry_run:
+        msg_preview = "\n".join(
+            f"  {i+1}. [{p['role']}] {p.get('content', '')[:60]}..."
+            for i, p in enumerate(payloads[:10])
+        )
+        if len(payloads) > 10:
+            msg_preview += f"\n  ... 他 {len(payloads) - 10}件"
+        return (
+            f"[dry-run] インポートする内容:\n"
+            f"- タイトル: {conv.title}\n"
+            f"- ソース: {conv.source}\n"
+            f"- メッセージ数: {len(payloads)}件\n"
+            f"- スレッド: {thread_suffix}\n\n"
+            f"メッセージプレビュー:\n{msg_preview}"
+        )
+
+    # Actually import
+    adapter, release_adapter = _acquire_adapter(manager, persona_id)
+    if not adapter or not adapter.is_ready():
+        return "SAIMemoryが使えなかったよ。設定を確認してみて。"
+
+    try:
+        for payload in payloads:
+            adapter.append_persona_message(payload, thread_suffix=thread_suffix)
+    except Exception as exc:
+        LOGGER.warning("Failed to import exporter conversation: %s", exc, exc_info=True)
+        return f"インポート中にエラーが発生したよ: {exc}"
+    finally:
+        if release_adapter and adapter:
+            try:
+                adapter.close()
+            except Exception:
+                LOGGER.debug("Failed to close temporary adapter", exc_info=True)
+
+    return (
+        f"インポート完了！\n"
+        f"- タイトル: {conv.title}\n"
+        f"- ソース: {conv.source}\n"
+        f"- メッセージ数: {len(payloads)}件\n"
+        f"- スレッド: {thread_suffix}"
+    )
 
 
 def _coerce_summaries(raw: Any) -> List[Dict[str, Any]]:
@@ -971,6 +1144,78 @@ def create_memory_settings_ui(manager) -> None:
             show_progress=True,
         )
 
+    with gr.Accordion("Exporter拡張機能からのインポート (ChatGPT/Gemini/Claude)", open=False):
+        gr.Markdown(
+            """
+            Chrome拡張機能 (ChatGPT Exporter, Gemini Exporter, Claude Exporter) でエクスポートした
+            JSONまたはMarkdownファイルをインポートできるよ。
+            """
+        )
+        exporter_file = gr.File(
+            label="エクスポートファイル (.json または .md)",
+            type="filepath",
+            interactive=bool(choices),
+        )
+        exporter_preview = gr.Markdown("")
+        exporter_info = gr.Markdown("ファイルを選んでね。")
+        exporter_file_state = gr.State({"path": None, "source": None})
+
+        exporter_file.change(
+            fn=_load_exporter_file,
+            inputs=[exporter_file],
+            outputs=[exporter_preview, exporter_info, exporter_file_state],
+            show_progress=True,
+        )
+
+        with gr.Row():
+            exporter_thread_suffix = gr.Textbox(
+                label="スレッド接尾辞 (任意)",
+                placeholder="空なら会話IDを使うよ",
+                interactive=bool(choices),
+            )
+            exporter_gemini_start = gr.Textbox(
+                label="Gemini用 開始日時 (YYYY-MM-DD HH:MM)",
+                placeholder="例: 2025-12-14 10:00",
+                interactive=bool(choices),
+                info="Gemini形式の場合のみ使用。この日時からメッセージごとに1分ずつ増加。",
+            )
+        with gr.Row():
+            exporter_header_checkbox = gr.Checkbox(
+                value=True,
+                label="システムヘッダーを追加する",
+                interactive=bool(choices),
+            )
+            exporter_dry_run_checkbox = gr.Checkbox(
+                value=False,
+                label="dry-run (書き込まない)",
+                interactive=bool(choices),
+            )
+        exporter_feedback = gr.Textbox(label="結果", lines=8, interactive=False)
+
+        exporter_import_btn = gr.Button("インポート", variant="primary", interactive=bool(choices))
+
+        exporter_import_btn.click(
+            fn=lambda persona_id, file_info, suffix, gemini_start, header, dry_run: _import_exporter_conversation(
+                manager,
+                persona_id,
+                file_info,
+                suffix,
+                gemini_start,
+                bool(header),
+                bool(dry_run),
+            ),
+            inputs=[
+                persona_id_state,
+                exporter_file_state,
+                exporter_thread_suffix,
+                exporter_gemini_start,
+                exporter_header_checkbox,
+                exporter_dry_run_checkbox,
+            ],
+            outputs=exporter_feedback,
+            show_progress=True,
+        )
+
     thread_summaries_state = gr.State([])
     thread_selected_state = gr.State(None)
     message_state = gr.State(_initial_message_state())
@@ -1116,3 +1361,75 @@ def create_memory_settings_ui(manager) -> None:
         outputs=load_outputs,
         show_progress=True,
     )
+
+    # Memory Recall テストセクション
+    gr.Markdown("#### Memory Recall テスト")
+    with gr.Accordion("memory_recall ツールを実行してみる", open=False):
+        gr.Markdown(
+            "memory_recall ツールと同じロジックでペルソナの長期記憶を検索できるよ。"
+            "結果を確認してデバッグに使ってね。"
+        )
+        recall_query_box = gr.Textbox(
+            label="検索クエリ",
+            placeholder="検索したい内容を入力してね",
+            interactive=bool(choices),
+        )
+        with gr.Row():
+            recall_topk_slider = gr.Slider(
+                minimum=1,
+                maximum=20,
+                value=4,
+                step=1,
+                label="topk (取得するシード数)",
+                interactive=bool(choices),
+            )
+            recall_max_chars_slider = gr.Slider(
+                minimum=100,
+                maximum=10000,
+                value=1200,
+                step=100,
+                label="max_chars (出力文字数上限)",
+                interactive=bool(choices),
+            )
+        recall_execute_btn = gr.Button("Memory Recall を実行", variant="primary", interactive=bool(choices))
+        recall_result_box = gr.Textbox(
+            label="実行結果",
+            lines=15,
+            interactive=False,
+            show_copy_button=True,
+        )
+
+        def _execute_memory_recall(persona_id: str, query: str, topk: int, max_chars: int) -> str:
+            if not persona_id:
+                return "ペルソナを先に選んでね。"
+            if not query or not query.strip():
+                return "検索クエリを入力してね。"
+
+            adapter, release_adapter = _acquire_adapter(manager, persona_id)
+            if not adapter or not adapter.is_ready():
+                return "SAIMemoryが利用できなかったよ。"
+
+            try:
+                result = adapter.recall_snippet(
+                    None,
+                    query_text=query.strip(),
+                    max_chars=int(max_chars),
+                    topk=int(topk),
+                )
+                return result or "(no relevant memory)"
+            except Exception as exc:
+                LOGGER.warning("Memory recall failed for %s: %s", persona_id, exc, exc_info=True)
+                return f"エラーが発生したよ: {exc}"
+            finally:
+                if release_adapter and adapter:
+                    try:
+                        adapter.close()
+                    except Exception:
+                        LOGGER.debug("Failed to close temporary adapter after recall", exc_info=True)
+
+        recall_execute_btn.click(
+            fn=_execute_memory_recall,
+            inputs=[persona_id_state, recall_query_box, recall_topk_slider, recall_max_chars_slider],
+            outputs=recall_result_box,
+            show_progress=True,
+        )

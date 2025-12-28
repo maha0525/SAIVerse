@@ -288,5 +288,97 @@ class OllamaClient(LLMClient):
             else:
                 yield "エラーが発生しました。"
 
+    def generate_with_tool_detection(
+        self,
+        messages: List[Dict[str, str]],
+        tools: Optional[list] | None = None,
+        *,
+        temperature: float | None = None,
+        **_: Any,
+    ) -> Dict[str, Any]:
+        """Generate response with tool call detection (do not execute tools).
+
+        Returns:
+            {"type": "text", "content": str} if no tool call
+            {"type": "tool_call", "tool_name": str, "tool_args": dict} if tool call detected
+            {"type": "both", "content": str, "tool_name": str, "tool_args": dict} if both
+        """
+        # Delegate to fallback client if available
+        if self.fallback_client is not None and not self.url:
+            return self.fallback_client.generate_with_tool_detection(
+                messages,
+                tools,
+                temperature=temperature,
+            )
+
+        tools_spec = tools or []
+        options: Dict[str, Any] = {"num_ctx": self.context_length}
+        if temperature is not None:
+            options["temperature"] = temperature
+
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": options,
+        }
+
+        if tools_spec:
+            payload["tools"] = tools_spec
+            # Note: Ollama v1 API doesn't have tool_choice parameter
+
+        try:
+            response = requests.post(self.url, json=payload, timeout=(3, 300))
+            preview = response.text[:500] if response.text else "(empty)"
+            logging.debug(
+                "Ollama v1 tool detection response status=%s preview=%s",
+                response.status_code,
+                preview,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception:
+            logging.exception("Ollama tool detection call failed")
+            if self.fallback_client is not None:
+                return self.fallback_client.generate_with_tool_detection(
+                    messages,
+                    tools,
+                    temperature=temperature,
+                )
+            return {"type": "text", "content": "エラーが発生しました。"}
+
+        choice = data.get("choices", [{}])[0]
+        message = choice.get("message", {})
+        content = message.get("content", "") or ""
+        tool_calls = message.get("tool_calls", [])
+
+        if tool_calls:
+            tc = tool_calls[0]
+            func = tc.get("function", {})
+            tool_name = func.get("name", "")
+            try:
+                tool_args = json.loads(func.get("arguments", "{}"))
+            except json.JSONDecodeError:
+                logging.warning("Tool call arguments invalid JSON: %s", func.get("arguments"))
+                tool_args = {}
+
+            if content.strip():
+                # Both text and tool call
+                return {
+                    "type": "both",
+                    "content": content,
+                    "tool_name": tool_name,
+                    "tool_args": tool_args,
+                }
+            else:
+                # Tool call only
+                return {
+                    "type": "tool_call",
+                    "tool_name": tool_name,
+                    "tool_args": tool_args,
+                }
+        else:
+            return {"type": "text", "content": content}
+
 
 __all__ = ["OllamaClient"]

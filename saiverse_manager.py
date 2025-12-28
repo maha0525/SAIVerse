@@ -7,7 +7,7 @@ import requests
 import logging
 from pathlib import Path
 import mimetypes
-from typing import Dict, List, Optional, Tuple, Iterator, Union, Any
+from typing import Dict, List, Optional, Tuple, Iterator, Union, Any, Callable
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import pandas as pd
@@ -19,6 +19,7 @@ import os
 from google.genai import errors
 from buildings import Building
 from sea import SEARuntime
+from sea.pulse_controller import PulseController
 from persona_core import PersonaCore
 from model_configs import get_model_provider, get_context_length
 from occupancy_manager import OccupancyManager
@@ -182,10 +183,13 @@ class SAIVerseManager(
                 self.building_histories[b_id] = []
 
         # --- Step 4: Initialize Core Components and State Containers ---
-        resolved_model = model or _get_default_model()
-        self.model = resolved_model
-        self.context_length = get_context_length(resolved_model)
-        self.provider = get_model_provider(resolved_model)
+        # Resolve base model (for internal fallbacks), but start with no global override
+        # so that Chat Options shows "(Default)" on startup.
+        base_model = model or _get_default_model()
+        self.model = "None"  # No global override by default
+        self.context_length = get_context_length(base_model)
+        self.provider = get_model_provider(base_model)
+        self._base_model = base_model  # Internal fallback for personas without DB default
         self.model_parameter_overrides: Dict[str, Any] = {}
 
         self.state = CoreState(
@@ -317,9 +321,11 @@ class SAIVerseManager(
                     "Failed to initialize Discord gateway integration: %s", exc
                 )
 
-        # SEA runtime (disabled by default unless env set)
-        self.sea_enabled = os.getenv("SAIVERSE_SEA_ENABLED", "0").lower() in {"1", "true", "yes"}
-        self.sea_runtime: Optional[SEARuntime] = SEARuntime(self) if self.sea_enabled else None
+        # SEA runtime (always enabled)
+        self.sea_runtime: SEARuntime = SEARuntime(self)
+        
+        # Pulse controller for managing concurrent playbook executions
+        self.pulse_controller: PulseController = PulseController(self.sea_runtime)
 
         self.runtime = RuntimeService(self, self.state)
         self.admin = AdminService(self, self.runtime, self.state)
@@ -330,6 +336,10 @@ class SAIVerseManager(
             target=self._db_polling_loop, daemon=True
         )
         self.db_polling_thread.start()
+
+        # Auto-start autonomous conversation managers for personas with mode=auto
+        logging.info("Auto-starting autonomous conversation managers...")
+        self.start_autonomous_conversations()
 
     def _update_timezone_cache(self, tz_name: Optional[str]) -> None:
         """Update cached timezone information for this manager."""
@@ -359,7 +369,8 @@ class SAIVerseManager(
 
     def _refresh_user_state_cache(self) -> None:
         """Mirror CoreState's user info onto the manager-level attributes."""
-        self.user_is_online = self.state.user_is_online
+        self.user_presence_status = self.state.user_presence_status
+        self.user_is_online = self.state.user_presence_status != "offline"  # Backward compat
         self.user_display_name = self.state.user_display_name
         self.user_current_building_id = self.state.user_current_building_id
         self.user_current_city_id = self.state.user_current_city_id
@@ -387,20 +398,27 @@ class SAIVerseManager(
 
     # SEA integration helpers -------------------------------------------------
     def run_sea_auto(self, persona, building_id: str, occupants: List[str]) -> None:
-        if not self.sea_runtime:
-            return None
+        """Run autonomous pulse via PulseController."""
         try:
-            self.sea_runtime.run_meta_auto(persona, building_id, occupants)
+            self.pulse_controller.submit_auto(
+                persona_id=persona.persona_id,
+                building_id=building_id,
+            )
         except Exception as exc:
             logging.exception("SEA auto run failed: %s", exc)
-            return None
-        return None
 
-    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None) -> List[str]:
-        if not self.sea_runtime:
-            return []
+    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[str]:
+        """Run user input via PulseController."""
         try:
-            return self.sea_runtime.run_meta_user(persona, user_input, building_id, metadata=metadata, meta_playbook=meta_playbook)
+            result = self.pulse_controller.submit_user(
+                persona_id=persona.persona_id,
+                building_id=building_id,
+                user_input=user_input,
+                metadata=metadata,
+                meta_playbook=meta_playbook,
+                event_callback=event_callback,
+            )
+            return result if result else []
         except Exception as exc:
             logging.exception("SEA user run failed: %s", exc)
             return []
@@ -654,7 +672,11 @@ class SAIVerseManager(
         if not building_id:
             return
         history = self.building_histories.setdefault(building_id, [])
-        history.append({"role": "host", "content": content})
+        history.append({
+        "role": "host", 
+        "content": content,
+        "timestamp": datetime.now().isoformat()
+    })
         try:
             self._save_building_histories([building_id])
         except Exception:
@@ -1032,6 +1054,76 @@ class SAIVerseManager(
         else:
             raise RuntimeError(f"未対応のアイテムタイプ: {item_type}")
 
+    def toggle_item_open_state(self, item_id: str) -> bool:
+        """
+        Toggle the open/close state of an item.
+        
+        When an item is "open", its content will be included in the visual context
+        for AI conversations.
+        
+        Args:
+            item_id: The item to toggle
+            
+        Returns:
+            The new is_open state (True = open, False = closed)
+        """
+        item = self.items.get(item_id)
+        if not item:
+            raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
+        
+        # Get current state
+        state = item.get("state", {})
+        if not isinstance(state, dict):
+            state = {}
+        
+        # Toggle is_open
+        current_is_open = state.get("is_open", False)
+        new_is_open = not current_is_open
+        state["is_open"] = new_is_open
+        
+        # Update memory cache
+        item["state"] = state
+        
+        # Update database
+        timestamp = datetime.utcnow()
+        db = self.SessionLocal()
+        try:
+            row = db.query(ItemModel).filter(ItemModel.ITEM_ID == item_id).one_or_none()
+            if row:
+                row.STATE_JSON = json.dumps(state)
+                row.UPDATED_AT = timestamp
+                db.commit()
+        except Exception as exc:
+            db.rollback()
+            logging.error(f"Failed to update item state in DB: {exc}")
+            raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
+        finally:
+            db.close()
+        
+        item["updated_at"] = timestamp
+        logging.info(f"Item {item_id} is_open toggled to {new_is_open}")
+        return new_is_open
+
+    def get_open_items_in_building(self, building_id: str) -> list:
+        """
+        Get all items in a building that have is_open = True.
+        
+        Args:
+            building_id: The building to check
+            
+        Returns:
+            List of item dicts that are open
+        """
+        open_items = []
+        item_ids = self.items_by_building.get(building_id, [])
+        for item_id in item_ids:
+            item = self.items.get(item_id)
+            if item:
+                state = item.get("state", {})
+                if isinstance(state, dict) and state.get("is_open", False):
+                    open_items.append(item)
+        return open_items
+
     def create_document_item(self, persona_id: str, name: str, description: str, content: str) -> str:
         """
         Create a new document item and place it in the current building.
@@ -1073,12 +1165,14 @@ class SAIVerseManager(
 
         db = self.SessionLocal()
         try:
+            # Store relative path for cross-platform compatibility
+            relative_path = str(file_path.relative_to(self.saiverse_home))
             item_row = ItemModel(
                 ITEM_ID=item_id,
                 NAME=name,
                 TYPE="document",
                 DESCRIPTION=summary,
-                FILE_PATH=str(file_path),
+                FILE_PATH=relative_path,
                 CREATED_AT=timestamp,
                 UPDATED_AT=timestamp,
             )
@@ -1105,7 +1199,7 @@ class SAIVerseManager(
             "name": name,
             "type": "document",
             "description": summary,
-            "file_path": str(file_path),
+            "file_path": relative_path,
             "state": {},
             "created_at": timestamp,
             "updated_at": timestamp,
@@ -1159,6 +1253,17 @@ class SAIVerseManager(
         item_id = str(uuid.uuid4())
         timestamp = datetime.utcnow()
 
+        # Convert to relative path if it's an absolute path under saiverse_home
+        file_path_obj = Path(file_path)
+        if file_path_obj.is_absolute():
+            try:
+                relative_path = str(file_path_obj.relative_to(self.saiverse_home))
+            except ValueError:
+                # Path is not under saiverse_home, keep as-is
+                relative_path = file_path
+        else:
+            relative_path = file_path
+
         db = self.SessionLocal()
         try:
             item_row = ItemModel(
@@ -1166,7 +1271,7 @@ class SAIVerseManager(
                 NAME=name,
                 TYPE="picture",
                 DESCRIPTION=description,
-                FILE_PATH=file_path,
+                FILE_PATH=relative_path,
                 CREATED_AT=timestamp,
                 UPDATED_AT=timestamp,
             )
@@ -1193,7 +1298,7 @@ class SAIVerseManager(
             "name": name,
             "type": "picture",
             "description": description,
-            "file_path": file_path,
+            "file_path": relative_path,
             "state": {},
             "created_at": timestamp,
             "updated_at": timestamp,
@@ -1234,7 +1339,8 @@ class SAIVerseManager(
                     .first()
                 )
                 if user:
-                    self.state.user_is_online = user.LOGGED_IN
+                    # Map DB boolean to presence status string
+                    self.state.user_presence_status = "online" if user.LOGGED_IN else "offline"
                     self.state.user_current_city_id = user.CURRENT_CITYID
                     self.state.user_current_building_id = user.CURRENT_BUILDINGID
                     self.state.user_display_name = (
@@ -1248,7 +1354,8 @@ class SAIVerseManager(
                         self.state.user_display_name
                     )
                 else:
-                    self.state.user_is_online = False
+                    self.state.user_presence_status = "offline"
+                    self.state.user_current_building_id = None
                     self.state.user_current_building_id = None
                     self.state.user_current_city_id = None
                     self.state.user_display_name = "ユーザー"
@@ -1260,7 +1367,7 @@ class SAIVerseManager(
                 logging.error(
                     "Failed to load user status from DB: %s", exc, exc_info=True
                 )
-                self.state.user_is_online = False
+                self.state.user_presence_status = "offline"
                 self.state.user_current_building_id = None
                 self.state.user_current_city_id = None
                 self.state.user_display_name = "ユーザー"
@@ -1283,9 +1390,10 @@ class SAIVerseManager(
             if user:
                 user.LOGGED_IN = status
                 db.commit()
-                self.state.user_is_online = status
+                self.state.user_presence_status = "online" if status else "offline"
                 self.state.user_display_name = (user.USERNAME or "ユーザー").strip() or "ユーザー"
-                self.user_is_online = self.state.user_is_online
+                self.user_is_online = status  # Backward compat
+                self.user_presence_status = self.state.user_presence_status
                 self.user_display_name = self.state.user_display_name
                 self.id_to_name_map[str(self.user_id)] = self.user_display_name
                 status_text = "オンライン" if status else "オフライン"
@@ -1335,7 +1443,7 @@ class SAIVerseManager(
             self.gateway_runtime = None
 
         # --- ★ アプリケーション終了時にユーザーをログアウトさせる ---
-        if self.state.user_is_online:
+        if self.state.user_presence_status != "offline":
             logging.info("Setting user to offline as part of shutdown.")
             self.set_user_login_status(self.user_id, False)
 
@@ -1405,10 +1513,10 @@ class SAIVerseManager(
     def set_model(self, model: str, parameters: Optional[Dict[str, Any]] = None) -> None:
         """
         Update LLM model override for all active personas in memory.
-        - If model == "None": clear the override and reset each persona to its DB-defined default model.
+        - If model is "None" or empty: clear the override and reset each persona to its DB-defined default model.
         - Otherwise: set the given model for all personas (temporary, not persisted).
         """
-        if model == "None":
+        if model == "None" or not model or not model.strip():
             logging.info("Clearing global model override; restoring each persona's DB default model.")
             self.model_parameter_overrides = {}
             db = self.SessionLocal()
@@ -1417,7 +1525,7 @@ class SAIVerseManager(
                     ai = db.query(AIModel).filter_by(AIID=pid).first()
                     if not ai:
                         continue
-                    m = ai.DEFAULT_MODEL or _get_default_model()
+                    m = ai.DEFAULT_MODEL or getattr(self, '_base_model', None) or _get_default_model()
                     persona.set_model(m, get_context_length(m), get_model_provider(m))
                 # Reflect no-override state in manager
                 self.model = "None"
@@ -1656,10 +1764,10 @@ class SAIVerseManager(
         return self.admin.delete_city(city_id)
 
     def create_building(
-        self, name: str, description: str, capacity: int, system_instruction: str, city_id: int
+        self, name: str, description: str, capacity: int, system_instruction: str, city_id: int, building_id: str = None
     ) -> str:
         """Creates a new building in a specified city."""
-        return self.admin.create_building(name, description, capacity, system_instruction, city_id)
+        return self.admin.create_building(name, description, capacity, system_instruction, city_id, building_id)
 
     def delete_building(self, building_id: str) -> str:
         """Deletes a building after checking for occupants."""
@@ -1695,6 +1803,7 @@ class SAIVerseManager(
         interaction_mode: str,
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
+        appearance_image_path: Optional[str] = None,
     ) -> str:
         """ワールドエディタからAIの設定を更新する"""
         return self.admin.update_ai(
@@ -1708,6 +1817,7 @@ class SAIVerseManager(
             interaction_mode,
             avatar_path,
             avatar_upload,
+            appearance_image_path,
         )
 
     def delete_ai(self, ai_id: str) -> str:
@@ -1732,6 +1842,7 @@ class SAIVerseManager(
         city_id: int,
         tool_ids: List[int],
         interval: int,
+        image_path: Optional[str] = None,
     ) -> str:
         """ワールドエディタからBuildingの設定を更新する"""
         return self.admin.update_building(
@@ -1743,6 +1854,7 @@ class SAIVerseManager(
             city_id,
             tool_ids,
             interval,
+            image_path,
         )
 
     def get_items_df(self) -> pd.DataFrame:
@@ -1759,8 +1871,9 @@ class SAIVerseManager(
         owner_kind: str,
         owner_id: Optional[str],
         state_json: Optional[str],
+        file_path: Optional[str] = None,
     ) -> str:
-        return self.admin.create_item(name, item_type, description, owner_kind, owner_id, state_json)
+        return self.admin.create_item(name, item_type, description, owner_kind, owner_id, state_json, file_path)
 
     def update_item(
         self,
@@ -1810,3 +1923,11 @@ class SAIVerseManager(
     def delete_playbook(self, playbook_id: int) -> str:
         """Delete a playbook from the world editor."""
         return self.admin.delete_playbook(playbook_id)
+
+    def import_playbook_from_file(self, file_path: str) -> str:
+        """Import a playbook JSON file from the world editor."""
+        return self.admin.import_playbook_from_file(file_path)
+
+    def reimport_all_playbooks(self, base_dir: Optional[str] = None) -> str:
+        """Re-import all playbooks under sea/playbooks or a custom directory."""
+        return self.admin.reimport_all_playbooks(base_dir)

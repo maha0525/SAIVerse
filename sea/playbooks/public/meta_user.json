@@ -1,26 +1,41 @@
 {
   "name": "meta_user",
-  "description": "Router -> sub-playbook -> speak (exec handled by runtime)",
+  "description": "Router -> sub-playbook -> speak (exec handled by runtime). Automatically retrieves context from previous autonomous activity.",
   "input_schema": [
     {
       "name": "input",
-      "description": "User input"
+      "description": "User input",
+      "source": null
     }
   ],
+  "output_schema": null,
   "context_requirements": {
     "history_depth": "full",
+    "history_balanced": true,
     "inventory": true,
     "building_items": true,
-    "system_prompt": true
+    "system_prompt": true,
+    "available_playbooks": false
   },
   "router_callable": false,
   "user_selectable": true,
   "nodes": [
     {
+      "id": "get_context",
+      "type": "tool",
+      "action": "get_since_last_user_conversation",
+      "args": {
+        "include_raw_log": true,
+        "max_raw_messages": 10
+      },
+      "output_key": "autonomous_context",
+      "next": "list_playbooks"
+    },
+    {
       "id": "list_playbooks",
       "type": "tool",
       "action": "list_available_playbooks",
-      "args_input": {},
+      "args": {},
       "output_key": "available_playbooks",
       "next": "router"
     },
@@ -34,8 +49,9 @@
     },
     {
       "id": "exec",
-      "type": "tool",
-      "action": "exec",
+      "type": "exec",
+      "playbook_source": "selected_playbook",
+      "args_source": "selected_args",
       "next": "finalize"
     },
     {
@@ -47,5 +63,5 @@
       "next": null
     }
   ],
-  "start_node": "list_playbooks"
+  "start_node": "get_context"
 }

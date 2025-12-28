@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import requests
+import threading
+import queue
 from google.genai import errors
 
 from discord_gateway.translator import GatewayCommand
@@ -103,7 +105,8 @@ class RuntimeService(
                 .first()
             )
             if user:
-                self.state.user_is_online = user.LOGGED_IN
+                # Map DB boolean to presence status string
+                self.state.user_presence_status = "online" if user.LOGGED_IN else "offline"
                 self.state.user_current_city_id = user.CURRENT_CITYID
                 self.state.user_current_building_id = user.CURRENT_BUILDINGID
                 self.state.user_display_name = (
@@ -118,7 +121,7 @@ class RuntimeService(
                 )
                 logging.info(
                     "Loaded user state: %s at %s",
-                    "Online" if self.state.user_is_online else "Offline",
+                    self.state.user_presence_status,
                     self.state.user_current_building_id,
                 )
             else:
@@ -126,7 +129,7 @@ class RuntimeService(
                     "User with USERID=%s not found. Defaulting to Offline.",
                     self.state.user_id,
                 )
-                self.state.user_is_online = False
+                self.state.user_presence_status = "offline"
                 self.state.user_current_building_id = None
                 self.state.user_current_city_id = None
                 self.state.user_display_name = "ユーザー"
@@ -138,7 +141,7 @@ class RuntimeService(
             logging.error(
                 "Failed to load user status from DB: %s", exc, exc_info=True
             )
-            self.state.user_is_online = False
+            self.state.user_presence_status = "offline"
             self.state.user_current_building_id = None
             self.state.user_display_name = "ユーザー"
             self.state.user_avatar_data = self.manager.default_avatar
@@ -149,14 +152,26 @@ class RuntimeService(
             db.close()
 
     def move_user(self, target_building_id: str) -> Tuple[bool, str]:
+        # DEBUG LOGGING
+        debug_log_path = r"c:\Users\shuhe\workspace\SAIVerse\debug_chat.log"
+        from datetime import datetime
+        def log_debug(msg):
+             with open(debug_log_path, "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now()}: [MANAGER_MOVE] {msg}\n")
+        
+        log_debug(f"Attempting move to {target_building_id}. Current: {self.state.user_current_building_id}")
+
         if target_building_id not in self.building_map:
-            return False, f"移動失敗: 建物 '{target_building_id}' が見つかりません。"
+            log_debug(f"Target {target_building_id} invalid.")
+            return False, "Invalid building ID"
 
         from_building_id = self.state.user_current_building_id
         if not from_building_id:
+            log_debug("Current building unknown.")
             return False, "移動失敗: 現在地が不明です。"
         if from_building_id == target_building_id:
             return True, "同じ場所にいます。"
+            
         logging.debug(
             "[runtime] move_user requested %s -> %s",
             from_building_id,
@@ -172,8 +187,10 @@ class RuntimeService(
         if success:
             self.state.user_current_building_id = target_building_id
             logging.debug("[runtime] move_user success: now %s", target_building_id)
+            log_debug(f"Move success. New state bid: {self.state.user_current_building_id}")
         else:
             logging.debug("[runtime] move_user failed: %s", message)
+            log_debug(f"Move failed: {message}")
         return success, message
 
     def _move_persona(
@@ -224,37 +241,42 @@ class RuntimeService(
         if not persona:
             return False, "Persona not found."
 
+        # Move to user's CURRENT building, not just user_room_id
+        target_building_id = self.state.user_current_building_id
+        if not target_building_id:
+            return False, "User's current building is unknown."
+
         prev = persona.current_building_id
-        if prev == self.user_room_id:
+        if prev == target_building_id:
             return True, None
 
         allowed, reason = True, None
         if self._move_persona:
             allowed, reason = self._move_persona(
-                persona.persona_id, prev, self.user_room_id
+                persona.persona_id, prev, target_building_id
             )
         if not allowed:
             persona.history_manager.add_to_building_only(
-                self.user_room_id,
+                target_building_id,
                 {
                     "role": "assistant",
                     "content": f'<div class="note-box">移動できませんでした。{reason}</div>',
                 },
-                heard_by=self._occupants_snapshot(self.user_room_id),
+                heard_by=self._occupants_snapshot(target_building_id),
             )
             persona._save_session_metadata()
             return False, reason
 
-        persona.current_building_id = self.user_room_id
+        persona.current_building_id = target_building_id
         persona.auto_count = 0
-        persona._mark_entry(self.user_room_id)
+        persona._mark_entry(target_building_id)
         persona.history_manager.add_to_building_only(
-            self.user_room_id,
+            target_building_id,
             {
                 "role": "assistant",
                 "content": f'<div class="note-box">🏢 Building:<br><b>{persona.persona_name}が入室しました</b></div>',
             },
-            heard_by=self._occupants_snapshot(self.user_room_id),
+            heard_by=self._occupants_snapshot(target_building_id),
         )
         persona._save_session_metadata()
         persona.run_auto_conversation(initial=True)
@@ -265,8 +287,13 @@ class RuntimeService(
         if not persona:
             return f"Error: Persona with ID '{persona_id}' not found."
 
-        if persona.current_building_id != self.user_room_id:
-            return f"{persona.persona_name} is not in the user room."
+        # Check if persona is in the same building as the user (not just user_room_id)
+        current_user_building = self.state.user_current_building_id
+        if not current_user_building:
+            return "Error: User's current building is unknown."
+        
+        if persona.current_building_id != current_user_building:
+            return f"{persona.persona_name} is not in the current building."
 
         private_room_id = getattr(persona, "private_room_id", None)
         if not private_room_id:
@@ -275,19 +302,19 @@ class RuntimeService(
             return "Error: Private room not found for this persona."
 
         success, reason = self._move_persona(
-            persona_id, self.user_room_id, private_room_id
+            persona_id, current_user_building, private_room_id
         )
         if not success:
             return f"Error: Failed to move: {reason}"
 
         persona.current_building_id = private_room_id
         persona.history_manager.add_to_building_only(
-            self.user_room_id,
+            current_user_building,
             {
                 "role": "assistant",
                 "content": f'<div class="note-box">🏢 Building:<br><b>{persona.persona_name}が退室しました</b></div>',
             },
-            heard_by=self._occupants_snapshot(self.user_room_id),
+            heard_by=self._occupants_snapshot(current_user_building),
         )
         persona._save_session_metadata()
         return f"Conversation with '{persona.persona_name}' ended."
@@ -329,52 +356,11 @@ class RuntimeService(
                 "[runtime] received metadata with keys=%s", list(metadata.keys())
             )
 
-        # Check if SEA is enabled before recording user message
         # SEA runtime handles history recording internally
-        sea_enabled = getattr(self.manager, "sea_enabled", False)
-
-        if responding_personas and not sea_enabled:
-            try:
-                # ユーザ発話を persona/SAIMemory にも同期させる
-                responding_personas[0].history_manager.add_message(
-                    user_entry,
-                    building_id,
-                    heard_by=list(self.occupants.get(building_id, [])),
-                )
-            except Exception:
-                hist = self.building_histories.setdefault(building_id, [])
-                next_seq = 1
-                if hist:
-                    try:
-                        next_seq = int(hist[-1].get("seq", len(hist))) + 1
-                    except (TypeError, ValueError):
-                        next_seq = len(hist) + 1
-                hist.append(
-                    {
-                        "role": "user",
-                        "content": message,
-                        "seq": next_seq,
-                        "message_id": f"{building_id}:{next_seq}",
-                        "heard_by": list(self.occupants.get(building_id, [])),
-                        **({"metadata": metadata} if metadata else {}),
-                    }
-                )
-
         replies: List[str] = []
         for persona in responding_personas:
-            if sea_enabled:
-                # SEA runtime already emits via gateway; avoid double返却
-                self.manager.run_sea_user(persona, building_id, message)
-            elif persona.interaction_mode == "manual":
-                replies.extend(
-                    persona.handle_user_input(message, metadata=metadata)
-                )
-            else:
-                replies.extend(
-                    persona.run_pulse(
-                        occupants=self.occupants.get(building_id, []), user_online=True
-                    )
-                )
+            # SEA経由でユーザー入力を処理
+            self.manager.run_sea_user(persona, building_id, message)
         logging.debug("[runtime] handle_user_input collected %d replies", len(replies))
 
         self._save_building_histories()
@@ -415,56 +401,39 @@ class RuntimeService(
         if metadata:
             user_entry["metadata"] = metadata
 
-        # Check if SEA is enabled before recording user message
         # SEA runtime handles history recording internally
-        sea_enabled = getattr(self.manager, "sea_enabled", False)
+        # SEAモード: タイムアウト回避のためのスレッド実行とKeep-Alive
+        response_queue = queue.Queue()
 
-        if responding_personas and not sea_enabled:
+        def backend_worker():
             try:
-                responding_personas[0].history_manager.add_to_building_only(
-                    building_id,
-                    user_entry,
-                    heard_by=list(self.occupants.get(building_id, [])),
-                )
-            except Exception:
-                hist = self.building_histories.setdefault(building_id, [])
-                next_seq = 1
-                if hist:
-                    try:
-                        next_seq = int(hist[-1].get("seq", len(hist))) + 1
-                    except (TypeError, ValueError):
-                        next_seq = len(hist) + 1
-                hist.append(
-                    {
-                        "role": "user",
-                        "content": message,
-                        "seq": next_seq,
-                        "message_id": f"{building_id}:{next_seq}",
-                        "heard_by": list(self.occupants.get(building_id, [])),
-                        **({"metadata": metadata} if metadata else {}),
-                    }
-                )
-        for persona in responding_personas:
-            if sea_enabled:
-                # SEA runtime pushes to gateway internally; streaming経路では二重出力を避けて返却しない
-                self.manager.run_sea_user(persona, building_id, message, metadata=metadata, meta_playbook=meta_playbook)
-            elif persona.interaction_mode == "manual":
-                for token in persona.handle_user_input_stream(
-                    message, metadata=metadata
-                ):
-                    yield token
-            else:
-                occupants = self.occupants.get(building_id, [])
-                pulse_responses = persona.run_pulse(occupants=occupants, user_online=True)
-                if pulse_responses is None:
-                    logging.warning(
-                        "[runtime] persona %s returned no responses from run_pulse; defaulting to empty list",
-                        getattr(persona, "persona_id", "unknown"),
+                for persona in responding_personas:
+                    # SEA実行。イベントはコールバック経由でキューに送る
+                    self.manager.run_sea_user(
+                        persona, building_id, message,
+                        metadata=metadata,
+                        meta_playbook=meta_playbook,
+                        event_callback=response_queue.put
                     )
-                    pulse_responses = []
-                for reply in pulse_responses:
-                    yield reply
-        logging.debug("[runtime] handle_user_input_stream completed")
+            except Exception as e:
+                logging.error("SEA worker error", exc_info=True)
+                response_queue.put({"type": "error", "content": str(e)})
+            finally:
+                response_queue.put(None)  # 番兵
+
+        threading.Thread(target=backend_worker, daemon=True).start()
+
+        # メインスレッド: キューを監視してクライアントに送信
+        while True:
+            try:
+                # 2.0秒待機（Keep-Aliveのため）
+                item = response_queue.get(timeout=2.0)
+                if item is None:
+                    break
+                yield json.dumps(item, ensure_ascii=False) + "\n"
+            except queue.Empty:
+                # プロキシ等のタイムアウトを防ぐためのPing
+                yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
 
         self._save_building_histories()
         for persona in self.personas.values():

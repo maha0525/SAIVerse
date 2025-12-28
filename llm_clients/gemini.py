@@ -201,9 +201,10 @@ class GeminiClient(LLMClient):
         supports_images: bool = True,
     ) -> None:
         super().__init__(supports_images=supports_images)
-        self.free_client, self.paid_client, self.client = build_gemini_clients()
-        self.model = model
         cfg = config or {}
+        prefer_paid = cfg.get("prefer_paid", False)
+        self.free_client, self.paid_client, self.client = build_gemini_clients(prefer_paid=prefer_paid)
+        self.model = model
         include_thoughts = cfg.get("include_thoughts")
         if include_thoughts is None:
             include_thoughts = "2.5" in (model or "").lower()
@@ -339,16 +340,25 @@ class GeminiClient(LLMClient):
         )
 
         attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
+        # Track messages that are exempt from attachment limits (visual context)
+        exempt_message_indices: Set[int] = set()
         if self.supports_images:
             for idx, message in enumerate(msgs):
                 if isinstance(message, dict):
-                    media_items = iter_image_media(message.get("metadata"))
+                    metadata = message.get("metadata")
+                    # Check for visual context marker - these are exempt from limits
+                    if isinstance(metadata, dict) and metadata.get("__visual_context__"):
+                        exempt_message_indices.add(idx)
+                    media_items = iter_image_media(metadata)
                     if media_items:
                         attachment_cache[idx] = media_items
         allowed_attachment_keys: Optional[Set[Tuple[int, int]]] = None
         if max_image_embeds is not None and attachment_cache:
             ordered: List[Tuple[int, int]] = []
             for msg_idx in sorted(attachment_cache.keys(), reverse=True):
+                # Skip exempt (visual context) messages when counting towards limit
+                if msg_idx in exempt_message_indices:
+                    continue
                 items = attachment_cache[msg_idx]
                 for att_idx in range(len(items)):
                     ordered.append((msg_idx, att_idx))
@@ -356,6 +366,16 @@ class GeminiClient(LLMClient):
                 allowed_attachment_keys = set()
             else:
                 allowed_attachment_keys = set(ordered[:max_image_embeds])
+            # Always allow visual context attachments (exempt from limit)
+            for msg_idx in exempt_message_indices:
+                if msg_idx in attachment_cache:
+                    for att_idx in range(len(attachment_cache[msg_idx])):
+                        allowed_attachment_keys.add((msg_idx, att_idx))
+                    logging.debug(
+                        "[gemini] visual context at idx=%d exempted from attachment limit (%d images)",
+                        msg_idx,
+                        len(attachment_cache[msg_idx]),
+                    )
         elif max_image_embeds is not None:
             allowed_attachment_keys = set()
 

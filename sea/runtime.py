@@ -4,13 +4,15 @@ import logging
 import os
 import uuid
 import asyncio
+from datetime import datetime, timezone as dt_timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Callable
 import json
 import re
 
 from sea.playbook_models import NodeType, PlaybookSchema, PlaybookValidationError, validate_playbook_graph
 from sea.langgraph_runner import compile_playbook
+from sea.cancellation import CancellationToken, ExecutionCancelledException
 from database.models import Playbook as PlaybookModel
 from model_configs import get_model_parameter_defaults
 
@@ -23,8 +25,23 @@ def _get_default_lightweight_model() -> str:
 
 
 def _format(template: str, variables: Dict[str, Any]) -> str:
+    """Format template with variables, supporting dot notation keys.
+    
+    Python's .format() interprets {a.b} as attribute access on 'a'.
+    This function first replaces dot-notation keys manually, then falls back to .format().
+    """
     try:
-        return template.format(**variables)
+        result = template
+        # First pass: replace dot-notation keys manually (e.g., {finalize_output.content})
+        # Sort by key length descending to replace longer keys first
+        dot_keys = sorted([k for k in variables.keys() if '.' in str(k)], key=len, reverse=True)
+        for key in dot_keys:
+            placeholder = "{" + str(key) + "}"
+            if placeholder in result:
+                value = variables[key]
+                result = result.replace(placeholder, str(value) if value is not None else "")
+        # Second pass: use .format() for remaining simple keys
+        return result.format(**variables)
     except Exception:
         # 安全側でそのまま返す
         return template
@@ -41,14 +58,34 @@ class SEARuntime:
         self._trace = bool(os.getenv("SAIVERSE_SEA_TRACE"))
 
     # ---------------- meta entrypoints -----------------
-    def run_meta_user(self, persona, user_input: str, building_id: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None) -> List[str]:
+    def run_meta_user(
+        self,
+        persona,
+        user_input: str,
+        building_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        meta_playbook: Optional[str] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+        pulse_type: str = "user",
+    ) -> List[str]:
         """Router -> subgraph -> speak. Returns spoken strings for gateway/UI."""
+        # Check for cancellation before starting
+        if cancellation_token:
+            cancellation_token.raise_if_cancelled()
+        
+        # Store pulse_type in persona for tools to access
+        persona._current_pulse_type = pulse_type
+        
         # Record user input to history before processing
         if user_input:
             try:
-                user_msg = {"role": "user", "content": user_input}
+                user_msg: Dict[str, Any] = {"role": "user", "content": user_input}
+                # Build metadata with "with" field for user messages
+                msg_metadata: Dict[str, Any] = {"with": ["user"]}
                 if metadata:
-                    user_msg["metadata"] = metadata
+                    msg_metadata.update(metadata)
+                user_msg["metadata"] = msg_metadata
                 persona.history_manager.add_message(user_msg, building_id, heard_by=None)
             except Exception:
                 LOGGER.exception("Failed to record user input to history")
@@ -61,13 +98,37 @@ class SEARuntime:
                 playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
         else:
             playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
-        result = self._run_playbook(playbook, persona, building_id, user_input, auto_mode=False, record_history=True)
+        result = self._run_playbook(
+            playbook, persona, building_id, user_input,
+            auto_mode=False, record_history=True, event_callback=event_callback,
+            cancellation_token=cancellation_token, pulse_type=pulse_type,
+        )
         return result
 
-    def run_meta_auto(self, persona, building_id: str, occupants: List[str]) -> None:
+    def run_meta_auto(
+        self,
+        persona,
+        building_id: str,
+        occupants: List[str],
+        cancellation_token: Optional[CancellationToken] = None,
+        pulse_type: str = "auto",
+    ) -> None:
         """Router -> subgraph -> think. For autonomous loop, no direct user output."""
+        # Check for cancellation before starting
+        if cancellation_token:
+            cancellation_token.raise_if_cancelled()
+        
+        # Store pulse_type in persona for tools to access
+        persona._current_pulse_type = pulse_type
+        
+        # Update last pulse time for get_situation_snapshot
+        persona._last_conscious_prompt_time_utc = datetime.now(dt_timezone.utc)
         playbook = self._choose_playbook(kind="auto", persona=persona, building_id=building_id)
-        self._run_playbook(playbook, persona, building_id, user_input=None, auto_mode=True, record_history=True)
+        self._run_playbook(
+            playbook, persona, building_id, user_input=None,
+            auto_mode=True, record_history=True,
+            cancellation_token=cancellation_token, pulse_type=pulse_type,
+        )
 
     # ---------------- core runner -----------------
     def _run_playbook(
@@ -79,7 +140,14 @@ class SEARuntime:
         auto_mode: bool,
         record_history: bool = True,
         parent_state: Optional[Dict[str, Any]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+        pulse_type: Optional[str] = None,
     ) -> List[str]:
+        # Check for cancellation at start
+        if cancellation_token:
+            cancellation_token.raise_if_cancelled()
+        
         # Generate or inherit pulse_id
         parent = parent_state or {}
         LOGGER.debug("[sea] _run_playbook called for %s, parent_state keys: %s", playbook.name, list(parent.keys()) if parent else "(none)")
@@ -88,6 +156,30 @@ class SEARuntime:
         else:
             pulse_id = str(uuid.uuid4())
 
+        # Build playbook chain for status display (e.g., "meta_user/exec > basic_chat/generate")
+        parent_chain = parent.get("_playbook_chain", "")
+        if parent_chain:
+            current_chain = f"{parent_chain} > {playbook.name}"
+        else:
+            current_chain = playbook.name
+
+        # Store chain in parent_state for sub-playbooks to inherit
+        parent["_playbook_chain"] = current_chain
+        
+        # Store cancellation token in parent_state for propagation
+        if cancellation_token:
+            parent["_cancellation_token"] = cancellation_token
+
+        # Wrap event_callback to include playbook chain in status events
+        def wrapped_event_callback(event: Dict[str, Any]) -> None:
+            if event_callback:
+                if event.get("type") == "status":
+                    # Replace playbook name with full chain
+                    node = event.get("node", "")
+                    event["content"] = f"{current_chain} / {node}"
+                    event["playbook_chain"] = current_chain
+                event_callback(event)
+
         # Update execution state: playbook started
         if hasattr(persona, "execution_state"):
             persona.execution_state["playbook"] = playbook.name
@@ -95,11 +187,22 @@ class SEARuntime:
             persona.execution_state["status"] = "running"
 
         # Prepare shared context (system prompt, history, inventories)
+        LOGGER.info("[sea][run-playbook] %s: calling _prepare_context with history_depth=%s, pulse_id=%s",
+                    playbook.name,
+                    playbook.context_requirements.history_depth if playbook.context_requirements else "None",
+                    pulse_id)
         base_messages = self._prepare_context(persona, building_id, user_input, playbook.context_requirements, pulse_id=pulse_id)
+        LOGGER.info("[sea][run-playbook] %s: _prepare_context returned %d messages", playbook.name, len(base_messages))
         conversation_msgs = list(base_messages)
 
-        # Execute playbook with LangGraph
-        compiled_ok = self._compile_with_langgraph(playbook, persona, building_id, user_input, auto_mode, conversation_msgs, pulse_id, parent_state=parent)
+        # Execute playbook with LangGraph (use wrapped callback)
+        compiled_ok = self._compile_with_langgraph(
+            playbook, persona, building_id, user_input, auto_mode,
+            conversation_msgs, pulse_id, parent_state=parent,
+            event_callback=wrapped_event_callback,
+            cancellation_token=cancellation_token,
+            pulse_type=pulse_type,
+        )
         if compiled_ok is None:
             # LangGraph compilation failed - this should not happen as all node types are now supported
             LOGGER.error("LangGraph compilation failed for playbook '%s'. This indicates a configuration or dependency issue.", playbook.name)
@@ -123,6 +226,9 @@ class SEARuntime:
         base_messages: List[Dict[str, Any]],
         pulse_id: str,
         parent_state: Optional[Dict[str, Any]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancellation_token: Optional[CancellationToken] = None,
+        pulse_type: Optional[str] = None,
     ) -> Optional[List[str]]:
         _lg_outputs: List[str] = []
         temperature = self._default_temperature(persona)
@@ -136,16 +242,15 @@ class SEARuntime:
 
         compiled = compile_playbook(
             playbook,
-            llm_node_factory=lambda node_def: self._lg_llm_node(node_def, persona, playbook),
-            tool_node_factory=lambda node_def: self._lg_tool_node(node_def, persona),
-            speak_node=lambda state: self._lg_speak_node(state, persona, building_id, _lg_outputs),
-            think_node=lambda state: self._lg_think_node(state, persona, _lg_outputs),
-            say_node_factory=lambda node_def: self._lg_say_node(node_def, persona, building_id, _lg_outputs),
-            memorize_node_factory=lambda node_def: self._lg_memorize_node(node_def, persona, playbook, _lg_outputs),
-            exec_node_factory=(lambda node_def: self._lg_exec_node(node_def, playbook, persona, building_id, auto_mode, _lg_outputs))
-            if playbook.name.startswith("meta_")
-            else None,
-            subplay_node_factory=lambda node_def: self._lg_subplay_node(node_def, persona, building_id, auto_mode, _lg_outputs),
+            llm_node_factory=lambda node_def: self._lg_llm_node(node_def, persona, playbook, event_callback),
+            tool_node_factory=lambda node_def: self._lg_tool_node(node_def, persona, playbook, event_callback),
+            speak_node=lambda state: self._lg_speak_node(state, persona, building_id, playbook, _lg_outputs, event_callback),
+            think_node=lambda state: self._lg_think_node(state, persona, playbook, _lg_outputs, event_callback),
+            say_node_factory=lambda node_def: self._lg_say_node(node_def, persona, building_id, playbook, _lg_outputs, event_callback),
+            memorize_node_factory=lambda node_def: self._lg_memorize_node(node_def, persona, playbook, _lg_outputs, event_callback),
+            exec_node_factory=lambda node_def: self._lg_exec_node(node_def, playbook, persona, building_id, auto_mode, _lg_outputs, event_callback),
+            subplay_node_factory=lambda node_def: self._lg_subplay_node(node_def, persona, building_id, playbook, auto_mode, _lg_outputs, event_callback),
+            set_node_factory=lambda node_def: self._lg_set_node(node_def, playbook, event_callback),
         )
         if not compiled:
             # Update execution state: compilation failed, reset to idle
@@ -183,11 +288,20 @@ class SEARuntime:
             "context_bundle": [],
             "context_bundle_text": "",
             "pulse_id": pulse_id,
+            "pulse_type": pulse_type,  # user/schedule/auto
+            "_cancellation_token": cancellation_token,  # For node-level cancellation checks
             **inherited_vars,  # Add inherited variables from input_schema
         }
 
         # Execute compiled playbook
+        # Set recursion limit high enough for agentic loops (default is 25, too low for multi-step agents)
+        langgraph_config = {"recursion_limit": 100}
+
         try:
+            # Check cancellation before starting execution
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
+            
             # Check if we're inside an existing event loop
             try:
                 running_loop = asyncio.get_running_loop()
@@ -198,11 +312,14 @@ class SEARuntime:
                 # We're inside an existing loop (e.g., Gradio), use run_in_executor
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, compiled(initial_state))
+                    future = executor.submit(asyncio.run, compiled(initial_state, langgraph_config))
                     final_state = future.result()
             else:
                 # No running loop, use asyncio.run directly
-                final_state = asyncio.run(compiled(initial_state))
+                final_state = asyncio.run(compiled(initial_state, langgraph_config))
+        except ExecutionCancelledException:
+            # Re-raise cancellation exceptions
+            raise
         except Exception:
             LOGGER.exception("SEA LangGraph execution failed")
             # Update execution state: execution failed, reset to idle
@@ -228,16 +345,31 @@ class SEARuntime:
         # speak/think nodes already emitted; return collected texts for UI consistency
         return list(_lg_outputs)
 
-    def _lg_llm_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema):
+    def _lg_llm_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         async def node(state: dict):
+            # Check for cancellation at start of node
+            cancellation_token = state.get("_cancellation_token")
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
+            
+            # Send status event for node execution
+            node_id = getattr(node_def, "id", "llm")
+            if event_callback:
+                event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             # Merge state into variables for template formatting
+            if playbook.name == 'sub_router_user':
+                action_dbg = getattr(node_def, 'action', None)
+                LOGGER.debug('[sea][router-debug] action=%s model_type=%s avail_len=%s',
+                             (action_dbg[:120] + '...') if isinstance(action_dbg, str) and len(action_dbg) > 120 else action_dbg,
+                             getattr(node_def, 'model_type', None),
+                             len(str(state.get('available_playbooks'))) if state.get('available_playbooks') is not None else None)
             variables = {
                 "input": state.get("inputs", {}).get("input", ""),
                 "last": state.get("last", ""),
                 "persona_id": getattr(persona, "persona_id", None),
                 "persona_name": getattr(persona, "persona_name", None),
                 "context_bundle_text": state.get("context_bundle_text", ""),
-                **{k: v for k, v in state.items() if k not in ["messages", "inputs", "outputs", "persona_obj"]},  # Include all other state variables
+                **{k: v for k, v in state.items() if k not in ["messages", "inputs", "outputs", "persona_obj", "_cancellation_token"]},  # Include all other state variables
             }
             text = ""
             schema_consumed = False
@@ -379,15 +511,14 @@ class SEARuntime:
                     self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                     schema_consumed = self._process_structured_output(node_def, text, state)
             except Exception as exc:
-                LOGGER.error("SEA LangGraph LLM failed: %s", exc)
+                LOGGER.error("SEA LangGraph LLM failed: %s: %s", type(exc).__name__, exc)
                 text = "(error in llm node)"
                 state["tool_called"] = False
             state["last"] = text
             state["messages"] = messages + [{"role": "assistant", "content": text}]
 
-            # meta router handling
-            if playbook.name.startswith("meta_") and getattr(node_def, "id", "") == "router" and not schema_consumed:
-                self._update_router_selection(state, text)
+            # Note: output_mapping in node definition handles state variable assignment
+            # No special handling needed here anymore
             return state
 
         return node
@@ -449,6 +580,7 @@ class SEARuntime:
             LOGGER.info("[sea] Using normal llm_client")
             base_client = persona.llm_client
             base_model = getattr(persona, "model", "unknown")
+            LOGGER.info("[sea] persona.model=%s, llm_client type=%s", base_model, type(base_client).__name__)
 
         # If structured output is needed, check if the selected model supports it
         if needs_structured_output:
@@ -605,10 +737,38 @@ class SEARuntime:
             return False
         key = getattr(node_def, "output_key", None) or getattr(node_def, "id", "") or "node"
         self._store_structured_result(state, key, parsed)
-        if getattr(node_def, "id", "") == "router":
-            self._update_router_selection(state, text, parsed)
-            self._append_router_function_call(state, parsed, text)
+
+        # Apply output_mapping if defined
+        output_mapping = getattr(node_def, "output_mapping", None)
+        if output_mapping:
+            self._apply_output_mapping(state, key, output_mapping)
+
         return True
+
+    def _apply_output_mapping(self, state: Dict[str, Any], output_key: str, mapping: Dict[str, str]) -> None:
+        """Apply output_mapping to copy structured output fields to state variables.
+
+        Args:
+            state: Current state dict
+            output_key: The key where structured output was stored (e.g., "router")
+            mapping: Dict mapping source paths to target state keys
+                     e.g., {"router.playbook": "selected_playbook"}
+        """
+        for source_path, target_key in mapping.items():
+            # Source path can be either:
+            # 1. Absolute path like "router.playbook" (starts with output_key)
+            # 2. Relative path like "playbook" (within the output_key namespace)
+            if source_path.startswith(f"{output_key}."):
+                # Already absolute path
+                full_path = source_path
+            else:
+                # Relative path, prepend output_key
+                full_path = f"{output_key}.{source_path}"
+
+            value = state.get(full_path)
+            if value is not None:
+                state[target_key] = value
+                LOGGER.debug("[sea] output_mapping: %s -> %s = %s", full_path, target_key, str(value)[:100])
 
     def _store_structured_result(self, state: Dict[str, Any], key: str, data: Any) -> None:
         state[key] = data
@@ -655,9 +815,30 @@ class SEARuntime:
         playbook_value = selection.get("playbook") if isinstance(selection, dict) else None
         if not playbook_value:
             playbook_value = selection.get("playbook_name") if isinstance(selection, dict) else None
+
+        # Parse available playbooks to validate selection
+        available_names: List[str] = []
+        try:
+            avail_raw = state.get("available_playbooks")
+            if isinstance(avail_raw, str):
+                avail_list = json.loads(avail_raw)
+            else:
+                avail_list = avail_raw
+            if isinstance(avail_list, list):
+                for pb in avail_list:
+                    if isinstance(pb, dict) and pb.get("name"):
+                        available_names.append(pb.get("name"))
+        except Exception:
+            pass
+
         if not playbook_value:
             stripped = str(text).strip()
             playbook_value = stripped.split()[0] if stripped else "basic_chat"
+
+        # Fallback to basic_chat when selection is not in available list
+        if available_names and playbook_value not in available_names:
+            playbook_value = "basic_chat"
+
         state["selected_playbook"] = playbook_value or "basic_chat"
         args_obj = selection.get("args") if isinstance(selection, dict) else None
         if isinstance(args_obj, dict):
@@ -665,7 +846,7 @@ class SEARuntime:
         else:
             state["selected_args"] = {"input": state.get("input")}
 
-    def _lg_tool_node(self, node_def: Any, persona: Any):
+    def _lg_tool_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         from tools import TOOL_REGISTRY
         from tools.context import persona_context
 
@@ -675,6 +856,15 @@ class SEARuntime:
         output_keys = getattr(node_def, "output_keys", None)
 
         async def node(state: dict):
+            # Check for cancellation at start of node
+            cancellation_token = state.get("_cancellation_token")
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
+            
+            # Send status event for node execution
+            node_id = getattr(node_def, "id", "tool")
+            if event_callback:
+                event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             tool_func = TOOL_REGISTRY.get(tool_name)
             persona_obj = state.get("persona_obj") or persona
             try:
@@ -687,10 +877,14 @@ class SEARuntime:
                 # Supports nested keys via dot notation (e.g., "tool_call.args.playbook_name")
                 kwargs = {}
                 if args_input:
-                    for arg_name, state_key in args_input.items():
-                        value = state.get(state_key, "")
+                    for arg_name, source in args_input.items():
+                        if isinstance(source, str):
+                            value = state.get(source, "")
+                            LOGGER.debug("[sea][tool] Mapping arg '%s' <- state['%s'] = %s", arg_name, source, value)
+                        else:
+                            value = source
+                            LOGGER.debug("[sea][tool] Using literal arg '%s' = %s", arg_name, value)
                         kwargs[arg_name] = value
-                        LOGGER.debug("[sea][tool] Mapping arg '%s' <- state['%s'] = %s", arg_name, state_key, value)
 
                 # Execute tool with persona context
                 if persona_id and persona_dir:
@@ -732,12 +926,26 @@ class SEARuntime:
         building_id: str,
         auto_mode: bool,
         outputs: Optional[List[str]] = None,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
+        # Get source variable names from node definition (with defaults for backward compatibility)
+        playbook_source = getattr(node_def, "playbook_source", "selected_playbook") or "selected_playbook"
+        args_source = getattr(node_def, "args_source", "selected_args") or "selected_args"
+
         async def node(state: dict):
-            sub_name = state.get("selected_playbook") or state.get("last") or "basic_chat"
+            # Check for cancellation at start of node
+            cancellation_token = state.get("_cancellation_token")
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
+            
+            # Send status event for node execution
+            node_id = getattr(node_def, "id", "exec")
+            if event_callback:
+                event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
+            sub_name = state.get(playbook_source) or state.get("last") or "basic_chat"
             sub_pb = self._load_playbook_for(str(sub_name).strip(), persona, building_id) or self._basic_chat_playbook()
             sub_input = None
-            args = state.get("selected_args") or {}
+            args = state.get(args_source) or {}
             if isinstance(args, dict):
                 sub_input = args.get("input") or args.get("query")
             if not sub_input:
@@ -745,7 +953,7 @@ class SEARuntime:
 
             try:
                 sub_outputs = await asyncio.to_thread(
-                    self._run_playbook, sub_pb, persona, building_id, sub_input, auto_mode, True, state
+                    self._run_playbook, sub_pb, persona, building_id, sub_input, auto_mode, True, state, event_callback
                 )
             except Exception as exc:
                 LOGGER.exception("SEA LangGraph exec sub-playbook failed")
@@ -753,6 +961,12 @@ class SEARuntime:
                 if outputs is not None:
                     outputs.append(state["last"])
                 return state
+
+            # Track executed playbook in executed_playbooks list
+            executed_list = state.get("executed_playbooks")
+            if isinstance(executed_list, list):
+                executed_list.append(str(sub_name).strip())
+                LOGGER.debug("[sea][exec] Added '%s' to executed_playbooks: %s", sub_name, executed_list)
 
             ingested = self._ingest_context_from_subplaybook(state, sub_name, sub_outputs)
             if ingested:
@@ -764,17 +978,32 @@ class SEARuntime:
         return node
 
 
-    def _lg_memorize_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, outputs: Optional[List[str]] = None):
+    def _lg_memorize_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         async def node(state: dict):
+            # Send status event for node execution
+            node_id = getattr(node_def, "id", "memorize")
+            if event_callback:
+                event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             # Include all state variables for template expansion (e.g., structured output like document_data.*)
             variables = dict(state)
+            # Flatten nested dicts/lists for dot notation access (e.g., finalize_output.content)
+            for key, value in list(state.items()):
+                if isinstance(value, dict):
+                    flat = self._flatten_dict(value)
+                    for path, val in flat.items():
+                        variables[f"{key}.{path}"] = val
             variables.update({
                 "input": state.get("inputs", {}).get("input", ""),
                 "last": state.get("last", ""),
                 "persona_id": getattr(persona, "persona_id", None),
                 "persona_name": getattr(persona, "persona_name", None),
             })
-            memo_text = _format(getattr(node_def, "action", None) or "{last}", variables)
+            action_template = getattr(node_def, "action", None) or "{last}"
+            LOGGER.debug("[memorize] action_template=%s", action_template)
+            LOGGER.debug("[memorize] available variables containing 'finalize': %s", 
+                        {k: v for k, v in variables.items() if 'finalize' in str(k).lower()})
+            memo_text = _format(action_template, variables)
+            LOGGER.debug("[memorize] memo_text=%s", memo_text[:100] if memo_text else None)
             role = getattr(node_def, "role", "assistant") or "assistant"
             tags = getattr(node_def, "tags", None)
             pulse_id = state.get("pulse_id")
@@ -788,16 +1017,25 @@ class SEARuntime:
 
         return node
 
-    def _lg_speak_node(self, state: dict, persona: Any, building_id: str, outputs: Optional[List[str]] = None):
+    def _lg_speak_node(self, state: dict, persona: Any, building_id: str, playbook: PlaybookSchema, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
+        # Send status event for node execution
+        if event_callback:
+            event_callback({"type": "status", "content": f"{playbook.name} / speak", "playbook": playbook.name, "node": "speak"})
         text = state.get("last") or ""
         pulse_id = state.get("pulse_id")
         self._emit_speak(persona, building_id, text, pulse_id=pulse_id)
         if outputs is not None:
             outputs.append(text)
+        if event_callback:
+            event_callback({"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None)})
         return state
 
-    def _lg_say_node(self, node_def: Any, persona: Any, building_id: str, outputs: Optional[List[str]] = None):
+    def _lg_say_node(self, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         async def node(state: dict):
+            # Send status event for node execution
+            node_id = getattr(node_def, "id", "say")
+            if event_callback:
+                event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             text = state.get("last") or ""
             pulse_id = state.get("pulse_id")
             metadata_key = getattr(node_def, "metadata_key", None)
@@ -805,19 +1043,35 @@ class SEARuntime:
             self._emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=metadata)
             if outputs is not None:
                 outputs.append(text)
+            if event_callback:
+                event_callback({"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None), "metadata": metadata})
             return state
         return node
 
-    def _lg_think_node(self, state: dict, persona: Any, outputs: Optional[List[str]] = None):
+    def _lg_think_node(self, state: dict, persona: Any, playbook: PlaybookSchema, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
+        # Send status event for node execution
+        if event_callback:
+            event_callback({"type": "status", "content": f"{playbook.name} / think", "playbook": playbook.name, "node": "think"})
         text = state.get("last") or ""
         pulse_id = state.get("pulse_id") or str(uuid.uuid4())
         self._emit_think(persona, pulse_id, text)
         if outputs is not None:
             outputs.append(text)
+        if event_callback:
+            event_callback({"type": "think", "content": text, "persona_id": getattr(persona, "persona_id", None)})
         return state
 
-    def _lg_subplay_node(self, node_def: Any, persona: Any, building_id: str, auto_mode: bool, outputs: Optional[List[str]] = None):
+    def _lg_subplay_node(self, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, auto_mode: bool, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         async def node(state: dict):
+            # Check for cancellation at start of node
+            cancellation_token = state.get("_cancellation_token")
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
+            
+            # Send status event for node execution
+            node_id = getattr(node_def, "id", "subplay")
+            if event_callback:
+                event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             # Get subplaybook name
             sub_name = getattr(node_def, "playbook", None) or getattr(node_def, "action", None)
             if not sub_name:
@@ -842,7 +1096,15 @@ class SEARuntime:
             sub_input = _format(template, variables)
 
             # Execute subplaybook
-            sub_outputs = self._run_playbook(sub_pb, persona, building_id, sub_input, auto_mode, record_history=True, parent_state=state)
+            # Note: We call _run_playbook directly (not via asyncio.to_thread) to keep
+            # SQLite connections on the same thread. _run_playbook handles its own
+            # async/sync boundary internally via ThreadPoolExecutor.
+            try:
+                sub_outputs = self._run_playbook(sub_pb, persona, building_id, sub_input, auto_mode, True, state, event_callback)
+            except Exception as exc:
+                LOGGER.exception("[sea][subplay] Failed to execute subplaybook '%s'", sub_name)
+                state["last"] = f"Sub-playbook error: {exc}"
+                return state
             last_text = sub_outputs[-1] if sub_outputs else ""
             state["last"] = last_text
 
@@ -850,14 +1112,107 @@ class SEARuntime:
             if getattr(node_def, "propagate_output", False) and sub_outputs and outputs is not None:
                 outputs.extend(sub_outputs)
 
-            # Special handling for router nodes
-            if getattr(node_def, "id", "") == "router":
-                parsed = self._extract_structured_json(last_text)
-                if parsed:
-                    self._update_router_selection(state, last_text, parsed)
+            # Note: State variables are propagated via output_schema in _compile_with_langgraph
+            # No special handling needed here anymore
 
             return state
         return node
+
+    def _lg_set_node(self, node_def: Any, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
+        """Create a node that sets/modifies state variables."""
+        assignments = getattr(node_def, "assignments", {}) or {}
+
+        async def node(state: dict):
+            # Send status event for node execution
+            node_id = getattr(node_def, "id", "set")
+            if event_callback:
+                event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
+            for key, value_template in assignments.items():
+                resolved_value = self._resolve_set_value(value_template, state)
+                state[key] = resolved_value
+                LOGGER.debug("[sea][set] %s = %s", key, resolved_value)
+
+            # Special handling: if executed_playbooks_init is set, initialize executed_playbooks as empty list
+            if state.get("executed_playbooks_init") and "executed_playbooks" not in state:
+                state["executed_playbooks"] = []
+                LOGGER.debug("[sea][set] Initialized executed_playbooks = []")
+
+            return state
+        return node
+
+    def _resolve_set_value(self, value_template: Any, state: Dict[str, Any]) -> Any:
+        """Resolve a value template for SET node assignments.
+
+        Handles:
+        - Literal values (int, float, bool, None): returned as-is
+        - Template strings with {var} placeholders: expanded with state values
+        - Arithmetic expressions like "{count} + 1": evaluated safely
+        """
+        # Literal values
+        if isinstance(value_template, (int, float, bool, type(None))):
+            return value_template
+
+        if not isinstance(value_template, str):
+            return value_template
+
+        # Check if it looks like an arithmetic expression
+        # Pattern: contains operators and {var} placeholders
+        if any(op in value_template for op in ["+", "-", "*", "/", "%"]):
+            return self._eval_arithmetic_expression(value_template, state)
+
+        # Simple template expansion
+        try:
+            return _format(value_template, state)
+        except Exception:
+            return value_template
+
+    def _eval_arithmetic_expression(self, expr: str, state: Dict[str, Any]) -> Any:
+        """Safely evaluate arithmetic expressions with state variable substitution.
+
+        Examples:
+        - "{count} + 1" -> state['count'] + 1
+        - "{a} * {b}" -> state['a'] * state['b']
+        """
+        import ast
+
+        # Expand {var} placeholders with state values
+        expanded = expr
+        placeholder_pattern = re.compile(r"\{(\w+)\}")
+        for match in placeholder_pattern.finditer(expr):
+            var_name = match.group(1)
+            var_value = state.get(var_name, 0)
+            # Convert to number if possible
+            try:
+                if isinstance(var_value, str):
+                    var_value = float(var_value) if "." in var_value else int(var_value)
+            except (ValueError, TypeError):
+                var_value = 0
+            expanded = expanded.replace(match.group(0), str(var_value))
+
+        # Safely evaluate the arithmetic expression
+        try:
+            # Parse and validate the expression
+            tree = ast.parse(expanded, mode='eval')
+
+            # Only allow safe operations
+            allowed_node_types = (
+                ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant, ast.Num,
+                # Operators (these appear as children of BinOp/UnaryOp)
+                ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.FloorDiv,
+                ast.UAdd, ast.USub,
+            )
+            for node in ast.walk(tree):
+                if not isinstance(node, allowed_node_types):
+                    raise ValueError(f"Unsupported node type: {type(node).__name__}")
+
+            result = eval(compile(tree, '<string>', 'eval'))
+            # Return int if result is a whole number
+            if isinstance(result, float) and result.is_integer():
+                return int(result)
+            return result
+        except Exception as exc:
+            LOGGER.warning("[sea][set] Failed to evaluate expression '%s': %s", expr, exc)
+            return 0
 
     # ---------------- context helpers -----------------
     def _append_router_function_call(
@@ -1003,9 +1358,23 @@ class SEARuntime:
     # ---------------- helpers -----------------
     def _emit_speak(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, record_history: bool = True) -> None:
         msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
-        # Add pulse:uuid tag to metadata
+        # Build metadata with tags and conversation partners
+        metadata: Dict[str, Any] = {"tags": ["conversation"]}
         if pulse_id:
-            msg["metadata"] = {"tags": ["conversation", f"pulse:{pulse_id}"]}
+            metadata["tags"].append(f"pulse:{pulse_id}")
+        # Add conversation partners to "with" field
+        partners = []
+        occupants = self.manager.occupants.get(building_id, [])
+        for oid in occupants:
+            if oid != persona.persona_id:
+                partners.append(oid)
+        # Add user if online/away
+        presence = getattr(self.manager, "user_presence_status", "offline")
+        if presence in ("online", "away"):
+            partners.append("user")
+        if partners:
+            metadata["with"] = partners
+        msg["metadata"] = metadata
         if record_history:
             try:
                 persona.history_manager.add_message(msg, building_id, heard_by=None)
@@ -1028,6 +1397,17 @@ class SEARuntime:
                     msg_metadata.setdefault("tags", []).extend(extra_tags)
                 else:
                     msg_metadata[key] = value
+        # Add conversation partners to "with" field
+        partners = []
+        occupants = self.manager.occupants.get(building_id, [])
+        for oid in occupants:
+            if oid != persona.persona_id:
+                partners.append(oid)
+        presence = getattr(self.manager, "user_presence_status", "offline")
+        if presence in ("online", "away"):
+            partners.append("user")
+        if partners:
+            msg_metadata["with"] = partners
         if msg_metadata:
             msg["metadata"] = msg_metadata
         try:
@@ -1158,11 +1538,12 @@ class SEARuntime:
                     from tools import TOOL_REGISTRY
                     list_playbooks_func = TOOL_REGISTRY.get("list_available_playbooks")
                     if list_playbooks_func:
-                        # Get available playbooks JSON
-                        playbooks_json, _, _ = list_playbooks_func(
+                        # Get available playbooks JSON (tool returns string; accept old tuple form)
+                        playbooks_raw = list_playbooks_func(
                             persona_id=getattr(persona, "persona_id", None),
                             building_id=building_id
                         )
+                        playbooks_json = playbooks_raw[0] if isinstance(playbooks_raw, tuple) else playbooks_raw
                         if playbooks_json:
                             import json
                             playbooks_list = json.loads(playbooks_json)
@@ -1172,9 +1553,39 @@ class SEARuntime:
                 except Exception as exc:
                     LOGGER.debug("Failed to add available playbooks section: %s", exc)
 
+            # 5. "## 現在の状況" section (working memory)
+            if reqs.working_memory:
+                try:
+                    sai_mem = getattr(persona, "sai_memory", None)
+                    if sai_mem and sai_mem.is_ready():
+                        wm_data = sai_mem.load_working_memory()
+                        if wm_data:
+                            import json as json_mod
+                            wm_text = json_mod.dumps(wm_data, ensure_ascii=False, indent=2)
+                            system_sections.append(f"## 現在の状況\n```json\n{wm_text}\n```")
+                            LOGGER.debug("[sea][prepare-context] Added working_memory section")
+                except Exception as exc:
+                    LOGGER.debug("Failed to add working_memory section: %s", exc)
+
             system_text = "\n\n---\n\n".join([s for s in system_sections if s])
             if system_text:
                 messages.append({"role": "system", "content": system_text})
+
+        # ---- visual context (Building / Persona images) ----
+        # Inserted right after system prompt but before conversation history
+        if reqs.visual_context:
+            try:
+                from tools.defs.get_visual_context import get_visual_context
+                from tools.context import persona_context, get_active_manager
+                persona_id = getattr(persona, "persona_id", None)
+                persona_dir = getattr(persona, "persona_dir", None)
+                with persona_context(persona_id, persona_dir, self.manager):
+                    visual_messages = get_visual_context(building_id=building_id)
+                if visual_messages:
+                    messages.extend(visual_messages)
+                    LOGGER.debug("[sea][prepare-context] Added %d visual context messages", len(visual_messages))
+            except Exception as exc:
+                LOGGER.debug("[sea][prepare-context] Failed to get visual context: %s", exc)
 
         # ---- history ----
         history_depth = reqs.history_depth
@@ -1191,15 +1602,39 @@ class SEARuntime:
                         except (ValueError, TypeError):
                             char_limit = 2000  # fallback
 
-                    # Filter by conversation tag or current pulse_id
-                    recent = history_mgr.get_recent_history(
-                        char_limit,
-                        required_tags=["conversation"],
-                        pulse_id=pulse_id,
-                    )
+                    # Determine which tags to include
+                    required_tags = ["conversation"]
+                    if reqs.include_internal:
+                        required_tags.append("internal")
+
+                    LOGGER.debug("[sea][prepare-context] Fetching history: char_limit=%d, pulse_id=%s, balanced=%s, tags=%s", char_limit, pulse_id, reqs.history_balanced, required_tags)
+
+                    if reqs.history_balanced:
+                        # Get conversation partners for balanced retrieval
+                        participant_ids = ["user"]
+                        occupants = self.manager.occupants.get(building_id, [])
+                        persona_id = getattr(persona, "persona_id", None)
+                        for oid in occupants:
+                            if oid != persona_id:
+                                participant_ids.append(oid)
+                        LOGGER.debug("[sea][prepare-context] Balancing across: %s", participant_ids)
+                        recent = history_mgr.get_recent_history_balanced(
+                            char_limit,
+                            participant_ids,
+                            required_tags=required_tags,
+                            pulse_id=pulse_id,
+                        )
+                    else:
+                        # Filter by required tags or current pulse_id
+                        recent = history_mgr.get_recent_history(
+                            char_limit,
+                            required_tags=required_tags,
+                            pulse_id=pulse_id,
+                        )
+                    LOGGER.debug("[sea][prepare-context] Got %d history messages", len(recent))
                     messages.extend(recent)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    LOGGER.exception("[sea][prepare-context] Failed to get history: %s", exc)
 
         return messages
 

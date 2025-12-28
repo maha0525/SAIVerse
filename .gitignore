@@ -39,9 +39,22 @@ __*.*
 !ui/__init__.py
 !ui/handlers/__init__.py
 !sea/__init__.py
+!sai_memory/memopedia/__init__.py
 tasks.md
 scripts/.searxng-src/
 scripts/.searxng-venv/
 scripts/searxng_settings.yml
 scripts/limiter.toml
 *.patch
+
+# Frontend (Next.js)
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.DS_Store
+frontend/*.log
+*.tsbuildinfo
+
+# Root dependencies
+node_modules/

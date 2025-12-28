@@ -1,3 +1,4 @@
+import logging
 from dotenv import load_dotenv
 
 from llm_clients.gemini_utils import build_gemini_clients
@@ -7,6 +8,8 @@ from tools.defs import ToolSchema, ToolResult
 from media_utils import store_image_bytes
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 def generate_image(prompt: str) -> tuple[str, ToolResult, str | None, dict | None]:
@@ -25,6 +28,24 @@ def generate_image(prompt: str) -> tuple[str, ToolResult, str | None, dict | Non
             response_modalities=["TEXT", "IMAGE"]  # ← TEXT を必ず含める
         )
     )
+
+    # Debug logging for response inspection
+    candidates_count = len(resp.candidates) if resp.candidates else 0
+    logger.info(f"[image_generator] Response: candidates={candidates_count}")
+    if hasattr(resp, 'prompt_feedback') and resp.prompt_feedback:
+        pf = resp.prompt_feedback
+        logger.info(f"[image_generator] prompt_feedback: block_reason={getattr(pf, 'block_reason', None)}, safety_ratings={getattr(pf, 'safety_ratings', None)}")
+    if resp.candidates:
+        for i, cand in enumerate(resp.candidates):
+            finish_reason = getattr(cand, 'finish_reason', None)
+            parts_count = len(cand.content.parts) if cand.content and cand.content.parts else 0
+            logger.info(f"[image_generator] Candidate[{i}]: finish_reason={finish_reason}, parts={parts_count}")
+            if cand.content and cand.content.parts:
+                for j, part in enumerate(cand.content.parts):
+                    has_inline = part.inline_data is not None
+                    has_text = part.text is not None
+                    logger.info(f"[image_generator] Part[{i}][{j}]: has_inline_data={has_inline}, has_text={has_text}")
+
     if not resp.candidates:
         text = f"こんにちは、お絵描き妖精だよ！ごめん、失敗しちゃった……。\n\n使ったプロンプトはこれだよ：\n{prompt}\n\n次は頑張るから、また呼んでね！"
         return text, ToolResult(None), None, None

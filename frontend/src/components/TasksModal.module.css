@@ -1,0 +1,291 @@
+.overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.75);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+    backdrop-filter: blur(4px);
+}
+
+.modal {
+    background-color: #1a1b1e;
+    width: 95%;
+    max-width: 1200px;
+    height: 90vh;
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    border: 1px solid #333;
+    overflow: hidden;
+    color: #e0e0e0;
+}
+
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid #333;
+    background-color: #25262b;
+}
+
+.title {
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin: 0;
+}
+
+.closeButton {
+    background: none;
+    border: none;
+    color: #888;
+    cursor: pointer;
+    padding: 4px;
+}
+
+.container {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+.sidebar {
+    width: 300px;
+    border-right: 1px solid #333;
+    display: flex;
+    flex-direction: column;
+    background-color: #141517;
+}
+
+.sidebarHeader {
+    padding: 1rem;
+    border-bottom: 1px solid #333;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.taskList {
+    flex: 1;
+    overflow-y: auto;
+}
+
+.taskItem {
+    padding: 1rem;
+    border-bottom: 1px solid #2c2e33;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.taskItem:hover {
+    background-color: #25262b;
+}
+
+.taskItem.selected {
+    background-color: #1c7ed6;
+    color: #fff;
+}
+
+.taskItemTitle {
+    font-weight: 500;
+    margin-bottom: 0.25rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.taskItemMeta {
+    font-size: 0.8rem;
+    color: #aaa;
+    display: flex;
+    justify-content: space-between;
+}
+
+.taskItem.selected .taskItemMeta {
+    color: #e3f2fd;
+}
+
+.mainArea {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background-color: #1a1b1e;
+}
+
+.detailsContainer {
+    padding: 1.5rem;
+    overflow-y: auto;
+    flex: 1;
+}
+
+.detailsHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 1.5rem;
+}
+
+.detailsTitle {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin: 0 0 0.5rem 0;
+}
+
+.detailsMeta {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.9rem;
+    color: #aaa;
+}
+
+.statusBadge {
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.status_active {
+    background-color: #3b5bdb;
+    color: #fff;
+}
+
+.status_pending {
+    background-color: #fab005;
+    color: #000;
+}
+
+.status_completed {
+    background-color: #40c057;
+    color: #fff;
+}
+
+.status_failed {
+    background-color: #fa5252;
+    color: #fff;
+}
+
+.section {
+    margin-bottom: 2rem;
+}
+
+.sectionTitle {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #333;
+    color: #d0ebff;
+}
+
+.stepList {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.stepItem {
+    padding: 0.75rem;
+    background-color: #25262b;
+    border-radius: 6px;
+    border: 1px solid #333;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.stepContent {
+    flex: 1;
+}
+
+.stepTitle {
+    font-weight: 500;
+}
+
+.stepDesc {
+    font-size: 0.85rem;
+    color: #888;
+}
+
+.historyList {
+    font-family: monospace;
+    font-size: 0.85rem;
+    background-color: #101113;
+    padding: 1rem;
+    border-radius: 6px;
+    border: 1px solid #333;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.historyItem {
+    margin-bottom: 0.5rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #2c2e33;
+}
+
+.historyMeta {
+    color: #555;
+    margin-bottom: 0.25rem;
+}
+
+.historyEvent {
+    color: #4dabf7;
+    font-weight: bold;
+}
+
+.createUi {
+    padding: 1.5rem;
+}
+
+.formGroup {
+    margin-bottom: 1rem;
+}
+
+.label {
+    display: block;
+    margin-bottom: 0.5rem;
+    color: #adb5bd;
+}
+
+.input,
+.textarea,
+.select {
+    width: 100%;
+    padding: 0.5rem;
+    background-color: #25262b;
+    border: 1px solid #444;
+    border-radius: 4px;
+    color: #fff;
+}
+
+.textarea {
+    min-height: 100px;
+    font-family: inherit;
+}
+
+.createBtn {
+    background-color: #1c7ed6;
+    color: white;
+    padding: 0.75rem 1.5rem;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.emptyState {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100%;
+    color: #666;
+}
