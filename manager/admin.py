@@ -25,7 +25,8 @@ from manager.blueprints import BlueprintMixin
 from manager.history import HistoryMixin
 from manager.persona import PersonaMixin
 from manager.state import CoreState
-
+from scripts.import_playbook import infer_scope_from_path
+from tools.defs.save_playbook import save_playbook
 
 class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
     """Administrative operations for world editing and CRUD."""
@@ -349,6 +350,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         capacity: int,
         system_instruction: str,
         city_id: int,
+        building_id: Optional[str] = None,
     ) -> str:
         db = self.SessionLocal()
         try:
@@ -358,10 +360,16 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 return f"Error: A building named '{name}' already exists in that city."
 
             city = db.query(CityModel).filter_by(CITYID=city_id).first()
-            building_id = f"{name.lower().replace(' ', '_')}_{city.CITYNAME}"
+            
+            # Use custom ID if provided, otherwise generate
+            if building_id and building_id.strip():
+                building_id = building_id.strip()
+            else:
+                building_id = f"{name.lower().replace(' ', '_')}_{city.CITYNAME}"
+            
             if db.query(BuildingModel).filter_by(BUILDINGID=building_id).first():
                 return (
-                    f"Error: A building with the generated ID '{building_id}' "
+                    f"Error: A building with the ID '{building_id}' "
                     "already exists."
                 )
 
@@ -375,9 +383,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             )
             db.add(new_building)
             db.commit()
-            logging.info("Created new building '%s' in city %s.", name, city_id)
+            logging.info("Created new building '%s' (ID: %s) in city %s.", name, building_id, city_id)
             return (
-                f"Building '{name}' created successfully. "
+                f"Building '{name}' (ID: {building_id}) created successfully. "
                 "A restart is required for it to be usable."
             )
         except Exception as exc:
@@ -430,6 +438,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         city_id: int,
         tool_ids: List[int],
         interval: int,
+        image_path: Optional[str] = None,
     ) -> str:
         db = self.SessionLocal()
         try:
@@ -454,6 +463,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             building.SYSTEM_INSTRUCTION = system_instruction
             building.AUTO_INTERVAL_SEC = interval
             building.CITYID = city_id
+            # Update image path if provided (allow clearing by passing empty string)
+            if image_path is not None:
+                building.IMAGE_PATH = image_path.strip() if image_path.strip() else None
 
             db.query(BuildingToolLink).filter_by(BUILDINGID=building_id).delete(
                 synchronize_session=False
@@ -547,6 +559,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         owner_kind: str,
         owner_id: Optional[str],
         state_json: Optional[str],
+        file_path: Optional[str] = None,
     ) -> str:
         normalized_kind = (owner_kind or "world").strip().lower()
         owner_id = (owner_id or "").strip()
@@ -574,6 +587,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 TYPE=item_type or "object",
                 DESCRIPTION=description or "",
                 STATE_JSON=state_payload,
+                FILE_PATH=(file_path or "").strip() or None,
             )
             db.add(new_item)
             if normalized_kind != "world":
@@ -721,6 +735,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "SYSTEMPROMPT": ai.SYSTEMPROMPT,
                 "DESCRIPTION": ai.DESCRIPTION,
                 "AVATAR_IMAGE": ai.AVATAR_IMAGE,
+                "APPEARANCE_IMAGE_PATH": ai.APPEARANCE_IMAGE_PATH,
                 "IS_DISPATCHED": ai.IS_DISPATCHED,
                 "DEFAULT_MODEL": ai.DEFAULT_MODEL,
                 "LIGHTWEIGHT_MODEL": ai.LIGHTWEIGHT_MODEL,
@@ -755,6 +770,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         interaction_mode: str,
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
+        appearance_image_path: Optional[str] = None,
     ) -> str:
         db = self.SessionLocal()
         try:
@@ -850,6 +866,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             ai.DEFAULT_MODEL = default_model or None
             ai.LIGHTWEIGHT_MODEL = lightweight_model or None
             ai.AVATAR_IMAGE = avatar_value
+            # Update appearance image path if provided
+            if appearance_image_path is not None:
+                ai.APPEARANCE_IMAGE_PATH = appearance_image_path.strip() if appearance_image_path.strip() else None
             db.commit()
 
             if ai_id in self.personas:
@@ -1131,6 +1150,84 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             return f"Error: Failed to delete playbook. {exc}"
         finally:
             db.close()
+
+    def import_playbook_from_file(self, file_path: str) -> str:
+        """Import a playbook JSON file and save/update it in the database."""
+        try:
+            path = Path(file_path)
+            if not path.exists():
+                return f"Error: File not found: {file_path}"
+            if path.is_dir():
+                return "Error: Please select a JSON file, not a directory."
+
+            data = json.loads(path.read_text(encoding="utf-8"))
+            scope, persona_id, building_id = infer_scope_from_path(path)
+            name = data.get("name")
+            if not name:
+                return f"Error: Playbook name is missing in {path.name}."
+            description = data.get("description", "")
+
+            save_playbook(
+                name=name,
+                description=description,
+                scope=scope,
+                created_by_persona_id=persona_id,
+                building_id=building_id,
+                playbook_json=json.dumps(data, ensure_ascii=False),
+                router_callable=None,
+                user_selectable=None,
+            )
+            return f"Success: Imported playbook '{name}' (scope={scope})."
+        except Exception as exc:
+            logging.error("Failed to import playbook from %s: %s", file_path, exc, exc_info=True)
+            return f"Error: Failed to import playbook. {exc}"
+
+    def reimport_all_playbooks(self, base_dir: Optional[str] = None) -> str:
+        """Re-import all playbooks under sea/playbooks (or a custom directory)."""
+        try:
+            root = Path(base_dir) if base_dir else Path(__file__).resolve().parents[1] / "sea" / "playbooks"
+            if not root.is_absolute():
+                root = Path(__file__).resolve().parents[1] / root
+            if not root.exists():
+                return f"Error: Directory not found: {root}"
+
+            json_files = sorted(p for p in root.rglob("*.json") if p.is_file())
+            if not json_files:
+                return f"Warning: No JSON files found under {root}."
+
+            imported = 0
+            failed = 0
+
+            for json_path in json_files:
+                try:
+                    data = json.loads(json_path.read_text(encoding="utf-8"))
+                    name = data.get("name")
+                    if not name:
+                        logging.warning("Skipping %s: missing 'name' field", json_path)
+                        failed += 1
+                        continue
+
+                    scope, persona_id, building_id = infer_scope_from_path(json_path)
+                    save_playbook(
+                        name=name,
+                        description=data.get("description", ""),
+                        scope=scope,
+                        created_by_persona_id=persona_id,
+                        building_id=building_id,
+                        playbook_json=json.dumps(data, ensure_ascii=False),
+                        router_callable=None,
+                        user_selectable=None,
+                    )
+                    imported += 1
+                except Exception as inner_exc:
+                    failed += 1
+                    logging.error("Failed to import %s: %s", json_path, inner_exc, exc_info=True)
+
+            total = len(json_files)
+            return f"Reimport finished: imported={imported}, failed={failed}, scanned={total} under {root}."
+        except Exception as exc:
+            logging.error("Failed to reimport playbooks: %s", exc, exc_info=True)
+            return f"Error: Failed to reimport playbooks. {exc}"
 
     # --- Helpers ---
 

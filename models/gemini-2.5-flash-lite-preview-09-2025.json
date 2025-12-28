@@ -3,5 +3,6 @@
   "display_name": "Gemini V2.5 Flash Lite Preview 09 2025",
   "provider": "gemini",
   "context_length": 128000,
-  "supports_images": true
+  "supports_images": true,
+  "prefer_paid": true
 }

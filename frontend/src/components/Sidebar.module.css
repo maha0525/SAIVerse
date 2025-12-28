@@ -1,0 +1,213 @@
+.sidebar {
+    width: 260px;
+    height: 100vh;
+    background: #f8fafc;
+    border-right: 1px solid rgba(0, 0, 0, 0.1);
+    display: flex;
+    flex-direction: column;
+    padding: 1.5rem 1rem 0 1rem;
+    box-sizing: border-box;
+    flex-shrink: 0;
+    transition: transform 0.3s ease;
+    z-index: 50;
+}
+
+.profileSection {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    padding-bottom: 1.5rem;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+    margin-bottom: 1.5rem;
+}
+
+.avatar {
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    background: #e2e8f0;
+    object-fit: cover;
+}
+
+.userInfo {
+    display: flex;
+    flex-direction: column;
+}
+
+.userName {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--foreground);
+}
+
+.userStatus {
+    font-size: 0.8rem;
+    color: #10b981;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.userStatus.offline {
+    color: #94a3b8;
+}
+
+.userStatus.online {
+    color: #10b981;
+}
+
+.userStatus.away {
+    color: #f59e0b;
+}
+
+.sectionTitle {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    color: #64748b;
+    font-weight: 700;
+    margin-bottom: 0.8rem;
+    letter-spacing: 0.05em;
+}
+
+.buildingList {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    overflow-y: auto;
+    flex: 1;
+}
+
+.buildingItem {
+    padding: 0.6rem 0.8rem;
+    border-radius: 0.6rem;
+    cursor: pointer;
+    font-size: 0.9rem;
+    color: #475569;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.buildingItem:hover {
+    background: rgba(0, 0, 0, 0.03);
+    color: #1e293b;
+}
+
+.active {
+    background: #e0e7ff;
+    color: #4338ca;
+    font-weight: 500;
+}
+
+.active:hover {
+    background: #dbeafe;
+}
+
+/* Footer Settings */
+.settingsFooter {
+    margin-top: auto;
+    padding: 1rem 1rem 1.2rem 1rem;
+    border-top: 1px solid rgba(0, 0, 0, 0.05);
+    padding-bottom: max(1.2rem, env(safe-area-inset-bottom));
+}
+
+.settingsBtn {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    background: transparent;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    cursor: pointer;
+    color: #64748b;
+    font-weight: 600;
+}
+
+/* Mobile Overlay */
+.overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 40;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+}
+
+.overlay.visible {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+
+/* Dark Mode */
+@media (prefers-color-scheme: dark) {
+    .sidebar {
+        background: #171717;
+        border-right-color: rgba(255, 255, 255, 0.1);
+    }
+
+    .profileSection {
+        border-bottom-color: rgba(255, 255, 255, 0.1);
+    }
+
+    .avatar {
+        background: #333;
+    }
+
+    .userName {
+        color: #f3f4f6;
+    }
+
+    .buildingItem {
+        color: #9ca3af;
+    }
+
+    .buildingItem:hover {
+        background: rgba(255, 255, 255, 0.05);
+        color: #f3f4f6;
+    }
+
+    .active {
+        background: rgba(67, 56, 202, 0.3);
+        color: #e0e7ff;
+    }
+
+    .active:hover {
+        background: rgba(67, 56, 202, 0.4);
+    }
+
+    .settingsFooter {
+        border-top-color: rgba(255, 255, 255, 0.1);
+    }
+
+    .settingsBtn {
+        border-color: rgba(255, 255, 255, 0.1);
+        color: #94a3b8;
+    }
+}
+
+/* Mobile Responsive */
+@media (max-width: 768px) {
+    .sidebar {
+        position: fixed;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        height: 100dvh;
+        /* Force dynamic viewport height */
+        transform: translateX(-100%);
+        box-shadow: 4px 0 24px rgba(0, 0, 0, 0.2);
+    }
+
+    .sidebar.open {
+        transform: translateX(0);
+    }
+}

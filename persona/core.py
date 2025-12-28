@@ -30,7 +30,6 @@ from persona.mixins import (
     PersonaHistoryMixin,
     PersonaMovementMixin,
     PersonaEmotionMixin,
-    PersonaPulseMixin,
 )
 
 load_dotenv()
@@ -41,7 +40,6 @@ class PersonaCore(
     PersonaHistoryMixin,
     PersonaMovementMixin,
     PersonaEmotionMixin,
-    PersonaPulseMixin,
 ):
     def __init__(
         self,

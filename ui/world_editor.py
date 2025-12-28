@@ -687,12 +687,55 @@ def create_world_editor_ui():
                 )
 
     with gr.Accordion("Playbook管理", open=False):
-        gr.Markdown("Playbookの一覧表示、編集、削除を行います。新規作成はスクリプト `python scripts/import_playbook.py` を使用してください。")
+        gr.Markdown("Playbookの一覧表示、編集、削除を行います。新規作成は下のインポート機能、またはスクリプト `python scripts/import_playbook.py` を使用してください。")
 
         playbook_df = gr.DataFrame(
             value=lambda: manager.get_playbooks_df(),
             interactive=False,
             label="Playbooks"
+        )
+
+        def import_playbook_file_ui(file_path):
+            normalized_path = file_path
+            if isinstance(file_path, list):
+                normalized_path = file_path[0] if file_path else None
+            elif isinstance(file_path, dict):
+                normalized_path = file_path.get("name") or file_path.get("path")
+
+            if not normalized_path:
+                return "Error: JSONファイルを選択してください。", gr.update()
+
+            result = manager.import_playbook_from_file(str(normalized_path))
+            return result, manager.get_playbooks_df()
+
+        def reimport_all_playbooks_ui():
+            result = manager.reimport_all_playbooks()
+            return result, manager.get_playbooks_df()
+
+        with gr.Row():
+            playbook_file_upload = gr.File(label="Playbook JSONを選択", file_types=[".json"], type="filepath", file_count="single")
+            import_playbook_btn = gr.Button("選択ファイルをインポート/上書き", variant="secondary")
+        with gr.Row():
+            reimport_confirm_check = gr.Checkbox(label="sea/playbooks配下を全て再インポートする", value=False, scale=2)
+            reimport_playbooks_btn = gr.Button("sea/playbooksを全再インポート", variant="secondary", interactive=False, scale=1)
+        playbook_import_status = gr.Textbox(label="Import Status", interactive=False)
+
+        import_playbook_btn.click(
+            fn=import_playbook_file_ui,
+            inputs=[playbook_file_upload],
+            outputs=[playbook_import_status, playbook_df]
+        )
+
+        reimport_confirm_check.change(
+            fn=toggle_delete_button,
+            inputs=reimport_confirm_check,
+            outputs=reimport_playbooks_btn
+        )
+
+        reimport_playbooks_btn.click(
+            fn=reimport_all_playbooks_ui,
+            inputs=[],
+            outputs=[playbook_import_status, playbook_df]
         )
 
         with gr.Tabs():

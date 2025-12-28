@@ -1,0 +1,266 @@
+.container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    color: #f1f5f9;
+}
+
+.tabs {
+    display: flex;
+    gap: 0.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid #334155;
+    margin-bottom: 1rem;
+    overflow-x: auto;
+}
+
+.tab {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    border: none;
+    background: transparent;
+    color: #94a3b8;
+    cursor: pointer;
+    border-radius: 6px;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: all 0.2s;
+}
+
+.tab:hover {
+    background: #334155;
+    color: #f1f5f9;
+}
+
+.tab.active {
+    background: #1e3a8a;
+    /* Blue 900 */
+    color: #60a5fa;
+    /* Blue 400 */
+}
+
+.content {
+    flex: 1;
+    overflow: hidden;
+}
+
+.pane {
+    display: flex;
+    height: 100%;
+    gap: 2rem;
+}
+
+.list {
+    width: 250px;
+    border-right: 1px solid #334155;
+    padding-right: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    overflow-y: auto;
+}
+
+.item {
+    padding: 0.75rem;
+    border-radius: 6px;
+    cursor: pointer;
+    background: #0f172a;
+    /* Slate 900 */
+    border: 1px solid #334155;
+    transition: all 0.2s;
+    color: #cbd5e1;
+}
+
+.item:hover {
+    background: #334155;
+    border-color: #475569;
+    color: #f1f5f9;
+}
+
+.item.selected {
+    background: #172554;
+    /* Blue 950 */
+    border-color: #3b82f6;
+    color: #60a5fa;
+    font-weight: 500;
+}
+
+.newBtn {
+    margin-top: auto;
+    padding: 0.75rem;
+    border: 1px dashed #475569;
+    background: transparent;
+    color: #94a3b8;
+    cursor: pointer;
+    border-radius: 6px;
+    text-align: center;
+    transition: all 0.2s;
+}
+
+.newBtn:hover {
+    border-color: #64748b;
+    color: #f1f5f9;
+    background: #1e293b;
+}
+
+.form {
+    flex: 1;
+    overflow-y: auto;
+    padding-right: 1rem;
+    max-width: 600px;
+}
+
+.field {
+    margin-bottom: 1rem;
+}
+
+.field label {
+    display: block;
+    margin-bottom: 0.35rem;
+    font-weight: 500;
+    color: #cbd5e1;
+    font-size: 0.9rem;
+}
+
+.field input[type="text"],
+.field input[type="number"],
+.field textarea,
+.field select {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid #475569;
+    background: #0f172a;
+    color: #f1f5f9;
+    border-radius: 6px;
+    font-size: 0.95rem;
+    transition: border-color 0.2s;
+}
+
+.field input:focus,
+.field textarea:focus,
+.field select:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+.field textarea {
+    min-height: 100px;
+    resize: vertical;
+}
+
+.row {
+    display: flex;
+    gap: 1rem;
+}
+
+.row .field {
+    flex: 1;
+}
+
+.actions {
+    display: flex;
+    gap: 1rem;
+    margin-top: 2rem;
+    padding-top: 1rem;
+    border-top: 1px solid #334155;
+}
+
+.primaryBtn {
+    background: #2563eb;
+    color: white;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.primaryBtn:hover {
+    background: #1d4ed8;
+}
+
+.dangerBtn {
+    background: #7f1d1d;
+    /* Red 900 */
+    color: #fca5a5;
+    border: 1px solid #991b1b;
+    padding: 0.75rem 1.5rem;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-left: auto;
+    transition: background 0.2s;
+}
+
+.dangerBtn:hover {
+    background: #991b1b;
+    color: white;
+}
+
+/* Mobile Responsive */
+@media (max-width: 768px) {
+    .container {
+        height: 100%;
+        overflow-y: auto;
+    }
+
+    .pane {
+        flex-direction: column;
+        gap: 1rem;
+    }
+
+    .list {
+        width: 100%;
+        height: auto;
+        max-height: none;
+        border-right: none;
+        border-bottom: 1px solid #334155;
+        padding-bottom: 0.5rem;
+        padding-right: 0;
+        flex: none;
+
+        /* Horizontal Scroll */
+        flex-direction: row;
+        overflow-x: auto;
+        gap: 0.5rem;
+        align-items: center;
+        scrollbar-width: none;
+    }
+
+    .list::-webkit-scrollbar {
+        display: none;
+    }
+
+    .item {
+        white-space: nowrap;
+        min-width: fit-content;
+        padding: 0.5rem 1rem;
+        border-radius: 999px;
+        /* Chip */
+    }
+
+    .newBtn {
+        margin-top: 0;
+        white-space: nowrap;
+        min-width: fit-content;
+        padding: 0.5rem 1rem;
+        border-radius: 999px;
+    }
+
+    .form {
+        max-width: none;
+        padding-right: 0;
+        padding-bottom: 2rem;
+        flex: 1;
+    }
+
+    .tabs {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        padding-bottom: 0.5rem;
+    }
+}

@@ -17,7 +17,8 @@
         "inventory": true,
         "building_items": true,
         "system_prompt": true,
-        "available_playbooks": true
+        "available_playbooks": true,
+        "visual_context": true
     },
     "router_callable": false,
     "nodes": [
@@ -25,10 +26,16 @@
             "id": "compose",
             "type": "llm",
             "action": null,
-            "available_tools": ["call_playbook"],
+            "available_tools": [
+                "call_playbook"
+            ],
             "output_keys": [
-                {"text": "speak_content"},
-                {"function_call": "tool_call"}
+                {
+                    "text": "speak_content"
+                },
+                {
+                    "function_call": "tool_call"
+                }
             ],
             "next": "log",
             "conditional_next": null

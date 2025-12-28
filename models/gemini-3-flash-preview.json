@@ -1,0 +1,8 @@
+{
+  "model": "gemini-3-flash-preview",
+  "display_name": "Gemini 3 Flash Preview",
+  "provider": "gemini",
+  "context_length": 128000,
+  "supports_images": true,
+  "prefer_paid": false
+}

@@ -68,6 +68,15 @@ class SAIMemoryAdapter:
 
         try:
             self.conn = init_db(self.settings.db_path, check_same_thread=False)
+            # Create working_memory table if not exists
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS working_memory (
+                    persona_id TEXT PRIMARY KEY,
+                    data TEXT,
+                    updated_at REAL
+                )
+            """)
+            self.conn.commit()
         except Exception as exc:
             LOGGER.exception("Failed to initialise SAIMemory DB at %s", self.settings.db_path)
             self.conn = None
@@ -98,6 +107,53 @@ class SAIMemoryAdapter:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+    def load_working_memory(self) -> Dict[str, Any]:
+        """Load working memory from DB.
+
+        Returns:
+            Dict containing working memory data, or empty dict if not found.
+        """
+        if not self._ready:
+            return {}
+        try:
+            with self._db_lock:
+                cur = self.conn.execute(
+                    "SELECT data FROM working_memory WHERE persona_id = ?",
+                    (self.persona_id,)
+                )
+                row = cur.fetchone()
+                if row and row[0]:
+                    return json.loads(row[0])
+                return {}
+        except Exception as exc:
+            LOGGER.warning("Failed to load working_memory for %s: %s", self.persona_id, exc)
+            return {}
+
+    def save_working_memory(self, data: Dict[str, Any]) -> None:
+        """Save working memory to DB.
+
+        Args:
+            data: Dict to persist as working memory.
+        """
+        if not self._ready:
+            return
+        try:
+            with self._db_lock:
+                json_data = json.dumps(data, ensure_ascii=False)
+                updated_at = time.time()
+                self.conn.execute(
+                    """
+                    INSERT INTO working_memory (persona_id, data, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(persona_id) DO UPDATE SET data = ?, updated_at = ?
+                    """,
+                    (self.persona_id, json_data, updated_at, json_data, updated_at)
+                )
+                self.conn.commit()
+                LOGGER.debug("Saved working_memory for %s", self.persona_id)
+        except Exception as exc:
+            LOGGER.warning("Failed to save working_memory for %s: %s", self.persona_id, exc)
+
     def append_building_message(
         self,
         building_id: str,
@@ -200,6 +256,103 @@ class SAIMemoryAdapter:
             selected.insert(0, payload)
         return selected
 
+    def recent_persona_messages_balanced(
+        self,
+        max_chars: int,
+        participant_ids: List[str],
+        *,
+        required_tags: Optional[List[str]] = None,
+        pulse_id: Optional[str] = None,
+    ) -> List[dict]:
+        """Get recent messages balanced across conversation partners.
+
+        Allocates max_chars equally among participants, retrieving recent
+        messages from each partner's conversations.
+
+        Args:
+            max_chars: Total character budget
+            participant_ids: List of partner IDs to balance (e.g., ["user", "persona_b"])
+            required_tags: Only include messages with these tags
+            pulse_id: Always include messages with this pulse ID
+
+        Returns:
+            List of messages, sorted by timestamp, balanced across participants
+        """
+        if not self._ready or not participant_ids:
+            return []
+
+        thread_id = self._thread_id(None)
+        try:
+            with self._db_lock:
+                all_rows = _fetch_all_messages(self.conn, thread_id)
+                payloads = [self._payload_from_message_locked(msg) for msg in all_rows]
+        except Exception as exc:
+            LOGGER.warning("Failed to fetch persona messages for balancing: %s", exc)
+            return []
+
+        required_tags = required_tags or []
+        pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
+
+        # Group messages by participant
+        # Key: participant_id, Value: list of (index, payload) tuples
+        participant_groups: Dict[str, List[tuple]] = {pid: [] for pid in participant_ids}
+        other_messages: List[tuple] = []  # Messages without "with" or with unknown participants
+
+        for idx, payload in enumerate(payloads):
+            metadata = payload.get("metadata") or {}
+            tags = metadata.get("tags", [])
+            with_list = metadata.get("with", [])
+
+            # Check if message matches required tags
+            include = True
+            if required_tags:
+                include = any(tag in tags for tag in required_tags)
+            if pulse_tag and pulse_tag in tags:
+                include = True
+            if not include:
+                continue
+
+            # Assign to participant groups
+            if with_list:
+                for partner in with_list:
+                    if partner in participant_groups:
+                        participant_groups[partner].append((idx, payload))
+            else:
+                # Messages without "with" go to other
+                other_messages.append((idx, payload))
+
+        # Calculate per-participant budget
+        num_participants = len(participant_ids)
+        per_participant_chars = max_chars // num_participants if num_participants > 0 else max_chars
+
+        # Select messages from each participant (most recent first)
+        selected_with_idx: List[tuple] = []
+
+        for pid in participant_ids:
+            group = participant_groups.get(pid, [])
+            consumed = 0
+            for idx, payload in reversed(group):
+                text = payload.get("content", "") or ""
+                if consumed + len(text) > per_participant_chars:
+                    break
+                consumed += len(text)
+                selected_with_idx.append((idx, payload))
+
+        # Add some "other" messages if there's remaining budget
+        total_consumed = sum(len(p.get("content", "") or "") for _, p in selected_with_idx)
+        remaining = max_chars - total_consumed
+        if remaining > 0 and other_messages:
+            for idx, payload in reversed(other_messages):
+                text = payload.get("content", "") or ""
+                if len(text) > remaining:
+                    break
+                remaining -= len(text)
+                selected_with_idx.append((idx, payload))
+
+        # Sort by original index to maintain chronological order
+        selected_with_idx.sort(key=lambda x: x[0])
+        return [payload for _, payload in selected_with_idx]
+
     def list_thread_summaries(self, max_preview_chars: int = 120) -> List[Dict[str, Any]]:
         if not self._ready:
             return []
@@ -233,6 +386,90 @@ class SAIMemoryAdapter:
         except Exception as exc:
             LOGGER.warning("Failed to list threads for persona %s: %s", self.persona_id, exc)
             return []
+
+    def get_thread_messages(self, thread_id: str, page: int = 0, page_size: int = 100) -> List[dict]:
+        if not self._ready:
+            return []
+        try:
+            with self._db_lock:
+                msgs = get_messages_paginated(self.conn, thread_id, page=page, page_size=page_size)  # type: ignore[arg-type]
+                return [self._payload_from_message_locked(msg) for msg in msgs]
+        except Exception as exc:
+            LOGGER.warning("Failed to get messages for thread %s: %s", thread_id, exc)
+            return []
+
+    def count_thread_messages(self, thread_id: str) -> int:
+        if not self._ready:
+            return 0
+        try:
+            with self._db_lock:
+                cur = self.conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id=?", (thread_id,))  # type: ignore[attr-defined]
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+        except Exception as exc:
+            LOGGER.warning("Failed to count messages for thread %s: %s", thread_id, exc)
+            return 0
+
+    def update_message_content(self, message_id: str, new_content: str) -> bool:
+        if not self._ready:
+            return False
+        try:
+            with self._db_lock:
+                # 1. Update content
+                cur = self.conn.execute("SELECT metadata FROM messages WHERE id=?", (message_id,))  # type: ignore[attr-defined]
+                row = cur.fetchone()
+                if row is None:
+                    return False
+                    
+                # We don't change metadata structure, just update content
+                self.conn.execute(  # type: ignore[attr-defined]
+                    "UPDATE messages SET content=? WHERE id=?",
+                    (new_content, message_id),
+                )
+                
+                # 2. Update embeddings
+                self.conn.execute("DELETE FROM message_embeddings WHERE message_id=?", (message_id,))  # type: ignore[attr-defined]
+                content_strip = new_content.strip()
+                if content_strip and self.embedder is not None:
+                    chunks = chunk_text(
+                        content_strip,
+                        min_chars=self.settings.chunk_min_chars,
+                        max_chars=self.settings.chunk_max_chars,
+                    )
+                    payload = [chunk.strip() for chunk in chunks if chunk and chunk.strip()]
+                    if payload:
+                        vectors = self.embedder.embed(payload, is_query=False)
+                        replace_message_embeddings(self.conn, message_id, vectors)   # type: ignore[attr-defined]
+                
+                self.conn.commit()  # type: ignore[attr-defined]
+                return True
+        except Exception as exc:
+            LOGGER.warning("Failed to update message %s: %s", message_id, exc)
+            return False
+
+    def delete_message(self, message_id: str) -> bool:
+        if not self._ready:
+            return False
+        try:
+            with self._db_lock:
+                self.conn.execute("DELETE FROM message_embeddings WHERE message_id=?", (message_id,))  # type: ignore[attr-defined]
+                self.conn.execute("DELETE FROM messages WHERE id=?", (message_id,))  # type: ignore[attr-defined]
+                self.conn.commit()  # type: ignore[attr-defined]
+                return True
+        except Exception as exc:
+            LOGGER.warning("Failed to delete message %s: %s", message_id, exc)
+            return False
+
+    def delete_thread(self, thread_id: str) -> bool:
+        if not self._ready:
+            return False
+        from sai_memory.memory.storage import delete_thread
+        try:
+            with self._db_lock:
+                return delete_thread(self.conn, thread_id)
+        except Exception as exc:
+            LOGGER.warning("Failed to delete thread %s: %s", thread_id, exc)
+            return False
 
     def recall_snippet(
         self,
@@ -481,7 +718,7 @@ class SAIMemoryAdapter:
                     )
                     payload = [c.strip() for c in chunks if c and c.strip()]
                     if payload:
-                        vectors = self.embedder.embed(payload)
+                        vectors = self.embedder.embed(payload, is_query=False)
                         replace_message_embeddings(self.conn, mid, vectors)
             LOGGER.debug(
                 "SAIMemory upserted message=%s thread=%s role=%s", mid, thread_id, role
