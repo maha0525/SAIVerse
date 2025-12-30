@@ -77,17 +77,20 @@ class PersonaGenerationMixin:
         building = self.buildings[self.current_building_id]
         now_local = datetime.now(self.timezone)
         current_time = now_local.strftime("%H:%M")
-        system_text = self.common_prompt.format(
-            current_building_name=building.name,
-            current_building_system_instruction=building.system_instruction.format(
-                current_time=current_time
-            ),
-            current_persona_id=self.persona_id,
-            current_persona_name=self.persona_name,
-            current_persona_system_instruction=self.persona_system_instruction,
-            current_time=current_time,
-            current_city_name=self.city_name,
-        )
+        # Use safe replace instead of .format() to avoid conflict with JSON examples in common.txt
+        system_text = self.common_prompt
+        building_sys_expanded = building.system_instruction.format(current_time=current_time)
+        replacements = {
+            "{current_building_name}": building.name,
+            "{current_building_system_instruction}": building_sys_expanded,
+            "{current_persona_id}": self.persona_id,
+            "{current_persona_name}": self.persona_name,
+            "{current_persona_system_instruction}": self.persona_system_instruction,
+            "{current_time}": current_time,
+            "{current_city_name}": self.city_name,
+        }
+        for placeholder, value in replacements.items():
+            system_text = system_text.replace(placeholder, value)
         inventory_lines: List[str] = []
         inventory_builder = getattr(self, "_inventory_summary_lines", None)
         if callable(inventory_builder):

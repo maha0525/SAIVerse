@@ -66,14 +66,17 @@ def get_system_prompt(
             building_name = building_obj.name if building_obj else building_id
             city_name = getattr(persona, "current_city_id", "unknown_city")
 
-            common_text = common_prompt_template.format(
-                current_persona_name=getattr(persona, "persona_name", "Unknown"),
-                current_persona_id=getattr(persona, "persona_id", "unknown_id"),
-                current_building_name=building_name,
-                current_city_name=city_name,
-                current_persona_system_instruction=getattr(persona, "persona_system_instruction", ""),
-                current_building_system_instruction=getattr(building_obj, "system_instruction", "") if building_obj else "",
-            )
+            common_text = common_prompt_template
+            replacements = {
+                "{current_persona_name}": getattr(persona, "persona_name", "Unknown"),
+                "{current_persona_id}": getattr(persona, "persona_id", "unknown_id"),
+                "{current_building_name}": building_name,
+                "{current_city_name}": city_name,
+                "{current_persona_system_instruction}": getattr(persona, "persona_system_instruction", ""),
+                "{current_building_system_instruction}": getattr(building_obj, "system_instruction", "") if building_obj else "",
+            }
+            for placeholder, value in replacements.items():
+                common_text = common_text.replace(placeholder, value)
             system_sections.append(common_text.strip())
         except Exception as exc:
             LOGGER.debug("Failed to format common prompt: %s", exc)

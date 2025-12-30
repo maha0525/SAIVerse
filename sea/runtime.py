@@ -867,10 +867,11 @@ class SEARuntime:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             tool_func = TOOL_REGISTRY.get(tool_name)
             persona_obj = state.get("persona_obj") or persona
+            persona_id = getattr(persona_obj, "persona_id", "unknown")
+            
             try:
                 persona_dir = getattr(persona_obj, "persona_log_path", None)
                 persona_dir = persona_dir.parent if persona_dir else Path.cwd()
-                persona_id = getattr(persona_obj, "persona_id", None)
                 manager_ref = getattr(persona_obj, "manager_ref", None)
 
                 # Build kwargs from args_input (None or {} = no args)
@@ -886,12 +887,20 @@ class SEARuntime:
                             LOGGER.debug("[sea][tool] Using literal arg '%s' = %s", arg_name, value)
                         kwargs[arg_name] = value
 
+                # ===== Tool execution logging (centralized) =====
+                kwargs_preview = {k: (str(v)[:100] + "..." if len(str(v)) > 100 else str(v)) for k, v in kwargs.items()}
+                LOGGER.info("[sea][tool] CALL %s (persona=%s) args=%s", tool_name, persona_id, kwargs_preview)
+                
                 # Execute tool with persona context
                 if persona_id and persona_dir:
                     with persona_context(persona_id, persona_dir, manager_ref):
                         result = tool_func(**kwargs) if callable(tool_func) else None
                 else:
                     result = tool_func(**kwargs) if callable(tool_func) else None
+                
+                # Log tool result
+                result_preview = str(result)[:200] + "..." if len(str(result)) > 200 else str(result)
+                LOGGER.info("[sea][tool] RESULT %s -> %s", tool_name, result_preview)
 
                 # Handle tuple results with output_keys (for multi-value returns)
                 if output_keys and isinstance(result, tuple):
@@ -1381,6 +1390,8 @@ class SEARuntime:
                 self.manager.gateway_handle_ai_replies(building_id, persona, [text])
             except Exception:
                 LOGGER.exception("Failed to emit speak message")
+        # Notify Unity Gateway
+        self._notify_unity_speak(persona, text)
 
     def _emit_say(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> None:
         msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
@@ -1415,6 +1426,8 @@ class SEARuntime:
             self.manager.gateway_handle_ai_replies(building_id, persona, [text])
         except Exception:
             LOGGER.exception("Failed to emit say message")
+        # Notify Unity Gateway
+        self._notify_unity_speak(persona, text)
 
     def _emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True) -> None:
         if not record_history:
@@ -1433,6 +1446,28 @@ class SEARuntime:
         except Exception:
             LOGGER.debug("think message not stored", exc_info=True)
 
+    def _notify_unity_speak(self, persona: Any, text: str) -> None:
+        """Send persona speak event to Unity Gateway if connected."""
+        if not text:
+            return
+        unity_gateway = getattr(self.manager, "unity_gateway", None)
+        if not unity_gateway:
+            return
+        try:
+            import asyncio
+            persona_id = getattr(persona, "persona_id", "unknown")
+            # Run async send_speak in a new event loop if not in async context
+            try:
+                loop = asyncio.get_running_loop()
+                asyncio.create_task(unity_gateway.send_speak(persona_id, text))
+            except RuntimeError:
+                # No running event loop
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(unity_gateway.send_speak(persona_id, text))
+                loop.close()
+        except Exception as exc:
+            LOGGER.debug("Failed to notify Unity Gateway: %s", exc)
+
     def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None) -> List[Dict[str, Any]]:
         from sea.playbook_models import ContextRequirements
 
@@ -1447,6 +1482,7 @@ class SEARuntime:
 
             # 1. Common prompt (world setting, framework explanation)
             common_prompt_template = getattr(persona, "common_prompt", None)
+            LOGGER.debug("common_prompt_template is %s (type=%s)", common_prompt_template[:100] if common_prompt_template else None, type(common_prompt_template))
             if common_prompt_template:
                 try:
                     # Get building info for variable expansion
@@ -1454,18 +1490,21 @@ class SEARuntime:
                     building_name = building_obj.name if building_obj else building_id
                     city_name = getattr(persona, "current_city_id", "unknown_city")
 
-                    # Expand variables in common prompt
-                    common_text = common_prompt_template.format(
-                        current_persona_name=getattr(persona, "persona_name", "Unknown"),
-                        current_persona_id=getattr(persona, "persona_id", "unknown_id"),
-                        current_building_name=building_name,
-                        current_city_name=city_name,
-                        current_persona_system_instruction=getattr(persona, "persona_system_instruction", ""),
-                        current_building_system_instruction=getattr(building_obj, "system_instruction", "") if building_obj else "",
-                    )
+                    # Expand variables in common prompt using safe replace (avoid conflict with JSON examples)
+                    common_text = common_prompt_template
+                    replacements = {
+                        "{current_persona_name}": getattr(persona, "persona_name", "Unknown"),
+                        "{current_persona_id}": getattr(persona, "persona_id", "unknown_id"),
+                        "{current_building_name}": building_name,
+                        "{current_city_name}": city_name,
+                        "{current_persona_system_instruction}": getattr(persona, "persona_system_instruction", ""),
+                        "{current_building_system_instruction}": getattr(building_obj, "system_instruction", "") if building_obj else "",
+                    }
+                    for placeholder, value in replacements.items():
+                        common_text = common_text.replace(placeholder, value)
                     system_sections.append(common_text.strip())
                 except Exception as exc:
-                    LOGGER.debug("Failed to format common prompt: %s", exc)
+                    LOGGER.error("Failed to format common prompt: %s", exc, exc_info=True)
 
             # 2. "## あなたについて" section
             persona_section_parts: List[str] = []

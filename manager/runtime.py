@@ -27,7 +27,6 @@ from database.models import (
 )
 import tools.defs
 
-
 class RuntimeService(
     VisitorMixin, GatewayMixin, SDSMixin, DatabasePollingMixin, PersonaMixin
 ):
@@ -156,9 +155,9 @@ class RuntimeService(
         debug_log_path = r"c:\Users\shuhe\workspace\SAIVerse\debug_chat.log"
         from datetime import datetime
         def log_debug(msg):
-             with open(debug_log_path, "a", encoding="utf-8") as f:
+            with open(debug_log_path, "a", encoding="utf-8") as f:
                 f.write(f"{datetime.now()}: [MANAGER_MOVE] {msg}\n")
-        
+
         log_debug(f"Attempting move to {target_building_id}. Current: {self.state.user_current_building_id}")
 
         if target_building_id not in self.building_map:
@@ -171,7 +170,7 @@ class RuntimeService(
             return False, "移動失敗: 現在地が不明です。"
         if from_building_id == target_building_id:
             return True, "同じ場所にいます。"
-            
+
         logging.debug(
             "[runtime] move_user requested %s -> %s",
             from_building_id,
@@ -291,7 +290,7 @@ class RuntimeService(
         current_user_building = self.state.user_current_building_id
         if not current_user_building:
             return "Error: User's current building is unknown."
-        
+
         if persona.current_building_id != current_user_building:
             return f"{persona.persona_name} is not in the current building."
 
@@ -380,6 +379,7 @@ class RuntimeService(
             logging.error("[runtime] handle_user_input_stream got empty message; aborting to avoid corrupt routing")
             yield '<div class="note-box">入力が空でした。再送してください。</div>'
             return
+
         if not self.state.user_current_building_id:
             yield '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'
             return
@@ -426,7 +426,7 @@ class RuntimeService(
         # メインスレッド: キューを監視してクライアントに送信
         while True:
             try:
-                # 2.0秒待機（Keep-Aliveのため）
+                # 2.0秒待機 (Keep-Aliveのため)
                 item = response_queue.get(timeout=2.0)
                 if item is None:
                     break
@@ -438,7 +438,6 @@ class RuntimeService(
         self._save_building_histories()
         for persona in self.personas.values():
             persona._save_session_metadata()
-
 
     def run_scheduled_prompts(self) -> List[str]:
         replies: List[str] = []
@@ -629,7 +628,6 @@ class RuntimeService(
                             f"City '{target_city_id}' を探索した結果、以下の建物が見つかりました。\n"
                             f"{building_list_str}"
                         )
-
                 except requests.exceptions.RequestException as exc:
                     feedback_message = (
                         f"探索失敗: City '{target_city_id}' との通信中にエラーが発生しました。"
