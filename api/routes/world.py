@@ -395,3 +395,79 @@ def delete_playbook(playbook_id: int, db = Depends(get_db)):
     db.commit()
     return {"success": True}
 
+
+class PlaybookImportRequest(BaseModel):
+    """Request body for importing a playbook from JSON content."""
+    playbook_json: str  # Full playbook JSON as string
+
+
+@router.post("/playbooks/import")
+def import_playbook(req: PlaybookImportRequest, db = Depends(get_db)):
+    """Import a playbook from JSON content. Creates new or updates existing based on name."""
+    try:
+        data = json.loads(req.playbook_json)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+    
+    name = data.get("name")
+    if not name:
+        raise HTTPException(status_code=400, detail="Playbook JSON must contain a 'name' field")
+    
+    description = data.get("description", "")
+    scope = data.get("scope", "public")
+    router_callable = data.get("router_callable", False)
+    user_selectable = data.get("user_selectable", False)
+    
+    # Validate playbook using full structure
+    try:
+        parsed = PlaybookSchema(**data)
+        validate_playbook_graph(parsed)
+    except PlaybookValidationError as e:
+        raise HTTPException(status_code=400, detail=f"Graph validation error: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Schema validation error: {e}")
+    
+    # Convert to normalized dict and serialize
+    normalized_data = parsed.dict()
+    
+    # nodes_json stores the FULL playbook structure (for runtime loading)
+    nodes_json = json.dumps(normalized_data, ensure_ascii=False)
+    
+    # schema_json stores metadata for display/editing
+    schema_payload = {
+        "name": name,
+        "description": description,
+        "input_schema": normalized_data.get("input_schema", []),
+        "start_node": normalized_data.get("start_node"),
+    }
+    schema_json = json.dumps(schema_payload, ensure_ascii=False)
+    
+    # Check if playbook exists
+    existing = db.query(PlaybookModel).filter(PlaybookModel.name == name).first()
+    
+    if existing:
+        # Update existing playbook
+        existing.description = description
+        existing.scope = scope
+        existing.router_callable = router_callable
+        existing.user_selectable = user_selectable
+        existing.nodes_json = nodes_json
+        existing.schema_json = schema_json
+        db.commit()
+        return {"success": True, "action": "updated", "id": existing.id, "name": name}
+    else:
+        # Create new playbook
+        playbook = PlaybookModel(
+            name=name,
+            description=description,
+            scope=scope,
+            router_callable=router_callable,
+            user_selectable=user_selectable,
+            nodes_json=nodes_json,
+            schema_json=schema_json,
+        )
+        db.add(playbook)
+        db.commit()
+        db.refresh(playbook)
+        return {"success": True, "action": "created", "id": playbook.id, "name": name}
+

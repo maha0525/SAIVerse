@@ -27,6 +27,7 @@ SAIVerseの公式ドキュメントへようこそ。
 - [ツールシステム](./features/tools-system.md) - AIが使えるツール
 - [Playbook/SEA](./features/playbooks.md) - 行動パターン定義
 - [Discord連携](./features/discord-gateway.md) - Discordとの接続
+- [Unity Gateway](./features/unity-gateway.md) - 3D/VR空間連携 ⭐NEW
 
 ### 開発者ガイド
 - [コントリビューション](./developer-guide/contributing.md) - 貢献の方法

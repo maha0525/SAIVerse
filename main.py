@@ -8,6 +8,7 @@ import json
 import argparse
 import atexit
 import signal
+import asyncio
 from dotenv import load_dotenv
 from typing import Optional
 from pathlib import Path
@@ -32,6 +33,14 @@ try:
     from discord_gateway import ensure_gateway_runtime
 except ImportError:  # pragma: no cover - optional dependency
     ensure_gateway_runtime = None
+
+# Unity Gateway (optional)
+try:
+    from unity_gateway import UnityGatewayServer
+    UNITY_GATEWAY_AVAILABLE = True
+except ImportError:
+    UnityGatewayServer = None
+    UNITY_GATEWAY_AVAILABLE = False
 
 level_name = os.getenv("SAIVERSE_LOG_LEVEL", "INFO").upper()
 if level_name not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
@@ -242,6 +251,7 @@ def shutdown_subprocess(process: Optional[subprocess.Popen], name: str) -> None:
 
 api_server_process: Optional[subprocess.Popen] = None
 manager: Optional[SAIVerseManager] = None
+unity_gateway_task: Optional[asyncio.Task] = None
 
 
 def main():
@@ -288,6 +298,24 @@ def main():
     ui_state.set_version(VERSION)
     ui_state.refresh_building_caches()
 
+    # Unity Gateway の起動（オプション）
+    unity_gateway_port = int(os.getenv("UNITY_GATEWAY_PORT", "8765"))
+    if UNITY_GATEWAY_AVAILABLE and os.getenv("UNITY_GATEWAY_ENABLED", "true").lower() == "true":
+        manager.unity_gateway = UnityGatewayServer(manager)
+        if manager.unity_gateway.is_available:
+            import asyncio
+            def run_unity_gateway():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(manager.unity_gateway.start(port=unity_gateway_port))
+            unity_gateway_thread = threading.Thread(target=run_unity_gateway, daemon=True)
+            unity_gateway_thread.start()
+            logging.info(f"Unity Gateway starting on ws://0.0.0.0:{unity_gateway_port}")
+        else:
+            logging.warning("Unity Gateway: websockets package not installed")
+    else:
+        manager.unity_gateway = None
+
     api_server_process = cleanup_and_start_server_with_args(
         manager.api_port,
         Path(__file__).parent / "database" / "api_server.py",
@@ -303,6 +331,14 @@ def main():
         if shutdown_called:
             return
         shutdown_called = True
+        # Unity Gatewayの停止
+        if manager and manager.unity_gateway:
+            import asyncio
+            try:
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(manager.unity_gateway.stop())
+            except Exception as e:
+                logging.debug(f"Error stopping Unity Gateway: {e}")
         shutdown_subprocess(api_server_process, "API Server")
         if manager:
             manager.shutdown()

@@ -507,6 +507,37 @@ export default function WorldEditor() {
                             <h3>Playbooks</h3>
                             {playbooks.map(pb => <div key={pb.id} className={`${styles.item} ${selectedPlaybook?.id === pb.id ? styles.selected : ''}`} onClick={() => handlePlaybookSelect(pb)}>{pb.name}</div>)}
                             <button className={styles.newBtn} onClick={() => { setSelectedPlaybook(null); setFormData({ scope: 'public', router_callable: false, user_selectable: false, nodes_json: '[]', schema_json: '{"input_schema": [], "start_node": "start"}' }); }}>+ New Playbook</button>
+                            <div style={{ marginTop: '1rem', borderTop: '1px solid #eee', paddingTop: '1rem' }}>
+                                <h4 style={{ marginBottom: '0.5rem', fontSize: '0.9rem' }}>JSONからインポート</h4>
+                                <input
+                                    type="file"
+                                    accept=".json"
+                                    style={{ fontSize: '0.8rem', marginBottom: '0.5rem', width: '100%' }}
+                                    onChange={async (e) => {
+                                        const file = e.target.files?.[0];
+                                        if (!file) return;
+                                        try {
+                                            const text = await file.text();
+                                            const res = await fetch('/api/world/playbooks/import', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ playbook_json: text })
+                                            });
+                                            const data = await res.json();
+                                            if (res.ok) {
+                                                const actionText = data.action === 'created' ? '新規作成' : '更新';
+                                                alert(`${actionText}しました: ${data.name}`);
+                                                loadPlaybooks();
+                                            } else {
+                                                alert(`エラー: ${data.detail || 'インポートに失敗しました'}`);
+                                            }
+                                        } catch (err) {
+                                            alert(`エラー: ${err}`);
+                                        }
+                                        e.target.value = '';  // Reset file input
+                                    }}
+                                />
+                            </div>
                         </div>
                         <div className={styles.form}>
                             <h3>{selectedPlaybook ? `Edit Playbook` : 'New Playbook'}</h3>

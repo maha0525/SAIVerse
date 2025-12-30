@@ -40,6 +40,7 @@ __*.*
 !ui/handlers/__init__.py
 !sea/__init__.py
 !sai_memory/memopedia/__init__.py
+!unity_gateway/__init__.py
 tasks.md
 scripts/.searxng-src/
 scripts/.searxng-venv/
@@ -58,3 +59,16 @@ frontend/*.log
 
 # Root dependencies
 node_modules/
+
+# Unity Client
+unity_client/SAIVerse3D/Library/
+unity_client/SAIVerse3D/Temp/
+unity_client/SAIVerse3D/Obj/
+unity_client/SAIVerse3D/Build/
+unity_client/SAIVerse3D/Builds/
+unity_client/SAIVerse3D/Logs/
+unity_client/SAIVerse3D/UserSettings/
+unity_client/SAIVerse3D/*.csproj
+unity_client/SAIVerse3D/*.sln
+unity_client/SAIVerse3D/*.userprefs
+unity_client/SAIVerse3D/.vsconfig

@@ -241,7 +241,7 @@ class ScheduleManager:
 
         # プロンプトを生成
         prompt = f"""<system>
-スケジュールが実行されました。
+スケジュールの実行時刻です。
 
 現在の日時: {local_now.strftime("%Y年%m月%d日 %H:%M")} ({persona_tz})
 スケジュールタイプ: {schedule.SCHEDULE_TYPE}
