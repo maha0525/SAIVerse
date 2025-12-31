@@ -34,8 +34,13 @@ def _format_timestamp(ts: Optional[int]) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
 
-def _format_messages_for_prompt(messages: List[Message]) -> str:
-    """Format messages for the arasuji prompt."""
+def _format_messages_for_prompt(messages: List[Message], *, include_timestamp: bool = True) -> str:
+    """Format messages for the arasuji prompt.
+
+    Args:
+        messages: Messages to format
+        include_timestamp: If False, omit timestamps from output
+    """
     lines: List[str] = []
     for msg in messages:
         role = msg.role
@@ -47,8 +52,11 @@ def _format_messages_for_prompt(messages: List[Message]) -> str:
         # Truncate very long messages
         if len(content) > 1500:
             content = content[:1500] + "..."
-        ts_str = _format_timestamp(msg.created_at)
-        lines.append(f"[{ts_str}] [{role}]: {content}")
+        if include_timestamp:
+            ts_str = _format_timestamp(msg.created_at)
+            lines.append(f"[{ts_str}] [{role}]: {content}")
+        else:
+            lines.append(f"[{role}]: {content}")
     return "\n\n".join(lines)
 
 
@@ -96,6 +104,7 @@ def generate_level1_arasuji(
     messages: List[Message],
     *,
     dry_run: bool = False,
+    include_timestamp: bool = True,
 ) -> Optional[ArasujiEntry]:
     """Generate a level-1 arasuji from messages.
 
@@ -104,6 +113,7 @@ def generate_level1_arasuji(
         conn: Database connection
         messages: Messages to summarize
         dry_run: If True, don't save to database
+        include_timestamp: If False, omit timestamps from prompt (useful when dates are unreliable)
 
     Returns:
         Created ArasujiEntry or None on failure
@@ -115,7 +125,7 @@ def generate_level1_arasuji(
     context = _get_context_summaries(conn, 1)
 
     # Format messages
-    conversation = _format_messages_for_prompt(messages)
+    conversation = _format_messages_for_prompt(messages, include_timestamp=include_timestamp)
     if not conversation.strip():
         return None
 
@@ -387,6 +397,7 @@ class ArasujiGenerator:
         *,
         batch_size: int = DEFAULT_BATCH_SIZE,
         consolidation_size: int = DEFAULT_CONSOLIDATION_SIZE,
+        include_timestamp: bool = True,
     ):
         """Initialize the generator.
 
@@ -395,11 +406,13 @@ class ArasujiGenerator:
             conn: Database connection
             batch_size: Number of messages per level-1 arasuji
             consolidation_size: Number of entries per higher-level arasuji
+            include_timestamp: If False, omit timestamps from prompts (useful when dates are unreliable)
         """
         self.client = client
         self.conn = conn
         self.batch_size = batch_size
         self.consolidation_size = consolidation_size
+        self.include_timestamp = include_timestamp
 
     def generate_from_messages(
         self,
@@ -438,6 +451,7 @@ class ArasujiGenerator:
                 self.conn,
                 batch,
                 dry_run=dry_run,
+                include_timestamp=self.include_timestamp,
             )
 
             if entry:
