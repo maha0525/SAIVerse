@@ -214,6 +214,9 @@ def main():
   # バッチサイズと統合サイズを変更
   python scripts/build_arasuji.py air_city_a --batch-size 30 --consolidation-size 5
 
+  # 日時情報を省略（インポートしたログで日時が不正確な場合）
+  python scripts/build_arasuji.py air_city_a --no-timestamp
+
   # 利用可能なモデル一覧を表示
   python scripts/build_arasuji.py --list-models
 """,
@@ -267,6 +270,10 @@ def main():
         "--thread", type=str, metavar="THREAD_ID",
         help="Process only messages from this thread ID"
     )
+    parser.add_argument(
+        "--no-timestamp", action="store_true",
+        help="Omit timestamps from prompts (useful when dates are unreliable due to log import)"
+    )
 
     args = parser.parse_args()
 
@@ -315,6 +322,8 @@ def main():
     LOGGER.info(f"Batch size: {args.batch_size}")
     LOGGER.info(f"Consolidation size: {args.consolidation_size}")
     LOGGER.info(f"Dry run: {args.dry_run}")
+    if args.no_timestamp:
+        LOGGER.info("Timestamps will be omitted from prompts")
 
     # Initialize LLM client
     resolved_model_id, model_config = find_model_config(args.model)
@@ -357,6 +366,7 @@ def main():
         conn,
         batch_size=args.batch_size,
         consolidation_size=args.consolidation_size,
+        include_timestamp=not args.no_timestamp,
     )
 
     def progress_callback(processed: int, total: int) -> None:
