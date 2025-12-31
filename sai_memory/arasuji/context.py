@@ -108,7 +108,7 @@ def _check_overlap(
 def get_episode_context(
     conn: sqlite3.Connection,
     *,
-    max_entries: int = 50,
+    max_entries: int = 100,
     include_raw_messages: bool = True,
 ) -> List[ContextEntry]:
     """Get episode context using the reverse level promotion algorithm.

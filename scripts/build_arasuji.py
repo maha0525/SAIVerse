@@ -149,7 +149,7 @@ def print_stats(conn, persona_id: str) -> None:
     print("=" * 60)
 
 
-def print_context_preview(conn, max_entries: int = 20, debug: bool = False) -> None:
+def print_context_preview(conn, max_entries: int = 100, debug: bool = False) -> None:
     """Print a preview of the episode context that would be injected."""
     if debug:
         # Debug mode: step through the algorithm manually
@@ -457,7 +457,7 @@ def main():
         print("\n" + "-" * 60)
         print("Episode Context Preview:")
         print("-" * 60)
-        print_context_preview(conn, max_entries=10)
+        print_context_preview(conn)
 
     conn.close()
     LOGGER.info("Done!")
