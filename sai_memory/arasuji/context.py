@@ -52,10 +52,21 @@ def _find_arasuji_at_position(
     entries: List[ArasujiEntry],
     position_time: int,
     target_level: int,
+    *,
+    only_unconsolidated: bool = True,
 ) -> Optional[ArasujiEntry]:
-    """Find an arasuji at a specific level that ends at or before the position time."""
+    """Find an arasuji at a specific level that ends at or before the position time.
+
+    Args:
+        entries: List of arasuji entries sorted by end_time descending
+        position_time: The time position to search from
+        target_level: The level to search for
+        only_unconsolidated: If True, skip entries that have been consolidated into higher levels
+    """
     for entry in entries:
         if entry.level != target_level:
+            continue
+        if only_unconsolidated and entry.is_consolidated:
             continue
         if entry.end_time is not None and entry.end_time <= position_time:
             return entry
@@ -94,6 +105,7 @@ def get_episode_context(
     2. Current level starts at 0 (raw messages)
     3. Level can only increase by +1 at a time
     4. No overlap with already-read content is allowed
+    5. Prefer lower levels (more detail) when possible
 
     This ensures:
     - Recent events are remembered in detail (low level)
@@ -135,13 +147,14 @@ def get_episode_context(
         found_entry: Optional[ArasujiEntry] = None
         found_level = 0
 
-        # Try levels from current_level + 1 down to 1
-        for try_level in range(current_level + 1, 0, -1):
+        # Try levels from 1 up to current_level + 1 (prefer lower levels for more detail)
+        max_allowed_level = current_level + 1
+        for try_level in range(1, max_allowed_level + 1):
             candidate = _find_arasuji_at_position(all_arasuji, position_time, try_level)
             if candidate and not _check_overlap(candidate, read_ranges):
                 found_entry = candidate
                 found_level = try_level
-                break
+                break  # Use the lowest level that works
 
         if found_entry is None:
             # No suitable arasuji found, we've reached the beginning
