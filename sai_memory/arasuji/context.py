@@ -52,8 +52,6 @@ def _find_arasuji_at_position(
     entries: List[ArasujiEntry],
     position_time: int,
     target_level: int,
-    *,
-    only_unconsolidated: bool = True,
 ) -> Optional[ArasujiEntry]:
     """Find an arasuji at a specific level that ends at or before the position time.
 
@@ -61,12 +59,9 @@ def _find_arasuji_at_position(
         entries: List of arasuji entries sorted by end_time descending
         position_time: The time position to search from
         target_level: The level to search for
-        only_unconsolidated: If True, skip entries that have been consolidated into higher levels
     """
     for entry in entries:
         if entry.level != target_level:
-            continue
-        if only_unconsolidated and entry.is_consolidated:
             continue
         if entry.end_time is not None and entry.end_time <= position_time:
             return entry
