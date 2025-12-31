@@ -60,19 +60,22 @@ def _format_messages_for_prompt(messages: List[Message], *, include_timestamp: b
     return "\n\n".join(lines)
 
 
-def _format_entries_for_prompt(entries: List[ArasujiEntry]) -> str:
+def _format_entries_for_prompt(entries: List[ArasujiEntry], *, include_timestamp: bool = True) -> str:
     """Format arasuji entries for consolidation prompt."""
     lines: List[str] = []
     for i, entry in enumerate(entries, 1):
-        start = _format_timestamp(entry.start_time)
-        end = _format_timestamp(entry.end_time)
-        lines.append(f"### あらすじ {i} ({start} ~ {end})")
+        if include_timestamp:
+            start = _format_timestamp(entry.start_time)
+            end = _format_timestamp(entry.end_time)
+            lines.append(f"### あらすじ {i} ({start} ~ {end})")
+        else:
+            lines.append(f"### あらすじ {i}")
         lines.append(entry.content)
         lines.append("")
     return "\n".join(lines)
 
 
-def _get_context_summaries(conn: sqlite3.Connection, current_level: int) -> str:
+def _get_context_summaries(conn: sqlite3.Connection, current_level: int, *, include_timestamp: bool = True) -> str:
     """Get context summaries from higher levels for generation context.
 
     Retrieves unconsolidated entries from levels above the current level
@@ -89,9 +92,10 @@ def _get_context_summaries(conn: sqlite3.Connection, current_level: int) -> str:
             # Level 1 = batch_size, Level 2 = batch_size * consolidation_size, etc.
             context_parts.append(f"## レベル{level}のあらすじ（より大きな流れ）")
             for entry in entries:
-                start = _format_timestamp(entry.start_time)
-                end = _format_timestamp(entry.end_time)
-                context_parts.append(f"【{start} ~ {end}】")
+                if include_timestamp:
+                    start = _format_timestamp(entry.start_time)
+                    end = _format_timestamp(entry.end_time)
+                    context_parts.append(f"【{start} ~ {end}】")
                 context_parts.append(entry.content)
                 context_parts.append("")
 
@@ -122,7 +126,7 @@ def generate_level1_arasuji(
         return None
 
     # Get context from higher levels
-    context = _get_context_summaries(conn, 1)
+    context = _get_context_summaries(conn, 1, include_timestamp=include_timestamp)
 
     # Format messages
     conversation = _format_messages_for_prompt(messages, include_timestamp=include_timestamp)
@@ -216,6 +220,7 @@ def generate_consolidated_arasuji(
     target_level: int,
     *,
     dry_run: bool = False,
+    include_timestamp: bool = True,
 ) -> Optional[ArasujiEntry]:
     """Generate a consolidated arasuji from lower-level entries.
 
@@ -240,10 +245,10 @@ def generate_consolidated_arasuji(
             return None
 
     # Get context from higher levels
-    context = _get_context_summaries(conn, target_level)
+    context = _get_context_summaries(conn, target_level, include_timestamp=include_timestamp)
 
     # Format entries
-    entries_text = _format_entries_for_prompt(entries)
+    entries_text = _format_entries_for_prompt(entries, include_timestamp=include_timestamp)
 
     # Build prompt
     level_desc = "あらすじ" + "のあらすじ" * (target_level - 1)
@@ -339,6 +344,7 @@ def maybe_consolidate(
     consolidation_size: int = DEFAULT_CONSOLIDATION_SIZE,
     *,
     dry_run: bool = False,
+    include_timestamp: bool = True,
 ) -> List[ArasujiEntry]:
     """Check if consolidation is needed at a level and perform it recursively.
 
@@ -369,6 +375,7 @@ def maybe_consolidate(
             batch,
             target_level=level + 1,
             dry_run=dry_run,
+            include_timestamp=include_timestamp,
         )
 
         if entry:
@@ -381,6 +388,7 @@ def maybe_consolidate(
                 level + 1,
                 consolidation_size=consolidation_size,
                 dry_run=dry_run,
+                include_timestamp=include_timestamp,
             )
             created.extend(higher)
 
@@ -464,6 +472,7 @@ class ArasujiGenerator:
                     level=1,
                     consolidation_size=self.consolidation_size,
                     dry_run=dry_run,
+                    include_timestamp=self.include_timestamp,
                 )
                 consolidated_entries.extend(consolidated)
 

@@ -142,14 +142,15 @@ def get_episode_context(
         found_entry: Optional[ArasujiEntry] = None
         found_level = 0
 
-        # Try levels from 1 up to current_level + 1 (prefer lower levels for more detail)
+        # Try levels from current_level + 1 down to 1 (prefer higher levels for compression)
+        # Level can only increase by +1 at a time from current_level
         max_allowed_level = current_level + 1
-        for try_level in range(1, max_allowed_level + 1):
+        for try_level in range(max_allowed_level, 0, -1):
             candidate = _find_arasuji_at_position(all_arasuji, position_time, try_level)
             if candidate and not _check_overlap(candidate, read_ranges):
                 found_entry = candidate
                 found_level = try_level
-                break  # Use the lowest level that works
+                break  # Use the highest level that works
 
         if found_entry is None:
             # No suitable arasuji found, we've reached the beginning
