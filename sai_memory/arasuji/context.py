@@ -52,6 +52,7 @@ def _find_arasuji_at_position(
     entries: List[ArasujiEntry],
     position_time: int,
     target_level: int,
+    read_ids: Set[str],
 ) -> Optional[ArasujiEntry]:
     """Find an arasuji at a specific level that ends at or before the position time.
 
@@ -59,9 +60,12 @@ def _find_arasuji_at_position(
         entries: List of arasuji entries sorted by end_time descending
         position_time: The time position to search from
         target_level: The level to search for
+        read_ids: Set of entry IDs that have already been read or covered
     """
     for entry in entries:
         if entry.level != target_level:
+            continue
+        if entry.id in read_ids:
             continue
         if entry.end_time is not None and entry.end_time <= position_time:
             return entry
@@ -146,9 +150,8 @@ def get_episode_context(
         # Level can only increase by +1 at a time from current_level
         max_allowed_level = current_level + 1
         for try_level in range(max_allowed_level, 0, -1):
-            candidate = _find_arasuji_at_position(all_arasuji, position_time, try_level)
-            # Check if this entry or its sources have already been read
-            if candidate and candidate.id not in read_ids:
+            candidate = _find_arasuji_at_position(all_arasuji, position_time, try_level, read_ids)
+            if candidate:
                 found_entry = candidate
                 found_level = try_level
                 break  # Use the highest level that works
@@ -175,7 +178,8 @@ def get_episode_context(
 
         # Update current level and position
         current_level = found_level
-        position_time = (found_entry.start_time or 0) - 1
+        # Don't subtract 1: read_ids handles duplicates, and same-time entries need to be found
+        position_time = found_entry.start_time or 0
 
         if position_time <= 0:
             break
