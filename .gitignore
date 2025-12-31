@@ -40,6 +40,7 @@ __*.*
 !ui/handlers/__init__.py
 !sea/__init__.py
 !sai_memory/memopedia/__init__.py
+!sai_memory/arasuji/__init__.py
 !unity_gateway/__init__.py
 tasks.md
 scripts/.searxng-src/
