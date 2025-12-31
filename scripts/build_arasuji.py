@@ -149,8 +149,74 @@ def print_stats(conn, persona_id: str) -> None:
     print("=" * 60)
 
 
-def print_context_preview(conn, max_entries: int = 20) -> None:
+def print_context_preview(conn, max_entries: int = 20, debug: bool = False) -> None:
     """Print a preview of the episode context that would be injected."""
+    if debug:
+        # Debug mode: step through the algorithm manually
+        from sai_memory.arasuji.context import _get_all_arasuji_sorted, _find_arasuji_at_position
+        from sai_memory.arasuji.storage import get_entries_by_level, get_max_level
+
+        print("\n" + "=" * 60)
+        print("DEBUG: Arasuji Algorithm Step-by-Step")
+        print("=" * 60)
+
+        # Show all arasuji in DB
+        max_level = get_max_level(conn)
+        print(f"\n[1] All arasuji in DB (max_level={max_level}):")
+        for level in range(1, max_level + 1):
+            entries = get_entries_by_level(conn, level, order_by_time=True)
+            print(f"  Level {level}: {len(entries)} entries")
+            for e in entries[:5]:  # Show first 5
+                print(f"    - id={e.id[:8]}... end_time={e.end_time} source_ids={len(e.source_ids)}")
+            if len(entries) > 5:
+                print(f"    ... and {len(entries) - 5} more")
+
+        # Show sorted list
+        all_arasuji = _get_all_arasuji_sorted(conn)
+        print(f"\n[2] All arasuji sorted by end_time desc: {len(all_arasuji)} total")
+        for i, e in enumerate(all_arasuji[:10]):
+            print(f"  {i}: level={e.level} end_time={e.end_time} id={e.id[:8]}...")
+        if len(all_arasuji) > 10:
+            print(f"  ... and {len(all_arasuji) - 10} more")
+
+        # Step through algorithm
+        print(f"\n[3] Algorithm execution:")
+        read_ids = set()
+        current_level = 0
+        position_time = all_arasuji[0].end_time if all_arasuji else 0
+        print(f"  Initial position_time={position_time}, current_level={current_level}")
+
+        for step in range(min(max_entries, 15)):
+            max_allowed_level = current_level + 1
+            print(f"\n  Step {step + 1}: position_time={position_time}, max_allowed={max_allowed_level}, read_ids={len(read_ids)}")
+
+            found_entry = None
+            found_level = 0
+            for try_level in range(max_allowed_level, 0, -1):
+                candidate = _find_arasuji_at_position(all_arasuji, position_time, try_level, read_ids)
+                print(f"    Try level {try_level}: candidate={'id=' + candidate.id[:8] + '...' if candidate else 'None'}")
+                if candidate:
+                    found_entry = candidate
+                    found_level = try_level
+                    break
+
+            if found_entry is None:
+                print("    -> No entry found, stopping")
+                break
+
+            print(f"    -> Selected: level={found_level}, id={found_entry.id[:8]}...")
+            print(f"    -> source_ids: {found_entry.source_ids[:3]}..." if len(found_entry.source_ids) > 3 else f"    -> source_ids: {found_entry.source_ids}")
+
+            read_ids.add(found_entry.id)
+            for source_id in found_entry.source_ids:
+                read_ids.add(source_id)
+
+            current_level = found_level
+            position_time = found_entry.start_time or 0
+            print(f"    -> Updated: current_level={current_level}, position_time={position_time}, read_ids={len(read_ids)}")
+
+        print("\n" + "=" * 60)
+
     context = get_episode_context(conn, max_entries=max_entries)
 
     print("\n" + "=" * 60)
@@ -274,6 +340,10 @@ def main():
         "--no-timestamp", action="store_true",
         help="Omit timestamps from prompts (useful when dates are unreliable due to log import)"
     )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Show detailed debug output for --preview-context"
+    )
 
     args = parser.parse_args()
 
@@ -304,7 +374,7 @@ def main():
 
     # Handle --preview-context
     if args.preview_context:
-        print_context_preview(conn)
+        print_context_preview(conn, debug=args.debug)
         conn.close()
         sys.exit(0)
 
