@@ -99,8 +99,8 @@ def get_episode_context(
     1. Start from the most recent position and go backwards in time
     2. Current level starts at 0 (raw messages)
     3. Level can only increase by +1 at a time
-    4. No overlap with already-read content is allowed
-    5. Prefer lower levels (more detail) when possible
+    4. No overlap with already-read content is allowed (tracked by ID, not time range)
+    5. Prefer higher levels (compression) when available within allowed range
 
     This ensures:
     - Recent events are remembered in detail (low level)
@@ -116,7 +116,7 @@ def get_episode_context(
         List of ContextEntry objects, ordered from oldest to newest
     """
     result: List[ContextEntry] = []
-    read_ranges: List[Tuple[int, int]] = []  # (start_time, end_time) of read content
+    read_ids: Set[str] = set()  # IDs of entries that have been read or covered
     current_level = 0  # Start at level 0 (raw messages)
 
     # Get all arasuji sorted by end_time descending
@@ -147,7 +147,8 @@ def get_episode_context(
         max_allowed_level = current_level + 1
         for try_level in range(max_allowed_level, 0, -1):
             candidate = _find_arasuji_at_position(all_arasuji, position_time, try_level)
-            if candidate and not _check_overlap(candidate, read_ranges):
+            # Check if this entry or its sources have already been read
+            if candidate and candidate.id not in read_ids:
                 found_entry = candidate
                 found_level = try_level
                 break  # Use the highest level that works
@@ -166,9 +167,11 @@ def get_episode_context(
             source_id=found_entry.id,
         ))
 
-        # Mark this range as read
-        if found_entry.start_time is not None and found_entry.end_time is not None:
-            read_ranges.append((found_entry.start_time, found_entry.end_time))
+        # Mark this entry as read
+        read_ids.add(found_entry.id)
+        # Also mark all source entries as read (prevents reading Level 1 after Level 2 covers it)
+        for source_id in found_entry.source_ids:
+            read_ids.add(source_id)
 
         # Update current level and position
         current_level = found_level
