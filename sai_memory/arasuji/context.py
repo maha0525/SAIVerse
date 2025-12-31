@@ -51,25 +51,39 @@ def _get_all_arasuji_sorted(conn: sqlite3.Connection) -> List[ArasujiEntry]:
 def _find_arasuji_at_position(
     entries: List[ArasujiEntry],
     position_time: int,
-    target_level: int,
+    max_allowed_level: int,
     read_ids: Set[str],
 ) -> Optional[ArasujiEntry]:
-    """Find an arasuji at a specific level that ends at or before the position time.
+    """Find the best arasuji that ends at or before the position time.
+
+    Selection priority:
+    1. Closest end_time to position_time (most recent)
+    2. If same end_time, prefer higher level (more compression)
 
     Args:
         entries: List of arasuji entries sorted by end_time descending
         position_time: The time position to search from
-        target_level: The level to search for
+        max_allowed_level: Maximum level allowed (current_level + 1)
         read_ids: Set of entry IDs that have already been read or covered
     """
+    best: Optional[ArasujiEntry] = None
     for entry in entries:
-        if entry.level != target_level:
+        if entry.level > max_allowed_level:
             continue
         if entry.id in read_ids:
             continue
-        if entry.end_time is not None and entry.end_time <= position_time:
-            return entry
-    return None
+        if entry.end_time is None or entry.end_time > position_time:
+            continue
+        # Found a candidate
+        if best is None:
+            best = entry
+        elif entry.end_time > best.end_time:
+            # Closer to position_time
+            best = entry
+        elif entry.end_time == best.end_time and entry.level > best.level:
+            # Same end_time, prefer higher level
+            best = entry
+    return best
 
 
 def _check_overlap(
@@ -146,15 +160,11 @@ def get_episode_context(
         found_entry: Optional[ArasujiEntry] = None
         found_level = 0
 
-        # Try levels from current_level + 1 down to 1 (prefer higher levels for compression)
-        # Level can only increase by +1 at a time from current_level
+        # Find the best arasuji: closest end_time, then higher level if tied
         max_allowed_level = current_level + 1
-        for try_level in range(max_allowed_level, 0, -1):
-            candidate = _find_arasuji_at_position(all_arasuji, position_time, try_level, read_ids)
-            if candidate:
-                found_entry = candidate
-                found_level = try_level
-                break  # Use the highest level that works
+        found_entry = _find_arasuji_at_position(all_arasuji, position_time, max_allowed_level, read_ids)
+        if found_entry:
+            found_level = found_entry.level
 
         if found_entry is None:
             # No suitable arasuji found, we've reached the beginning
@@ -178,8 +188,8 @@ def get_episode_context(
 
         # Update current level and position
         current_level = found_level
-        # Don't subtract 1: read_ids handles duplicates, and same-time entries need to be found
-        position_time = found_entry.start_time or 0
+        # Subtract 1 to move to the position just before this entry's coverage
+        position_time = (found_entry.start_time or 0) - 1
 
         if position_time <= 0:
             break

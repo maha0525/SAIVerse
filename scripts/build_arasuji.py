@@ -182,7 +182,7 @@ def print_context_preview(conn, max_entries: int = 20, debug: bool = False) -> N
         # Step through algorithm
         print(f"\n[3] Algorithm execution:")
         read_ids = set()
-        current_level = 0
+        current_level = 0  # Start at level 0
         position_time = all_arasuji[0].end_time if all_arasuji else 0
         print(f"  Initial position_time={position_time}, current_level={current_level}")
 
@@ -190,21 +190,14 @@ def print_context_preview(conn, max_entries: int = 20, debug: bool = False) -> N
             max_allowed_level = current_level + 1
             print(f"\n  Step {step + 1}: position_time={position_time}, max_allowed={max_allowed_level}, read_ids={len(read_ids)}")
 
-            found_entry = None
-            found_level = 0
-            for try_level in range(max_allowed_level, 0, -1):
-                candidate = _find_arasuji_at_position(all_arasuji, position_time, try_level, read_ids)
-                print(f"    Try level {try_level}: candidate={'id=' + candidate.id[:8] + '...' if candidate else 'None'}")
-                if candidate:
-                    found_entry = candidate
-                    found_level = try_level
-                    break
+            found_entry = _find_arasuji_at_position(all_arasuji, position_time, max_allowed_level, read_ids)
 
             if found_entry is None:
                 print("    -> No entry found, stopping")
                 break
 
-            print(f"    -> Selected: level={found_level}, id={found_entry.id[:8]}...")
+            found_level = found_entry.level
+            print(f"    -> Selected: level={found_level}, end_time={found_entry.end_time}, id={found_entry.id[:8]}...")
             print(f"    -> source_ids: {found_entry.source_ids[:3]}..." if len(found_entry.source_ids) > 3 else f"    -> source_ids: {found_entry.source_ids}")
 
             read_ids.add(found_entry.id)
