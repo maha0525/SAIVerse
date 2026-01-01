@@ -12,6 +12,9 @@ import logging
 import asyncio
 from typing import Optional
 
+from tools.defs import ToolSchema
+from tools.context import get_active_manager, get_active_persona_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,8 +36,10 @@ def control_body(message: str, persona_id: Optional[str] = None) -> str:
     if not message:
         return message
     
-    # Unity Gatewayを取得
-    from tools.context import get_active_manager
+    # ツールコンテキストから必要な情報を取得
+    if not persona_id:
+        persona_id = get_active_persona_id()
+        
     manager = get_active_manager()
     unity_gateway = getattr(manager, "unity_gateway", None)
     
@@ -48,6 +53,8 @@ def control_body(message: str, persona_id: Optional[str] = None) -> str:
     
     if not matches:
         return message
+    
+    logger.info(f"[control_body] Processing {len(matches)} body control commands for persona={persona_id}")
     
     # 抽出したコマンドを処理
     processed_commands = []
@@ -98,3 +105,19 @@ def _send_to_unity(unity_gateway, cmd_type: str, persona_id: str, value: str):
         elif cmd_type == "behavior":
             loop.run_until_complete(unity_gateway.send_behavior(persona_id, value))
         loop.close()
+
+
+def schema() -> ToolSchema:
+    return ToolSchema(
+        name="control_body",
+        description="Extract body control commands from message and send to Unity Gateway.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "The persona's spoken message containing potential body control commands."},
+                "persona_id": {"type": "string", "description": "Optional persona ID. If not provided, retrieved from context."}
+            },
+            "required": ["message"]
+        },
+        result_type="string"
+    )

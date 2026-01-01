@@ -393,7 +393,10 @@ class SEARuntime:
 
                 # Check if tools are available for this node
                 available_tools = getattr(node_def, "available_tools", None)
+                LOGGER.info("[DEBUG] available_tools = %s", available_tools)
+                
                 if available_tools:
+                    LOGGER.info("[DEBUG] Entering tools mode (generate_with_tool_detection)")
                     # Tool calling mode
                     tools_spec = self._build_tools_spec(available_tools, llm_client)
                     result = llm_client.generate_with_tool_detection(
@@ -419,7 +422,12 @@ class SEARuntime:
 
                     import json
 
+                    # Debug: log result type and keys
+                    LOGGER.info("[DEBUG] LLM result type='%s', has content=%s, has tool_name=%s", 
+                               result.get("type"), "content" in result, "tool_name" in result)
+
                     if result["type"] == "tool_call":
+                        LOGGER.info("[DEBUG] Entering tool_call branch")
                         # Only tool call, no text
                         if output_keys_spec:
                             # New behavior: use explicit output_keys
@@ -452,6 +460,7 @@ class SEARuntime:
                         LOGGER.info("[sea] Tool call detected: %s", text)
 
                     elif result["type"] == "both":
+                        LOGGER.info("[DEBUG] Entering 'both' branch (text + tool call)")
                         # Both text and tool call
                         if output_keys_spec:
                             # New behavior: use explicit output_keys
@@ -485,21 +494,25 @@ class SEARuntime:
                                     result["tool_name"], len(text))
 
                     else:
-                        # Normal text response
+                        LOGGER.info("[DEBUG] Entering 'else' branch (normal text response)")
+                        # Normal text response (no tool call)
+                        state["tool_called"] = False
+                        
                         if output_keys_spec and text_key:
                             # New behavior: store in explicit text_key
                             state[text_key] = result["content"]
-                            LOGGER.debug("[sea] Stored %s = (text, length=%d)", text_key, len(result["content"]))
+                            content_preview = result["content"][:200] + "..." if len(result["content"]) > 200 else result["content"]
+                            LOGGER.info("[sea][llm] Stored state['%s'] = %s", text_key, content_preview)
                             state["has_speak_content"] = True
                         else:
                             # Legacy behavior: no specific text storage (just in "last")
                             state["has_speak_content"] = True
 
-                        state["tool_called"] = False
                         text = result["content"]
 
                     self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                 else:
+                    LOGGER.info("[DEBUG] Entering normal mode (no tools)")
                     # Normal mode (no tools)
                     state["tool_called"] = False
                     text = llm_client.generate(
@@ -510,12 +523,29 @@ class SEARuntime:
                     )
                     self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                     schema_consumed = self._process_structured_output(node_def, text, state)
+                    
+                    # Process output_keys even in normal mode (no tools)
+                    output_keys_spec = getattr(node_def, "output_keys", None)
+                    if output_keys_spec:
+                        for mapping in output_keys_spec:
+                            if "text" in mapping:
+                                text_key = mapping["text"]
+                                state[text_key] = text
+                                content_preview = text[:200] + "..." if len(text) > 200 else text
+                                LOGGER.info("[sea][llm] (normal mode) Stored state['%s'] = %s", text_key, content_preview)
+                                state["has_speak_content"] = True
+                                break
             except Exception as exc:
                 LOGGER.error("SEA LangGraph LLM failed: %s: %s", type(exc).__name__, exc)
                 text = "(error in llm node)"
                 state["tool_called"] = False
             state["last"] = text
             state["messages"] = messages + [{"role": "assistant", "content": text}]
+
+            # Debug: log speak_content at end of LLM node
+            speak_content = state.get("speak_content", "")
+            preview = speak_content[:100] + "..." if len(speak_content) > 100 else speak_content
+            LOGGER.info("[DEBUG] LLM node end: state['speak_content'] = '%s'", preview)
 
             # Note: output_mapping in node definition handles state variable assignment
             # No special handling needed here anymore
@@ -891,6 +921,11 @@ class SEARuntime:
                 kwargs_preview = {k: (str(v)[:100] + "..." if len(str(v)) > 100 else str(v)) for k, v in kwargs.items()}
                 LOGGER.info("[sea][tool] CALL %s (persona=%s) args=%s", tool_name, persona_id, kwargs_preview)
                 
+                if tool_func is None:
+                    LOGGER.error("[sea][tool] CRITICAL: Tool function '%s' not found in registry! TOOL_REGISTRY keys: %s", tool_name, list(TOOL_REGISTRY.keys()))
+                else:
+                    LOGGER.info("[sea][tool] Tool function found: %s", tool_func)
+
                 # Execute tool with persona context
                 if persona_id and persona_dir:
                     with persona_context(persona_id, persona_dir, manager_ref):
@@ -1022,6 +1057,12 @@ class SEARuntime:
             state["last"] = memo_text
             if outputs is not None and self._should_collect_memory_output(playbook):
                 outputs.append(memo_text)
+            
+            # Debug: log speak_content at end of memorize node
+            speak_content = state.get("speak_content", "")
+            preview = speak_content[:100] + "..." if len(speak_content) > 100 else speak_content
+            LOGGER.info("[DEBUG] memorize node end: state['speak_content'] = '%s'", preview)
+            
             return state
 
         return node
@@ -1054,6 +1095,12 @@ class SEARuntime:
                 outputs.append(text)
             if event_callback:
                 event_callback({"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None), "metadata": metadata})
+            
+            # Debug: log speak_content at end of say node
+            speak_content = state.get("speak_content", "")
+            preview = speak_content[:100] + "..." if len(speak_content) > 100 else speak_content
+            LOGGER.info("[DEBUG] say node end: state['speak_content'] = '%s'", preview)
+            
             return state
         return node
 
@@ -1605,6 +1652,29 @@ class SEARuntime:
                             LOGGER.debug("[sea][prepare-context] Added working_memory section")
                 except Exception as exc:
                     LOGGER.debug("Failed to add working_memory section: %s", exc)
+
+            # 6. "## 空間情報" section (Unity spatial context - volatile, real-time)
+            try:
+                unity_gateway = getattr(self.manager, "unity_gateway", None)
+                if unity_gateway and getattr(unity_gateway, "is_running", False):
+                    persona_id = getattr(persona, "persona_id", None)
+                    spatial_state = unity_gateway.spatial_state.get(persona_id) if persona_id else None
+                    if spatial_state:
+                        distance = getattr(spatial_state, "distance_to_player", None)
+                        is_visible = getattr(spatial_state, "is_visible", None)
+                        
+                        spatial_lines = []
+                        if distance is not None:
+                            spatial_lines.append(f"- プレイヤーとの距離: {distance:.1f}m")
+                        if is_visible is not None:
+                            visibility_text = "はい" if is_visible else "いいえ"
+                            spatial_lines.append(f"- 視界内にプレイヤーがいるか: {visibility_text}")
+                        
+                        if spatial_lines:
+                            system_sections.append("## 空間情報（リアルタイム）\n" + "\n".join(spatial_lines))
+                            LOGGER.debug("[sea][prepare-context] Added spatial context section: distance=%.1f, visible=%s", distance, is_visible)
+            except Exception as exc:
+                LOGGER.debug("Failed to add spatial context section: %s", exc)
 
             system_text = "\n\n---\n\n".join([s for s in system_sections if s])
             if system_text:

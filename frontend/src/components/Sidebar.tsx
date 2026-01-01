@@ -191,7 +191,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
 
                 <GlobalSettingsModal
                     isOpen={isSettingsOpen}
-                    onClose={() => setIsSettingsOpen(false)}
+                    onClose={() => { setIsSettingsOpen(false); refreshData(); }}
                 />
 
                 <UserProfileModal
