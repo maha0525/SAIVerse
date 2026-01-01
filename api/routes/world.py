@@ -93,11 +93,11 @@ class ItemCreate(BaseModel):
 class ItemUpdate(BaseModel):
     name: str
     item_type: str
-    description: str
-    owner_kind: str
-    owner_id: Optional[str]
-    state_json: str
-    file_path: str
+    description: str = ""
+    owner_kind: str = "world"
+    owner_id: Optional[str] = None
+    state_json: Optional[str] = None
+    file_path: Optional[str] = None
 
 # --- Routes ---
 
@@ -234,6 +234,14 @@ def create_item(i: ItemCreate, manager: SAIVerseManager = Depends(get_manager)):
 @router.put("/items/{item_id}")
 def update_item(item_id: str, i: ItemUpdate, manager: SAIVerseManager = Depends(get_manager)):
     return manager.update_item(item_id, i.name, i.item_type, i.description, i.owner_kind, i.owner_id, i.state_json, i.file_path)
+
+@router.get("/items/{item_id}")
+def get_item(item_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    """Get item details including owner information."""
+    details = manager.get_item_details(item_id)
+    if not details:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return details
 
 @router.delete("/items/{item_id}")
 def delete_item(item_id: str, manager: SAIVerseManager = Depends(get_manager)):

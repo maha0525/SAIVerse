@@ -209,7 +209,31 @@ export default function WorldEditor() {
     const handleDeleteTool = async () => { if (confirm("Are you sure?")) { await fetch(`/api/world/tools/${selectedTool!.TOOLID}`, { method: 'DELETE' }); setSelectedTool(null); setFormData({}); loadTools(); } };
 
     // --- Item Handlers ---
-    const handleItemSelect = (i: Item) => { setSelectedItem(i); setFormData({ name: i.NAME, item_type: i.TYPE, description: i.DESCRIPTION, owner_kind: 'world', owner_id: '', state_json: i.STATE_JSON, file_path: i.FILE_PATH }); }; // Owner info missing in generic list, default to world
+    const handleItemSelect = async (i: Item) => {
+        setSelectedItem(i);
+        // Fetch item details to get owner info
+        try {
+            const res = await fetch(`/api/world/items/${i.ITEM_ID}`);
+            if (res.ok) {
+                const details = await res.json();
+                setFormData({
+                    name: details.NAME || i.NAME,
+                    item_type: details.TYPE || i.TYPE,
+                    description: details.DESCRIPTION || i.DESCRIPTION,
+                    owner_kind: details.OWNER_KIND || 'world',
+                    owner_id: details.OWNER_ID || '',
+                    state_json: details.STATE_JSON || i.STATE_JSON,
+                    file_path: details.FILE_PATH || i.FILE_PATH
+                });
+            } else {
+                // Fallback if API fails
+                setFormData({ name: i.NAME, item_type: i.TYPE, description: i.DESCRIPTION, owner_kind: 'world', owner_id: '', state_json: i.STATE_JSON, file_path: i.FILE_PATH });
+            }
+        } catch (e) {
+            // Fallback on error
+            setFormData({ name: i.NAME, item_type: i.TYPE, description: i.DESCRIPTION, owner_kind: 'world', owner_id: '', state_json: i.STATE_JSON, file_path: i.FILE_PATH });
+        }
+    };
     const handleCreateItem = async () => { await fetch('/api/world/items', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadItems(); setFormData({}); };
     const handleUpdateItem = async () => { await fetch(`/api/world/items/${selectedItem!.ITEM_ID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadItems(); };
     const handleDeleteItem = async () => { if (confirm("Are you sure?")) { await fetch(`/api/world/items/${selectedItem!.ITEM_ID}`, { method: 'DELETE' }); setSelectedItem(null); setFormData({}); loadItems(); } };

@@ -13,10 +13,13 @@ from dataclasses import dataclass, field
 try:
     import websockets
     from websockets.server import WebSocketServerProtocol
+    from websockets.http11 import Request, Response
     WEBSOCKETS_AVAILABLE = True
 except ImportError:
     WEBSOCKETS_AVAILABLE = False
     WebSocketServerProtocol = None
+    Request = None
+    Response = None
 
 from .protocol import (
     GatewayMessage,
@@ -88,11 +91,29 @@ class UnityGatewayServer:
         logger.info(f"Starting Unity Gateway on ws://{host}:{port}")
         self._running = True
         
-        async with websockets.serve(self._handle_client, host, port):
+        async with websockets.serve(
+            self._handle_client, 
+            host, 
+            port,
+            process_request=self._process_request
+        ):
             logger.info(f"Unity Gateway listening on ws://{host}:{port}")
             # サーバーが停止されるまで待機
             while self._running:
                 await asyncio.sleep(1)
+    
+    def _process_request(self, connection, request: Request):
+        """
+        WebSocket以外のHTTPリクエストを処理
+        
+        Chrome DevTools等がポートをスキャンする際のリクエストを
+        エラーではなく404で静かに返す
+        """
+        # WebSocketアップグレードリクエストでない場合
+        upgrade_header = request.headers.get("Upgrade", "").lower()
+        if upgrade_header != "websocket":
+            logger.debug(f"Non-WebSocket request to {request.path}, returning 404")
+            return Response(404, "Not Found", websockets.Headers())
     
     async def stop(self):
         """サーバーを停止"""

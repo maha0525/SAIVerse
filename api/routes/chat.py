@@ -181,13 +181,22 @@ def get_chat_history(
             avatar = "/api/static/icons/host.png"
             
         # Extract images from metadata
+        # Support both 'images' (user upload) and 'media' (tool-generated) keys
         images_list = None
         metadata = msg.get("metadata", {})
-        if metadata and "images" in metadata:
+        if metadata and ("images" in metadata or "media" in metadata):
             images_list = []
-            for img in metadata["images"]:
+            media_items = metadata.get("images") or metadata.get("media") or []
+            for img in media_items:
                 # Convert path to URL
-                img_path = img.get("path", "")
+                # Tool-generated images may use 'uri' instead of 'path'
+                img_path = img.get("path") or ""
+                if not img_path:
+                    # Try to extract from uri (saiverse://image/filename.jpg)
+                    uri = img.get("uri", "")
+                    if uri.startswith("saiverse://image/"):
+                        filename = uri.replace("saiverse://image/", "")
+                        img_path = str(Path.home() / ".saiverse" / "image" / filename)
                 if img_path:
                     # Serve via static endpoint
                     images_list.append(ChatMessageImage(
