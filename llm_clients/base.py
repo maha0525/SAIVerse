@@ -92,4 +92,8 @@ class IncompleteStreamError(RuntimeError):
     """Raised when a streamed response ends without a completion signal."""
 
 
-__all__ = ["LLMClient", "raw_logger", "RAW_LOG_FILE", "IncompleteStreamError"]
+class EmptyResponseError(RuntimeError):
+    """Raised when LLM returns an empty response (no text or function call)."""
+
+
+__all__ = ["LLMClient", "raw_logger", "RAW_LOG_FILE", "IncompleteStreamError", "EmptyResponseError"]
