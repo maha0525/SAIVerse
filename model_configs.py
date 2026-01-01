@@ -21,15 +21,17 @@ def load_configs() -> Dict[str, Dict]:
             try:
                 config_data = json.loads(config_file.read_text(encoding="utf-8"))
 
-                # Extract model ID from config (required field)
+                # Extract model ID from config (required field for API calls)
                 model_id = config_data.get("model")
                 if not model_id:
                     LOGGER.warning("Model config %s missing 'model' field, skipping", config_file.name)
                     continue
 
-                # Store config with model ID as key
-                configs[model_id] = config_data
-                LOGGER.debug("Loaded model config: %s from %s", model_id, config_file.name)
+                # Use filename (without extension) as config key
+                # This allows multiple configs for the same API model (e.g., free vs paid)
+                config_key = config_file.stem
+                configs[config_key] = config_data
+                LOGGER.debug("Loaded model config: %s (model=%s) from %s", config_key, model_id, config_file.name)
             except Exception as exc:
                 LOGGER.warning("Failed to load model config from %s: %s", config_file.name, exc)
 

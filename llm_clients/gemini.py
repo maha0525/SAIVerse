@@ -157,7 +157,7 @@ from tools import GEMINI_TOOLS_SPEC, TOOL_REGISTRY
 from tools.defs import parse_tool_result
 from llm_router import route
 
-from .base import IncompleteStreamError, LLMClient, raw_logger
+from .base import EmptyResponseError, IncompleteStreamError, LLMClient, raw_logger
 from .utils import content_to_text, is_truthy_flag, merge_reasoning_strings
 
 GEMINI_SAFETY_CONFIG = [
@@ -567,24 +567,21 @@ class GeminiClient(LLMClient):
                 raw_logger.debug("Gemini raw:\n%s", resp)
 
                 if not resp.candidates:
-                    # No candidates: return empty string
-                    self._store_reasoning([])
-                    prefix = "\n".join(snippets)
-                    return prefix
+                    # No candidates: raise for retry
+                    logging.warning("Gemini returned no candidates (empty response)")
+                    raise EmptyResponseError("No candidates in response")
 
                 candidate = resp.candidates[0]
                 if not candidate.content or not candidate.content.parts:
-                    # Empty content/parts: return empty string
-                    self._store_reasoning([])
-                    prefix = "\n".join(snippets)
-                    return prefix
+                    # Empty content/parts: raise for retry
+                    logging.warning("Gemini returned empty content/parts")
+                    raise EmptyResponseError("Empty content or parts in response")
 
                 text, reasoning_entries = self._separate_parts(candidate.content.parts)
                 if not text and not candidate.function_call:
-                    # No text and no function call: return empty string
-                    self._store_reasoning(reasoning_entries)
-                    prefix = "\n".join(snippets)
-                    return prefix
+                    # No text and no function call: raise for retry
+                    logging.warning("Gemini returned no text and no function call")
+                    raise EmptyResponseError("No text or function call in response")
 
                 fcall = getattr(candidate, "function_call", None)
                 fcall_name = getattr(fcall, "name", None)
@@ -639,19 +636,27 @@ class GeminiClient(LLMClient):
 
         active_client = self.client
         model_id = self.model
-        try:
-            result = _call(active_client, model_id)
-            if result:
-                return result
-        except Exception as exc:
-            if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
-                logging.info("Retrying with paid Gemini API key due to rate limit")
-                active_client = self.paid_client
+        max_empty_retries = 3
+        for attempt in range(max_empty_retries):
+            try:
                 result = _call(active_client, model_id)
                 if result:
                     return result
-            logging.exception("Gemini call failed")
-            return "エラーが発生しました。"
+                # If result is empty string but no exception, retry
+                logging.warning("Gemini returned empty result (attempt %d/%d)", attempt + 1, max_empty_retries)
+                continue
+            except EmptyResponseError as e:
+                logging.warning("Gemini empty response (attempt %d/%d): %s", attempt + 1, max_empty_retries, e)
+                # Continue to retry
+                continue
+            except Exception as exc:
+                if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
+                    logging.info("Retrying with paid Gemini API key due to rate limit")
+                    active_client = self.paid_client
+                    continue
+                logging.exception("Gemini call failed")
+                return "エラーが発生しました。"
+        logging.error("Gemini returned empty response after %d retries", max_empty_retries)
         return "エラーが発生しました。"
 
     def _separate_parts(self, parts: List[Any]) -> Tuple[str, List[Dict[str, str]]]:
@@ -1023,41 +1028,42 @@ class GeminiClient(LLMClient):
         if self._thinking_config is not None:
             cfg_kwargs["thinking_config"] = self._thinking_config
 
-        try:
-            resp = active_client.models.generate_content(
-                model=self.model,
-                contents=contents,
-                config=types.GenerateContentConfig(**cfg_kwargs),
-            )
-        except Exception as exc:
-            if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
-                logging.info("Retrying with paid Gemini API key due to rate limit")
-                active_client = self.paid_client
-                try:
-                    resp = active_client.models.generate_content(
-                        model=self.model,
-                        contents=contents,
-                        config=types.GenerateContentConfig(**cfg_kwargs),
-                    )
-                except Exception:
-                    logging.exception("Gemini call failed in generate_with_tool_detection")
-                    return {"type": "text", "content": "エラーが発生しました。"}
-            else:
+        max_empty_retries = 3
+        resp = None
+        for attempt in range(max_empty_retries):
+            try:
+                resp = active_client.models.generate_content(
+                    model=self.model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(**cfg_kwargs),
+                )
+            except Exception as exc:
+                if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
+                    logging.info("Retrying with paid Gemini API key due to rate limit")
+                    active_client = self.paid_client
+                    continue
                 logging.exception("Gemini call failed in generate_with_tool_detection")
                 return {"type": "text", "content": "エラーが発生しました。"}
 
-        raw_logger.debug("Gemini raw (tool detection):\n%s", resp)
+            raw_logger.debug("Gemini raw (tool detection):\n%s", resp)
 
-        if not resp.candidates:
-            logging.warning("[gemini] No candidates in response")
-            return {"type": "text", "content": ""}
+            if not resp.candidates:
+                logging.warning("[gemini] No candidates in response (attempt %d/%d)", attempt + 1, max_empty_retries)
+                continue
 
-        candidate = resp.candidates[0]
-        finish_reason = getattr(candidate, "finish_reason", None)
-        logging.info("[gemini] Tool detection finish_reason: %s", finish_reason)
+            candidate = resp.candidates[0]
+            finish_reason = getattr(candidate, "finish_reason", None)
+            logging.info("[gemini] Tool detection finish_reason: %s", finish_reason)
 
-        if not candidate.content or not candidate.content.parts:
-            logging.warning("[gemini] No content or parts in candidate")
+            if not candidate.content or not candidate.content.parts:
+                logging.warning("[gemini] No content or parts in candidate (attempt %d/%d)", attempt + 1, max_empty_retries)
+                continue
+
+            # Found valid response, break out of retry loop
+            break
+        else:
+            # All retries exhausted
+            logging.error("[gemini] Empty response after %d retries", max_empty_retries)
             return {"type": "text", "content": ""}
 
         # Extract text, reasoning, and function calls from parts

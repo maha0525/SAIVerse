@@ -79,11 +79,16 @@
 }
 
 .description {
-    padding: 0 1.5rem;
-    margin-top: 0.5rem;
+    padding: 0.75rem 1rem;
+    margin: 0.5rem 1.5rem 0;
     font-size: 0.95rem;
     line-height: 1.5;
     color: #d1d5db;
+    max-height: 4.5em;
+    /* 3 lines */
+    overflow-y: auto;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 6px;
 }
 
 .body {
