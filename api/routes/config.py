@@ -215,3 +215,19 @@ def set_global_auto(req: GlobalAutoRequest, manager = Depends(get_manager)):
     manager.state.global_auto_enabled = req.enabled
     return {"success": True, "enabled": req.enabled}
 
+
+class PlaybookOverrideRequest(BaseModel):
+    playbook: Optional[str] = None
+
+
+@router.get("/playbook")
+def get_current_playbook(manager = Depends(get_manager)):
+    """Get current playbook override."""
+    return {"playbook": manager.state.current_playbook}
+
+
+@router.post("/playbook")
+def set_playbook(req: PlaybookOverrideRequest, manager = Depends(get_manager)):
+    """Set playbook override."""
+    manager.state.current_playbook = req.playbook if req.playbook else None
+    return {"success": True, "playbook": manager.state.current_playbook}

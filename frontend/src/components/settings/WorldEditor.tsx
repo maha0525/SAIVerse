@@ -370,10 +370,18 @@ export default function WorldEditor() {
                             </Select></Field>
                             {selectedAI && <>
                                 <Field label="Default Model"><Select value={formData.default_model || ''} onChange={(e: any) => setFormData({ ...formData, default_model: e.target.value })}>
-                                    <option value="">Use System Default</option>{modelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                                    <option value="">Use System Default</option>
+                                    {formData.default_model && !modelChoices.some(m => m.id === formData.default_model) && (
+                                        <option value={formData.default_model}>⚠️ Unknown: {formData.default_model}</option>
+                                    )}
+                                    {modelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                                 </Select></Field>
                                 <Field label="Lightweight Model"><Select value={formData.lightweight_model || ''} onChange={(e: any) => setFormData({ ...formData, lightweight_model: e.target.value })}>
-                                    <option value="">Use System Default</option>{modelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                                    <option value="">Use System Default</option>
+                                    {formData.lightweight_model && !modelChoices.some(m => m.id === formData.lightweight_model) && (
+                                        <option value={formData.lightweight_model}>⚠️ Unknown: {formData.lightweight_model}</option>
+                                    )}
+                                    {modelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                                 </Select></Field>
                                 <Field label="Interaction Mode"><Select value={formData.interaction_mode || 'auto'} onChange={(e: any) => setFormData({ ...formData, interaction_mode: e.target.value })}>
                                     <option value="auto">Auto</option><option value="manual">Manual</option><option value="sleep">Sleep</option>
