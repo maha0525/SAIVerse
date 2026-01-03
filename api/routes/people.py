@@ -1509,11 +1509,34 @@ def get_arasuji_stats(persona_id: str, manager = Depends(get_manager)):
         conn.close()
 
 def _get_message_number_map(conn: sqlite3.Connection) -> dict:
-    """Build a mapping of message_id -> row number (1-indexed) for the messages table."""
-    cur = conn.execute(
-        "SELECT id FROM messages ORDER BY created_at ASC, id ASC"
-    )
-    return {row[0]: i + 1 for i, row in enumerate(cur.fetchall())}
+    """Build a mapping of message_id -> row number (1-indexed) matching build_arasuji.py order.
+
+    build_arasuji.py processes threads in order of their first message timestamp,
+    and within each thread, messages are ordered by created_at ASC.
+    """
+    # Get threads ordered by their earliest message timestamp (same as build_arasuji.py)
+    cur = conn.execute("""
+        SELECT t.id, MIN(m.created_at) as first_msg_ts
+        FROM threads t
+        LEFT JOIN messages m ON t.id = m.thread_id
+        GROUP BY t.id
+        ORDER BY first_msg_ts ASC NULLS LAST
+    """)
+    threads = [row[0] for row in cur.fetchall()]
+
+    # Build message order by iterating threads in order
+    msg_num_map = {}
+    msg_num = 1
+    for thread_id in threads:
+        cur = conn.execute(
+            "SELECT id FROM messages WHERE thread_id = ? ORDER BY created_at ASC",
+            (thread_id,)
+        )
+        for (msg_id,) in cur.fetchall():
+            msg_num_map[msg_id] = msg_num
+            msg_num += 1
+
+    return msg_num_map
 
 @router.get("/{persona_id}/arasuji", response_model=ArasujiListResponse)
 def list_arasuji_entries(
