@@ -1412,7 +1412,7 @@ class InventoryItem(BaseModel):
 def list_persona_items(persona_id: str, manager = Depends(get_manager)):
     """List items held by a persona."""
     from database.models import Item as ItemModel, ItemLocation
-    
+
     session = manager.SessionLocal()
     try:
         # Query items where location owner is this persona
@@ -1426,7 +1426,7 @@ def list_persona_items(persona_id: str, manager = Depends(get_manager)):
             .order_by(ItemModel.NAME)
             .all()
         )
-        
+
         return [
             InventoryItem(
                 id=i.ITEM_ID,
@@ -1442,3 +1442,138 @@ def list_persona_items(persona_id: str, manager = Depends(get_manager)):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         session.close()
+
+# -----------------------------------------------------------------------------
+# Arasuji (Episode Summary) APIs
+# -----------------------------------------------------------------------------
+
+class ArasujiStatsResponse(BaseModel):
+    max_level: int
+    counts_by_level: dict  # {level: count}
+    total_count: int
+
+class ArasujiEntryItem(BaseModel):
+    id: str
+    level: int
+    content: str
+    start_time: Optional[int] = None
+    end_time: Optional[int] = None
+    message_count: int
+    is_consolidated: bool
+    created_at: Optional[int] = None
+
+class ArasujiListResponse(BaseModel):
+    entries: List[ArasujiEntryItem]
+    total: int
+    level_filter: Optional[int] = None
+
+def _get_arasuji_db(persona_id: str):
+    """Get database connection for arasuji tables."""
+    from pathlib import Path
+    import sqlite3
+    from sai_memory.arasuji.storage import init_arasuji_tables
+
+    db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    if not db_path.exists():
+        return None
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    init_arasuji_tables(conn)
+    return conn
+
+@router.get("/{persona_id}/arasuji/stats", response_model=ArasujiStatsResponse)
+def get_arasuji_stats(persona_id: str, manager = Depends(get_manager)):
+    """Get arasuji statistics for a persona."""
+    from sai_memory.arasuji.storage import count_entries_by_level, get_max_level
+
+    conn = _get_arasuji_db(persona_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+
+    try:
+        counts = count_entries_by_level(conn)
+        max_level = get_max_level(conn)
+        total = sum(counts.values())
+        return ArasujiStatsResponse(
+            max_level=max_level,
+            counts_by_level=counts,
+            total_count=total
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get arasuji stats: {e}")
+    finally:
+        conn.close()
+
+@router.get("/{persona_id}/arasuji", response_model=ArasujiListResponse)
+def list_arasuji_entries(
+    persona_id: str,
+    level: Optional[int] = None,
+    limit: int = 200,
+    manager = Depends(get_manager)
+):
+    """List arasuji entries for a persona."""
+    from sai_memory.arasuji.storage import get_entries_by_level, get_all_entries_ordered
+
+    conn = _get_arasuji_db(persona_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+
+    try:
+        if level is not None:
+            entries = get_entries_by_level(conn, level, order_by_time=True)
+        else:
+            entries = get_all_entries_ordered(conn, limit=limit)
+
+        items = [
+            ArasujiEntryItem(
+                id=e.id,
+                level=e.level,
+                content=e.content,
+                start_time=e.start_time,
+                end_time=e.end_time,
+                message_count=e.message_count,
+                is_consolidated=e.is_consolidated,
+                created_at=e.created_at
+            )
+            for e in entries
+        ]
+
+        return ArasujiListResponse(
+            entries=items,
+            total=len(items),
+            level_filter=level
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list arasuji entries: {e}")
+    finally:
+        conn.close()
+
+@router.get("/{persona_id}/arasuji/{entry_id}", response_model=ArasujiEntryItem)
+def get_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_manager)):
+    """Get a specific arasuji entry."""
+    from sai_memory.arasuji.storage import get_entry
+
+    conn = _get_arasuji_db(persona_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+
+    try:
+        entry = get_entry(conn, entry_id)
+        if not entry:
+            raise HTTPException(status_code=404, detail=f"Arasuji entry {entry_id} not found")
+
+        return ArasujiEntryItem(
+            id=entry.id,
+            level=entry.level,
+            content=entry.content,
+            start_time=entry.start_time,
+            end_time=entry.end_time,
+            message_count=entry.message_count,
+            is_consolidated=entry.is_consolidated,
+            created_at=entry.created_at
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get arasuji entry: {e}")
+    finally:
+        conn.close()

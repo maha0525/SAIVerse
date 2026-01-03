@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { X, MessageSquare, Upload, Book, Search } from 'lucide-react';
+import { X, MessageSquare, Upload, Book, Search, Layers } from 'lucide-react';
 import styles from './MemoryModal.module.css';
 import MemoryBrowser from './memory/MemoryBrowser';
 import MemoryImport from './memory/MemoryImport';
 import MemopediaViewer from './memory/MemopediaViewer';
 import MemoryRecall from './memory/MemoryRecall';
+import ArasujiViewer from './memory/ArasujiViewer';
 
 interface MemoryModalProps {
     isOpen: boolean;
@@ -12,7 +13,7 @@ interface MemoryModalProps {
     personaId: string;
 }
 
-type Tab = 'browser' | 'import' | 'memopedia' | 'recall';
+type Tab = 'browser' | 'import' | 'memopedia' | 'recall' | 'arasuji';
 
 export default function MemoryModal({ isOpen, onClose, personaId }: MemoryModalProps) {
     const [activeTab, setActiveTab] = useState<Tab>('browser');
@@ -63,6 +64,13 @@ export default function MemoryModal({ isOpen, onClose, personaId }: MemoryModalP
                         <Search size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
                         Recall Test
                     </button>
+                    <button
+                        className={`${styles.tab} ${activeTab === 'arasuji' ? styles.activeTab : ''}`}
+                        onClick={() => setActiveTab('arasuji')}
+                    >
+                        <Layers size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
+                        あらすじ
+                    </button>
                 </div>
 
                 <div className={styles.content}>
@@ -70,6 +78,7 @@ export default function MemoryModal({ isOpen, onClose, personaId }: MemoryModalP
                     {activeTab === 'import' && <MemoryImport personaId={personaId} />}
                     {activeTab === 'memopedia' && <MemopediaViewer personaId={personaId} />}
                     {activeTab === 'recall' && <MemoryRecall personaId={personaId} />}
+                    {activeTab === 'arasuji' && <ArasujiViewer personaId={personaId} />}
                 </div>
             </div>
         </div>

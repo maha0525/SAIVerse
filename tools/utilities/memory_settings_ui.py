@@ -27,6 +27,14 @@ from tools.utilities.chatlog_exporter_importer import (
     parse_exporter_file,
     ExporterConversation,
 )
+from sai_memory.arasuji.storage import (
+    ArasujiEntry,
+    get_entries_by_level,
+    get_all_entries_ordered,
+    count_entries_by_level,
+    get_max_level,
+    init_arasuji_tables,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1432,4 +1440,217 @@ def create_memory_settings_ui(manager) -> None:
             inputs=[persona_id_state, recall_query_box, recall_topk_slider, recall_max_chars_slider],
             outputs=recall_result_box,
             show_progress=True,
+        )
+
+    # あらすじビューワーセクション
+    gr.Markdown("#### あらすじビューワー")
+    with gr.Accordion("あらすじを閲覧する", open=False):
+        gr.Markdown(
+            "ペルソナのあらすじ（階層的な会話要約）を閲覧できるよ。"
+            "レベル1は直接の要約、レベル2以上は統合された要約だよ。"
+        )
+
+        def _get_arasuji_connection(persona_id: str):
+            """Get database connection for arasuji."""
+            from pathlib import Path
+            import sqlite3
+            db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+            if not db_path.exists():
+                return None
+            conn = sqlite3.connect(str(db_path), check_same_thread=False)
+            init_arasuji_tables(conn)
+            return conn
+
+        def _format_timestamp_range(start_time: Optional[int], end_time: Optional[int]) -> str:
+            """Format timestamp range for display."""
+            if start_time is None and end_time is None:
+                return "-"
+            from datetime import datetime as dt
+            parts = []
+            if start_time:
+                parts.append(dt.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M"))
+            else:
+                parts.append("?")
+            parts.append(" ~ ")
+            if end_time:
+                parts.append(dt.fromtimestamp(end_time).strftime("%Y-%m-%d %H:%M"))
+            else:
+                parts.append("?")
+            return "".join(parts)
+
+        def _load_arasuji_stats(persona_id: str) -> str:
+            """Load arasuji statistics."""
+            if not persona_id:
+                return "ペルソナを選んでね。"
+            conn = _get_arasuji_connection(persona_id)
+            if not conn:
+                return "メモリDBが見つからなかったよ。"
+            try:
+                counts = count_entries_by_level(conn)
+                max_level = get_max_level(conn)
+                if not counts:
+                    return "あらすじがまだ生成されていないよ。"
+                lines = [f"**最大レベル**: {max_level}"]
+                for level, count in sorted(counts.items()):
+                    level_name = "あらすじ" if level == 1 else "あらすじ" + "のあらすじ" * (level - 1)
+                    lines.append(f"- レベル{level} ({level_name}): {count}件")
+                return "\n".join(lines)
+            except Exception as e:
+                LOGGER.exception("Failed to load arasuji stats for %s", persona_id)
+                return f"エラー: {e}"
+            finally:
+                conn.close()
+
+        def _load_arasuji_entries(persona_id: str, level_filter: str) -> tuple[pd.DataFrame, str]:
+            """Load arasuji entries as table data."""
+            if not persona_id:
+                return pd.DataFrame(columns=["ID", "レベル", "時間範囲", "メッセージ数", "プレビュー"]), "ペルソナを選んでね。"
+            conn = _get_arasuji_connection(persona_id)
+            if not conn:
+                return pd.DataFrame(columns=["ID", "レベル", "時間範囲", "メッセージ数", "プレビュー"]), "メモリDBが見つからなかったよ。"
+            try:
+                if level_filter and level_filter != "すべて":
+                    try:
+                        level = int(level_filter.replace("レベル", ""))
+                        entries = get_entries_by_level(conn, level, order_by_time=True)
+                    except ValueError:
+                        entries = get_all_entries_ordered(conn, limit=500)
+                else:
+                    entries = get_all_entries_ordered(conn, limit=500)
+
+                if not entries:
+                    return pd.DataFrame(columns=["ID", "レベル", "時間範囲", "メッセージ数", "プレビュー"]), "あらすじがまだ生成されていないよ。"
+
+                rows = []
+                for entry in entries:
+                    time_range = _format_timestamp_range(entry.start_time, entry.end_time)
+                    preview = entry.content[:100].replace("\n", " ")
+                    if len(entry.content) > 100:
+                        preview += "..."
+                    rows.append([
+                        entry.id,
+                        entry.level,
+                        time_range,
+                        entry.message_count,
+                        preview,
+                    ])
+
+                df = pd.DataFrame(rows, columns=["ID", "レベル", "時間範囲", "メッセージ数", "プレビュー"])
+                return df, f"{len(entries)}件のあらすじを取得したよ。"
+            except Exception as e:
+                LOGGER.exception("Failed to load arasuji entries for %s", persona_id)
+                return pd.DataFrame(columns=["ID", "レベル", "時間範囲", "メッセージ数", "プレビュー"]), f"エラー: {e}"
+            finally:
+                conn.close()
+
+        def _get_level_choices(persona_id: str) -> List[str]:
+            """Get available level choices for dropdown."""
+            if not persona_id:
+                return ["すべて"]
+            conn = _get_arasuji_connection(persona_id)
+            if not conn:
+                return ["すべて"]
+            try:
+                max_level = get_max_level(conn)
+                if max_level == 0:
+                    return ["すべて"]
+                choices = ["すべて"] + [f"レベル{i}" for i in range(1, max_level + 1)]
+                return choices
+            except Exception:
+                return ["すべて"]
+            finally:
+                conn.close()
+
+        def _on_arasuji_select(persona_id: str, select_data: SelectData, table_data: pd.DataFrame) -> str:
+            """Handle arasuji entry selection."""
+            if select_data is None or select_data.index is None:
+                return "*あらすじを選んでね。*"
+
+            idx = select_data.index
+            if isinstance(idx, (list, tuple)):
+                row_idx = idx[0]
+            else:
+                row_idx = idx
+
+            if not isinstance(table_data, pd.DataFrame) or row_idx >= len(table_data):
+                return "*あらすじを選んでね。*"
+
+            entry_id = table_data.iloc[row_idx]["ID"]
+
+            conn = _get_arasuji_connection(persona_id)
+            if not conn:
+                return "*メモリDBが見つからなかったよ。*"
+
+            try:
+                from sai_memory.arasuji.storage import get_entry
+                entry = get_entry(conn, entry_id)
+                if not entry:
+                    return "*あらすじが見つからなかったよ。*"
+
+                level_name = "あらすじ" if entry.level == 1 else "あらすじ" + "のあらすじ" * (entry.level - 1)
+                time_range = _format_timestamp_range(entry.start_time, entry.end_time)
+
+                lines = [
+                    f"## {level_name} (レベル{entry.level})",
+                    f"**時間範囲**: {time_range}",
+                    f"**メッセージ数**: {entry.message_count}件",
+                    f"**統合済み**: {'はい' if entry.is_consolidated else 'いいえ'}",
+                    "",
+                    "---",
+                    "",
+                    entry.content,
+                ]
+                return "\n".join(lines)
+            except Exception as e:
+                LOGGER.exception("Failed to load arasuji entry %s", entry_id)
+                return f"*エラー: {e}*"
+            finally:
+                conn.close()
+
+        arasuji_stats_display = gr.Markdown("ペルソナを選ぶとここに統計が出るよ。")
+        with gr.Row():
+            arasuji_level_filter = gr.Dropdown(
+                choices=["すべて"],
+                value="すべて",
+                label="レベルフィルター",
+                interactive=bool(choices),
+            )
+            arasuji_refresh_btn = gr.Button("あらすじを読み込む", variant="secondary", interactive=bool(choices))
+        arasuji_table = gr.DataFrame(
+            value=pd.DataFrame(columns=["ID", "レベル", "時間範囲", "メッセージ数", "プレビュー"]),
+            interactive=False,
+            label="あらすじ一覧（クリックで詳細表示）",
+        )
+        arasuji_feedback = gr.Markdown("")
+        arasuji_content_display = gr.Markdown(
+            value="*あらすじを選んでね。*",
+            label="あらすじ詳細",
+        )
+
+        # Event handlers for arasuji viewer
+        def _refresh_arasuji_view(persona_id: str, level_filter: str):
+            stats = _load_arasuji_stats(persona_id)
+            table, feedback = _load_arasuji_entries(persona_id, level_filter)
+            level_choices = _get_level_choices(persona_id)
+            return stats, gr.update(choices=level_choices, value=level_filter if level_filter in level_choices else "すべて"), table, feedback, "*あらすじを選んでね。*"
+
+        arasuji_refresh_btn.click(
+            fn=_refresh_arasuji_view,
+            inputs=[persona_id_state, arasuji_level_filter],
+            outputs=[arasuji_stats_display, arasuji_level_filter, arasuji_table, arasuji_feedback, arasuji_content_display],
+            show_progress=True,
+        )
+
+        arasuji_level_filter.change(
+            fn=lambda persona_id, level: _load_arasuji_entries(persona_id, level),
+            inputs=[persona_id_state, arasuji_level_filter],
+            outputs=[arasuji_table, arasuji_feedback],
+            show_progress=True,
+        )
+
+        arasuji_table.select(
+            fn=_on_arasuji_select,
+            inputs=[persona_id_state, arasuji_table],
+            outputs=[arasuji_content_display],
+            show_progress="hidden",
         )
