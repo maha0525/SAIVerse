@@ -81,6 +81,40 @@
     align-items: center;
     gap: 8px;
     margin-bottom: 6px;
+    flex-wrap: wrap;
+}
+
+.messageRange {
+    font-size: 0.75rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background-color: rgba(64, 192, 87, 0.2);
+    color: #40c057;
+    font-family: monospace;
+    font-weight: 600;
+}
+
+.deleteBtn {
+    background: none;
+    border: none;
+    color: #666;
+    padding: 4px;
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    opacity: 0;
+    transition: opacity 0.2s, color 0.2s, background-color 0.2s;
+    margin-left: auto;
+}
+
+.entryItem:hover .deleteBtn {
+    opacity: 1;
+}
+
+.deleteBtn:hover {
+    color: #fa5252;
+    background-color: rgba(250, 82, 82, 0.1);
 }
 
 .levelBadge {
@@ -159,6 +193,39 @@
 .headerTitle {
     color: #e0e0e0;
     font-weight: 600;
+    flex: 1;
+}
+
+.detailDeleteBtn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background-color: rgba(250, 82, 82, 0.15);
+    border: 1px solid rgba(250, 82, 82, 0.3);
+    color: #fa5252;
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: background-color 0.2s, border-color 0.2s;
+}
+
+.detailDeleteBtn:hover {
+    background-color: rgba(250, 82, 82, 0.25);
+    border-color: rgba(250, 82, 82, 0.5);
+}
+
+.messageRangeDetail {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-family: monospace;
+    color: #40c057;
+}
+
+.offsetHint {
+    font-size: 0.75rem;
+    color: #888;
 }
 
 .backButton {

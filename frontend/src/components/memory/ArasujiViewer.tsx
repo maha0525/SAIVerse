@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Loader2, ChevronLeft, BookOpen, Layers } from 'lucide-react';
+import { Loader2, ChevronLeft, BookOpen, Layers, Trash2 } from 'lucide-react';
 import styles from './ArasujiViewer.module.css';
 
 interface ArasujiEntry {
@@ -11,6 +11,9 @@ interface ArasujiEntry {
     message_count: number;
     is_consolidated: boolean;
     created_at: number | null;
+    source_ids: string[];
+    source_start_num: number | null;
+    source_end_num: number | null;
 }
 
 interface ArasujiStats {
@@ -40,6 +43,40 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     useEffect(() => {
         loadEntries(levelFilter);
     }, [levelFilter]);
+
+    const handleDelete = async (entryId: string, e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (!confirm("このあらすじを削除しますか？")) return;
+
+        try {
+            const res = await fetch(`/api/people/${personaId}/arasuji/${entryId}`, {
+                method: 'DELETE'
+            });
+            if (res.ok) {
+                // Remove from local state
+                setEntries(prev => prev.filter(entry => entry.id !== entryId));
+                if (selectedEntry?.id === entryId) {
+                    setSelectedEntry(null);
+                }
+                // Reload stats
+                loadStats();
+            } else {
+                alert("削除に失敗しました");
+            }
+        } catch (error) {
+            console.error("Failed to delete arasuji", error);
+            alert("削除中にエラーが発生しました");
+        }
+    };
+
+    const formatMessageRange = (entry: ArasujiEntry): string => {
+        if (entry.level !== 1) return "";
+        if (entry.source_start_num === null || entry.source_end_num === null) return "";
+        if (entry.source_start_num === entry.source_end_num) {
+            return `#${entry.source_start_num}`;
+        }
+        return `#${entry.source_start_num}-${entry.source_end_num}`;
+    };
 
     const loadStats = async () => {
         setIsLoadingStats(true);
@@ -154,9 +191,21 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                     <span className={styles.levelBadge} data-level={entry.level}>
                                         Lv.{entry.level}
                                     </span>
+                                    {formatMessageRange(entry) && (
+                                        <span className={styles.messageRange}>
+                                            {formatMessageRange(entry)}
+                                        </span>
+                                    )}
                                     <span className={styles.timeRange}>
                                         {formatTimeRange(entry.start_time, entry.end_time)}
                                     </span>
+                                    <button
+                                        className={styles.deleteBtn}
+                                        onClick={(e) => handleDelete(entry.id, e)}
+                                        title="削除"
+                                    >
+                                        <Trash2 size={14} />
+                                    </button>
                                 </div>
                                 <div className={styles.entryPreview}>
                                     {entry.content.slice(0, 100).replace(/\n/g, ' ')}
@@ -184,6 +233,16 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     <span className={styles.headerTitle}>
                         {selectedEntry ? getLevelName(selectedEntry.level) : "あらすじを選択してください"}
                     </span>
+                    {selectedEntry && (
+                        <button
+                            className={styles.detailDeleteBtn}
+                            onClick={(e) => handleDelete(selectedEntry.id, e)}
+                            title="削除"
+                        >
+                            <Trash2 size={16} />
+                            削除
+                        </button>
+                    )}
                 </div>
 
                 <div className={styles.detailContent}>
@@ -196,6 +255,17 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                         {selectedEntry.level} - {getLevelName(selectedEntry.level)}
                                     </span>
                                 </div>
+                                {selectedEntry.level === 1 && selectedEntry.source_start_num !== null && (
+                                    <div className={styles.metaItem}>
+                                        <span className={styles.metaLabel}>メッセージ番号</span>
+                                        <span className={styles.messageRangeDetail}>
+                                            #{selectedEntry.source_start_num} ~ #{selectedEntry.source_end_num}
+                                            <span className={styles.offsetHint}>
+                                                (--offset {selectedEntry.source_start_num - 1} --limit {(selectedEntry.source_end_num || 0) - (selectedEntry.source_start_num || 0) + 1})
+                                            </span>
+                                        </span>
+                                    </div>
+                                )}
                                 <div className={styles.metaItem}>
                                     <span className={styles.metaLabel}>期間</span>
                                     <span>{formatTimeRange(selectedEntry.start_time, selectedEntry.end_time)}</span>

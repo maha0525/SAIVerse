@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from api.deps import get_manager
 import json
+import sqlite3
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from database.models import PersonaSchedule, Playbook as PlaybookModel, AI as AIModel, City as CityModel
@@ -1461,6 +1462,10 @@ class ArasujiEntryItem(BaseModel):
     message_count: int
     is_consolidated: bool
     created_at: Optional[int] = None
+    source_ids: List[str] = []
+    # For level 1: message number range (1-indexed, for build_arasuji.py --offset)
+    source_start_num: Optional[int] = None  # first message number
+    source_end_num: Optional[int] = None    # last message number
 
 class ArasujiListResponse(BaseModel):
     entries: List[ArasujiEntryItem]
@@ -1503,6 +1508,13 @@ def get_arasuji_stats(persona_id: str, manager = Depends(get_manager)):
     finally:
         conn.close()
 
+def _get_message_number_map(conn: sqlite3.Connection) -> dict:
+    """Build a mapping of message_id -> row number (1-indexed) for the messages table."""
+    cur = conn.execute(
+        "SELECT id FROM messages ORDER BY created_at ASC, id ASC"
+    )
+    return {row[0]: i + 1 for i, row in enumerate(cur.fetchall())}
+
 @router.get("/{persona_id}/arasuji", response_model=ArasujiListResponse)
 def list_arasuji_entries(
     persona_id: str,
@@ -1523,8 +1535,28 @@ def list_arasuji_entries(
         else:
             entries = get_all_entries_ordered(conn, limit=limit)
 
-        items = [
-            ArasujiEntryItem(
+        # Build message number map for level 1 entries
+        msg_num_map = None
+        has_level1 = any(e.level == 1 for e in entries)
+        if has_level1:
+            try:
+                msg_num_map = _get_message_number_map(conn)
+            except Exception:
+                pass  # Table might not exist or be empty
+
+        items = []
+        for e in entries:
+            source_start_num = None
+            source_end_num = None
+
+            if e.level == 1 and e.source_ids and msg_num_map:
+                # Calculate message number range
+                nums = [msg_num_map.get(sid) for sid in e.source_ids if sid in msg_num_map]
+                if nums:
+                    source_start_num = min(nums)
+                    source_end_num = max(nums)
+
+            items.append(ArasujiEntryItem(
                 id=e.id,
                 level=e.level,
                 content=e.content,
@@ -1532,10 +1564,11 @@ def list_arasuji_entries(
                 end_time=e.end_time,
                 message_count=e.message_count,
                 is_consolidated=e.is_consolidated,
-                created_at=e.created_at
-            )
-            for e in entries
-        ]
+                created_at=e.created_at,
+                source_ids=e.source_ids,
+                source_start_num=source_start_num,
+                source_end_num=source_end_num,
+            ))
 
         return ArasujiListResponse(
             entries=items,
@@ -1561,6 +1594,19 @@ def get_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_mana
         if not entry:
             raise HTTPException(status_code=404, detail=f"Arasuji entry {entry_id} not found")
 
+        # Calculate message number range for level 1
+        source_start_num = None
+        source_end_num = None
+        if entry.level == 1 and entry.source_ids:
+            try:
+                msg_num_map = _get_message_number_map(conn)
+                nums = [msg_num_map.get(sid) for sid in entry.source_ids if sid in msg_num_map]
+                if nums:
+                    source_start_num = min(nums)
+                    source_end_num = max(nums)
+            except Exception:
+                pass
+
         return ArasujiEntryItem(
             id=entry.id,
             level=entry.level,
@@ -1569,11 +1615,35 @@ def get_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_mana
             end_time=entry.end_time,
             message_count=entry.message_count,
             is_consolidated=entry.is_consolidated,
-            created_at=entry.created_at
+            created_at=entry.created_at,
+            source_ids=entry.source_ids,
+            source_start_num=source_start_num,
+            source_end_num=source_end_num,
         )
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get arasuji entry: {e}")
+    finally:
+        conn.close()
+
+@router.delete("/{persona_id}/arasuji/{entry_id}")
+def delete_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_manager)):
+    """Delete an arasuji entry."""
+    from sai_memory.arasuji.storage import delete_entry
+
+    conn = _get_arasuji_db(persona_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+
+    try:
+        success = delete_entry(conn, entry_id)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Arasuji entry {entry_id} not found")
+        return {"success": True, "message": f"Deleted arasuji entry {entry_id}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete arasuji entry: {e}")
     finally:
         conn.close()
