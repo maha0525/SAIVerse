@@ -1542,11 +1542,11 @@ def _get_message_number_map(conn: sqlite3.Connection) -> dict:
 def list_arasuji_entries(
     persona_id: str,
     level: Optional[int] = None,
-    limit: int = 200,
+    limit: int = 500,
     manager = Depends(get_manager)
 ):
     """List arasuji entries for a persona."""
-    from sai_memory.arasuji.storage import get_entries_by_level, get_all_entries_ordered
+    from sai_memory.arasuji.storage import get_entries_by_level
 
     conn = _get_arasuji_db(persona_id)
     if not conn:
@@ -1556,7 +1556,16 @@ def list_arasuji_entries(
         if level is not None:
             entries = get_entries_by_level(conn, level, order_by_time=True)
         else:
-            entries = get_all_entries_ordered(conn, limit=limit)
+            # Get all entries ordered by level DESC, then start_time ASC
+            cur = conn.execute("""
+                SELECT id, level, content, source_ids_json, start_time, end_time,
+                       source_count, message_count, parent_id, is_consolidated, created_at
+                FROM arasuji_entries
+                ORDER BY level DESC, start_time ASC
+                LIMIT ?
+            """, (limit,))
+            from sai_memory.arasuji.storage import _row_to_entry
+            entries = [_row_to_entry(row) for row in cur.fetchall()]
 
         # Build message number map for level 1 entries
         msg_num_map = None
