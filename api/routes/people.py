@@ -419,9 +419,10 @@ def update_persona_config(
     # Merge updates
     new_desc = req.description if req.description is not None else current["DESCRIPTION"]
     new_prompt = req.system_prompt if req.system_prompt is not None else current["SYSTEMPROMPT"]
-    new_model = req.default_model if req.default_model is not None else current["DEFAULT_MODEL"]
+    # For model fields: empty string means "clear to None", None means "no change"
+    new_model = (req.default_model or None) if req.default_model is not None else current["DEFAULT_MODEL"]
     
-    new_lightweight_model = req.lightweight_model if req.lightweight_model is not None else current.get("LIGHTWEIGHT_MODEL")
+    new_lightweight_model = (req.lightweight_model or None) if req.lightweight_model is not None else current.get("LIGHTWEIGHT_MODEL")
     new_mode = req.interaction_mode if req.interaction_mode is not None else current["INTERACTION_MODE"]
     new_avatar = req.avatar_path if req.avatar_path is not None else current.get("AVATAR_IMAGE")
     new_appearance = req.appearance_image_path if req.appearance_image_path is not None else current.get("APPEARANCE_IMAGE_PATH")
