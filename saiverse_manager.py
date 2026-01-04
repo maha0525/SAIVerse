@@ -1167,12 +1167,14 @@ class SAIVerseManager(
         try:
             # Store relative path for cross-platform compatibility
             relative_path = str(file_path.relative_to(self.saiverse_home))
+            initial_state = {"is_open": True}
             item_row = ItemModel(
                 ITEM_ID=item_id,
                 NAME=name,
                 TYPE="document",
                 DESCRIPTION=summary,
                 FILE_PATH=relative_path,
+                STATE_JSON=json.dumps(initial_state),
                 CREATED_AT=timestamp,
                 UPDATED_AT=timestamp,
             )
@@ -1200,7 +1202,7 @@ class SAIVerseManager(
             "type": "document",
             "description": summary,
             "file_path": relative_path,
-            "state": {},
+            "state": {"is_open": True},
             "created_at": timestamp,
             "updated_at": timestamp,
         }

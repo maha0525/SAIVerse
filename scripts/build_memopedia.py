@@ -40,7 +40,7 @@ load_dotenv()
 os.environ["SAIVERSE_SKIP_TOOL_IMPORTS"] = "1"
 
 from sai_memory.memory.storage import init_db, get_messages_paginated, Message
-from sai_memory.memopedia import Memopedia, init_memopedia_tables, CATEGORY_PEOPLE, CATEGORY_EVENTS, CATEGORY_PLANS
+from sai_memory.memopedia import Memopedia, init_memopedia_tables, CATEGORY_PEOPLE, CATEGORY_TERMS, CATEGORY_PLANS
 from model_configs import get_model_config, find_model_config
 
 # Import llm_clients lazily to avoid circular import
@@ -394,6 +394,7 @@ def extract_knowledge(
     dry_run: bool = False,
     refine_writes: bool = False,
     episode_context_conn=None,
+    debug_log_path=None,
 ) -> List[Dict[str, Any]]:
     """Extract knowledge from messages using the LLM.
 
@@ -470,10 +471,10 @@ def extract_knowledge(
                     episode_context_conn, batch_start, batch_end
                 )
                 if episode_ctx:
-                    prompt = f"""## この時期の出来事の流れ（参考）
+                    prompt = f"""## これまでの出来事の流れ（参考）
 
-以下は、この会話が行われた時期の前後の出来事のあらすじです。
-会話の文脈理解や、既存の記録との重複を避けるために参照してください。
+以下は、この会話が行われるより前の出来事のあらすじです。
+過去の経緯や文脈を理解するために参照してください。
 
 {episode_ctx}
 
@@ -487,12 +488,30 @@ def extract_knowledge(
         # Retry loop for empty responses
         batch_pages: List[Dict[str, Any]] = []
         for attempt in range(max_retries + 1):
+            # Debug log: write prompt
+            if debug_log_path and attempt == 0:
+                from datetime import datetime
+                with open(debug_log_path, "a", encoding="utf-8") as f:
+                    f.write("\n" + "=" * 80 + "\n")
+                    f.write(f"[MEMOPEDIA] {datetime.now().isoformat()}\n")
+                    f.write("=" * 80 + "\n")
+                    f.write("--- PROMPT ---\n")
+                    f.write(prompt)
+                    f.write("\n")
+
             try:
                 text = client.generate(
                     messages=[{"role": "user", "content": prompt}],
                     tools=[],
                     response_schema=response_schema,
                 )
+
+                # Debug log: write response
+                if debug_log_path and attempt == 0:
+                    with open(debug_log_path, "a", encoding="utf-8") as f:
+                        f.write("--- RESPONSE ---\n")
+                        f.write(text or "(empty)")
+                        f.write("\n")
 
                 if not text:
                     LOGGER.warning("Empty response from LLM")
@@ -574,7 +593,7 @@ def apply_pages_to_memopedia(
     """
     category_to_root = {
         "people": "root_people",
-        "events": "root_events",
+        "terms": "root_terms",
         "plans": "root_plans",
     }
 
@@ -690,7 +709,7 @@ def main():
   # 既存ページをクリアしてからインポート
   python scripts/build_memopedia.py air_city_a --import memopedia_backup.json --clear
 
-  # エピソード記憶（あらすじ）を文脈として使用
+  # Chronicle (Chronicle context) を文脈として使用
   python scripts/build_memopedia.py air_city_a --with-episode-context
 """,
     )
@@ -708,7 +727,7 @@ def main():
     parser.add_argument("--clear", action="store_true", help="Clear all existing pages (can be used alone or with --import)")
     parser.add_argument("--offset", type=int, default=0, help="Number of messages to skip (for resuming, e.g., --offset 100 to skip first 100)")
     parser.add_argument("--thread", type=str, metavar="THREAD_ID", help="Process only messages from this thread ID")
-    parser.add_argument("--with-episode-context", action="store_true", help="Include episode context (arasuji) in prompts for better context understanding")
+    parser.add_argument("--with-episode-context", action="store_true", help="Include Chronicle context (Memory Weave) in prompts for better context understanding")
 
     args = parser.parse_args()
 

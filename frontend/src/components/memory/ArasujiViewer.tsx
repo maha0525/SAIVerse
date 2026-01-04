@@ -16,6 +16,13 @@ interface ArasujiEntry {
     source_end_num: number | null;
 }
 
+interface SourceMessage {
+    id: string;
+    role: string;
+    content: string;
+    created_at: number;
+}
+
 interface ArasujiStats {
     max_level: number;
     counts_by_level: Record<string, number>;
@@ -35,6 +42,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     const [isLoadingStats, setIsLoadingStats] = useState(false);
     const [isLoadingEntries, setIsLoadingEntries] = useState(false);
     const [showList, setShowList] = useState(true);
+    const [sourceMessages, setSourceMessages] = useState<SourceMessage[]>([]);
+    const [isLoadingMessages, setIsLoadingMessages] = useState(false);
 
     useEffect(() => {
         loadStats();
@@ -75,9 +84,34 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         return null;
     };
 
+    // Fetch source messages for level-1 entry
+    const fetchSourceMessages = async (entryId: string) => {
+        setIsLoadingMessages(true);
+        try {
+            const res = await fetch(`/api/people/${personaId}/arasuji/${entryId}/messages`);
+            if (res.ok) {
+                const data = await res.json();
+                setSourceMessages(data);
+            }
+        } catch (e) {
+            console.error("Failed to fetch source messages", e);
+        } finally {
+            setIsLoadingMessages(false);
+        }
+    };
+
+    // Load source messages when a level-1 entry is selected
+    useEffect(() => {
+        if (selectedEntry && selectedEntry.level === 1 && selectedEntry.source_ids.length > 0) {
+            fetchSourceMessages(selectedEntry.id);
+        } else {
+            setSourceMessages([]);
+        }
+    }, [selectedEntry?.id]);
+
     const handleDelete = async (entryId: string, e: React.MouseEvent) => {
         e.stopPropagation();
-        if (!confirm("このあらすじを削除しますか？")) return;
+        if (!confirm("この Chronicle を削除しますか？")) return;
 
         try {
             const res = await fetch(`/api/people/${personaId}/arasuji/${entryId}`, {
@@ -155,8 +189,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     };
 
     const getLevelName = (level: number): string => {
-        if (level === 1) return "あらすじ";
-        return "あらすじ" + "のあらすじ".repeat(level - 1);
+        if (level === 1) return "Chronicle";
+        return "Chronicle" + " (Lv" + level + ")";
     };
 
     const handleEntrySelect = (entry: ArasujiEntry) => {
@@ -171,7 +205,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 <div className={styles.sidebarHeader}>
                     <div className={styles.headerContent}>
                         <Layers size={18} />
-                        <span>あらすじ一覧</span>
+                        <span>Chronicle 一覧 (Memory Weave)</span>
                     </div>
                     {stats && (
                         <div className={styles.statsInfo}>
@@ -206,9 +240,9 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     ) : entries.length === 0 ? (
                         <div className={styles.emptyState}>
                             <BookOpen size={48} />
-                            <p>あらすじがまだ生成されていません</p>
+                            <p>Chronicle がまだ生成されていません</p>
                             <p className={styles.hint}>
-                                build_arasuji.py スクリプトで生成できます
+                                build_arasuji.py スクリプトを使用して Chronicle を生成し、Memory Weave を構築できます
                             </p>
                         </div>
                     ) : (
@@ -244,7 +278,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                 </div>
                                 <div className={styles.entryStats}>
                                     <span>{entry.message_count} メッセージ</span>
-                                    {entry.is_consolidated && <span className={styles.consolidatedBadge}>統合済</span>}
+                                    {entry.is_consolidated && <span className={styles.consolidatedBadge}>統合済 (Memory Weave)</span>}
                                 </div>
                             </div>
                         ))
@@ -320,16 +354,32 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             {selectedEntry.source_ids.length > 0 && (
                                 <div className={styles.sourceSection}>
                                     <h3 className={styles.sourceSectionTitle}>
-                                        {selectedEntry.level === 1 ? '統合元メッセージ' : '統合元あらすじ'}
+                                        {selectedEntry.level === 1 ? '統合元メッセージ' : '統合元 Chronicle'}
                                     </h3>
                                     {selectedEntry.level === 1 ? (
-                                        // Level 1: Show message numbers
+                                        // Level 1: Show source messages
                                         <div className={styles.sourceMessageList}>
-                                            {selectedEntry.source_start_num !== null && selectedEntry.source_end_num !== null ? (
-                                                <span className={styles.sourceMessageRange}>
-                                                    メッセージ #{selectedEntry.source_start_num} ~ #{selectedEntry.source_end_num}
-                                                    ({selectedEntry.source_ids.length}件)
-                                                </span>
+                                            {isLoadingMessages ? (
+                                                <div className={styles.loadingMessages}>
+                                                    <Loader2 className={styles.loader} size={16} />
+                                                    <span>メッセージを読み込み中...</span>
+                                                </div>
+                                            ) : sourceMessages.length > 0 ? (
+                                                sourceMessages.map(msg => (
+                                                    <div key={msg.id} className={styles.sourceMessageItem}>
+                                                        <div className={styles.sourceMessageHeader}>
+                                                            <span className={`${styles.sourceMessageRole} ${styles[msg.role.toLowerCase()] || ''}`}>
+                                                                {msg.role === 'model' ? 'assistant' : msg.role}
+                                                            </span>
+                                                            <span className={styles.sourceMessageTime}>
+                                                                {new Date(msg.created_at * 1000).toLocaleString()}
+                                                            </span>
+                                                        </div>
+                                                        <div className={styles.sourceMessageContent}>
+                                                            {msg.content}
+                                                        </div>
+                                                    </div>
+                                                ))
                                             ) : (
                                                 <span className={styles.sourceMessageCount}>
                                                     {selectedEntry.source_ids.length} 件のメッセージ
@@ -386,7 +436,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     ) : (
                         <div className={styles.emptyState}>
                             <BookOpen size={48} />
-                            <p>左のリストからあらすじを選択してください</p>
+                            <p>左のリストから Chronicle を選択してください</p>
                         </div>
                     )}
                 </div>

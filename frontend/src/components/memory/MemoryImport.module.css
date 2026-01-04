@@ -360,3 +360,73 @@
     color: #4dabf7;
     font-size: 0.9rem;
 }
+
+/* Embedding Dialog */
+.embeddingDialog {
+    background-color: #1a1b1e;
+    border-radius: 8px;
+    padding: 2rem;
+    text-align: center;
+}
+
+.embeddingDialog h3 {
+    font-size: 1.2rem;
+    font-weight: 500;
+    margin-bottom: 1.5rem;
+    color: #e0e0e0;
+}
+
+.dialogInfo {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 2rem 0;
+    text-align: left;
+    background-color: rgba(77, 171, 247, 0.1);
+    border: 1px solid rgba(77, 171, 247, 0.3);
+    border-radius: 6px;
+    padding: 1rem 1.5rem;
+}
+
+.dialogInfo li {
+    color: #aaa;
+    font-size: 0.9rem;
+    padding: 0.3rem 0;
+    position: relative;
+    padding-left: 1.2rem;
+}
+
+.dialogInfo li::before {
+    content: "•";
+    position: absolute;
+    left: 0;
+    color: #4dabf7;
+}
+
+.dialogActions {
+    display: flex;
+    justify-content: center;
+    gap: 1rem;
+}
+
+/* Import Progress */
+.importingProgress {
+    background-color: #1a1b1e;
+    border-radius: 8px;
+    padding: 3rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+}
+
+.progressText {
+    font-size: 1.1rem;
+    color: #4dabf7;
+}
+
+/* Tab disabled state */
+.subTab:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}

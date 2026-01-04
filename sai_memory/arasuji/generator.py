@@ -19,6 +19,10 @@ from sai_memory.arasuji.storage import (
     get_max_level,
     mark_consolidated,
 )
+from sai_memory.arasuji.context import (
+    get_episode_context,
+    format_episode_context,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -109,6 +113,8 @@ def generate_level1_arasuji(
     *,
     dry_run: bool = False,
     include_timestamp: bool = True,
+    memopedia_context: Optional[str] = None,
+    debug_log_path: Optional[Path] = None,
 ) -> Optional[ArasujiEntry]:
     """Generate a level-1 arasuji from messages.
 
@@ -118,6 +124,7 @@ def generate_level1_arasuji(
         messages: Messages to summarize
         dry_run: If True, don't save to database
         include_timestamp: If False, omit timestamps from prompt (useful when dates are unreliable)
+        memopedia_context: Optional semantic memory context (page titles, summaries, keywords)
 
     Returns:
         Created ArasujiEntry or None on failure
@@ -125,8 +132,10 @@ def generate_level1_arasuji(
     if not messages:
         return None
 
-    # Get context from higher levels
-    context = _get_context_summaries(conn, 1, include_timestamp=include_timestamp)
+    # Get episode context using the same algorithm as --preview-context
+    # This includes Level 1 entries (hierarchical promotion algorithm)
+    context_entries = get_episode_context(conn, max_entries=20)
+    context = format_episode_context(context_entries) if context_entries else ""
 
     # Format messages
     conversation = _format_messages_for_prompt(messages, include_timestamp=include_timestamp)
@@ -146,6 +155,13 @@ def generate_level1_arasuji(
             "",
         ])
 
+    if memopedia_context:
+        prompt_parts.extend([
+            "## 意味記憶（人物・用語の背景情報）",
+            memopedia_context,
+            "",
+        ])
+
     prompt_parts.extend([
         "## 今回記録する会話",
         conversation,
@@ -156,17 +172,36 @@ def generate_level1_arasuji(
         "- 固有名詞や重要な詳細は保持する",
         "- 感情や雰囲気も含める",
         "- 「〜について話した」のような抽象的な記述は避け、具体的に書く",
+        "- **日時情報（【2025-01-07 23:56 ~】など）は書かないでください**（自動で付与されます）",
+        "- **「あらすじ」などの見出しは書かないでください**（本文のみ出力）",
         "",
         "あらすじを日本語で書いてください。",
     ])
 
     prompt = "\n".join(prompt_parts)
 
+    # Debug log: write prompt
+    if debug_log_path:
+        with open(debug_log_path, "a", encoding="utf-8") as f:
+            f.write("\n" + "=" * 80 + "\n")
+            f.write(f"[CHRONICLE Lv1] {datetime.now().isoformat()}\n")
+            f.write("=" * 80 + "\n")
+            f.write("--- PROMPT ---\n")
+            f.write(prompt)
+            f.write("\n")
+
     try:
         response = client.generate(
             messages=[{"role": "user", "content": prompt}],
             tools=[],
         )
+
+        # Debug log: write response
+        if debug_log_path:
+            with open(debug_log_path, "a", encoding="utf-8") as f:
+                f.write("--- RESPONSE ---\n")
+                f.write(response or "(empty)")
+                f.write("\n")
 
         if not response or not response.strip():
             LOGGER.warning("Empty response from LLM for level-1 arasuji")
@@ -406,6 +441,7 @@ class ArasujiGenerator:
         batch_size: int = DEFAULT_BATCH_SIZE,
         consolidation_size: int = DEFAULT_CONSOLIDATION_SIZE,
         include_timestamp: bool = True,
+        memopedia_context: Optional[str] = None,
     ):
         """Initialize the generator.
 
@@ -415,12 +451,15 @@ class ArasujiGenerator:
             batch_size: Number of messages per level-1 arasuji
             consolidation_size: Number of entries per higher-level arasuji
             include_timestamp: If False, omit timestamps from prompts (useful when dates are unreliable)
+            memopedia_context: Optional semantic memory context (page titles, summaries, keywords)
         """
         self.client = client
         self.conn = conn
         self.batch_size = batch_size
         self.consolidation_size = consolidation_size
         self.include_timestamp = include_timestamp
+        self.memopedia_context = memopedia_context
+        self.debug_log_path = None  # Can be set externally
 
     def generate_from_messages(
         self,
@@ -428,6 +467,7 @@ class ArasujiGenerator:
         *,
         dry_run: bool = False,
         progress_callback: Optional[Callable[[int, int], None]] = None,
+        batch_callback: Optional[Callable[[List[Message]], None]] = None,
     ) -> Tuple[List[ArasujiEntry], List[ArasujiEntry]]:
         """Generate arasuji entries from messages.
 
@@ -435,6 +475,9 @@ class ArasujiGenerator:
             messages: Messages to process
             dry_run: If True, don't save to database
             progress_callback: Optional callback(processed, total) for progress updates
+            batch_callback: Optional callback(batch_messages) called after each batch's
+                            Chronicle generation and consolidation. Use this to run
+                            Memopedia extraction per-batch for interleaved Memory Weave.
 
         Returns:
             Tuple of (level1_entries, consolidated_entries)
@@ -460,12 +503,13 @@ class ArasujiGenerator:
                 batch,
                 dry_run=dry_run,
                 include_timestamp=self.include_timestamp,
+                memopedia_context=self.memopedia_context,
+                debug_log_path=self.debug_log_path,
             )
 
             if entry:
                 level1_entries.append(entry)
 
-                # Check for consolidation
                 consolidated = maybe_consolidate(
                     self.client,
                     self.conn,
@@ -475,6 +519,10 @@ class ArasujiGenerator:
                     include_timestamp=self.include_timestamp,
                 )
                 consolidated_entries.extend(consolidated)
+
+            # Call batch callback for Memopedia extraction (Memory Weave interleaved mode)
+            if batch_callback:
+                batch_callback(batch)
 
         if progress_callback:
             progress_callback(total, total)

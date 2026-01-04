@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """
-Build Arasuji (episode memory) from existing SAIMemory conversation logs.
+Build Chronicle (episode memory, part of Memory Weave) from existing SAIMemory conversation logs.
 
 This script reads conversation messages from a persona's memory.db and generates
-hierarchical summaries (arasuji) for episode memory.
+hierarchical summaries (Chronicle) for episode memory.
 
 Usage:
     python scripts/build_arasuji.py <persona_id> [--limit N] [--model MODEL] [--dry-run]
 
 Examples:
-    # Build from first 100 messages
+    # Build Chronicle from first 100 messages
     python scripts/build_arasuji.py air_city_a --limit 100
 
-    # Process messages 101-200 (for testing)
+    # Process messages 101-200
     python scripts/build_arasuji.py air_city_a --offset 100 --limit 100
 
     # Preview what would be generated without writing
     python scripts/build_arasuji.py air_city_a --limit 50 --dry-run
 
-    # Show current arasuji statistics
+    # Show current Chronicle statistics
     python scripts/build_arasuji.py air_city_a --stats
 
-    # Clear all arasuji and start fresh
+    # Clear all Chronicle entries and start fresh
     python scripts/build_arasuji.py air_city_a --clear
 """
 
@@ -68,11 +68,18 @@ from sai_memory.arasuji.context import (
     get_episode_context,
     format_episode_context,
     get_episode_summary_stats,
+    get_episode_context_for_timerange,
 )
 from model_configs import find_model_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOGGER = logging.getLogger(__name__)
+
+# Environment variable configuration for Memory Weave
+ENV_MODEL = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.0-flash")
+ENV_BATCH_SIZE = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)))
+ENV_CONSOLIDATION_SIZE = int(os.getenv("MEMORY_WEAVE_CONSOLIDATION_SIZE", str(DEFAULT_CONSOLIDATION_SIZE)))
+ENV_MAINTAIN_INTERVAL = int(os.getenv("MEMORY_WEAVE_MAINTAIN_INTERVAL", "0"))
 
 
 def get_persona_db_path(persona_id: str) -> Path:
@@ -147,11 +154,11 @@ def fetch_messages(
 
 
 def print_stats(conn, persona_id: str) -> None:
-    """Print arasuji statistics."""
+    """Print chronicle statistics."""
     stats = get_episode_summary_stats(conn)
 
     print("\n" + "=" * 60)
-    print(f"Arasuji Statistics for: {persona_id}")
+    print(f"Chronicle Statistics for: {persona_id}")
     print("=" * 60)
     print(f"Total messages covered: {stats['total_messages_covered']}")
     print(f"Maximum level: {stats['max_level']}")
@@ -160,10 +167,10 @@ def print_stats(conn, persona_id: str) -> None:
         print("\nEntries by level:")
         for level, count in sorted(stats['entries_by_level'].items()):
             unconsolidated = stats['unconsolidated_by_level'].get(level, 0)
-            level_name = "あらすじ" if level == 1 else "あらすじ" + "のあらすじ" * (level - 1)
+            level_name = "Chronicle" if level == 1 else "Chronicle" + "'s Chronicle" * (level - 1)
             print(f"  Level {level} ({level_name}): {count} total, {unconsolidated} unconsolidated")
     else:
-        print("\nNo arasuji entries yet.")
+        print("\nNo chronicle entries yet.")
 
     print("=" * 60)
 
@@ -181,7 +188,7 @@ def print_context_preview(conn, max_entries: int = 100, debug: bool = False) -> 
 
         # Show all arasuji in DB
         max_level = get_max_level(conn)
-        print(f"\n[1] All arasuji in DB (max_level={max_level}):")
+        print(f"\n[1] All chronicle in DB (max_level={max_level}):")
         for level in range(1, max_level + 1):
             entries = get_entries_by_level(conn, level, order_by_time=True)
             print(f"  Level {level}: {len(entries)} entries")
@@ -192,7 +199,7 @@ def print_context_preview(conn, max_entries: int = 100, debug: bool = False) -> 
 
         # Show sorted list
         all_arasuji = _get_all_arasuji_sorted(conn)
-        print(f"\n[2] All arasuji sorted by end_time desc: {len(all_arasuji)} total")
+        print(f"\n[2] All chronicle sorted by end_time desc: {len(all_arasuji)} total")
         for i, e in enumerate(all_arasuji[:10]):
             print(f"  {i}: level={e.level} end_time={e.end_time} id={e.id[:8]}...")
         if len(all_arasuji) > 10:
@@ -247,7 +254,7 @@ def print_context_preview(conn, max_entries: int = 100, debug: bool = False) -> 
 
 
 def export_arasuji(conn, output_path: Path) -> int:
-    """Export all arasuji entries to a JSON file.
+    """Export all chronicle entries to a JSON file.
 
     Args:
         conn: Database connection
@@ -272,7 +279,7 @@ def export_arasuji(conn, output_path: Path) -> int:
 
 
 def import_arasuji(conn, input_path: Path, clear_existing: bool = False) -> int:
-    """Import arasuji entries from a JSON file.
+    """Import chronicle entries from a JSON file.
 
     Args:
         conn: Database connection
@@ -337,14 +344,14 @@ def list_available_models() -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Build Arasuji (episode memory) from SAIMemory conversation logs",
+        description="Build Chronicle (episode memory, part of Memory Weave) from SAIMemory logs",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用例:
   # デフォルトモデル (gemini-2.0-flash) で100件処理
   python scripts/build_arasuji.py air_city_a --limit 100
 
-  # 101件目から100件処理（テスト用）
+  # 101件目から100件処理
   python scripts/build_arasuji.py air_city_a --offset 100 --limit 100
 
   # ドライラン（保存せずにプレビュー）
@@ -356,8 +363,14 @@ def main():
   # コンテキストプレビューを表示
   python scripts/build_arasuji.py air_city_a --preview-context
 
-  # 全てのあらすじをクリア
-  python scripts/build_arasuji.py air_city_a --clear
+  # 全てのChronicleをクリア
+  python scripts/build_arasuji.py air_city_a --clear-chronicle
+
+  # 全てのMemopediaをクリア
+  python scripts/build_memopedia.py air_city_a --clear-memopedia
+
+  # 両方をクリア (Memory Weave全体)
+  python scripts/build_arasuji.py air_city_a --clear-chronicle --clear-memopedia
 
   # バッチサイズと統合サイズを変更
   python scripts/build_arasuji.py air_city_a --batch-size 30 --consolidation-size 5
@@ -365,14 +378,17 @@ def main():
   # 日時情報を省略（インポートしたログで日時が不正確な場合）
   python scripts/build_arasuji.py air_city_a --no-timestamp
 
-  # あらすじをJSONにエクスポート
-  python scripts/build_arasuji.py air_city_a --export arasuji_backup.json
+  # ChronicleをJSONにエクスポート
+  python scripts/build_arasuji.py air_city_a --export chronicle_backup.json
 
-  # あらすじをJSONからインポート（既存を保持して追加）
-  python scripts/build_arasuji.py air_city_a --import arasuji_backup.json
+  # ChronicleをJSONからインポート（既存を保持して追加）
+  python scripts/build_arasuji.py air_city_a --import chronicle_backup.json
 
-  # あらすじをJSONからインポート（既存をクリアして置換）
-  python scripts/build_arasuji.py air_city_a --import arasuji_backup.json --clear
+  # ChronicleをJSONからインポート（既存をクリアして置換）
+  python scripts/build_arasuji.py air_city_a --import chronicle_backup.json --clear
+
+  # Memory Weave: Chronicle と Memopedia を同時生成
+  python scripts/build_arasuji.py air_city_a --limit 100 --with-memopedia
 
   # 利用可能なモデル一覧を表示
   python scripts/build_arasuji.py --list-models
@@ -388,8 +404,8 @@ def main():
         help="Number of messages to skip (for testing, e.g., --offset 100 to skip first 100)"
     )
     parser.add_argument(
-        "--model", default="gemini-2.0-flash",
-        help="Model to use for generation (default: gemini-2.0-flash)"
+        "--model", default=ENV_MODEL,
+        help=f"Model to use for generation (default: {ENV_MODEL}, env: MEMORY_WEAVE_MODEL)"
     )
     parser.add_argument(
         "--provider",
@@ -400,12 +416,12 @@ def main():
         help="Preview generation without writing to database"
     )
     parser.add_argument(
-        "--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
-        help=f"Number of messages per level-1 arasuji (default: {DEFAULT_BATCH_SIZE})"
+        "--batch-size", type=int, default=ENV_BATCH_SIZE,
+        help=f"Number of messages per level-1 Chronicle (default: {ENV_BATCH_SIZE}, env: MEMORY_WEAVE_BATCH_SIZE)"
     )
     parser.add_argument(
-        "--consolidation-size", type=int, default=DEFAULT_CONSOLIDATION_SIZE,
-        help=f"Number of entries per higher-level arasuji (default: {DEFAULT_CONSOLIDATION_SIZE})"
+        "--consolidation-size", type=int, default=ENV_CONSOLIDATION_SIZE,
+        help=f"Number of entries per higher-level Chronicle (default: {ENV_CONSOLIDATION_SIZE}, env: MEMORY_WEAVE_CONSOLIDATION_SIZE)"
     )
     parser.add_argument(
         "--list-models", action="store_true",
@@ -413,15 +429,19 @@ def main():
     )
     parser.add_argument(
         "--stats", action="store_true",
-        help="Show arasuji statistics and exit"
+        help="Show Chronicle statistics (part of Memory Weave) and exit"
     )
     parser.add_argument(
         "--preview-context", action="store_true",
-        help="Preview the episode context that would be injected"
+        help="Preview the Chronicle context that would be injected"
     )
     parser.add_argument(
-        "--clear", action="store_true",
-        help="Clear all arasuji entries and exit"
+        "--clear-chronicle", action="store_true",
+        help="Clear all Chronicle entries and exit"
+    )
+    parser.add_argument(
+        "--clear-memopedia", action="store_true",
+        help="Clear all Memopedia pages and exit"
     )
     parser.add_argument(
         "--thread", type=str, metavar="THREAD_ID",
@@ -437,11 +457,23 @@ def main():
     )
     parser.add_argument(
         "--export", type=str, metavar="FILE",
-        help="Export all arasuji entries to a JSON file"
+        help="Export all Chronicle entries to a JSON file"
     )
     parser.add_argument(
         "--import", dest="import_file", type=str, metavar="FILE",
-        help="Import arasuji entries from a JSON file"
+        help="Import Chronicle entries from a JSON file"
+    )
+    parser.add_argument(
+        "--with-memopedia", action="store_true",
+        help="Also generate Memopedia pages from the same messages (Memory Weave)"
+    )
+    parser.add_argument(
+        "--debug-log", type=str, metavar="FILE",
+        help="Output prompts and LLM responses to a log file for debugging"
+    )
+    parser.add_argument(
+        "--maintain-interval", type=int, metavar="N", default=ENV_MAINTAIN_INTERVAL,
+        help=f"Run maintain_memopedia every N messages processed (default: {ENV_MAINTAIN_INTERVAL}, env: MEMORY_WEAVE_MAINTAIN_INTERVAL)"
     )
 
     args = parser.parse_args()
@@ -477,18 +509,35 @@ def main():
         conn.close()
         sys.exit(0)
 
-    # Handle --clear (standalone, without --import)
-    if args.clear and not args.import_file:
-        LOGGER.info("Clearing all arasuji entries...")
+    # Handle --clear-chronicle (standalone, without --import)
+    if args.clear_chronicle and not args.import_file:
+        LOGGER.info("Clearing all Chronicle entries...")
         deleted = clear_all_entries(conn)
-        LOGGER.info(f"Deleted {deleted} entries")
+        LOGGER.info(f"Deleted {deleted} Chronicle entries")
+        if not args.clear_memopedia:
+            conn.close()
+            sys.exit(0)
+
+    # Handle --clear-memopedia
+    if args.clear_memopedia:
+        LOGGER.info("Clearing all Memopedia pages...")
+        try:
+            from sai_memory.memopedia import Memopedia, init_memopedia_tables
+            init_memopedia_tables(conn)
+            memopedia = Memopedia(conn)
+            deleted = memopedia.clear_all_pages()
+            LOGGER.info(f"Deleted {deleted} Memopedia pages")
+        except ImportError as e:
+            LOGGER.error(f"Memopedia module not available: {e}")
+        except Exception as e:
+            LOGGER.error(f"Failed to clear Memopedia: {e}")
         conn.close()
         sys.exit(0)
 
     # Handle --export
     if args.export:
         output_path = Path(args.export)
-        LOGGER.info(f"Exporting arasuji to: {output_path}")
+        LOGGER.info(f"Exporting chronicle to: {output_path}")
         count = export_arasuji(conn, output_path)
         LOGGER.info(f"Exported {count} entries to {output_path}")
         conn.close()
@@ -501,7 +550,7 @@ def main():
             LOGGER.error(f"Import file not found: {input_path}")
             conn.close()
             sys.exit(1)
-        LOGGER.info(f"Importing arasuji from: {input_path}")
+        LOGGER.info(f"Importing chronicle from: {input_path}")
         if args.clear:
             LOGGER.info("Clearing existing entries before import...")
         count = import_arasuji(conn, input_path, clear_existing=args.clear)
@@ -510,7 +559,7 @@ def main():
         conn.close()
         sys.exit(0)
 
-    LOGGER.info(f"Building Arasuji for persona: {args.persona_id}")
+    LOGGER.info(f"Building chronicle for persona: {args.persona_id}")
     LOGGER.info(f"Database: {db_path}")
     LOGGER.info(f"Message range: offset={args.offset}, limit={args.limit}")
     LOGGER.info(f"Batch size: {args.batch_size}")
@@ -554,28 +603,124 @@ def main():
         conn.close()
         sys.exit(0)
 
-    # Generate arasuji
+    # Get Memopedia context for semantic memory (Memory Weave)
+    memopedia_context = None
+    try:
+        from sai_memory.memopedia import Memopedia, init_memopedia_tables
+        from scripts.build_memopedia import format_existing_pages
+
+        init_memopedia_tables(conn)
+        memopedia = Memopedia(conn)
+        memopedia_context = format_existing_pages(memopedia)
+        if memopedia_context and memopedia_context != "(まだページはありません)":
+            LOGGER.info(f"Using Memopedia context for semantic memory ({len(memopedia_context)} chars)")
+        else:
+            memopedia_context = None
+    except ImportError as e:
+        LOGGER.debug(f"Memopedia modules not available: {e}")
+    except Exception as e:
+        LOGGER.warning(f"Failed to get Memopedia context: {e}")
+
+    # Generate chronicle
     generator = ArasujiGenerator(
         client,
         conn,
         batch_size=args.batch_size,
         consolidation_size=args.consolidation_size,
         include_timestamp=not args.no_timestamp,
+        memopedia_context=memopedia_context,
     )
+
+    # Set debug log path if specified
+    if args.debug_log:
+        generator.debug_log_path = Path(args.debug_log)
+        LOGGER.info(f"Debug logging enabled: {args.debug_log}")
 
     def progress_callback(processed: int, total: int) -> None:
         if total > 0:
             pct = (processed / total) * 100
             LOGGER.info(f"Progress: {processed}/{total} ({pct:.1f}%)")
 
+    # Set up Memopedia batch callback if --with-memopedia is enabled (interleaved Memory Weave)
+    batch_callback = None
+    memopedia_pages_total = 0
+    messages_since_maintain = 0
+
+    if args.with_memopedia:
+        try:
+            from sai_memory.memopedia import Memopedia, init_memopedia_tables
+            from scripts.build_memopedia import extract_knowledge
+
+            # Initialize Memopedia tables
+            init_memopedia_tables(conn)
+            memopedia = Memopedia(conn)
+            debug_log_path = Path(args.debug_log) if args.debug_log else None
+
+            def memopedia_batch_callback(batch_messages):
+                """Extract Memopedia pages for each batch (interleaved with Chronicle)."""
+                nonlocal memopedia_pages_total, messages_since_maintain
+
+                if not batch_messages:
+                    return
+
+                LOGGER.info(f"  [Memory Weave] Extracting Memopedia from batch ({len(batch_messages)} messages)...")
+
+                # Update Memopedia context for Generator (semantic memory gets updated per batch)
+                from scripts.build_memopedia import format_existing_pages
+                updated_memopedia_context = format_existing_pages(memopedia)
+                if updated_memopedia_context and updated_memopedia_context != "(まだページはありません)":
+                    generator.memopedia_context = updated_memopedia_context
+
+                try:
+                    pages = extract_knowledge(
+                        client,
+                        batch_messages,
+                        memopedia,
+                        batch_size=len(batch_messages),  # Process as single batch
+                        dry_run=args.dry_run,
+                        refine_writes=True,  # Use LLM to integrate content instead of simple append
+                        episode_context_conn=conn,
+                        debug_log_path=debug_log_path,
+                    )
+                    memopedia_pages_total += len(pages)
+                    LOGGER.info(f"  [Memory Weave] Extracted {len(pages)} pages (total: {memopedia_pages_total})")
+
+                    # Track messages for maintain_memopedia
+                    messages_since_maintain += len(batch_messages)
+
+                    # Run maintain_memopedia if interval is reached
+                    if args.maintain_interval > 0 and messages_since_maintain >= args.maintain_interval:
+                        LOGGER.info(f"  [Memory Weave] Running maintain_memopedia (interval: {args.maintain_interval})...")
+                        try:
+                            from scripts.maintain_memopedia import run_merge_similar, run_fix_markdown
+                            run_fix_markdown(memopedia, dry_run=args.dry_run)
+                            run_merge_similar(memopedia, client, dry_run=args.dry_run)
+                            messages_since_maintain = 0
+                            LOGGER.info("  [Memory Weave] Maintenance complete")
+                        except Exception as e:
+                            LOGGER.warning(f"  [Memory Weave] Maintenance failed: {e}")
+
+                except Exception as e:
+                    LOGGER.error(f"  [Memory Weave] Memopedia extraction failed: {e}")
+
+            batch_callback = memopedia_batch_callback
+            LOGGER.info("Memory Weave mode: Memopedia extraction will run per batch (interleaved)")
+
+        except ImportError as e:
+            LOGGER.error(f"Failed to import Memopedia modules: {e}")
+            LOGGER.error("Memopedia extraction disabled. Make sure sai_memory.memopedia is available.")
+
     level1_entries, consolidated_entries = generator.generate_from_messages(
         messages,
         dry_run=args.dry_run,
         progress_callback=progress_callback,
+        batch_callback=batch_callback,
     )
 
-    LOGGER.info(f"Generated {len(level1_entries)} level-1 arasuji")
-    LOGGER.info(f"Generated {len(consolidated_entries)} consolidated arasuji")
+    LOGGER.info(f"Generated {len(level1_entries)} level-1 chronicle")
+    LOGGER.info(f"Generated {len(consolidated_entries)} consolidated chronicle")
+    if args.with_memopedia:
+        LOGGER.info(f"Generated {memopedia_pages_total} Memopedia pages (interleaved)")
 
     # Update progress tracking
     if not args.dry_run and messages:

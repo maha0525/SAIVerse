@@ -295,7 +295,7 @@ class SEARuntime:
 
         # Execute compiled playbook
         # Set recursion limit high enough for agentic loops (default is 25, too low for multi-step agents)
-        langgraph_config = {"recursion_limit": 100}
+        langgraph_config = {"recursion_limit": 1000}
 
         try:
             # Check cancellation before starting execution
