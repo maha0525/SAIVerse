@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 # Category constants
 CATEGORY_PEOPLE = "people"
-CATEGORY_EVENTS = "events"
+CATEGORY_TERMS = "terms"
 CATEGORY_PLANS = "plans"
 
 INITIAL_ROOTS = [
@@ -24,10 +24,10 @@ INITIAL_ROOTS = [
         "content": "",
     },
     {
-        "id": "root_events",
-        "title": "出来事",
-        "category": CATEGORY_EVENTS,
-        "summary": "過去に起きた出来事の記録",
+        "id": "root_terms",
+        "title": "用語",
+        "category": CATEGORY_TERMS,
+        "summary": "対話の中で特別な意味を持つ言葉や概念",
         "content": "",
     },
     {
@@ -377,7 +377,7 @@ def build_tree(conn: sqlite3.Connection) -> Dict[str, List[MemopediaPage]]:
     # Organize by category
     result: Dict[str, List[MemopediaPage]] = {
         CATEGORY_PEOPLE: [],
-        CATEGORY_EVENTS: [],
+        CATEGORY_TERMS: [],
         CATEGORY_PLANS: [],
     }
     for root in roots:

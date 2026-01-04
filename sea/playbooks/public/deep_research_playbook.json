@@ -20,7 +20,7 @@
             "type": "set",
             "assignments": {
                 "loop_count": 0,
-                "max_loops": 5,
+                "max_loops": 10,
                 "accumulated_info": "",
                 "sources": "",
                 "research_topic": "{input}"

@@ -252,45 +252,79 @@ def get_episode_context_for_timerange(
     conn: sqlite3.Connection,
     start_time: int,
     end_time: int,
+    *,
+    max_entries: int = 10,
 ) -> str:
-    """Get episode context relevant to a specific time range.
+    """Get episode context for events BEFORE the specified time range.
 
-    Useful for providing context when generating Memopedia entries.
+    Uses the same hierarchical level promotion algorithm as get_episode_context:
+    - Events close to start_time use lower levels (Lv1 = detailed)
+    - Events far from start_time use higher levels (Lv2+ = compressed)
+    - Level can only increase by +1 at a time as we go further back
+
+    This provides appropriate context density: detailed info for recent
+    past, compressed summaries for distant past.
 
     Args:
         conn: Database connection
-        start_time: Start of the time range
-        end_time: End of the time range
+        start_time: Start of the time range (context is for events BEFORE this)
+        end_time: End of the time range (not used, kept for API compatibility)
+        max_entries: Maximum number of context entries to return
 
     Returns:
         Formatted context string
     """
-    # Get arasuji that overlap with or precede this time range
     all_arasuji = _get_all_arasuji_sorted(conn)
 
-    relevant: List[ArasujiEntry] = []
-    for entry in all_arasuji:
-        if entry.end_time is None:
-            continue
-
-        # Include if:
-        # 1. Ends before or at the start of our range (provides context)
-        # 2. Overlaps with our range
-        if entry.end_time <= end_time:
-            relevant.append(entry)
-
-        # Limit to reasonable number
-        if len(relevant) >= 10:
-            break
-
-    if not relevant:
+    if not all_arasuji:
         return ""
 
-    # Sort by end_time ascending (oldest first)
-    relevant.sort(key=lambda e: e.end_time or 0)
+    result: List[ContextEntry] = []
+    read_ids: Set[str] = set()
+    current_level = 0  # Start at level 0
 
+    # Start just before the batch start time
+    position_time = start_time - 1
+
+    # Main loop: traverse backwards in time (same algorithm as get_episode_context)
+    while len(result) < max_entries:
+        max_allowed_level = current_level + 1
+        found_entry = _find_arasuji_at_position(all_arasuji, position_time, max_allowed_level, read_ids)
+
+        if found_entry is None:
+            break
+
+        # Add to result
+        result.append(ContextEntry(
+            level=found_entry.level,
+            content=found_entry.content,
+            start_time=found_entry.start_time,
+            end_time=found_entry.end_time,
+            message_count=found_entry.message_count,
+            source_id=found_entry.id,
+        ))
+
+        # Mark as read
+        read_ids.add(found_entry.id)
+        for source_id in found_entry.source_ids:
+            read_ids.add(source_id)
+
+        # Update position and level
+        current_level = found_entry.level
+        position_time = (found_entry.start_time or 0) - 1
+
+        if position_time <= 0:
+            break
+
+    if not result:
+        return ""
+
+    # Reverse to get oldest-to-newest order
+    result.reverse()
+
+    # Format output
     parts: List[str] = []
-    for entry in relevant:
+    for entry in result:
         start = _format_timestamp(entry.start_time)
         end = _format_timestamp(entry.end_time)
         level_name = "あらすじ" if entry.level == 1 else "あらすじ" + "のあらすじ" * (entry.level - 1)

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Optional
 from api.deps import get_manager
@@ -579,16 +579,226 @@ class ImportRequest(BaseModel):
     conversation_ids: TypingList[str]  # List of conversation_id or idx as string
     skip_embedding: bool = False
 
+
+# -----------------------------------------------------------------------------
+# Import Background Tasks
+# -----------------------------------------------------------------------------
+
+import threading
+
+# Track import status per persona
+_extension_import_status: dict = {}
+_extension_import_lock = threading.Lock()
+
+_official_import_status: dict = {}
+_official_import_lock = threading.Lock()
+
+
+def _run_extension_import_task(
+    persona_id: str,
+    tmp_path_str: str,
+    skip_embedding: bool,
+):
+    """Background task to import extension export."""
+    import logging
+    from pathlib import Path
+    
+    tmp_path = Path(tmp_path_str)
+    
+    with _extension_import_lock:
+        _extension_import_status[persona_id] = {
+            "running": True, "progress": 0, "total": 0, "message": "Parsing file..."
+        }
+    
+    try:
+        # 1. Parse file
+        from tools.utilities.chatlog_exporter_importer import parse_exporter_file
+        conversation = parse_exporter_file(tmp_path)
+        
+        payloads = list(conversation.iter_memory_payloads())
+        total = len(payloads)
+        thread_suffix = conversation.identifier
+        
+        with _extension_import_lock:
+            _extension_import_status[persona_id] = {
+                "running": True, "progress": 0, "total": total,
+                "message": f"Importing 0/{total} messages..."
+            }
+        
+        # 2. Acquire adapter
+        from saiverse_memory import SAIMemoryAdapter
+        adapter = SAIMemoryAdapter(persona_id)
+        
+        try:
+            msg_count = 0
+            for i, payload in enumerate(payloads):
+                if skip_embedding:
+                    payload["embedding_chunks"] = 0
+                adapter.append_persona_message(payload, thread_suffix=thread_suffix)
+                msg_count += 1
+                
+                # Update progress every 10 messages
+                if msg_count % 10 == 0:
+                    with _extension_import_lock:
+                        _extension_import_status[persona_id] = {
+                            "running": True, "progress": msg_count, "total": total,
+                            "message": f"Importing {msg_count}/{total} messages..."
+                        }
+            
+            with _extension_import_lock:
+                _extension_import_status[persona_id] = {
+                    "running": False, "progress": msg_count, "total": total,
+                    "message": f"Imported '{conversation.title}' ({msg_count} messages).",
+                    "success": True, "title": conversation.title
+                }
+        finally:
+            adapter.close()
+            
+    except Exception as e:
+        logging.exception("Extension import failed for %s", persona_id)
+        with _extension_import_lock:
+            _extension_import_status[persona_id] = {
+                "running": False, "message": f"Error: {str(e)}", "success": False
+            }
+    finally:
+        # Cleanup temp file
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except:
+                pass
+
+
+def _run_official_import_task(
+    persona_id: str,
+    cache_key: str,
+    conversation_ids: list,
+    skip_embedding: bool,
+):
+    """Background task to import official ChatGPT export."""
+    import logging
+    
+    with _official_import_lock:
+        _official_import_status[persona_id] = {
+            "running": True, "progress": 0, "total": 0, "message": "Starting import..."
+        }
+    
+    try:
+        # 1. Retrieve cached export
+        cached = _chatgpt_export_cache.get(cache_key)
+        if not cached:
+            with _official_import_lock:
+                _official_import_status[persona_id] = {
+                    "running": False, "message": "Preview expired. Please upload again.",
+                    "success": False
+                }
+            return
+        
+        export = cached["export"]
+        tmp_path = cached["tmp_path"]
+        records = export.conversations
+        
+        # 2. Resolve selected records
+        selected_records = []
+        for selector in conversation_ids:
+            try:
+                idx = int(selector)
+                if 0 <= idx < len(records):
+                    selected_records.append(records[idx])
+                    continue
+            except ValueError:
+                pass
+            for record in records:
+                if record.conversation_id == selector or record.identifier == selector:
+                    selected_records.append(record)
+                    break
+        
+        if not selected_records:
+            with _official_import_lock:
+                _official_import_status[persona_id] = {
+                    "running": False, "message": "No valid conversations found.",
+                    "success": False
+                }
+            return
+        
+        # 3. Acquire adapter
+        from saiverse_memory import SAIMemoryAdapter
+        adapter = SAIMemoryAdapter(persona_id)
+        
+        try:
+            total_conversations = len(selected_records)
+            imported_count = 0
+            msg_count = 0
+            
+            for conv_idx, record in enumerate(selected_records):
+                payloads = list(record.iter_memory_payloads(include_roles=["user", "assistant"]))
+                thread_suffix = record.conversation_id or record.identifier
+                
+                for payload in payloads:
+                    meta = payload.get("metadata", {})
+                    tags = meta.get("tags", [])
+                    if "conversation" not in tags:
+                        tags.append("conversation")
+                    meta["tags"] = tags
+                    if skip_embedding:
+                        payload["embedding_chunks"] = 0
+                    payload["metadata"] = meta
+                    
+                    adapter.append_persona_message(payload, thread_suffix=thread_suffix)
+                    msg_count += 1
+                
+                imported_count += 1
+                
+                with _official_import_lock:
+                    _official_import_status[persona_id] = {
+                        "running": True, "progress": imported_count, "total": total_conversations,
+                        "message": f"Imported {imported_count}/{total_conversations} conversations ({msg_count} messages)..."
+                    }
+            
+            with _official_import_lock:
+                _official_import_status[persona_id] = {
+                    "running": False, "progress": imported_count, "total": total_conversations,
+                    "message": f"Imported {imported_count} conversations ({msg_count} messages).",
+                    "success": True, "conversations": imported_count, "messages": msg_count
+                }
+        finally:
+            adapter.close()
+            
+    except Exception as e:
+        import logging
+        logging.exception("Official import failed for %s", persona_id)
+        with _official_import_lock:
+            _official_import_status[persona_id] = {
+                "running": False, "message": f"Error: {str(e)}", "success": False
+            }
+    finally:
+        # Clean up cache and temp file
+        if cache_key in _chatgpt_export_cache:
+            cached = _chatgpt_export_cache.pop(cache_key, None)
+            if cached and cached.get("tmp_path"):
+                try:
+                    cached["tmp_path"].unlink()
+                except:
+                    pass
+
+
 @router.post("/{persona_id}/import/official")
 def import_official_chatgpt(
     persona_id: str,
     request: ImportRequest,
+    background_tasks: BackgroundTasks,
     manager = Depends(get_manager)
 ):
-    """Import selected ChatGPT conversations from a previously previewed export."""
+    """Import selected ChatGPT conversations from a previously previewed export (background)."""
     cache_key = request.cache_key
     conversation_ids = request.conversation_ids
     skip_embedding = request.skip_embedding
+    
+    # Check if already running
+    with _official_import_lock:
+        status = _official_import_status.get(persona_id, {})
+        if status.get("running"):
+            raise HTTPException(status_code=409, detail="Import already in progress.")
     
     # 1. Retrieve cached export
     cached = _chatgpt_export_cache.get(cache_key)
@@ -596,7 +806,6 @@ def import_official_chatgpt(
         raise HTTPException(status_code=400, detail="Preview expired or invalid. Please upload the file again.")
     
     export = cached["export"]
-    tmp_path = cached["tmp_path"]
     
     # Verify persona matches
     if cached["persona_id"] != persona_id:
@@ -608,149 +817,126 @@ def import_official_chatgpt(
     
     records = export.conversations
     
-    # 3. Resolve selected records (by index or conversation_id)
-    selected_records = []
+    # 3. Count selected records for response
+    selected_count = 0
     for selector in conversation_ids:
-        # Try as index first
         try:
             idx = int(selector)
             if 0 <= idx < len(records):
-                selected_records.append(records[idx])
+                selected_count += 1
                 continue
         except ValueError:
             pass
-        # Try as conversation_id
         for record in records:
             if record.conversation_id == selector or record.identifier == selector:
-                selected_records.append(record)
+                selected_count += 1
                 break
     
-    if not selected_records:
+    if selected_count == 0:
         raise HTTPException(status_code=400, detail="No valid conversations found for the given selection.")
     
-    # 4. Acquire adapter
-    persona = manager.personas.get(persona_id)
-    adapter = getattr(persona, "sai_memory", None) if persona else None
-    should_close = False
-    adapter_ready = adapter and adapter.is_ready()
+    # 4. Start background task
+    background_tasks.add_task(
+        _run_official_import_task,
+        persona_id,
+        cache_key,
+        list(conversation_ids),
+        skip_embedding,
+    )
     
-    if not adapter_ready:
-        from saiverse_memory import SAIMemoryAdapter
-        try:
-            adapter = SAIMemoryAdapter(persona_id)
-            should_close = True
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to access memory: {e}")
-
-    # 5. Import selected conversations
-    imported_count = 0
-    msg_count = 0
-    
-    try:
-        for record in selected_records:
-            payloads = list(record.iter_memory_payloads(include_roles=["user", "assistant"]))
-            thread_suffix = record.conversation_id or record.identifier
-            
-            for payload in payloads:
-                meta = payload.get("metadata", {})
-                tags = meta.get("tags", [])
-                if "conversation" not in tags:
-                    tags.append("conversation")
-                meta["tags"] = tags
-                if skip_embedding:
-                    payload["embedding_chunks"] = 0
-                payload["metadata"] = meta
-                
-                adapter.append_persona_message(payload, thread_suffix=thread_suffix)
-                msg_count += 1
-            imported_count += 1
-    finally:
-        if should_close and adapter:
-            adapter.close()
-        
-        # Clean up cache and temp file
-        if cache_key in _chatgpt_export_cache:
-            del _chatgpt_export_cache[cache_key]
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except:
-                pass
-            
     return {
-        "success": True, 
-        "conversations": imported_count, 
-        "messages": msg_count,
-        "message": f"Imported {imported_count} conversations ({msg_count} messages)."
+        "success": True,
+        "message": f"Import started for {selected_count} conversations. Check status endpoint for progress.",
+        "status": {"running": True, "progress": 0, "total": selected_count, "message": "Starting..."}
     }
+
+
+class OfficialImportStatusResponse(BaseModel):
+    running: bool
+    progress: Optional[int] = None
+    total: Optional[int] = None
+    message: Optional[str] = None
+    success: Optional[bool] = None
+    conversations: Optional[int] = None
+    messages: Optional[int] = None
+
+
+@router.get("/{persona_id}/import/official/status", response_model=OfficialImportStatusResponse)
+def get_official_import_status(persona_id: str, manager = Depends(get_manager)):
+    """Get the status of official import task."""
+    with _official_import_lock:
+        status = _official_import_status.get(persona_id, {"running": False, "message": "No import task has been run."})
+    return OfficialImportStatusResponse(**status)
 
 @router.post("/{persona_id}/import/extension")
 def import_extension_export(
     persona_id: str,
     file: UploadFile = File(...),
+    skip_embedding: bool = Form(False),
+    background_tasks: BackgroundTasks = None,
     manager = Depends(get_manager)
 ):
-    """Import Chrome extension export (JSON or Markdown)."""
-    # 1. Save upload to temp file
+    """Import Chrome extension export (JSON or Markdown) in background."""
+    from fastapi import BackgroundTasks as BT
+    
+    # Check if already running
+    with _extension_import_lock:
+        status = _extension_import_status.get(persona_id, {})
+        if status.get("running"):
+            raise HTTPException(status_code=409, detail="Import already in progress.")
+    
+    # 1. Save upload to temp file (will be deleted by background task)
     suffix = Path(file.filename).suffix if file.filename else ".tmp"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         shutil.copyfileobj(file.file, tmp)
         tmp_path = Path(tmp.name)
 
+    # 2. Validate file can be parsed (quick check)
     try:
-        # 2. Parse using parse_exporter_file
         from tools.utilities.chatlog_exporter_importer import parse_exporter_file
         conversation = parse_exporter_file(tmp_path)
-        
-        # 3. Import
-        persona = manager.personas.get(persona_id)
-        adapter = getattr(persona, "sai_memory", None) if persona else None
-        should_close = False
-        adapter_ready = adapter and adapter.is_ready()
-        
-        if not adapter_ready:
-            from saiverse_memory import SAIMemoryAdapter
-            try:
-                adapter = SAIMemoryAdapter(persona_id)
-                should_close = True
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Failed to access memory: {e}")
-
-        msg_count = 0
-        try:
-            # Extension export usually contains just ONE conversation
-            payloads = list(conversation.iter_memory_payloads())
-            thread_suffix = conversation.identifier
-            
-            for payload in payloads:
-                adapter.append_persona_message(payload, thread_suffix=thread_suffix)
-                msg_count += 1
-        finally:
-            if should_close and adapter:
-                adapter.close()
-                
-        return {
-            "success": True, 
-            "title": conversation.title,
-            "messages": msg_count,
-            "message": f"Imported '{conversation.title}' ({msg_count} messages)."
-        }
-
+        title = conversation.title
+        msg_count = len(list(conversation.iter_memory_payloads()))
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Import failed: {str(e)}")
-    finally:
         if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except:
-                pass
+            tmp_path.unlink()
+        raise HTTPException(status_code=400, detail=f"Invalid file: {str(e)}")
+    
+    # 3. Start background task
+    background_tasks.add_task(
+        _run_extension_import_task,
+        persona_id,
+        str(tmp_path),
+        skip_embedding,
+    )
+    
+    return {
+        "success": True,
+        "message": f"Import started for '{title}' ({msg_count} messages). Check status endpoint for progress.",
+        "status": {"running": True, "progress": 0, "total": msg_count, "message": "Starting..."}
+    }
+
+
+class ExtensionImportStatusResponse(BaseModel):
+    running: bool
+    progress: Optional[int] = None
+    total: Optional[int] = None
+    message: Optional[str] = None
+    success: Optional[bool] = None
+    title: Optional[str] = None
+
+
+@router.get("/{persona_id}/import/extension/status", response_model=ExtensionImportStatusResponse)
+def get_extension_import_status(persona_id: str, manager = Depends(get_manager)):
+    """Get the status of extension import task."""
+    with _extension_import_lock:
+        status = _extension_import_status.get(persona_id, {"running": False, "message": "No import task has been run."})
+    return ExtensionImportStatusResponse(**status)
+
 
 # -----------------------------------------------------------------------------
 # Re-embed API
 # -----------------------------------------------------------------------------
-
-from fastapi import BackgroundTasks
-import threading
 
 # Track re-embed status per persona
 _reembed_status: dict = {}
@@ -1524,14 +1710,14 @@ def _get_message_number_map(conn: sqlite3.Connection) -> dict:
 
     return msg_num_map
 
-@router.get("/{persona_id}/arasuji", response_model=ArasujiListResponse)
+@router.get("/{persona_id}/arasuji", response_model=ArasujiListResponse, tags=["Chronicle"])
 def list_arasuji_entries(
     persona_id: str,
     level: Optional[int] = None,
     limit: int = 500,
     manager = Depends(get_manager)
 ):
-    """List arasuji entries for a persona."""
+    """List Chronicle entries for a persona (part of Memory Weave)."""
     from sai_memory.arasuji.storage import get_entries_by_level
 
     conn = _get_arasuji_db(persona_id)
@@ -1594,13 +1780,17 @@ def list_arasuji_entries(
             level_filter=level
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list arasuji entries: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list Chronicle entries: {e}")
     finally:
         conn.close()
 
-@router.get("/{persona_id}/arasuji/{entry_id}", response_model=ArasujiEntryItem)
-def get_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_manager)):
-    """Get a specific arasuji entry."""
+@router.get("/{persona_id}/arasuji/{entry_id}", response_model=ArasujiEntryItem, tags=["Chronicle"])
+def get_arasuji_entry(
+    persona_id: str,
+    entry_id: str,
+    manager = Depends(get_manager)
+):
+    """Get a detailed Chronicle entry by ID."""
     from sai_memory.arasuji.storage import get_entry
 
     conn = _get_arasuji_db(persona_id)
@@ -1610,7 +1800,7 @@ def get_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_mana
     try:
         entry = get_entry(conn, entry_id)
         if not entry:
-            raise HTTPException(status_code=404, detail=f"Arasuji entry {entry_id} not found")
+            raise HTTPException(status_code=404, detail=f"Chronicle entry {entry_id} not found")
 
         # Calculate message number range for level 1
         source_start_num = None
@@ -1641,13 +1831,13 @@ def get_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_mana
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get arasuji entry: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get Chronicle entry: {e}")
     finally:
         conn.close()
 
 @router.delete("/{persona_id}/arasuji/{entry_id}")
 def delete_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_manager)):
-    """Delete an arasuji entry and unmark child entries as consolidated."""
+    """Delete a Chronicle entry and unmark child entries as consolidated."""
     from sai_memory.arasuji.storage import delete_entry, get_entry
 
     conn = _get_arasuji_db(persona_id)
@@ -1658,7 +1848,7 @@ def delete_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_m
         # Get entry first to find child entries
         entry = get_entry(conn, entry_id)
         if not entry:
-            raise HTTPException(status_code=404, detail=f"Arasuji entry {entry_id} not found")
+            raise HTTPException(status_code=404, detail=f"Chronicle entry {entry_id} not found")
 
         # If this is a consolidated entry (level 2+), unmark children as consolidated
         if entry.level >= 2 and entry.source_ids:
@@ -1676,16 +1866,69 @@ def delete_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_m
         # Now delete the entry
         success = delete_entry(conn, entry_id)
         if not success:
-            raise HTTPException(status_code=404, detail=f"Arasuji entry {entry_id} not found")
+            raise HTTPException(status_code=404, detail=f"Chronicle entry {entry_id} not found")
 
         return {
             "success": True,
-            "message": f"Deleted arasuji entry {entry_id}",
+            "message": f"Deleted Chronicle entry {entry_id}",
             "children_unmarked": len(entry.source_ids) if entry.level >= 2 else 0
         }
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete arasuji entry: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete Chronicle entry: {e}")
+    finally:
+        conn.close()
+
+
+class SourceMessageItem(BaseModel):
+    id: str
+    role: str
+    content: str
+    created_at: int
+
+
+@router.get("/{persona_id}/arasuji/{entry_id}/messages", response_model=List[SourceMessageItem], tags=["Chronicle"])
+def get_arasuji_messages(
+    persona_id: str,
+    entry_id: str,
+    manager = Depends(get_manager)
+):
+    """Get the source raw messages for a Level 1 Chronicle entry."""
+    from sai_memory.arasuji.storage import get_entry
+    from sai_memory.memory.storage import get_message
+
+    conn = _get_arasuji_db(persona_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+
+    try:
+        entry = get_entry(conn, entry_id)
+        if not entry:
+            raise HTTPException(status_code=404, detail=f"Arasuji entry {entry_id} not found")
+
+        if entry.level != 1:
+            raise HTTPException(status_code=400, detail="This endpoint only works for level-1 arasuji entries")
+
+        # Fetch messages by IDs
+        messages = []
+        for msg_id in entry.source_ids:
+            msg = get_message(conn, msg_id)
+            if msg:
+                messages.append(SourceMessageItem(
+                    id=msg.id,
+                    role=msg.role,
+                    content=msg.content or "",
+                    created_at=msg.created_at,
+                ))
+
+        # Sort by created_at
+        messages.sort(key=lambda m: m.created_at)
+        return messages
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get source messages: {e}")
     finally:
         conn.close()
