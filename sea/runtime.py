@@ -814,11 +814,47 @@ class SEARuntime:
                 result.update(self._flatten_dict(v, new_prefix))
         elif isinstance(value, list):
             for idx, item in enumerate(value):
-                new_prefix = f"{prefix}[{idx}]" if prefix else f"[{idx}]"
+                # Use .N format (not [N]) for consistency with playbook templates
+                new_prefix = f"{prefix}.{idx}" if prefix else str(idx)
                 result.update(self._flatten_dict(item, new_prefix))
         else:
             result[prefix or "value"] = value
         return result
+
+    def _resolve_state_value(self, state: Dict[str, Any], key: str) -> Any:
+        """Resolve a nested key from state using dot notation.
+
+        Supports:
+        - Simple keys: "foo" -> state["foo"]
+        - Nested dict keys: "foo.bar" -> state["foo"]["bar"]
+        - Array indexing: "foo.0" or "foo.items.0" -> state["foo"][0] or state["foo"]["items"][0]
+
+        Falls back to direct state lookup if nested resolution fails.
+        """
+        # First try direct lookup (for flattened keys like "page_selection.selected_urls")
+        if key in state:
+            return state[key]
+
+        # Try nested resolution
+        parts = key.split(".")
+        value = state
+        for part in parts:
+            if value is None:
+                return ""
+            if isinstance(value, dict):
+                value = value.get(part)
+            elif isinstance(value, list):
+                # Support array indexing: "0", "1", etc.
+                if part.isdigit():
+                    idx = int(part)
+                    value = value[idx] if idx < len(value) else None
+                else:
+                    return ""
+            else:
+                return ""
+
+        return value if value is not None else ""
+
 
     def _extract_structured_json(self, text: str) -> Optional[Dict[str, Any]]:
         candidate = text.strip()
@@ -910,7 +946,7 @@ class SEARuntime:
                 if args_input:
                     for arg_name, source in args_input.items():
                         if isinstance(source, str):
-                            value = state.get(source, "")
+                            value = self._resolve_state_value(state, source)
                             LOGGER.debug("[sea][tool] Mapping arg '%s' <- state['%s'] = %s", arg_name, source, value)
                         else:
                             value = source
@@ -1212,8 +1248,11 @@ class SEARuntime:
             return value_template
 
         # Check if it looks like an arithmetic expression
-        # Pattern: contains operators and {var} placeholders
-        if any(op in value_template for op in ["+", "-", "*", "/", "%"]):
+        # Must have a pattern like "{var} + 1" or "{a} * {b}" - operator with {var} adjacent
+        # This avoids false positives on strings like "---" (markdown separator)
+        import re
+        arithmetic_pattern = re.compile(r"\{[^}]+\}\s*[\+\-\*/%]\s*(?:\d+|\{[^}]+\})|\d+\s*[\+\-\*/%]\s*\{[^}]+\}")
+        if arithmetic_pattern.search(value_template):
             return self._eval_arithmetic_expression(value_template, state)
 
         # Simple template expansion

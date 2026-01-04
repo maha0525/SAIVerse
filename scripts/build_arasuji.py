@@ -47,13 +47,17 @@ os.environ["SAIVERSE_SKIP_TOOL_IMPORTS"] = "1"
 from sai_memory.memory.storage import init_db, get_messages_paginated, Message
 from sai_memory.arasuji import init_arasuji_tables
 from sai_memory.arasuji.storage import (
+    ArasujiEntry,
     count_entries_by_level,
     count_unconsolidated_by_level,
+    create_entry,
     get_total_message_count,
     get_max_level,
+    get_all_entries_ordered,
     clear_all_entries,
     get_progress,
     update_progress,
+    mark_consolidated,
 )
 from sai_memory.arasuji.generator import (
     ArasujiGenerator,
@@ -89,42 +93,57 @@ def fetch_messages(
         limit: Maximum number of messages to return
         offset: Number of messages to skip from the beginning
         thread_id: If specified, only fetch from this thread. Otherwise fetch from all threads.
+
+    Note:
+        Messages are ordered by created_at ASC across all threads to ensure
+        consistent chronological ordering (message #1 is always the oldest).
     """
     conn = init_db(str(db_path), check_same_thread=False)
 
-    # Get threads to process
     if thread_id:
-        threads = [thread_id]
-    else:
-        # Order threads by their earliest message timestamp
-        cur = conn.execute("""
-            SELECT t.id, MIN(m.created_at) as first_msg_ts
-            FROM threads t
-            LEFT JOIN messages m ON t.id = m.thread_id
-            GROUP BY t.id
-            ORDER BY first_msg_ts ASC NULLS LAST
-        """)
-        threads = [row[0] for row in cur.fetchall()]
-
-    all_messages: List[Message] = []
-    total_to_fetch = offset + limit  # Need to fetch offset+limit then slice
-
-    for tid in threads:
+        # Single thread: use existing paginated fetch
+        all_messages: List[Message] = []
+        total_to_fetch = offset + limit
         page = 0
         while len(all_messages) < total_to_fetch:
-            batch = get_messages_paginated(conn, tid, page=page, page_size=100)
+            batch = get_messages_paginated(conn, thread_id, page=page, page_size=100)
             if not batch:
                 break
             all_messages.extend(batch)
             page += 1
-            if len(all_messages) >= total_to_fetch:
-                break
-        if len(all_messages) >= total_to_fetch:
-            break
+        conn.close()
+        return all_messages[offset:offset + limit]
+
+    # All threads: fetch globally sorted by created_at
+    cur = conn.execute("""
+        SELECT id, thread_id, role, content, resource_id, created_at, metadata
+        FROM messages
+        ORDER BY created_at ASC
+        LIMIT ? OFFSET ?
+    """, (limit, offset))
+
+    messages: List[Message] = []
+    for row in cur.fetchall():
+        msg_id, tid, role, content, resource_id, created_at, metadata_raw = row
+        metadata = {}
+        if metadata_raw:
+            try:
+                import json
+                metadata = json.loads(metadata_raw)
+            except:
+                pass
+        messages.append(Message(
+            id=msg_id,
+            thread_id=tid,
+            role=role,
+            content=content,
+            resource_id=resource_id,
+            created_at=created_at,
+            metadata=metadata,
+        ))
 
     conn.close()
-    # Apply offset and limit
-    return all_messages[offset:offset + limit]
+    return messages
 
 
 def print_stats(conn, persona_id: str) -> None:
@@ -227,6 +246,76 @@ def print_context_preview(conn, max_entries: int = 100, debug: bool = False) -> 
     print("=" * 60)
 
 
+def export_arasuji(conn, output_path: Path) -> int:
+    """Export all arasuji entries to a JSON file.
+
+    Args:
+        conn: Database connection
+        output_path: Path to the output JSON file
+
+    Returns:
+        Number of entries exported
+    """
+    import json
+
+    entries = get_all_entries_ordered(conn)
+    data = {
+        "version": 1,
+        "exported_at": int(__import__("time").time()),
+        "entries": [e.to_dict() for e in entries],
+    }
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    return len(entries)
+
+
+def import_arasuji(conn, input_path: Path, clear_existing: bool = False) -> int:
+    """Import arasuji entries from a JSON file.
+
+    Args:
+        conn: Database connection
+        input_path: Path to the input JSON file
+        clear_existing: If True, clear existing entries before import
+
+    Returns:
+        Number of entries imported
+    """
+    import json
+
+    with open(input_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if clear_existing:
+        clear_all_entries(conn)
+
+    entries_data = data.get("entries", [])
+    imported = 0
+
+    # First pass: Create all entries without parent references
+    for entry_data in entries_data:
+        create_entry(
+            conn,
+            level=entry_data["level"],
+            content=entry_data["content"],
+            source_ids=entry_data.get("source_ids", []),
+            start_time=entry_data.get("start_time"),
+            end_time=entry_data.get("end_time"),
+            source_count=entry_data.get("source_count", 0),
+            message_count=entry_data.get("message_count", 0),
+            entry_id=entry_data["id"],
+        )
+        imported += 1
+
+    # Second pass: Restore consolidation relationships
+    for entry_data in entries_data:
+        if entry_data.get("is_consolidated") and entry_data.get("parent_id"):
+            mark_consolidated(conn, [entry_data["id"]], entry_data["parent_id"])
+
+    return imported
+
+
 def list_available_models() -> None:
     """Print available models and exit."""
     from model_configs import MODEL_CONFIGS, get_model_display_name
@@ -275,6 +364,15 @@ def main():
 
   # 日時情報を省略（インポートしたログで日時が不正確な場合）
   python scripts/build_arasuji.py air_city_a --no-timestamp
+
+  # あらすじをJSONにエクスポート
+  python scripts/build_arasuji.py air_city_a --export arasuji_backup.json
+
+  # あらすじをJSONからインポート（既存を保持して追加）
+  python scripts/build_arasuji.py air_city_a --import arasuji_backup.json
+
+  # あらすじをJSONからインポート（既存をクリアして置換）
+  python scripts/build_arasuji.py air_city_a --import arasuji_backup.json --clear
 
   # 利用可能なモデル一覧を表示
   python scripts/build_arasuji.py --list-models
@@ -337,6 +435,14 @@ def main():
         "--debug", action="store_true",
         help="Show detailed debug output for --preview-context"
     )
+    parser.add_argument(
+        "--export", type=str, metavar="FILE",
+        help="Export all arasuji entries to a JSON file"
+    )
+    parser.add_argument(
+        "--import", dest="import_file", type=str, metavar="FILE",
+        help="Import arasuji entries from a JSON file"
+    )
 
     args = parser.parse_args()
 
@@ -371,11 +477,36 @@ def main():
         conn.close()
         sys.exit(0)
 
-    # Handle --clear
-    if args.clear:
+    # Handle --clear (standalone, without --import)
+    if args.clear and not args.import_file:
         LOGGER.info("Clearing all arasuji entries...")
         deleted = clear_all_entries(conn)
         LOGGER.info(f"Deleted {deleted} entries")
+        conn.close()
+        sys.exit(0)
+
+    # Handle --export
+    if args.export:
+        output_path = Path(args.export)
+        LOGGER.info(f"Exporting arasuji to: {output_path}")
+        count = export_arasuji(conn, output_path)
+        LOGGER.info(f"Exported {count} entries to {output_path}")
+        conn.close()
+        sys.exit(0)
+
+    # Handle --import
+    if args.import_file:
+        input_path = Path(args.import_file)
+        if not input_path.exists():
+            LOGGER.error(f"Import file not found: {input_path}")
+            conn.close()
+            sys.exit(1)
+        LOGGER.info(f"Importing arasuji from: {input_path}")
+        if args.clear:
+            LOGGER.info("Clearing existing entries before import...")
+        count = import_arasuji(conn, input_path, clear_existing=args.clear)
+        LOGGER.info(f"Imported {count} entries from {input_path}")
+        print_stats(conn, args.persona_id)
         conn.close()
         sys.exit(0)
 

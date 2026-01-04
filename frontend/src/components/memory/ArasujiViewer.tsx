@@ -29,6 +29,7 @@ interface ArasujiViewerProps {
 export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     const [stats, setStats] = useState<ArasujiStats | null>(null);
     const [entries, setEntries] = useState<ArasujiEntry[]>([]);
+    const [entryCache, setEntryCache] = useState<Record<string, ArasujiEntry>>({});
     const [selectedEntry, setSelectedEntry] = useState<ArasujiEntry | null>(null);
     const [levelFilter, setLevelFilter] = useState<number | null>(null);
     const [isLoadingStats, setIsLoadingStats] = useState(false);
@@ -43,6 +44,36 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     useEffect(() => {
         loadEntries(levelFilter);
     }, [levelFilter]);
+
+    // Update cache when entries change
+    useEffect(() => {
+        setEntryCache(prev => {
+            const newCache = { ...prev };
+            entries.forEach(e => { newCache[e.id] = e; });
+            return newCache;
+        });
+    }, [entries]);
+
+    // Get entry from cache or entries
+    const getEntry = (id: string): ArasujiEntry | undefined => {
+        return entryCache[id] || entries.find(e => e.id === id);
+    };
+
+    // Fetch single entry by ID if not in cache
+    const fetchEntryById = async (entryId: string): Promise<ArasujiEntry | null> => {
+        if (entryCache[entryId]) return entryCache[entryId];
+        try {
+            const res = await fetch(`/api/people/${personaId}/arasuji/${entryId}`);
+            if (res.ok) {
+                const entry = await res.json();
+                setEntryCache(prev => ({ ...prev, [entryId]: entry }));
+                return entry;
+            }
+        } catch (e) {
+            console.error("Failed to fetch entry", e);
+        }
+        return null;
+    };
 
     const handleDelete = async (entryId: string, e: React.MouseEvent) => {
         e.stopPropagation();
@@ -284,6 +315,73 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                     {selectedEntry.content}
                                 </div>
                             </div>
+
+                            {/* Source Items Section */}
+                            {selectedEntry.source_ids.length > 0 && (
+                                <div className={styles.sourceSection}>
+                                    <h3 className={styles.sourceSectionTitle}>
+                                        {selectedEntry.level === 1 ? '統合元メッセージ' : '統合元あらすじ'}
+                                    </h3>
+                                    {selectedEntry.level === 1 ? (
+                                        // Level 1: Show message numbers
+                                        <div className={styles.sourceMessageList}>
+                                            {selectedEntry.source_start_num !== null && selectedEntry.source_end_num !== null ? (
+                                                <span className={styles.sourceMessageRange}>
+                                                    メッセージ #{selectedEntry.source_start_num} ~ #{selectedEntry.source_end_num}
+                                                    ({selectedEntry.source_ids.length}件)
+                                                </span>
+                                            ) : (
+                                                <span className={styles.sourceMessageCount}>
+                                                    {selectedEntry.source_ids.length} 件のメッセージ
+                                                </span>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        // Level 2+: Show clickable arasuji entries
+                                        <div className={styles.sourceArasujiList}>
+                                            {selectedEntry.source_ids.map(sourceId => {
+                                                const sourceEntry = getEntry(sourceId);
+                                                if (!sourceEntry) {
+                                                    return (
+                                                        <div
+                                                            key={sourceId}
+                                                            className={styles.sourceArasujiItem}
+                                                            style={{ opacity: 0.7 }}
+                                                            onClick={async () => {
+                                                                const entry = await fetchEntryById(sourceId);
+                                                                if (entry) handleEntrySelect(entry);
+                                                            }}
+                                                        >
+                                                            <span className={styles.sourceArasujiId}>{sourceId.slice(0, 8)}...</span>
+                                                            <span className={styles.sourceArasujiMissing}>(クリックして読み込む)</span>
+                                                        </div>
+                                                    );
+                                                }
+                                                return (
+                                                    <div
+                                                        key={sourceId}
+                                                        className={styles.sourceArasujiItem}
+                                                        onClick={() => handleEntrySelect(sourceEntry)}
+                                                    >
+                                                        <div className={styles.sourceArasujiHeader}>
+                                                            <span className={styles.levelBadge} data-level={sourceEntry.level}>
+                                                                Lv.{sourceEntry.level}
+                                                            </span>
+                                                            <span className={styles.sourceArasujiTime}>
+                                                                {formatTimeRange(sourceEntry.start_time, sourceEntry.end_time)}
+                                                            </span>
+                                                        </div>
+                                                        <div className={styles.sourceArasujiPreview}>
+                                                            {sourceEntry.content.slice(0, 150).replace(/\n/g, ' ')}
+                                                            {sourceEntry.content.length > 150 ? '...' : ''}
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     ) : (
                         <div className={styles.emptyState}>

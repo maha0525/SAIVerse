@@ -113,6 +113,17 @@ def compile_playbook(
                         for key in field_path:
                             if isinstance(value, dict):
                                 value = value.get(key)
+                            elif isinstance(value, list):
+                                # Support array indexing (e.g., "0", "1") and .length
+                                if key == "length":
+                                    value = len(value)
+                                    break
+                                elif key.isdigit():
+                                    idx = int(key)
+                                    value = value[idx] if idx < len(value) else None
+                                else:
+                                    value = None
+                                    break
                             else:
                                 value = None
                                 break

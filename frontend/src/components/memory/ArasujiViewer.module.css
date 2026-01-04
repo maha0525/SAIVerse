@@ -314,9 +314,90 @@
     from {
         transform: rotate(0deg);
     }
+
     to {
         transform: rotate(360deg);
     }
+}
+
+/* Source Section */
+.sourceSection {
+    margin-top: 1rem;
+    padding: 1rem;
+    background-color: #1f2023;
+    border-radius: 8px;
+    border: 1px solid #333;
+}
+
+.sourceSectionTitle {
+    font-size: 0.9rem;
+    color: #888;
+    margin: 0 0 0.75rem 0;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.sourceMessageList {
+    padding: 0.5rem;
+}
+
+.sourceMessageRange,
+.sourceMessageCount {
+    font-family: monospace;
+    color: #40c057;
+    font-size: 0.9rem;
+}
+
+.sourceArasujiList {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.sourceArasujiItem {
+    padding: 0.75rem;
+    background-color: #2c2e33;
+    border: 1px solid #3a3d44;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background-color 0.2s, border-color 0.2s;
+}
+
+.sourceArasujiItem:hover {
+    background-color: #35383f;
+    border-color: #4dabf7;
+}
+
+.sourceArasujiHeader {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.sourceArasujiTime {
+    font-size: 0.8rem;
+    color: #666;
+    font-family: monospace;
+}
+
+.sourceArasujiPreview {
+    font-size: 0.85rem;
+    color: #aaa;
+    line-height: 1.5;
+}
+
+.sourceArasujiId {
+    font-family: monospace;
+    font-size: 0.8rem;
+    color: #666;
+}
+
+.sourceArasujiMissing {
+    font-size: 0.8rem;
+    color: #888;
+    margin-left: 0.5rem;
 }
 
 /* Mobile Responsive */
