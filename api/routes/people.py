@@ -1184,6 +1184,104 @@ def get_memopedia_page_history(persona_id: str, page_id: str, limit: int = 50, m
         if should_close and adapter:
             adapter.close()
 
+
+class UpdateMemopediaPageRequest(BaseModel):
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    content: Optional[str] = None
+    keywords: Optional[List[str]] = None
+
+
+@router.put("/{persona_id}/memopedia/pages/{page_id}")
+def update_memopedia_page(
+    persona_id: str,
+    page_id: str,
+    request: UpdateMemopediaPageRequest,
+    manager = Depends(get_manager)
+):
+    """Update a Memopedia page (title, summary, content, keywords)."""
+    # Prevent editing root pages
+    if page_id.startswith("root_"):
+        raise HTTPException(status_code=400, detail="Cannot edit root pages")
+    
+    persona = manager.personas.get(persona_id)
+    adapter = getattr(persona, "sai_memory", None) if persona else None
+    should_close = False
+    
+    if not adapter or not adapter.is_ready():
+        from saiverse_memory import SAIMemoryAdapter
+        try:
+            adapter = SAIMemoryAdapter(persona_id)
+            should_close = True
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to access memory: {e}")
+
+    try:
+        from sai_memory.memopedia import Memopedia
+        memopedia = Memopedia(adapter.conn)
+        updated = memopedia.update_page(
+            page_id,
+            title=request.title,
+            summary=request.summary,
+            content=request.content,
+            keywords=request.keywords,
+            edit_source="manual_ui",
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="Page not found")
+        return {
+            "success": True,
+            "page": {
+                "id": updated.id,
+                "title": updated.title,
+                "summary": updated.summary,
+                "content": updated.content,
+                "keywords": updated.keywords,
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Memopedia error: {e}")
+    finally:
+        if should_close and adapter:
+            adapter.close()
+
+
+@router.delete("/{persona_id}/memopedia/pages/{page_id}")
+def delete_memopedia_page(persona_id: str, page_id: str, manager = Depends(get_manager)):
+    """Delete a Memopedia page (soft delete)."""
+    # Prevent deleting root pages
+    if page_id.startswith("root_"):
+        raise HTTPException(status_code=400, detail="Cannot delete root pages")
+    
+    persona = manager.personas.get(persona_id)
+    adapter = getattr(persona, "sai_memory", None) if persona else None
+    should_close = False
+    
+    if not adapter or not adapter.is_ready():
+        from saiverse_memory import SAIMemoryAdapter
+        try:
+            adapter = SAIMemoryAdapter(persona_id)
+            should_close = True
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to access memory: {e}")
+
+    try:
+        from sai_memory.memopedia import Memopedia
+        memopedia = Memopedia(adapter.conn)
+        success = memopedia.delete_page(page_id, edit_source="manual_ui")
+        if not success:
+            raise HTTPException(status_code=404, detail="Page not found or could not be deleted")
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Memopedia error: {e}")
+    finally:
+        if should_close and adapter:
+            adapter.close()
+
 # -----------------------------------------------------------------------------
 # Schedule APIs
 # -----------------------------------------------------------------------------

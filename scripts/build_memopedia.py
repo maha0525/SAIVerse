@@ -426,7 +426,7 @@ def extract_knowledge(
                     "properties": {
                         "category": {
                             "type": "string",
-                            "enum": ["people", "events", "plans"],
+                            "enum": ["people", "terms", "plans"],
                         },
                         "title": {"type": "string"},
                         "summary": {"type": "string"},
