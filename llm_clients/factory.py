@@ -11,6 +11,7 @@ from .gemini import GeminiClient
 from .ollama import OllamaClient
 from .openai import OpenAIClient
 from .nvidia_nim import NvidiaNIMClient
+from .llama_cpp import LlamaCppClient
 from .base import LLMClient
 
 
@@ -96,6 +97,29 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
         client = AnthropicClient(api_model, config=config, supports_images=supports_images)
     elif provider == "gemini":
         client = GeminiClient(api_model, config=config, supports_images=supports_images)
+    elif provider == "llama_cpp":
+        extra_kwargs: Dict[str, object] = {}
+        if isinstance(config, dict):
+            # model_path is required for llama.cpp
+            model_path = config.get("model_path") or config.get("model")
+            if not model_path:
+                raise ValueError("llama_cpp provider requires 'model_path' in config")
+
+            # GPU layers (-1 = all, 0 = CPU only)
+            n_gpu_layers = config.get("n_gpu_layers", -1)
+            if isinstance(n_gpu_layers, int):
+                extra_kwargs["n_gpu_layers"] = n_gpu_layers
+
+            # Fallback to Gemini on error (default: True)
+            fallback_on_error = config.get("fallback_on_error", True)
+            if isinstance(fallback_on_error, bool):
+                extra_kwargs["fallback_on_error"] = fallback_on_error
+        else:
+            # Fallback: use api_model as model_path
+            model_path = api_model
+
+        logging.debug("Creating llama.cpp client for model path '%s' with kwargs: %s", model_path, extra_kwargs)
+        client = LlamaCppClient(model_path, context_length, supports_images=supports_images, **extra_kwargs)
     else:
         client = OllamaClient(api_model, context_length, supports_images=supports_images)
 

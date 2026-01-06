@@ -1,0 +1,15 @@
+{
+  "model": "gemma-2-9b-it-q8",
+  "display_name": "Gemma 2 9B Instruct Q8 (llama.cpp)",
+  "provider": "llama_cpp",
+  "context_length": 8192,
+  "model_path": "~/models/gemma-2-9b-it-q8_0.gguf",
+  "n_gpu_layers": -1,
+  "fallback_on_error": true,
+  "supports_images": false,
+  "parameters": {
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "max_tokens": 2048
+  }
+}
