@@ -209,7 +209,31 @@ export default function WorldEditor() {
     const handleDeleteTool = async () => { if (confirm("Are you sure?")) { await fetch(`/api/world/tools/${selectedTool!.TOOLID}`, { method: 'DELETE' }); setSelectedTool(null); setFormData({}); loadTools(); } };
 
     // --- Item Handlers ---
-    const handleItemSelect = (i: Item) => { setSelectedItem(i); setFormData({ name: i.NAME, item_type: i.TYPE, description: i.DESCRIPTION, owner_kind: 'world', owner_id: '', state_json: i.STATE_JSON, file_path: i.FILE_PATH }); }; // Owner info missing in generic list, default to world
+    const handleItemSelect = async (i: Item) => {
+        setSelectedItem(i);
+        // Fetch item details to get owner info
+        try {
+            const res = await fetch(`/api/world/items/${i.ITEM_ID}`);
+            if (res.ok) {
+                const details = await res.json();
+                setFormData({
+                    name: details.NAME || i.NAME,
+                    item_type: details.TYPE || i.TYPE,
+                    description: details.DESCRIPTION || i.DESCRIPTION,
+                    owner_kind: details.OWNER_KIND || 'world',
+                    owner_id: details.OWNER_ID || '',
+                    state_json: details.STATE_JSON || i.STATE_JSON,
+                    file_path: details.FILE_PATH || i.FILE_PATH
+                });
+            } else {
+                // Fallback if API fails
+                setFormData({ name: i.NAME, item_type: i.TYPE, description: i.DESCRIPTION, owner_kind: 'world', owner_id: '', state_json: i.STATE_JSON, file_path: i.FILE_PATH });
+            }
+        } catch (e) {
+            // Fallback on error
+            setFormData({ name: i.NAME, item_type: i.TYPE, description: i.DESCRIPTION, owner_kind: 'world', owner_id: '', state_json: i.STATE_JSON, file_path: i.FILE_PATH });
+        }
+    };
     const handleCreateItem = async () => { await fetch('/api/world/items', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadItems(); setFormData({}); };
     const handleUpdateItem = async () => { await fetch(`/api/world/items/${selectedItem!.ITEM_ID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadItems(); };
     const handleDeleteItem = async () => { if (confirm("Are you sure?")) { await fetch(`/api/world/items/${selectedItem!.ITEM_ID}`, { method: 'DELETE' }); setSelectedItem(null); setFormData({}); loadItems(); } };
@@ -346,10 +370,18 @@ export default function WorldEditor() {
                             </Select></Field>
                             {selectedAI && <>
                                 <Field label="Default Model"><Select value={formData.default_model || ''} onChange={(e: any) => setFormData({ ...formData, default_model: e.target.value })}>
-                                    <option value="">Use System Default</option>{modelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                                    <option value="">Use System Default</option>
+                                    {formData.default_model && !modelChoices.some(m => m.id === formData.default_model) && (
+                                        <option value={formData.default_model}>⚠️ Unknown: {formData.default_model}</option>
+                                    )}
+                                    {modelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                                 </Select></Field>
                                 <Field label="Lightweight Model"><Select value={formData.lightweight_model || ''} onChange={(e: any) => setFormData({ ...formData, lightweight_model: e.target.value })}>
-                                    <option value="">Use System Default</option>{modelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                                    <option value="">Use System Default</option>
+                                    {formData.lightweight_model && !modelChoices.some(m => m.id === formData.lightweight_model) && (
+                                        <option value={formData.lightweight_model}>⚠️ Unknown: {formData.lightweight_model}</option>
+                                    )}
+                                    {modelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                                 </Select></Field>
                                 <Field label="Interaction Mode"><Select value={formData.interaction_mode || 'auto'} onChange={(e: any) => setFormData({ ...formData, interaction_mode: e.target.value })}>
                                     <option value="auto">Auto</option><option value="manual">Manual</option><option value="sleep">Sleep</option>
@@ -507,6 +539,37 @@ export default function WorldEditor() {
                             <h3>Playbooks</h3>
                             {playbooks.map(pb => <div key={pb.id} className={`${styles.item} ${selectedPlaybook?.id === pb.id ? styles.selected : ''}`} onClick={() => handlePlaybookSelect(pb)}>{pb.name}</div>)}
                             <button className={styles.newBtn} onClick={() => { setSelectedPlaybook(null); setFormData({ scope: 'public', router_callable: false, user_selectable: false, nodes_json: '[]', schema_json: '{"input_schema": [], "start_node": "start"}' }); }}>+ New Playbook</button>
+                            <div style={{ marginTop: '1rem', borderTop: '1px solid #eee', paddingTop: '1rem' }}>
+                                <h4 style={{ marginBottom: '0.5rem', fontSize: '0.9rem' }}>JSONからインポート</h4>
+                                <input
+                                    type="file"
+                                    accept=".json"
+                                    style={{ fontSize: '0.8rem', marginBottom: '0.5rem', width: '100%' }}
+                                    onChange={async (e) => {
+                                        const file = e.target.files?.[0];
+                                        if (!file) return;
+                                        try {
+                                            const text = await file.text();
+                                            const res = await fetch('/api/world/playbooks/import', {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ playbook_json: text })
+                                            });
+                                            const data = await res.json();
+                                            if (res.ok) {
+                                                const actionText = data.action === 'created' ? '新規作成' : '更新';
+                                                alert(`${actionText}しました: ${data.name}`);
+                                                loadPlaybooks();
+                                            } else {
+                                                alert(`エラー: ${data.detail || 'インポートに失敗しました'}`);
+                                            }
+                                        } catch (err) {
+                                            alert(`エラー: ${err}`);
+                                        }
+                                        e.target.value = '';  // Reset file input
+                                    }}
+                                />
+                            </div>
                         </div>
                         <div className={styles.form}>
                             <h3>{selectedPlaybook ? `Edit Playbook` : 'New Playbook'}</h3>

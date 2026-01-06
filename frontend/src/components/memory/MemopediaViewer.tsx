@@ -1,18 +1,19 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Book, ChevronRight, ChevronDown, ChevronLeft, History, Clock, GitCommit } from 'lucide-react';
+import { Book, ChevronRight, ChevronDown, ChevronLeft, History, Clock, GitCommit, Tag, Edit2, Trash2, Save, X } from 'lucide-react';
 import styles from './MemopediaViewer.module.css';
 
 interface MemopediaPage {
     id: string;
     title: string;
     summary: string;
+    keywords: string[];
     children: MemopediaPage[];
 }
 
 interface TreeStructure {
     people: MemopediaPage[];
-    events: MemopediaPage[];
+    terms: MemopediaPage[];
     plans: MemopediaPage[];
 }
 
@@ -60,6 +61,18 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     const [isLoadingHistory, setIsLoadingHistory] = useState(false);
     const [selectedHistoryEntry, setSelectedHistoryEntry] = useState<EditHistoryEntry | null>(null);
 
+    // Edit mode state
+    const [isEditing, setIsEditing] = useState(false);
+    const [editTitle, setEditTitle] = useState("");
+    const [editSummary, setEditSummary] = useState("");
+    const [editContent, setEditContent] = useState("");
+    const [editKeywords, setEditKeywords] = useState("");
+    const [isSaving, setIsSaving] = useState(false);
+
+    // Delete confirmation state
+    const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+    const [isDeleting, setIsDeleting] = useState(false);
+
     useEffect(() => {
         loadTree();
     }, [personaId]);
@@ -68,7 +81,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     useEffect(() => {
         if (tree) {
             const allExpandable = new Set<string>();
-            [tree.people, tree.events, tree.plans].forEach(pages => {
+            [tree.people, tree.terms, tree.plans].forEach(pages => {
                 collectExpandableIds(pages).forEach(id => allExpandable.add(id));
             });
             setExpandedIds(allExpandable);
@@ -80,6 +93,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
             loadPage(selectedPageId);
             setShowHistory(false);
             setSelectedHistoryEntry(null);
+            setIsEditing(false);
         } else {
             setPageContent("");
         }
@@ -132,7 +146,116 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     const handleShowHistory = () => {
         if (selectedPageId) {
             setShowHistory(true);
+            setIsEditing(false);
             loadHistory(selectedPageId);
+        }
+    };
+
+    // Edit mode handlers
+    const startEditing = () => {
+        if (!selectedPageId || !tree) return;
+        const allPages = [...tree.people, ...tree.terms, ...tree.plans];
+        const findPage = (pages: MemopediaPage[]): MemopediaPage | null => {
+            for (const p of pages) {
+                if (p.id === selectedPageId) return p;
+                const found = findPage(p.children);
+                if (found) return found;
+            }
+            return null;
+        };
+        const page = findPage(allPages);
+        if (!page) return;
+
+        // Parse the markdown content to extract title, summary, content
+        // The pageContent from API is markdown: "# Title\n*summary*\ncontent"
+        const lines = pageContent.split('\n');
+        let title = page.title;
+        let summary = page.summary;
+        let content = "";
+
+        // Try to extract from markdown
+        let contentStartIdx = 0;
+        if (lines[0]?.startsWith('# ')) {
+            title = lines[0].substring(2);
+            contentStartIdx = 1;
+        }
+        if (lines[contentStartIdx]?.startsWith('*') && lines[contentStartIdx]?.endsWith('*')) {
+            summary = lines[contentStartIdx].slice(1, -1);
+            contentStartIdx++;
+        }
+        // Skip empty line after summary
+        if (lines[contentStartIdx] === '') contentStartIdx++;
+        content = lines.slice(contentStartIdx).join('\n');
+
+        setEditTitle(title);
+        setEditSummary(summary);
+        setEditContent(content);
+        setEditKeywords(page.keywords?.join(', ') || '');
+        setIsEditing(true);
+        setShowHistory(false);
+    };
+
+    const cancelEditing = () => {
+        setIsEditing(false);
+    };
+
+    const saveEdit = async () => {
+        if (!selectedPageId) return;
+        setIsSaving(true);
+        try {
+            const keywords = editKeywords
+                .split(',')
+                .map(k => k.trim())
+                .filter(k => k.length > 0);
+
+            const res = await fetch(`/api/people/${personaId}/memopedia/pages/${selectedPageId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    title: editTitle,
+                    summary: editSummary,
+                    content: editContent,
+                    keywords,
+                }),
+            });
+
+            if (res.ok) {
+                setIsEditing(false);
+                await loadTree();
+                await loadPage(selectedPageId);
+            } else {
+                const err = await res.json();
+                alert(`保存に失敗しました: ${err.detail || 'Unknown error'}`);
+            }
+        } catch (error) {
+            console.error('Failed to save page', error);
+            alert('保存に失敗しました');
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    const deletePage = async () => {
+        if (!selectedPageId) return;
+        setIsDeleting(true);
+        try {
+            const res = await fetch(`/api/people/${personaId}/memopedia/pages/${selectedPageId}`, {
+                method: 'DELETE',
+            });
+
+            if (res.ok) {
+                setShowDeleteConfirm(false);
+                setSelectedPageId(null);
+                await loadTree();
+            } else {
+                const err = await res.json();
+                alert(`削除に失敗しました: ${err.detail || 'Unknown error'}`);
+            }
+        } catch (error) {
+            console.error('Failed to delete page', error);
+            alert('削除に失敗しました');
+        } finally {
+            setIsDeleting(false);
         }
     };
 
@@ -209,6 +332,24 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         );
     };
 
+    // Helper to find selected page and get its keywords
+    const getSelectedPageKeywords = (): string[] => {
+        if (!tree || !selectedPageId) return [];
+        const allPages = [...tree.people, ...tree.terms, ...tree.plans];
+        const findPage = (pages: MemopediaPage[]): MemopediaPage | null => {
+            for (const p of pages) {
+                if (p.id === selectedPageId) return p;
+                const found = findPage(p.children);
+                if (found) return found;
+            }
+            return null;
+        };
+        const page = findPage(allPages);
+        return page?.keywords || [];
+    };
+
+    const selectedKeywords = getSelectedPageKeywords();
+
     if (!tree) return <div className={styles.emptyState}>Loading knowledge base...</div>;
 
     return (
@@ -219,8 +360,8 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                     <div className={styles.categoryTitle}>People</div>
                     {tree.people.map(p => <TreeItem key={p.id} page={p} />)}
 
-                    <div className={styles.categoryTitle}>Events</div>
-                    {tree.events.map(p => <TreeItem key={p.id} page={p} />)}
+                    <div className={styles.categoryTitle}>Terms</div>
+                    {tree.terms.map(p => <TreeItem key={p.id} page={p} />)}
 
                     <div className={styles.categoryTitle}>Plans</div>
                     {tree.plans.map(p => <TreeItem key={p.id} page={p} />)}
@@ -236,14 +377,35 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                         <ChevronLeft size={20} /> Back
                     </button>
                     {selectedPageId && !selectedPageId.startsWith('root_') && (
-                        <button
-                            className={`${styles.historyButton} ${showHistory ? styles.active : ''}`}
-                            onClick={() => showHistory ? setShowHistory(false) : handleShowHistory()}
-                            title="編集履歴を表示"
-                        >
-                            <History size={16} />
-                            <span>履歴</span>
-                        </button>
+                        <div className={styles.headerButtons}>
+                            {!isEditing && (
+                                <>
+                                    <button
+                                        className={styles.editButton}
+                                        onClick={startEditing}
+                                        title="編集"
+                                    >
+                                        <Edit2 size={16} />
+                                        <span>編集</span>
+                                    </button>
+                                    <button
+                                        className={`${styles.historyButton} ${showHistory ? styles.active : ''}`}
+                                        onClick={() => showHistory ? setShowHistory(false) : handleShowHistory()}
+                                        title="編集履歴を表示"
+                                    >
+                                        <History size={16} />
+                                        <span>履歴</span>
+                                    </button>
+                                    <button
+                                        className={styles.deleteButton}
+                                        onClick={() => setShowDeleteConfirm(true)}
+                                        title="削除"
+                                    >
+                                        <Trash2 size={16} />
+                                    </button>
+                                </>
+                            )}
+                        </div>
                     )}
                 </div>
 
@@ -301,14 +463,85 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                             </div>
                         )}
                     </div>
+                ) : isEditing ? (
+                    // Edit Form
+                    <div className={styles.editForm}>
+                        <div className={styles.formGroup}>
+                            <label>タイトル</label>
+                            <input
+                                type="text"
+                                value={editTitle}
+                                onChange={e => setEditTitle(e.target.value)}
+                                className={styles.formInput}
+                            />
+                        </div>
+                        <div className={styles.formGroup}>
+                            <label>概要</label>
+                            <input
+                                type="text"
+                                value={editSummary}
+                                onChange={e => setEditSummary(e.target.value)}
+                                className={styles.formInput}
+                            />
+                        </div>
+                        <div className={styles.formGroup}>
+                            <label>キーワード (カンマ区切り)</label>
+                            <input
+                                type="text"
+                                value={editKeywords}
+                                onChange={e => setEditKeywords(e.target.value)}
+                                className={styles.formInput}
+                                placeholder="キーワード1, キーワード2, ..."
+                            />
+                        </div>
+                        <div className={styles.formGroup}>
+                            <label>本文</label>
+                            <textarea
+                                value={editContent}
+                                onChange={e => setEditContent(e.target.value)}
+                                className={styles.formTextarea}
+                                rows={15}
+                            />
+                        </div>
+                        <div className={styles.formActions}>
+                            <button
+                                className={styles.cancelButton}
+                                onClick={cancelEditing}
+                                disabled={isSaving}
+                            >
+                                <X size={16} />
+                                キャンセル
+                            </button>
+                            <button
+                                className={styles.saveButton}
+                                onClick={saveEdit}
+                                disabled={isSaving}
+                            >
+                                <Save size={16} />
+                                {isSaving ? '保存中...' : '保存'}
+                            </button>
+                        </div>
+                    </div>
                 ) : (
                     // Content View
                     selectedPageId ? (
                         isLoadingPage ? (
                             <div className={styles.emptyState}>Loading...</div>
                         ) : (
-                            <div className={styles.markdown}>
-                                <ReactMarkdown>{pageContent}</ReactMarkdown>
+                            <div className={styles.contentBody}>
+                                {selectedKeywords.length > 0 && (
+                                    <div className={styles.contentKeywords}>
+                                        <Tag size={14} className={styles.keywordIcon} />
+                                        <div className={styles.keywords}>
+                                            {selectedKeywords.map((kw, idx) => (
+                                                <span key={idx} className={styles.keyword}>{kw}</span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                                <div className={styles.markdown}>
+                                    <ReactMarkdown>{pageContent}</ReactMarkdown>
+                                </div>
                             </div>
                         )
                     ) : (
@@ -319,6 +552,32 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                             </div>
                         </div>
                     )
+                )}
+
+                {/* Delete Confirmation Dialog */}
+                {showDeleteConfirm && (
+                    <div className={styles.overlay}>
+                        <div className={styles.confirmDialog}>
+                            <h3>ページを削除しますか？</h3>
+                            <p>この操作は取り消せません。本当に削除しますか？</p>
+                            <div className={styles.confirmActions}>
+                                <button
+                                    className={styles.cancelButton}
+                                    onClick={() => setShowDeleteConfirm(false)}
+                                    disabled={isDeleting}
+                                >
+                                    キャンセル
+                                </button>
+                                <button
+                                    className={styles.confirmDeleteButton}
+                                    onClick={deletePage}
+                                    disabled={isDeleting}
+                                >
+                                    {isDeleting ? '削除中...' : '削除する'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
                 )}
             </div>
         </div>

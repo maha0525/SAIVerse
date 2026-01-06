@@ -193,6 +193,8 @@
     border-radius: 6px;
     overflow-x: auto;
     margin: 0.5em 0;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .cardBody pre code {
@@ -473,5 +475,10 @@
 
     .chatArea {
         padding-bottom: 1rem;
+    }
+
+    .card {
+        max-width: 100%;
+        min-width: unset;
     }
 }

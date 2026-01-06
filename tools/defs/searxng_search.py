@@ -8,7 +8,7 @@ import requests
 from tools.defs import ToolResult, ToolSchema
 
 DEFAULT_BASE_URL = os.getenv("SEARXNG_URL") or os.getenv("SEARXNG_BASE_URL") or "http://localhost:8080"
-DEFAULT_SAFESEARCH = os.getenv("SEARXNG_SAFESEARCH") or "1"
+DEFAULT_SAFESEARCH = int(os.getenv("SEARXNG_SAFESEARCH", "1"))
 DEFAULT_LANGUAGE = os.getenv("SEARXNG_LANGUAGE", "ja")
 DEFAULT_LIMIT = int(os.getenv("SEARXNG_LIMIT", "5"))
 
@@ -60,6 +60,19 @@ def searxng_search(
     Returns:
         (整形済みメッセージ, 履歴用スニペット)
     """
+    # Normalize empty strings from SEA runtime to None
+    if max_results == "" or max_results is None:
+        max_results = None
+    else:
+        max_results = int(max_results)
+    if engines == "":
+        engines = None
+    if language == "":
+        language = None
+    if safe == "" or safe is None:
+        safe = None
+    else:
+        safe = int(safe)
 
     try:
         url, params = _build_params(query, max_results, engines, language, safe)

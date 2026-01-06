@@ -35,6 +35,8 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
 
     // Swipe Logic for Control
     const startX = useRef<number | null>(null);
+    const startY = useRef<number | null>(null);
+    const startTime = useRef<number | null>(null);
 
     const refreshData = async () => {
         try {
@@ -61,17 +63,41 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
     useEffect(() => {
         const handleTouchStart = (e: TouchEvent) => {
             startX.current = e.touches[0].clientX;
+            startY.current = e.touches[0].clientY;
+            startTime.current = Date.now();
         };
 
         const handleTouchMove = (e: TouchEvent) => {
-            if (startX.current === null) return;
-            const currentX = e.touches[0].clientX;
-            const diff = currentX - startX.current;
+            if (startX.current === null || startY.current === null || startTime.current === null) return;
 
-            // If swiped right > 100px, open
-            if (diff > 100) {
+            const currentX = e.touches[0].clientX;
+            const currentY = e.touches[0].clientY;
+            const diffX = currentX - startX.current;
+            const diffY = currentY - startY.current;
+            const timeDiff = Date.now() - startTime.current;
+
+            // Vertical scroll preference check - if vertical movement is dominant, abort
+            if (Math.abs(diffY) > Math.abs(diffX)) {
+                startX.current = null;
+                startY.current = null;
+                startTime.current = null;
+                return;
+            }
+
+            // Time limit for quick swipe - only detect gesture within 300ms
+            if (timeDiff > 300) {
+                startX.current = null;
+                startY.current = null;
+                startTime.current = null;
+                return;
+            }
+
+            // If swiped right > 100px quickly, open
+            if (diffX > 100) {
                 onOpen();
-                startX.current = null; // Reset
+                startX.current = null;
+                startY.current = null;
+                startTime.current = null;
             }
         };
 
@@ -110,17 +136,42 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
     const handleSidebarTouchStart = (e: React.TouchEvent) => {
         e.stopPropagation();
         startX.current = e.touches[0].clientX;
+        startY.current = e.touches[0].clientY;
+        startTime.current = Date.now();
     };
 
     const handleSidebarTouchMove = (e: React.TouchEvent) => {
         e.stopPropagation();
-        if (startX.current === null) return;
+        if (startX.current === null || startY.current === null || startTime.current === null) return;
+
         const currentX = e.touches[0].clientX;
-        const diff = currentX - startX.current;
+        const currentY = e.touches[0].clientY;
+        const diffX = currentX - startX.current;
+        const diffY = currentY - startY.current;
+        const timeDiff = Date.now() - startTime.current;
+
+        // Vertical scroll preference check
+        if (Math.abs(diffY) > Math.abs(diffX)) {
+            startX.current = null;
+            startY.current = null;
+            startTime.current = null;
+            return;
+        }
+
+        // Time limit for quick swipe
+        if (timeDiff > 300) {
+            startX.current = null;
+            startY.current = null;
+            startTime.current = null;
+            return;
+        }
+
         // Swipe Left <- (-50px)
-        if (diff < -50) {
+        if (diffX < -50) {
             onClose();
             startX.current = null;
+            startY.current = null;
+            startTime.current = null;
         }
     };
 
@@ -191,7 +242,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
 
                 <GlobalSettingsModal
                     isOpen={isSettingsOpen}
-                    onClose={() => setIsSettingsOpen(false)}
+                    onClose={() => { setIsSettingsOpen(false); refreshData(); }}
                 />
 
                 <UserProfileModal

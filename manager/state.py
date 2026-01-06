@@ -60,3 +60,4 @@ class CoreState:
     api_port: int = 0
     autonomous_conversation_running: bool = False
     global_auto_enabled: bool = False  # Global ON/OFF for ConversationManager
+    current_playbook: Optional[str] = None  # Selected playbook override for Chat Options

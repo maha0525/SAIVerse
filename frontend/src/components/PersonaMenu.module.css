@@ -13,8 +13,8 @@
 }
 
 .menu {
-    background-color: var(--bg-secondary);
-    border: 1px solid var(--border-color);
+    background-color: #1f2937;
+    border: 1px solid #374151;
     border-radius: 12px;
     width: 320px;
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);

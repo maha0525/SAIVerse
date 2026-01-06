@@ -270,6 +270,15 @@ export default function Home() {
 
     useEffect(() => {
         fetchHistory();
+        // Fetch saved playbook setting from server
+        fetch('/api/config/playbook')
+            .then(res => res.ok ? res.json() : null)
+            .then(data => {
+                if (data && data.playbook) {
+                    setSelectedPlaybook(data.playbook);
+                }
+            })
+            .catch(err => console.error('Failed to load playbook setting', err));
     }, []);
 
     // Polling for new messages (schedule-triggered persona speech, etc.)

@@ -295,7 +295,7 @@ class SEARuntime:
 
         # Execute compiled playbook
         # Set recursion limit high enough for agentic loops (default is 25, too low for multi-step agents)
-        langgraph_config = {"recursion_limit": 100}
+        langgraph_config = {"recursion_limit": 1000}
 
         try:
             # Check cancellation before starting execution
@@ -393,7 +393,10 @@ class SEARuntime:
 
                 # Check if tools are available for this node
                 available_tools = getattr(node_def, "available_tools", None)
+                LOGGER.info("[DEBUG] available_tools = %s", available_tools)
+                
                 if available_tools:
+                    LOGGER.info("[DEBUG] Entering tools mode (generate_with_tool_detection)")
                     # Tool calling mode
                     tools_spec = self._build_tools_spec(available_tools, llm_client)
                     result = llm_client.generate_with_tool_detection(
@@ -419,7 +422,12 @@ class SEARuntime:
 
                     import json
 
+                    # Debug: log result type and keys
+                    LOGGER.info("[DEBUG] LLM result type='%s', has content=%s, has tool_name=%s", 
+                               result.get("type"), "content" in result, "tool_name" in result)
+
                     if result["type"] == "tool_call":
+                        LOGGER.info("[DEBUG] Entering tool_call branch")
                         # Only tool call, no text
                         if output_keys_spec:
                             # New behavior: use explicit output_keys
@@ -452,6 +460,7 @@ class SEARuntime:
                         LOGGER.info("[sea] Tool call detected: %s", text)
 
                     elif result["type"] == "both":
+                        LOGGER.info("[DEBUG] Entering 'both' branch (text + tool call)")
                         # Both text and tool call
                         if output_keys_spec:
                             # New behavior: use explicit output_keys
@@ -485,21 +494,25 @@ class SEARuntime:
                                     result["tool_name"], len(text))
 
                     else:
-                        # Normal text response
+                        LOGGER.info("[DEBUG] Entering 'else' branch (normal text response)")
+                        # Normal text response (no tool call)
+                        state["tool_called"] = False
+                        
                         if output_keys_spec and text_key:
                             # New behavior: store in explicit text_key
                             state[text_key] = result["content"]
-                            LOGGER.debug("[sea] Stored %s = (text, length=%d)", text_key, len(result["content"]))
+                            content_preview = result["content"][:200] + "..." if len(result["content"]) > 200 else result["content"]
+                            LOGGER.info("[sea][llm] Stored state['%s'] = %s", text_key, content_preview)
                             state["has_speak_content"] = True
                         else:
                             # Legacy behavior: no specific text storage (just in "last")
                             state["has_speak_content"] = True
 
-                        state["tool_called"] = False
                         text = result["content"]
 
                     self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                 else:
+                    LOGGER.info("[DEBUG] Entering normal mode (no tools)")
                     # Normal mode (no tools)
                     state["tool_called"] = False
                     text = llm_client.generate(
@@ -510,12 +523,29 @@ class SEARuntime:
                     )
                     self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                     schema_consumed = self._process_structured_output(node_def, text, state)
+                    
+                    # Process output_keys even in normal mode (no tools)
+                    output_keys_spec = getattr(node_def, "output_keys", None)
+                    if output_keys_spec:
+                        for mapping in output_keys_spec:
+                            if "text" in mapping:
+                                text_key = mapping["text"]
+                                state[text_key] = text
+                                content_preview = text[:200] + "..." if len(text) > 200 else text
+                                LOGGER.info("[sea][llm] (normal mode) Stored state['%s'] = %s", text_key, content_preview)
+                                state["has_speak_content"] = True
+                                break
             except Exception as exc:
                 LOGGER.error("SEA LangGraph LLM failed: %s: %s", type(exc).__name__, exc)
                 text = "(error in llm node)"
                 state["tool_called"] = False
             state["last"] = text
             state["messages"] = messages + [{"role": "assistant", "content": text}]
+
+            # Debug: log speak_content at end of LLM node
+            speak_content = state.get("speak_content", "")
+            preview = speak_content[:100] + "..." if len(speak_content) > 100 else speak_content
+            LOGGER.info("[DEBUG] LLM node end: state['speak_content'] = '%s'", preview)
 
             # Note: output_mapping in node definition handles state variable assignment
             # No special handling needed here anymore
@@ -784,11 +814,47 @@ class SEARuntime:
                 result.update(self._flatten_dict(v, new_prefix))
         elif isinstance(value, list):
             for idx, item in enumerate(value):
-                new_prefix = f"{prefix}[{idx}]" if prefix else f"[{idx}]"
+                # Use .N format (not [N]) for consistency with playbook templates
+                new_prefix = f"{prefix}.{idx}" if prefix else str(idx)
                 result.update(self._flatten_dict(item, new_prefix))
         else:
             result[prefix or "value"] = value
         return result
+
+    def _resolve_state_value(self, state: Dict[str, Any], key: str) -> Any:
+        """Resolve a nested key from state using dot notation.
+
+        Supports:
+        - Simple keys: "foo" -> state["foo"]
+        - Nested dict keys: "foo.bar" -> state["foo"]["bar"]
+        - Array indexing: "foo.0" or "foo.items.0" -> state["foo"][0] or state["foo"]["items"][0]
+
+        Falls back to direct state lookup if nested resolution fails.
+        """
+        # First try direct lookup (for flattened keys like "page_selection.selected_urls")
+        if key in state:
+            return state[key]
+
+        # Try nested resolution
+        parts = key.split(".")
+        value = state
+        for part in parts:
+            if value is None:
+                return ""
+            if isinstance(value, dict):
+                value = value.get(part)
+            elif isinstance(value, list):
+                # Support array indexing: "0", "1", etc.
+                if part.isdigit():
+                    idx = int(part)
+                    value = value[idx] if idx < len(value) else None
+                else:
+                    return ""
+            else:
+                return ""
+
+        return value if value is not None else ""
+
 
     def _extract_structured_json(self, text: str) -> Optional[Dict[str, Any]]:
         candidate = text.strip()
@@ -867,10 +933,11 @@ class SEARuntime:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             tool_func = TOOL_REGISTRY.get(tool_name)
             persona_obj = state.get("persona_obj") or persona
+            persona_id = getattr(persona_obj, "persona_id", "unknown")
+            
             try:
                 persona_dir = getattr(persona_obj, "persona_log_path", None)
                 persona_dir = persona_dir.parent if persona_dir else Path.cwd()
-                persona_id = getattr(persona_obj, "persona_id", None)
                 manager_ref = getattr(persona_obj, "manager_ref", None)
 
                 # Build kwargs from args_input (None or {} = no args)
@@ -879,12 +946,21 @@ class SEARuntime:
                 if args_input:
                     for arg_name, source in args_input.items():
                         if isinstance(source, str):
-                            value = state.get(source, "")
+                            value = self._resolve_state_value(state, source)
                             LOGGER.debug("[sea][tool] Mapping arg '%s' <- state['%s'] = %s", arg_name, source, value)
                         else:
                             value = source
                             LOGGER.debug("[sea][tool] Using literal arg '%s' = %s", arg_name, value)
                         kwargs[arg_name] = value
+
+                # ===== Tool execution logging (centralized) =====
+                kwargs_preview = {k: (str(v)[:100] + "..." if len(str(v)) > 100 else str(v)) for k, v in kwargs.items()}
+                LOGGER.info("[sea][tool] CALL %s (persona=%s) args=%s", tool_name, persona_id, kwargs_preview)
+                
+                if tool_func is None:
+                    LOGGER.error("[sea][tool] CRITICAL: Tool function '%s' not found in registry! TOOL_REGISTRY keys: %s", tool_name, list(TOOL_REGISTRY.keys()))
+                else:
+                    LOGGER.info("[sea][tool] Tool function found: %s", tool_func)
 
                 # Execute tool with persona context
                 if persona_id and persona_dir:
@@ -892,6 +968,10 @@ class SEARuntime:
                         result = tool_func(**kwargs) if callable(tool_func) else None
                 else:
                     result = tool_func(**kwargs) if callable(tool_func) else None
+                
+                # Log tool result
+                result_preview = str(result)[:200] + "..." if len(str(result)) > 200 else str(result)
+                LOGGER.info("[sea][tool] RESULT %s -> %s", tool_name, result_preview)
 
                 # Handle tuple results with output_keys (for multi-value returns)
                 if output_keys and isinstance(result, tuple):
@@ -1013,6 +1093,12 @@ class SEARuntime:
             state["last"] = memo_text
             if outputs is not None and self._should_collect_memory_output(playbook):
                 outputs.append(memo_text)
+            
+            # Debug: log speak_content at end of memorize node
+            speak_content = state.get("speak_content", "")
+            preview = speak_content[:100] + "..." if len(speak_content) > 100 else speak_content
+            LOGGER.info("[DEBUG] memorize node end: state['speak_content'] = '%s'", preview)
+            
             return state
 
         return node
@@ -1045,6 +1131,12 @@ class SEARuntime:
                 outputs.append(text)
             if event_callback:
                 event_callback({"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None), "metadata": metadata})
+            
+            # Debug: log speak_content at end of say node
+            speak_content = state.get("speak_content", "")
+            preview = speak_content[:100] + "..." if len(speak_content) > 100 else speak_content
+            LOGGER.info("[DEBUG] say node end: state['speak_content'] = '%s'", preview)
+            
             return state
         return node
 
@@ -1156,8 +1248,11 @@ class SEARuntime:
             return value_template
 
         # Check if it looks like an arithmetic expression
-        # Pattern: contains operators and {var} placeholders
-        if any(op in value_template for op in ["+", "-", "*", "/", "%"]):
+        # Must have a pattern like "{var} + 1" or "{a} * {b}" - operator with {var} adjacent
+        # This avoids false positives on strings like "---" (markdown separator)
+        import re
+        arithmetic_pattern = re.compile(r"\{[^}]+\}\s*[\+\-\*/%]\s*(?:\d+|\{[^}]+\})|\d+\s*[\+\-\*/%]\s*\{[^}]+\}")
+        if arithmetic_pattern.search(value_template):
             return self._eval_arithmetic_expression(value_template, state)
 
         # Simple template expansion
@@ -1381,6 +1476,8 @@ class SEARuntime:
                 self.manager.gateway_handle_ai_replies(building_id, persona, [text])
             except Exception:
                 LOGGER.exception("Failed to emit speak message")
+        # Notify Unity Gateway
+        self._notify_unity_speak(persona, text)
 
     def _emit_say(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> None:
         msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
@@ -1415,6 +1512,8 @@ class SEARuntime:
             self.manager.gateway_handle_ai_replies(building_id, persona, [text])
         except Exception:
             LOGGER.exception("Failed to emit say message")
+        # Notify Unity Gateway
+        self._notify_unity_speak(persona, text)
 
     def _emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True) -> None:
         if not record_history:
@@ -1433,6 +1532,28 @@ class SEARuntime:
         except Exception:
             LOGGER.debug("think message not stored", exc_info=True)
 
+    def _notify_unity_speak(self, persona: Any, text: str) -> None:
+        """Send persona speak event to Unity Gateway if connected."""
+        if not text:
+            return
+        unity_gateway = getattr(self.manager, "unity_gateway", None)
+        if not unity_gateway:
+            return
+        try:
+            import asyncio
+            persona_id = getattr(persona, "persona_id", "unknown")
+            # Run async send_speak in a new event loop if not in async context
+            try:
+                loop = asyncio.get_running_loop()
+                asyncio.create_task(unity_gateway.send_speak(persona_id, text))
+            except RuntimeError:
+                # No running event loop
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(unity_gateway.send_speak(persona_id, text))
+                loop.close()
+        except Exception as exc:
+            LOGGER.debug("Failed to notify Unity Gateway: %s", exc)
+
     def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None) -> List[Dict[str, Any]]:
         from sea.playbook_models import ContextRequirements
 
@@ -1447,6 +1568,7 @@ class SEARuntime:
 
             # 1. Common prompt (world setting, framework explanation)
             common_prompt_template = getattr(persona, "common_prompt", None)
+            LOGGER.debug("common_prompt_template is %s (type=%s)", common_prompt_template[:100] if common_prompt_template else None, type(common_prompt_template))
             if common_prompt_template:
                 try:
                     # Get building info for variable expansion
@@ -1454,18 +1576,21 @@ class SEARuntime:
                     building_name = building_obj.name if building_obj else building_id
                     city_name = getattr(persona, "current_city_id", "unknown_city")
 
-                    # Expand variables in common prompt
-                    common_text = common_prompt_template.format(
-                        current_persona_name=getattr(persona, "persona_name", "Unknown"),
-                        current_persona_id=getattr(persona, "persona_id", "unknown_id"),
-                        current_building_name=building_name,
-                        current_city_name=city_name,
-                        current_persona_system_instruction=getattr(persona, "persona_system_instruction", ""),
-                        current_building_system_instruction=getattr(building_obj, "system_instruction", "") if building_obj else "",
-                    )
+                    # Expand variables in common prompt using safe replace (avoid conflict with JSON examples)
+                    common_text = common_prompt_template
+                    replacements = {
+                        "{current_persona_name}": getattr(persona, "persona_name", "Unknown"),
+                        "{current_persona_id}": getattr(persona, "persona_id", "unknown_id"),
+                        "{current_building_name}": building_name,
+                        "{current_city_name}": city_name,
+                        "{current_persona_system_instruction}": getattr(persona, "persona_system_instruction", ""),
+                        "{current_building_system_instruction}": getattr(building_obj, "system_instruction", "") if building_obj else "",
+                    }
+                    for placeholder, value in replacements.items():
+                        common_text = common_text.replace(placeholder, value)
                     system_sections.append(common_text.strip())
                 except Exception as exc:
-                    LOGGER.debug("Failed to format common prompt: %s", exc)
+                    LOGGER.error("Failed to format common prompt: %s", exc, exc_info=True)
 
             # 2. "## あなたについて" section
             persona_section_parts: List[str] = []
@@ -1566,6 +1691,29 @@ class SEARuntime:
                             LOGGER.debug("[sea][prepare-context] Added working_memory section")
                 except Exception as exc:
                     LOGGER.debug("Failed to add working_memory section: %s", exc)
+
+            # 6. "## 空間情報" section (Unity spatial context - volatile, real-time)
+            try:
+                unity_gateway = getattr(self.manager, "unity_gateway", None)
+                if unity_gateway and getattr(unity_gateway, "is_running", False):
+                    persona_id = getattr(persona, "persona_id", None)
+                    spatial_state = unity_gateway.spatial_state.get(persona_id) if persona_id else None
+                    if spatial_state:
+                        distance = getattr(spatial_state, "distance_to_player", None)
+                        is_visible = getattr(spatial_state, "is_visible", None)
+                        
+                        spatial_lines = []
+                        if distance is not None:
+                            spatial_lines.append(f"- プレイヤーとの距離: {distance:.1f}m")
+                        if is_visible is not None:
+                            visibility_text = "はい" if is_visible else "いいえ"
+                            spatial_lines.append(f"- 視界内にプレイヤーがいるか: {visibility_text}")
+                        
+                        if spatial_lines:
+                            system_sections.append("## 空間情報（リアルタイム）\n" + "\n".join(spatial_lines))
+                            LOGGER.debug("[sea][prepare-context] Added spatial context section: distance=%.1f, visible=%s", distance, is_visible)
+            except Exception as exc:
+                LOGGER.debug("Failed to add spatial context section: %s", exc)
 
             system_text = "\n\n---\n\n".join([s for s in system_sections if s])
             if system_text:

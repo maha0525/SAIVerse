@@ -51,8 +51,18 @@
             "type": "say",
             "action": "{speak_content}",
             "metadata_key": "metadata",
-            "next": null,
+            "next": "process_body",
             "conditional_next": null
+        },
+        {
+            "id": "process_body",
+            "type": "tool",
+            "action": "control_body",
+            "args_input": {
+                "message": "speak_content"
+            },
+            "output_key": null,
+            "next": null
         }
     ],
     "start_node": "compose"

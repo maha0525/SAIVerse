@@ -64,17 +64,30 @@ def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:
     for item in media:
         if not isinstance(item, dict):
             continue
+        
+        # Try to resolve path from URI first
         uri = item.get("uri")
-        if not uri:
-            continue
-        path = resolve_media_uri(uri)
+        path = None
+        if uri:
+            path = resolve_media_uri(uri)
+        
+        # Fallback: use direct path field if URI resolution failed
+        if path is None:
+            direct_path = item.get("path")
+            if direct_path:
+                if isinstance(direct_path, Path):
+                    path = direct_path
+                else:
+                    path = Path(direct_path)
+        
         if path is None or not path.exists():
-            LOGGER.warning("Image URI %s could not be resolved or file missing", uri)
+            LOGGER.warning("Image URI %s could not be resolved or file missing (path=%s)", uri, path)
             continue
+        
         mime_type = item.get("mime_type") or mimetypes.guess_type(path)[0] or "image/png"
         results.append(
             {
-                "uri": uri,
+                "uri": uri or str(path),
                 "path": path,
                 "mime_type": mime_type,
             }

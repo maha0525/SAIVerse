@@ -93,11 +93,11 @@ class ItemCreate(BaseModel):
 class ItemUpdate(BaseModel):
     name: str
     item_type: str
-    description: str
-    owner_kind: str
-    owner_id: Optional[str]
-    state_json: str
-    file_path: str
+    description: str = ""
+    owner_kind: str = "world"
+    owner_id: Optional[str] = None
+    state_json: Optional[str] = None
+    file_path: Optional[str] = None
 
 # --- Routes ---
 
@@ -234,6 +234,14 @@ def create_item(i: ItemCreate, manager: SAIVerseManager = Depends(get_manager)):
 @router.put("/items/{item_id}")
 def update_item(item_id: str, i: ItemUpdate, manager: SAIVerseManager = Depends(get_manager)):
     return manager.update_item(item_id, i.name, i.item_type, i.description, i.owner_kind, i.owner_id, i.state_json, i.file_path)
+
+@router.get("/items/{item_id}")
+def get_item(item_id: str, manager: SAIVerseManager = Depends(get_manager)):
+    """Get item details including owner information."""
+    details = manager.get_item_details(item_id)
+    if not details:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return details
 
 @router.delete("/items/{item_id}")
 def delete_item(item_id: str, manager: SAIVerseManager = Depends(get_manager)):
@@ -394,4 +402,80 @@ def delete_playbook(playbook_id: int, db = Depends(get_db)):
     db.delete(playbook)
     db.commit()
     return {"success": True}
+
+
+class PlaybookImportRequest(BaseModel):
+    """Request body for importing a playbook from JSON content."""
+    playbook_json: str  # Full playbook JSON as string
+
+
+@router.post("/playbooks/import")
+def import_playbook(req: PlaybookImportRequest, db = Depends(get_db)):
+    """Import a playbook from JSON content. Creates new or updates existing based on name."""
+    try:
+        data = json.loads(req.playbook_json)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
+    
+    name = data.get("name")
+    if not name:
+        raise HTTPException(status_code=400, detail="Playbook JSON must contain a 'name' field")
+    
+    description = data.get("description", "")
+    scope = data.get("scope", "public")
+    router_callable = data.get("router_callable", False)
+    user_selectable = data.get("user_selectable", False)
+    
+    # Validate playbook using full structure
+    try:
+        parsed = PlaybookSchema(**data)
+        validate_playbook_graph(parsed)
+    except PlaybookValidationError as e:
+        raise HTTPException(status_code=400, detail=f"Graph validation error: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Schema validation error: {e}")
+    
+    # Convert to normalized dict and serialize
+    normalized_data = parsed.dict()
+    
+    # nodes_json stores the FULL playbook structure (for runtime loading)
+    nodes_json = json.dumps(normalized_data, ensure_ascii=False)
+    
+    # schema_json stores metadata for display/editing
+    schema_payload = {
+        "name": name,
+        "description": description,
+        "input_schema": normalized_data.get("input_schema", []),
+        "start_node": normalized_data.get("start_node"),
+    }
+    schema_json = json.dumps(schema_payload, ensure_ascii=False)
+    
+    # Check if playbook exists
+    existing = db.query(PlaybookModel).filter(PlaybookModel.name == name).first()
+    
+    if existing:
+        # Update existing playbook
+        existing.description = description
+        existing.scope = scope
+        existing.router_callable = router_callable
+        existing.user_selectable = user_selectable
+        existing.nodes_json = nodes_json
+        existing.schema_json = schema_json
+        db.commit()
+        return {"success": True, "action": "updated", "id": existing.id, "name": name}
+    else:
+        # Create new playbook
+        playbook = PlaybookModel(
+            name=name,
+            description=description,
+            scope=scope,
+            router_callable=router_callable,
+            user_selectable=user_selectable,
+            nodes_json=nodes_json,
+            schema_json=schema_json,
+        )
+        db.add(playbook)
+        db.commit()
+        db.refresh(playbook)
+        return {"success": True, "action": "created", "id": playbook.id, "name": name}
 

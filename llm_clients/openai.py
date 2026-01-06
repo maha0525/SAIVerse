@@ -120,6 +120,7 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
                         }
                     )
                 else:
+                    logging.warning("Image file not found or unreadable, skipping attachment: %s", att.get("uri") or att.get("path"))
                     parts.append({"type": "text", "text": f"[画像: {att['uri']}]"})
             clean_msg["content"] = parts if parts else text
             prepared.append(clean_msg)
