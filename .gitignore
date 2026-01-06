@@ -73,3 +73,5 @@ unity_client/SAIVerse3D/*.csproj
 unity_client/SAIVerse3D/*.sln
 unity_client/SAIVerse3D/*.userprefs
 unity_client/SAIVerse3D/.vsconfig
+sbert
+unity_client
