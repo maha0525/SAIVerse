@@ -118,8 +118,8 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 body: JSON.stringify({
                     description: description,
                     system_prompt: systemPrompt,
-                    default_model: defaultModel || null,
-                    lightweight_model: lightweightModel || null,
+                    default_model: defaultModel,  // empty string = clear to None
+                    lightweight_model: lightweightModel,  // empty string = clear to None
                     interaction_mode: interactionMode,
                     avatar_path: avatarPath || null,
                     appearance_image_path: appearanceImagePath || null
@@ -180,6 +180,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     onChange={(e) => setDefaultModel(e.target.value)}
                                 >
                                     <option value="">Use System Default</option>
+                                    {defaultModel && !availableModels.some(m => m.id === defaultModel) && (
+                                        <option value={defaultModel}>⚠️ Unknown: {defaultModel}</option>
+                                    )}
                                     {availableModels.map(m => (
                                         <option key={m.id} value={m.id}>{m.name}</option>
                                     ))}
@@ -194,6 +197,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     onChange={(e) => setLightweightModel(e.target.value)}
                                 >
                                     <option value="">None (Use Default)</option>
+                                    {lightweightModel && !availableModels.some(m => m.id === lightweightModel) && (
+                                        <option value={lightweightModel}>⚠️ Unknown: {lightweightModel}</option>
+                                    )}
                                     {availableModels.map(m => (
                                         <option key={m.id} value={m.id}>{m.name}</option>
                                     ))}

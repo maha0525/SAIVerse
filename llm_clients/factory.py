@@ -24,13 +24,23 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
     """Factory function to get the appropriate LLM client.
     
     Args:
-        model: Model ID to use
+        model: Model ID (config key, typically filename) to use
         provider: Provider name (openai, anthropic, gemini, ollama, nvidia_nim)
         context_length: Context length for the model
         config: Optional model config dict. If not provided, will be looked up by model ID.
     """
     if config is None:
         config = get_model_config(model)
+    
+    # Use the actual API model name from config if available
+    # This is important because 'model' might be the config key (filename)
+    # while config["model"] is the actual API model name
+    api_model = model
+    if isinstance(config, dict) and "model" in config:
+        api_model = config["model"]
+        if api_model != model:
+            logging.debug("Using API model name '%s' (config key: '%s')", api_model, model)
+    
     supports_images = _supports_images(provider, config if isinstance(config, dict) else None)
     client: LLMClient
     if provider == "openai":
@@ -57,10 +67,10 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
             structured_output_backend = config.get("structured_output_backend")
             if isinstance(structured_output_backend, str):
                 extra_kwargs["structured_output_backend"] = structured_output_backend
-                logging.info("Using structured_output_backend='%s' for model '%s'", structured_output_backend, model)
+                logging.info("Using structured_output_backend='%s' for model '%s'", structured_output_backend, api_model)
 
-        logging.debug("Creating OpenAI client for model '%s' with kwargs: %s", model, extra_kwargs)
-        client = OpenAIClient(model, supports_images=supports_images, **extra_kwargs)
+        logging.debug("Creating OpenAI client for model '%s' with kwargs: %s", api_model, extra_kwargs)
+        client = OpenAIClient(api_model, supports_images=supports_images, **extra_kwargs)
     elif provider == "nvidia_nim":
         extra_kwargs: Dict[str, object] = {}
         if isinstance(config, dict):
@@ -80,14 +90,14 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
             if isinstance(convert_system, bool):
                 extra_kwargs["convert_system_to_user"] = convert_system
 
-        logging.debug("Creating Nvidia NIM client for model '%s' with kwargs: %s", model, extra_kwargs)
-        client = NvidiaNIMClient(model, supports_images=supports_images, **extra_kwargs)
+        logging.debug("Creating Nvidia NIM client for model '%s' with kwargs: %s", api_model, extra_kwargs)
+        client = NvidiaNIMClient(api_model, supports_images=supports_images, **extra_kwargs)
     elif provider == "anthropic":
-        client = AnthropicClient(model, config=config, supports_images=supports_images)
+        client = AnthropicClient(api_model, config=config, supports_images=supports_images)
     elif provider == "gemini":
-        client = GeminiClient(model, config=config, supports_images=supports_images)
+        client = GeminiClient(api_model, config=config, supports_images=supports_images)
     else:
-        client = OllamaClient(model, context_length, supports_images=supports_images)
+        client = OllamaClient(api_model, context_length, supports_images=supports_images)
 
     parameter_defaults = get_model_parameter_defaults(model)
     if parameter_defaults:

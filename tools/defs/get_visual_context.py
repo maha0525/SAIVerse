@@ -278,7 +278,6 @@ def get_visual_context(
         mime_type = mimetypes.guess_type(item["path"])[0] or "image/png"
         media_list.append({
             "path": item["path"],
-            "uri": f"file://{item['path']}",
             "mime_type": mime_type,
             "type": "image",
         })

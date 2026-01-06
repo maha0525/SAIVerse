@@ -40,7 +40,7 @@ load_dotenv()
 os.environ["SAIVERSE_SKIP_TOOL_IMPORTS"] = "1"
 
 from sai_memory.memory.storage import init_db, get_messages_paginated, Message
-from sai_memory.memopedia import Memopedia, init_memopedia_tables, CATEGORY_PEOPLE, CATEGORY_EVENTS, CATEGORY_PLANS
+from sai_memory.memopedia import Memopedia, init_memopedia_tables, CATEGORY_PEOPLE, CATEGORY_TERMS, CATEGORY_PLANS
 from model_configs import get_model_config, find_model_config
 
 # Import llm_clients lazily to avoid circular import
@@ -393,6 +393,8 @@ def extract_knowledge(
     max_retries: int = 2,
     dry_run: bool = False,
     refine_writes: bool = False,
+    episode_context_conn=None,
+    debug_log_path=None,
 ) -> List[Dict[str, Any]]:
     """Extract knowledge from messages using the LLM.
 
@@ -404,6 +406,8 @@ def extract_knowledge(
         max_retries: Max retries when LLM returns empty pages
         dry_run: If True, don't write to DB
         refine_writes: If True, use LLM to refine content when appending
+        episode_context_conn: Database connection for fetching episode context (arasuji).
+            If provided, episode context will be included in the prompt.
 
     Note:
         Pages are applied to Memopedia immediately after each batch extraction.
@@ -422,7 +426,7 @@ def extract_knowledge(
                     "properties": {
                         "category": {
                             "type": "string",
-                            "enum": ["people", "events", "plans"],
+                            "enum": ["people", "terms", "plans"],
                         },
                         "title": {"type": "string"},
                         "summary": {"type": "string"},
@@ -456,15 +460,58 @@ def extract_knowledge(
             conversation=conversation,
         )
 
+        # Add episode context if available
+        if episode_context_conn is not None:
+            try:
+                from sai_memory.arasuji.context import get_episode_context_for_timerange
+                # Get time range from batch
+                batch_start = min(m.created_at for m in batch) if batch else 0
+                batch_end = max(m.created_at for m in batch) if batch else 0
+                episode_ctx = get_episode_context_for_timerange(
+                    episode_context_conn, batch_start, batch_end
+                )
+                if episode_ctx:
+                    prompt = f"""## これまでの出来事の流れ（参考）
+
+以下は、この会話が行われるより前の出来事のあらすじです。
+過去の経緯や文脈を理解するために参照してください。
+
+{episode_ctx}
+
+---
+
+{prompt}"""
+                    LOGGER.info(f"  Added episode context ({len(episode_ctx)} chars)")
+            except Exception as e:
+                LOGGER.warning(f"Failed to add episode context: {e}")
+
         # Retry loop for empty responses
         batch_pages: List[Dict[str, Any]] = []
         for attempt in range(max_retries + 1):
+            # Debug log: write prompt
+            if debug_log_path and attempt == 0:
+                from datetime import datetime
+                with open(debug_log_path, "a", encoding="utf-8") as f:
+                    f.write("\n" + "=" * 80 + "\n")
+                    f.write(f"[MEMOPEDIA] {datetime.now().isoformat()}\n")
+                    f.write("=" * 80 + "\n")
+                    f.write("--- PROMPT ---\n")
+                    f.write(prompt)
+                    f.write("\n")
+
             try:
                 text = client.generate(
                     messages=[{"role": "user", "content": prompt}],
                     tools=[],
                     response_schema=response_schema,
                 )
+
+                # Debug log: write response
+                if debug_log_path and attempt == 0:
+                    with open(debug_log_path, "a", encoding="utf-8") as f:
+                        f.write("--- RESPONSE ---\n")
+                        f.write(text or "(empty)")
+                        f.write("\n")
 
                 if not text:
                     LOGGER.warning("Empty response from LLM")
@@ -546,7 +593,7 @@ def apply_pages_to_memopedia(
     """
     category_to_root = {
         "people": "root_people",
-        "events": "root_events",
+        "terms": "root_terms",
         "plans": "root_plans",
     }
 
@@ -661,6 +708,9 @@ def main():
 
   # 既存ページをクリアしてからインポート
   python scripts/build_memopedia.py air_city_a --import memopedia_backup.json --clear
+
+  # Chronicle (Chronicle context) を文脈として使用
+  python scripts/build_memopedia.py air_city_a --with-episode-context
 """,
     )
     parser.add_argument("persona_id", nargs="?", help="Persona ID to process")
@@ -677,6 +727,7 @@ def main():
     parser.add_argument("--clear", action="store_true", help="Clear all existing pages (can be used alone or with --import)")
     parser.add_argument("--offset", type=int, default=0, help="Number of messages to skip (for resuming, e.g., --offset 100 to skip first 100)")
     parser.add_argument("--thread", type=str, metavar="THREAD_ID", help="Process only messages from this thread ID")
+    parser.add_argument("--with-episode-context", action="store_true", help="Include Chronicle context (Memory Weave) in prompts for better context understanding")
 
     args = parser.parse_args()
 
@@ -796,6 +847,14 @@ def main():
         sys.exit(0)
 
     if messages:
+        # Initialize arasuji tables if using episode context
+        episode_context_conn = None
+        if args.with_episode_context:
+            from sai_memory.arasuji import init_arasuji_tables
+            init_arasuji_tables(conn)
+            episode_context_conn = conn
+            LOGGER.info("Episode context enabled (arasuji)")
+
         # Extract knowledge (pages are applied immediately after each batch)
         LOGGER.info("Extracting knowledge from messages...")
         pages = extract_knowledge(
@@ -805,6 +864,7 @@ def main():
             batch_size=args.batch_size,
             dry_run=args.dry_run,
             refine_writes=args.refine_writes,
+            episode_context_conn=episode_context_conn,
         )
         LOGGER.info(f"Extracted and applied {len(pages)} pages total")
 

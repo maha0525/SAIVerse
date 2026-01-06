@@ -99,6 +99,17 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
         fetchDetails();
     }, [refreshTrigger, isOpen]);
 
+    // Polling for real-time updates when sidebar is open
+    useEffect(() => {
+        if (!isOpen) return;
+
+        const pollInterval = setInterval(() => {
+            fetchDetails();
+        }, 10000); // Poll every 10 seconds
+
+        return () => clearInterval(pollInterval);
+    }, [isOpen]);
+
     const handleTouchStart = (e: React.TouchEvent) => {
         e.stopPropagation();
         startX.current = e.touches[0].clientX;

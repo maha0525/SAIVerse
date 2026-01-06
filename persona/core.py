@@ -86,7 +86,7 @@ class PersonaCore(
         self.SessionLocal = session_factory
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
         self.user_room_id = user_room_id
-        self.common_prompt = common_prompt_path.read_text(encoding="utf-8")
+        self.common_prompt_path = common_prompt_path  # ファイルパスを保持
         self.emotion_prompt = emotion_prompt_path.read_text(encoding="utf-8")
         self.persona_id = persona_id
         self.persona_name = persona_name
@@ -237,3 +237,21 @@ class PersonaCore(
     def get_execution_state(self) -> Dict[str, Any]:
         """Get the current playbook execution state for UI display."""
         return dict(self.execution_state)
+
+    @property
+    def common_prompt(self) -> str:
+        """
+        共通プロンプトを実行時に読み込む。
+        ファイル更新が即座に反映されるように、毎回読み込む。
+        """
+        try:
+            path = self.common_prompt_path
+            abs_path = path.resolve()
+            logging.debug(f"[common_prompt] path={path}, abs_path={abs_path}, exists={abs_path.exists()}")
+            if not abs_path.exists():
+                logging.error(f"[common_prompt] File not found: {abs_path}")
+                return ""
+            return abs_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            logging.error(f"Failed to read common_prompt from {self.common_prompt_path}: {exc}")
+            return ""

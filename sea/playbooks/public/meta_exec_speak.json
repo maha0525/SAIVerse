@@ -1,7 +1,18 @@
 {
   "name": "meta_exec_speak",
   "description": "Execute a playbook and speak the result (used by call_playbook tool)",
-  "input_schema": [],
+  "input_schema": [
+    {
+      "name": "selected_playbook",
+      "description": "Name of the playbook to execute",
+      "source": "parent.selected_playbook"
+    },
+    {
+      "name": "selected_args",
+      "description": "Arguments for the playbook",
+      "source": "parent.selected_args"
+    }
+  ],
   "output_schema": null,
   "context_requirements": {
     "history_depth": "full",
@@ -34,7 +45,9 @@
       "type": "memorize",
       "action": "{last}",
       "role": "assistant",
-      "tags": ["conversation"],
+      "tags": [
+        "conversation"
+      ],
       "metadata_key": "metadata",
       "next": "say",
       "conditional_next": null

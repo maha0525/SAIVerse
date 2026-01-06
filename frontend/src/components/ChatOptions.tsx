@@ -94,6 +94,20 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
         setParams(newParams);
     };
 
+    const handlePlaybookChange = async (playbookId: string | null) => {
+        onPlaybookChange(playbookId);
+        // Save to server immediately
+        try {
+            await fetch('/api/config/playbook', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ playbook: playbookId })
+            });
+        } catch (e) {
+            console.error("Failed to save playbook", e);
+        }
+    };
+
     const saveParams = async () => {
         try {
             await fetch('/api/config/parameters', {
@@ -142,7 +156,7 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
                                     <select
                                         className={styles.select}
                                         value={currentPlaybook || ''}
-                                        onChange={(e) => onPlaybookChange(e.target.value || null)}
+                                        onChange={(e) => handlePlaybookChange(e.target.value || null)}
                                     >
                                         <option value="">(Auto Detect)</option>
                                         {playbooks.map(p => (

@@ -23,7 +23,7 @@ interface PreviewData {
     total_count: number;
 }
 
-type Step = 'upload' | 'select' | 'importing';
+type Step = 'upload' | 'select' | 'embedding-dialog' | 'importing';
 
 export default function MemoryImport({ personaId }: MemoryImportProps) {
     const [activeSubTab, setActiveSubTab] = useState<'official' | 'extension'>('official');
@@ -35,13 +35,50 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
     const [step, setStep] = useState<Step>('upload');
     const [previewData, setPreviewData] = useState<PreviewData | null>(null);
     const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
-    const [skipEmbedding, setSkipEmbedding] = useState(true);
+
+    // Extension import state
+    const [pendingExtensionFile, setPendingExtensionFile] = useState<File | null>(null);
+
+    // Import progress
+    const [importProgress, setImportProgress] = useState<string | null>(null);
 
     const resetState = () => {
         setStep('upload');
         setPreviewData(null);
         setSelectedIds(new Set());
         setResult(null);
+        setPendingExtensionFile(null);
+        setImportProgress(null);
+    };
+
+    // Polling for import status
+    const pollImportStatus = async (type: 'extension' | 'official') => {
+        try {
+            const res = await fetch(`/api/people/${personaId}/import/${type}/status`);
+            const data = await res.json();
+
+            if (data.running) {
+                setImportProgress(data.message || `Processing ${data.progress || 0}/${data.total || 0}...`);
+                setTimeout(() => pollImportStatus(type), 1000);
+            } else {
+                // Task completed
+                setStep('upload');
+                setImportProgress(null);
+                setIsLoading(false);
+                if (data.success) {
+                    setResult({ type: 'success', message: data.message || 'Import successful' });
+                    setPreviewData(null);
+                    setSelectedIds(new Set());
+                } else {
+                    setResult({ type: 'error', message: data.message || 'Import failed' });
+                }
+            }
+        } catch (error) {
+            setStep('upload');
+            setImportProgress(null);
+            setIsLoading(false);
+            setResult({ type: 'error', message: 'Failed to get import status.' });
+        }
     };
 
     const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -51,11 +88,11 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
         setIsLoading(true);
         setResult(null);
 
-        const formData = new FormData();
-        formData.append('file', file);
-
         if (activeSubTab === 'official') {
             // Preview flow for official export
+            const formData = new FormData();
+            formData.append('file', file);
+
             try {
                 const res = await fetch(`/api/people/${personaId}/import/official/preview`, {
                     method: 'POST',
@@ -66,7 +103,7 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
                 if (res.ok) {
                     if (data.conversations && data.conversations.length > 0) {
                         setPreviewData(data);
-                        setSelectedIds(new Set()); // Start with none selected
+                        setSelectedIds(new Set());
                         setStep('select');
                     } else {
                         setResult({ type: 'error', message: 'No conversations found in the file.' });
@@ -81,25 +118,49 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
                 if (fileInputRef.current) fileInputRef.current.value = '';
             }
         } else {
-            // Direct import for extension export
-            try {
-                const res = await fetch(`/api/people/${personaId}/import/extension`, {
-                    method: 'POST',
-                    body: formData,
-                });
-                const data = await res.json();
+            // Extension: Show embedding dialog before import
+            setPendingExtensionFile(file);
+            setStep('embedding-dialog');
+            setIsLoading(false);
+            if (fileInputRef.current) fileInputRef.current.value = '';
+        }
+    };
 
-                if (res.ok) {
-                    setResult({ type: 'success', message: data.message || 'Import successful' });
-                } else {
-                    setResult({ type: 'error', message: data.detail || 'Import failed' });
-                }
-            } catch (error) {
-                setResult({ type: 'error', message: 'Network error occurred.' });
-            } finally {
+    const executeExtensionImport = async (skipEmbedding: boolean) => {
+        if (!pendingExtensionFile) return;
+
+        setStep('importing');
+        setIsLoading(true);
+        setResult(null);
+        setImportProgress('Starting import...');
+
+        const formData = new FormData();
+        formData.append('file', pendingExtensionFile);
+        formData.append('skip_embedding', skipEmbedding.toString());
+
+        try {
+            const res = await fetch(`/api/people/${personaId}/import/extension`, {
+                method: 'POST',
+                body: formData,
+            });
+            const data = await res.json();
+
+            if (res.ok) {
+                // Start polling for status
+                setTimeout(() => pollImportStatus('extension'), 1000);
+            } else {
+                setStep('upload');
                 setIsLoading(false);
-                if (fileInputRef.current) fileInputRef.current.value = '';
+                setImportProgress(null);
+                setResult({ type: 'error', message: data.detail || 'Import failed' });
             }
+        } catch (error) {
+            setStep('upload');
+            setIsLoading(false);
+            setImportProgress(null);
+            setResult({ type: 'error', message: 'Network error occurred.' });
+        } finally {
+            setPendingExtensionFile(null);
         }
     };
 
@@ -124,15 +185,22 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
         }
     };
 
-    const handleImport = async () => {
+    const handleOfficialImportClick = () => {
         if (!previewData || selectedIds.size === 0) {
             setResult({ type: 'error', message: 'Please select at least one conversation to import.' });
             return;
         }
+        // Show embedding dialog
+        setStep('embedding-dialog');
+    };
+
+    const executeOfficialImport = async (skipEmbedding: boolean) => {
+        if (!previewData) return;
 
         setStep('importing');
         setIsLoading(true);
         setResult(null);
+        setImportProgress('Starting import...');
 
         try {
             const res = await fetch(`/api/people/${personaId}/import/official`, {
@@ -147,19 +215,19 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
             const data = await res.json();
 
             if (res.ok) {
-                setResult({ type: 'success', message: data.message || 'Import successful' });
-                setStep('upload');
-                setPreviewData(null);
-                setSelectedIds(new Set());
+                // Start polling for status
+                setTimeout(() => pollImportStatus('official'), 1000);
             } else {
-                setResult({ type: 'error', message: data.detail || 'Import failed' });
                 setStep('select');
+                setIsLoading(false);
+                setImportProgress(null);
+                setResult({ type: 'error', message: data.detail || 'Import failed' });
             }
         } catch (error) {
-            setResult({ type: 'error', message: 'Network error occurred.' });
             setStep('select');
-        } finally {
             setIsLoading(false);
+            setImportProgress(null);
+            setResult({ type: 'error', message: 'Network error occurred.' });
         }
     };
 
@@ -173,10 +241,8 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
 
             if (data.running) {
                 setReembedProgress(data.message || `Processing ${data.progress || 0}/${data.total || 0}...`);
-                // Continue polling
                 setTimeout(pollReembedStatus, 1000);
             } else {
-                // Task completed
                 setIsReembedding(false);
                 setReembedProgress(null);
                 if (data.message) {
@@ -204,7 +270,6 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
             const data = await res.json();
 
             if (res.ok && data.success) {
-                // Start polling for status
                 setTimeout(pollReembedStatus, 1000);
             } else {
                 setIsReembedding(false);
@@ -245,6 +310,50 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
         </div>
     );
 
+    const renderEmbeddingDialog = () => (
+        <div className={styles.embeddingDialog}>
+            <h3>記憶想起用のエンベディングを作成しますか？</h3>
+            <ul className={styles.dialogInfo}>
+                <li>バックグラウンドで実行されます</li>
+                <li>CPU実行では時間がかかります</li>
+                <li>スキップした場合、別途「Fill Missing Embeddings」から再実行可能です</li>
+            </ul>
+            <div className={styles.dialogActions}>
+                <button
+                    className={styles.cancelButton}
+                    onClick={() => {
+                        if (activeSubTab === 'extension') {
+                            executeExtensionImport(true);
+                        } else {
+                            executeOfficialImport(true);
+                        }
+                    }}
+                >
+                    スキップ
+                </button>
+                <button
+                    className={styles.importButton}
+                    onClick={() => {
+                        if (activeSubTab === 'extension') {
+                            executeExtensionImport(false);
+                        } else {
+                            executeOfficialImport(false);
+                        }
+                    }}
+                >
+                    作成する
+                </button>
+            </div>
+        </div>
+    );
+
+    const renderImportingProgress = () => (
+        <div className={styles.importingProgress}>
+            <Loader2 className={styles.loader} size={48} />
+            <div className={styles.progressText}>{importProgress || 'Importing...'}</div>
+        </div>
+    );
+
     const renderConversationTable = () => {
         if (!previewData) return null;
 
@@ -257,17 +366,6 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
                     <span className={styles.selectionCount}>
                         {selectedIds.size} of {previewData.total_count} selected
                     </span>
-                </div>
-
-                <div className={styles.options}>
-                    <label className={styles.checkbox}>
-                        <input
-                            type="checkbox"
-                            checked={skipEmbedding}
-                            onChange={(e) => setSkipEmbedding(e.target.checked)}
-                        />
-                        <span>Skip embedding (faster import)</span>
-                    </label>
                 </div>
 
                 <div className={styles.tableContainer}>
@@ -309,7 +407,7 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
                     </button>
                     <button
                         className={styles.importButton}
-                        onClick={handleImport}
+                        onClick={handleOfficialImportClick}
                         disabled={selectedIds.size === 0 || isLoading}
                     >
                         {isLoading ? <Loader2 size={16} className={styles.loader} /> : null}
@@ -320,6 +418,19 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
         );
     };
 
+    const renderMainContent = () => {
+        if (step === 'embedding-dialog') {
+            return renderEmbeddingDialog();
+        }
+        if (step === 'importing') {
+            return renderImportingProgress();
+        }
+        if (activeSubTab === 'official' && step === 'select') {
+            return renderConversationTable();
+        }
+        return renderUploadArea();
+    };
+
     return (
         <div className={styles.container}>
             <h2 className={styles.title}>Import Chat Logs</h2>
@@ -328,22 +439,20 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
                 <button
                     className={`${styles.subTab} ${activeSubTab === 'official' ? styles.active : ''}`}
                     onClick={() => { setActiveSubTab('official'); resetState(); }}
+                    disabled={step === 'importing'}
                 >
                     Official Data Export
                 </button>
                 <button
                     className={`${styles.subTab} ${activeSubTab === 'extension' ? styles.active : ''}`}
                     onClick={() => { setActiveSubTab('extension'); resetState(); }}
+                    disabled={step === 'importing'}
                 >
                     Extension Export
                 </button>
             </div>
 
-            {activeSubTab === 'official' && step === 'select' ? (
-                renderConversationTable()
-            ) : (
-                renderUploadArea()
-            )}
+            {renderMainContent()}
 
             {result && (
                 <div className={`${styles.result} ${styles[result.type]}`}>

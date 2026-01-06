@@ -13,7 +13,7 @@ from sai_memory.memopedia.storage import (
     PageState,
     PageEditHistory,
     CATEGORY_PEOPLE,
-    CATEGORY_EVENTS,
+    CATEGORY_TERMS,
     CATEGORY_PLANS,
     build_tree,
     create_page,
@@ -90,7 +90,7 @@ class Memopedia:
 
         return {
             "people": [_annotate(p) for p in tree.get(CATEGORY_PEOPLE, [])],
-            "events": [_annotate(p) for p in tree.get(CATEGORY_EVENTS, [])],
+            "terms": [_annotate(p) for p in tree.get(CATEGORY_TERMS, [])],
             "plans": [_annotate(p) for p in tree.get(CATEGORY_PLANS, [])],
         }
 
@@ -105,7 +105,7 @@ class Memopedia:
 
         category_names = {
             "people": "人物",
-            "events": "出来事",
+            "terms": "用語",
             "plans": "予定",
         }
 
@@ -118,7 +118,7 @@ class Memopedia:
             for child in page.get("children", []):
                 _render_page(child, depth + 1)
 
-        for category_key in ["people", "events", "plans"]:
+        for category_key in ["people", "terms", "plans"]:
             category_name = category_names.get(category_key, category_key)
             pages = tree.get(category_key, [])
             lines.append(f"\n## {category_name}\n")
@@ -451,7 +451,7 @@ class Memopedia:
 
         category_names = {
             CATEGORY_PEOPLE: "人物",
-            CATEGORY_EVENTS: "出来事",
+            CATEGORY_TERMS: "用語",
             CATEGORY_PLANS: "予定",
         }
 
@@ -470,7 +470,7 @@ class Memopedia:
                 lines.extend(_render_page(child, level + 1))
             return lines
 
-        for category in [CATEGORY_PEOPLE, CATEGORY_EVENTS, CATEGORY_PLANS]:
+        for category in [CATEGORY_PEOPLE, CATEGORY_TERMS, CATEGORY_PLANS]:
             category_name = category_names.get(category, category)
             pages = tree.get(category, [])
             if not pages:

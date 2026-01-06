@@ -881,11 +881,12 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 # Recreate lightweight LLM client if model changed
                 if lightweight_model:
                     from llm_clients import get_llm_client
-                    from model_configs import get_context_length
+                    from model_configs import get_context_length, get_model_provider
                     try:
                         lw_context = get_context_length(lightweight_model)
+                        lw_provider = get_model_provider(lightweight_model)
                         persona.lightweight_llm_client = get_llm_client(
-                            lightweight_model, self.provider, lw_context
+                            lightweight_model, lw_provider, lw_context
                         )
                         logging.info(
                             "Recreated lightweight LLM client for persona '%s' with model '%s'.",
