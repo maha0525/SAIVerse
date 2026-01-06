@@ -13,9 +13,9 @@ const nextConfig: NextConfig = {
     // Allow larger file uploads for ChatGPT export import
     experimental: {
         serverActions: {
-            bodySizeLimit: '100mb',
+            bodySizeLimit: '5000mb',
         },
-        proxyClientMaxBodySize: '100mb',
+        proxyClientMaxBodySize: '5000mb',
     },
 };
 

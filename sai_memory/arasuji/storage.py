@@ -317,12 +317,148 @@ def delete_entry(conn: sqlite3.Connection, entry_id: str) -> bool:
     return cur.rowcount > 0
 
 
+def delete_entry_and_update_parent(
+    conn: sqlite3.Connection, 
+    entry_id: str
+) -> tuple[bool, Optional[str]]:
+    """Delete entry and remove from parent's source_ids.
+    
+    Returns:
+        (success, parent_id) - parent_id is None if no parent existed
+    """
+    # Get entry to find parent
+    entry = get_entry(conn, entry_id)
+    if not entry:
+        return False, None
+    
+    parent_id = entry.parent_id
+    
+    # Update parent's source_ids if exists
+    if parent_id:
+        parent = get_entry(conn, parent_id)
+        if parent:
+            new_source_ids = [sid for sid in parent.source_ids if sid != entry_id]
+            conn.execute(
+                "UPDATE arasuji_entries SET source_ids_json = ? WHERE id = ?",
+                (json.dumps(new_source_ids), parent_id)
+            )
+    
+    # Delete entry
+    conn.execute("DELETE FROM arasuji_entries WHERE id = ?", (entry_id,))
+    conn.commit()
+    
+    return True, parent_id
+
+
+def add_to_parent_source_ids(
+    conn: sqlite3.Connection,
+    entry_id: str,
+    parent_id: str
+) -> bool:
+    """Add entry to parent's source_ids and mark as consolidated.
+    
+    Args:
+        entry_id: ID of entry to add to parent
+        parent_id: ID of parent entry
+        
+    Returns:
+        True if successful, False if parent not found
+    """
+    parent = get_entry(conn, parent_id)
+    if not parent:
+        return False
+    
+    # Add to parent's source_ids
+    new_source_ids = parent.source_ids + [entry_id]
+    conn.execute(
+        "UPDATE arasuji_entries SET source_ids_json = ? WHERE id = ?",
+        (json.dumps(new_source_ids), parent_id)
+    )
+    
+    # Mark entry as consolidated
+    conn.execute(
+        "UPDATE arasuji_entries SET is_consolidated = 1, parent_id = ? WHERE id = ?",
+        (parent_id, entry_id)
+    )
+    
+    conn.commit()
+    return True
+
+
 def clear_all_entries(conn: sqlite3.Connection) -> int:
     """Delete all arasuji entries. Returns count of deleted entries."""
     cur = conn.execute("DELETE FROM arasuji_entries")
     conn.execute("DELETE FROM arasuji_progress")
     conn.commit()
     return cur.rowcount
+
+
+def regenerate_entry(
+    conn: sqlite3.Connection,
+    entry_id: str,
+    model_name: Optional[str] = None
+) -> Optional[ArasujiEntry]:
+    """Regenerate a Chronicle entry while preserving parent relationship.
+    
+    This orchestrates the full regeneration process:
+    1. Get existing entry and save parent info
+    2. Delete entry and update parent's source_ids
+    3. Get original messages
+    4. Call build_arasuji.regenerate_entry_from_messages for business logic
+    5. Restore parent relationship
+    
+    Args:
+        conn: Database connection
+        entry_id: ID of entry to regenerate
+        model_name: Model to use (defaults to MEMORY_WEAVE_MODEL env var)
+        
+    Returns:
+        New ArasujiEntry or None on failure
+    """
+    from sai_memory.memory.storage import get_message
+    
+    # 1. Get existing entry
+    entry = get_entry(conn, entry_id)
+    if not entry:
+        return None
+    
+    if entry.level != 1:
+        raise ValueError("Only level-1 entries can be regenerated")
+    
+    # 2. Save parent info and source message IDs
+    parent_id = entry.parent_id
+    source_message_ids = entry.source_ids
+    
+    # 3. Delete entry and update parent
+    success, _ = delete_entry_and_update_parent(conn, entry_id)
+    if not success:
+        return None
+    
+    # 4. Get original messages
+    messages = []
+    for msg_id in source_message_ids:
+        msg = get_message(conn, msg_id)
+        if msg:
+            messages.append(msg)
+    
+    if not messages:
+        return None
+    
+    # Sort by created_at
+    messages.sort(key=lambda m: m.created_at)
+    
+    # 5. Call scripts layer for business logic
+    from scripts.build_arasuji import regenerate_entry_from_messages
+    new_entry = regenerate_entry_from_messages(conn, messages, model_name)
+    
+    if not new_entry:
+        return None
+    
+    # 6. Restore parent relationship
+    if parent_id:
+        add_to_parent_source_ids(conn, new_entry.id, parent_id)
+    
+    return new_entry
 
 
 # ----- Progress tracking -----
