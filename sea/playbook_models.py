@@ -249,6 +249,7 @@ class ContextRequirements(BaseModel):
     system_prompt: bool = Field(default=True, description="Include persona and building system prompts")
     available_playbooks: bool = Field(default=False, description="Include available playbooks list in system prompt")
     visual_context: bool = Field(default=False, description="Include visual context (Building/Persona images) after system prompt")
+    memory_weave: bool = Field(default=False, description="Include Memory Weave context (Chronicle + Memopedia) after system prompt")
     working_memory: bool = Field(default=False, description="Include working memory contents in system prompt")
 
 

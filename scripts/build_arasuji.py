@@ -342,6 +342,63 @@ def list_available_models() -> None:
     print(f"合計: {len(MODEL_CONFIGS)} モデル\n")
 
 
+def regenerate_entry_from_messages(
+    conn: sqlite3.Connection,
+    messages: List[Message],
+    model_name: str = None,
+) -> Optional[Any]:
+    """Regenerate a Chronicle entry from messages.
+    
+    This function contains the business logic for regeneration:
+    - Get LLM client based on model config
+    - Call generate_level1_arasuji
+    
+    Args:
+        conn: Database connection
+        messages: Messages to regenerate from
+        model_name: Model to use (defaults to MEMORY_WEAVE_MODEL env var)
+        
+    Returns:
+        New ArasujiEntry or None on failure
+    """
+    import os
+    from model_configs import find_model_config
+    from llm_clients.factory import get_llm_client
+    from sai_memory.arasuji.generator import generate_level1_arasuji
+    
+    # Get model from env if not specified
+    if model_name is None:
+        model_name = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.0-flash")
+    
+    # Find model config
+    model_id, model_config = find_model_config(model_name)
+    
+    if model_config:
+        actual_model_id = model_config.get("model", model_name)
+        auto_provider = model_config.get("provider", "gemini")
+    else:
+        LOGGER.warning(f"Model '{model_name}' not found in config, using default provider 'gemini'")
+        actual_model_id = model_name
+        auto_provider = "gemini"
+        model_config = {}
+    
+    provider = auto_provider
+    context_length = model_config.get("context_length", 128000)
+    
+    # Get LLM client
+    client = get_llm_client(actual_model_id, provider, context_length, config=model_config)
+    
+    # Generate Chronicle entry
+    new_entry = generate_level1_arasuji(
+        client,
+        conn,
+        messages,
+        dry_run=False
+    )
+    
+    return new_entry
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Build Chronicle (episode memory, part of Memory Weave) from SAIMemory logs",
@@ -551,9 +608,9 @@ def main():
             conn.close()
             sys.exit(1)
         LOGGER.info(f"Importing chronicle from: {input_path}")
-        if args.clear:
+        if args.clear_chronicle:
             LOGGER.info("Clearing existing entries before import...")
-        count = import_arasuji(conn, input_path, clear_existing=args.clear)
+        count = import_arasuji(conn, input_path, clear_existing=args.clear_chronicle)
         LOGGER.info(f"Imported {count} entries from {input_path}")
         print_stats(conn, args.persona_id)
         conn.close()

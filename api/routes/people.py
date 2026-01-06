@@ -7,6 +7,9 @@ import sqlite3
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from database.models import PersonaSchedule, Playbook as PlaybookModel, AI as AIModel, City as CityModel
+import logging
+
+LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -2028,5 +2031,50 @@ def get_arasuji_messages(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get source messages: {e}")
+    finally:
+        conn.close()
+
+@router.post("/{persona_id}/arasuji/{entry_id}/regenerate", tags=["Chronicle"])
+async def regenerate_arasuji_entry(
+    persona_id: str,
+    entry_id: str,
+    manager = Depends(get_manager)
+):
+    """Regenerate a specific Chronicle entry while preserving parent relationship.
+    
+    This endpoint delegates to the storage layer which handles:
+    1. Saving parent relationship
+    2. Deleting and updating parent
+    3. Regenerating with LLM
+    4. Restoring parent relationship
+    """
+    from sai_memory.arasuji.storage import regenerate_entry
+    
+    conn = _get_arasuji_db(persona_id)
+    
+    try:
+        new_entry = regenerate_entry(conn, entry_id)
+        
+        if not new_entry:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to regenerate entry"
+            )
+        
+        return {
+            "success": True,
+            "old_entry_id": entry_id,
+            "new_entry_id": new_entry.id,
+            "content": new_entry.content
+        }
+    
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        LOGGER.exception(f"[regenerate] Exception during regeneration: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to regenerate entry: {e}"
+        )
     finally:
         conn.close()

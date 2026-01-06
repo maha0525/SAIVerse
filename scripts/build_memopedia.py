@@ -136,7 +136,7 @@ def format_existing_pages(memopedia: Memopedia) -> str:
 
     category_names = {
         "people": "人物",
-        "events": "出来事",
+        "terms": "用語",
         "plans": "予定",
     }
 
@@ -154,7 +154,7 @@ def format_existing_pages(memopedia: Memopedia) -> str:
             if children:
                 _list_pages(children, prefix + "  ")
 
-    for category in ["people", "events", "plans"]:
+    for category in ["people", "terms", "plans"]:
         pages = tree.get(category, [])
         if pages:
             lines.append(f"\n### {category_names[category]}")
