@@ -134,6 +134,44 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         }
     };
 
+    const handleRegenerate = async (entryId: string, e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (!confirm("この Chronicle を再生成しますか？")) return;
+
+        try {
+            const res = await fetch(`/api/people/${personaId}/arasuji/${entryId}/regenerate`, {
+                method: 'POST'
+            });
+            if (res.ok) {
+                const result = await res.json();
+                // Reload stats and entries
+                loadStats();
+                // Refresh entries list
+                const entriesRes = await fetch(`/api/people/${personaId}/arasuji?level=${levelFilter}`);
+                if (entriesRes.ok) {
+                    const data = await entriesRes.json();
+                    setEntries(data.entries || []);
+                }
+                if (selectedEntry?.id === entryId) {
+                    // Update selectedEntry with new entry
+                    const newEntryRes = await fetch(`/api/people/${personaId}/arasuji/${result.new_entry_id}`);
+                    if (newEntryRes.ok) {
+                        const newEntry = await newEntryRes.json();
+                        setSelectedEntry(newEntry);
+                    }
+                }
+                alert("再生成が完了しました");
+            } else {
+                const error = await res.json();
+                alert(`再生成に失敗しました: ${error.detail || 'Unknown error'}`);
+            }
+        } catch (error) {
+            console.error("Failed to regenerate arasuji", error);
+            alert("再生成中にエラーが発生しました");
+        }
+    };
+
+
     const formatMessageRange = (entry: ArasujiEntry): string => {
         if (entry.level !== 1) return "";
         if (entry.source_start_num === null || entry.source_end_num === null) return "";
@@ -299,14 +337,25 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         {selectedEntry ? getLevelName(selectedEntry.level) : "あらすじを選択してください"}
                     </span>
                     {selectedEntry && (
-                        <button
-                            className={styles.detailDeleteBtn}
-                            onClick={(e) => handleDelete(selectedEntry.id, e)}
-                            title="削除"
-                        >
-                            <Trash2 size={16} />
-                            削除
-                        </button>
+                        <>
+                            {selectedEntry.level === 1 && (
+                                <button
+                                    className={styles.detailRegenerateBtn}
+                                    onClick={(e) => handleRegenerate(selectedEntry.id, e)}
+                                    title="再生成"
+                                >
+                                    🔄 再生成
+                                </button>
+                            )}
+                            <button
+                                className={styles.detailDeleteBtn}
+                                onClick={(e) => handleDelete(selectedEntry.id, e)}
+                                title="削除"
+                            >
+                                <Trash2 size={16} />
+                                削除
+                            </button>
+                        </>
                     )}
                 </div>
 

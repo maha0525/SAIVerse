@@ -1719,6 +1719,30 @@ class SEARuntime:
             if system_text:
                 messages.append({"role": "system", "content": system_text})
 
+        # ---- Memory Weave context (Chronicle + Memopedia) ----
+        # Inserted between system prompt and visual context
+        LOGGER.info("[sea][prepare-context] memory_weave=%s", reqs.memory_weave)
+        if reqs.memory_weave:
+            try:
+                from tools.defs.get_memory_weave_context import get_memory_weave_context
+                from tools.context import persona_context
+                persona_id = getattr(persona, "persona_id", None)
+                
+                # Get persona_dir from sai_memory adapter (same pattern as working_memory)
+                sai_mem = getattr(persona, "sai_memory", None)
+                persona_dir_path = getattr(sai_mem, "persona_dir", None) if sai_mem else None
+                persona_dir = str(persona_dir_path) if persona_dir_path else None
+                
+                LOGGER.info("[sea][prepare-context] Calling get_memory_weave_context for persona=%s dir=%s", persona_id, persona_dir)
+                with persona_context(persona_id, persona_dir, self.manager):
+                    mw_messages = get_memory_weave_context(persona_id=persona_id, persona_dir=persona_dir)
+                LOGGER.info("[sea][prepare-context] get_memory_weave_context returned %d messages", len(mw_messages))
+                if mw_messages:
+                    messages.extend(mw_messages)
+                    LOGGER.debug("[sea][prepare-context] Added %d Memory Weave context messages", len(mw_messages))
+            except Exception as exc:
+                LOGGER.exception("[sea][prepare-context] Failed to get Memory Weave context: %s", exc)
+
         # ---- visual context (Building / Persona images) ----
         # Inserted right after system prompt but before conversation history
         if reqs.visual_context:
