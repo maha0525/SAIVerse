@@ -132,10 +132,22 @@ def generate_level1_arasuji(
     if not messages:
         return None
 
-    # Get episode context using the same algorithm as --preview-context
-    # This includes Level 1 entries (hierarchical promotion algorithm)
-    context_entries = get_episode_context(conn, max_entries=20)
-    context = format_episode_context(context_entries) if context_entries else ""
+    # Extract time range from messages first (needed for temporal isolation)
+    start_time = min(msg.created_at for msg in messages) if messages else None
+    end_time = max(msg.created_at for msg in messages) if messages else None
+
+    # Get episode context BEFORE this time range (temporal isolation)
+    # This ensures we only see past Chronicles, not future ones during regeneration
+    if start_time and end_time:
+        from sai_memory.arasuji.context import get_episode_context_for_timerange
+        context = get_episode_context_for_timerange(
+            conn, 
+            start_time=start_time, 
+            end_time=end_time,
+            max_entries=20
+        )
+    else:
+        context = ""
 
     # Format messages
     conversation = _format_messages_for_prompt(messages, include_timestamp=include_timestamp)
@@ -209,10 +221,8 @@ def generate_level1_arasuji(
 
         content = response.strip()
 
-        # Extract time range and message IDs
+        # Extract message IDs (time range already calculated at the beginning)
         source_ids = [msg.id for msg in messages]
-        start_time = min(msg.created_at for msg in messages) if messages else None
-        end_time = max(msg.created_at for msg in messages) if messages else None
 
         if dry_run:
             LOGGER.info(f"[DRY RUN] Would create level-1 arasuji: {content[:100]}...")
@@ -279,8 +289,22 @@ def generate_consolidated_arasuji(
             LOGGER.error(f"Entry {entry.id} is at level {entry.level}, expected {expected_level}")
             return None
 
-    # Get context from higher levels
-    context = _get_context_summaries(conn, target_level, include_timestamp=include_timestamp)
+    # Calculate time range from entries for temporal isolation
+    start_time = min(e.start_time for e in entries if e.start_time) if any(e.start_time for e in entries) else None
+    end_time = max(e.end_time for e in entries if e.end_time) if any(e.end_time for e in entries) else None
+
+    # Get context from BEFORE this time range (temporal isolation)
+    # Uses same hierarchical algorithm as level-1 generation
+    if start_time and end_time:
+        from sai_memory.arasuji.context import get_episode_context_for_timerange
+        context = get_episode_context_for_timerange(
+            conn,
+            start_time=start_time,
+            end_time=end_time,
+            max_entries=10
+        )
+    else:
+        context = ""
 
     # Format entries
     entries_text = _format_entries_for_prompt(entries, include_timestamp=include_timestamp)

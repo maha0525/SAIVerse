@@ -18,7 +18,8 @@
         "building_items": true,
         "system_prompt": true,
         "available_playbooks": true,
-        "visual_context": true
+        "visual_context": true,
+        "memory_weave": true
     },
     "router_callable": false,
     "nodes": [
