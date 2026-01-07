@@ -278,6 +278,7 @@ def delete_message(
         if should_close and adapter:
             adapter.close()
 
+
 @router.delete("/{persona_id}/threads/{thread_id}")
 def delete_thread(
     persona_id: str, 
@@ -303,6 +304,35 @@ def delete_thread(
              raise HTTPException(status_code=404, detail="Thread not found or delete failed")
         
         return {"success": True}
+    finally:
+        if should_close and adapter:
+            adapter.close()
+
+@router.put("/{persona_id}/threads/{thread_id}/activate")
+def set_active_thread(
+    persona_id: str,
+    thread_id: str,
+    manager = Depends(get_manager)
+):
+    """Set a thread as the active thread for the persona."""
+    persona = manager.personas.get(persona_id)
+    adapter = getattr(persona, "sai_memory", None) if persona else None
+    should_close = False
+    
+    if not adapter or not adapter.is_ready():
+        from saiverse_memory import SAIMemoryAdapter
+        try:
+            adapter = SAIMemoryAdapter(persona_id)
+            should_close = True
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to access memory: {e}")
+
+    try:
+        success = adapter.set_active_thread(thread_id)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to set active thread")
+        
+        return {"success": True, "thread_id": thread_id}
     finally:
         if should_close and adapter:
             adapter.close()

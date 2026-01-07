@@ -641,7 +641,7 @@ class SEARuntime:
         client_class_name = type(llm_client).__name__
         LOGGER.info("[sea] LLM client class: %s", client_class_name)
 
-        if client_class_name in ("OpenAIClient", "AnthropicClient", "OllamaClient", "NvidiaNIMClient"):
+        if client_class_name in ("OpenAIClient", "AnthropicClient", "OllamaClient", "NvidiaNIMClient", "LlamaCppClient"):
             # Filter OpenAI tools spec (OpenAI-compatible)
             LOGGER.info("[sea] Using OpenAI-compatible tools format (client: %s)", client_class_name)
             LOGGER.info("[sea] Filtering from OPENAI_TOOLS_SPEC (total: %d)", len(OPENAI_TOOLS_SPEC))

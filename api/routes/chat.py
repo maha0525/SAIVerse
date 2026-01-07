@@ -173,7 +173,18 @@ def get_chat_history(
                 persona = manager.personas.get(pid)
                 if persona:
                     sender = persona.persona_name
-                    avatar = f"/api/chat/persona/{pid}/avatar"
+                    # Use same avatar handling logic as info.py to support both file paths and API URLs
+                    avatar_path = persona.avatar_image
+                    if avatar_path:
+                        if avatar_path.startswith("assets/"):
+                            # Convert local path to API URL
+                            avatar = "/api/static/" + avatar_path[7:]
+                        else:
+                            # If avatar already starts with /api/ or other format, use it as-is
+                            avatar = avatar_path
+                    else:
+                        # Fallback if no avatar set
+                        avatar = "/api/static/icons/host.png"
             else:
                 sender = "Assistant"
         elif role == "host":

@@ -672,6 +672,42 @@ class SAIMemoryAdapter:
             return candidate
         return None
 
+    def set_active_thread(self, thread_id: str) -> bool:
+        """Set the active thread for this persona.
+        
+        Args:
+            thread_id: Full thread ID (e.g., "persona_id:suffix")
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not thread_id:
+            return False
+            
+        # Extract suffix from thread_id
+        suffix = thread_id.split(":", 1)[1] if ":" in thread_id else thread_id
+        
+        path = self.persona_dir / self._ACTIVE_STATE_FILENAME
+        try:
+            state_data = {
+                "active_thread_id": suffix,
+                "updated_at": datetime.now().isoformat()
+            }
+            path.write_text(json.dumps(state_data, ensure_ascii=False, indent=2), encoding="utf-8")
+            LOGGER.info("Set active thread for %s to %s", self.persona_id, suffix)
+            return True
+        except Exception as exc:
+            LOGGER.warning("Failed to set active thread for %s: %s", self.persona_id, exc)
+            return False
+
+    def get_current_thread(self) -> Optional[str]:
+        """Get the current active thread suffix.
+        
+        Returns:
+            The thread suffix (not the full thread_id), or None if not set
+        """
+        return self._active_persona_suffix()
+
     def _append_message(
         self,
         *,
