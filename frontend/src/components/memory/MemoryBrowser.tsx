@@ -121,6 +121,25 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
         }
     };
 
+    const handleSetActiveThread = async (threadId: string, e: React.MouseEvent) => {
+        e.stopPropagation();
+
+        try {
+            const res = await fetch(`/api/people/${personaId}/threads/${encodeURIComponent(threadId)}/activate`, {
+                method: 'PUT'
+            });
+            if (res.ok) {
+                // Refresh threads to update active status
+                await loadThreads();
+            } else {
+                alert("Failed to set active thread");
+            }
+        } catch (error) {
+            console.error(error);
+            alert("Error setting active thread");
+        }
+    };
+
     const [showList, setShowList] = useState(true);
 
     const handleThreadSelect = (threadId: string) => {
@@ -256,6 +275,15 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                     <span className={styles.threadId}>{thread.suffix}</span>
                                     <div className={styles.threadActions}>
                                         {thread.active && <span className={styles.activeBadge}>Active</span>}
+                                        {!thread.active && (
+                                            <button
+                                                className={styles.setActiveBtn}
+                                                onClick={(e) => handleSetActiveThread(thread.thread_id, e)}
+                                                title="Set as Active Thread"
+                                            >
+                                                Set Active
+                                            </button>
+                                        )}
                                         <button
                                             className={styles.deleteThreadBtn}
                                             onClick={(e) => handleDeleteThread(thread.thread_id, e)}

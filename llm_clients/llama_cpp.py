@@ -53,8 +53,10 @@ class LlamaCppClient(LLMClient):
         try:
             from llama_cpp import Llama
 
-            # Expand ~ and environment variables in path
-            expanded_path = os.path.expanduser(os.path.expandvars(self.model_path))
+            # Expand ~ and environment variables in path, then normalize separators
+            expanded_path = os.path.normpath(
+                os.path.expanduser(os.path.expandvars(self.model_path))
+            )
 
             if not os.path.exists(expanded_path):
                 logger.error(
