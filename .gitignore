@@ -30,6 +30,7 @@ tests/tools/*
 
 #開発用ファイル
 __*.*
+!**/__init__.py
 !llm_clients/__init__.py
 !persona/__init__.py
 !persona/tasks/__init__.py

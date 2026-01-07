@@ -30,8 +30,11 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
         context_length: Context length for the model
         config: Optional model config dict. If not provided, will be looked up by model ID.
     """
+    logging.info("[factory] get_llm_client called: model=%s, provider=%s", model, provider)
+    
     if config is None:
         config = get_model_config(model)
+        logging.info("[factory] Loaded config for model '%s': %s", model, "found" if config else "NOT FOUND")
     
     # Use the actual API model name from config if available
     # This is important because 'model' might be the config key (filename)
@@ -39,6 +42,7 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
     api_model = model
     if isinstance(config, dict) and "model" in config:
         api_model = config["model"]
+        logging.info("[factory] Extracted api_model from config: '%s' (original model param: '%s')", api_model, model)
         if api_model != model:
             logging.debug("Using API model name '%s' (config key: '%s')", api_model, model)
     
@@ -96,6 +100,7 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
     elif provider == "anthropic":
         client = AnthropicClient(api_model, config=config, supports_images=supports_images)
     elif provider == "gemini":
+        logging.info("[factory] Creating GeminiClient with api_model='%s'", api_model)
         client = GeminiClient(api_model, config=config, supports_images=supports_images)
     elif provider == "llama_cpp":
         extra_kwargs: Dict[str, object] = {}
