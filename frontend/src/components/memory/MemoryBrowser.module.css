@@ -91,6 +91,22 @@
     background-color: rgba(250, 82, 82, 0.1);
 }
 
+.setActiveBtn {
+    background: none;
+    border: 1px solid #4dabf7;
+    color: #4dabf7;
+    padding: 2px 8px;
+    font-size: 0.7rem;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background-color 0.2s, color 0.2s;
+}
+
+.setActiveBtn:hover {
+    background-color: rgba(77, 171, 247, 0.15);
+    color: #74c0fc;
+}
+
 .threadPreview {
 
     font-size: 0.85rem;

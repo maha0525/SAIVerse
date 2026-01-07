@@ -30,6 +30,7 @@ tests/tools/*
 
 #開発用ファイル
 __*.*
+!**/__init__.py
 !llm_clients/__init__.py
 !persona/__init__.py
 !persona/tasks/__init__.py
@@ -73,3 +74,5 @@ unity_client/SAIVerse3D/*.csproj
 unity_client/SAIVerse3D/*.sln
 unity_client/SAIVerse3D/*.userprefs
 unity_client/SAIVerse3D/.vsconfig
+sbert
+unity_client
