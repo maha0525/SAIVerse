@@ -161,6 +161,7 @@ class UpdateMemopediaPageRequest(BaseModel):
     summary: Optional[str] = None
     content: Optional[str] = None
     keywords: Optional[List[str]] = None
+    vividness: Optional[str] = None
 
 
 # -----------------------------------------------------------------------------
