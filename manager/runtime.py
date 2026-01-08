@@ -27,6 +27,13 @@ from database.models import (
 )
 import tools.defs
 
+# Import trigger types for phenomenon system
+try:
+    from phenomena.triggers import TriggerEvent, TriggerType
+    TRIGGERS_AVAILABLE = True
+except ImportError:
+    TRIGGERS_AVAILABLE = False
+
 class RuntimeService(
     VisitorMixin, GatewayMixin, SDSMixin, DatabasePollingMixin, PersonaMixin
 ):
@@ -187,10 +194,23 @@ class RuntimeService(
             self.state.user_current_building_id = target_building_id
             logging.debug("[runtime] move_user success: now %s", target_building_id)
             log_debug(f"Move success. New state bid: {self.state.user_current_building_id}")
+            # Emit user_move trigger
+            self._emit_user_move_trigger(from_building_id, target_building_id)
         else:
             logging.debug("[runtime] move_user failed: %s", message)
             log_debug(f"Move failed: {message}")
         return success, message
+
+    def _emit_user_move_trigger(self, from_building: str, to_building: str) -> None:
+        """Emit user_move trigger to PhenomenonManager."""
+        if not TRIGGERS_AVAILABLE:
+            return
+        if not hasattr(self.manager, "_emit_trigger"):
+            return
+        self.manager._emit_trigger(
+            TriggerType.USER_MOVE,
+            {"from_building": from_building, "to_building": to_building},
+        )
 
     def _move_persona(
         self,
@@ -199,13 +219,20 @@ class RuntimeService(
         to_id: str,
         db_session=None,
     ) -> Tuple[bool, Optional[str]]:
-        return self.occupancy_manager.move_entity(
+        result = self.occupancy_manager.move_entity(
             entity_id=persona_id,
             entity_type="ai",
             from_id=from_id,
             to_id=to_id,
             db_session=db_session,
         )
+        # Emit persona_move trigger on success
+        if result[0] and TRIGGERS_AVAILABLE and hasattr(self.manager, "_emit_trigger"):
+            self.manager._emit_trigger(
+                TriggerType.PERSONA_MOVE,
+                {"persona_id": persona_id, "from_building": from_id, "to_building": to_id},
+            )
+        return result
 
     # ----- Conversation helpers -----
 

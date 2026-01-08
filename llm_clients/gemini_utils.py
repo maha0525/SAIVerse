@@ -22,6 +22,7 @@ def build_gemini_clients(*, prefer_paid: bool = False) -> Tuple[Any | None, Any 
     genai = _get_genai_module()
     def _http_options() -> Any:
         return genai.types.HttpOptions(
+            timeout=120_000,  # 120 seconds in milliseconds
             retry_options=genai.types.HttpRetryOptions(
                 attempts=5,
                 initial_delay=1.0,

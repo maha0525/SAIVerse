@@ -569,3 +569,36 @@ def get_total_message_count(conn: sqlite3.Connection) -> int:
     )
     row = cur.fetchone()
     return row[0] if row and row[0] is not None else 0
+
+
+def has_overlapping_entries(
+    conn: sqlite3.Connection,
+    start_time: int,
+    end_time: int,
+    level: int = 1,
+) -> bool:
+    """Check if there are existing entries that overlap with the given time range.
+    
+    An entry overlaps if:
+    - entry.start_time <= end_time AND entry.end_time >= start_time
+    
+    Args:
+        conn: Database connection
+        start_time: Start of time range to check
+        end_time: End of time range to check
+        level: Level to check (default: 1 for level-1 Chronicle)
+        
+    Returns:
+        True if overlapping entries exist, False otherwise
+    """
+    cur = conn.execute(
+        """
+        SELECT COUNT(*) FROM arasuji_entries
+        WHERE level = ?
+          AND start_time <= ?
+          AND end_time >= ?
+        """,
+        (level, end_time, start_time),
+    )
+    row = cur.fetchone()
+    return row[0] > 0 if row else False
