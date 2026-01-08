@@ -8,6 +8,7 @@ interface MemopediaPage {
     title: string;
     summary: string;
     keywords: string[];
+    vividness: string;
     children: MemopediaPage[];
 }
 
@@ -67,6 +68,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     const [editSummary, setEditSummary] = useState("");
     const [editContent, setEditContent] = useState("");
     const [editKeywords, setEditKeywords] = useState("");
+    const [editVividness, setEditVividness] = useState("rough");
     const [isSaving, setIsSaving] = useState(false);
 
     // Delete confirmation state
@@ -191,12 +193,34 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         setEditSummary(summary);
         setEditContent(content);
         setEditKeywords(page.keywords?.join(', ') || '');
+        setEditVividness(page.vividness || 'rough');
         setIsEditing(true);
         setShowHistory(false);
     };
 
     const cancelEditing = () => {
         setIsEditing(false);
+    };
+
+    const handleVividnessChange = async (newVividness: string) => {
+        if (!selectedPageId) return;
+        try {
+            const res = await fetch(`/api/people/${personaId}/memopedia/pages/${selectedPageId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ vividness: newVividness }),
+            });
+
+            if (res.ok) {
+                await loadTree(); // Refresh tree to show updated vividness
+            } else {
+                const err = await res.json();
+                alert(`鮮明度の更新に失敗しました: ${err.detail || 'Unknown error'}`);
+            }
+        } catch (error) {
+            console.error('Failed to update vividness', error);
+            alert('鮮明度の更新に失敗しました');
+        }
     };
 
     const saveEdit = async () => {
@@ -216,6 +240,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                     summary: editSummary,
                     content: editContent,
                     keywords,
+                    vividness: editVividness,
                 }),
             });
 
@@ -305,10 +330,26 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
             if (!hasChildren) setShowList(false); // Mobile: go to content if leaf
         };
 
+        // CSS class based on vividness
+        const getVividnessClass = () => {
+            switch (page.vividness) {
+                case 'vivid':
+                    return styles.pageVividVivid;
+                case 'rough':
+                    return styles.pageVividRough;
+                case 'faint':
+                    return styles.pageVividFaint;
+                case 'buried':
+                    return styles.pageVividBuried;
+                default:
+                    return '';
+            }
+        };
+
         return (
             <div>
                 <div
-                    className={`${styles.pageItem} ${selectedPageId === page.id ? styles.active : ''}`}
+                    className={`${styles.pageItem} ${selectedPageId === page.id ? styles.active : ''} ${getVividnessClass()}`}
                     onClick={handlePageClick}
                 >
                     {hasChildren ? (
@@ -348,7 +389,34 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         return page?.keywords || [];
     };
 
+    // Helper to find selected page and get its vividness
+    const getSelectedPageVividness = (): string => {
+        if (!tree || !selectedPageId) return 'rough';
+        const allPages = [...tree.people, ...tree.terms, ...tree.plans];
+        const findPage = (pages: MemopediaPage[]): MemopediaPage | null => {
+            for (const p of pages) {
+                if (p.id === selectedPageId) return p;
+                const found = findPage(p.children);
+                if (found) return found;
+            }
+            return null;
+        };
+        const page = findPage(allPages);
+        return page?.vividness || 'rough';
+    };
+
     const selectedKeywords = getSelectedPageKeywords();
+    const selectedVividness = getSelectedPageVividness();
+
+    const getVividnessLabel = (vividness: string) => {
+        switch (vividness) {
+            case 'vivid': return '鮮明（全内容）';
+            case 'rough': return '概要';
+            case 'faint': return '淡い（タイトルのみ）';
+            case 'buried': return '埋没（非表示）';
+            default: return vividness;
+        }
+    };
 
     if (!tree) return <div className={styles.emptyState}>Loading knowledge base...</div>;
 
@@ -495,6 +563,22 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                             />
                         </div>
                         <div className={styles.formGroup}>
+                            <label>鮮明度</label>
+                            <select
+                                value={editVividness}
+                                onChange={e => setEditVividness(e.target.value)}
+                                className={styles.formInput}
+                            >
+                                <option value="vivid">鮮明（全内容）</option>
+                                <option value="rough">概要（デフォルト）</option>
+                                <option value="faint">淡い（タイトルのみ）</option>
+                                <option value="buried">埋没（非表示）</option>
+                            </select>
+                            <small style={{ color: '#888', display: 'block', marginTop: '4px' }}>
+                                コンテキストに含める情報量を制御します
+                            </small>
+                        </div>
+                        <div className={styles.formGroup}>
                             <label>本文</label>
                             <textarea
                                 value={editContent}
@@ -539,6 +623,29 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                         </div>
                                     </div>
                                 )}
+                                <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                    <label style={{ fontSize: '0.9em', fontWeight: 'bold', color: '#666' }}>鮮明度:</label>
+                                    <select
+                                        value={selectedVividness}
+                                        onChange={e => handleVividnessChange(e.target.value)}
+                                        style={{
+                                            padding: '4px 8px',
+                                            fontSize: '0.9em',
+                                            borderRadius: '4px',
+                                            border: '1px solid #ccc',
+                                            backgroundColor: '#fff',
+                                            cursor: 'pointer'
+                                        }}
+                                    >
+                                        <option value="vivid">鮮明（全内容）</option>
+                                        <option value="rough">概要（デフォルト）</option>
+                                        <option value="faint">淡い（タイトルのみ）</option>
+                                        <option value="buried">埋没（非表示）</option>
+                                    </select>
+                                    <small style={{ color: '#888' }}>
+                                        コンテキストに含める情報量
+                                    </small>
+                                </div>
                                 <div className={styles.markdown}>
                                     <ReactMarkdown>{pageContent}</ReactMarkdown>
                                 </div>

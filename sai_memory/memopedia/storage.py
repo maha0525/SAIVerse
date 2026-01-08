@@ -53,6 +53,7 @@ class MemopediaPage:
     created_at: int
     updated_at: int
     keywords: List[str] = field(default_factory=list)
+    vividness: str = "rough"  # vivid, rough, faint, buried
     children: List["MemopediaPage"] = field(default_factory=list)
 
     def to_dict(self, include_children: bool = True) -> Dict[str, Any]:
@@ -66,6 +67,7 @@ class MemopediaPage:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "keywords": self.keywords,
+            "vividness": self.vividness,
         }
         if include_children:
             result["children"] = [c.to_dict(include_children=True) for c in self.children]
@@ -132,6 +134,12 @@ def init_memopedia_tables(conn: sqlite3.Connection) -> None:
         conn.execute("SELECT is_deleted FROM memopedia_pages LIMIT 1")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE memopedia_pages ADD COLUMN is_deleted INTEGER DEFAULT 0")
+
+    # Migration: add vividness column
+    try:
+        conn.execute("SELECT vividness FROM memopedia_pages LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE memopedia_pages ADD COLUMN vividness TEXT DEFAULT 'rough'")
 
     conn.execute(
         """
@@ -207,6 +215,9 @@ def _row_to_page(row: tuple) -> MemopediaPage:
     except (json.JSONDecodeError, TypeError):
         keywords = []
 
+    # Get vividness (column index 9, defaults to 'rough')
+    vividness = row[9] if len(row) > 9 and row[9] else "rough"
+
     return MemopediaPage(
         id=row[0],
         parent_id=row[1],
@@ -217,6 +228,7 @@ def _row_to_page(row: tuple) -> MemopediaPage:
         created_at=int(row[6]),
         updated_at=int(row[7]),
         keywords=keywords,
+        vividness=vividness,
     )
 
 
@@ -232,6 +244,7 @@ def create_page(
     content: str = "",
     category: str,
     keywords: Optional[List[str]] = None,
+    vividness: str = "rough",
     page_id: Optional[str] = None,
 ) -> MemopediaPage:
     """Create a new page."""
@@ -240,10 +253,10 @@ def create_page(
     kw_list = keywords or []
     conn.execute(
         """
-        INSERT INTO memopedia_pages (id, parent_id, title, summary, content, category, created_at, updated_at, keywords)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO memopedia_pages (id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (pid, parent_id, title, summary, content, category, now, now, json.dumps(kw_list)),
+        (pid, parent_id, title, summary, content, category, now, now, json.dumps(kw_list), vividness),
     )
     conn.commit()
     return MemopediaPage(
@@ -256,13 +269,14 @@ def create_page(
         created_at=now,
         updated_at=now,
         keywords=kw_list,
+        vividness=vividness,
     )
 
 
 def get_page(conn: sqlite3.Connection, page_id: str) -> Optional[MemopediaPage]:
     """Get a page by ID."""
     cur = conn.execute(
-        "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords FROM memopedia_pages WHERE id = ?",
+        "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness FROM memopedia_pages WHERE id = ?",
         (page_id,),
     )
     row = cur.fetchone()
@@ -279,6 +293,7 @@ def update_page(
     summary: Optional[str] = None,
     content: Optional[str] = None,
     keywords: Optional[List[str]] = None,
+    vividness: Optional[str] = None,
     parent_id: Optional[str] = ...,  # Use ... as sentinel for "not provided"
 ) -> Optional[MemopediaPage]:
     """Update a page's fields. Only provided fields are updated."""
@@ -290,16 +305,17 @@ def update_page(
     new_summary = summary if summary is not None else page.summary
     new_content = content if content is not None else page.content
     new_keywords = keywords if keywords is not None else page.keywords
+    new_vividness = vividness if vividness is not None else page.vividness
     new_parent_id = parent_id if parent_id is not ... else page.parent_id
     now = int(time.time())
 
     conn.execute(
         """
         UPDATE memopedia_pages
-        SET title = ?, summary = ?, content = ?, keywords = ?, parent_id = ?, updated_at = ?
+        SET title = ?, summary = ?, content = ?, keywords = ?, vividness = ?, parent_id = ?, updated_at = ?
         WHERE id = ?
         """,
-        (new_title, new_summary, new_content, json.dumps(new_keywords), new_parent_id, now, page_id),
+        (new_title, new_summary, new_content, json.dumps(new_keywords), new_vividness, new_parent_id, now, page_id),
     )
     conn.commit()
     return get_page(conn, page_id)
@@ -324,11 +340,11 @@ def get_children(conn: sqlite3.Connection, parent_id: Optional[str]) -> List[Mem
     """Get all direct children of a page."""
     if parent_id is None:
         cur = conn.execute(
-            "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords FROM memopedia_pages WHERE parent_id IS NULL ORDER BY title",
+            "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness FROM memopedia_pages WHERE parent_id IS NULL ORDER BY title",
         )
     else:
         cur = conn.execute(
-            "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords FROM memopedia_pages WHERE parent_id = ? ORDER BY title",
+            "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness FROM memopedia_pages WHERE parent_id = ? ORDER BY title",
             (parent_id,),
         )
     return [_row_to_page(row) for row in cur.fetchall()]
@@ -337,7 +353,7 @@ def get_children(conn: sqlite3.Connection, parent_id: Optional[str]) -> List[Mem
 def get_all_pages(conn: sqlite3.Connection) -> List[MemopediaPage]:
     """Get all non-deleted pages."""
     cur = conn.execute(
-        "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords FROM memopedia_pages WHERE is_deleted = 0 OR is_deleted IS NULL ORDER BY category, title"
+        "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness FROM memopedia_pages WHERE is_deleted = 0 OR is_deleted IS NULL ORDER BY category, title"
     )
     return [_row_to_page(row) for row in cur.fetchall()]
 
@@ -345,7 +361,7 @@ def get_all_pages(conn: sqlite3.Connection) -> List[MemopediaPage]:
 def get_pages_by_category(conn: sqlite3.Connection, category: str) -> List[MemopediaPage]:
     """Get all pages in a category."""
     cur = conn.execute(
-        "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords FROM memopedia_pages WHERE category = ? ORDER BY title",
+        "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness FROM memopedia_pages WHERE category = ? ORDER BY title",
         (category,),
     )
     return [_row_to_page(row) for row in cur.fetchall()]
@@ -426,7 +442,7 @@ def get_open_pages(conn: sqlite3.Connection, thread_id: str) -> List[MemopediaPa
     """Get all pages that are currently open for a thread."""
     cur = conn.execute(
         """
-        SELECT p.id, p.parent_id, p.title, p.summary, p.content, p.category, p.created_at, p.updated_at
+        SELECT p.id, p.parent_id, p.title, p.summary, p.content, p.category, p.created_at, p.updated_at, p.keywords, p.vividness
         FROM memopedia_pages p
         JOIN memopedia_page_states s ON p.id = s.page_id
         WHERE s.thread_id = ? AND s.is_open = 1
@@ -489,12 +505,12 @@ def find_page_by_title(conn: sqlite3.Connection, title: str, category: Optional[
     """Find a page by exact title match, optionally filtered by category."""
     if category:
         cur = conn.execute(
-            "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords FROM memopedia_pages WHERE title = ? AND category = ?",
+            "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness FROM memopedia_pages WHERE title = ? AND category = ?",
             (title, category),
         )
     else:
         cur = conn.execute(
-            "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords FROM memopedia_pages WHERE title = ?",
+            "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness FROM memopedia_pages WHERE title = ?",
             (title,),
         )
     row = cur.fetchone()
@@ -508,7 +524,7 @@ def search_pages(conn: sqlite3.Connection, query: str, limit: int = 10) -> List[
     pattern = f"%{query}%"
     cur = conn.execute(
         """
-        SELECT id, parent_id, title, summary, content, category, created_at, updated_at
+        SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness
         FROM memopedia_pages
         WHERE title LIKE ? OR summary LIKE ? OR content LIKE ?
         ORDER BY updated_at DESC
