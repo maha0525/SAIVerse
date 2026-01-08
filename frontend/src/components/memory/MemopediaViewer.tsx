@@ -202,6 +202,27 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         setIsEditing(false);
     };
 
+    const handleVividnessChange = async (newVividness: string) => {
+        if (!selectedPageId) return;
+        try {
+            const res = await fetch(`/api/people/${personaId}/memopedia/pages/${selectedPageId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ vividness: newVividness }),
+            });
+
+            if (res.ok) {
+                await loadTree(); // Refresh tree to show updated vividness
+            } else {
+                const err = await res.json();
+                alert(`鮮明度の更新に失敗しました: ${err.detail || 'Unknown error'}`);
+            }
+        } catch (error) {
+            console.error('Failed to update vividness', error);
+            alert('鮮明度の更新に失敗しました');
+        }
+    };
+
     const saveEdit = async () => {
         if (!selectedPageId) return;
         setIsSaving(true);
@@ -586,8 +607,28 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                         </div>
                                     </div>
                                 )}
-                                <div style={{ marginBottom: '1rem', fontSize: '0.9em', color: '#666' }}>
-                                    <strong>鮮明度:</strong> {getVividnessLabel(selectedVividness)}
+                                <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                    <label style={{ fontSize: '0.9em', fontWeight: 'bold', color: '#666' }}>鮮明度:</label>
+                                    <select
+                                        value={selectedVividness}
+                                        onChange={e => handleVividnessChange(e.target.value)}
+                                        style={{
+                                            padding: '4px 8px',
+                                            fontSize: '0.9em',
+                                            borderRadius: '4px',
+                                            border: '1px solid #ccc',
+                                            backgroundColor: '#fff',
+                                            cursor: 'pointer'
+                                        }}
+                                    >
+                                        <option value="vivid">鮮明（全内容）</option>
+                                        <option value="rough">概要（デフォルト）</option>
+                                        <option value="faint">淡い（タイトルのみ）</option>
+                                        <option value="buried">埋没（非表示）</option>
+                                    </select>
+                                    <small style={{ color: '#888' }}>
+                                        コンテキストに含める情報量
+                                    </small>
                                 </div>
                                 <div className={styles.markdown}>
                                     <ReactMarkdown>{pageContent}</ReactMarkdown>
