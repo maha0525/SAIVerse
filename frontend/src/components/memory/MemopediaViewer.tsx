@@ -169,7 +169,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         if (!page) return;
 
         // Parse the markdown content to extract title, summary, content
-        // The pageContent from API is markdown: "# Title\n*summary*\ncontent"
+        // The pageContent from API is markdown: "# Title\n\n*summary*\n\ncontent"
         const lines = pageContent.split('\n');
         let title = page.title;
         let summary = page.summary;
@@ -177,17 +177,33 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
 
         // Try to extract from markdown
         let contentStartIdx = 0;
+
+        // Extract title
         if (lines[0]?.startsWith('# ')) {
             title = lines[0].substring(2);
             contentStartIdx = 1;
         }
-        if (lines[contentStartIdx]?.startsWith('*') && lines[contentStartIdx]?.endsWith('*')) {
+
+        // Skip empty lines after title
+        while (contentStartIdx < lines.length && lines[contentStartIdx] === '') {
+            contentStartIdx++;
+        }
+
+        // Extract summary
+        if (contentStartIdx < lines.length &&
+            lines[contentStartIdx]?.startsWith('*') &&
+            lines[contentStartIdx]?.endsWith('*')) {
             summary = lines[contentStartIdx].slice(1, -1);
             contentStartIdx++;
         }
-        // Skip empty line after summary
-        if (lines[contentStartIdx] === '') contentStartIdx++;
-        content = lines.slice(contentStartIdx).join('\n');
+
+        // Skip empty lines after summary
+        while (contentStartIdx < lines.length && lines[contentStartIdx] === '') {
+            contentStartIdx++;
+        }
+
+        // Extract content (remaining lines)
+        content = lines.slice(contentStartIdx).join('\n').trim();
 
         setEditTitle(title);
         setEditSummary(summary);
