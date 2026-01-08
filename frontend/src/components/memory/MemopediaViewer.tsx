@@ -203,7 +203,8 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         }
 
         // Extract content (remaining lines)
-        content = lines.slice(contentStartIdx).join('\n').trim();
+        // Use trimEnd() to preserve leading whitespace (important for code blocks and indentation)
+        content = lines.slice(contentStartIdx).join('\n').trimEnd();
 
         setEditTitle(title);
         setEditSummary(summary);
