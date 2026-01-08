@@ -154,12 +154,43 @@ def _get_memopedia_context(conn: sqlite3.Connection) -> str:
             for page in pages:
                 # Skip root pages
                 if not page["id"].startswith("root_"):
-                    keywords = page.get("keywords", [])
-                    if keywords:
-                        kw_str = f" [キーワード: {', '.join(keywords)}]"
-                    else:
-                        kw_str = ""
-                    lines.append(f"{prefix}- {page['title']}: {page['summary']}{kw_str}")
+                    vividness = page.get("vividness", "rough")
+
+                    # buried: Skip entirely
+                    if vividness == "buried":
+                        continue
+
+                    # faint: Page title only
+                    elif vividness == "faint":
+                        lines.append(f"{prefix}- {page['title']}")
+
+                    # rough: Title + summary + keywords (default)
+                    elif vividness == "rough":
+                        keywords = page.get("keywords", [])
+                        if keywords:
+                            kw_str = f" [キーワード: {', '.join(keywords)}]"
+                        else:
+                            kw_str = ""
+                        lines.append(f"{prefix}- {page['title']}: {page['summary']}{kw_str}")
+
+                    # vivid: Title + summary + keywords + full content
+                    elif vividness == "vivid":
+                        keywords = page.get("keywords", [])
+                        if keywords:
+                            kw_str = f" [キーワード: {', '.join(keywords)}]"
+                        else:
+                            kw_str = ""
+                        summary = page['summary']
+                        # Need to fetch content from database
+                        # For now, we'll need to pass full page data including content
+                        lines.append(f"{prefix}- **{page['title']}**: {summary}{kw_str}")
+                        # Add content if available
+                        content = page.get("content", "")
+                        if content:
+                            # Indent content under the page title
+                            for line in content.split("\n"):
+                                lines.append(f"{prefix}  {line}")
+
                 children = page.get("children", [])
                 if children:
                     _list_pages(children, prefix + "  ")
