@@ -90,21 +90,32 @@ def create_memopedia_ui(manager) -> None:
             tree = memopedia.get_tree()
             rows: List[List[str]] = []
 
+            # Vividness display mapping
+            vividness_display = {
+                "vivid": "鮮明",
+                "rough": "概要",
+                "faint": "淡い",
+                "buried": "埋没",
+            }
+
             def _flatten(pages: List[Dict], category: str, depth: int = 0):
                 for page in pages:
                     indent = "  " * depth
+                    vividness = page.get("vividness", "rough")
+                    vividness_label = vividness_display.get(vividness, vividness)
                     rows.append([
                         page["id"],
                         category,
                         f"{indent}{page['title']}",
                         page.get("summary", ""),
+                        vividness_label,
                     ])
                     children = page.get("children", [])
                     if children:
                         _flatten(children, category, depth + 1)
 
-            category_names = {"people": "人物", "events": "出来事", "plans": "予定"}
-            for cat_key in ["people", "events", "plans"]:
+            category_names = {"people": "人物", "events": "出来事", "plans": "予定", "terms": "用語"}
+            for cat_key in ["people", "terms", "plans"]:
                 pages = tree.get(cat_key, [])
                 _flatten(pages, category_names.get(cat_key, cat_key))
 
@@ -130,10 +141,10 @@ def create_memopedia_ui(manager) -> None:
             LOGGER.exception("Failed to load page %s for %s", page_id, persona_id)
             return f"*エラー: {e}*"
 
-    def on_table_select(selected_label: str, evt: gr.SelectData) -> str:
-        """Handle table row selection."""
+    def on_table_select(selected_label: str, evt: gr.SelectData) -> Tuple[str, str, str]:
+        """Handle table row selection. Returns (content, page_id, current_vividness_display)."""
         if evt is None:
-            return "*ページを選択してください*"
+            return "*ページを選択してください*", "", "概要（デフォルト）"
 
         # Get the row index
         idx = evt.index
@@ -142,13 +153,51 @@ def create_memopedia_ui(manager) -> None:
         else:
             row_idx = idx
 
-        # Reload table data to get the page_id
+        # Reload table data to get the page_id and vividness
         rows = load_page_list(selected_label)
         if row_idx < len(rows):
             page_id = rows[row_idx][0]  # First column is page_id
-            return load_page_content(selected_label, page_id)
+            vividness_display = rows[row_idx][4]  # Fifth column is vividness display
 
-        return "*ページが見つかりません*"
+            # Convert table display to dropdown display
+            dropdown_map = {
+                "鮮明": "鮮明（全内容）",
+                "概要": "概要（デフォルト）",
+                "淡い": "淡い（タイトルのみ）",
+                "埋没": "埋没（非表示）"
+            }
+            vividness_dropdown_display = dropdown_map.get(vividness_display, "概要（デフォルト）")
+
+            content = load_page_content(selected_label, page_id)
+            return content, page_id, vividness_dropdown_display
+
+        return "*ページが見つかりません*", "", "概要（デフォルト）"
+
+    def update_vividness(selected_label: str, page_id: str, new_vividness_display: str) -> Tuple[List[List[str]], str]:
+        """Update page vividness and refresh table."""
+        if not selected_label or not page_id:
+            return [], "*ページを選択してください*"
+
+        persona_id = _resolve_persona_id(selected_label)
+        memopedia = _get_memopedia(persona_id)
+
+        if memopedia is None:
+            return [], f"*{persona_id} のメモリDBが見つかりません*"
+
+        # Convert display name to internal value
+        vividness_map = {"鮮明（全内容）": "vivid", "概要（デフォルト）": "rough", "淡い（タイトルのみ）": "faint", "埋没（非表示）": "buried"}
+        new_vividness = vividness_map.get(new_vividness_display, "rough")
+
+        try:
+            # Update vividness
+            memopedia.update_page(page_id, vividness=new_vividness)
+
+            # Reload table
+            new_table = load_page_list(selected_label)
+            return new_table, f"✓ 鮮明度を更新しました: {new_vividness_display}"
+        except Exception as e:
+            LOGGER.exception("Failed to update vividness for page %s", page_id)
+            return load_page_list(selected_label), f"*エラー: {e}*"
 
     # --- UI Components ---
     gr.Markdown("## Memopedia - ペルソナ知識ベース")
@@ -174,7 +223,7 @@ def create_memopedia_ui(manager) -> None:
             with gr.Row():
                 with gr.Column(scale=1):
                     page_table = gr.Dataframe(
-                        headers=["ID", "カテゴリ", "タイトル", "概要"],
+                        headers=["ID", "カテゴリ", "タイトル", "概要", "鮮明度"],
                         value=load_page_list(initial_label) if initial_label else [],
                         interactive=False,
                         label="ページ一覧（クリックで詳細表示）",
@@ -184,6 +233,17 @@ def create_memopedia_ui(manager) -> None:
                         value="*左のテーブルからページを選択してください*",
                         label="ページ内容",
                     )
+                    with gr.Row():
+                        vividness_dropdown = gr.Dropdown(
+                            choices=["鮮明（全内容）", "概要（デフォルト）", "淡い（タイトルのみ）", "埋没（非表示）"],
+                            label="鮮明度",
+                            value="概要（デフォルト）",
+                            interactive=True,
+                            scale=3,
+                        )
+                        update_vividness_btn = gr.Button("更新", scale=1)
+                    selected_page_id = gr.Textbox(value="", visible=False, interactive=False)
+                    vividness_status = gr.Markdown(value="")
 
         with gr.Tab("全ページエクスポート"):
             export_display = gr.Markdown(
@@ -208,9 +268,9 @@ def create_memopedia_ui(manager) -> None:
         outputs=[export_display],
     )
     persona_dropdown.change(
-        fn=lambda _: "*ページを選択してください*",
+        fn=lambda _: ("*ページを選択してください*", "", "概要（デフォルト）", ""),
         inputs=[persona_dropdown],
-        outputs=[page_content_display],
+        outputs=[page_content_display, selected_page_id, vividness_dropdown, vividness_status],
     )
 
     refresh_btn.click(
@@ -232,5 +292,11 @@ def create_memopedia_ui(manager) -> None:
     page_table.select(
         fn=on_table_select,
         inputs=[persona_dropdown],
-        outputs=[page_content_display],
+        outputs=[page_content_display, selected_page_id, vividness_dropdown],
+    )
+
+    update_vividness_btn.click(
+        fn=update_vividness,
+        inputs=[persona_dropdown, selected_page_id, vividness_dropdown],
+        outputs=[page_table, vividness_status],
     )

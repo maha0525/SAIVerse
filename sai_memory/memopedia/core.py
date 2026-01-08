@@ -83,6 +83,8 @@ class Memopedia:
                 "title": page.title,
                 "summary": page.summary,
                 "keywords": page.keywords,
+                "vividness": page.vividness,
+                "content": page.content,  # Include content for vivid pages
                 "is_open": states.get(page.id, False),
                 "children": [_annotate(c) for c in page.children],
             }
@@ -161,6 +163,7 @@ class Memopedia:
         summary: str = "",
         content: str = "",
         keywords: Optional[List[str]] = None,
+        vividness: str = "rough",
         ref_start_message_id: Optional[str] = None,
         ref_end_message_id: Optional[str] = None,
         edit_source: Optional[str] = None,
@@ -176,6 +179,7 @@ class Memopedia:
             summary: Page summary
             content: Page content
             keywords: List of keywords
+            vividness: Vividness level (vivid/rough/faint/buried), default: rough
             ref_start_message_id: Start of message reference range
             ref_end_message_id: End of message reference range
             edit_source: Source of this edit (e.g., 'ai_conversation', 'manual')
@@ -192,6 +196,7 @@ class Memopedia:
                 content=content,
                 category=parent.category,
                 keywords=keywords,
+                vividness=vividness,
             )
             # Record edit history for create
             full_content = f"title: {title}\nsummary: {summary}\ncontent:\n{content}"
@@ -215,11 +220,12 @@ class Memopedia:
         summary: Optional[str] = None,
         content: Optional[str] = None,
         keywords: Optional[List[str]] = None,
+        vividness: Optional[str] = None,
         ref_start_message_id: Optional[str] = None,
         ref_end_message_id: Optional[str] = None,
         edit_source: Optional[str] = None,
     ) -> Optional[MemopediaPage]:
-        """Update a page's title, summary, content, or keywords."""
+        """Update a page's title, summary, content, keywords, or vividness."""
         with self._lock:
             # Get old page for diff
             old_page = get_page(self.conn, page_id)
@@ -234,6 +240,7 @@ class Memopedia:
                 summary=summary,
                 content=content,
                 keywords=keywords,
+                vividness=vividness,
             )
 
             if result:
