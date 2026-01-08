@@ -213,3 +213,28 @@ class PersonaSchedule(Base):
 
     CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
     UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class PhenomenonRule(Base):
+    """フェノメノン（現象）発火ルールを管理するテーブル。
+
+    トリガー条件に一致したときに、指定されたフェノメノンを引数付きで発火させる。
+    """
+    __tablename__ = "phenomenon_rule"
+    RULE_ID = Column(Integer, primary_key=True, autoincrement=True)
+
+    # トリガー条件
+    TRIGGER_TYPE = Column(String(64), nullable=False)  # e.g., "persona_speech", "persona_move", "server_start"
+    CONDITION_JSON = Column(Text, nullable=True)  # JSON: 条件設定 {"persona_id": "air", "to_building": "user_room"}
+
+    # 発火するフェノメノン
+    PHENOMENON_NAME = Column(String(255), nullable=False)  # レジストリ内の名前
+    ARGUMENT_MAPPING_JSON = Column(Text, nullable=True)  # JSON: 引数マッピング {"actor": "$trigger.persona_id"}
+
+    # メタデータ
+    ENABLED = Column(Boolean, default=True, nullable=False)
+    PRIORITY = Column(Integer, default=0, nullable=False)  # 大きいほど優先
+    DESCRIPTION = Column(String(1024), default="", nullable=False)
+    CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
+    UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+

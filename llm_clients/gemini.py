@@ -542,6 +542,9 @@ class GeminiClient(LLMClient):
                 if use_tools:
                     cfg_kwargs["tools"] = merge_tools_for_gemini(tools_spec)
                     cfg_kwargs["tool_config"] = tool_cfg
+                else:
+                    # Disable Automatic Function Calling when not using tools
+                    cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
                 if self._thinking_config is not None:
                     cfg_kwargs["thinking_config"] = self._thinking_config
                 if response_schema:
