@@ -330,28 +330,27 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
             if (!hasChildren) setShowList(false); // Mobile: go to content if leaf
         };
 
-        // Style based on vividness
-        const getVividnessStyle = () => {
+        // CSS class based on vividness
+        const getVividnessClass = () => {
             switch (page.vividness) {
                 case 'vivid':
-                    return { fontWeight: 'bold' as const, color: '#000' };
+                    return styles.pageVividVivid;
                 case 'rough':
-                    return {}; // Default style
+                    return styles.pageVividRough;
                 case 'faint':
-                    return { color: '#999' };
+                    return styles.pageVividFaint;
                 case 'buried':
-                    return { color: '#ccc', fontStyle: 'italic' as const };
+                    return styles.pageVividBuried;
                 default:
-                    return {};
+                    return '';
             }
         };
 
         return (
             <div>
                 <div
-                    className={`${styles.pageItem} ${selectedPageId === page.id ? styles.active : ''}`}
+                    className={`${styles.pageItem} ${selectedPageId === page.id ? styles.active : ''} ${getVividnessClass()}`}
                     onClick={handlePageClick}
-                    style={getVividnessStyle()}
                 >
                     {hasChildren ? (
                         <span
