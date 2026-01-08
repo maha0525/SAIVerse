@@ -129,6 +129,7 @@ def update_memopedia_page(
             summary=request.summary,
             content=request.content,
             keywords=request.keywords,
+            vividness=request.vividness,
             edit_source="manual_ui",
         )
         if not updated:
@@ -141,6 +142,7 @@ def update_memopedia_page(
                 "summary": updated.summary,
                 "content": updated.content,
                 "keywords": updated.keywords,
+                "vividness": updated.vividness,
             }
         }
     except HTTPException:
