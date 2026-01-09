@@ -53,13 +53,37 @@ def _register_phenomenon(module: Any) -> bool:
 
 
 def _load_module_from_path(module_name: str, file_path: Path) -> Any:
-    """Dynamically load a Python module from a file path."""
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    if spec is None or spec.loader is None:
-        return None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    """Dynamically load a Python module from a file path.
+    
+    For subdirectory modules (schema.py), the parent directory is temporarily
+    added to sys.path to allow local imports (e.g., from .helper import ...).
+    """
+    import sys
+    
+    parent_dir = str(file_path.parent)
+    added_to_path = False
+    
+    # Add parent directory to sys.path for local imports
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+        added_to_path = True
+    
+    try:
+        spec = importlib.util.spec_from_file_location(
+            module_name, 
+            file_path,
+            submodule_search_locations=[parent_dir]
+        )
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module  # Register module for relative imports
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        # Clean up sys.path if we added to it
+        if added_to_path and parent_dir in sys.path:
+            sys.path.remove(parent_dir)
 
 
 def _autodiscover_phenomena() -> None:
