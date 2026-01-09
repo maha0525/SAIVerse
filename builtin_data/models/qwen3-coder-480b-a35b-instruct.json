@@ -1,0 +1,39 @@
+{
+  "model": "qwen/qwen3-coder-480b-a35b-instruct",
+  "display_name": "Qwen 3 Coder 480B-A35B (NIM)",
+  "provider": "nvidia_nim",
+  "supports_structured_output": true,
+  "context_length": 250000,
+  "base_url": "https://integrate.api.nvidia.com/v1",
+  "api_key_env": "NVIDIA_API_KEY",
+  "convert_system_to_user": true,
+  "parameters": {
+    "temperature": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.01,
+      "default": 0.7,
+      "label": "Temperature",
+      "description": "Controls randomness."
+    },
+    "top_p": {
+      "type": "float",
+      "min": 0,
+      "max": 1,
+      "step": 0.05,
+      "default": 0.8,
+      "label": "Top P",
+      "description": "Nucleus sampling cutoff."
+    },
+    "max_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 260000,
+      "step": 1,
+      "default": 8000,
+      "label": "Max tokens",
+      "description": "Upper bound on generated tokens."
+    }
+  }
+}

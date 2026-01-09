@@ -176,8 +176,11 @@ def get_chat_history(
                     # Use same avatar handling logic as info.py to support both file paths and API URLs
                     avatar_path = persona.avatar_image
                     if avatar_path:
-                        if avatar_path.startswith("assets/"):
-                            # Convert local path to API URL
+                        if avatar_path.startswith("user_data/icons/"):
+                            # Convert user_data/icons path to API URL
+                            avatar = "/api/static/user_icons/" + avatar_path[len("user_data/icons/"):]
+                        elif avatar_path.startswith("assets/"):
+                            # Convert legacy assets path to API URL
                             avatar = "/api/static/" + avatar_path[7:]
                         else:
                             # If avatar already starts with /api/ or other format, use it as-is

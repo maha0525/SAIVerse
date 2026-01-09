@@ -1,0 +1,36 @@
+{
+  "model": "gpt-4o",
+  "display_name": "Gpt 4o",
+  "provider": "openai",
+  "context_length": 32000,
+  "supports_images": true,
+  "parameters": {
+    "temperature": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.1,
+      "default": 1,
+      "label": "Temperature",
+      "description": "Controls randomness."
+    },
+    "top_p": {
+      "type": "float",
+      "min": 0,
+      "max": 1,
+      "step": 0.05,
+      "default": 1.0,
+      "label": "Top P",
+      "description": "Nucleus sampling cutoff."
+    },
+    "max_completion_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 4096,
+      "step": 1,
+      "default": 4096,
+      "label": "Max completion tokens",
+      "description": "Upper bound on reply length."
+    }
+  }
+}

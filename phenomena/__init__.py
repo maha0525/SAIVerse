@@ -4,43 +4,118 @@ phenomena ― フェノメノン（現象）システム
 SAIVerse世界で発生する現象を定義し、トリガーイベントに応じて自動実行する。
 ペルソナとは独立してバックグラウンドで動作可能。
 
-使用方法:
-    1. phenomena/defs/ 以下に .py ファイルを配置
-    2. schema() -> PhenomenonSchema と 同名関数を定義
-    3. 自動的にレジストリに登録される
+Autodiscovers phenomena from:
+  - user_data/phenomena/    (priority)
+  - builtin_data/phenomena/
+
+Supports both:
+  - Direct .py files with schema() function
+  - Subdirectories with schema.py file (for git-cloned phenomenon repos)
 """
-import importlib
+import importlib.util
+import logging
 import os
 import pkgutil
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Any, Callable, Dict, List
 
 from phenomena.defs import PhenomenonSchema
+
+LOGGER = logging.getLogger(__name__)
 
 PHENOMENON_REGISTRY: Dict[str, Callable] = {}
 PHENOMENON_SCHEMAS: List[PhenomenonSchema] = []
 
 
+def _register_phenomenon(module: Any) -> bool:
+    """Register a phenomenon from a module if it has schema() function."""
+    if not hasattr(module, "schema") or not callable(module.schema):
+        return False
+    
+    try:
+        meta: PhenomenonSchema = module.schema()
+        impl: Callable = getattr(module, meta.name, None)
+        if not impl or not callable(impl):
+            LOGGER.warning("Phenomenon '%s' has schema but no implementation function", meta.name)
+            return False
+        
+        # Skip if already registered (user_data takes priority)
+        if meta.name in PHENOMENON_REGISTRY:
+            LOGGER.debug("Phenomenon '%s' already registered, skipping", meta.name)
+            return False
+        
+        PHENOMENON_REGISTRY[meta.name] = impl
+        PHENOMENON_SCHEMAS.append(meta)
+        return True
+    except Exception as e:
+        LOGGER.warning("Failed to register phenomenon from module: %s", e)
+        return False
+
+
+def _load_module_from_path(module_name: str, file_path: Path) -> Any:
+    """Dynamically load a Python module from a file path."""
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _autodiscover_phenomena() -> None:
     """phenomena/defs/ 以下のモジュールを自動的に読み込み、レジストリに登録する"""
-    defs_path = Path(__file__).parent / "defs"
-    if not defs_path.exists():
-        return
-
-    for modinfo in pkgutil.iter_modules([str(defs_path)]):
-        if modinfo.name.startswith("_"):
+    # Import here to avoid circular imports at module load time
+    from data_paths import get_data_paths, PHENOMENA_DIR
+    
+    registered_names: set[str] = set()
+    
+    # Get phenomena directories (user_data first for priority)
+    phenomena_dirs = get_data_paths(PHENOMENA_DIR)
+    
+    # Also include legacy phenomena/defs for backwards compatibility during transition
+    legacy_defs = Path(__file__).parent / "defs"
+    if legacy_defs.exists() and legacy_defs not in phenomena_dirs:
+        phenomena_dirs.append(legacy_defs)
+    
+    for phenomena_path in phenomena_dirs:
+        if not phenomena_path.exists():
             continue
-        try:
-            module = importlib.import_module(f"phenomena.defs.{modinfo.name}")
-            if hasattr(module, "schema") and callable(module.schema):
-                meta: PhenomenonSchema = module.schema()
-                impl: Callable = getattr(module, meta.name, None)
-                if impl and callable(impl):
-                    PHENOMENON_REGISTRY[meta.name] = impl
-                    PHENOMENON_SCHEMAS.append(meta)
-        except Exception as e:
-            import logging
-            logging.warning("Failed to load phenomenon module '%s': %s", modinfo.name, e)
+        
+        # 1. Direct .py files in the directory
+        for modinfo in pkgutil.iter_modules([str(phenomena_path)]):
+            if modinfo.name.startswith("_"):
+                continue
+            
+            py_file = phenomena_path / f"{modinfo.name}.py"
+            if not py_file.exists():
+                continue
+            
+            try:
+                module = _load_module_from_path(f"phenomena._loaded.{modinfo.name}", py_file)
+                if module and _register_phenomenon(module):
+                    registered_names.add(modinfo.name)
+                    LOGGER.debug("Registered phenomenon from %s", py_file)
+            except Exception as e:
+                LOGGER.warning("Failed to load phenomenon from %s: %s", py_file, e)
+        
+        # 2. Subdirectories with schema.py (for git-cloned repos)
+        for subdir in phenomena_path.iterdir():
+            if not subdir.is_dir() or subdir.name.startswith("_"):
+                continue
+            
+            schema_file = subdir / "schema.py"
+            if not schema_file.exists():
+                continue
+            
+            try:
+                module = _load_module_from_path(f"phenomena._loaded.{subdir.name}", schema_file)
+                if module and _register_phenomenon(module):
+                    registered_names.add(subdir.name)
+                    LOGGER.debug("Registered phenomenon from %s", schema_file)
+            except Exception as e:
+                LOGGER.warning("Failed to load phenomenon from %s: %s", schema_file, e)
+    
+    LOGGER.info("Autodiscovered %d phenomena", len(PHENOMENON_REGISTRY))
 
 
 # 環境変数でスキップ可能

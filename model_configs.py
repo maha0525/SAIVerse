@@ -7,40 +7,63 @@ LOGGER = logging.getLogger(__name__)
 
 # Legacy single-file config
 LEGACY_CONFIG_PATH = Path("models.json")
-# New directory-based configs
-MODELS_DIR = Path("models")
+# Legacy directory-based configs
+LEGACY_MODELS_DIR = Path("models")
 
 
 def load_configs() -> Dict[str, Dict]:
-    """Load model configurations from models/ directory or legacy models.json."""
+    """Load model configurations from user_data and builtin_data directories.
+    
+    Priority order:
+    1. user_data/models/ (highest priority)
+    2. builtin_data/models/
+    3. models/ (legacy, for backwards compatibility)
+    4. models.json (legacy fallback)
+    """
+    from data_paths import iter_files, MODELS_DIR
+    
     configs: Dict[str, Dict] = {}
-
-    # Try loading from models/ directory first (new structure)
-    if MODELS_DIR.exists() and MODELS_DIR.is_dir():
-        for config_file in sorted(MODELS_DIR.glob("*.json")):
+    seen_keys: set[str] = set()
+    
+    # Load from user_data and builtin_data (iter_files handles priority)
+    for config_file in iter_files(MODELS_DIR, "*.json"):
+        try:
+            config_data = json.loads(config_file.read_text(encoding="utf-8"))
+            
+            # Extract model ID from config (required field for API calls)
+            model_id = config_data.get("model")
+            if not model_id:
+                LOGGER.warning("Model config %s missing 'model' field, skipping", config_file.name)
+                continue
+            
+            # Use filename (without extension) as config key
+            config_key = config_file.stem
+            if config_key not in seen_keys:
+                configs[config_key] = config_data
+                seen_keys.add(config_key)
+                LOGGER.debug("Loaded model config: %s (model=%s) from %s", config_key, model_id, config_file)
+        except Exception as exc:
+            LOGGER.warning("Failed to load model config from %s: %s", config_file.name, exc)
+    
+    # Fallback to legacy models/ directory if no configs loaded yet
+    if not configs and LEGACY_MODELS_DIR.exists() and LEGACY_MODELS_DIR.is_dir():
+        for config_file in sorted(LEGACY_MODELS_DIR.glob("*.json")):
             try:
                 config_data = json.loads(config_file.read_text(encoding="utf-8"))
-
-                # Extract model ID from config (required field for API calls)
                 model_id = config_data.get("model")
                 if not model_id:
-                    LOGGER.warning("Model config %s missing 'model' field, skipping", config_file.name)
                     continue
-
-                # Use filename (without extension) as config key
-                # This allows multiple configs for the same API model (e.g., free vs paid)
                 config_key = config_file.stem
-                configs[config_key] = config_data
-                LOGGER.debug("Loaded model config: %s (model=%s) from %s", config_key, model_id, config_file.name)
+                if config_key not in seen_keys:
+                    configs[config_key] = config_data
+                    seen_keys.add(config_key)
             except Exception as exc:
                 LOGGER.warning("Failed to load model config from %s: %s", config_file.name, exc)
 
-    # Fallback to legacy models.json if models/ dir is empty or doesn't exist
+    # Fallback to legacy models.json if still empty
     if not configs and LEGACY_CONFIG_PATH.exists():
         try:
             legacy_configs = json.loads(LEGACY_CONFIG_PATH.read_text(encoding="utf-8"))
-            # In legacy format, keys are model IDs and values don't have "model" field
-            # Add "model" field to each config for consistency
             for model_id, config_data in legacy_configs.items():
                 if "model" not in config_data:
                     config_data["model"] = model_id
@@ -49,7 +72,9 @@ def load_configs() -> Dict[str, Dict]:
         except Exception as exc:
             LOGGER.warning("Failed to load legacy models.json: %s", exc)
 
+    LOGGER.info("Loaded %d model configurations", len(configs))
     return configs
+
 
 MODEL_CONFIGS = load_configs()
 
