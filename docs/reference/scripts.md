@@ -98,6 +98,22 @@ Playbookをデータベースにインポート。
 python scripts/import_all_playbooks.py
 ```
 
+## データ移行
+
+### migrate_to_user_data.py
+
+既存データを `user_data/` 構造に移行。
+
+```bash
+python scripts/migrate_to_user_data.py --dry-run  # プレビュー
+python scripts/migrate_to_user_data.py            # 実行
+```
+
+処理内容：
+- `database/data/*` → `user_data/database/`
+- `assets/avatars/*` → `user_data/icons/`
+- DBのアバターパス更新
+
 ## Discord関連
 
 ### run_discord_gateway_tests.py
