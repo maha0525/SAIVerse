@@ -32,9 +32,14 @@ def infer_scope_from_path(path: Path) -> tuple[str, str | None, str | None]:
     """Infer playbook scope from file path.
 
     Returns: (scope, persona_id, building_id)
-    - sea/playbooks/public/*.json → ("public", None, None)
-    - sea/playbooks/building/<building_id>/*.json → ("building", None, building_id)
-    - sea/playbooks/personal/<persona_id>/*.json → ("personal", persona_id, None)
+    - */playbooks/public/*.json → ("public", None, None)
+    - */playbooks/building/<building_id>/*.json → ("building", None, building_id)
+    - */playbooks/personal/<persona_id>/*.json → ("personal", persona_id, None)
+    
+    Works for both:
+    - user_data/playbooks/...
+    - builtin_data/playbooks/...
+    - sea/playbooks/... (legacy)
     """
     parts = path.resolve().parts
     try:

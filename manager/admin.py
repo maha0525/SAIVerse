@@ -1184,48 +1184,69 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             return f"Error: Failed to import playbook. {exc}"
 
     def reimport_all_playbooks(self, base_dir: Optional[str] = None) -> str:
-        """Re-import all playbooks under sea/playbooks (or a custom directory)."""
+        """Re-import all playbooks from builtin_data and user_data directories."""
         try:
-            root = Path(base_dir) if base_dir else Path(__file__).resolve().parents[1] / "sea" / "playbooks"
-            if not root.is_absolute():
-                root = Path(__file__).resolve().parents[1] / root
-            if not root.exists():
-                return f"Error: Directory not found: {root}"
-
-            json_files = sorted(p for p in root.rglob("*.json") if p.is_file())
-            if not json_files:
-                return f"Warning: No JSON files found under {root}."
+            from data_paths import get_all_data_paths, PLAYBOOKS_DIR
+            
+            # Collect all directories to scan
+            roots: list[Path] = []
+            if base_dir:
+                custom_root = Path(base_dir)
+                if not custom_root.is_absolute():
+                    custom_root = Path(__file__).resolve().parents[1] / custom_root
+                if custom_root.exists():
+                    roots.append(custom_root)
+                else:
+                    return f"Error: Directory not found: {custom_root}"
+            else:
+                # Use both builtin_data and user_data playbooks directories
+                for playbook_path in get_all_data_paths(PLAYBOOKS_DIR):
+                    if playbook_path.exists():
+                        roots.append(playbook_path)
+                
+                # Fallback to legacy sea/playbooks if no other directories exist
+                legacy_path = Path(__file__).resolve().parents[1] / "sea" / "playbooks"
+                if not roots and legacy_path.exists():
+                    roots.append(legacy_path)
+            
+            if not roots:
+                return "Error: No playbook directories found."
 
             imported = 0
             failed = 0
+            total_scanned = 0
 
-            for json_path in json_files:
-                try:
-                    data = json.loads(json_path.read_text(encoding="utf-8"))
-                    name = data.get("name")
-                    if not name:
-                        logging.warning("Skipping %s: missing 'name' field", json_path)
+            for root in roots:
+                json_files = sorted(p for p in root.rglob("*.json") if p.is_file())
+                total_scanned += len(json_files)
+                
+                for json_path in json_files:
+                    try:
+                        data = json.loads(json_path.read_text(encoding="utf-8"))
+                        name = data.get("name")
+                        if not name:
+                            logging.warning("Skipping %s: missing 'name' field", json_path)
+                            failed += 1
+                            continue
+
+                        scope, persona_id, building_id = infer_scope_from_path(json_path)
+                        save_playbook(
+                            name=name,
+                            description=data.get("description", ""),
+                            scope=scope,
+                            created_by_persona_id=persona_id,
+                            building_id=building_id,
+                            playbook_json=json.dumps(data, ensure_ascii=False),
+                            router_callable=None,
+                            user_selectable=None,
+                        )
+                        imported += 1
+                    except Exception as inner_exc:
                         failed += 1
-                        continue
+                        logging.error("Failed to import %s: %s", json_path, inner_exc, exc_info=True)
 
-                    scope, persona_id, building_id = infer_scope_from_path(json_path)
-                    save_playbook(
-                        name=name,
-                        description=data.get("description", ""),
-                        scope=scope,
-                        created_by_persona_id=persona_id,
-                        building_id=building_id,
-                        playbook_json=json.dumps(data, ensure_ascii=False),
-                        router_callable=None,
-                        user_selectable=None,
-                    )
-                    imported += 1
-                except Exception as inner_exc:
-                    failed += 1
-                    logging.error("Failed to import %s: %s", json_path, inner_exc, exc_info=True)
-
-            total = len(json_files)
-            return f"Reimport finished: imported={imported}, failed={failed}, scanned={total} under {root}."
+            dirs_scanned = ", ".join(str(r) for r in roots)
+            return f"Reimport finished: imported={imported}, failed={failed}, scanned={total_scanned} from [{dirs_scanned}]."
         except Exception as exc:
             logging.error("Failed to reimport playbooks: %s", exc, exc_info=True)
             return f"Error: Failed to reimport playbooks. {exc}"

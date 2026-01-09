@@ -18,6 +18,7 @@ from sai_memory.arasuji.storage import (
     get_leaf_entries_by_level,
     get_max_level,
     mark_consolidated,
+    has_overlapping_entries,
 )
 from sai_memory.arasuji.context import (
     get_episode_context,
@@ -519,6 +520,17 @@ class ArasujiGenerator:
                 progress_callback(i, total)
 
             LOGGER.info(f"Processing messages {i+1}-{i+len(batch)} of {total}")
+
+            # Check if Chronicle already exists for this time range
+            batch_start = min(msg.created_at for msg in batch) if batch else None
+            batch_end = max(msg.created_at for msg in batch) if batch else None
+            
+            if batch_start and batch_end and has_overlapping_entries(self.conn, batch_start, batch_end, level=1):
+                LOGGER.info(f"  Skipping: Chronicle already exists for time range {batch_start}-{batch_end}")
+                # Still call batch_callback for Memopedia extraction even if Chronicle exists
+                if batch_callback:
+                    batch_callback(batch)
+                continue
 
             # Generate level-1 arasuji
             entry = generate_level1_arasuji(

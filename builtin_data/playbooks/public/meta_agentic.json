@@ -1,0 +1,96 @@
+{
+  "name": "meta_agentic",
+  "description": "Multi-step agent loop: router -> exec -> loop back (max iterations enforced)",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "User input"
+    }
+  ],
+  "context_requirements": {
+    "history_depth": "full",
+    "inventory": true,
+    "building_items": true,
+    "system_prompt": true
+  },
+  "router_callable": false,
+  "user_selectable": true,
+  "nodes": [
+    {
+      "id": "init",
+      "type": "set",
+      "assignments": {
+        "loop_count": 0,
+        "max_loops": 5,
+        "meta_playbook_name": "meta_agentic",
+        "meta_playbook_description": "Multi-step agent loop: router -> exec -> loop back (max iterations enforced)",
+        "executed_playbooks_init": true
+      },
+      "next": "list_playbooks"
+    },
+    {
+      "id": "list_playbooks",
+      "type": "tool",
+      "action": "list_available_playbooks",
+      "args_input": {},
+      "output_key": "available_playbooks",
+      "next": "router"
+    },
+    {
+      "id": "router",
+      "type": "subplay",
+      "playbook": "sub_router_user",
+      "input_template": "{input}",
+      "propagate_output": false,
+      "next": "check_early_exit"
+    },
+    {
+      "id": "check_early_exit",
+      "type": "pass",
+      "conditional_next": {
+        "field": "selected_playbook",
+        "operator": "eq",
+        "cases": {
+          "basic_chat": "finalize",
+          "default": "exec"
+        }
+      }
+    },
+    {
+      "id": "exec",
+      "type": "exec",
+      "playbook_source": "selected_playbook",
+      "args_source": "selected_args",
+      "next": "inc_loop"
+    },
+    {
+      "id": "inc_loop",
+      "type": "set",
+      "assignments": {
+        "loop_count": "{loop_count} + 1"
+      },
+      "next": "check_loop"
+    },
+    {
+      "id": "check_loop",
+      "type": "pass",
+      "conditional_next": {
+        "field": "loop_count",
+        "operator": "gte",
+        "cases": {
+          "5": "finalize",
+          "default": "router"
+        }
+      }
+    },
+    {
+      "id": "finalize",
+      "type": "subplay",
+      "playbook": "sub_speak_meta",
+      "input_template": "{input}\n\n参考情報:\n{context_bundle_text}",
+      "propagate_output": true,
+      "next": null
+    }
+  ],
+  "start_node": "init"
+}

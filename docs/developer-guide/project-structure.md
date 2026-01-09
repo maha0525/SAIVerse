@@ -13,6 +13,7 @@ SAIVerse/
 ├── action_handler.py       # アクション解析・実行
 ├── llm_router.py           # ツール呼び出し判定
 ├── buildings.py            # Buildingモデル
+├── data_paths.py           # パス管理（user_data/builtin_data）
 │
 ├── frontend/               # Next.js フロントエンド
 ├── api/                    # FastAPI ルート定義
@@ -26,12 +27,26 @@ SAIVerse/
 ├── scripts/                # 保守スクリプト
 ├── tests/                  # テスト
 ├── docs/                   # ドキュメント
-├── docs_legacy/            # 旧ドキュメント
+│
+├── builtin_data/           # 組み込みデフォルト（git追跡）
+│   ├── tools/              # デフォルトツール
+│   ├── phenomena/          # デフォルトフェノメノン
+│   ├── playbooks/          # デフォルトPlaybook
+│   ├── models/             # デフォルトモデル設定
+│   ├── prompts/            # デフォルトプロンプト
+│   └── icons/              # デフォルトアイコン
+│
+├── user_data/              # ユーザーカスタム（gitignore）
+│   ├── tools/              # カスタムツール（優先読み込み）
+│   ├── playbooks/          # カスタムPlaybook
+│   ├── models/             # カスタムモデル設定
+│   ├── database/           # SQLiteデータベース
+│   └── icons/              # アップロードアイコン
 │
 ├── ui/                     # [レガシー] Gradio UI
 ├── saiverse_memory/        # [レガシー] 記憶アダプター
 │
-├── models.json             # モデル定義
+├── models.json             # モデル定義（レガシー）
 ├── cities.json             # City設定
 └── requirements.txt        # Python依存
 ```
@@ -133,7 +148,7 @@ AIが使用するツール。
 
 ```
 tools/
-├── __init__.py       # レジストリ
+├── __init__.py       # レジストリ（user_data/builtin_data両方から読み込み）
 ├── context.py        # コンテキスト管理
 ├── defs/             # ツール定義
 │   ├── calculator.py
@@ -142,6 +157,8 @@ tools/
 │   └── ...
 └── utilities/        # ユーティリティ
 ```
+
+**ツールの優先順位**: `user_data/tools/` > `builtin_data/tools/` > `tools/defs/`
 
 ### database/
 
@@ -152,8 +169,11 @@ database/
 ├── models.py         # SQLAlchemyモデル
 ├── api_server.py     # FastAPIサーバー
 ├── seed.py           # 初期データ
-└── data/             # DBファイル格納
+├── paths.py          # DBパス管理（user_data/database/を使用）
+└── data/             # [レガシー] DBファイル格納
 ```
+
+**現在のDB格納場所**: `user_data/database/saiverse.db`
 
 ## 次のステップ
 

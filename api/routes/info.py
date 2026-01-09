@@ -51,9 +51,13 @@ def get_building_details(manager = Depends(get_manager)):
             if oid in manager.personas:
                 persona = manager.personas[oid]
                 avatar = persona.avatar_image
-                if avatar and avatar.startswith("assets/"):
-                    # Convert local path "assets/..." to API URL "/api/static/..."
-                    avatar = "/api/static/" + avatar[7:]
+                if avatar:
+                    if avatar.startswith("user_data/icons/"):
+                        # Convert user_data/icons path to API URL
+                        avatar = "/api/static/user_icons/" + avatar[len("user_data/icons/"):]
+                    elif avatar.startswith("assets/"):
+                        # Convert local path "assets/..." to API URL "/api/static/..."
+                        avatar = "/api/static/" + avatar[7:]
                 
                 occupants_list.append({
                     "id": oid,
