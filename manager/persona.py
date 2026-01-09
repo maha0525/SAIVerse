@@ -70,8 +70,8 @@ class PersonaMixin:
 
     def _process_avatar_upload(self, ai_id: str, upload_path: Path) -> str:
         """Resize & convert avatar uploads to WebP for caching."""
-        avatars_dir = Path("assets") / "avatars"
-        avatars_dir.mkdir(parents=True, exist_ok=True)
+        from data_paths import get_user_icons_dir
+        avatars_dir = get_user_icons_dir()
         dest_name = f"{ai_id}_{int(time.time())}.webp"
         dest_path = avatars_dir / dest_name
         with Image.open(upload_path) as img:
@@ -108,6 +108,8 @@ class PersonaMixin:
                 persona_provider = get_model_provider(persona_model)  # Get provider for persona's model
                 persona_lightweight_model = db_ai.LIGHTWEIGHT_MODEL
 
+                from data_paths import find_file, PROMPTS_DIR
+                common_prompt_file = find_file(PROMPTS_DIR, "common.txt") or Path("system_prompts/common.txt")
                 persona = PersonaCore(
                     city_name=self.city_name,
                     persona_id=pid,
@@ -115,7 +117,7 @@ class PersonaMixin:
                     persona_system_instruction=db_ai.SYSTEMPROMPT or "",
                     avatar_image=db_ai.AVATAR_IMAGE,
                     buildings=self.buildings,
-                    common_prompt_path=Path("system_prompts/common.txt"),
+                    common_prompt_path=common_prompt_file,
                     action_priority_path=Path("action_priority.json"),
                     building_histories=self.building_histories,
                     occupants=self.occupants,
@@ -287,6 +289,8 @@ class PersonaMixin:
             new_persona_provider = get_model_provider(new_persona_model)  # Get provider for model
             new_persona_context_length = get_context_length(new_persona_model)
 
+            from data_paths import find_file, PROMPTS_DIR
+            common_prompt_file = find_file(PROMPTS_DIR, "common.txt") or Path("system_prompts/common.txt")
             new_persona_core = PersonaCore(
                 city_name=self.city_name,
                 persona_id=new_ai_id,
@@ -294,7 +298,7 @@ class PersonaMixin:
                 persona_system_instruction=system_prompt,
                 avatar_image=None,
                 buildings=self.buildings,
-                common_prompt_path=Path("system_prompts/common.txt"),
+                common_prompt_path=common_prompt_file,
                 action_priority_path=Path("action_priority.json"),
                 building_histories=self.building_histories,
                 occupants=self.occupants,

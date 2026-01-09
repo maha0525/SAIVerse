@@ -25,6 +25,8 @@ from model_configs import get_model_provider, get_context_length
 from occupancy_manager import OccupancyManager
 from conversation_manager import ConversationManager
 from schedule_manager import ScheduleManager
+from phenomena.manager import PhenomenonManager
+from phenomena.triggers import TriggerEvent, TriggerType
 from sqlalchemy.orm import sessionmaker
 from remote_persona_proxy import RemotePersonaProxy
 from manager.sds import SDSMixin
@@ -51,6 +53,7 @@ from database.models import (
     ItemLocation as ItemLocationModel,
     PersonaEventLog,
     Playbook,
+    PhenomenonRule,
 )
 
 
@@ -91,6 +94,7 @@ class SAIVerseManager(
         self._ensure_user_avatar_column(engine)
         self._ensure_city_host_avatar_column(engine)
         self._ensure_item_tables(engine)
+        self._ensure_phenomenon_tables(engine)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         
         # --- Step 1: Load City Configuration from DB ---
@@ -284,6 +288,14 @@ class SAIVerseManager(
         self.schedule_manager.start()
         logging.info("Initialized and started ScheduleManager with 60 second check interval.")
 
+        # --- Initialize PhenomenonManager ---
+        self.phenomenon_manager = PhenomenonManager(
+            session_factory=self.SessionLocal,
+            async_execution=True,
+        )
+        self.phenomenon_manager.start()
+        logging.info("Initialized and started PhenomenonManager.")
+
         # --- Step 7: Register with SDS and start background tasks ---
         self.sds_url = sds_url
         self.sds_session = requests.Session()
@@ -341,6 +353,12 @@ class SAIVerseManager(
         logging.info("Auto-starting autonomous conversation managers...")
         self.start_autonomous_conversations()
 
+        # Emit server_start trigger
+        self._emit_trigger(
+            TriggerType.SERVER_START,
+            {"city_id": self.city_id, "city_name": self.city_name},
+        )
+
     def _update_timezone_cache(self, tz_name: Optional[str]) -> None:
         """Update cached timezone information for this manager."""
         name = (tz_name or "UTC").strip() or "UTC"
@@ -395,6 +413,17 @@ class SAIVerseManager(
             data = self._load_avatar_data(Path(avatar_path))
         self.host_avatar = data or self.default_avatar
         self.state.host_avatar = self.host_avatar
+
+    # Phenomenon trigger helpers -----------------------------------------------
+    def _emit_trigger(self, trigger_type: TriggerType, data: Dict[str, Any]) -> None:
+        """Emit a trigger event to the PhenomenonManager."""
+        if not hasattr(self, "phenomenon_manager") or not self.phenomenon_manager:
+            return
+        try:
+            event = TriggerEvent(type=trigger_type, data=data)
+            self.phenomenon_manager.emit(event)
+        except Exception as exc:
+            logging.error("Failed to emit trigger %s: %s", trigger_type, exc, exc_info=True)
 
     # SEA integration helpers -------------------------------------------------
     def run_sea_auto(self, persona, building_id: str, occupants: List[str]) -> None:
@@ -471,6 +500,13 @@ class SAIVerseManager(
             PersonaEventLog.__table__.create(bind=engine, checkfirst=True)
         except Exception as exc:
             logging.error("Failed to ensure item tables exist: %s", exc, exc_info=True)
+
+    def _ensure_phenomenon_tables(self, engine) -> None:
+        """Ensure phenomenon-related tables exist."""
+        try:
+            PhenomenonRule.__table__.create(bind=engine, checkfirst=True)
+        except Exception as exc:
+            logging.error("Failed to ensure phenomenon tables exist: %s", exc, exc_info=True)
 
     def _load_items_from_db(self) -> None:
         """Load items and their locations from the database into memory."""
@@ -1469,6 +1505,17 @@ class SAIVerseManager(
         if hasattr(self, "schedule_manager"):
             self.schedule_manager.stop()
             logging.info("ScheduleManager stopped.")
+
+        # Emit server_stop trigger before stopping phenomenon manager
+        self._emit_trigger(
+            TriggerType.SERVER_STOP,
+            {"city_id": self.city_id, "city_name": self.city_name},
+        )
+
+        # Stop phenomenon manager
+        if hasattr(self, "phenomenon_manager") and self.phenomenon_manager:
+            self.phenomenon_manager.stop()
+            logging.info("PhenomenonManager stopped.")
 
         # Save all persona and building states
         for persona in self.personas.values():

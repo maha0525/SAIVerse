@@ -1,0 +1,6 @@
+{
+  "model": "llama4:16x17b",
+  "display_name": "Llama4 16x17b",
+  "provider": "ollama",
+  "context_length": 1000000
+}

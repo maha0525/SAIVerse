@@ -1,0 +1,6 @@
+{
+  "model": "gpt-oss:20b",
+  "display_name": "Gpt Oss 20b",
+  "provider": "ollama",
+  "context_length": 32768
+}

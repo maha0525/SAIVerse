@@ -174,8 +174,8 @@ Examples:
     parser.add_argument(
         "--directory",
         type=Path,
-        default=ROOT / "sea" / "playbooks" / "public",
-        help="Directory containing playbook JSON files (default: sea/playbooks/public)"
+        default=ROOT / "builtin_data" / "playbooks" / "public",
+        help="Directory containing playbook JSON files (default: builtin_data/playbooks/public)"
     )
     parser.add_argument(
         "--force",

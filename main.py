@@ -379,6 +379,12 @@ def main():
     uploads_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/api/static/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
     
+    # Mount user_data/icons for user-uploaded avatars (new structure)
+    # Access via /api/static/user_icons/filename.webp
+    user_icons_dir = Path(__file__).parent / "user_data" / "icons"
+    user_icons_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/api/static/user_icons", StaticFiles(directory=str(user_icons_dir)), name="user_icons")
+    
     # Mount assets directory for static files (e.g. default avatars)
     # Access via /api/static/icons/user.png
     app.mount("/api/static", StaticFiles(directory="assets"), name="static")

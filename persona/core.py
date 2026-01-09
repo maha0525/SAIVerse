@@ -55,7 +55,7 @@ class PersonaCore(
         home_city_id: Optional[str] = None, # ★ 故郷のCity ID
         interaction_mode: str = "auto", # ★ 現在の対話モード
         is_dispatched: bool = False, # ★ このペルソナが他のCityに派遣中かどうかのフラグ
-        emotion_prompt_path: Path = Path("system_prompts/emotion_parameter.txt"),
+        emotion_prompt_path: Optional[Path] = None,
         action_priority_path: Path = Path("action_priority.json"),
         building_histories: Optional[Dict[str, List[Dict[str, str]]]] = None,
         occupants: Optional[Dict[str, List[str]]] = None,
@@ -87,6 +87,9 @@ class PersonaCore(
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}
         self.user_room_id = user_room_id
         self.common_prompt_path = common_prompt_path  # ファイルパスを保持
+        if emotion_prompt_path is None:
+            from data_paths import find_file, PROMPTS_DIR
+            emotion_prompt_path = find_file(PROMPTS_DIR, "emotion_parameter.txt") or Path("system_prompts/emotion_parameter.txt")
         self.emotion_prompt = emotion_prompt_path.read_text(encoding="utf-8")
         self.persona_id = persona_id
         self.persona_name = persona_name

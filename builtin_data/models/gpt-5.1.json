@@ -1,0 +1,44 @@
+{
+  "model": "gpt-5.1",
+  "display_name": "Gpt V5.1",
+  "provider": "openai",
+  "context_length": 32000,
+  "supports_images": true,
+  "parameters": {
+    "reasoning_effort": {
+      "type": "enum",
+      "options": [
+        "none",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": "medium",
+      "label": "Reasoning Effort",
+      "description": "Controls how much thinking time the model spends."
+    },
+    "verbosity": {
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": "high",
+      "label": "Verbosity",
+      "description": "Controls how long or detailed responses should be.",
+      "client_support": [
+        "responses"
+      ]
+    },
+    "max_completion_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 8192,
+      "step": 1,
+      "default": 4096,
+      "label": "Max completion tokens",
+      "description": "Upper bound on how many tokens the reply can use."
+    }
+  }
+}

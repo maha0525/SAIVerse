@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from 'react';
 import styles from './Sidebar.module.css';
-import { Settings } from 'lucide-react';
+import { Settings, Zap } from 'lucide-react';
 import GlobalSettingsModal from './GlobalSettingsModal';
 import UserProfileModal from './UserProfileModal';
 
@@ -228,6 +228,22 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
                             {status?.current_building_id === b.id && <span>📍</span>}
                         </div>
                     ))}
+                </div>
+
+                {/* System Section */}
+                <div className={styles.sectionTitle}>System</div>
+                <div className={styles.buildingList} style={{ flex: 'none', marginBottom: '1rem' }}>
+                    <div
+                        className={styles.buildingItem}
+                        onClick={() => {
+                            window.location.href = '/phenomena';
+                            if (onClose) onClose();
+                        }}
+                    >
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <Zap size={16} /> Phenomenon Rules
+                        </span>
+                    </div>
                 </div>
 
                 {/* Global Settings Trigger */}

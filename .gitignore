@@ -11,6 +11,11 @@ generate_image/
 /bk
 sai_memory/__pycache__/
 .gradio/*.pem
+
+# User data directory (user customizations, not tracked in git)
+user_data/
+
+# Legacy database data (migrated to user_data/database)
 database/data/*
 !database/data/.gitkeep
 
@@ -21,7 +26,7 @@ temp/
 # Local Claude Code preferences
 CLAUDE.local.md
 
-# User-uploaded assets
+# User-uploaded assets (legacy, migrated to user_data/icons)
 assets/avatars/
 
 #開発用フォルダ
