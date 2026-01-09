@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 SAIVerse is a multi-agent AI system where autonomous AI personas (agents) inhabit a virtual world composed of Cities and Buildings. The system features:
 
 - Multiple LLM providers (OpenAI, Anthropic, Google Gemini, Ollama, llama.cpp) with automatic fallback
-- Persistent long-term memory using SAIMemory (SQLite) + MemoryCore (Qdrant vector DB)
+- Persistent long-term memory using SAIMemory (SQLite)
 - Inter-city travel: personas can dispatch to other SAIVerse instances via database-mediated transactions
 - SEA (Self-Evolving Agent) framework: LangGraph-based playbook system for routing conversations and autonomous behavior
 - Optional Discord gateway for real-time chat integration
@@ -95,8 +95,8 @@ SAIVerse automatically backs up both saiverse.db and persona memory.db files on 
 **Manual Backup Scripts**
 
 ```bash
-# Manual saiverse.db backup
-python3 -c "from database.backup import backup_saiverse_db; from database.paths import default_db_path; backup_saiverse_db(default_db_path())"
+# Startup database backup
+python -c "from database.backup import backup_saiverse_db; from database.paths import default_db_path; backup_saiverse_db(default_db_path())"
 
 # Manual persona memory backup (requires rdiff-backup)
 python scripts/backup_saimemory.py persona_id --output-dir ~/.saiverse/backups/
@@ -115,6 +115,10 @@ python scripts/process_task_requests.py --base ~/.saiverse/personas
 
 # Visualize memory topics in browser
 python scripts/memory_topics_ui.py
+
+# Migrate data to new user_data structure
+python scripts/migrate_to_user_data.py --dry-run  # Preview
+python scripts/migrate_to_user_data.py             # Execute
 ```
 
 ## Architecture
@@ -224,6 +228,34 @@ python scripts/memory_topics_ui.py
 **Migration Script**:
 - `scripts/migrate_models_to_directory.py`: Migrates legacy `models.json` to `models/` directory structure
 
+## User Data Directory Structure
+
+SAIVerse separates user-customizable data from built-in defaults:
+
+```
+SAIVerse/
+├── builtin_data/           ← Built-in defaults (git tracked)
+│   ├── tools/              ← Default tool definitions
+│   ├── phenomena/          ← Default phenomena definitions  
+│   ├── playbooks/public/   ← Default playbooks
+│   ├── models/             ← Default model configurations
+│   ├── prompts/            ← Default system prompts
+│   └── icons/              ← Default icons
+│
+├── user_data/              ← User customizations (gitignored)
+│   ├── tools/              ← Custom tools (priority over builtin)
+│   ├── phenomena/          ← Custom phenomena
+│   ├── playbooks/          ← Custom playbooks
+│   ├── models/             ← Custom model configs
+│   ├── database/           ← SQLite database
+│   ├── prompts/            ← Custom prompts
+│   └── icons/              ← User-uploaded avatars
+```
+
+**Priority**: When loading resources, `user_data/` takes precedence over `builtin_data/`. This allows users to override defaults without modifying tracked files.
+
+**Migration**: Run `python scripts/migrate_to_user_data.py` to migrate existing data from legacy locations to the new structure.
+
 ## Key Files and Patterns
 
 ### Database Schema (`database/models.py`)
@@ -250,8 +282,10 @@ python scripts/memory_topics_ui.py
 
 ### Tools (`tools/`)
 - **Registry**: `tools/__init__.py` exports `TOOL_REGISTRY` dict (function_name → schema + callable)
+- **Loading**: Tools are loaded from both `user_data/tools/` (priority) and `builtin_data/tools/`
+- **Subdirectory support**: Tools can be organized in subdirectories with `schema.py` (e.g., git-cloned tool repos)
 - **Context**: `tools/context.py` uses contextvars to inject persona/manager references during tool execution
-- **Built-in tools** (`tools/defs/`):
+- **Built-in tools** (`builtin_data/tools/defs/` or `tools/defs/`):
   - `calculator.py`: safe AST-based expression evaluator
   - `image_generator.py`: Gemini 2.5 Flash Image API
   - `item_*.py`: pickup/place/use item in building inventory
@@ -423,9 +457,9 @@ Critical settings (see `.env.example`):
 
 **Move persona between buildings**: `OccupancyManager.move_to(persona, building_id)` (do not call PersonaCore methods directly)
 
-**Add new tool**: Define in `tools/defs/`, register in `tools/__init__.py`, link to buildings via `BuildingToolLink` or World Editor
+**Add new tool**: Define in `tools/defs/` (or `user_data/tools/` for custom tools), register automatically on startup. Tools in subdirectories need a `schema.py` file. Link to buildings via `BuildingToolLink` or World Editor
 
-**Modify playbook**: Edit JSON in `sea/playbooks/`, then run `python scripts/import_playbook.py --file sea/playbooks/<playbook>.json` to import to database. Alternatively, use `save_playbook` tool (validates graph before saving)
+**Modify playbook**: Edit JSON in `builtin_data/playbooks/` or `user_data/playbooks/`, then run `python scripts/import_playbook.py --file <path>` to import to database. Alternatively, use `save_playbook` tool (validates graph before saving)
 
 **Playbook design philosophy**:
 - **Router simplicity**: The router node in meta playbooks is designed to run on lightweight LLMs. It should ONLY select which playbook to execute (enum selection), not decide complex arguments.

@@ -4,7 +4,9 @@
 
 ## 基本構造
 
-Playbookは `sea/playbooks/` にJSONファイルとして配置します。
+Playbookは以下のディレクトリにJSONファイルとして配置します：
+- `user_data/playbooks/` - カスタムPlaybook（優先読み込み）
+- `builtin_data/playbooks/` - 組み込みデフォルト
 
 ```json
 {
