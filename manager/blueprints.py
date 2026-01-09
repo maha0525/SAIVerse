@@ -269,6 +269,8 @@ class BlueprintMixin:
                 blueprint_provider = get_model_provider(blueprint_model)  # Get provider for model
                 blueprint_context_length = get_context_length(blueprint_model)
 
+                from data_paths import find_file, PROMPTS_DIR
+                common_prompt_file = find_file(PROMPTS_DIR, "common.txt") or Path("system_prompts/common.txt")
                 new_persona_core = PersonaCore(
                     city_name=self.city_name,
                     persona_id=new_ai_id,
@@ -276,7 +278,7 @@ class BlueprintMixin:
                     persona_system_instruction=blueprint.BASE_SYSTEM_PROMPT,
                     avatar_image=blueprint.BASE_AVATAR,
                     buildings=self.buildings,
-                    common_prompt_path=Path("system_prompts/common.txt"),
+                    common_prompt_path=common_prompt_file,
                     action_priority_path=Path("action_priority.json"),
                     building_histories=self.building_histories,
                     occupants=self.occupants,

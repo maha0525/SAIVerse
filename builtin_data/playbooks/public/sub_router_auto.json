@@ -1,0 +1,81 @@
+{
+  "name": "sub_router_auto",
+  "description": "Route autonomous pulse to appropriate playbook (including wait option)",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "Trigger input",
+      "source": null
+    },
+    {
+      "name": "messages",
+      "description": "Conversation context messages",
+      "source": "parent.messages"
+    },
+    {
+      "name": "situation_snapshot",
+      "description": "Current situation snapshot",
+      "source": "parent.situation_snapshot"
+    },
+    {
+      "name": "task_summary",
+      "description": "Current task summary",
+      "source": "parent.task_summary"
+    },
+    {
+      "name": "available_playbooks",
+      "description": "JSON list of available playbooks",
+      "source": "parent.available_playbooks"
+    },
+    {
+      "name": "meta_playbook_name",
+      "description": "Name of the current meta playbook",
+      "source": "parent.meta_playbook_name"
+    },
+    {
+      "name": "meta_playbook_description",
+      "description": "Description of the current meta playbook",
+      "source": "parent.meta_playbook_description"
+    },
+    {
+      "name": "executed_playbooks",
+      "description": "List of playbooks already executed in this run",
+      "source": "parent.executed_playbooks"
+    }
+  ],
+  "output_schema": ["selected_playbook", "selected_args"],
+  "context_requirements": {
+    "history_depth": 0,
+    "system_prompt": false
+  },
+  "router_callable": false,
+  "user_selectable": false,
+  "nodes": [
+    {
+      "id": "decide",
+      "type": "llm",
+      "action": "あなたはSEAルーターです。現在の状況を判断し、最適なPlaybookを選択してください。\n\n## 現在の状況\n{situation_snapshot}\n\n## タスク状況\n{task_summary}\n\n## 利用可能なPlaybook\n{available_playbooks}\n\n## 注意事項\n- 'wait' を選択すると何もせず待機します。特に行動する必要がない場合はwaitを選んでください。\n- 会話の文脈を考慮し、適切な応答や行動を選んでください。\n- 実行済みPlaybook: {executed_playbooks}\n- 同じPlaybookを連続で選ばないでください（waitは例外）。\n\nJSON形式で回答してください。",
+      "next": null,
+      "model_type": "lightweight",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "このPlaybookを選んだ理由"
+          },
+          "playbook": {
+            "type": "string",
+            "description": "実行するPlaybook名（available_playbooksから選択、または'wait'）"
+          }
+        },
+        "required": ["reason", "playbook"]
+      },
+      "output_key": "decision",
+      "output_mapping": {
+        "playbook": "selected_playbook"
+      }
+    }
+  ],
+  "start_node": "decide"
+}

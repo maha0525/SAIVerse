@@ -12,7 +12,10 @@ from google.genai import types
 class EmotionControlModule:
     """Lightweight module to adjust emotion parameters using Gemini."""
 
-    def __init__(self, prompt_path: Path = Path("system_prompts/emotion_control.txt"), model: str = "gemini-2.0-flash") -> None:
+    def __init__(self, prompt_path: Path = None, model: str = "gemini-2.0-flash") -> None:
+        if prompt_path is None:
+            from data_paths import find_file, PROMPTS_DIR
+            prompt_path = find_file(PROMPTS_DIR, "emotion_control.txt") or Path("system_prompts/emotion_control.txt")
         self.prompt_template = prompt_path.read_text(encoding="utf-8")
         self.model = model
         self.free_client, self.paid_client, self.client = build_gemini_clients()

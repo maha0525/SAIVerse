@@ -1,0 +1,25 @@
+{
+  "name": "basic_chat",
+  "description": "No-op for simple conversations handled by meta layer",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "User input"
+    }
+  ],
+  "context_requirements": {
+    "history_depth": "full",
+    "inventory": true,
+    "building_items": true,
+    "system_prompt": true
+  },
+  "router_callable": true,
+  "nodes": [
+    {
+      "id": "noop",
+      "type": "pass",
+      "next": null
+    }
+  ],
+  "start_node": "noop"
+}
