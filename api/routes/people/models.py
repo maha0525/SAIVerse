@@ -39,9 +39,12 @@ class MessagesResponse(BaseModel):
     total: int
     page: int
     page_size: int
+    first_created_at: Optional[float] = None
+    last_created_at: Optional[float] = None
 
 class UpdateMessageRequest(BaseModel):
-    content: str
+    content: Optional[str] = None
+    created_at: Optional[float] = None
 
 
 # -----------------------------------------------------------------------------

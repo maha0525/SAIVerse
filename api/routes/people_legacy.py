@@ -161,6 +161,8 @@ class MessagesResponse(BaseModel):
     total: int
     page: int
     page_size: int
+    first_created_at: Optional[float] = None
+    last_created_at: Optional[float] = None
 
 @router.get("/{persona_id}/threads/{thread_id}/messages", response_model=MessagesResponse)
 def list_thread_messages(
@@ -212,8 +214,32 @@ def list_thread_messages(
                 created_at=m["created_at"],
                 metadata=m.get("metadata")
             ))
+        
+        # Get first and last timestamps for the thread
+        first_created_at: Optional[float] = None
+        last_created_at: Optional[float] = None
+        try:
+            # Get first message (oldest)
+            first_msgs = adapter.get_thread_messages(thread_id, page=0, page_size=1)
+            if first_msgs:
+                first_created_at = first_msgs[0].get("created_at")
+            # Get last message (newest) - use total to calculate last page
+            import math
+            last_page = max(0, math.ceil(total / 1) - 1)  # page_size=1 for last msg
+            last_msgs = adapter.get_thread_messages(thread_id, page=last_page, page_size=1)
+            if last_msgs:
+                last_created_at = last_msgs[0].get("created_at")
+        except Exception:
+            pass  # Timestamps are optional, don't fail the request
             
-        return MessagesResponse(items=items, total=total, page=page, page_size=page_size)
+        return MessagesResponse(
+            items=items, 
+            total=total, 
+            page=page, 
+            page_size=page_size,
+            first_created_at=first_created_at,
+            last_created_at=last_created_at,
+        )
     finally:
         if should_close and adapter:
             adapter.close()

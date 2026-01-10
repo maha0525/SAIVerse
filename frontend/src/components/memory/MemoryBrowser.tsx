@@ -29,11 +29,14 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
     const [isLoadingMessages, setIsLoadingMessages] = useState(false);
     const [page, setPage] = useState(1);
     const [totalMessages, setTotalMessages] = useState(0);
+    const [firstCreatedAt, setFirstCreatedAt] = useState<number | null>(null);
+    const [lastCreatedAt, setLastCreatedAt] = useState<number | null>(null);
     const pageSize = 50;
 
     // Edit state
     const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
     const [editContent, setEditContent] = useState("");
+    const [editTimestamp, setEditTimestamp] = useState<string>("");
 
     // Selection state for bulk delete
     const [selectionMode, setSelectionMode] = useState(false);
@@ -82,6 +85,8 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                 const data = await res.json();
                 setMessages(data.items);
                 setTotalMessages(data.total);
+                setFirstCreatedAt(data.first_created_at ?? null);
+                setLastCreatedAt(data.last_created_at ?? null);
                 // If we requested page -1, backend returns the actual last page number in response (if updated backend logic supports it, else we assume data.page)
                 if (pageNum === -1 && data.page) {
                     setPage(data.page);
@@ -153,26 +158,62 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
         return new Date(ts * 1000).toLocaleString();
     };
 
+    const formatDateRange = (first: number | null, last: number | null) => {
+        if (!first || !last) return null;
+        const formatShort = (ts: number) => {
+            const d = new Date(ts * 1000);
+            const y = d.getFullYear();
+            const m = d.getMonth() + 1;
+            const day = d.getDate();
+            const h = d.getHours();
+            const min = d.getMinutes().toString().padStart(2, '0');
+            const sec = d.getSeconds().toString().padStart(2, '0');
+            return `${y}/${m}/${day} ${h}:${min}:${sec}`;
+        };
+        return `${formatShort(first)} - ${formatShort(last)}`;
+    };
+
     // Message Actions
     const handleEditStart = (msg: MessageItem) => {
         setEditingMsgId(msg.id);
         setEditContent(msg.content);
+        // Convert Unix timestamp to datetime-local format (local time)
+        if (msg.created_at) {
+            const d = new Date(msg.created_at * 1000);
+            // Format as YYYY-MM-DDTHH:mm in local time
+            const year = d.getFullYear();
+            const month = (d.getMonth() + 1).toString().padStart(2, '0');
+            const day = d.getDate().toString().padStart(2, '0');
+            const hours = d.getHours().toString().padStart(2, '0');
+            const minutes = d.getMinutes().toString().padStart(2, '0');
+            setEditTimestamp(`${year}-${month}-${day}T${hours}:${minutes}`);
+        } else {
+            setEditTimestamp("");
+        }
     };
 
     const handleEditCancel = () => {
         setEditingMsgId(null);
         setEditContent("");
+        setEditTimestamp("");
     };
 
     const handleEditSave = async (msgId: string) => {
         try {
+            const body: { content?: string; created_at?: number } = {};
+            body.content = editContent;
+            if (editTimestamp) {
+                const ts = new Date(editTimestamp).getTime() / 1000;
+                body.created_at = ts;
+            }
             const res = await fetch(`/api/people/${personaId}/messages/${msgId}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: editContent })
+                body: JSON.stringify(body)
             });
             if (res.ok) {
                 setEditingMsgId(null);
+                setEditTimestamp("");
                 // Refresh current page
                 if (selectedThreadId) loadMessages(selectedThreadId, page);
             } else {
@@ -314,6 +355,11 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                     <span className={styles.headerTitle}>
                         {selectedThreadId || "Select a thread"}
                     </span>
+                    {selectedThreadId && firstCreatedAt && lastCreatedAt && (
+                        <span className={styles.dateRange}>
+                            {formatDateRange(firstCreatedAt, lastCreatedAt)}
+                        </span>
+                    )}
                     <div className={styles.headerActions}>
                         {selectionMode ? (
                             <>
@@ -397,6 +443,15 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                 <div className={styles.content}>
                                     {editingMsgId === msg.id ? (
                                         <div className={styles.editInterface}>
+                                            <div className={styles.editTimestampRow}>
+                                                <label>Timestamp:</label>
+                                                <input
+                                                    type="datetime-local"
+                                                    className={styles.editTimestampInput}
+                                                    value={editTimestamp}
+                                                    onChange={(e) => setEditTimestamp(e.target.value)}
+                                                />
+                                            </div>
                                             <textarea
                                                 className={styles.editTextarea}
                                                 value={editContent}

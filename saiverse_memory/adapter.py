@@ -411,35 +411,70 @@ class SAIMemoryAdapter:
             return 0
 
     def update_message_content(self, message_id: str, new_content: str) -> bool:
+        """Legacy wrapper for update_message with only content."""
+        return self.update_message(message_id, new_content=new_content)
+
+    def update_message(
+        self, 
+        message_id: str, 
+        new_content: Optional[str] = None, 
+        new_created_at: Optional[int] = None
+    ) -> bool:
+        """Update message content and/or timestamp.
+        
+        Args:
+            message_id: ID of the message to update
+            new_content: New content (optional, if None content is unchanged)
+            new_created_at: New timestamp as Unix epoch (optional)
+            
+        Returns:
+            True if successful, False otherwise
+        """
         if not self._ready:
             return False
+        if new_content is None and new_created_at is None:
+            return True  # Nothing to update
         try:
             with self._db_lock:
-                # 1. Update content
-                cur = self.conn.execute("SELECT metadata FROM messages WHERE id=?", (message_id,))  # type: ignore[attr-defined]
+                # Check message exists
+                cur = self.conn.execute("SELECT content FROM messages WHERE id=?", (message_id,))  # type: ignore[attr-defined]
                 row = cur.fetchone()
                 if row is None:
                     return False
-                    
-                # We don't change metadata structure, just update content
-                self.conn.execute(  # type: ignore[attr-defined]
-                    "UPDATE messages SET content=? WHERE id=?",
-                    (new_content, message_id),
-                )
                 
-                # 2. Update embeddings
-                self.conn.execute("DELETE FROM message_embeddings WHERE message_id=?", (message_id,))  # type: ignore[attr-defined]
-                content_strip = new_content.strip()
-                if content_strip and self.embedder is not None:
-                    chunks = chunk_text(
-                        content_strip,
-                        min_chars=self.settings.chunk_min_chars,
-                        max_chars=self.settings.chunk_max_chars,
+                current_content = row[0]
+                    
+                # Update fields as needed
+                if new_content is not None and new_created_at is not None:
+                    self.conn.execute(  # type: ignore[attr-defined]
+                        "UPDATE messages SET content=?, created_at=? WHERE id=?",
+                        (new_content, new_created_at, message_id),
                     )
-                    payload = [chunk.strip() for chunk in chunks if chunk and chunk.strip()]
-                    if payload:
-                        vectors = self.embedder.embed(payload, is_query=False)
-                        replace_message_embeddings(self.conn, message_id, vectors)   # type: ignore[attr-defined]
+                elif new_content is not None:
+                    self.conn.execute(  # type: ignore[attr-defined]
+                        "UPDATE messages SET content=? WHERE id=?",
+                        (new_content, message_id),
+                    )
+                elif new_created_at is not None:
+                    self.conn.execute(  # type: ignore[attr-defined]
+                        "UPDATE messages SET created_at=? WHERE id=?",
+                        (new_created_at, message_id),
+                    )
+                
+                # Update embeddings only if content changed
+                if new_content is not None:
+                    self.conn.execute("DELETE FROM message_embeddings WHERE message_id=?", (message_id,))  # type: ignore[attr-defined]
+                    content_strip = new_content.strip()
+                    if content_strip and self.embedder is not None:
+                        chunks = chunk_text(
+                            content_strip,
+                            min_chars=self.settings.chunk_min_chars,
+                            max_chars=self.settings.chunk_max_chars,
+                        )
+                        payload = [chunk.strip() for chunk in chunks if chunk and chunk.strip()]
+                        if payload:
+                            vectors = self.embedder.embed(payload, is_query=False)
+                            replace_message_embeddings(self.conn, message_id, vectors)   # type: ignore[attr-defined]
                 
                 self.conn.commit()  # type: ignore[attr-defined]
                 return True

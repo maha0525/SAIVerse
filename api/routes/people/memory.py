@@ -89,8 +89,31 @@ def list_thread_messages(
                 created_at=m["created_at"],
                 metadata=m.get("metadata")
             ))
+        
+        # Get first and last timestamps for the thread
+        first_created_at = None
+        last_created_at = None
+        try:
+            # Get first message (oldest)
+            first_msgs = adapter.get_thread_messages(thread_id, page=0, page_size=1)
+            if first_msgs:
+                first_created_at = first_msgs[0].get("created_at")
+            # Get last message (newest) - use total to calculate last page
+            last_page = max(0, math.ceil(total / 1) - 1)  # page_size=1 for last msg
+            last_msgs = adapter.get_thread_messages(thread_id, page=last_page, page_size=1)
+            if last_msgs:
+                last_created_at = last_msgs[0].get("created_at")
+        except Exception:
+            pass  # Timestamps are optional, don't fail the request
             
-        return MessagesResponse(items=items, total=total, page=page, page_size=page_size)
+        return MessagesResponse(
+            items=items, 
+            total=total, 
+            page=page, 
+            page_size=page_size,
+            first_created_at=first_created_at,
+            last_created_at=last_created_at,
+        )
     finally:
         if should_close and adapter:
             adapter.close()
@@ -102,7 +125,7 @@ def update_message(
     request: UpdateMessageRequest, 
     manager = Depends(get_manager)
 ):
-    """Update message content."""
+    """Update message content and/or timestamp."""
     persona = manager.personas.get(persona_id)
     adapter = getattr(persona, "sai_memory", None) if persona else None
     should_close = False
@@ -116,7 +139,12 @@ def update_message(
             raise HTTPException(status_code=500, detail=f"Failed to access memory: {e}")
 
     try:
-        success = adapter.update_message_content(message_id, request.content)
+        new_created_at = int(request.created_at) if request.created_at is not None else None
+        success = adapter.update_message(
+            message_id, 
+            new_content=request.content, 
+            new_created_at=new_created_at
+        )
         if not success:
             raise HTTPException(status_code=404, detail="Message not found or update failed")
         return {"success": True}

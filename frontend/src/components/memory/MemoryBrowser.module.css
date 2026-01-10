@@ -138,6 +138,14 @@
     flex: 1;
 }
 
+.dateRange {
+    font-size: 0.75rem;
+    color: #888;
+    font-family: monospace;
+    margin-left: 8px;
+    white-space: nowrap;
+}
+
 .headerActions {
     display: flex;
     align-items: center;
@@ -334,6 +342,27 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+}
+
+.editTimestampRow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.85rem;
+    color: #aaa;
+}
+
+.editTimestampRow label {
+    flex-shrink: 0;
+}
+
+.editTimestampInput {
+    background-color: #141517;
+    border: 1px solid #444;
+    color: #e0e0e0;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-family: monospace;
 }
 
 .editTextarea {
