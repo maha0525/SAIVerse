@@ -37,6 +37,24 @@ python main.py city_a
 
 起動後、ブラウザで http://localhost:3000 を開いてフロントエンドにアクセス。
 
+## 🧪 テスト環境
+
+本番データを使わずにバックエンドをテストするための隔離されたテスト環境が用意されています。
+
+```bash
+# テスト環境のセットアップ
+python test_fixtures/setup_test_env.py
+
+# テストサーバー起動（ポート18000）
+./test_fixtures/start_test_server.sh
+
+# APIテスト実行
+python test_fixtures/test_api.py         # フルテスト（LLM呼び出し含む）
+python test_fixtures/test_api.py --quick # クイックテスト（LLM除く）
+```
+
+詳細は [docs/test_environment.md](./docs/test_environment.md) を参照してください。
+
 ## 📚 ドキュメント
 
 詳細なドキュメントは [docs/](./docs/) を参照してください：

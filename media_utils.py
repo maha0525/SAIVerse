@@ -21,13 +21,15 @@ SUMMARY_SUFFIX = ".summary.txt"
 
 
 def _ensure_image_dir() -> Path:
-    dest_dir = Path.home() / ".saiverse" / "image"
+    from data_paths import get_saiverse_home
+    dest_dir = get_saiverse_home() / "image"
     dest_dir.mkdir(parents=True, exist_ok=True)
     return dest_dir
 
 
 def _ensure_document_dir() -> Path:
-    dest_dir = Path.home() / ".saiverse" / "documents"
+    from data_paths import get_saiverse_home
+    dest_dir = get_saiverse_home() / "documents"
     dest_dir.mkdir(parents=True, exist_ok=True)
     return dest_dir
 

@@ -2,10 +2,15 @@
 
 Provides centralized access to user_data and builtin_data directories.
 Files in user_data take priority over builtin_data.
+
+Environment variables:
+    SAIVERSE_USER_DATA_DIR: Override user_data directory (for testing)
+    SAIVERSE_HOME: Override ~/.saiverse directory (for testing)
 """
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Iterator
 
@@ -13,8 +18,28 @@ LOGGER = logging.getLogger(__name__)
 
 # Root directories
 PROJECT_ROOT = Path(__file__).resolve().parent
-USER_DATA_DIR = PROJECT_ROOT / "user_data"
+
+# USER_DATA_DIR can be overridden via environment variable (for testing)
+_user_data_env = os.getenv("SAIVERSE_USER_DATA_DIR")
+USER_DATA_DIR = Path(_user_data_env) if _user_data_env else PROJECT_ROOT / "user_data"
+
 BUILTIN_DATA_DIR = PROJECT_ROOT / "builtin_data"
+
+
+def get_saiverse_home() -> Path:
+    """Get the SAIVerse home directory (~/.saiverse or SAIVERSE_HOME env var).
+
+    This directory contains:
+        - personas/<id>/: SAIMemory databases and logs
+        - cities/<city>/buildings/<building>/: Building logs
+        - image/: Uploaded images
+        - qdrant/: Qdrant vector database
+        - backups/: Backup files
+    """
+    env_home = os.getenv("SAIVERSE_HOME")
+    if env_home:
+        return Path(env_home)
+    return Path.home() / ".saiverse"
 
 # Subdirectory names
 TOOLS_DIR = "tools"
@@ -246,6 +271,7 @@ def ensure_user_data_dirs() -> None:
 
 
 __all__ = [
+    "PROJECT_ROOT",
     "USER_DATA_DIR",
     "BUILTIN_DATA_DIR",
     "TOOLS_DIR",
@@ -255,6 +281,7 @@ __all__ = [
     "DATABASE_DIR",
     "PROMPTS_DIR",
     "ICONS_DIR",
+    "get_saiverse_home",
     "get_data_paths",
     "get_all_data_paths",
     "find_file",
