@@ -427,7 +427,20 @@ class SAIVerseManager(
 
     # SEA integration helpers -------------------------------------------------
     def run_sea_auto(self, persona, building_id: str, occupants: List[str]) -> None:
-        """Run autonomous pulse via PulseController."""
+        """Run autonomous pulse via PulseController.
+
+        Discord visitors (DiscordVisitorStub) are handled by DiscordConnector,
+        not by the local PulseController.
+        """
+        # Discord visitor guard: skip local processing
+        # DiscordConnector will handle turn requests via Turn Request/Response flow
+        if getattr(persona, "is_discord_visitor", False):
+            logging.debug(
+                "Skipping local run_sea_auto for Discord visitor: %s",
+                getattr(persona, "persona_id", "unknown"),
+            )
+            return
+
         try:
             self.pulse_controller.submit_auto(
                 persona_id=persona.persona_id,

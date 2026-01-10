@@ -1,7 +1,7 @@
 """Tools package for SAIVerse.
 
 Autodiscovers tools from:
-  - user_data/tools/    (priority)
+  - user_data/<project>/tools/  (project-based, priority)
   - builtin_data/tools/
 
 Supports both:
@@ -26,11 +26,49 @@ GEMINI_TOOLS_SPEC: List[Any] = []
 TOOL_SCHEMAS: List[ToolSchema] = []
 
 
+def _register_multiple_tools(module: Any) -> bool:
+    """Register multiple tools from a module with schemas() function.
+
+    This supports tool packages that export multiple tools from a single module,
+    such as user_data/discord/tools/schema.py.
+    """
+    try:
+        tool_schemas: List[ToolSchema] = module.schemas()
+        registered = False
+        for meta in tool_schemas:
+            impl: Callable = getattr(module, meta.name, None)
+            if not impl or not callable(impl):
+                LOGGER.warning("Tool '%s' has schema but no implementation function", meta.name)
+                continue
+
+            # Skip if already registered (user_data takes priority)
+            if meta.name in TOOL_REGISTRY:
+                LOGGER.debug("Tool '%s' already registered, skipping", meta.name)
+                continue
+
+            TOOL_REGISTRY[meta.name] = impl
+            OPENAI_TOOLS_SPEC.append(oa.to_openai(meta))
+            GEMINI_TOOLS_SPEC.append(gm.to_gemini(meta))
+            TOOL_SCHEMAS.append(meta)
+            registered = True
+            LOGGER.debug("Registered tool '%s' from schemas()", meta.name)
+
+        return registered
+    except Exception as e:
+        LOGGER.warning("Failed to register tools from schemas(): %s", e)
+        return False
+
+
 def _register_tool(module: Any) -> bool:
-    """Register a tool from a module if it has schema() function."""
+    """Register a tool from a module if it has schema() or schemas() function."""
+    # Multiple tools support: schemas() takes priority
+    if hasattr(module, "schemas") and callable(module.schemas):
+        return _register_multiple_tools(module)
+
+    # Single tool: schema() function
     if not hasattr(module, "schema") or not callable(module.schema):
         return False
-    
+
     try:
         meta: ToolSchema = module.schema()
         impl: Callable = getattr(module, meta.name, None)
@@ -99,13 +137,13 @@ def _load_module_from_path(module_name: str, file_path: Path) -> Any:
 def _autodiscover_tools() -> None:
     """Discover and register tools from user_data and builtin_data directories."""
     # Import here to avoid circular imports at module load time
-    from data_paths import get_data_paths, TOOLS_DIR
-    
+    from data_paths import iter_project_subdirs, TOOLS_DIR
+
     registered_names: set[str] = set()
-    
-    # Get tool directories (user_data first for priority)
-    tool_dirs = get_data_paths(TOOLS_DIR)
-    
+
+    # Get tool directories from all projects (user_data/<project>/tools/) + builtin_data/tools/
+    tool_dirs = list(iter_project_subdirs(TOOLS_DIR))
+
     # Also include legacy tools/defs for backwards compatibility during transition
     legacy_defs = Path(__file__).parent / "defs"
     if legacy_defs.exists() and legacy_defs not in tool_dirs:
