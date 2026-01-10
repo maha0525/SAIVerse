@@ -1,0 +1,74 @@
+{
+  "description": "Test data definitions for SAIVerse testing environment",
+  "user": {
+    "USERID": 1,
+    "USERNAME": "test_user",
+    "PASSWORD": "test_password",
+    "LOGGED_IN": true,
+    "CURRENT_CITYID": 1,
+    "CURRENT_BUILDINGID": "test_lobby"
+  },
+  "city": {
+    "CITYID": 1,
+    "CITYNAME": "test_city",
+    "DESCRIPTION": "Test city for automated testing",
+    "TIMEZONE": "Asia/Tokyo",
+    "UI_PORT": 18000,
+    "API_PORT": 18001,
+    "START_IN_ONLINE_MODE": false
+  },
+  "buildings": [
+    {
+      "BUILDINGID": "test_lobby",
+      "BUILDINGNAME": "Test Lobby",
+      "DESCRIPTION": "Main lobby for testing",
+      "CAPACITY": 10,
+      "SYSTEM_INSTRUCTION": "This is a test building for automated testing.",
+      "ENTRY_PROMPT": "",
+      "AUTO_PROMPT": "",
+      "AUTO_INTERVAL_SEC": 30
+    },
+    {
+      "BUILDINGID": "test_room_a",
+      "BUILDINGNAME": "Test Room A",
+      "DESCRIPTION": "Test room A",
+      "CAPACITY": 5,
+      "SYSTEM_INSTRUCTION": "Test room for persona interactions.",
+      "ENTRY_PROMPT": "",
+      "AUTO_PROMPT": "",
+      "AUTO_INTERVAL_SEC": 30
+    }
+  ],
+  "personas": [
+    {
+      "AIID": "test_persona_a",
+      "AINAME": "Test Persona A",
+      "DESCRIPTION": "Test persona for automated testing",
+      "SYSTEMPROMPT": "You are a test persona named Test Persona A. You are helpful and respond concisely for testing purposes.",
+      "INTERACTION_MODE": "auto",
+      "DEFAULT_MODEL": "gemini-2.5-flash-preview-09-2025",
+      "LIGHTWEIGHT_MODEL": "gemini-2.5-flash-lite-preview-09-2025",
+      "start_building": "test_lobby"
+    },
+    {
+      "AIID": "test_persona_b",
+      "AINAME": "Test Persona B",
+      "DESCRIPTION": "Second test persona",
+      "SYSTEMPROMPT": "You are a test persona named Test Persona B. You assist with testing.",
+      "INTERACTION_MODE": "manual",
+      "DEFAULT_MODEL": "gemini-2.5-flash-preview-09-2025",
+      "LIGHTWEIGHT_MODEL": "gemini-2.5-flash-lite-preview-09-2025",
+      "start_building": "test_room_a"
+    }
+  ],
+  "playbooks": [
+    "basic_chat",
+    "meta_user",
+    "meta_auto",
+    "sub_router_user",
+    "sub_speak_meta",
+    "sub_speak_simple",
+    "meta_simple_speak",
+    "meta_exec_speak"
+  ]
+}

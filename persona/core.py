@@ -95,7 +95,8 @@ class PersonaCore(
         self.persona_name = persona_name
         self.persona_system_instruction = persona_system_instruction
         self.avatar_image = avatar_image
-        self.saiverse_home = Path.home() / ".saiverse"
+        from data_paths import get_saiverse_home
+        self.saiverse_home = get_saiverse_home()
         self.persona_log_path = (
             self.saiverse_home / "personas" / self.persona_id / "log.json"
         )
