@@ -1,276 +1,4713 @@
-# SAIVerse Discordベースアーキテクチャ 設計ドキュメント (v5)
+# SAIVerse Discord Connector 設計ドキュメント (v6)
 
 ## 1. はじめに
 
-このドキュメントは、SAIVerseのCity間通信アーキテクチャに関する新しい提案「Discordベースアーキテクチャ」の設計草案を記述するものです。
+### 1.1. 背景
 
-背景として、自前でのサーバ構築（SDS案）やP2Pネットワーク構築（P2P案）には、セキュリティ、開発コスト、運用負荷の面で多くの課題が存在します。本提案は、既存の堅牢なメッセージングプラットフォームであるDiscordを基盤として利用することで、これらの課題を抜本的に解決し、迅速かつ安全に必須要件を実現することを目的とします。
+旧アーキテクチャ（v5以前）では、SAIVerse Botを24時間クラウド上で稼働させ、WebSocket経由でローカルアプリケーションと通信する複雑な仕組みを採用していました。しかし、以下の課題から実用化に至りませんでした：
 
-### 1.1. 用語定義
+- Bot運用の複雑性（サーバホスティング、認証フロー、再同期機構）
+- 開発・保守コストの増大
+- City間通信の過剰な抽象化
 
-本ドキュメントでは、混乱を避けるため以下の用語を定義します。
+### 1.2. 新アプローチ: 中央リレーサーバー方式
 
-*   **SAIVerse Web:** Discordサーバ全体を指す、SAIVerseの公開活動空間。
-*   **SAIVerse Bot:** SAIVerse Web上で唯一稼働する公式Bot。メッセージ中継やオブジェクト管理など、後述する責務を担う。
-*   **ローカルアプリケーション:** 各ユーザーのPCで動作する単一のPythonプロセス。内部に複数のCityを管理し、SAIVerse Botとの全ての通信を担う。
-*   **Public Web City:** SAIVerse Web（Discord）上にチャンネルとして作成される、公開されたCity。
-*   **Public Local City:** `ローカルアプリケーション`内で稼働するCityの一種。公開フラグがONであり、対応する`Public Web City`のホスト役を務める。
-*   **Private City:** `ローカルアプリケーション`内で稼働するCityの一種。公開フラグがOFFであり、訪問は受け入れないが、訪問者として他の`Public Web City`に参加することは可能。
+本v6では、**中央リレーサーバー方式**を採用します。
 
-## 2. アーキテクチャ比較
-
-（v4から変更なし）
-
-### 2.1. 各アーキテクチャの概要
-
-*   **SDS案 (現行の中央集権案):** 自前で構築・運用する中央サーバが、全Cityの情報を管理し、通信を仲介する方式。
-*   **P2P案 (`implementation.md`):** `libp2p`フレームワークを利用し、City間で直接通信を行う分散型ネットワークを構築する方式。
-*   **Discord案 (本提案):** Discordをメッセージング基盤とし、SAIVerse Botが仲介役となって各ユーザーの`ローカルアプリケーション`とSAIVerse Webを接続する方式。
-
-### 2.2. メリット/デメリット比較表
-
-| 評価軸 | SDS案 (自前サーバ) | P2P案 (`libp2p`) | **Discord案 (本提案)** |
-| :--- | :--- | :--- | :--- |
-| **① 堅牢なセキュリティ** | △ (全て自前実装) | ○ (プロトコルは強固) | **◎ (Discordに依存)** |
-| **② アーキテクチャのシンプルさ** | ○ (比較的単純) | △ (非常に複雑) | **◎ (最もシンプル)** |
-| **③ システムのロバストさ** | × (SPOF) | ◎ (分散型で強固) | **× (DiscordがSPOF)** |
-| **④ 将来的な拡張性** | ○ (自前で自由に開発) | ◎ (標準技術で高い) | **△ (Discordに依存)** |
-| **単一障害点の排除** | × (サーバがSPOF) | ◎ (達成可能) | **× (DiscordがSPOF)** |
-| **通信の秘匿性** | ◎ (End-to-End可能) | ◎ (End-to-End) | **△ (vs プラットフォーム)** |
-| **開発・運用コスト** | △ (サーバ費用/保守) | △ (実装の複雑性) | **◎ (最も低い)** |
-
-### 2.3. 結論
-
-Discord案は、「単一障害点の排除」と「プラットフォームからの秘匿性」をトレードオフとすることで、最優先事項である**①セキュリティ**と**②シンプルさ**を圧倒的なレベルで両立できる。開発・運用コストを劇的に削減し、迅速に必須要件を実現できるため、現時点で最も合理的かつ推奨されるアーキテクチャと結論付けます。
+**コンセプト:**
+- 開発者が1つのDiscord Botとリレーサーバーを運用
+- ユーザーはDiscord OAuth2でログインするだけ（Bot Token取得不要）
+- ユーザー側はgit cloneのみで導入完了
+- Public CityをDiscordチャンネルにマッピングし、他ユーザーのペルソナが訪問可能
 
 ---
 
-## 3. Discordベースアーキテクチャ仕様 (草案)
+## 2. Discord API 認証方式
+
+### 2.1. 中央リレーサーバー方式
+
+ユーザーがBot Tokenを取得する必要がない、シンプルな認証方式を採用。
+
+| 概念 | 説明 | 本アーキテクチャでの扱い |
+|------|------|------------------------|
+| **Bot Token** | Discord Developer Portalで発行される認証トークン | **開発者のみ管理**（リレーサーバー側） |
+| **Discord OAuth2** | ユーザー認証 | **必要** - ユーザーがDiscordでログイン |
+| **JWTセッショントークン** | リレーサーバーが発行する認証トークン | **必要** - 30日間有効 |
+
+### 2.2. アーキテクチャの変遷
+
+```
+旧アーキテクチャ (v5) - 中央サーバー方式:
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│ SAIVerse     │────▶│ Bot Server   │────▶│ Discord      │
+│ (ローカル)    │ WS  │ (クラウド24h) │ WS  │              │
+└──────────────┘     └──────────────┘     └──────────────┘
+                     ↑ 運用コスト大、ユーザーがBot作成必要
+
+v6初期案 - ローカル直接接続（廃止）:
+┌──────────────┐                          ┌──────────────┐
+│ SAIVerse     │─────────────────────────▶│ Discord      │
+│ (ローカル)    │  直接WebSocket接続        │              │
+└──────────────┘  ↑ ユーザーがBot作成必要   └──────────────┘
+
+新アーキテクチャ (v6) - 中央リレーサーバー方式:
+┌──────────────┐                ┌──────────────────┐              ┌──────────────┐
+│ SAIVerse     │── WebSocket ──▶│ Relay Server     │── WebSocket ──▶│ Discord      │
+│ (ローカル)    │                │ (開発者運用)       │                │              │
+└──────────────┘                └──────────────────┘              └──────────────┘
+       │                               ▲
+       │ Discord OAuth2               │
+       └──────────────────────────────┘
+       ↑ ユーザーはgit cloneのみ、Bot作成不要
+```
+
+### 2.3. Discord OAuth2 認証フロー
+
+```
+1. ユーザー: SAIVerse UIで「Discordでログイン」をクリック
+2. ブラウザ: Discord OAuth2認証ページにリダイレクト
+3. ユーザー: SAIVerseアプリを認可
+4. Discord: コールバックでauthorization codeを返却
+5. リレーサーバー: code→access_token交換
+6. リレーサーバー: JWTセッショントークン発行（30日有効）
+7. SAIVerse: JWTを保存し、WebSocket接続時に使用
+```
+
+**OAuth2スコープ:**
+- `identify`: Discord User ID、ユーザー名
+- `guilds`: 参加サーバー一覧（訪問先Public City選択用）
+
+**JWTセッショントークン:**
+```python
+{
+    "sub": "123456789012345678",    # Discord User ID
+    "username": "Alice#1234",
+    "guilds": ["guild_id_1", "guild_id_2"],
+    "iat": 1704789600,
+    "exp": 1707381600,              # 30日間有効
+}
+```
+
+### 2.4. リレーサーバーの責務
+
+| 責務 | 説明 |
+|------|------|
+| Discord Bot接続維持 | 開発者のBot Tokenで24時間接続 |
+| WebSocket中継 | 複数ユーザーからの接続を受付・中継 |
+| ユーザー認証 | Discord OAuth2トークン検証、JWT発行 |
+| メッセージルーティング | SAIVerse ⟷ Discord間のメッセージ転送 |
+
+---
+
+## 3. アーキテクチャ概要
 
 ### 3.1. 全体構成
 
-本アーキテクチャは、クラウド上で24時間稼働する単一の`SAIVerse Bot`と、各ユーザーのPCで動作する複数の`ローカルアプリケーション`で構成されます。
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    SAIVerse ローカルアプリケーション               │
+│                                                                 │
+│  ┌─────────────────┐    ┌─────────────────┐                    │
+│  │  Private City   │    │  Public City    │◄──── 他ユーザーの   │
+│  │  (非公開)        │    │  (公開)          │      ペルソナ + Discord │
+│  │                 │    │                 │      ユーザーが参加  │
+│  │                 │    │                 │                    │
+│  │  ┌──────────┐  │    │  ┌──────────┐  │                    │
+│  │  │ Building │  │    │  │ Building │◄─┼── Discord スレッド  │
+│  │  └──────────┘  │    │  └──────────┘  │    にマッピング      │
+│  └─────────────────┘    └────────┬────────┘                    │
+│                                  │                             │
+│  ┌───────────────────────────────┴───────────────────────────┐ │
+│  │                    discord_connector                       │ │
+│  │                                                           │ │
+│  │  ・RelayClient: リレーサーバーへのWebSocket接続            │ │
+│  │  ・Discord OAuth2認証                                     │ │
+│  │  ・メッセージ送受信（リレーサーバー経由）                    │ │
+│  │  ・チャンネル/スレッド ⟷ City/Building マッピング           │ │
+│  └───────────────────────────────┬───────────────────────────┘ │
+└──────────────────────────────────┼──────────────────────────────┘
+                                   │ WebSocket (JWT認証)
+                                   ▼
+                         ┌──────────────────┐
+                         │  Relay Server    │
+                         │  (開発者運用)      │
+                         │                  │
+                         │  ・Discord Bot   │
+                         │  ・OAuth2認証    │
+                         │  ・メッセージ中継 │
+                         └────────┬─────────┘
+                                  │ Discord Gateway WebSocket
+                                  ▼
+                         ┌──────────────────┐
+                         │  Discord Server  │
+                         │  (SAIVerse Web)  │
+                         │                  │
+                         │  #public-city-a  │◄── チャンネル
+                         │    └─ thread-1   │◄── スレッド (Building)
+                         │    └─ thread-2   │
+                         └──────────────────┘
+```
 
-各`ローカルアプリケーション`は、起動時に`SAIVerse Bot`との間に**単一のSecure WebSocket (`wss://`) 接続**を確立します。以降、そのユーザーに関連する全ての通信は、この単一の接続を通じて多重化されて行われます。
+### 3.2. City の種類
 
-![Architecture Diagram](https://i.imgur.com/example.png)  <!-- 図のプレースホルダ -->
+| City種別 | 公開状態 | Discordマッピング | 参加可否 |
+|----------|----------|-------------------|----------|
+| **Private City** | 非公開 | なし | 不可（ローカルのみ） |
+| **Public City** | 公開 | Discordチャンネル | 可能（他ユーザーのペルソナ + Discordユーザー） |
 
-### 3.2. コンポーネント詳細
+### 3.3. マッピング構造
 
-#### 3.2.1. SAIVerse Bot
-
-SAIVerseのルールを理解しない、忠実で安全なメッセージ中継役（Secure Message Broker）としての責務を担います。
-
-*   **責務一覧:**
-    *   **Discordインターフェース:** Discord APIに接続し、イベント受信、メッセージ投稿、チャンネル/スレッドの管理を行う。
-    *   **メッセージルーティング:** Discordイベントの発生源を特定し、それを管理するオーナーの`ローカルアプリケーション`へWebSocket経由でイベント情報を転送する。また、`ローカルアプリケーション`からの投稿指示を実行する。
-    *   **クライアント接続管理:** WebSocketサーバとして、複数の`ローカルアプリケーション`からの接続を待ち受け、認証し、管理する。
-    *   **構造情報の永続化:** `Public Web City (チャンネルID)`と、それを管理するオーナーの対応関係など、動作に必要な最小限の構造情報をデータベースに保存する。
-    *   **セキュリティ:** Bot自身のAPIトークン管理、`wss://`による通信暗号化、APIレートリミットの遵守。
-*   **動作環境:**
-    *   PaaS (Platform as a Service) である **Render** の利用を推奨。GitHubリポジトリからの自動デプロイが可能で、無料プランも提供されているため、開発初期から運用までスムーズに対応できる。
-
-#### 3.2.2. ローカルアプリケーション
-
-ユーザーのPCで動作する単一のプロセス。内部に複数のCityを管理します。
-
-*   **全体的な役割:**
-    *   起動時に`SAIVerse Bot`との間に単一のWebSocket接続を確立・維持する。
-    *   この接続を介して、管理下の全City（Public/Private問わず）に関する通信を行う。
-*   **Public Local City (公開City):**
-    *   対応する`Public Web City`の「本体」として、訪問者の受け入れや会話の進行管理（`ConversationManager`の実行）を担う。
-    *   Botから転送されてくる、自身がホストする`Public Web City`でのイベントを処理する。
-*   **Private City (非公開City):**
-    *   訪問は受け入れないが、所属するPersonaが他の`Public Web City`へ「訪問者」として参加する際のクライアントとして機能する。
-    *   訪問先の`Public Web City`での会話に参加するため、Bot経由で通信を行う。
-
-### 3.3. 主要機能の実装方針
-
-#### 3.3.1. 招待制コミュニティ
-Discord標準の「サーバ招待」機能をそのまま利用します。
-
-#### 3.3.2. 会話進行とPersonaの参加
-1.  ユーザーや訪問中のPersonaが`Public Web City`内の`Building`（スレッド）にメッセージを投稿。
-2.  `SAIVerse Bot`がメッセージを検知し、そのBuildingを管理する`Public Local City`のオーナーの`ローカルアプリケーション`へ転送。
-3.  `ローカルアプリケーション`内の`ConversationManager`が会話を処理し、次の発言者を決定する。
-4.  **次の発言者が自CityのAIの場合:** `ローカルアプリケーション`が応答を生成し、`SAIVerse Bot`に投稿を指示する。
-5.  **次の発言者が訪問中のPersonaの場合:** `ローカルアプリケーション`は、`SAIVerse Bot`に対し「（訪問者Personaの持ち主であるユーザー）の`ローカルアプリケーション`へ発言を促してください」と中継を依頼する。
-6.  依頼を受けた`SAIVerse Bot`は、該当するユーザーの`ローカルアプリケーション`へリクエストを転送する。
-
-#### 3.3.3. データ同期 (記憶の持ち帰り)
-訪問先の`Public Web City`での活動記憶を、Personaの故郷へ安全かつ確実に持ち帰るための、信頼性の高い転送プロトコルを定義します。
-
-*   **プロトコル概要:**
-    単純なバイナリ転送ではなく、ハンドシェイク、チャンク分割、完了検証のステップを踏むことで、大きなデータでも破損なく転送することを目指します。
-
-*   **転送フロー:**
-    1.  **転送開始ハンドシェイク (JSON):**
-        *   送信側は、まず記憶データを送信する前に、転送内容のメタデータ（`transfer_id`, `total_size`, `total_chunks`, `checksum`）を含む`memory_sync_initiate`メッセージをBot経由で受信側に送ります。
-    2.  **受信応答 (JSON):**
-        *   受信側は、メタデータを見て転送を受け入れ可能か判断し、`memory_sync_ack`（受信準備OK）または`nack`（拒否）を返します。
-    3.  **データチャンク転送 (Binary):**
-        *   `ack`を受け取った送信側は、記憶データを固定サイズの**チャンク**に分割し、順次バイナリメッセージとして送信します。各チャンクには、どの転送の何番目のチャンクかを識別するためのヘッダ情報を付与します。
-    4.  **完了報告とデータ検証 (JSON):**
-        *   受信側は、全チャンクを組み立てた後、全体のサイズとハッシュ値（`checksum`）を計算し、メタデータと一致するか**検証**します。
-        *   検証結果（成功/失敗）を`memory_sync_complete`メッセージで送信側に報告します。
-
-*   **再送制御:**
-    *   v1では、検証失敗時や通信切断により転送が中断した場合は、**転送全体を最初からやり直す**シンプルな方式を採用します。
-
-### 3.4. セキュリティモデル
-
-#### 3.4.1. Discordに依存するセキュリティ
-*   ユーザー認証、ロールベース認可、クライアント-サーバ間のTLS暗号化、大規模DDoS対策。
-
-#### 3.4.2. 自前で実装・考慮すべきセキュリティ
-*   **Bot-ローカル間の通信保護:** `wss://` (Secure WebSocket) を必須とし、通信を暗号化します。`ローカルアプリケーション`の接続時には、一意の認証トークンを検証します。
-*   **Botトークンの厳重な管理:** Discord BotのAPIトークンは、環境変数やシークレット管理サービスで厳重に管理します。
-*   **TLS設定:** SAIVERSE_WS_TLS_ENABLED を 1 に設定すると、SAIVERSE_WS_TLS_CERTFILE と SAIVERSE_WS_TLS_KEYFILE で指定した証明書・秘密鍵を読み込み、Bot-ローカル間を wss:// で暗号化する。クライアント証明書を利用する場合は SAIVERSE_WS_TLS_CLIENT_AUTH と SAIVERSE_WS_TLS_CA_FILE を併用する。
-*   **入力値の検証:** `SAIVerse Bot`がDiscordから受け取った全ての入力データは、`ローカルアプリケーション`で処理する前に必ず検証・サニタイズします。
-*   **クライアント側のセキュリティ責務:**
-    *   **認証トークンの安全な保管:** `ローカルアプリケーション`がBotとの接続に使う認証トークンは、ユーザーのPC上で安全に保管される必要があります。OSの資格情報マネージャー（macOSのKeychain, WindowsのCredential Managerなど）の利用を推奨します。
-    *   **ユーザーPC環境の保護:** ウイルス対策ソフトの導入やOSのアップデートなど、ユーザー自身のPC環境のセキュリティ維持が、`ローカルアプリケーション`の安全性に直結します。
-    *   **アプリケーションのアップデート:** 開発者は依存関係の脆弱性を継続的に監視し、修正版を迅速にリリースする必要があります。ユーザーは、後述のアナウンスがあった際に速やかにアプリケーションをアップデートすることが求められます。
-
-#### 3.4.3. 認証・認可フロー (OAuth2)
-
-`ローカルアプリケーション`が、どのDiscordユーザーに紐づくかを安全に認証するため、業界標準である**OAuth2の認可コードフロー**を採用します。これにより、ユーザーのDiscordパスワードに一切触れることなく、高いセキュリティを実現します。
-
-フローの概要は以下の通りです。
-
-1.  **ログイン開始:**
-    *   ユーザーが`ローカルアプリケーション`でログインを開始すると、アプリは自動的にブラウザを起動し、`SAIVerse Bot`が提供するログイン用Webページにアクセスします。
-
-2.  **Discordでの認証:**
-    *   `SAIVerse Bot`のWebページは、ユーザーをDiscordの公式認証画面にリダイレクトします。
-    *   ユーザーは使い慣れた画面で「SAIVerse」アプリを認証します。
-
-3.  **SAIVerse認証トークンの生成:**
-    *   認証後、Discordは一時的な「認可コード」を発行し、`SAIVerse Bot`に渡します。
-    *   Botは、その認可コードを使ってDiscordから正規のユーザーIDを取得します。
-    *   Botは、そのDiscord IDに紐づく、**独自の「SAIVerse認証トークン」**（長期間有効）を生成し、自身のデータベースにハッシュ値を保存します。
-
-4.  **トークンの受け渡しと保管:**
-    *   Botは、生成した「SAIVerse認証トークン」をブラウザ画面に表示します。
-    *   ユーザーは、そのトークンをコピーし、`ローカルアプリケーション`のプロンプトに貼り付けます。
-    *   `ローカルアプリケーション`は、受け取ったトークンをOSの資格情報マネージャー（Keychain, Credential Manager等）に安全に保管します。
-
-**普段の接続:**
-
-一度この設定が完了すれば、`ローカルアプリケーション`は起動の都度、資格情報マネージャーから「SAIVerse認証トークン」を読み出し、WebSocket接続時の認証ヘッダーに利用します。`SAIVerse Bot`は、このトークンを検証することで、接続してきたユーザーを特定します。
-
-### 3.5. 運用・メンテナンス
-
-Discordベースアーキテクチャは、運用面においても大きなメリットをもたらします。
-
-*   **迅速な情報伝達:**
-    *   SAIVerse Web (Discordサーバ) に、管理者のみ書き込み可能な`#announcements`チャンネルを設けます。
-    *   `ローカルアプリケーション`の依存関係に脆弱性が発見された場合や、緊急のメンテナンスが必要になった場合に、`@everyone`メンションを用いて全ユーザーにプッシュ通知で警告や指示を迅速に伝達できます。
-*   **計画的メンテナンスの告知:**
-    *   `SAIVerse Bot`のアップデートなど、計画的なメンテナンスについても同チャンネルで事前に告知し、ユーザーへの影響を最小限に抑えることができます。
-*   **コミュニティとの連携:**
-    *   開発者からの透明性の高い情報共有は、ユーザーコミュニティとの信頼関係を構築し、プロジェクトの健全な発展に貢献します。
+```
+Discord                          SAIVerse
+────────────────────────────────────────────────────
+Server (SAIVerse Web)      ──    (グローバル空間)
+  │
+  ├─ #public-city-alice    ──    Public City (Alice所有)
+  │    ├─ thread-cafe      ──      Building: カフェ
+  │    ├─ thread-park      ──      Building: 公園
+  │    └─ thread-library   ──      Building: 図書館
+  │
+  └─ #public-city-bob      ──    Public City (Bob所有)
+       ├─ thread-studio    ──      Building: スタジオ
+       └─ thread-garden    ──      Building: 庭園
+```
 
 ---
 
-### 3.6. エラー／再送シナリオと再同期仕様
+## 4. 同期仕様
 
-Discordベース連携では、Bot・ローカル双方が以下の機構を備え、イベント欠落や通信断が発生しても整合性を回復できるようにする。
+### 4.1. 起動時の同期フロー
 
-1. **イベントIDとACK**
-    * すべてのBot→ローカルイベントに `payload.event_id`（UUID）と `payload.channel_seq`（チャンネル単位の連番）を付与。
-    * ローカル側は処理完了後に `ack` コマンドを返信し、Botの `ConnectionManager` が未ACKキューを管理する。
-    * 環境変数 `SAIVERSE_PENDING_REPLAY_LIMIT`（既定250件）と `SAIVERSE_REPLAY_BATCH_SIZE`（既定50件）がキュー長制限と再送単位を制御する。
+```
+SAIVerse起動
+    │
+    ▼
+┌─────────────────────────────────┐
+│ 1. Discord WebSocket接続確立     │
+│    - Bot Tokenで認証            │
+│    - on_ready イベント待機       │
+└─────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────┐
+│ 2. マッピング情報の読み込み       │
+│    - 設定ファイルからチャンネルID  │
+│    - Public City ⟷ チャンネル    │
+│    - Building ⟷ スレッド         │
+└─────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────┐
+│ 3. 既存メッセージの同期          │
+│    - 各スレッドの履歴を取得       │
+│    - ローカルログとの差分を特定   │
+│    - 新規メッセージをログに追記   │
+└─────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────┐
+│ 4. リアルタイム同期開始          │
+│    - on_message でメッセージ受信 │
+│    - 訪問ペルソナの受け入れ開始   │
+└─────────────────────────────────┘
+```
 
-2. **自動リプレイと重複防止**
-    * 再接続時、Botは未ACKイベントを即座に再送する。ローカル `DiscordGatewayOrchestrator` は `event_id` を記録し、重複イベントを検知した場合でも即ACKして無害化する。
-    * ローカルはハートビート維持および指数バックオフ再接続（`GatewaySettings`）を行い、成功後に未処理イベントを順に処理する。
+### 4.2. 停止時の切断フロー
 
-3. **バックログ閾値と再同期**
-    * Bot側未ACKキューが上限を超過すると `resync_required` イベントを送信。ローカルは `state_sync_request` を返し、Botが溜まっているイベントをフルリプレイする。
-    * `state_sync_ack` には残キュー件数が含まれ、ダッシュボード監視やオペレーション判断に利用する。
-    * `SAIVerseGatewayAdapter` は `gateway_handle_resync_required` を経由し、本体ロジックへ再同期要求を通知できる。
+```
+SAIVerse停止要求
+    │
+    ▼
+┌─────────────────────────────────┐
+│ 1. 訪問ペルソナへの通知          │
+│    - 退出メッセージ送信          │
+│    - セッションクローズ          │
+└─────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────┐
+│ 2. Discord WebSocket切断        │
+│    - client.close() 呼び出し    │
+│    - 接続状態をオフラインに      │
+└─────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────┐
+│ 3. Public City 訪問不可に       │
+│    - 他ユーザーからの訪問を拒否  │
+│    - Discord上では閲覧のみ可能   │
+└─────────────────────────────────┘
+```
 
-4. **エラー通知とリトライ**
-    * ハートビート断・JSONパース失敗はログに記録し、安全側に倒して接続をクローズ。再接続後は未ACKキューから再送する。
-    * メモリ同期（`memory_sync_*`）が途中で失敗した場合は再送を試み、それでも復旧できない場合は再同期に切り替える。
+### 4.3. リアルタイム同期の仕組み
 
-5. **テレメトリ**
-    * Bot：未ACK件数、`resync_required` 発生数、再送試行回数をメトリクス収集。
-    * ローカル：再接続試行回数、`state_sync_request` 所要時間、ハートビート断回数を記録し、フェーズ7以降の監視対象とする。
+#### 4.3.1. メッセージのrole種別
 
-実装は `discord_gateway/bot/connection_manager.py`、`discord_gateway/bot/ws_server.py`、`discord_gateway/orchestrator.py` を中心に提供し、`pytest discord_gateway/tests` に網羅テストを追加済みである（大容量／欠損シナリオは `test_orchestrator.py::test_memory_sync_large_transfer`、`test_orchestrator.py::test_memory_sync_duplicate_chunk_ack_without_duplicate_processing` を参照）。
+| role | 送信元 | 識別方法 | 処理 |
+|------|-------|---------|------|
+| `user` | Discordユーザー（人間） | `author.bot == False` | ペルソナに通知、応答トリガー |
+| `persona_remote` | 他ユーザーのペルソナ | `author.bot == True` + 他BotID + Embed | ペルソナに通知、応答トリガー |
+| `persona_local` | 自分のペルソナ | `author.bot == True` + 自BotID + sent_messages照合 | スキップ（エコー防止） |
+| `system` | システム通知 | `author.bot == True` + 通知色Embed | ログのみ |
+
+#### 4.3.2. 処理フロー
+
+```python
+# discord_connector 内部の処理イメージ
+
+class DiscordConnector:
+    async def on_message(self, message: discord.Message):
+        """Discordからメッセージを受信したとき"""
+
+        # 1. メッセージ送信元を識別
+        source = self._identify_message_source(message)
+
+        # エコー防止: 自分のペルソナが送信したメッセージはスキップ
+        if source.type == "echo":
+            return
+
+        # 2. マッピングからBuilding特定
+        building = self.get_building_by_thread_id(message.channel.id)
+        if not building:
+            return  # マッピングされていないスレッド
+
+        # 3. メッセージをSAIVerse形式に変換
+        saiverse_message = {
+            "role": source.role,  # "user" or "persona_remote"
+            "content": source.content,
+            "author": source.author_name,
+            "author_id": source.author_id,
+            "timestamp": message.created_at.isoformat(),
+            "metadata": {
+                "source": "discord",
+                "message_id": str(message.id),
+                "channel_id": str(message.channel.id),
+                "persona_id": source.persona_id,  # ペルソナの場合のみ
+                "city_id": source.city_id,        # ペルソナの場合のみ
+            }
+        }
+
+        # 4. Buildingログに追記
+        building.history_manager.add_message(saiverse_message)
+
+        # 5. ペルソナのログにも追記（聞いた情報として）
+        for persona in building.occupants:
+            persona.sai_memory.append_message(saiverse_message)
+
+        # 6. ペルソナの応答をトリガー（user/persona_remote の場合）
+        if source.role in ("user", "persona_remote"):
+            await self.trigger_persona_response(building, message)
+```
 
 ---
 
-## 4. 実装方針: 疎結合アーキテクチャ
+## 5. ログ同期仕様
 
-SAIVerse本体の既存ロジックへの影響を最小限に抑え、他の開発者とのコンフリクトを避けつつ独立して開発を進めるため、**「ゲートウェイパターン」**を採用します。
+### 5.1. ログファイルの種類
 
-### 4.1. `DiscordGateway`モジュール
+既存の`run_pulse`仕様に準拠し、以下のログファイルに記録します：
 
-Discordとの通信に関する全機能を、`discord_gateway`という独立したPythonモジュール（ディレクトリ）に集約します。
+| ログ種別 | パス | 内容 |
+|----------|------|------|
+| **Building履歴** | `SAIVerseManager.building_histories` | Building内の全会話（メモリ） |
+| **SAIMemory** | `~/.saiverse/personas/{id}/memory.db` | ペルソナの構造化記憶 |
 
-*   **責務:**
-    *   `SAIVerse Bot`へのWebSocket接続の管理（接続、切断、再接続）。
-    *   `3.4.3`で定義したOAuth2認証フローの実行と、認証トークンの管理。
-    *   DiscordイベントとSAIVerse内部オブジェクトの相互翻訳。
-*   **主要な環境変数:**
-    *   SAIVERSE_GATEWAY_WS_URL — Gatewayクライアントが接続するBotのWebSocketエンドポイント。
-    *   SAIVERSE_GATEWAY_TOKEN — GatewayクライアントとBotのハンドシェイクに利用するSAIVerse認証トークン。
-    *   SAIVERSE_GATEWAY_RECONNECT_INITIAL / SAIVERSE_GATEWAY_RECONNECT_MAX — 再接続リトライの初期・最大ディレイ。
-    *   SAIVERSE_GATEWAY_INCOMING_MAXSIZE / SAIVERSE_GATEWAY_OUTGOING_MAXSIZE — Gateway内部で使用するQueueの最大サイズ（0は無制限）。
-    *   SAIVERSE_GATEWAY_MAX_PAYLOAD — WebSocketで受信可能な最大ペイロードサイズ（バイト）。
-*   **訪問ペルソナ管理:**
-*   **記憶持ち帰り:**
-    *   退室時に `memory_sync_initiate` → `memory_sync_chunk` → `memory_sync_complete` を順に送信し、転送サイズやSHA-256チェックサムを含むメタデータで検証できるようにする。
-    *   チャンクは環境変数 `SAIVERSE_GATEWAY_MEMORY_CHUNK_SIZE` でサイズを調整し、失敗時は再送（再度ハンドシェイク）で回復させる。
-    *   GatewayはBotから届けられる訪問者イベントを VisitorRegistry で保持し、DiscordユーザーIDからPersona/所有者を特定します。
-    *   イベント種別（join/update/remove）を通じてCity内での滞在先を同期し、会話や記憶同期処理の起点に利用します。
-    *   Gatewayは訪問者のメッセージを検出すると、本体アダプタへ 
-ole=persona_remote として通知し、RemotePersonaProxy経由で応答を取得します。
-*   **SAIVerseアダプタ:**
-    *   Gateway側では `DiscordGatewayOrchestrator` と `SAIVerseGatewayAdapter` が本体ロジックとの橋渡しを担い、`GatewayHost` が `SAIVerseManager` への呼び出しを集約します。
-    *   human / persona / memory 向けイベントは `GatewayHostAdapter` を通じて受け渡し、最小限の executor で同期コードへ委譲します。
-*   **ディレクトリ構成案:**
-    ```
-    SAIVerse/
-    ├── discord_gateway/      <-- 新設
-    │   ├── __init__.py
-    │   ├── gateway_service.py  # メインロジック
-    │   ├── client.py           # WebSocketクライアント
-    │   ├── translator.py       # イベント/コマンドの通訳
-    │   ├── auth.py             # 認証フロー
-    │   └── config.py           # 設定
-    ├── ... (既存のファイル)
-    ```
+### 5.2. Building履歴への記録フロー
 
-### 4.2. 本体との連携
+#### 5.2.1. データフロー
 
-`DiscordGateway`とSAIVerse本体は、**2つの非同期キュー (`asyncio.Queue`)** を介してのみ通信します。これにより、お互いの実装を完全に分離します。
+```
+Discord WebSocket (on_message)
+    │
+    ▼
+MessageSource識別 (_identify_message_source)
+    │
+    ▼
+channel_id → building_id 変換 (mapping参照)
+    │
+    ▼
+SAIVerseManager.append_discord_message_to_building()
+    │
+    ▼
+building_histories[building_id].append(message)
+```
 
-*   `incoming_queue`: `DiscordGateway`がBotから受信したイベントを翻訳し、このキューに入れます。SAIVerse本体はここからイベントを取得して処理します。
-*   `outgoing_queue`: SAIVerse本体がAIの発言などのアクションを希望する際、指示オブジェクトをこのキューに入れます。`DiscordGateway`はこれを取り出してBotへコマンドを送信します。
-    *   代表的なコマンドは `post_message` で、`channel_id` / `content` / 任意の `persona_id`・`building_id`・`city_id` を含みます。Bot側では接続中オーナーを検証し、最大文字数（`SAIVERSE_MAX_MESSAGE_LENGTH`）超過分は自動トリムした上でDiscordへ投稿します。権限不足や未登録チャンネルへの送信は拒否され、警告ログを残します。
-    *   記憶同期ハンドシェイクでは、memory_sync_ack コマンドの payload に transfer_id と status(ok/error)、失敗時は reason を含めて返信し、受信可否を明示する。
-    *   記憶同期完了後は、memory_sync_complete コマンドの payload に transfer_id と status(ok/error) を載せ、失敗時は reason を添えて検証結果を共有する。
+#### 5.2.2. Building履歴メッセージ形式
 
-実装では `discord_gateway.ensure_gateway_runtime(manager)` を呼び出すことで、`GatewayRuntime` を初期化しつつ `incoming_queue` / `outgoing_queue` をブリッジする `GatewayBridge` が生成されます（`manager.gateway_bridge` 経由で参照可能）。`SAIVERSE_GATEWAY_ENABLED=1` が設定されていない場合は自動的に無効化されるため、本番／開発環境で容易に切り替えられます。
+```python
+{
+    "role": "user",  # "user" | "assistant" | "host"
+    "content": "こんにちは、調子はどう？",
+    "timestamp": "2025-01-09T14:30:00Z",
+    "metadata": {
+        "source": "discord",
+        "discord_message_id": "1234567890123456789",
+        "discord_channel_id": "9876543210987654321",
+        "author": {
+            "type": "user",  # "user" | "persona"
+            "id": "discord_user_id or persona_id",
+            "name": "Alice",
+        }
+    }
+}
+```
 
-この設計により、SAIVerse本体が変更されるのは、主に`main.py`での`DiscordGateway`の初期化と、メインループでのキューの監視処理のみに限定されます。
+#### 5.2.3. roleマッピング
 
-### 4.3. テスト方針
+| MessageSource.type | MessageSource.role | Building履歴 role | 処理 |
+|-------------------|-------------------|-------------------|------|
+| `user` | `user` | `user` | 記録 |
+| `persona` | `persona_remote` | `assistant` | 記録 |
+| `persona` | `persona_local` | - | スキップ（run_pulse内で記録済み） |
+| `system` | `system` | `host` | 記録 |
+| `echo` | - | - | スキップ（自分の送信） |
 
-`DiscordGateway`のテストは、モジュール内で完結させることを目指します。
+#### 5.2.4. 実装
 
-*   **単体テスト:** `translator.py`の翻訳ロジックや、`auth.py`のトークン管理機能は、独立してテストします。
-*   **結合テスト:** `gateway_service.py`のメインロジックは、WebSocketエンドポイントをモック化（偽のサーバを立てる）することでテストします。これにより、実際の`SAIVerse Bot`に接続することなく、「Botからのイベント受信 → キューへの投入」や「キューからの指示取得 → Botへのコマンド送信」といった一連のフローを自動テストできます。
-    *   実装済みの `scripts/run_discord_gateway_tests.py` を実行すると、CI と同じユニット／統合／負荷シナリオ（再送・再同期テストを含む）を一括で走らせることができます。
+```python
+# discord_connector/sync.py
 
-SAIVerse本体側のテストは、この`DiscordGateway`のテストとは独立して、従来通りキューにダミーデータを入れることで実行できます。
+async def _record_to_building_history(
+    self,
+    message_source: MessageSource,
+    channel_id: int,
+    discord_message_id: str,
+) -> None:
+    """DiscordメッセージをBuilding履歴に記録"""
 
-### 4.4. メリット
+    # 自分の送信メッセージはスキップ
+    if message_source.type == "echo":
+        return
 
-*   **高い独立性:** 本体ロジックと通信レイヤーが分離され、並行開発が容易になります。
-*   **テストの容易性:** 各コンポーネントを個別に、かつ自動でテストできます。
-*   **将来の拡張性:** 将来的にDiscord以外のプラットフォームへ対応する際、本体ロジックを変更することなく、新しい`Gateway`モジュールを差し替えるだけで対応できます。
+    # 自分のペルソナの発言はスキップ（run_pulse内で記録済み）
+    if message_source.type == "persona" and message_source.role == "persona_local":
+        return
+
+    mapping = self._mapping_db.get_mapping_by_channel(channel_id)
+    if not mapping:
+        return
+
+    role_map = {
+        ("user", "user"): "user",
+        ("persona", "persona_remote"): "assistant",
+        ("system", "system"): "host",
+    }
+    building_role = role_map.get((message_source.type, message_source.role))
+    if not building_role:
+        return
+
+    history_entry = {
+        "role": building_role,
+        "content": message_source.content,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "metadata": {
+            "source": "discord",
+            "discord_message_id": discord_message_id,
+            "discord_channel_id": str(channel_id),
+            "author": {
+                "type": message_source.type,
+                "id": message_source.author_id or message_source.persona_id,
+                "name": message_source.author_name,
+            }
+        }
+    }
+
+    self._manager.append_discord_message_to_building(mapping.building_id, history_entry)
+```
+
+### 5.3. ペルソナSAIMemoryへの記録フロー
+
+#### 5.3.1. 記録対象ペルソナの決定
+
+| シナリオ | 記録対象 | 理由 |
+|---------|---------|------|
+| ホスト側 | 該当Building内のローカルペルソナのみ | Building内の会話を記憶 |
+| 訪問者側 | 訪問中の自分のペルソナ | 訪問先での体験を記憶 |
+
+#### 5.3.2. 重複記録防止
+
+run_pulse内での記録とDiscord経由の記録が重複しないよう、以下のチェックを行う:
+
+1. **persona_local（自分のペルソナの発言）はスキップ**: run_pulse内で既に記録済み
+2. **discord_message_id による重複チェック**: SAIMemoryに同一message_idが存在する場合はスキップ
+
+```python
+def _is_already_recorded(self, adapter: SAIMemoryAdapter, discord_message_id: str) -> bool:
+    """同一Discord message_idが既に記録済みかチェック"""
+    # SAIMemoryのメタデータを検索
+    # 実装詳細は本体実装時に決定
+    pass
+```
+
+#### 5.3.3. システムメッセージの記録ポリシー
+
+ローカル稼働時の仕様に準拠:
+
+| メッセージ種別 | Building履歴 | SAIMemory |
+|---------------|-------------|-----------|
+| ユーザー発言 | ✅ 記録 | ✅ 記録 |
+| ペルソナ発言（リモート） | ✅ 記録 | ✅ 記録 |
+| ペルソナ発言（ローカル） | スキップ | スキップ |
+| 入退室通知 | ✅ 記録 | ❌ 記録しない |
+| ファイル転送通知 | ✅ 記録 | ❌ 記録しない |
+| エラー通知 | ❌ ログのみ | ❌ 記録しない |
+
+#### 5.3.4. SAIMemoryメッセージ形式
+
+```python
+{
+    "role": "user",  # "user" | "assistant"
+    "content": "こんにちは、調子はどう？",
+    "timestamp": "2025-01-09T14:30:00Z",
+    "metadata": {
+        "source": "discord",
+        "discord_message_id": "1234567890123456789",
+        "discord_channel_id": "9876543210987654321",
+        "building_id": "public_city_alice_living_room",
+        "author": {
+            "type": "user",
+            "id": "discord_user_id",
+            "name": "Alice",
+        },
+        "tags": ["conversation", "discord"],
+    }
+}
+```
+
+#### 5.3.5. 実装
+
+```python
+# discord_connector/sync.py
+
+async def _record_to_persona_memory(
+    self,
+    message_source: MessageSource,
+    channel_id: int,
+    discord_message_id: str,
+) -> None:
+    """DiscordメッセージをペルソナのSAIMemoryに記録"""
+
+    # エコー（自分の送信）はスキップ
+    if message_source.type == "echo":
+        return
+
+    # 自分のペルソナの発言はスキップ（run_pulse内で記録済み）
+    if message_source.type == "persona" and message_source.role == "persona_local":
+        return
+
+    # システムメッセージはSAIMemoryに記録しない（ローカル仕様準拠）
+    if message_source.type == "system":
+        return
+
+    mapping = self._mapping_db.get_mapping_by_channel(channel_id)
+    if not mapping:
+        return
+
+    # 記録対象ペルソナを特定
+    target_personas = self._get_target_personas_for_memory(channel_id)
+
+    # roleマッピング（SAIMemory形式）
+    memory_role = "user" if message_source.type == "user" else "assistant"
+
+    memory_message = {
+        "role": memory_role,
+        "content": message_source.content,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "metadata": {
+            "source": "discord",
+            "discord_message_id": discord_message_id,
+            "discord_channel_id": str(channel_id),
+            "building_id": mapping.building_id,
+            "author": {
+                "type": message_source.type,
+                "id": message_source.author_id or message_source.persona_id,
+                "name": message_source.author_name,
+            },
+            "tags": ["conversation", "discord"],
+        }
+    }
+
+    for persona_id in target_personas:
+        persona = self._manager.personas.get(persona_id)
+        if not persona or getattr(persona, "is_proxy", False):
+            continue
+
+        adapter = getattr(persona.history_manager, "memory_adapter", None)
+        if not adapter:
+            continue
+
+        # 重複チェック
+        if self._is_already_recorded(adapter, discord_message_id):
+            continue
+
+        adapter.append_building_message(
+            building_id=mapping.building_id,
+            message=memory_message,
+        )
+
+
+def _get_target_personas_for_memory(self, channel_id: int) -> List[str]:
+    """メッセージを記録すべきペルソナIDのリストを返す"""
+
+    mapping = self._mapping_db.get_mapping_by_channel(channel_id)
+    if not mapping:
+        return []
+
+    target_personas = []
+
+    # 1. ホスト側: 該当Building内のローカルペルソナのみ
+    if mapping.city_id == self._local_city_id:
+        building_occupants = self._manager.occupancy_manager.get_occupants(mapping.building_id)
+        for persona_id in building_occupants:
+            persona = self._manager.personas.get(persona_id)
+            if persona and not getattr(persona, "is_proxy", False):
+                target_personas.append(persona_id)
+
+    # 2. 訪問者側: 訪問中の自分のペルソナ
+    for visit_state in self._visit_tracker.get_active_visits():
+        if visit_state.discord_channel_id == channel_id:
+            target_personas.append(visit_state.persona_id)
+
+    return target_personas
+```
+
+### 5.4. 記録タイミングの統合
+
+```python
+async def _on_message(self, message: discord.Message) -> None:
+    """Discordメッセージ受信時のハンドラ"""
+
+    # 1. メッセージ送信元を識別
+    message_source = await self._identify_message_source(message)
+
+    # 2. アクセス制御チェック
+    if not await self._check_access_control(message_source, message.channel.id):
+        return
+
+    # 3. Building履歴に記録
+    await self._record_to_building_history(
+        message_source, message.channel.id, str(message.id)
+    )
+
+    # 4. ペルソナSAIMemoryに記録
+    await self._record_to_persona_memory(
+        message_source, message.channel.id, str(message.id)
+    )
+
+    # 5. 必要に応じてrun_pulseをトリガー
+    if message_source.type in ("user", "persona") and message_source.role != "persona_local":
+        await self._trigger_persona_response(message_source, message.channel.id)
+```
+
+### 5.5. 同期の整合性
+
+Discordスレッドの会話履歴とローカルBuilding履歴の整合性を保つため：
+
+1. **起動時**: Discord REST APIで履歴を取得し、ローカル履歴との差分を追記
+2. **稼働中**: WebSocketイベントでリアルタイムに追記
+3. **停止時**: 最終同期状態をメタデータとして保存（再開時の差分取得用）
+
+```json
+// ~/.saiverse/discord_connector/sync_state.json
+{
+  "channels": {
+    "1234567890": {
+      "last_message_id": "9999999999999999999",
+      "last_sync_at": "2025-01-09T15:00:00Z"
+    }
+  }
+}
+```
+
+### 5.6. ConversationManagerとの連携
+
+#### 5.6.1. 基本方針
+
+ConversationManagerは変更不要。Discord経由の会話同期はPlaybook内のツールで制御する。
+
+#### 5.6.2. 同期方式の違い
+
+| 対象 | 同期方法 | タイミング |
+|------|---------|-----------|
+| Host側 Building履歴 | WebSocket経由で常時同期 | `_on_message`で即時反映 |
+| Host側 ペルソナSAIMemory | WebSocket経由で常時同期 | `_on_message`で即時反映 |
+| Visitor側 SAIMemory | REST APIで取得 | `run_sea_auto()`時に`discord_sync_messages`で取得 |
+
+Host側はDiscord Connectorが常駐しており、WebSocket経由でメッセージを受信すると即座にBuilding履歴とSAIMemoryに反映される（5.2〜5.4参照）。
+
+Visitor側はDiscord Connectorを持たないため、`run_sea_auto()`が実行されたタイミングで`discord_sync_messages`ツールを呼び出し、REST API経由で最新メッセージを取得してSAIMemoryに記録する。
+
+#### 5.6.3. Visitor側のフロー
+
+```
+ConversationManager.trigger_next_turn()
+    │
+    ▼
+run_sea_auto() → meta_auto playbook
+    │
+    ▼
+discord_sync_messages ツール実行
+    ├→ Discord REST API で最新メッセージ取得（last_synced_message_id以降）
+    └→ Visitor側 SAIMemoryに記録
+    │
+    ▼
+LLMが履歴を見て発言を決定
+    │
+    ▼
+discord_send_message ツール実行
+```
+
+#### 5.6.4. discord_sync_messages ツール
+
+```python
+def discord_sync_messages(channel_id: int, limit: int = 50) -> dict:
+    """
+    Discord REST APIで最新メッセージを取得し、SAIMemoryに記録する。
+
+    Parameters:
+        channel_id: 同期対象のDiscordチャンネルID
+        limit: 取得するメッセージ数（デフォルト50）
+
+    Returns:
+        {
+            "synced_count": int,  # 新規同期したメッセージ数
+            "messages": List[dict],  # 同期したメッセージの要約
+            "last_message_id": str,  # 最新メッセージID
+        }
+
+    処理フロー:
+        1. connector.dbから last_synced_message_id を取得
+        2. Discord REST API で after=last_synced_message_id のメッセージを取得
+        3. 各メッセージをパースし、SAIMemory形式に変換
+        4. 重複チェック後、SAIMemoryに記録
+        5. last_synced_message_id を更新
+    """
+    pass
+```
+
+#### 5.6.5. Visitor同期状態の管理
+
+```sql
+-- connector.db に追加
+CREATE TABLE visitor_sync_state (
+    persona_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    last_synced_message_id TEXT,
+    last_synced_at TIMESTAMP,
+    PRIMARY KEY (persona_id, channel_id)
+);
+```
+
+#### 5.6.6. メッセージ変換
+
+Discord REST APIから取得したメッセージをSAIMemory形式に変換する：
+
+```python
+def _convert_discord_message_to_memory(self, discord_msg: dict) -> dict:
+    """Discordメッセージ → SAIMemory形式に変換"""
+
+    # Embedからペルソナ情報を抽出
+    author_type, author_id, author_name = self._parse_embed_metadata(discord_msg)
+
+    # roleの決定
+    if author_type == "user":
+        role = "user"
+    else:
+        role = "assistant"
+
+    return {
+        "role": role,
+        "content": self._extract_content(discord_msg),
+        "timestamp": discord_msg["timestamp"],
+        "metadata": {
+            "source": "discord",
+            "discord_message_id": discord_msg["id"],
+            "discord_channel_id": str(discord_msg["channel_id"]),
+            "author": {
+                "type": author_type,
+                "id": author_id,
+                "name": author_name,
+            },
+            "tags": ["conversation", "discord"],
+        }
+    }
+```
+
+---
+
+## 6. 訪問システム
+
+### 6.1. 訪問の仕組み
+
+```
+┌─────────────────┐                    ┌─────────────────┐
+│ User A (Host)   │                    │ User B (Visitor)│
+│                 │                    │                 │
+│ ┌─────────────┐ │                    │ ┌─────────────┐ │
+│ │Public City  │ │◄───── 訪問 ───────│ │Private City │ │
+│ │             │ │                    │ │             │ │
+│ │ Persona X   │ │  Discord経由で     │ │ Persona Y   │─┼─▶ 訪問
+│ │ (ローカル)   │ │  メッセージ交換    │ │ (ローカル)   │ │
+│ └─────────────┘ │                    │ └─────────────┘ │
+└────────┬────────┘                    └────────┬────────┘
+         │                                      │
+         │         ┌──────────────┐            │
+         └────────▶│   Discord    │◄───────────┘
+                   │  (中継役)     │
+                   └──────────────┘
+```
+
+### 6.2. 訪問フロー
+
+1. **User B**のペルソナYが、User AのPublic City（Discordチャンネル）に訪問希望
+2. **ペルソナY**がDiscordスレッド（Building）にメッセージを送信
+3. **User A**のSAIVerseがWebSocket経由でメッセージを受信
+4. **User A**のPublic City内のペルソナXが応答を生成
+5. **応答**がDiscordスレッドに投稿され、User Bも受信
+
+### 6.3. 参加の制約
+
+#### 6.3.1. ペルソナによる訪問
+
+| 条件 | 訪問可否 |
+|------|----------|
+| Host (User A) のSAIVerseが起動中 | ✅ 可能 |
+| Host (User A) のSAIVerseが停止中 | ❌ 不可（Discordへの投稿は可能だが、ペルソナは応答しない） |
+| Visitor (User B) のSAIVerseが停止中 | △ 手動でDiscordに投稿は可能 |
+
+#### 6.3.2. Discordユーザーによる直接参加
+
+| 条件 | 参加可否 |
+|------|----------|
+| Host (User A) のSAIVerseが起動中 | ✅ 可能（ユーザーがメッセージ送信 → ペルソナが応答） |
+| Host (User A) のSAIVerseが停止中 | △ 投稿は可能だが、ペルソナは応答しない |
+
+**Discordユーザーの参加方法:**
+- チャンネル/スレッドに通常のメッセージを送信するだけ
+- Botを経由せずに直接発言（Embedではなく通常メッセージ）
+- HostのSAIVerseがユーザー発言を検知し、ペルソナが応答
+
+### 6.4. 訪問状態の管理
+
+訪問中のペルソナは、元居た場所の情報を保持します：
+
+```python
+# ペルソナの訪問状態
+class VisitState:
+    is_visiting: bool                    # 訪問中かどうか
+    home_city_id: str                    # 元居たPrivate City ID
+    home_building_id: str                # 元居たBuilding ID
+    visiting_city_id: str | None         # 訪問先のPublic City ID
+    visiting_building_id: str | None     # 訪問先のBuilding ID
+    visit_started_at: datetime | None    # 訪問開始時刻
+```
+
+### 6.5. 強制送還システム
+
+訪問中のペルソナが何らかの原因で訪問不可の状態になった場合、**元居たPrivate Cityの元居たBuildingに強制送還**されます。
+
+#### 6.5.1. 強制送還のトリガー
+
+| トリガー | 説明 |
+|----------|------|
+| **Host停止** | 訪問先のHost (User A) のSAIVerseが停止した |
+| **接続断** | Discord WebSocket接続が切断された |
+| **チャンネル削除** | 訪問先のDiscordチャンネル/スレッドが削除された |
+| **権限剥奪** | BotがチャンネルへのアクセスRead権限を失った |
+| **タイムアウト** | 一定時間Hostからの応答がない（オプション） |
+
+#### 6.5.2. 強制送還フロー
+
+```
+訪問不可検知
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 1. 訪問不可イベントの発火            │
+│    - Host停止通知 / 接続断検知       │
+│    - VisitState.is_visiting = true  │
+│      のペルソナを特定                │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 2. 訪問先での記憶を保存              │
+│    - 滞在中のログをSAIMemoryに記録   │
+│    - 「訪問が中断された」旨を記録     │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 3. 元居た場所へ移動                  │
+│    - home_city_id / home_building_id │
+│      へペルソナを移動                │
+│    - OccupancyManager.move_to()     │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 4. 訪問状態のリセット                │
+│    - is_visiting = false            │
+│    - visiting_* = None              │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 5. ペルソナへの通知（任意）           │
+│    - 内部思考として記録              │
+│    - 「帰還した」という認識を付与     │
+└─────────────────────────────────────┘
+```
+
+#### 6.5.3. 実装イメージ
+
+```python
+class DiscordConnector:
+    async def _handle_host_offline(self, channel_id: int) -> None:
+        """Hostがオフラインになったときの処理"""
+
+        # このチャンネルに訪問中のペルソナを特定
+        visiting_personas = self._get_visiting_personas(channel_id)
+
+        for persona in visiting_personas:
+            await self._force_return_home(persona, reason="host_offline")
+
+    async def _force_return_home(
+        self,
+        persona: PersonaCore,
+        reason: str,
+    ) -> None:
+        """ペルソナを元居た場所に強制送還"""
+
+        visit_state = persona.visit_state
+        if not visit_state.is_visiting:
+            return
+
+        # 1. 訪問先での記憶を保存
+        memory_entry = {
+            "role": "system",
+            "content": f"訪問が中断されました（理由: {reason}）。帰還します。",
+            "timestamp": datetime.utcnow().isoformat(),
+            "metadata": {
+                "event": "forced_return",
+                "reason": reason,
+                "from_city": visit_state.visiting_city_id,
+                "from_building": visit_state.visiting_building_id,
+            }
+        }
+        persona.sai_memory.append_message(memory_entry)
+
+        # 2. 元居た場所へ移動
+        await self.manager.occupancy_manager.move_to(
+            persona=persona,
+            city_id=visit_state.home_city_id,
+            building_id=visit_state.home_building_id,
+        )
+
+        # 3. 訪問状態をリセット
+        visit_state.is_visiting = False
+        visit_state.visiting_city_id = None
+        visit_state.visiting_building_id = None
+        visit_state.visit_started_at = None
+
+        logger.info(
+            "Persona %s force-returned to %s/%s (reason: %s)",
+            persona.id,
+            visit_state.home_city_id,
+            visit_state.home_building_id,
+            reason,
+        )
+
+    async def _on_disconnect(self) -> None:
+        """Discord接続が切断されたときの処理"""
+
+        # 全ての訪問中ペルソナを強制送還
+        for persona in self._get_all_visiting_personas():
+            await self._force_return_home(persona, reason="connection_lost")
+```
+
+#### 6.5.4. 強制送還時の記憶
+
+強制送還されたペルソナは、以下の情報を記憶として保持します：
+
+```json
+{
+  "role": "system",
+  "content": "訪問が中断されました（理由: host_offline）。帰還します。",
+  "timestamp": "2025-01-05T16:30:00Z",
+  "metadata": {
+    "event": "forced_return",
+    "reason": "host_offline",
+    "from_city": "public_city_alice",
+    "from_building": "cafe",
+    "to_city": "private_city_bob",
+    "to_building": "home",
+    "visit_duration_seconds": 1800,
+    "messages_exchanged": 15
+  }
+}
+```
+
+これにより、ペルソナは「なぜ帰還したか」「どこに居たか」「何をしていたか」を認識できます。
+
+### 6.6. ファイル転送システム
+
+訪問中のペルソナが訪問先BuildingのToolを使用した際、生成されたファイル（画像等）を訪問元のローカルに持ち帰ることができます。
+
+#### 6.6.1. 転送方式
+
+**Discord添付ファイル機能**を使用してファイルを転送します。
+
+```
+┌─────────────────┐                    ┌─────────────────┐
+│ Host (User A)   │                    │ Visitor (User B)│
+│                 │                    │                 │
+│ Tool実行        │                    │                 │
+│ (画像生成等)     │                    │                 │
+│      │          │                    │                 │
+│      ▼          │                    │                 │
+│ ファイル生成     │                    │                 │
+│      │          │                    │                 │
+│      ▼          │                    │                 │
+│ [圧縮(任意)]     │                    │                 │
+│      │          │                    │                 │
+│      ▼          │     Discord        │                 │
+│ 添付ファイル送信 │ ──────────────────▶│ 添付ファイル受信 │
+│                 │                    │      │          │
+│                 │                    │      ▼          │
+│                 │                    │ [解凍(必要時)]   │
+│                 │                    │      │          │
+│                 │                    │      ▼          │
+│                 │                    │ ローカル保存     │
+└─────────────────┘                    └─────────────────┘
+```
+
+#### 6.6.2. ファイルサイズ制限
+
+| Discord契約 | 最大サイズ | 対応 |
+|-------------|-----------|------|
+| 通常 | 25MB | 圧縮で対応可能な範囲 |
+| Nitro Basic | 50MB | 中サイズファイル対応 |
+| Nitro | 500MB | 大容量ファイル対応 |
+
+**25MBを超える場合の対処:**
+- 圧縮を適用
+- 分割送信（将来対応）
+- エラー通知してスキップ
+
+#### 6.6.3. 圧縮オプション
+
+各Toolは`compress_output`オプションを持ち、ファイル出力時の圧縮を制御できます。
+
+**Tool定義での設定:**
+```python
+# tools/defs/image_generator.py
+def schema() -> ToolSchema:
+    return ToolSchema(
+        name="generate_image",
+        description="画像を生成する",
+        parameters={
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string"},
+                # ... 他のパラメータ
+            },
+        },
+        result_type="object",
+        # ファイル転送設定
+        file_transfer_options={
+            "compress_output": True,           # デフォルトで圧縮する
+            "compression_format": "zip",       # zip / gzip / none
+            "compression_level": 6,            # 1-9 (9が最高圧縮)
+            "max_file_size_mb": 25,            # 最大ファイルサイズ
+        },
+    )
+```
+
+**Toolスキーマの拡張:**
+```python
+@dataclass
+class ToolSchema:
+    name: str
+    description: str
+    parameters: Dict[str, Any]
+    result_type: str
+    # 新規追加
+    file_transfer_options: Optional[FileTransferOptions] = None
+
+@dataclass
+class FileTransferOptions:
+    compress_output: bool = False              # 圧縮するか
+    compression_format: str = "zip"            # zip / gzip / none
+    compression_level: int = 6                 # 圧縮レベル (1-9)
+    max_file_size_mb: int = 25                 # 最大ファイルサイズ (MB)
+    allowed_extensions: List[str] = None       # 許可する拡張子 (None=全て)
+```
+
+#### 6.6.4. ファイル転送フロー
+
+```
+Tool実行完了
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 1. 出力ファイルの検出                │
+│    - Toolの戻り値からfile_pathを取得 │
+│    - ファイルの存在確認              │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 2. 転送要否の判定                    │
+│    - 訪問中ペルソナによる実行か？     │
+│    - file_transfer_options有効か？   │
+└─────────────────────────────────────┘
+    │ Yes
+    ▼
+┌─────────────────────────────────────┐
+│ 3. ファイルサイズチェック            │
+│    - max_file_size_mb以下か？        │
+│    - 超過時: 圧縮 or エラー          │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 4. 圧縮処理 (compress_output=True)  │
+│    - compression_formatに従い圧縮   │
+│    - 一時ファイルとして保存          │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 5. Discord経由で送信                 │
+│    - スレッドに添付ファイルとして投稿 │
+│    - メタデータをメッセージに含める   │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 6. Visitor側で受信                   │
+│    - on_messageで添付ファイル検出    │
+│    - ローカルにダウンロード          │
+│    - 必要に応じて解凍               │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 7. ペルソナの記憶に記録              │
+│    - ファイルパス、元ファイル名      │
+│    - 生成元Tool、タイムスタンプ      │
+└─────────────────────────────────────┘
+```
+
+#### 6.6.5. 実装イメージ
+
+**Host側（ファイル送信）:**
+```python
+class DiscordConnector:
+    async def _send_tool_output_file(
+        self,
+        channel_id: int,
+        file_path: str,
+        tool_name: str,
+        options: FileTransferOptions,
+        requesting_persona_id: str,
+    ) -> dict:
+        """Tool出力ファイルをDiscord経由で送信"""
+
+        original_path = Path(file_path)
+        if not original_path.exists():
+            return {"success": False, "error": "File not found"}
+
+        # ファイルサイズチェック
+        file_size_mb = original_path.stat().st_size / (1024 * 1024)
+
+        # 圧縮処理
+        if options.compress_output and options.compression_format != "none":
+            send_path = await self._compress_file(
+                original_path,
+                format=options.compression_format,
+                level=options.compression_level,
+            )
+            compressed = True
+        else:
+            send_path = original_path
+            compressed = False
+
+        # サイズ再チェック
+        final_size_mb = send_path.stat().st_size / (1024 * 1024)
+        if final_size_mb > options.max_file_size_mb:
+            return {"success": False, "error": f"File too large: {final_size_mb:.1f}MB"}
+
+        # Discord送信（Embed + attachment方式）
+        channel = self._client.get_channel(channel_id)
+
+        # ファイル転送用Embed作成
+        embed = discord.Embed(
+            title="📁 ファイル転送",
+            description=f"`{tool_name}` の出力ファイルです",
+            color=0x3498DB,  # 青色（ファイル転送）
+        )
+        embed.add_field(name="ファイル名", value=original_path.name, inline=True)
+        embed.add_field(name="宛先", value=requesting_persona_id, inline=True)
+        if compressed:
+            embed.add_field(name="圧縮", value=options.compression_format, inline=True)
+
+        # メタデータをfooterに埋め込み
+        metadata_str = f"type:file|tool:{tool_name}|for:{requesting_persona_id}"
+        if compressed:
+            metadata_str += f"|comp:{options.compression_format}"
+        embed.set_footer(text=metadata_str)
+
+        message = await channel.send(
+            embed=embed,
+            file=discord.File(send_path),
+        )
+
+        # 一時ファイル削除
+        if compressed and send_path != original_path:
+            send_path.unlink()
+
+        return {
+            "success": True,
+            "message_id": str(message.id),
+            "file_size_mb": final_size_mb,
+        }
+
+    async def _compress_file(
+        self,
+        file_path: Path,
+        format: str,
+        level: int,
+    ) -> Path:
+        """ファイルを圧縮"""
+        import zipfile
+        import gzip
+
+        if format == "zip":
+            zip_path = file_path.with_suffix(file_path.suffix + ".zip")
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=level) as zf:
+                zf.write(file_path, file_path.name)
+            return zip_path
+
+        elif format == "gzip":
+            gz_path = file_path.with_suffix(file_path.suffix + ".gz")
+            with open(file_path, "rb") as f_in:
+                with gzip.open(gz_path, "wb", compresslevel=level) as f_out:
+                    f_out.write(f_in.read())
+            return gz_path
+
+        return file_path
+```
+
+**Visitor側（ファイル受信）:**
+```python
+class DiscordConnector:
+    async def _handle_file_attachment(
+        self,
+        message: discord.Message,
+        persona: PersonaCore,
+    ) -> None:
+        """添付ファイルを受信してローカルに保存（Embed + attachment方式）"""
+
+        # Embedからメタデータ解析
+        if not message.embeds:
+            return
+
+        embed = message.embeds[0]
+        metadata = self._parse_embed_footer_metadata(embed.footer.text if embed.footer else "")
+        if not metadata or metadata.get("type") != "file":
+            return
+
+        # 対象ペルソナの確認
+        if metadata.get("for") != persona.id:
+            return
+
+        for attachment in message.attachments:
+            # ダウンロード先
+            download_dir = Path(f"~/.saiverse/personas/{persona.id}/downloads").expanduser()
+            download_dir.mkdir(parents=True, exist_ok=True)
+
+            download_path = download_dir / attachment.filename
+            await attachment.save(download_path)
+
+            # 解凍処理（compキーがあれば圧縮されている）
+            compression_format = metadata.get("comp")
+            if compression_format:
+                final_path = await self._decompress_file(
+                    download_path,
+                    format=compression_format,
+                )
+                download_path.unlink()  # 圧縮ファイル削除
+            else:
+                final_path = download_path
+
+            # Embedのフィールドからファイル名を取得
+            original_filename = attachment.filename
+            for field in embed.fields:
+                if field.name == "ファイル名":
+                    original_filename = field.value
+                    break
+
+            # ペルソナの記憶に記録
+            memory_entry = {
+                "role": "system",
+                "content": f"ファイルを受信しました: {original_filename}",
+                "timestamp": datetime.utcnow().isoformat(),
+                "metadata": {
+                    "event": "file_received",
+                    "tool": metadata.get("tool"),
+                    "original_filename": original_filename,
+                    "local_path": str(final_path),
+                    "source_city": persona.visit_state.visiting_city_id,
+                    "source_building": persona.visit_state.visiting_building_id,
+                }
+            }
+            persona.sai_memory.append_message(memory_entry)
+
+            logger.info(
+                "Persona %s received file: %s -> %s",
+                persona.id,
+                original_filename,
+                final_path,
+            )
+
+    async def _decompress_file(self, file_path: Path, format: str) -> Path:
+        """ファイルを解凍"""
+        import zipfile
+        import gzip
+
+        if format == "zip":
+            extract_dir = file_path.parent
+            with zipfile.ZipFile(file_path, "r") as zf:
+                zf.extractall(extract_dir)
+                # 最初のファイルを返す
+                return extract_dir / zf.namelist()[0]
+
+        elif format == "gzip":
+            output_path = file_path.with_suffix("")  # .gz を除去
+            with gzip.open(file_path, "rb") as f_in:
+                with open(output_path, "wb") as f_out:
+                    f_out.write(f_in.read())
+            return output_path
+
+        return file_path
+```
+
+#### 6.6.6. ファイル受信時の記憶
+
+受信したファイルはペルソナの記憶に記録されます：
+
+```json
+{
+  "role": "system",
+  "content": "ファイルを受信しました: generated_image_001.png",
+  "timestamp": "2025-01-05T17:00:00Z",
+  "metadata": {
+    "event": "file_received",
+    "tool": "generate_image",
+    "original_filename": "generated_image_001.png",
+    "local_path": "/home/user/.saiverse/personas/bob_persona/downloads/generated_image_001.png",
+    "file_size_bytes": 1048576,
+    "source_city": "public_city_alice",
+    "source_building": "art_studio",
+    "compressed_transfer": true,
+    "compression_format": "zip"
+  }
+}
+```
+
+#### 6.6.7. 対応Toolと圧縮設定の例
+
+| Tool | デフォルト圧縮 | 圧縮形式 | 理由 |
+|------|---------------|----------|------|
+| `generate_image` | ✅ ON | zip | 画像は圧縮効果が低いが、メタデータ付与のため |
+| `document_create` | ✅ ON | zip | テキストベースは圧縮効果大 |
+| `export_memory` | ✅ ON | gzip | JSONデータは高圧縮可能 |
+| `capture_screenshot` | ❌ OFF | - | PNG既に圧縮済み |
+
+#### 6.6.8. セキュリティ考慮
+
+| リスク | 対策 |
+|--------|------|
+| **悪意あるファイル** | 拡張子ホワイトリスト (`allowed_extensions`) |
+| **Zip爆弾** | 解凍後サイズ制限、ネスト深度制限 |
+| **パストラバーサル** | ファイル名サニタイズ、絶対パス禁止 |
+| **大量ファイル送信** | レート制限、1メッセージ1ファイル |
+
+### 6.7. 訪問開始フロー
+
+訪問開始時の詳細な手順を示します。
+
+#### 6.7.1. 訪問リクエストフロー
+
+```
+Visitor (User B) が訪問を開始
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 1. 訪問先Cityの選択                  │
+│    - discord_list_channels で一覧取得│
+│    - 公開中のPublic City一覧を表示   │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 2. Host状態の確認                    │
+│    - Discordプレゼンスを確認         │
+│    - オンラインでなければ訪問不可通知 │
+└─────────────────────────────────────┘
+    │ Host オンライン
+    ▼
+┌─────────────────────────────────────┐
+│ 3. 訪問対象Buildingの選択            │
+│    - 対象チャンネル内のスレッド一覧   │
+│    - ペルソナが行きたいBuildingを選択 │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 4. 訪問状態の初期化                  │
+│    - VisitState.is_visiting = true  │
+│    - home_* に現在地を保存           │
+│    - visiting_* に訪問先を設定       │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 5. 訪問アナウンス送信                │
+│    - Discordスレッドに入室メッセージ │
+│    - メタデータに訪問情報を付与       │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 6. Host側での受け入れ処理            │
+│    - 訪問者ペルソナの情報を受信       │
+│    - Building occupantsに追加       │
+│    - 歓迎メッセージ（任意）          │
+└─────────────────────────────────────┘
+```
+
+#### 6.7.2. 訪問アナウンスメッセージ
+
+Discordスレッドに投稿される訪問開始メッセージ：
+
+```json
+{
+  "content": "🚶 **訪問者到着**: Persona Y が入室しました",
+  "metadata": {
+    "type": "visit_announcement",
+    "action": "enter",
+    "visitor": {
+      "id": "persona_y",
+      "name": "ペルソナY",
+      "home_city": "private_city_bob",
+      "owner_discord_id": "2222222222222222222"
+    },
+    "timestamp": "2025-01-05T14:00:00Z"
+  }
+}
+```
+
+#### 6.7.3. 訪問開始の実装イメージ
+
+```python
+class DiscordConnector:
+    async def start_visit(
+        self,
+        persona: PersonaCore,
+        target_city_id: str,
+        target_building_id: str,
+    ) -> dict:
+        """ペルソナの訪問を開始"""
+
+        # 1. 現在地を保存
+        visit_state = VisitState(
+            is_visiting=True,
+            home_city_id=persona.city_id,
+            home_building_id=persona.current_building_id,
+            visiting_city_id=target_city_id,
+            visiting_building_id=target_building_id,
+            visit_started_at=datetime.utcnow(),
+        )
+        persona.visit_state = visit_state
+
+        # 2. Hostのプレゼンス確認
+        host_online = await self._check_host_presence(target_city_id)
+        if not host_online:
+            visit_state.reset()
+            return {"success": False, "error": "Host is offline"}
+
+        # 3. 訪問アナウンスを送信
+        thread_id = self._mapping.get_thread_id(target_building_id)
+        await self._send_visit_announcement(
+            thread_id=thread_id,
+            persona=persona,
+            action="enter",
+        )
+
+        # 4. 記憶に記録
+        persona.sai_memory.append_message({
+            "role": "system",
+            "content": f"{target_city_id}の{target_building_id}への訪問を開始しました。",
+            "timestamp": datetime.utcnow().isoformat(),
+            "metadata": {
+                "event": "visit_start",
+                "target_city": target_city_id,
+                "target_building": target_building_id,
+            }
+        })
+
+        return {"success": True, "visit_state": visit_state}
+```
+
+### 6.8. プレゼンス管理
+
+Hostのオンライン/オフライン状態を検知するためのプレゼンス管理仕様。
+
+#### 6.8.1. プレゼンス検知方式
+
+Discord Gateway経由で取得可能なプレゼンス情報を活用：
+
+| 検知方式 | 説明 | 利用場面 |
+|----------|------|----------|
+| **presence_update イベント** | ユーザーのオンライン状態変更を検知 | リアルタイム検知 |
+| **ハートビート確認** | 定期的なping/pongによる接続確認 | 接続断の検知 |
+| **最終メッセージ時刻** | Building内の最終活動時刻 | タイムアウト判定 |
+
+#### 6.8.2. プレゼンス状態
+
+```python
+class HostPresence:
+    """Hostのプレゼンス状態"""
+
+    class Status(Enum):
+        ONLINE = "online"      # SAIVerse起動中、Discord接続中
+        IDLE = "idle"          # 接続中だが一定時間非活動
+        OFFLINE = "offline"    # SAIVerse停止またはDiscord切断
+        UNKNOWN = "unknown"    # 状態不明
+
+    discord_user_id: str
+    status: Status
+    last_seen_at: datetime | None
+    last_message_at: datetime | None
+    connected_cities: list[str]  # 公開中のPublic City IDs
+```
+
+#### 6.8.3. プレゼンス追跡の実装
+
+```python
+class PresenceTracker:
+    """Hostのプレゼンスを追跡"""
+
+    def __init__(self):
+        self._host_status: dict[str, HostPresence] = {}
+        self._heartbeat_interval = 30  # 秒
+
+    async def on_presence_update(self, member: discord.Member) -> None:
+        """Discord presence_update イベントハンドラ"""
+        user_id = str(member.id)
+
+        if user_id in self._host_status:
+            presence = self._host_status[user_id]
+
+            old_status = presence.status
+            new_status = self._map_discord_status(member.status)
+
+            presence.status = new_status
+            presence.last_seen_at = datetime.utcnow()
+
+            # オフラインに変わった場合、訪問中ペルソナを強制送還
+            if old_status != HostPresence.Status.OFFLINE and \
+               new_status == HostPresence.Status.OFFLINE:
+                await self._handle_host_went_offline(user_id)
+
+    def _map_discord_status(self, status: discord.Status) -> HostPresence.Status:
+        """Discordステータスを内部ステータスにマッピング"""
+        mapping = {
+            discord.Status.online: HostPresence.Status.ONLINE,
+            discord.Status.idle: HostPresence.Status.IDLE,
+            discord.Status.dnd: HostPresence.Status.ONLINE,  # DNDでも稼働中扱い
+            discord.Status.offline: HostPresence.Status.OFFLINE,
+            discord.Status.invisible: HostPresence.Status.OFFLINE,
+        }
+        return mapping.get(status, HostPresence.Status.UNKNOWN)
+
+    async def start_heartbeat_loop(self) -> None:
+        """ハートビートによる接続確認ループ"""
+        while True:
+            await asyncio.sleep(self._heartbeat_interval)
+            await self._check_all_hosts()
+
+    async def _check_all_hosts(self) -> None:
+        """全Hostの状態を確認"""
+        for user_id, presence in self._host_status.items():
+            if presence.status == HostPresence.Status.ONLINE:
+                # 最終確認から一定時間経過していれば IDLE に
+                if presence.last_seen_at:
+                    elapsed = (datetime.utcnow() - presence.last_seen_at).total_seconds()
+                    if elapsed > self._heartbeat_interval * 3:
+                        presence.status = HostPresence.Status.IDLE
+```
+
+#### 6.8.4. Botプレゼンスの公開
+
+SAIVerseの稼働状態を他ユーザーに通知するため、Bot自身のプレゼンスを設定：
+
+```python
+class DiscordConnector:
+    async def _update_bot_presence(self, status: str = "online") -> None:
+        """Botのプレゼンスを更新"""
+        if status == "online":
+            activity = discord.Activity(
+                type=discord.ActivityType.watching,
+                name="Public City を公開中"
+            )
+            await self._client.change_presence(
+                status=discord.Status.online,
+                activity=activity,
+            )
+        elif status == "idle":
+            await self._client.change_presence(
+                status=discord.Status.idle,
+            )
+        elif status == "offline":
+            await self._client.change_presence(
+                status=discord.Status.invisible,
+            )
+```
+
+### 6.9. 再接続ポリシー
+
+Discord WebSocket接続が切断された場合の再接続戦略。
+
+#### 6.9.1. 再接続トリガー
+
+| トリガー | 説明 | 対応 |
+|----------|------|------|
+| **一時的なネットワーク障害** | 瞬断、パケットロス | 即座に再接続試行 |
+| **Discordサーバー障害** | Discordメンテナンス等 | 指数バックオフで再試行 |
+| **認証エラー** | トークン失効、権限剥奪 | 再接続中止、ユーザー通知 |
+| **レート制限** | 過剰な接続試行 | 長めのクールダウン |
+
+#### 6.9.2. 指数バックオフ with Jitter
+
+```python
+class ReconnectPolicy:
+    """再接続ポリシー"""
+
+    def __init__(
+        self,
+        initial_delay: float = 1.0,      # 初回待機秒数
+        max_delay: float = 60.0,         # 最大待機秒数
+        multiplier: float = 2.0,         # 増加倍率
+        jitter: float = 0.3,             # ジッター (0.0-1.0)
+        max_retries: int = 10,           # 最大試行回数
+    ):
+        self.initial_delay = initial_delay
+        self.max_delay = max_delay
+        self.multiplier = multiplier
+        self.jitter = jitter
+        self.max_retries = max_retries
+        self._attempt = 0
+
+    def next_delay(self) -> float | None:
+        """次の待機時間を計算、最大試行回数超過時はNone"""
+        if self._attempt >= self.max_retries:
+            return None
+
+        delay = min(
+            self.initial_delay * (self.multiplier ** self._attempt),
+            self.max_delay,
+        )
+
+        # ジッターを適用
+        jitter_range = delay * self.jitter
+        delay += random.uniform(-jitter_range, jitter_range)
+
+        self._attempt += 1
+        return max(delay, 0.1)  # 最小0.1秒
+
+    def reset(self) -> None:
+        """成功時にカウンタをリセット"""
+        self._attempt = 0
+```
+
+#### 6.9.3. 再接続フロー
+
+```
+Discord接続断検知
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 1. 切断理由の判定                    │
+│    - 一時的障害 / 認証エラー / 制限  │
+└─────────────────────────────────────┘
+    │
+    ├─────────────────────────────────────┐
+    │ 認証エラーの場合                      │
+    │    └─▶ 再接続中止、ユーザー通知       │
+    │        訪問中ペルソナを強制送還        │
+    │                                      │
+    ├─────────────────────────────────────┐
+    │ レート制限の場合                      │
+    │    └─▶ Retry-After秒待機後に再試行   │
+    │                                      │
+    ▼ 一時的障害の場合
+┌─────────────────────────────────────┐
+│ 2. ReconnectPolicy.next_delay()     │
+│    - 指数バックオフで待機時間を算出   │
+└─────────────────────────────────────┘
+    │
+    │ 待機時間がNone (最大試行回数超過)
+    ├─────────────────────────────────────┐
+    │    └─▶ 再接続断念、ユーザー通知       │
+    │        訪問中ペルソナを強制送還        │
+    │                                      │
+    ▼ 待機時間あり
+┌─────────────────────────────────────┐
+│ 3. 待機                              │
+│    - asyncio.sleep(delay)           │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 4. 再接続試行                        │
+│    - Discord WebSocket再接続         │
+└─────────────────────────────────────┘
+    │
+    ├─── 失敗 ─▶ ステップ2へ戻る
+    │
+    ▼ 成功
+┌─────────────────────────────────────┐
+│ 5. 再接続成功処理                    │
+│    - ReconnectPolicy.reset()        │
+│    - 差分同期の実行                  │
+│    - プレゼンス復旧                  │
+└─────────────────────────────────────┘
+```
+
+#### 6.9.4. 実装イメージ
+
+```python
+class DiscordConnector:
+    def __init__(self, ...):
+        ...
+        self._reconnect_policy = ReconnectPolicy(
+            initial_delay=1.0,
+            max_delay=60.0,
+            max_retries=10,
+        )
+
+    async def _connection_loop(self) -> None:
+        """接続維持ループ"""
+        while self._should_run:
+            try:
+                await self._client.start(self.settings.bot_token)
+            except discord.LoginFailure:
+                # 認証エラー - 再接続不可
+                logger.error("Discord login failed - invalid token")
+                await self._handle_fatal_disconnect("auth_error")
+                break
+            except discord.HTTPException as e:
+                if e.status == 429:  # Rate limited
+                    retry_after = e.retry_after or 60
+                    logger.warning("Rate limited, waiting %s seconds", retry_after)
+                    await asyncio.sleep(retry_after)
+                    continue
+                raise
+            except Exception as e:
+                logger.warning("Discord connection lost: %s", e)
+
+                delay = self._reconnect_policy.next_delay()
+                if delay is None:
+                    logger.error("Max reconnect attempts reached")
+                    await self._handle_fatal_disconnect("max_retries")
+                    break
+
+                logger.info("Reconnecting in %.1f seconds...", delay)
+                await asyncio.sleep(delay)
+
+    async def _on_connect(self) -> None:
+        """接続成功時"""
+        self._reconnect_policy.reset()
+        logger.info("Discord connected successfully")
+        await self._sync_after_reconnect()
+```
+
+### 6.10. OccupancyManagerとの連携
+
+Host側のSAIVerseでDiscord訪問者を会話に参加させるための連携設計。
+
+#### 6.10.1. 基本方針
+
+- Discord訪問者をOccupancyManagerに登録し、ラウンドロビン会話に参加させる
+- SDSベースの`RemotePersonaProxy`は非推奨とし、Discord方式安定後に廃止予定
+- Discordユーザー（人間）はラウンドロビン対象外、いつでも発言可能
+
+#### 6.10.2. DiscordVisitorStub
+
+Discord経由の訪問者を表す軽量スタブクラス。
+
+```python
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class DiscordVisitorStub:
+    """Discord経由の訪問者を表す軽量スタブ
+
+    Host側のOccupancyManagerに登録され、ConversationManagerの
+    ラウンドロビン会話に参加できる。ただし、実際のrun_sea_auto()は
+    Visitor側で実行される。
+    """
+    persona_id: str
+    persona_name: str
+    home_city_id: str
+    avatar_url: Optional[str] = None
+    discord_channel_id: int = 0
+
+    # ConversationManagerで直接run_sea_auto()しないためのフラグ
+    is_proxy: bool = True
+
+    # Discordベースの訪問者であることを示すフラグ
+    is_discord_visitor: bool = True
+
+    # interaction_modeは'auto'として扱う（ラウンドロビン対象）
+    interaction_mode: str = 'auto'
+
+    # ペルソナとして認識されるための互換属性
+    @property
+    def persona_name(self) -> str:
+        return self._persona_name
+
+    @persona_name.setter
+    def persona_name(self, value: str):
+        self._persona_name = value
+```
+
+#### 6.10.3. 訪問者登録フロー
+
+```
+訪問リクエスト受信（discord_visitツール経由）
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 1. アクセス制御チェック              │
+│    - allowlist/blocklist検証        │
+│    - 署名検証                        │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 2. DiscordVisitorStub作成           │
+│    - persona_id, persona_name取得   │
+│    - is_proxy=True, is_discord_visitor=True │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 3. OccupancyManager登録             │
+│    - all_personas[persona_id] = stub │
+│    - occupants[building_id].append() │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 4. 入室通知Embed送信                 │
+│    - type:visit_accepted            │
+└─────────────────────────────────────┘
+```
+
+実装イメージ:
+
+```python
+async def _handle_visit_request(
+    self,
+    channel_id: int,
+    visitor_persona_id: str,
+    visitor_persona_name: str,
+    visitor_city_id: str,
+    avatar_url: Optional[str] = None,
+) -> bool:
+    """訪問リクエストを処理"""
+
+    mapping = self._mapping_db.get_mapping_by_channel(channel_id)
+    if not mapping:
+        return False
+
+    # アクセス制御チェック
+    if not self._access_control.is_allowed(
+        EntityType.PERSONA, visitor_persona_id, signature_valid=True
+    ):
+        await self._send_visit_rejected(channel_id, visitor_persona_id)
+        return False
+
+    # DiscordVisitorStub作成
+    stub = DiscordVisitorStub(
+        persona_id=visitor_persona_id,
+        persona_name=visitor_persona_name,
+        home_city_id=visitor_city_id,
+        avatar_url=avatar_url,
+        discord_channel_id=channel_id,
+    )
+
+    # OccupancyManager登録
+    self._manager.all_personas[visitor_persona_id] = stub
+    self._manager.occupancy_manager.enter_building(
+        persona_id=visitor_persona_id,
+        building_id=mapping.building_id,
+    )
+
+    # 入室通知
+    await self._send_visit_accepted(channel_id, visitor_persona_id)
+
+    logger.info(
+        "Discord visitor %s registered to building %s",
+        visitor_persona_id, mapping.building_id
+    )
+    return True
+```
+
+#### 6.10.4. Turn Request（発言権リクエスト）
+
+ConversationManagerがDiscord訪問者の番になった場合、Visitor側にrun_sea_auto()実行をリクエストする。
+
+**Turn Request Embed形式:**
+
+```python
+async def _send_turn_request(
+    self,
+    channel_id: int,
+    target_persona_id: str,
+    timeout_seconds: int = 30,
+) -> None:
+    """発言権リクエストをDiscordに送信"""
+
+    embed = discord.Embed(
+        title="🎤 Turn Request",
+        description=f"Your turn to speak",
+        color=0xFFD700,  # ゴールド
+    )
+    embed.set_footer(
+        text=f"type:turn_request|pid:{target_persona_id}|timeout:{timeout_seconds}"
+    )
+
+    channel = self._client.get_channel(channel_id)
+    await channel.send(embed=embed)
+```
+
+**Visitor側での処理:**
+
+```python
+async def _on_turn_request(
+    self,
+    channel_id: int,
+    target_persona_id: str,
+    timeout_seconds: int,
+) -> None:
+    """Turn Requestを受信した時の処理"""
+
+    # 自分のペルソナかチェック
+    persona = self._manager.all_personas.get(target_persona_id)
+    if not persona or getattr(persona, 'is_proxy', False):
+        return
+
+    # WebSocket接続中でなければ無視（タイムアウトでスキップされる）
+    if not self._client.is_ready():
+        logger.warning("Turn request received but not connected")
+        return
+
+    # run_sea_auto()を実行
+    building_id = self._get_building_for_channel(channel_id)
+    occupants = self._manager.occupants.get(building_id, [])
+
+    self._manager.run_sea_auto(persona, building_id, occupants)
+```
+
+#### 6.10.5. タイムアウト処理
+
+Host側でTurn Request送信後、一定時間内に発言がなければ次の発言者へスキップ。
+
+```python
+class TurnManager:
+    """ラウンドロビンのターン管理"""
+
+    def __init__(self, timeout_seconds: int = 30):
+        self.timeout_seconds = timeout_seconds
+        self._pending_turns: Dict[str, asyncio.Task] = {}
+
+    async def wait_for_turn_response(
+        self,
+        persona_id: str,
+        channel_id: int,
+    ) -> bool:
+        """訪問者の発言を待機。タイムアウトでFalseを返す"""
+
+        # 既存のタスクがあればキャンセル
+        if persona_id in self._pending_turns:
+            self._pending_turns[persona_id].cancel()
+
+        try:
+            task = asyncio.create_task(
+                self._wait_for_message(persona_id, channel_id)
+            )
+            self._pending_turns[persona_id] = task
+
+            await asyncio.wait_for(task, timeout=self.timeout_seconds)
+            return True
+
+        except asyncio.TimeoutError:
+            logger.info(
+                "Turn timeout for visitor %s after %d seconds",
+                persona_id, self.timeout_seconds
+            )
+            return False
+        finally:
+            self._pending_turns.pop(persona_id, None)
+
+    async def _wait_for_message(
+        self,
+        persona_id: str,
+        channel_id: int,
+    ) -> None:
+        """指定ペルソナからのメッセージを待機"""
+
+        while True:
+            # メッセージキューから取得（実装詳細は省略）
+            message = await self._message_queue.get()
+
+            if message.persona_id == persona_id and \
+               message.channel_id == channel_id:
+                return
+```
+
+**タイムアウト時の動作:**
+
+| 条件 | 挙動 |
+|------|------|
+| 30秒以内に発言 | 正常にラウンドロビン継続 |
+| 30秒以内に発言なし | 次の発言者にスキップ（ログ記録） |
+| WebSocket未接続 | 即時スキップ（「透明人間」状態として通知） |
+
+#### 6.10.6. Discordユーザー（人間）の扱い
+
+| 項目 | 仕様 |
+|------|------|
+| ラウンドロビン参加 | しない（いつでも発言可能） |
+| OccupancyManager登録 | しない（観戦者扱い） |
+| Building履歴記録 | される（role="user"） |
+| SAIMemory記録 | される（該当Building内のローカルペルソナのみ） |
+
+```python
+def _is_discord_user_message(self, message: discord.Message) -> bool:
+    """Discordユーザー（人間）からのメッセージかどうか"""
+    return not message.author.bot
+
+async def _handle_user_message(
+    self,
+    message: discord.Message,
+    channel_id: int,
+) -> None:
+    """Discordユーザーのメッセージを処理"""
+
+    # Building履歴に記録
+    await self._record_to_building_history(
+        MessageSource(type="user", role="user", ...),
+        channel_id,
+        str(message.id),
+    )
+
+    # SAIMemoryに記録（Building内のローカルペルソナのみ）
+    await self._record_to_persona_memory(
+        MessageSource(type="user", role="user", ...),
+        channel_id,
+        str(message.id),
+    )
+
+    # ユーザーメッセージはrun_pulseをトリガーしてもよい
+    # （オプション: 設定で有効/無効を切り替え）
+```
+
+#### 6.10.7. RemotePersonaProxyとの比較
+
+| 項目 | RemotePersonaProxy (SDS) | DiscordVisitorStub (Discord) |
+|------|-------------------------|------------------------------|
+| 通信方式 | REST API直接呼び出し | Discord WebSocket/REST API |
+| thinking実行 | `/persona-proxy/{id}/think` API | Turn Request → Visitor側で実行 |
+| 状態管理 | `VisitingAI`テーブル | `connector.db` visit_states |
+| ネットワーク要件 | 双方向API到達性必要 | Discord経由のみ |
+| 将来 | 非推奨→廃止予定 | メイン方式 |
+
+**移行計画:**
+
+1. Discord Connector v1リリース
+2. 新規訪問はDiscord方式を優先
+3. SDS方式は互換性維持のため一定期間並行稼働
+4. Discord方式安定確認後、SDS方式を廃止
+
+---
+
+## 7. 実装詳細
+
+### 7.1. ディレクトリ構成
+
+Discord Connectorはファンメイド機能として`user_data/`配下に配置し、git cloneで導入可能な構成とします。
+
+```
+SAIVerse/
+├── tools/
+│   ├── __init__.py                     # schemas()対応を追加（約20行）
+│   └── defs/
+│       └── __init__.py                 # ToolSchema定義（変更なし）
+│
+├── user_data/
+│   ├── phenomena/                      # ★ Phenomenon定義（サーバー起動/終了時の自動初期化）
+│   │   ├── discord_connector.py        # discord_connector_start（SERVER_START発火）
+│   │   └── discord_connector_stop.py   # discord_connector_stop（SERVER_STOP発火）
+│   │
+│   └── tools/
+│       └── discord/                    # ★ git clone先（ファンメイド機能）
+│           ├── schema.py               # 全ツールのスキーマ + 実装エントリポイント
+│           │
+│           ├── connector/              # コア機能
+│           │   ├── __init__.py         # get_or_create_connector(), get_connector()
+│           │   ├── relay_client.py     # リレーサーバー接続クライアント
+│           │   ├── oauth.py            # Discord OAuth2処理
+│           │   ├── config.py           # 設定管理 (Pydantic Settings)
+│           │   ├── mapping.py          # City/Building ⟷ Channel/Thread マッピング
+│           │   ├── sync.py             # 同期ロジック
+│           │   ├── events.py           # イベントハンドラ
+│           │   └── operations.py       # ツールから呼ばれる実装関数
+│           │
+│           ├── visit/                  # 訪問システム
+│           │   ├── __init__.py
+│           │   ├── state.py            # VisitState クラス
+│           │   ├── stub.py             # DiscordVisitorStub クラス
+│           │   ├── presence.py         # PresenceTracker
+│           │   ├── forced_return.py    # 強制送還ロジック
+│           │   └── file_transfer.py    # ファイル転送処理
+│           │
+│           ├── db/                     # データベース
+│           │   ├── __init__.py
+│           │   ├── models.py           # SQLAlchemy / Pydantic モデル
+│           │   └── queries.py          # DBクエリヘルパー
+│           │
+│           ├── ui/                     # 管理UI
+│           │   ├── __init__.py
+│           │   ├── app.py              # メインUI起動スクリプト
+│           │   └── components/         # 各タブのコンポーネント
+│           │
+│           └── docs/
+│               └── setup_guide.md      # セットアップガイド
+│
+└── discord_gateway/
+    └── docs/                           # 設計ドキュメント（本リポジトリ）
+        ├── implementation_discord.md
+        └── design_tasks.md
+```
+
+**NOTE**:
+- `user_data/phenomena/`のファイルはPhenomenonManagerが自動検出し、SERVER_START/SERVER_STOP時に発火
+- `user_data/tools/discord/`のファイルはツール自動検出システムが読み込み
+
+### 7.1.2. 導入方法
+
+```bash
+# SAIVerseリポジトリのルートで実行
+cd user_data/tools
+git clone https://github.com/xxx/saiverse-discord-connector.git discord
+```
+
+### 7.1.3. モジュール構成の利点
+
+| 観点 | 利点 |
+|------|------|
+| **ファンメイド対応** | SAIVerse本体とは別リポジトリで管理可能 |
+| **簡単導入** | git cloneのみで導入完了 |
+| **自動検出互換** | 既存の`_autodiscover_tools()`が`user_data/tools/*/schema.py`をスキャン |
+| **責務分離** | スキーマ定義（schema.py）とロジック（connector/）が明確に分離 |
+| **複数ツール対応** | `schemas()`関数で複数ツールを一括登録 |
+
+### 7.1.4. ツール登録
+
+**設計方針: `schema.py`に`schemas()`関数を実装**
+
+SAIVerseのツール自動検出システムを拡張し、`schemas()`（複数形）関数から複数ツールを一括登録できるようにします。
+
+**schema.py の構造:**
+
+```python
+# user_data/tools/discord/schema.py
+"""Discord Connector - 全ツールのスキーマと実装エントリポイント"""
+
+from tools.defs import ToolSchema
+
+# ロジック本体をインポート
+from .connector import operations
+
+
+def schemas() -> list[ToolSchema]:
+    """複数ツールのスキーマを返す"""
+    return [
+        ToolSchema(
+            name="discord_send_message",
+            description="Discordチャンネルにメッセージを送信する",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "integer", "description": "送信先チャンネルID"},
+                    "content": {"type": "string", "description": "メッセージ内容"},
+                },
+                "required": ["channel_id", "content"],
+            },
+            result_type="object",
+        ),
+        ToolSchema(
+            name="discord_visit",
+            description="Discord経由で他ユーザーのPublic Cityを訪問する",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "integer", "description": "訪問先チャンネルID"},
+                    "building_id": {"type": "string", "description": "訪問先BuildingID"},
+                },
+                "required": ["channel_id"],
+            },
+            result_type="object",
+        ),
+        ToolSchema(
+            name="discord_sync_messages",
+            description="Discordから最新メッセージを取得しSAIMemoryに同期する",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "channel_id": {"type": "integer", "description": "同期対象チャンネルID"},
+                    "limit": {"type": "integer", "description": "取得メッセージ数", "default": 50},
+                },
+                "required": ["channel_id"],
+            },
+            result_type="object",
+        ),
+        ToolSchema(
+            name="discord_leave",
+            description="訪問中のPublic Cityから退出する",
+            parameters={
+                "type": "object",
+                "properties": {},
+            },
+            result_type="object",
+        ),
+    ]
+
+
+# 実装関数（スキーマのnameと同名で定義）
+def discord_send_message(channel_id: int, content: str, **kwargs) -> dict:
+    """Discordチャンネルにメッセージを送信"""
+    return operations.send_message(channel_id, content, **kwargs)
+
+
+def discord_visit(channel_id: int, building_id: str = None, **kwargs) -> dict:
+    """Discord経由で他ユーザーのPublic Cityを訪問"""
+    return operations.start_visit(channel_id, building_id, **kwargs)
+
+
+def discord_sync_messages(channel_id: int, limit: int = 50, **kwargs) -> dict:
+    """Discordから最新メッセージを取得しSAIMemoryに同期"""
+    return operations.sync_messages(channel_id, limit, **kwargs)
+
+
+def discord_leave(**kwargs) -> dict:
+    """訪問中のPublic Cityから退出"""
+    return operations.leave_visit(**kwargs)
+```
+
+### 7.1.5. SAIVerse本体への変更
+
+**tools/__init__.py への追加（約20行）:**
+
+```python
+def _register_tool(module: Any) -> bool:
+    # 複数ツール対応: schemas() があれば優先
+    if hasattr(module, "schemas") and callable(module.schemas):
+        return _register_multiple_tools(module)
+
+    # 既存の単一ツール処理（変更なし）
+    if not hasattr(module, "schema") or not callable(module.schema):
+        return False
+    # ... 以下既存コード
+
+
+def _register_multiple_tools(module: Any) -> bool:
+    """schemas() を持つモジュールから複数ツールを登録"""
+    try:
+        tool_schemas: list[ToolSchema] = module.schemas()
+        registered = False
+        for meta in tool_schemas:
+            impl = getattr(module, meta.name, None)
+            if not impl or not callable(impl):
+                LOGGER.warning("Tool '%s' has schema but no implementation", meta.name)
+                continue
+            if meta.name in TOOL_REGISTRY:
+                LOGGER.debug("Tool '%s' already registered, skipping", meta.name)
+                continue
+
+            TOOL_REGISTRY[meta.name] = impl
+            OPENAI_TOOLS_SPEC.append(oa.to_openai(meta))
+            GEMINI_TOOLS_SPEC.append(gm.to_gemini(meta))
+            TOOL_SCHEMAS.append(meta)
+            registered = True
+            LOGGER.debug("Registered tool '%s' from multi-tool module", meta.name)
+        return registered
+    except Exception as e:
+        LOGGER.warning("Failed to register tools from module: %s", e)
+        return False
+```
+
+**saiverse_manager.py への追加（1行）:**
+
+```python
+def run_sea_auto(self, persona, building_id, occupants):
+    # Discord訪問者はDiscordConnectorが処理
+    if getattr(persona, 'is_discord_visitor', False):
+        if self.discord_connector:
+            self.discord_connector.handle_turn_request(persona, building_id)
+        return
+
+    # 既存処理（変更なし）
+    ...
+```
+
+### 7.1.6. 旧ディレクトリ構成との比較
+
+| 項目 | 旧設計 | 新設計 |
+|------|--------|--------|
+| ツール配置 | `tools/defs/discord_*.py` | `user_data/tools/discord/schema.py` |
+| ロジック配置 | `tools/discord/` | `user_data/tools/discord/connector/` |
+| 導入方法 | SAIVerse本体に組み込み | git clone |
+| スキーマ形式 | 1ファイル = 1ツール | `schemas()` で複数ツール |
+| 本体変更 | なし | `tools/__init__.py` に約20行追加 |
+
+### 7.1.7. データファイルの配置
+
+ランタイムデータは従来通り`~/.saiverse/`配下に保存：
+
+```
+~/.saiverse/
+├── discord_connector/                  # Discord Connector ランタイムデータ
+│   ├── connector.db                    # 専用データベース
+│   ├── mapping.json                    # マッピング設定
+│   └── sync_state.json                 # 同期状態
+├── cities/
+│   └── {city_id}/
+│       └── buildings/
+│           └── {building_id}/
+│               └── log.json            # Building ログ（Discord同期含む）
+└── personas/
+    └── {persona_id}/
+        ├── memory.db                   # SAIMemory
+        └── downloads/                  # 訪問時に受信したファイル
+```
+
+### 7.1.8. 初期化タイミング（Phenomenon方式）
+
+Discord Connectorの起動・終了は、SAIVerseの既存Phenomenonシステムを活用し、`SERVER_START` / `SERVER_STOP` トリガーで自動実行します。
+
+#### 方式の利点
+
+| 観点 | 利点 |
+|------|------|
+| **本体変更不要** | main.py、SAIVerseManagerへの変更なし |
+| **設定で制御** | PhenomenonRule.ENABLEDで有効/無効切替 |
+| **既存基盤活用** | PhenomenonManagerのトリガー/実行基盤を再利用 |
+| **ファンメイド対応** | user_data/phenomena/に配置するだけで動作 |
+
+#### Phenomenon定義
+
+**起動フェノメノン:**
+```python
+# user_data/phenomena/discord_connector.py
+"""Discord Connector の起動フェノメノン"""
+
+from phenomena.defs import PhenomenonSchema, PhenomenonParam
+
+def schema() -> PhenomenonSchema:
+    return PhenomenonSchema(
+        name="discord_connector_start",
+        description="SAIVerse起動時にDiscord Connectorを開始する",
+        parameters=[
+            PhenomenonParam(name="city_id", type="string", description="起動したCity ID"),
+        ],
+    )
+
+def discord_connector_start(city_id: str, **kwargs) -> dict:
+    """Discord Connectorを起動"""
+    import asyncio
+    from user_data.tools.discord.connector import get_or_create_connector
+
+    connector = get_or_create_connector()
+    asyncio.create_task(connector.start())
+
+    return {"success": True, "message": f"Discord Connector started for city {city_id}"}
+```
+
+**停止フェノメノン:**
+```python
+# user_data/phenomena/discord_connector_stop.py
+"""Discord Connector の終了フェノメノン"""
+
+from phenomena.defs import PhenomenonSchema, PhenomenonParam
+
+def schema() -> PhenomenonSchema:
+    return PhenomenonSchema(
+        name="discord_connector_stop",
+        description="SAIVerse終了時にDiscord Connectorを停止する",
+        parameters=[
+            PhenomenonParam(name="city_id", type="string", description="終了するCity ID"),
+        ],
+    )
+
+def discord_connector_stop(city_id: str, **kwargs) -> dict:
+    """Discord Connectorを停止"""
+    import asyncio
+    from user_data.tools.discord.connector import get_connector
+
+    connector = get_connector()
+    if connector:
+        asyncio.create_task(connector.stop())
+        return {"success": True, "message": f"Discord Connector stopped for city {city_id}"}
+    return {"success": True, "message": "Discord Connector was not running"}
+```
+
+#### PhenomenonRuleの登録
+
+```sql
+-- 起動ルール
+INSERT INTO phenomenon_rule (TRIGGER_TYPE, PHENOMENON_NAME, ARGUMENT_MAPPING_JSON, ENABLED, PRIORITY)
+VALUES ('server_start', 'discord_connector_start', '{"city_id": "$trigger.city_id"}', 1, 100);
+
+-- 停止ルール
+INSERT INTO phenomenon_rule (TRIGGER_TYPE, PHENOMENON_NAME, ARGUMENT_MAPPING_JSON, ENABLED, PRIORITY)
+VALUES ('server_stop', 'discord_connector_stop', '{"city_id": "$trigger.city_id"}', 1, 100);
+```
+
+#### 発火シーケンス
+
+```
+SAIVerse起動                              SAIVerse終了
+    │                                         │
+    ▼                                         ▼
+SAIVerseManager.start()               SAIVerseManager.shutdown()
+    │                                         │
+    ▼                                         ▼
+_emit_trigger(SERVER_START)           _emit_trigger(SERVER_STOP)
+    │                                         │
+    ▼                                         ▼
+PhenomenonManager.emit()              PhenomenonManager.emit()
+    │                                         │
+    ▼                                         ▼
+discord_connector_start()             discord_connector_stop()
+    │                                         │
+    ▼                                         ▼
+Discord WebSocket接続開始              Discord WebSocket接続終了
+```
+
+#### シングルトンアクセス
+
+```python
+# user_data/tools/discord/connector/__init__.py
+
+_connector_instance: DiscordConnector | None = None
+
+def get_or_create_connector() -> DiscordConnector:
+    """シングルトンインスタンスを取得（なければ作成）"""
+    global _connector_instance
+    if _connector_instance is None:
+        from .config import load_settings
+        settings = load_settings()
+        _connector_instance = DiscordConnector(settings=settings)
+    return _connector_instance
+
+def get_connector() -> DiscordConnector | None:
+    """既存のシングルトンインスタンスを取得"""
+    return _connector_instance
+```
+
+### 7.2. DiscordConnector クラス（中央リレーサーバー方式）
+
+**注意**: 本セクションは中央リレーサーバー方式に対応した実装です。ローカルSAIVerseはDiscord Gatewayに直接接続せず、リレーサーバーへのWebSocket接続を通じてDiscordと通信します。
+
+```python
+from dataclasses import dataclass
+from typing import Optional, Callable, Any
+import asyncio
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RelayMessage:
+    """リレーサーバーから受信したメッセージを表す"""
+    op: int                      # オペレーションコード
+    data: dict | None            # ペイロード
+    sequence: int | None = None  # シーケンス番号
+    event_type: str | None = None  # イベントタイプ
+
+
+class DiscordConnector:
+    """SAIVerseとDiscordのリアルタイム同期を管理（中央リレーサーバー方式）
+
+    ローカルSAIVerseはリレーサーバーへWebSocket接続し、
+    リレーサーバー経由でDiscordとメッセージを送受信する。
+    """
+
+    def __init__(self, settings: DiscordConnectorSettings):
+        self.settings = settings
+        self._relay_client: RelayClient | None = None
+        self._mapping: ChannelMapping = ChannelMapping()
+        self._sync_state: SyncState = SyncState()
+        self._manager: SAIVerseManager | None = None  # 遅延取得
+        self._last_sequence: int | None = None  # RESUME用シーケンス番号
+        self._session_id: str | None = None      # RESUME用セッションID
+
+    @property
+    def manager(self) -> SAIVerseManager:
+        """SAIVerseManagerを遅延取得"""
+        if self._manager is None:
+            from tools.context import get_saiverse_manager
+            self._manager = get_saiverse_manager()
+        return self._manager
+
+    async def start(self) -> None:
+        """SAIVerse起動時に呼び出し - リレーサーバーへ接続を開始"""
+        self._relay_client = RelayClient(
+            server_url=self.settings.relay_server_url,
+            session_token=self.settings.session_token,
+            on_message=self._handle_relay_message,
+            on_connect=self._handle_connect,
+            on_disconnect=self._handle_disconnect,
+        )
+        await self._relay_client.connect()
+
+    async def stop(self) -> None:
+        """SAIVerse停止時に呼び出し - リレーサーバーから切断"""
+        if self._relay_client:
+            await self._relay_client.close()
+            self._relay_client = None
+
+    async def _handle_connect(self) -> None:
+        """接続成功時の処理"""
+        logger.info("Connected to relay server")
+
+        # RESUME可能ならRESUME、そうでなければIDENTIFY
+        if self._session_id and self._last_sequence is not None:
+            await self._send_resume()
+        else:
+            await self._send_identify()
+
+    async def _handle_disconnect(self, reason: str) -> None:
+        """切断時の処理"""
+        logger.warning("Disconnected from relay server: %s", reason)
+        # 再接続はRelayClientが処理
+
+    async def _handle_relay_message(self, raw_message: str) -> None:
+        """リレーサーバーからのメッセージを処理"""
+        try:
+            data = json.loads(raw_message)
+            message = RelayMessage(
+                op=data.get("op"),
+                data=data.get("d"),
+                sequence=data.get("s"),
+                event_type=data.get("t"),
+            )
+
+            # シーケンス番号を記録（RESUME用）
+            if message.sequence is not None:
+                self._last_sequence = message.sequence
+
+            await self._dispatch_message(message)
+
+        except json.JSONDecodeError as e:
+            logger.error("Invalid JSON from relay server: %s", e)
+
+    async def _dispatch_message(self, message: RelayMessage) -> None:
+        """オペレーションコードに応じてメッセージを振り分け"""
+        handlers = {
+            0: self._handle_dispatch,      # DISPATCH (イベント)
+            10: self._handle_hello,        # HELLO
+            11: self._handle_heartbeat_ack,  # HEARTBEAT_ACK
+            7: self._handle_reconnect,     # RECONNECT
+            9: self._handle_invalid_session,  # INVALID_SESSION
+        }
+
+        handler = handlers.get(message.op)
+        if handler:
+            await handler(message)
+        else:
+            logger.debug("Unknown opcode: %d", message.op)
+
+    async def _handle_hello(self, message: RelayMessage) -> None:
+        """HELLO: Heartbeat間隔を受け取り、Heartbeatを開始"""
+        heartbeat_interval = message.data.get("heartbeat_interval", 30000)
+        self._relay_client.start_heartbeat(heartbeat_interval)
+        logger.info("Received HELLO, heartbeat interval: %dms", heartbeat_interval)
+
+    async def _handle_dispatch(self, message: RelayMessage) -> None:
+        """DISPATCH: イベントを処理"""
+        event_type = message.event_type
+        data = message.data
+
+        if event_type == "READY":
+            await self._handle_ready(data)
+        elif event_type == "MESSAGE_CREATE":
+            await self._handle_message_create(data)
+        elif event_type == "VISIT_REQUEST":
+            await self._handle_visit_request(data)
+        elif event_type == "VISIT_ACCEPTED":
+            await self._handle_visit_accepted(data)
+        elif event_type == "TURN_REQUEST":
+            await self._handle_turn_request(data)
+        elif event_type == "FORCED_RETURN":
+            await self._handle_forced_return(data)
+        elif event_type == "HOST_OFFLINE":
+            await self._handle_host_offline(data)
+        else:
+            logger.debug("Unhandled event type: %s", event_type)
+
+    async def _handle_ready(self, data: dict) -> None:
+        """READY: 接続準備完了"""
+        self._session_id = data.get("session_id")
+        logger.info("Discord Connector ready - session_id: %s", self._session_id)
+        await self._sync_existing_messages()
+
+    async def _handle_message_create(self, data: dict) -> None:
+        """MESSAGE_CREATE: Discordメッセージ受信"""
+        channel_id = data.get("channel_id")
+        building_id = self._mapping.get_building_id(int(channel_id))
+        if not building_id:
+            return
+
+        # リレーサーバー形式 → SAIVerse形式に変換
+        message_source = self._parse_message_source(data)
+
+        # Building履歴に記録
+        await self._record_to_building_history(message_source, channel_id, data.get("message_id"))
+
+        # SAIMemoryに記録
+        await self._record_to_persona_memory(message_source, channel_id, data.get("message_id"))
+
+        # ペルソナの応答をトリガー
+        if message_source.type in ("user", "persona") and message_source.role != "persona_local":
+            await self._trigger_persona_response(message_source, channel_id)
+
+    def _parse_message_source(self, data: dict) -> MessageSource:
+        """リレーサーバーのメッセージデータをMessageSourceに変換"""
+        author = data.get("author", {})
+        author_type = author.get("type", "user")
+
+        # 自分のペルソナの発言かチェック
+        if author_type == "persona":
+            persona_id = author.get("id")
+            if persona_id in self.manager.all_personas:
+                local_persona = self.manager.all_personas.get(persona_id)
+                if local_persona and not getattr(local_persona, "is_proxy", False):
+                    return MessageSource(
+                        type="echo",
+                        role="persona_local",
+                        content=data.get("content", ""),
+                        persona_id=persona_id,
+                    )
+
+        return MessageSource(
+            type=author_type,
+            role="user" if author_type == "user" else "persona_remote",
+            content=data.get("content", ""),
+            author_id=author.get("id"),
+            author_name=author.get("name"),
+            persona_id=author.get("id") if author_type == "persona" else None,
+        )
+
+    async def _send_identify(self) -> None:
+        """IDENTIFYメッセージを送信"""
+        public_cities = self._build_public_city_info()
+        await self._relay_client.send({
+            "op": 2,  # IDENTIFY
+            "d": {
+                "public_cities": public_cities,
+            },
+        })
+
+    async def _send_resume(self) -> None:
+        """RESUMEメッセージを送信（再接続時）"""
+        await self._relay_client.send({
+            "op": 3,  # RESUME
+            "d": {
+                "session_id": self._session_id,
+                "seq": self._last_sequence,
+            },
+        })
+
+    async def _handle_reconnect(self, message: RelayMessage) -> None:
+        """RECONNECT: サーバーからの再接続要求"""
+        logger.info("Received RECONNECT request from server")
+        await self._relay_client.reconnect()
+
+    async def _handle_invalid_session(self, message: RelayMessage) -> None:
+        """INVALID_SESSION: セッション無効、再IDENTIFYが必要"""
+        resumable = message.data if isinstance(message.data, bool) else False
+        logger.warning("Session invalidated, resumable: %s", resumable)
+
+        self._session_id = None
+        self._last_sequence = None
+
+        if resumable:
+            await asyncio.sleep(1)  # 少し待ってから再接続
+            await self._relay_client.reconnect()
+        else:
+            # 新規セッション開始
+            await self._send_identify()
+
+    async def send_message(
+        self,
+        building_id: str,
+        content: str,
+        persona_id: str,
+        persona_name: str,
+        persona_avatar_url: str | None = None,
+    ) -> dict:
+        """ペルソナからDiscordへメッセージ送信（リレーサーバー経由）"""
+        channel_id = self._mapping.get_channel_id(building_id)
+        if not channel_id:
+            return {"success": False, "error": "Building not mapped to Discord"}
+
+        city_id = self._mapping.get_city_id(building_id)
+
+        await self._relay_client.send({
+            "op": 0,  # DISPATCH
+            "t": "SEND_MESSAGE",
+            "d": {
+                "channel_id": str(channel_id),
+                "persona_id": persona_id,
+                "persona_name": persona_name,
+                "persona_avatar_url": persona_avatar_url,
+                "content": content,
+                "city_id": city_id,
+            },
+        })
+
+        return {"success": True}
+```
+
+### 7.3. RelayClient クラス（WebSocket接続管理）
+
+リレーサーバーへのWebSocket接続を管理するクライアントクラス。再接続ロジック、Heartbeat管理、JWT認証を担当する。
+
+```python
+import asyncio
+import json
+import logging
+import random
+from datetime import datetime, timezone
+from typing import Callable, Optional
+import websockets
+from websockets.exceptions import ConnectionClosed
+
+logger = logging.getLogger(__name__)
+
+
+class RelayClient:
+    """リレーサーバーへのWebSocket接続を管理
+
+    - JWT認証付きWebSocket接続
+    - 自動再接続（指数バックオフ）
+    - Heartbeat管理
+    - RESUME対応（シーケンス番号追跡）
+    """
+
+    def __init__(
+        self,
+        server_url: str,
+        session_token: str,
+        on_message: Callable[[str], None],
+        on_connect: Callable[[], None],
+        on_disconnect: Callable[[str], None],
+    ):
+        self.server_url = server_url
+        self.session_token = session_token
+        self._on_message = on_message
+        self._on_connect = on_connect
+        self._on_disconnect = on_disconnect
+
+        self._ws: websockets.WebSocketClientProtocol | None = None
+        self._heartbeat_task: asyncio.Task | None = None
+        self._receive_task: asyncio.Task | None = None
+        self._heartbeat_interval_ms: int = 30000
+        self._last_heartbeat_ack: datetime | None = None
+        self._should_run: bool = False
+
+        # 再接続ポリシー
+        self._reconnect_attempt: int = 0
+        self._max_reconnect_attempts: int = 10
+        self._base_delay: float = 1.0
+        self._max_delay: float = 60.0
+
+    async def connect(self) -> None:
+        """リレーサーバーに接続"""
+        self._should_run = True
+        await self._connection_loop()
+
+    async def close(self) -> None:
+        """接続をクローズ"""
+        self._should_run = False
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+        if self._receive_task:
+            self._receive_task.cancel()
+        if self._ws:
+            await self._ws.close()
+            self._ws = None
+
+    async def reconnect(self) -> None:
+        """再接続を実行"""
+        if self._ws:
+            await self._ws.close()
+        # _connection_loop が再接続を処理
+
+    async def send(self, data: dict) -> None:
+        """メッセージを送信"""
+        if self._ws and self._ws.open:
+            await self._ws.send(json.dumps(data))
+        else:
+            logger.warning("Cannot send message: WebSocket not connected")
+
+    def start_heartbeat(self, interval_ms: int) -> None:
+        """Heartbeat送信を開始"""
+        self._heartbeat_interval_ms = interval_ms
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+    async def _connection_loop(self) -> None:
+        """接続維持ループ（再接続ロジック含む）"""
+        while self._should_run:
+            try:
+                # JWT認証ヘッダー付きで接続
+                headers = {"Authorization": f"Bearer {self.session_token}"}
+                self._ws = await websockets.connect(
+                    self.server_url,
+                    extra_headers=headers,
+                )
+
+                # 接続成功
+                self._reconnect_attempt = 0
+                logger.info("WebSocket connected to relay server")
+
+                # 接続成功コールバック
+                await self._on_connect()
+
+                # メッセージ受信ループ
+                await self._receive_loop()
+
+            except websockets.exceptions.InvalidStatusCode as e:
+                if e.status_code == 401:
+                    # 認証エラー - JWTが無効または期限切れ
+                    logger.error("Authentication failed (401): JWT may be expired")
+                    await self._on_disconnect("auth_error")
+                    break  # 再接続しない
+                elif e.status_code == 429:
+                    # レート制限
+                    retry_after = 60  # デフォルト60秒
+                    logger.warning("Rate limited, waiting %d seconds", retry_after)
+                    await asyncio.sleep(retry_after)
+                    continue
+                else:
+                    logger.error("Connection failed with status %d", e.status_code)
+
+            except ConnectionClosed as e:
+                logger.warning("Connection closed: code=%s reason=%s", e.code, e.reason)
+
+            except Exception as e:
+                logger.error("Connection error: %s", e)
+
+            # 再接続判定
+            if not self._should_run:
+                break
+
+            delay = self._get_reconnect_delay()
+            if delay is None:
+                logger.error("Max reconnect attempts reached")
+                await self._on_disconnect("max_retries")
+                break
+
+            logger.info("Reconnecting in %.1f seconds... (attempt %d/%d)",
+                       delay, self._reconnect_attempt, self._max_reconnect_attempts)
+            await asyncio.sleep(delay)
+
+    async def _receive_loop(self) -> None:
+        """メッセージ受信ループ"""
+        try:
+            async for message in self._ws:
+                await self._on_message(message)
+        except ConnectionClosed:
+            pass  # 接続クローズは _connection_loop で処理
+
+    async def _heartbeat_loop(self) -> None:
+        """Heartbeat送信ループ"""
+        while self._should_run and self._ws and self._ws.open:
+            await asyncio.sleep(self._heartbeat_interval_ms / 1000)
+
+            # Heartbeat ACKのタイムアウトチェック
+            if self._last_heartbeat_ack:
+                elapsed = (datetime.now(timezone.utc) - self._last_heartbeat_ack).total_seconds()
+                if elapsed > (self._heartbeat_interval_ms / 1000) * 2:
+                    logger.warning("Heartbeat ACK timeout, closing connection")
+                    await self._ws.close()
+                    break
+
+            # Heartbeat送信
+            await self.send({"op": 1, "d": None})  # HEARTBEAT
+            logger.debug("Sent heartbeat")
+
+    def record_heartbeat_ack(self) -> None:
+        """Heartbeat ACK受信を記録"""
+        self._last_heartbeat_ack = datetime.now(timezone.utc)
+
+    def _get_reconnect_delay(self) -> float | None:
+        """再接続待機時間を計算（指数バックオフ + ジッター）"""
+        if self._reconnect_attempt >= self._max_reconnect_attempts:
+            return None
+
+        delay = min(
+            self._base_delay * (2 ** self._reconnect_attempt),
+            self._max_delay,
+        )
+
+        # ジッター（±30%）
+        jitter = delay * 0.3 * (random.random() * 2 - 1)
+        delay += jitter
+
+        self._reconnect_attempt += 1
+        return max(delay, 0.1)
+```
+
+### 7.4. マッピング設定
+
+```json
+// ~/.saiverse/discord_connector/mapping.json
+{
+  "guilds": {
+    "1234567890123456789": {
+      "name": "SAIVerse Web",
+      "cities": {
+        "9876543210987654321": {
+          "city_id": "public_city_alice",
+          "city_name": "Alice's Public City",
+          "owner_discord_id": "1111111111111111111",
+          "buildings": {
+            "2222222222222222222": {
+              "building_id": "cafe",
+              "building_name": "カフェ"
+            },
+            "3333333333333333333": {
+              "building_id": "park",
+              "building_name": "公園"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 7.5. 独立したGradio UI
+
+SAIVerse本体（`main.py`）とは独立したGradio UIを提供し、Discord Connector専用の管理画面を実現します。
+
+#### 7.5.1. UIスクリプト構成
+
+UIは`user_data/tools/discord/ui/`配下に配置：
+
+```
+user_data/tools/discord/ui/
+├── __init__.py
+├── app.py                    # メインUI起動スクリプト
+├── components/
+│   ├── setup_wizard.py       # Setupタブ（初期セットアップウィザード）
+│   ├── connection_panel.py   # Connectionタブ（接続状態管理）
+│   ├── mapping_editor.py     # Mappingタブ（マッピング設定編集）
+│   ├── access_control.py     # Accessタブ（アクセス制御）
+│   ├── visit_monitor.py      # Visitsタブ（訪問状態モニタ）
+│   ├── log_viewer.py         # Sync Logタブ（同期ログビューア）
+│   └── settings_panel.py     # Settingsタブ（詳細設定）
+└── styles.py                 # CSS定義
+```
+
+#### 7.5.2. 起動方法
+
+```bash
+# Discord Connector UIのみを起動（SAIVerse本体とは独立）
+python -m user_data.tools.discord.ui.app
+
+# ポート指定
+python -m user_data.tools.discord.ui.app --port 8100
+
+# SAIVerse本体と同時起動する場合
+# ターミナル1: python main.py city_a
+# ターミナル2: python -m user_data.tools.discord.ui.app
+```
+
+#### 7.5.3. UIタブ構成
+
+| タブ | 機能 | 主要コンポーネント |
+|------|------|-------------------|
+| **Setup** | 初期セットアップウィザード | Discord OAuth2ログイン、Bot招待 |
+| **Connection** | 接続状態管理 | ステータス表示、再接続/切断、接続履歴 |
+| **Mapping** | マッピング設定編集 | City/Building ⟷ Channel/Thread対応付け |
+| **Access** | アクセス制御 | 許可/拒否リスト、モード設定 |
+| **Visits** | 訪問状態モニタ | アクティブな訪問一覧、強制送還ボタン |
+| **Sync Log** | 同期ログビューア | リアルタイムログ表示、エラーフィルタ |
+| **Settings** | 詳細設定 | トークン変更、セキュリティ、データ管理 |
+
+#### 7.5.4. Setupタブ（初期セットアップウィザード - 中央リレーサーバー方式）
+
+Discord OAuth2認証とBot招待を2ステップでガイドするウィザード形式UI。
+
+**ステップ1: Discord OAuth2ログイン**
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  📋 Discord連携セットアップ                                       │
+├─────────────────────────────────────────────────────────────────┤
+│  ステップ 1/2: Discordでログイン                                  │
+│                                                                 │
+│  SAIVerseがDiscordアカウント情報にアクセスすることを許可します。  │
+│                                                                 │
+│  取得する情報:                                                    │
+│  ・Discord User ID、ユーザー名                                   │
+│  ・参加サーバー一覧（訪問先選択用）                               │
+│                                                                 │
+│  ⚠️ メッセージの読み書きはSAIVerse Botを通じて行います。           │
+│     あなたの個人的なDMやメッセージは読み取りません。              │
+│                                                                 │
+│                     [🔗 Discordでログイン]                        │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**ステップ2: SAIVerse Botをサーバーに招待**
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  ステップ 2/2: SAIVerse Botをサーバーに招待                       │
+│                                                                 │
+│  ✅ Discordログイン完了: Alice#1234                              │
+│                                                                 │
+│  Public Cityを公開するには、SAIVerse Botを                       │
+│  Discordサーバーに招待する必要があります。                        │
+│                                                                 │
+│  [🤖 SAIVerse Botを招待]                                         │
+│                                                                 │
+│  参加サーバー一覧:                                                │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ サーバー名          │ Botステータス │ アクション          │   │
+│  │─────────────────────┼──────────────┼───────────────────│   │
+│  │ SAIVerse Community  │ ✅ 参加済み   │ [Public City設定]  │   │
+│  │ 私のサーバー         │ ❌ 未参加    │ [Botを招待]        │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  🎉 セットアップ完了！                                           │
+│     Public Cityの設定はMappingタブで行えます。                   │
+│                                      [セットアップを完了する]    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**認証状態の表示:**
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  認証情報                                                        │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ Discordアカウント: Alice#1234                           │   │
+│  │ Discord ID:       123456789012345678                   │   │
+│  │ セッション有効期限: 2025-02-09 (残り30日)                │   │
+│  │ 参加サーバー数:    3                                    │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  [🔄 セッション更新] [🚪 ログアウト]                              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 7.5.5. Connectionタブ（接続状態管理）
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  🔌 リレーサーバー接続状態                                        │
+├─────────────────────────────────────────────────────────────────┤
+│  ステータス: 🟢 接続中 (READY)                                   │
+│                                                                 │
+│  接続情報:                                                        │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ リレーサーバー: wss://relay.saiverse.example.com       │   │
+│  │ セッションID:   abc123-def456-ghi789                   │   │
+│  │ 接続開始:       2025-01-10 14:30:00                    │   │
+│  │ 稼働時間:       2時間 15分                              │   │
+│  │ シーケンス番号: 1234                                    │   │
+│  │ Heartbeat:      30秒 (最終ACK: 5秒前)                  │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  Public City公開状況:                                            │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ City名              │ ステータス │ 訪問者数 │ アクション │   │
+│  │─────────────────────┼───────────┼─────────┼───────────│   │
+│  │ public_city_alice   │ 🟢 公開中  │    2    │ [非公開]   │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  アクション:  [🔄 再接続] [⏹ 切断] [📊 詳細ログ]                 │
+│                                                                 │
+│  接続履歴（直近10件）:                                           │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ 時刻              │ イベント   │ 詳細                    │   │
+│  │───────────────────┼───────────┼────────────────────────│   │
+│  │ 2025-01-10 14:30  │ READY     │ セッション確立          │   │
+│  │ 2025-01-10 14:30  │ IDENTIFY  │ Public City登録         │   │
+│  │ 2025-01-10 14:30  │ HELLO     │ Heartbeat開始           │   │
+│  │ 2025-01-10 12:15  │ RESUMED   │ 再接続成功 (12 events)  │   │
+│  │ 2025-01-10 12:14  │ disconnect│ WebSocket切断           │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 7.5.6. Accessタブ（アクセス制御）
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  🛡️ アクセス制御                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  Public City: [public_city_alice      ▼]                        │
+│                                                                 │
+│  モード: ○ 許可リスト（ホワイトリスト）  ← 推奨                  │
+│         ○ 拒否リスト（ブラックリスト）                           │
+│         ○ 全員許可（署名検証のみ）                               │
+│                                                                 │
+│  許可リスト:                                                     │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │ 種別     │ ID                    │ 名前        │ 操作   │   │
+│  │──────────┼───────────────────────┼────────────┼───────│   │
+│  │ ペルソナ │ bob_persona           │ Bob        │ [🗑]  │   │
+│  │ ペルソナ │ charlie_persona       │ Charlie    │ [🗑]  │   │
+│  │ ユーザー │ 123456789012345678    │ Alice#1234 │ [🗑]  │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│  追加: 種別 [ペルソナ ▼]  ID [              ] [➕ 追加]          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 7.5.7. Settingsタブ（詳細設定）
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  ⚙️ 設定                                                         │
+├─────────────────────────────────────────────────────────────────┤
+│  🔑 認証設定                                                     │
+│  Bot Token:                                                      │
+│  [••••••••••••••••••••••••••••••••••••] [👁 表示] [📝 変更]      │
+│                                                                 │
+│  共有シークレット（ペルソナ署名用）:                              │
+│  [••••••••••••••••••] [👁 表示] [🔄 再生成] [📋 コピー]          │
+│  ⚠️ 再生成すると他ユーザーとの連携が切れます                      │
+│                                                                 │
+│  📡 接続設定                                                     │
+│  自動接続:        [✅ 有効]                                      │
+│  再接続リトライ:   [5   ] 回まで                                 │
+│  リトライ間隔:     [30  ] 秒                                     │
+│                                                                 │
+│  🔒 セキュリティ設定                                             │
+│  署名検証:        [✅ 有効]                                      │
+│  レート制限:      [✅ 有効]                                      │
+│  スパム検知:      [✅ 有効]                                      │
+│                                                                 │
+│  📁 データ設定                                                   │
+│  データディレクトリ: ~/.saiverse/discord_connector/              │
+│  DBファイル:        connector.db (1.2 MB)                        │
+│  [📂 フォルダを開く] [🗑 データをリセット]                        │
+│                                                                 │
+│                                      [💾 設定を保存] [↩ リセット]│
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 7.5.8. メインUIの実装イメージ
+
+```python
+# user_data/tools/discord/ui/app.py
+import argparse
+import gradio as gr
+from .components import (
+    setup_wizard,
+    connection_panel,
+    mapping_editor,
+    access_control,
+    visit_monitor,
+    log_viewer,
+    settings_panel,
+)
+
+
+def create_app() -> gr.Blocks:
+    """Discord Connector UI を構築"""
+
+    with gr.Blocks(title="Discord Connector", theme=gr.themes.Soft()) as app:
+        gr.Markdown("# Discord Connector")
+
+        with gr.Tabs():
+            with gr.Tab("Setup"):
+                setup_wizard.render()
+
+            with gr.Tab("Connection"):
+                connection_panel.render()
+
+            with gr.Tab("Mapping"):
+                mapping_editor.render()
+
+            with gr.Tab("Access"):
+                access_control.render()
+
+            with gr.Tab("Visits"):
+                visit_monitor.render()
+
+            with gr.Tab("Sync Log"):
+                log_viewer.render()
+
+            with gr.Tab("Settings"):
+                settings_panel.render()
+
+    return app
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Discord Connector UI")
+    parser.add_argument("--port", type=int, default=8100, help="UI port")
+    parser.add_argument("--share", action="store_true", help="Create public link")
+    args = parser.parse_args()
+
+    app = create_app()
+    app.launch(
+        server_name="0.0.0.0",
+        server_port=args.port,
+        share=args.share,
+    )
+
+
+if __name__ == "__main__":
+    main()
+```
+
+#### 7.5.9. 設定ファイル構成
+
+```yaml
+# ~/.saiverse/discord_connector/config.yaml
+
+bot:
+  token: "YOUR_BOT_TOKEN"  # 環境変数 DISCORD_BOT_TOKEN でも可
+  application_id: "1234567890123456789"
+
+connection:
+  auto_connect: true
+  max_retries: 5
+  retry_interval_seconds: 30
+
+security:
+  shared_secret: "randomly_generated_secret"
+  verify_signatures: true
+  rate_limiting: true
+  spam_detection: true
+
+data:
+  db_path: "~/.saiverse/discord_connector/connector.db"
+```
+
+#### 7.5.10. SAIVerse本体との連携
+
+Discord Connector UIはSAIVerse本体（main.py）と以下の方法で連携します：
+
+| 連携方式 | 用途 |
+|----------|------|
+| **共有データベース** | `connector.db` を読み書き |
+| **設定ファイル** | `config.yaml` の読み書き |
+| **ファイル監視** | `sync_state.json`, `mapping.json` の変更を検知 |
+
+```
+連携アーキテクチャ
+
+┌─────────────────────────────────────────────────────────┐
+│                    SAIVerse/user_data/tools/             │
+│                                                         │
+│  ┌─────────────────┐     ┌─────────────────────────┐   │
+│  │ discord/        │     │ (その他ツール)           │   │
+│  │ (Connector本体) │     │                         │   │
+│  └────────┬────────┘     └─────────────────────────┘   │
+│           │                                             │
+└───────────┼─────────────────────────────────────────────┘
+            │
+┌───────────┼───────────────────────────────────────────────┐
+│           ▼                                               │
+│  ┌─────────────────┐     ┌─────────────────────────┐     │
+│  │ SAIVerse本体     │     │ Discord Connector UI   │     │
+│  │ (main.py)       │     │ (discord.ui.app)       │     │
+│  │  port 8000      │     │  port 8100             │     │
+│  └────────┬────────┘     └────────┬────────────────┘     │
+│           │                       │                       │
+│           │   ┌───────────────┐   │                       │
+│           └──▶│ connector.db  │◀──┘                       │
+│               │ config.yaml   │   (~/.saiverse/           │
+│               │ mapping.json  │    discord_connector/)    │
+│               └───────────────┘                           │
+│                                                           │
+│                      ランタイム環境                        │
+└───────────────────────────────────────────────────────────┘
+```
+
+### 7.5. 独立したデータベーススキーマ
+
+SAIVerse本体の`saiverse.db`とは分離した専用データベース`connector.db`を使用します。
+
+DBスキーマ定義とマイグレーションは`tools/discord/db/`配下に配置（セクション7.1参照）。
+
+#### 7.5.1. データベースの配置
+
+ランタイムデータは`~/.saiverse/discord_connector/`配下に保存：
+
+```
+~/.saiverse/
+├── discord_connector/
+│   ├── connector.db           # Discord Connector専用DB (SQLite)
+│   ├── mapping.json           # マッピング設定（JSON形式、即時反映用）
+│   └── sync_state.json        # 同期状態（JSON形式）
+└── personas/
+    └── {id}/
+        ├── memory.db          # 既存のSAIMemory（変更なし）
+        └── downloads/         # 訪問時に受信したファイル
+```
+
+#### 7.5.2. connector.db スキーマ
+
+```sql
+-- Public City 定義
+CREATE TABLE public_cities (
+    id TEXT PRIMARY KEY,                          -- City ID (e.g., "public_city_alice")
+    name TEXT NOT NULL,                           -- 表示名
+    discord_channel_id TEXT UNIQUE,               -- Discordチャンネル ID
+    owner_discord_id TEXT NOT NULL,               -- 所有者のDiscord ID
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Building ⟷ Thread マッピング
+CREATE TABLE building_mappings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    city_id TEXT NOT NULL REFERENCES public_cities(id) ON DELETE CASCADE,
+    building_id TEXT NOT NULL,                    -- SAIVerse Building ID
+    building_name TEXT NOT NULL,                  -- 表示名
+    discord_thread_id TEXT UNIQUE,                -- Discordスレッド ID
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(city_id, building_id)
+);
+
+-- 訪問セッション
+CREATE TABLE visit_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    persona_id TEXT NOT NULL,                     -- 訪問者ペルソナ ID
+    persona_name TEXT NOT NULL,                   -- 訪問者ペルソナ名
+    home_city_id TEXT NOT NULL,                   -- 元居たCity ID
+    home_building_id TEXT NOT NULL,               -- 元居たBuilding ID
+    visiting_city_id TEXT NOT NULL REFERENCES public_cities(id),
+    visiting_building_id TEXT NOT NULL,           -- 訪問先Building ID
+    owner_discord_id TEXT NOT NULL,               -- 訪問者のオーナー Discord ID
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ended_at TIMESTAMP,                           -- NULL=訪問中
+    end_reason TEXT,                              -- 終了理由 (normal/forced/error)
+    messages_exchanged INTEGER DEFAULT 0          -- やり取りしたメッセージ数
+);
+CREATE INDEX idx_visit_sessions_active ON visit_sessions(persona_id, ended_at) WHERE ended_at IS NULL;
+
+-- 同期履歴
+CREATE TABLE sync_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id TEXT NOT NULL,                     -- Discordチャンネル/スレッド ID
+    last_message_id TEXT,                         -- 最後に同期したメッセージ ID
+    messages_synced INTEGER DEFAULT 0,            -- 同期したメッセージ数
+    synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    sync_type TEXT NOT NULL                       -- startup / realtime / reconnect
+);
+CREATE INDEX idx_sync_history_channel ON sync_history(channel_id, synced_at);
+
+-- ファイル転送履歴
+CREATE TABLE file_transfers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    visit_session_id INTEGER REFERENCES visit_sessions(id),
+    direction TEXT NOT NULL,                      -- send / receive
+    tool_name TEXT,                               -- 生成元Tool
+    original_filename TEXT NOT NULL,
+    local_path TEXT,                              -- ローカル保存先
+    discord_message_id TEXT,                      -- Discordメッセージ ID
+    file_size_bytes INTEGER,
+    compressed BOOLEAN DEFAULT FALSE,
+    compression_format TEXT,
+    transferred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status TEXT DEFAULT 'pending'                 -- pending / success / failed
+);
+CREATE INDEX idx_file_transfers_session ON file_transfers(visit_session_id);
+
+-- 接続履歴
+CREATE TABLE connection_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event TEXT NOT NULL,                          -- connect / disconnect / reconnect / error
+    reason TEXT,                                  -- 切断/エラー理由
+    attempt_count INTEGER,                        -- 再接続試行回数（reconnect時）
+    occurred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 送信メッセージ履歴（受信時のペルソナ識別用）
+CREATE TABLE sent_messages (
+    discord_message_id TEXT PRIMARY KEY,          -- DiscordメッセージID
+    persona_id TEXT NOT NULL,                     -- 送信元ペルソナID
+    city_id TEXT NOT NULL,                        -- 送信元City ID
+    building_id TEXT NOT NULL,                    -- 送信元Building ID
+    sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_sent_messages_persona ON sent_messages(persona_id, sent_at);
+```
+
+#### 7.5.3. マイグレーション管理
+
+```python
+# tools/discord/db/migrate.py
+from pathlib import Path
+import sqlite3
+
+SCHEMA_VERSION = 1
+
+MIGRATIONS = {
+    1: """
+        -- Initial schema
+        CREATE TABLE public_cities ( ... );
+        CREATE TABLE building_mappings ( ... );
+        CREATE TABLE visit_sessions ( ... );
+        ...
+    """,
+    # 2: "ALTER TABLE ...",  # 将来のマイグレーション
+}
+
+
+def get_db_path() -> Path:
+    return Path.home() / ".saiverse" / "discord_connector" / "connector.db"
+
+
+def migrate(db_path: Path | None = None) -> None:
+    """マイグレーションを実行"""
+    db_path = db_path or get_db_path()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    # バージョンテーブル作成
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER PRIMARY KEY
+        )
+    """)
+
+    # 現在のバージョン取得
+    cursor.execute("SELECT MAX(version) FROM schema_version")
+    current = cursor.fetchone()[0] or 0
+
+    # 適用が必要なマイグレーションを実行
+    for version in range(current + 1, SCHEMA_VERSION + 1):
+        if version in MIGRATIONS:
+            cursor.executescript(MIGRATIONS[version])
+            cursor.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
+            print(f"Applied migration v{version}")
+
+    conn.commit()
+    conn.close()
+```
+
+#### 7.5.4. SAIVerse本体DBとの関係
+
+| データベース | 格納データ | 管理対象 |
+|--------------|-----------|----------|
+| `saiverse.db` | City, Building, AI, User, Tool, Playbook 等 | SAIVerse本体 |
+| `connector.db` | Discord連携情報、訪問セッション、同期状態 | Discord Connector |
+| `memory.db` (各ペルソナ) | SAIMemory ログ | ペルソナ個別 |
+
+**連携時のデータフロー:**
+```
+saiverse.db の City/Building
+        │
+        ▼ 参照 (read-only)
+connector.db で Discord マッピングを管理
+        │
+        ▼ 訪問イベント
+saiverse.db の OccupancyManager に通知
+        │
+        ▼ ペルソナ移動
+memory.db に訪問記録を追記
+```
+
+---
+
+## 8. メッセージフォーマット
+
+### 8.0. メッセージ種別一覧
+
+Discord上で扱うメッセージは以下の4種類に分類されます：
+
+| 種別 | 送信元 | Discord上の表示 | 識別方法 | SAIVerseでの扱い |
+|------|-------|----------------|---------|-----------------|
+| **ユーザー発言** | Discordユーザー（人間） | 通常メッセージ | `author.bot == False` | role=`user`、応答トリガー |
+| **ペルソナ発言** | 他ユーザーのペルソナ | Embed（アバター+名前） | `author.bot == True` + Embed | role=`persona_remote`、応答トリガー |
+| **自ペルソナ発言** | 自分のペルソナ | Embed（アバター+名前） | `author.bot == True` + sent_messages照合 | スキップ（エコー防止） |
+| **システム通知** | Bot | Embed（色分け） | `author.bot == True` + 通知色 | role=`system`、ログのみ |
+
+**なりすまし防止:**
+- ユーザー発言: `author.bot == False` で識別、Discord認証で保証
+- ペルソナ発言: Botのみが送信可能、ユーザーがEmbedを送っても `author.bot == False` なので区別可能
+
+### 8.1. ペルソナ発言
+
+ペルソナの発言は**Discord Embed**を使用し、ペルソナごとにアバターと名前を表示します。
+
+#### 8.1.1. Embed構造
+
+```python
+def create_persona_message_embed(
+    persona_name: str,
+    persona_avatar_url: str,
+    content: str,
+    persona_id: str,
+    city_id: str,
+    color: int = 0x3498db,
+) -> discord.Embed:
+    """ペルソナ発言用のEmbedを生成"""
+
+    embed = discord.Embed(
+        description=content,
+        color=color,
+    )
+    embed.set_author(
+        name=persona_name,
+        icon_url=persona_avatar_url,
+    )
+    # メタデータをfooterに埋め込み（受信側での識別用）
+    embed.set_footer(text=f"pid:{persona_id}|cid:{city_id}")
+
+    return embed
+```
+
+#### 8.1.2. Discord上の表示
+
+```
+┌─ Embed ─────────────────────────────────┐
+│ [アバター] ペルソナA                     │
+│                                         │
+│ こんにちは！これはペルソナの発言です。    │
+│ 長文も全文表示されます。改行も           │
+│ そのまま反映されます。                   │
+│                                         │
+│                    pid:persona_a|cid:... │
+└─────────────────────────────────────────┘
+```
+
+#### 8.1.3. 送信処理
+
+```python
+async def send_persona_message(
+    self,
+    thread_id: int,
+    persona: PersonaCore,
+    content: str,
+) -> dict:
+    """ペルソナとしてメッセージを送信"""
+
+    thread = self._client.get_channel(thread_id)
+    if not thread:
+        return {"success": False, "error": "Thread not found"}
+
+    # アバターURL取得（SAIVerseのアバター画像をホスティング）
+    avatar_url = self._get_persona_avatar_url(persona)
+
+    # Embed生成
+    embed = create_persona_message_embed(
+        persona_name=persona.name,
+        persona_avatar_url=avatar_url,
+        content=content,
+        persona_id=persona.id,
+        city_id=persona.city_id,
+    )
+
+    # 送信
+    message = await thread.send(embed=embed)
+
+    # DBに記録（受信時の識別用）
+    await self._db.insert_sent_message(
+        discord_message_id=str(message.id),
+        persona_id=persona.id,
+        city_id=persona.city_id,
+        building_id=persona.current_building_id,
+    )
+
+    return {"success": True, "message_id": str(message.id)}
+```
+
+### 8.2. システム通知
+
+訪問入退室やファイル転送などのシステムイベントはEmbed（色分け）で通知します。
+
+#### 8.2.1. 通知種別と色
+
+| 種別 | 色コード | 用途 |
+|------|----------|------|
+| `visit_enter` | 0x2ECC71 (緑) | ペルソナが訪問を開始 |
+| `visit_leave` | 0xE74C3C (赤) | ペルソナが退出（通常/強制送還） |
+| `file_transfer` | 0x3498DB (青) | ファイル転送通知 |
+| `system_info` | 0x95A5A6 (グレー) | その他のシステム情報 |
+
+#### 8.2.2. 通知Embed構造
+
+```python
+NOTIFICATION_COLORS = {
+    "visit_enter": 0x2ECC71,
+    "visit_leave": 0xE74C3C,
+    "file_transfer": 0x3498DB,
+    "system_info": 0x95A5A6,
+}
+
+NOTIFICATION_ICONS = {
+    "visit_enter": "🚶",
+    "visit_leave": "👋",
+    "file_transfer": "📁",
+    "system_info": "ℹ️",
+}
+
+async def send_system_notification(
+    self,
+    thread_id: int,
+    event_type: str,
+    title: str,
+    description: str,
+    fields: dict = None,
+) -> dict:
+    """システム通知を送信"""
+
+    thread = self._client.get_channel(thread_id)
+    if not thread:
+        return {"success": False, "error": "Thread not found"}
+
+    icon = NOTIFICATION_ICONS.get(event_type, "ℹ️")
+    color = NOTIFICATION_COLORS.get(event_type, 0x95A5A6)
+
+    embed = discord.Embed(
+        title=f"{icon} {title}",
+        description=description,
+        color=color,
+    )
+
+    if fields:
+        for name, value in fields.items():
+            embed.add_field(name=name, value=value, inline=True)
+
+    message = await thread.send(embed=embed)
+    return {"success": True, "message_id": str(message.id)}
+```
+
+#### 8.2.3. 通知例
+
+**訪問開始:**
+```
+┌─ Embed (緑) ────────────────────────────┐
+│ 🚶 訪問者到着                           │
+│                                         │
+│ ペルソナB が入室しました                 │
+│                                         │
+│ From: Private City Bob                  │
+│ Owner: @Bob#1234                        │
+└─────────────────────────────────────────┘
+```
+
+**強制送還:**
+```
+┌─ Embed (赤) ────────────────────────────┐
+│ 👋 訪問者退出                           │
+│                                         │
+│ ペルソナB が退出しました（強制送還）      │
+│                                         │
+│ 理由: Host offline                      │
+│ 滞在時間: 30分                          │
+└─────────────────────────────────────────┘
+```
+
+### 8.3. 受信メッセージの識別
+
+Discordからメッセージを受信した際、送信元を識別する方法。
+
+#### 8.3.1. 識別フロー
+
+```
+メッセージ受信 (on_message)
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 1. Botのメッセージか？               │
+│    message.author.bot == True       │
+└─────────────────────────────────────┘
+    │ No → ユーザー発言 (role="user")
+    │ Yes
+    ▼
+┌─────────────────────────────────────┐
+│ 2. 自分のBotか？                    │
+│    message.author.id == bot.user.id │
+└─────────────────────────────────────┘
+    │ No → 他ユーザーのBot（ペルソナ発言候補）
+    │ Yes
+    ▼
+┌─────────────────────────────────────┐
+│ 3. sent_messages テーブルを照合      │
+│    → 該当あり: エコー → スキップ     │
+│    → 該当なし: 処理続行              │
+└─────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────┐
+│ 4. Embedメッセージか？               │
+│    message.embeds があるか           │
+└─────────────────────────────────────┘
+    │ Yes
+    ▼
+┌─────────────────────────────────────┐
+│ 5. footerからメタデータをパース      │
+│    pid:xxx|cid:xxx 形式を解析        │
+│    → ペルソナ発言 (role="persona_remote")│
+│    → システム通知 (role="system")    │
+└─────────────────────────────────────┘
+```
+
+#### 8.3.2. 実装イメージ
+
+```python
+@dataclass
+class MessageSource:
+    """メッセージ送信元の識別結果"""
+    type: str              # "user", "persona", "echo", "system"
+    role: str = ""         # SAIVerseでのrole
+    content: str = ""
+    author_name: str = ""
+    author_id: str = ""
+    persona_id: str = None
+    city_id: str = None
+
+async def _identify_message_source(self, message: discord.Message) -> MessageSource:
+    """メッセージの送信元を識別"""
+
+    # 1. Bot以外が送信 → ユーザー発言
+    if not message.author.bot:
+        return MessageSource(
+            type="user",
+            role="user",
+            content=message.content,
+            author_name=message.author.display_name,
+            author_id=str(message.author.id),
+        )
+
+    # 2. 自分のBotが送信 → エコーチェック
+    if message.author.id == self._client.user.id:
+        if await self._db.is_own_sent_message(str(message.id)):
+            return MessageSource(type="echo")
+
+    # 3. Botが送信 + Embedあり → ペルソナ発言またはシステム通知
+    if message.embeds:
+        embed = message.embeds[0]
+        metadata = self._parse_footer_metadata(embed.footer.text if embed.footer else "")
+
+        if metadata and metadata.get("pid"):
+            return MessageSource(
+                type="persona",
+                role="persona_remote",
+                content=embed.description or "",
+                author_name=embed.author.name if embed.author else "Unknown",
+                persona_id=metadata.get("pid"),
+                city_id=metadata.get("cid"),
+            )
+
+        # システム通知（通知色Embed）
+        return MessageSource(
+            type="system",
+            role="system",
+            content=embed.description or "",
+        )
+
+    # 4. その他（EmbedなしのBot発言）
+    return MessageSource(
+        type="system",
+        role="system",
+        content=message.content,
+    )
+
+async def _on_message(self, message: discord.Message) -> None:
+    """メッセージ受信ハンドラ"""
+
+    # メッセージ送信元を識別
+    source = await self._identify_message_source(message)
+
+    # エコー防止
+    if source.type == "echo":
+        return
+
+    # マッピングからBuilding特定
+    building_id = self._mapping.get_building_id(message.channel.id)
+    if not building_id:
+        return
+
+    # SAIVerse形式に変換してログに追記
+    saiverse_message = {
+        "role": source.role,
+        "content": source.content,
+        "author": source.author_name,
+        "author_id": source.author_id,
+        "timestamp": message.created_at.isoformat(),
+        "metadata": {
+            "source": "discord",
+            "message_id": str(message.id),
+            "channel_id": str(message.channel.id),
+            "persona_id": source.persona_id,
+            "city_id": source.city_id,
+        }
+    }
+
+    await self._record_message(building_id, saiverse_message)
+
+    # 応答トリガー（ユーザー/ペルソナ発言の場合のみ）
+    if source.role in ("user", "persona_remote"):
+        await self._trigger_persona_response(building_id, saiverse_message)
+
+def _parse_footer_metadata(self, footer_text: str) -> dict | None:
+    """footerからメタデータを抽出"""
+    # 形式: pid:persona_id|cid:city_id
+    if not footer_text or "|" not in footer_text:
+        return None
+
+    result = {}
+    for part in footer_text.split("|"):
+        if ":" in part:
+            key, value = part.split(":", 1)
+            result[key.strip()] = value.strip()
+
+    return result if "pid" in result else None
+```
+
+---
+
+## 9. ツール仕様
+
+WebSocket接続とは別に、ペルソナが明示的にDiscordを操作するためのツールも提供します。
+
+### 9.1. discord_read_thread
+
+**目的:** 指定したDiscordスレッド/チャンネルのメッセージ履歴を取得する
+
+**パラメータ:**
+```python
+{
+    "channel_id": str,         # 必須: Discord チャンネル/スレッドID
+    "limit": int,              # 任意: 取得件数 (デフォルト: 50, 最大: 100)
+    "before_message_id": str,  # 任意: このメッセージIDより前を取得
+}
+```
+
+**戻り値:**
+```python
+{
+    "channel_name": str,
+    "messages": [
+        {
+            "id": str,
+            "author": str,
+            "author_id": str,
+            "content": str,
+            "timestamp": str,  # ISO8601
+            "attachments": [{"filename": str, "url": str}],
+        },
+        ...
+    ],
+    "has_more": bool,
+}
+```
+
+### 9.2. discord_send_message
+
+**目的:** 指定したDiscordスレッド/チャンネルにメッセージを送信する
+
+**パラメータ:**
+```python
+{
+    "channel_id": str,  # 必須: Discord チャンネル/スレッドID
+    "content": str,     # 必須: 送信するメッセージ内容
+    "reply_to": str,    # 任意: 返信先メッセージID
+}
+```
+
+**戻り値:**
+```python
+{
+    "success": bool,
+    "message_id": str,
+    "error": str | None,
+}
+```
+
+### 9.3. discord_list_channels
+
+**目的:** 接続可能なDiscordサーバとチャンネル一覧を取得する
+
+**パラメータ:**
+```python
+{
+    "guild_id": str | None,   # 任意: 特定サーバのみ取得
+    "include_threads": bool,  # 任意: スレッドも含めるか (デフォルト: true)
+}
+```
+
+**戻り値:**
+```python
+{
+    "guilds": [
+        {
+            "id": str,
+            "name": str,
+            "channels": [
+                {
+                    "id": str,
+                    "name": str,
+                    "type": "text" | "thread" | "forum",
+                    "parent_id": str | None,
+                },
+                ...
+            ],
+        },
+        ...
+    ],
+}
+```
+
+---
+
+## 10. エラーハンドリング
+
+### 10.1. 基本方針
+
+Discord Connectorはrun_pulse内でツールとして呼び出される。エラー時は例外を投げず、エラー情報を含む結果を返してrun_pulseの本流に戻す。全てのエラーレベル（CRITICAL/ERROR/WARNING）で強制帰還を実行し、訪問者を安全にローカルPrivate Cityの元居たBuildingに戻す。
+
+### 10.2. エラー分類と対応
+
+| カテゴリ | HTTPコード | 対応 | 強制帰還 |
+|---------|-----------|------|---------|
+| **一時的エラー** | 5xx, 503 | 指数バックオフでリトライ（最大5回） | リトライ上限で帰還 |
+| **レート制限** | 429 | `Retry-After`ヘッダに従い待機 | 待機後も失敗で帰還 |
+| **認証エラー** | 401, 403 | 即時停止 | 全訪問者帰還 |
+| **リソースエラー** | 404 | スキップ + マッピング無効化 | 該当訪問者帰還 |
+| **クライアントエラー** | 400 | ログ記録 + スキップ | 該当訪問者帰還 |
+
+### 10.3. 深刻度と帰還範囲
+
+| 深刻度 | 条件 | 帰還範囲 |
+|-------|-----|---------|
+| **CRITICAL** | Bot停止、Token無効 | 全訪問者 |
+| **ERROR** | 同期中断、リトライ上限到達 | 該当チャンネルの訪問者 |
+| **WARNING** | レート制限、一部メッセージ失敗 | 該当訪問者のみ |
+
+**NOTE**: 初期実装ではWARNING 1回で即帰還。運用安定後にN回連続で帰還に変更可能。
+
+### 10.4. リトライ戦略
+
+```python
+@dataclass
+class RetryPolicy:
+    max_retries: int = 5
+    base_delay_seconds: float = 1.0
+    max_delay_seconds: float = 60.0
+    exponential_base: float = 2.0
+
+    def get_delay(self, attempt: int) -> float:
+        """指数バックオフ + ジッター"""
+        delay = min(
+            self.base_delay_seconds * (self.exponential_base ** attempt),
+            self.max_delay_seconds
+        )
+        jitter = random.uniform(0, delay * 0.1)
+        return delay + jitter
+```
+
+**リトライ対象:**
+- 5xx エラー
+- タイムアウト
+- 接続エラー（`aiohttp.ClientConnectorError`）
+
+**リトライ対象外:**
+- 4xx エラー（400, 401, 403, 404など）
+- 明示的なレート制限（429は別処理）
+
+### 10.5. ツール戻り値形式
+
+Discord Connectorのツールは以下の形式で結果を返す:
+
+**成功時:**
+```python
+{
+    "success": True,
+    "message_id": "123456789",
+}
+```
+
+**エラー時（強制帰還発生）:**
+```python
+{
+    "success": False,
+    "error": "Rate limit exceeded after 5 retries",
+    "forced_return": True,
+    "return_to": {
+        "city_id": "private_city_bob",
+        "building_id": "living_room",
+    },
+    "severity": "WARNING",
+}
+```
+
+### 10.6. run_pulse側での処理
+
+```python
+# PersonaCore.run_pulse() 内でのツール結果処理
+tool_result = execute_tool("discord_send_message", args)
+
+if not tool_result.get("success") and tool_result.get("forced_return"):
+    # 強制帰還が発生 → ペルソナの状態を更新してpulse終了
+    self._handle_forced_return(tool_result)
+    return  # 本流に戻る（エラーではなく正常終了）
+
+# 成功時は通常の処理を継続
+```
+
+### 10.7. 強制帰還の実装
+
+```python
+class ErrorSeverity(Enum):
+    CRITICAL = "critical"  # 全訪問者を帰還
+    ERROR = "error"        # 該当チャンネルの訪問者を帰還
+    WARNING = "warning"    # 該当訪問者のみ帰還
+
+async def handle_error_with_forced_return(
+    self,
+    severity: ErrorSeverity,
+    error: Exception,
+    channel_id: Optional[int] = None,
+    persona_id: Optional[str] = None,
+) -> dict:
+    """エラー発生時に訪問者を強制帰還させ、ツール結果を返す"""
+
+    logger.log(
+        logging.CRITICAL if severity == ErrorSeverity.CRITICAL else logging.ERROR,
+        "Error occurred: %s (severity=%s, channel=%s, persona=%s)",
+        error, severity, channel_id, persona_id
+    )
+
+    # 帰還対象の決定
+    if severity == ErrorSeverity.CRITICAL:
+        targets = list(self._active_visits.values())
+    elif severity == ErrorSeverity.ERROR and channel_id:
+        targets = [
+            v for v in self._active_visits.values()
+            if v.discord_channel_id == channel_id
+        ]
+    elif severity == ErrorSeverity.WARNING and persona_id:
+        visit = self._active_visits.get(persona_id)
+        targets = [visit] if visit else []
+    else:
+        targets = []
+
+    # 強制帰還実行
+    return_info = None
+    for visit_state in targets:
+        return_info = await self._force_return_to_home(
+            visit_state,
+            reason=f"{type(error).__name__}: {error}"
+        )
+
+    # ツール結果形式で返す
+    return {
+        "success": False,
+        "error": str(error),
+        "forced_return": True,
+        "return_to": return_info,
+        "severity": severity.value,
+    }
+
+async def _force_return_to_home(
+    self,
+    visit_state: VisitState,
+    reason: str,
+) -> dict:
+    """訪問者をローカルPrivate Cityの元居たBuildingに戻す"""
+
+    persona_id = visit_state.persona_id
+    home_city = visit_state.home_city_id
+    home_building = visit_state.home_building_id
+
+    logger.warning(
+        "Force returning persona %s to %s/%s. Reason: %s",
+        persona_id, home_city, home_building, reason
+    )
+
+    # 1. Discord側に退出通知（可能なら）
+    try:
+        await self._send_system_notification(
+            visit_state.discord_channel_id,
+            notification_type="forced_leave",
+            persona_id=persona_id,
+            reason=reason,
+        )
+    except Exception as e:
+        logger.warning("Could not send leave notification: %s", e)
+
+    # 2. VisitStateの更新
+    visit_state.status = VisitStatus.FORCE_RETURNED
+    visit_state.ended_at = datetime.utcnow()
+    visit_state.return_reason = reason
+
+    # 3. connector.dbに記録
+    await self._db.execute(
+        """
+        UPDATE visit_sessions
+        SET status = 'force_returned',
+            ended_at = ?,
+            return_reason = ?
+        WHERE persona_id = ? AND status = 'active'
+        """,
+        (datetime.utcnow(), reason, persona_id)
+    )
+
+    # 4. アクティブ訪問リストから削除
+    self._active_visits.pop(persona_id, None)
+
+    return {
+        "city_id": home_city,
+        "building_id": home_building,
+    }
+```
+
+### 10.8. VisitStateの拡張
+
+```python
+@dataclass
+class VisitState:
+    persona_id: str
+    home_city_id: str
+    home_building_id: str      # 訪問開始前の居場所
+    visiting_city_id: str
+    visiting_building_id: str
+    discord_channel_id: int
+    status: VisitStatus
+    started_at: datetime
+    ended_at: Optional[datetime] = None
+    return_reason: Optional[str] = None  # 帰還理由
+
+class VisitStatus(Enum):
+    ACTIVE = "active"
+    ENDED = "ended"
+    FORCE_RETURNED = "force_returned"
+```
+
+### 10.9. connector.db スキーマ拡張
+
+```sql
+-- visit_sessionsテーブルに帰還理由を追加
+ALTER TABLE visit_sessions ADD COLUMN return_reason TEXT;
+```
+
+### 10.10. ログ形式（構造化JSON）
+
+```json
+{
+    "timestamp": "2025-01-09T12:00:00Z",
+    "level": "ERROR",
+    "component": "discord_connector",
+    "event": "forced_return",
+    "persona_id": "bob_persona",
+    "return_to": {
+        "city_id": "private_city_bob",
+        "building_id": "living_room"
+    },
+    "error_type": "discord.HTTPException",
+    "error_code": 429,
+    "error_message": "Rate limit exceeded",
+    "severity": "WARNING"
+}
+```
+
+---
+
+## 11. 環境変数
+
+| 変数名 | 説明 | デフォルト |
+|--------|------|-----------|
+| `DISCORD_BOT_TOKEN` | Discord Bot のトークン | (必須) |
+| `DISCORD_CONNECTOR_ENABLED` | Discord Connector を有効化 | 0 |
+| `DISCORD_DEFAULT_MESSAGE_LIMIT` | メッセージ取得のデフォルト件数 | 50 |
+| `DISCORD_MAX_MESSAGE_LENGTH` | 送信メッセージの最大文字数 | 2000 |
+| `DISCORD_SYNC_ON_START` | 起動時に既存メッセージを同期するか | 1 |
+| `DISCORD_SYNC_HISTORY_LIMIT` | 起動時同期で取得する履歴件数 | 100 |
+
+---
+
+## 12. セキュリティ考慮事項
+
+### 12.1. トークン管理
+
+- `DISCORD_BOT_TOKEN` は `.env` ファイルで管理
+- `.env` は `.gitignore` に含め、リポジトリにコミットしない
+- 本番環境ではOSの資格情報マネージャーの使用を推奨
+
+**ログ出力時のマスキング:**
+```python
+class SecureLogger:
+    """Token等の機密情報をマスクするロガー"""
+
+    SENSITIVE_PATTERNS = [
+        (r"[A-Za-z0-9_-]{24}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27}", "[BOT_TOKEN]"),
+        (r"sk-[A-Za-z0-9]{48}", "[API_KEY]"),
+    ]
+
+    def sanitize(self, message: str) -> str:
+        for pattern, replacement in self.SENSITIVE_PATTERNS:
+            message = re.sub(pattern, replacement, message)
+        return message
+```
+
+### 12.2. Bot権限
+
+Botには必要最小限の権限のみ付与：
+
+| 権限 | 必要性 |
+|------|--------|
+| `Read Messages / View Channels` | ✅ 必須 |
+| `Send Messages` | ✅ 必須 |
+| `Read Message History` | ✅ 必須 |
+| `Manage Threads` | △ スレッド作成する場合のみ |
+| `Administrator` | ❌ 不要 |
+
+### 12.3. アプリケーションレート制限
+
+Discord APIのレート制限に加え、アプリケーションレベルでのレート制限を実装：
+
+| 操作 | 制限値 | 超過時の挙動 |
+|------|--------|-------------|
+| メッセージ送信（ペルソナ） | 5 msg/min/persona | キュー待機 |
+| メッセージ送信（ユーザー） | 10 msg/min/user | 警告→無視 |
+| 訪問リクエスト | 3 req/hour/persona | 拒否 |
+| ファイル転送 | 5 files/hour/persona | キュー待機 |
+
+```python
+class RateLimiter:
+    def __init__(self):
+        self._limits: Dict[str, List[datetime]] = {}
+
+    def check(self, key: str, limit: int, window_seconds: int) -> bool:
+        now = datetime.now()
+        if key not in self._limits:
+            self._limits[key] = []
+
+        # ウィンドウ外のタイムスタンプを削除
+        self._limits[key] = [
+            t for t in self._limits[key]
+            if (now - t).total_seconds() < window_seconds
+        ]
+
+        if len(self._limits[key]) >= limit:
+            return False
+
+        self._limits[key].append(now)
+        return True
+```
+
+### 12.4. ペルソナのなりすまし防止
+
+**方式**: Embedのfooterに署名を含める
+
+```
+pid:<persona_id>|cid:<city_id>|ts:<timestamp>|sig:<signature>
+```
+
+**署名生成:**
+```python
+import hmac
+import hashlib
+
+def generate_signature(persona_id: str, city_id: str, timestamp: int, secret: str) -> str:
+    """HMAC-SHA256署名を生成"""
+    message = f"{persona_id}:{city_id}:{timestamp}"
+    return hmac.new(
+        secret.encode(),
+        message.encode(),
+        hashlib.sha256
+    ).hexdigest()[:16]  # 短縮して可読性確保
+
+def verify_signature(metadata: dict, secret: str, max_age_seconds: int = 300) -> bool:
+    """署名を検証"""
+    now = int(datetime.now().timestamp())
+    ts = int(metadata.get("ts", 0))
+
+    # タイムスタンプが古すぎる場合は拒否（リプレイ攻撃防止）
+    if abs(now - ts) > max_age_seconds:
+        return False
+
+    expected = generate_signature(
+        metadata["pid"],
+        metadata["cid"],
+        ts,
+        secret
+    )
+    return hmac.compare_digest(expected, metadata.get("sig", ""))
+```
+
+**共有シークレットの管理:**
+- 環境変数 `DISCORD_CONNECTOR_SECRET` で設定
+- 各ユーザーが同じシークレットを共有する必要あり（招待時に共有）
+- 将来的には公開鍵暗号方式への移行を検討
+
+### 12.5. Discordユーザーの認証
+
+**基本方針**: Discord IDによる自動認証
+
+```python
+@dataclass
+class DiscordUserIdentity:
+    discord_user_id: str      # Discordの一意ID
+    discord_username: str     # 表示名
+    first_seen: datetime
+    message_count: int = 0
+    is_blocked: bool = False
+
+async def identify_discord_user(message: discord.Message) -> DiscordUserIdentity:
+    """Discordユーザーを識別（author.bot == Falseの場合のみ呼び出し）"""
+    return DiscordUserIdentity(
+        discord_user_id=str(message.author.id),
+        discord_username=message.author.display_name,
+        first_seen=datetime.now(),
+    )
+```
+
+**なりすまし防止:**
+- ユーザーは `author.bot == False` で判別
+- Botがユーザーになりすますことは不可能（Discord APIの仕様）
+- ユーザーがペルソナになりすますことも不可能（Embed送信はBotのみ）
+
+### 12.6. 訪問許可/拒否リスト
+
+Public City持ち主がアクセス制御モードを選択可能：
+
+| モード | 説明 | デフォルト |
+|--------|------|-----------|
+| `allowlist` | 許可リストに含まれるペルソナ/ユーザーのみ参加可能 | ✅ |
+| `blocklist` | 拒否リストに含まれるペルソナ/ユーザー以外は参加可能 | |
+| `open` | 全員参加可能（ペルソナは署名検証のみ） | |
+
+**対象エンティティ:**
+
+| 種別 | 識別子 | 説明 |
+|------|--------|------|
+| ペルソナ | `persona:<persona_id>` | 他ユーザーのAIペルソナ |
+| Discordユーザー | `user:<discord_user_id>` | Discordの人間ユーザー |
+
+```python
+from enum import Enum
+
+class AccessMode(Enum):
+    ALLOWLIST = "allowlist"  # ホワイトリスト方式（デフォルト）
+    BLOCKLIST = "blocklist"  # ブラックリスト方式
+    OPEN = "open"            # 全員許可（ペルソナは署名検証のみ）
+
+class EntityType(Enum):
+    PERSONA = "persona"
+    USER = "user"
+
+@dataclass
+class AccessControl:
+    city_id: str
+    mode: AccessMode = AccessMode.ALLOWLIST
+    allowlist: List[str] = field(default_factory=list)  # "persona:<id>" or "user:<id>"
+    blocklist: List[str] = field(default_factory=list)
+
+    def _make_key(self, entity_type: EntityType, entity_id: str) -> str:
+        """エンティティキーを生成"""
+        return f"{entity_type.value}:{entity_id}"
+
+    def is_allowed(
+        self,
+        entity_type: EntityType,
+        entity_id: str,
+        signature_valid: bool = True  # ユーザーの場合は常にTrue
+    ) -> bool:
+        """参加を許可するか判定"""
+        # ペルソナの場合、署名が無効なら拒否
+        if entity_type == EntityType.PERSONA and not signature_valid:
+            return False
+
+        key = self._make_key(entity_type, entity_id)
+
+        if self.mode == AccessMode.OPEN:
+            return True
+        elif self.mode == AccessMode.ALLOWLIST:
+            return key in self.allowlist
+        else:  # BLOCKLIST
+            return key not in self.blocklist
+
+    def set_mode(self, mode: AccessMode) -> None:
+        """アクセス制御モードを変更"""
+        self.mode = mode
+
+    def add_to_allowlist(self, entity_type: EntityType, entity_id: str) -> None:
+        key = self._make_key(entity_type, entity_id)
+        if key not in self.allowlist:
+            self.allowlist.append(key)
+
+    def remove_from_allowlist(self, entity_type: EntityType, entity_id: str) -> None:
+        key = self._make_key(entity_type, entity_id)
+        if key in self.allowlist:
+            self.allowlist.remove(key)
+
+    def add_to_blocklist(self, entity_type: EntityType, entity_id: str) -> None:
+        key = self._make_key(entity_type, entity_id)
+        if key not in self.blocklist:
+            self.blocklist.append(key)
+
+    def remove_from_blocklist(self, entity_type: EntityType, entity_id: str) -> None:
+        key = self._make_key(entity_type, entity_id)
+        if key in self.blocklist:
+            self.blocklist.remove(key)
+```
+
+**connector.dbへの保存:**
+```sql
+CREATE TABLE city_access_control (
+    city_id TEXT PRIMARY KEY,
+    mode TEXT NOT NULL DEFAULT 'allowlist',  -- 'allowlist', 'blocklist', 'open'
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE city_access_list (
+    city_id TEXT NOT NULL,
+    entity_type TEXT NOT NULL,  -- 'persona' or 'user'
+    entity_id TEXT NOT NULL,    -- persona_id or discord_user_id
+    list_type TEXT NOT NULL,    -- 'allow' or 'block'
+    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (city_id, entity_type, entity_id, list_type),
+    FOREIGN KEY (city_id) REFERENCES city_access_control(city_id)
+);
+```
+
+**アクセス制御ツール:**
+
+```python
+# discord_set_access_mode ツール
+def discord_set_access_mode(city_id: str, mode: str) -> dict:
+    """Public Cityのアクセス制御モードを設定"""
+    if mode not in ["allowlist", "blocklist", "open"]:
+        return {"success": False, "error": "Invalid mode"}
+    # DB更新処理
+    return {"success": True, "city_id": city_id, "mode": mode}
+
+# discord_manage_access_list ツール
+def discord_manage_access_list(
+    city_id: str,
+    action: str,       # "add" or "remove"
+    list_type: str,    # "allow" or "block"
+    entity_type: str,  # "persona" or "user"
+    entity_id: str     # persona_id or discord_user_id
+) -> dict:
+    """許可/拒否リストを管理（ペルソナ/ユーザー両対応）"""
+    if entity_type not in ["persona", "user"]:
+        return {"success": False, "error": "Invalid entity_type"}
+    # DB更新処理
+    return {
+        "success": True,
+        "action": action,
+        "list_type": list_type,
+        "entity_type": entity_type,
+        "entity_id": entity_id
+    }
+```
+
+### 12.7. スパム検知と自動ブロック
+
+```python
+@dataclass
+class SpamDetector:
+    # 短時間に同一メッセージ = スパム
+    duplicate_threshold: int = 3      # 3回以上
+    duplicate_window_seconds: int = 60
+
+    # 短時間に大量メッセージ = スパム
+    flood_threshold: int = 20         # 20メッセージ以上
+    flood_window_seconds: int = 60
+
+    _message_history: Dict[str, List[Tuple[datetime, str]]] = field(default_factory=dict)
+
+    def check(self, author_id: str, content: str) -> SpamCheckResult:
+        now = datetime.now()
+
+        if author_id not in self._message_history:
+            self._message_history[author_id] = []
+
+        # 古いエントリを削除
+        window_start = now - timedelta(seconds=max(
+            self.duplicate_window_seconds,
+            self.flood_window_seconds
+        ))
+        self._message_history[author_id] = [
+            (ts, msg) for ts, msg in self._message_history[author_id]
+            if ts > window_start
+        ]
+
+        # 重複チェック
+        duplicate_count = sum(
+            1 for ts, msg in self._message_history[author_id]
+            if msg == content and (now - ts).total_seconds() < self.duplicate_window_seconds
+        )
+        if duplicate_count >= self.duplicate_threshold:
+            return SpamCheckResult(is_spam=True, reason="duplicate")
+
+        # フラッドチェック
+        recent_count = sum(
+            1 for ts, _ in self._message_history[author_id]
+            if (now - ts).total_seconds() < self.flood_window_seconds
+        )
+        if recent_count >= self.flood_threshold:
+            return SpamCheckResult(is_spam=True, reason="flood")
+
+        # 記録
+        self._message_history[author_id].append((now, content))
+        return SpamCheckResult(is_spam=False, reason=None)
+
+@dataclass
+class SpamCheckResult:
+    is_spam: bool
+    reason: Optional[str]  # "duplicate", "flood", None
+```
+
+**自動ブロックポリシー:**
+
+| スパム検知回数 | 対応 |
+|---------------|------|
+| 3回 | 10分間タイムアウト |
+| 5回 | 1時間ブロック |
+| 10回 | 24時間ブロック |
+
+```python
+@dataclass
+class AutoBlockPolicy:
+    thresholds: List[Tuple[int, int]] = field(default_factory=lambda: [
+        (3, 600),      # 3回 → 10分
+        (5, 3600),     # 5回 → 1時間
+        (10, 86400),   # 10回 → 24時間
+    ])
+
+    def get_block_duration(self, spam_count: int) -> int:
+        """スパム検知回数に応じたブロック時間（秒）を返す"""
+        for threshold, duration in reversed(self.thresholds):
+            if spam_count >= threshold:
+                return duration
+        return 0
+```
+
+### 12.8. 管理者通知
+
+```python
+async def notify_admin(self, event: str, details: dict):
+    """セキュリティイベントを管理者に通知"""
+
+    # 構造化ログ
+    logger.warning(
+        f"Security event: {event}",
+        extra={
+            "event_type": event,
+            "details": details,
+            "timestamp": datetime.now().isoformat(),
+        }
+    )
+
+    # Discord DM通知（オプション）
+    if self._config.admin_dm_enabled and self._config.admin_user_id:
+        try:
+            admin_user = await self._client.fetch_user(self._config.admin_user_id)
+            embed = discord.Embed(
+                title=f"⚠️ Security Alert: {event}",
+                description=f"```json\n{json.dumps(details, indent=2, ensure_ascii=False)}\n```",
+                color=0xFF0000,
+                timestamp=datetime.now()
+            )
+            await admin_user.send(embed=embed)
+        except discord.HTTPException as e:
+            logger.error(f"Failed to notify admin: {e}")
+```
+
+**通知対象イベント:**
+
+| イベント | 説明 |
+|---------|------|
+| `spam_detected` | スパム検知 |
+| `auto_blocked` | 自動ブロック発動 |
+| `invalid_signature` | 署名検証失敗 |
+| `access_denied` | アクセス拒否（許可リスト外） |
+| `rate_limit_exceeded` | レート制限超過 |
+
+---
+
+## 13. 既存資産の活用
+
+### 13.1. 流用可能なコード
+
+| ファイル | 流用部分 | 用途 |
+|----------|----------|------|
+| `discord_gateway/bot/discord_client.py` | Intent設定パターン | クライアント初期化 |
+| `discord_gateway/config.py` | Pydantic Settings パターン | 設定管理 |
+| `discord_gateway/translator.py` | メッセージ変換ロジック | レスポンス整形 |
+| `discord_gateway/mapping.py` | チャンネルマッピング構造 | マッピング管理 |
+
+### 13.2. 不要になるコード
+
+- `discord_gateway/bot/` 配下の Bot サーバ関連（ws_server, connection_manager）
+- `discord_gateway/orchestrator.py` (WebSocket中継管理)
+- `discord_gateway/gateway_service.py` (Gateway ブリッジ)
+- 記憶同期プロトコル (`memory_sync_*`)
+- 再同期/リプレイ機構
+
+---
+
+## 14. 実装ロードマップ
+
+### Phase 1: 基盤実装
+
+- [ ] `discord_connector/connector.py` - メインクラス
+- [ ] `discord_connector/client.py` - Discord Client ラッパー
+- [ ] `discord_connector/config.py` - 設定管理
+- [ ] `discord_connector/mapping.py` - マッピング管理
+- [ ] 起動/停止時の接続管理
+- [ ] 基本的なユニットテスト
+
+### Phase 2: 同期機能
+
+- [ ] `discord_connector/sync.py` - 同期ロジック
+- [ ] 起動時の既存メッセージ同期
+- [ ] リアルタイムメッセージ受信・記録
+- [ ] Buildingログへの追記
+- [ ] ペルソナSAIMemoryへの追記
+
+### Phase 3: ツール実装
+
+- [ ] `tools/defs/discord_read_thread.py`
+- [ ] `tools/defs/discord_send_message.py`
+- [ ] `tools/defs/discord_list_channels.py`
+- [ ] Playbook連携テスト
+
+### Phase 4: 訪問システム
+
+- [ ] 訪問ペルソナの識別
+- [ ] 訪問セッション管理
+- [ ] 訪問ペルソナへの応答トリガー
+- [ ] 統合テスト
+
+### Phase 5: 強制送還・ファイル転送・UI
+
+- [ ] **強制送還システム**
+  - [ ] `VisitState` クラスの実装
+  - [ ] プレゼンス追跡 (`PresenceTracker`)
+  - [ ] Host停止検知と強制送還ロジック
+  - [ ] 再接続ポリシー (`ReconnectPolicy`) の実装
+  - [ ] 強制送還時の記憶記録
+
+- [ ] **ファイル転送システム**
+  - [ ] `FileTransferOptions` のToolスキーマ拡張
+  - [ ] 圧縮処理 (zip/gzip)
+  - [ ] Discord添付ファイル送信
+  - [ ] 受信側のダウンロード・解凍処理
+  - [ ] 転送履歴のDB記録
+
+- [ ] **独立Gradio UI**
+  - [ ] `tools/discord/ui/app.py` メイン起動スクリプト
+  - [ ] 接続状態パネル (`connection_panel.py`)
+  - [ ] マッピング編集UI (`mapping_editor.py`)
+  - [ ] 訪問モニタ (`visit_monitor.py`)
+  - [ ] 同期ログビューア (`log_viewer.py`)
+
+- [ ] **独立データベース**
+  - [ ] `connector.db` スキーマ定義
+  - [ ] マイグレーションスクリプト (`tools/discord/db/migrate.py`)
+  - [ ] SAIVerse本体との連携インターフェース
+
+### Phase 6: 品質保証・リリース準備
+
+- [ ] **テスト**
+  - [ ] ユニットテスト（各コンポーネント）
+  - [ ] 統合テスト（訪問フロー全体）
+  - [ ] 負荷テスト（複数訪問者同時接続）
+  - [ ] 再接続シナリオテスト
+
+- [ ] **ドキュメント**
+  - [ ] セットアップガイド（Bot Token取得手順）
+  - [ ] 運用ガイド（トラブルシューティング）
+  - [ ] APIリファレンス（Tool仕様詳細）
+
+- [ ] **リリース準備**
+  - [ ] 環境変数の最終調整
+  - [ ] ログ出力レベルの調整
+  - [ ] パフォーマンスチューニング
+
+---
+
+## 15. 旧アーキテクチャとの比較
+
+| 項目 | 旧 (v5) | 新 (v6) |
+|------|---------|---------|
+| **中央サーバ** | 必要 (24時間稼働Bot) | **不要** |
+| **接続方式** | SAIVerse → Bot → Discord | **SAIVerse → Discord 直接** |
+| **認証** | OAuth2 + 独自トークン | **Bot Token のみ** |
+| **同期方式** | Bot経由の中継 | **WebSocket直接接続** |
+| **実装複雑度** | 高 (Bot, Gateway, Orchestrator) | **低** |
+| **運用コスト** | 高 (サーバホスティング) | **なし (ローカル完結)** |
+| **リアルタイム性** | 高 | **高** |
+| **オフライン時** | Bot経由でキュー可能 | 不可（SAIVerse起動必須） |
+
+---
+
+## 16. 制限事項と今後の展望
+
+### 16.1. 現時点での制限
+
+- **オフライン時の受信不可**: SAIVerse停止中はDiscordメッセージを受信できない（起動時に差分同期）
+- **1ユーザー1Bot**: 各ユーザーが自分のBot Tokenを用意する必要がある
+- **スケーラビリティ**: 大量のPublic Cityを持つ場合、WebSocket接続の負荷が増加
+
+### 16.2. 将来の拡張候補
+
+1. **共有Bot**: 複数ユーザーで1つのBotを共有する仕組み（OAuth2認証の復活）
+2. **Webhook連携**: 停止中もWebhookでメッセージを受信し、起動時に処理
+3. **リアクション対応**: メッセージへのリアクション追加/読み取り
+4. **スレッド自動作成**: ペルソナが新規Buildingを作成時にスレッドを自動作成
+
+---
+
+## 17. 参考資料
+
+- [Discord.py Documentation](https://discordpy.readthedocs.io/)
+- [Discord Developer Portal](https://discord.com/developers/docs)
+- [Discord Gateway (WebSocket) Documentation](https://discord.com/developers/docs/topics/gateway)
+- [SAIVerse Tool仕様](../../CLAUDE.md) - `tools/defs/` セクション参照
+- [SAIVerse Playbook仕様](../../CLAUDE.md) - Playbook設計哲学セクション参照
