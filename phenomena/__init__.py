@@ -5,7 +5,7 @@ SAIVerse世界で発生する現象を定義し、トリガーイベントに応
 ペルソナとは独立してバックグラウンドで動作可能。
 
 Autodiscovers phenomena from:
-  - user_data/phenomena/    (priority)
+  - user_data/<project>/phenomena/  (project-based, priority)
   - builtin_data/phenomena/
 
 Supports both:
@@ -27,8 +27,44 @@ PHENOMENON_REGISTRY: Dict[str, Callable] = {}
 PHENOMENON_SCHEMAS: List[PhenomenonSchema] = []
 
 
+def _register_multiple_phenomena(module: Any) -> bool:
+    """Register multiple phenomena from a module with schemas() function.
+
+    This supports phenomenon packages that export multiple phenomena from a single module,
+    such as user_data/discord/phenomena/schema.py.
+    """
+    try:
+        phenomenon_schemas: List[PhenomenonSchema] = module.schemas()
+        registered = False
+        for meta in phenomenon_schemas:
+            impl: Callable = getattr(module, meta.name, None)
+            if not impl or not callable(impl):
+                LOGGER.warning("Phenomenon '%s' has schema but no implementation function", meta.name)
+                continue
+
+            # Skip if already registered (user_data takes priority)
+            if meta.name in PHENOMENON_REGISTRY:
+                LOGGER.debug("Phenomenon '%s' already registered, skipping", meta.name)
+                continue
+
+            PHENOMENON_REGISTRY[meta.name] = impl
+            PHENOMENON_SCHEMAS.append(meta)
+            registered = True
+            LOGGER.debug("Registered phenomenon '%s' from schemas()", meta.name)
+
+        return registered
+    except Exception as e:
+        LOGGER.warning("Failed to register phenomena from schemas(): %s", e)
+        return False
+
+
 def _register_phenomenon(module: Any) -> bool:
-    """Register a phenomenon from a module if it has schema() function."""
+    """Register a phenomenon from a module if it has schema() or schemas() function."""
+    # Multiple phenomena support: schemas() takes priority
+    if hasattr(module, "schemas") and callable(module.schemas):
+        return _register_multiple_phenomena(module)
+
+    # Single phenomenon: schema() function
     if not hasattr(module, "schema") or not callable(module.schema):
         return False
     
@@ -89,13 +125,13 @@ def _load_module_from_path(module_name: str, file_path: Path) -> Any:
 def _autodiscover_phenomena() -> None:
     """phenomena/defs/ 以下のモジュールを自動的に読み込み、レジストリに登録する"""
     # Import here to avoid circular imports at module load time
-    from data_paths import get_data_paths, PHENOMENA_DIR
-    
+    from data_paths import iter_project_subdirs, PHENOMENA_DIR
+
     registered_names: set[str] = set()
-    
-    # Get phenomena directories (user_data first for priority)
-    phenomena_dirs = get_data_paths(PHENOMENA_DIR)
-    
+
+    # Get phenomena directories from all projects (user_data/<project>/phenomena/) + builtin_data/phenomena/
+    phenomena_dirs = list(iter_project_subdirs(PHENOMENA_DIR))
+
     # Also include legacy phenomena/defs for backwards compatibility during transition
     legacy_defs = Path(__file__).parent / "defs"
     if legacy_defs.exists() and legacy_defs not in phenomena_dirs:

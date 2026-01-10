@@ -11,6 +11,7 @@ generate_image/
 /bk
 sai_memory/__pycache__/
 .gradio/*.pem
+.claude/
 
 # User data directory (user customizations, not tracked in git)
 user_data/
@@ -81,3 +82,7 @@ unity_client/SAIVerse3D/*.userprefs
 unity_client/SAIVerse3D/.vsconfig
 sbert
 unity_client
+
+#discord gateway一時退避用
+discord_gateway/*.py
+discord_gateway/*/*.py

@@ -126,6 +126,83 @@ def iter_directories(subdir: str) -> Iterator[Path]:
                 yield dir_path
 
 
+def iter_project_files(subdir: str, pattern: str = "*") -> Iterator[Path]:
+    """Iterate over files across all projects in user_data.
+
+    This supports the project-based directory structure:
+        user_data/<project>/<subdir>/
+
+    Files from earlier projects take priority - if the same filename exists
+    in multiple projects, only the first one is yielded.
+
+    Args:
+        subdir: Subdirectory name (e.g., "models", "playbooks")
+        pattern: Glob pattern for files (default: "*")
+
+    Yields:
+        Path objects for matching files
+    """
+    seen_names: set[str] = set()
+
+    # Iterate over all project subdirectories
+    for subdir_path in iter_project_subdirs(subdir):
+        for file_path in subdir_path.glob(pattern):
+            if file_path.is_file() and file_path.name not in seen_names:
+                seen_names.add(file_path.name)
+                yield file_path
+
+
+def iter_project_subdirs(subdir: str) -> Iterator[Path]:
+    """Iterate over subdirectories across all projects in user_data.
+
+    This supports the project-based directory structure:
+        user_data/<project>/<subdir>/
+
+    For example, iter_project_subdirs("tools") yields:
+        - user_data/discord/tools/
+        - user_data/another_project/tools/
+        - builtin_data/tools/  (legacy/builtin compatibility)
+
+    Args:
+        subdir: Subdirectory name (e.g., "tools", "phenomena", "playbooks")
+
+    Yields:
+        Path objects for each project's subdirectory
+    """
+    seen_project_names: set[str] = set()
+
+    # Scan all projects in user_data
+    if USER_DATA_DIR.exists():
+        for project_dir in sorted(USER_DATA_DIR.iterdir()):
+            # Skip hidden directories and non-directories
+            if not project_dir.is_dir() or project_dir.name.startswith(("_", ".")):
+                continue
+
+            subdir_path = project_dir / subdir
+            if subdir_path.exists() and subdir_path.is_dir():
+                seen_project_names.add(project_dir.name)
+                yield subdir_path
+
+    # Also yield builtin_data for backwards compatibility
+    builtin_path = BUILTIN_DATA_DIR / subdir
+    if builtin_path.exists() and builtin_path.is_dir():
+        yield builtin_path
+
+
+def get_project_data_paths(subdir: str) -> list[Path]:
+    """Get all project subdirectory paths for a given subdirectory type.
+
+    Similar to iter_project_subdirs but returns a list.
+
+    Args:
+        subdir: Subdirectory name (e.g., "tools", "phenomena")
+
+    Returns:
+        List of paths in discovery order
+    """
+    return list(iter_project_subdirs(subdir))
+
+
 def load_prompt(name: str) -> str:
     """Load a prompt file from prompts directory.
     
@@ -183,6 +260,9 @@ __all__ = [
     "find_file",
     "iter_files",
     "iter_directories",
+    "iter_project_files",
+    "iter_project_subdirs",
+    "get_project_data_paths",
     "load_prompt",
     "get_user_icons_dir",
     "get_user_database_dir",
