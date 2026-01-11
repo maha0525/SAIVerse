@@ -12,21 +12,34 @@ Usage:
     python scripts/organize_to_trunk.py --persona air --trunk <trunk_id>
     python scripts/organize_to_trunk.py --persona air --trunk <trunk_id> --category people
     python scripts/organize_to_trunk.py --persona air --trunk <trunk_id> --dry-run
+    python scripts/organize_to_trunk.py --persona air --list-trunks
 """
+
+from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
+from pathlib import Path
 
-# Add parent directory to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add project root to path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Skip tool imports to avoid circular import issue
+os.environ["SAIVERSE_SKIP_TOOL_IMPORTS"] = "1"
 
 from saiverse_memory import SAIMemoryAdapter
 from sai_memory.memopedia import Memopedia
-from model_configs import get_model_config, find_model_config
-# Import factory directly to avoid circular import
-from llm_clients.factory import get_llm_client
+from model_configs import find_model_config
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+LOGGER = logging.getLogger(__name__)
 
 
 def get_llm_response(client, prompt: str, response_schema: dict) -> dict:
@@ -217,15 +230,27 @@ JSON形式で回答してください。"""
     # Get LLM client
     print(f"\nAsking LLM ({args.model}) to select pages...")
 
-    # Find model config
-    model_config = find_model_config(args.model)
-    if not model_config:
-        print(f"Error: Model config not found for '{args.model}'")
-        sys.exit(1)
+    # Find model config (same pattern as build_arasuji.py)
+    resolved_model_id, model_config = find_model_config(args.model)
 
-    provider = model_config.get("provider", "gemini")
-    context_length = model_config.get("context_length", 32000)
-    actual_model_id = model_config.get("model", args.model)
+    if resolved_model_id:
+        if resolved_model_id != args.model:
+            LOGGER.info(f"Resolved model '{args.model}' -> '{resolved_model_id}'")
+        actual_model_id = model_config.get("model", resolved_model_id)
+        context_length = model_config.get("context_length", 128000)
+        provider = model_config.get("provider", "gemini")
+    else:
+        LOGGER.warning(f"Model '{args.model}' not found in config, using default provider 'gemini'")
+        actual_model_id = args.model
+        context_length = 128000
+        provider = "gemini"
+        model_config = {}
+
+    LOGGER.info(f"Using model: {actual_model_id}")
+    LOGGER.info(f"Using provider: {provider}")
+
+    # Import factory directly to avoid circular import
+    from llm_clients.factory import get_llm_client
 
     client = get_llm_client(actual_model_id, provider, context_length, config=model_config)
 
