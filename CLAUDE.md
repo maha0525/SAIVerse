@@ -78,6 +78,39 @@ python -m pytest tests/test_llm_clients.py
 python -m unittest discover tests
 ```
 
+### Test Environment (Isolated Backend Testing)
+
+For testing the backend without affecting production data, use the isolated test environment:
+
+```bash
+# Setup test environment (creates test_data/ directory)
+python test_fixtures/setup_test_env.py
+
+# Start test server (port 18000)
+./test_fixtures/start_test_server.sh
+
+# Run API tests
+python test_fixtures/test_api.py         # Full test (includes LLM calls)
+python test_fixtures/test_api.py --quick # Quick test (no LLM calls)
+
+# Reset database only
+python test_fixtures/setup_test_env.py --reset-db
+
+# Clean rebuild
+python test_fixtures/setup_test_env.py --clean
+```
+
+**Test environment structure:**
+- `test_fixtures/definitions/test_data.json` - Test data definitions (git-tracked)
+- `test_data/` - Generated test data directory (gitignored)
+- Environment variables: `SAIVERSE_HOME=test_data/.saiverse`, `SAIVERSE_USER_DATA_DIR=test_data/user_data`
+
+**Important for AI agents:**
+- Always use `--quick` mode for fast verification without LLM costs
+- The chat API returns streaming NDJSON responses
+- User must have `CURRENT_BUILDINGID` set for chat tests to work
+- Personas need `LIGHTWEIGHT_MODEL` set for router nodes
+
 ### Backup and Recovery
 
 **Automatic Backups (Recommended)**

@@ -160,7 +160,8 @@ class QdrantStorage(StorageBackend):
             # Embedded mode: use provided location or default under ~/.saiverse/qdrant
             loc_raw = (config.qdrant_location or "").strip()
             if not loc_raw:
-                loc_raw = str(Path.home() / ".saiverse" / "qdrant")
+                from data_paths import get_saiverse_home
+                loc_raw = str(get_saiverse_home() / "qdrant")
             # Expand ~ and env vars
             loc_expanded = os.path.expandvars(os.path.expanduser(loc_raw))
             # Special in-memory mode

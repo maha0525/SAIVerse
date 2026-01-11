@@ -143,7 +143,8 @@ class SAIVerseManager(
 
         # --- Step 2: Setup File Paths and Default Avatars ---
         # 各種ログファイルのパスや、デフォルトのアバター画像を設定します。
-        self.saiverse_home = Path.home() / ".saiverse"
+        from data_paths import get_saiverse_home
+        self.saiverse_home = get_saiverse_home()
         self.backup_dir = self.saiverse_home / "backups"
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         self.building_memory_paths: Dict[str, Path] = {
