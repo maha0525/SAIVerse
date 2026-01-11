@@ -71,8 +71,12 @@ def main():
     )
     parser.add_argument(
         "--trunk",
-        required=True,
         help="Trunk page ID to organize pages into"
+    )
+    parser.add_argument(
+        "--list-trunks",
+        action="store_true",
+        help="List all trunks and exit"
     )
     parser.add_argument(
         "--category",
@@ -101,6 +105,34 @@ def main():
     print(f"Loading Memopedia for persona: {args.persona}")
     adapter = SAIMemoryAdapter(args.persona)
     memopedia = Memopedia(adapter.conn)
+
+    # List trunks mode
+    if args.list_trunks:
+        trunks = memopedia.get_trunks()
+        if not trunks:
+            print("No trunks found.")
+        else:
+            # Group by category
+            by_category = {"people": [], "terms": [], "plans": []}
+            for t in trunks:
+                if t.category in by_category:
+                    by_category[t.category].append(t)
+
+            category_names = {"people": "人物", "terms": "用語", "plans": "予定"}
+            for cat, pages in by_category.items():
+                if pages:
+                    print(f"\n{category_names[cat]} ({cat}):")
+                    for p in pages:
+                        summary_preview = f" - {p.summary[:40]}..." if p.summary else ""
+                        print(f"  - {p.title}{summary_preview}")
+                        print(f"    ID: {p.id}")
+        adapter.close()
+        sys.exit(0)
+
+    # Check --trunk is provided
+    if not args.trunk:
+        print("Error: --trunk is required (or use --list-trunks to see available trunks)")
+        sys.exit(1)
 
     # Get trunk info
     trunk = memopedia.get_page(args.trunk)
