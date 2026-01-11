@@ -32,6 +32,11 @@ from sai_memory.memopedia.storage import (
     record_page_edit,
     get_page_edit_history as storage_get_page_edit_history,
     get_edit_by_id,
+    # Trunk operations
+    set_trunk_flag,
+    get_trunks as storage_get_trunks,
+    move_pages_to_parent,
+    get_unorganized_pages as storage_get_unorganized_pages,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -84,6 +89,7 @@ class Memopedia:
                 "summary": page.summary,
                 "keywords": page.keywords,
                 "vividness": page.vividness,
+                "is_trunk": page.is_trunk,
                 "content": page.content,  # Include content for vivid pages
                 "is_open": states.get(page.id, False),
                 "children": [_annotate(c) for c in page.children],
@@ -164,6 +170,7 @@ class Memopedia:
         content: str = "",
         keywords: Optional[List[str]] = None,
         vividness: str = "rough",
+        is_trunk: bool = False,
         ref_start_message_id: Optional[str] = None,
         ref_end_message_id: Optional[str] = None,
         edit_source: Optional[str] = None,
@@ -180,6 +187,7 @@ class Memopedia:
             content: Page content
             keywords: List of keywords
             vividness: Vividness level (vivid/rough/faint/buried), default: rough
+            is_trunk: If True, this page is a trunk (category container)
             ref_start_message_id: Start of message reference range
             ref_end_message_id: End of message reference range
             edit_source: Source of this edit (e.g., 'ai_conversation', 'manual')
@@ -197,6 +205,7 @@ class Memopedia:
                 category=parent.category,
                 keywords=keywords,
                 vividness=vividness,
+                is_trunk=is_trunk,
             )
             # Record edit history for create
             full_content = f"title: {title}\nsummary: {summary}\ncontent:\n{content}"
@@ -636,3 +645,132 @@ class Memopedia:
                     deleted += 1
             LOGGER.info("Deleted %d pages", deleted)
             return deleted
+
+    # ----- Trunk operations -----
+
+    def set_trunk(self, page_id: str, is_trunk: bool) -> Optional[MemopediaPage]:
+        """
+        Set or unset the trunk flag for a page.
+
+        A trunk is a category container page that can hold other pages.
+        Trunks are displayed differently in the UI and used for organization.
+
+        Args:
+            page_id: ID of the page to modify
+            is_trunk: True to make this page a trunk, False to make it a regular page
+
+        Returns:
+            The updated page, or None if not found
+        """
+        # Prevent modifying root pages
+        if page_id.startswith("root_"):
+            LOGGER.warning("Cannot modify trunk status of root page: %s", page_id)
+            return None
+
+        with self._lock:
+            result = set_trunk_flag(self.conn, page_id, is_trunk)
+            if result:
+                LOGGER.info("Set trunk flag for page %s to %s", page_id, is_trunk)
+            return result
+
+    def get_trunks(self, category: Optional[str] = None) -> List[MemopediaPage]:
+        """
+        Get all trunk pages, optionally filtered by category.
+
+        Args:
+            category: Optional category filter ('people', 'terms', 'plans')
+
+        Returns:
+            List of trunk pages
+        """
+        with self._lock:
+            return storage_get_trunks(self.conn, category)
+
+    def get_unorganized_pages(self, category: str) -> List[MemopediaPage]:
+        """
+        Get pages that are direct children of the root (not in any trunk).
+
+        These are pages that haven't been organized into trunks yet.
+
+        Args:
+            category: Category to search ('people', 'terms', 'plans')
+
+        Returns:
+            List of unorganized pages
+        """
+        with self._lock:
+            return storage_get_unorganized_pages(self.conn, category)
+
+    def move_pages_to_trunk(
+        self,
+        page_ids: List[str],
+        trunk_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Move multiple pages to a trunk.
+
+        Args:
+            page_ids: List of page IDs to move
+            trunk_id: ID of the destination trunk page
+
+        Returns:
+            {
+                "success": True,
+                "moved_count": int,
+                "trunk_id": str,
+                "trunk_title": str
+            }
+        """
+        with self._lock:
+            trunk = get_page(self.conn, trunk_id)
+            if trunk is None:
+                raise ValueError(f"Trunk not found: {trunk_id}")
+
+            moved_count = move_pages_to_parent(self.conn, page_ids, trunk_id)
+            LOGGER.info("Moved %d pages to trunk %s (%s)", moved_count, trunk_id, trunk.title)
+
+            return {
+                "success": True,
+                "moved_count": moved_count,
+                "trunk_id": trunk_id,
+                "trunk_title": trunk.title,
+            }
+
+    def create_trunk(
+        self,
+        *,
+        parent_id: str,
+        title: str,
+        summary: str = "",
+        content: str = "",
+        keywords: Optional[List[str]] = None,
+        vividness: str = "rough",
+        edit_source: Optional[str] = None,
+    ) -> MemopediaPage:
+        """
+        Create a new trunk page.
+
+        A convenience method that creates a page with is_trunk=True.
+
+        Args:
+            parent_id: ID of the parent page (usually a root page like 'root_people')
+            title: Trunk title
+            summary: Trunk summary/description
+            content: Trunk content
+            keywords: List of keywords
+            vividness: Vividness level, default: rough
+            edit_source: Source of this edit
+
+        Returns:
+            The created trunk page
+        """
+        return self.create_page(
+            parent_id=parent_id,
+            title=title,
+            summary=summary,
+            content=content,
+            keywords=keywords,
+            vividness=vividness,
+            is_trunk=True,
+            edit_source=edit_source,
+        )
