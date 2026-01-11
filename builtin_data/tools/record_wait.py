@@ -6,7 +6,7 @@ from datetime import datetime, timezone as dt_timezone
 from typing import Optional
 
 from tools.context import get_active_persona_id, get_active_manager
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 LOGGER = logging.getLogger(__name__)
 

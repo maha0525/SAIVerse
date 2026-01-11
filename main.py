@@ -45,7 +45,9 @@ except ImportError:
 level_name = os.getenv("SAIVERSE_LOG_LEVEL", "INFO").upper()
 if level_name not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
     level_name = "INFO"
-logging.basicConfig(level=getattr(logging, level_name))
+# Configure logging with terminal mirroring and per-startup log files
+from logging_config import configure_logging
+SESSION_LOG_DIR = configure_logging(level_name)
 try:
     _chat_limit_env = int(os.getenv("SAIVERSE_CHAT_HISTORY_LIMIT", "120"))
 except ValueError:
@@ -385,7 +387,13 @@ def main():
     user_icons_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/api/static/user_icons", StaticFiles(directory=str(user_icons_dir)), name="user_icons")
     
-    # Mount assets directory for static files (e.g. default avatars)
+    # Mount builtin_data/icons for default icons (host.png, user.png)
+    # Access via /api/static/builtin_icons/host.png
+    builtin_icons_dir = Path(__file__).parent / "builtin_data" / "icons"
+    builtin_icons_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/api/static/builtin_icons", StaticFiles(directory=str(builtin_icons_dir)), name="builtin_icons")
+    
+    # Mount assets directory for static files (legacy fallback)
     # Access via /api/static/icons/user.png
     app.mount("/api/static", StaticFiles(directory="assets"), name="static")
 

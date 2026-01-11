@@ -4,7 +4,7 @@ import json
 from typing import Any, Dict, List
 
 from tools.context import get_active_manager
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 
 def list_city_buildings() -> str:

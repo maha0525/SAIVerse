@@ -13,10 +13,10 @@ from openai import OpenAI
 
 from media_utils import iter_image_media, load_image_bytes_for_llm
 from tools import OPENAI_TOOLS_SPEC, TOOL_REGISTRY
-from tools.defs import parse_tool_result
+from tools.core import parse_tool_result
 from llm_router import route
 
-from .base import LLMClient, raw_logger
+from .base import LLMClient, get_llm_logger
 from .utils import content_to_text, merge_reasoning_strings, obj_to_dict
 
 
@@ -345,7 +345,7 @@ class OpenAIClient(LLMClient):
                 logging.exception("OpenAI call failed")
                 return "エラーが発生しました。"
 
-            raw_logger.debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
+            get_llm_logger().debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
             choice = resp.choices[0]
             text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
             if not text_body:
@@ -387,7 +387,7 @@ class OpenAIClient(LLMClient):
                     n=1,
                     **_build_request_kwargs(),
                 )
-                raw_logger.debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
+                get_llm_logger().debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
 
                 target_choice = next(
                     (c for c in resp.choices if getattr(c.message, "tool_calls", [])),
@@ -705,7 +705,7 @@ class OpenAIClient(LLMClient):
             logging.exception("OpenAI call failed in generate_with_tool_detection")
             return {"type": "text", "content": "エラーが発生しました。"}
 
-        raw_logger.debug("OpenAI raw (tool detection):\n%s", resp.model_dump_json(indent=2))
+        get_llm_logger().debug("OpenAI raw (tool detection):\n%s", resp.model_dump_json(indent=2))
         choice = resp.choices[0]
         tool_calls = getattr(choice.message, "tool_calls", [])
 

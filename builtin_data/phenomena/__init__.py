@@ -1,18 +1,11 @@
 """
-phenomena.defs ― フェノメノン定義用のベーススキーマ
+builtin_data/phenomena ― ビルトインフェノメノン定義
 
-各フェノメノンモジュールは以下を必ず公開する:
-    - phenomenon_function()  # 実際の処理
-    - schema() -> PhenomenonSchema
+フェノメノンの共通型 (PhenomenonSchema) は
+phenomena.core からインポートしてください。
+ここでは後方互換性のためにそれらを再エクスポートしています。
 """
-from dataclasses import dataclass
-from typing import Any, Dict
+# Re-export core types for backward compatibility
+from phenomena.core import PhenomenonSchema
 
-
-@dataclass
-class PhenomenonSchema:
-    """フェノメノンのスキーマ定義"""
-    name: str
-    description: str
-    parameters: Dict[str, Any]  # JSON Schema
-    is_async: bool = True  # デフォルトは非同期実行
+__all__ = ["PhenomenonSchema"]

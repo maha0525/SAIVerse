@@ -5,19 +5,15 @@ import logging
 import os
 from typing import Any, Dict, Iterator, List
 
-RAW_LOG_FILE = os.getenv("SAIVERSE_RAW_LLM_LOG", "raw_llm_responses.txt")
-
-raw_logger = logging.getLogger("saiverse.llm.raw")
-raw_logger.setLevel(logging.DEBUG)
-if not any(
-    isinstance(handler, logging.FileHandler)
-    and getattr(handler, "baseFilename", None) == os.path.abspath(RAW_LOG_FILE)
-    for handler in raw_logger.handlers
-):
-    file_handler = logging.FileHandler(RAW_LOG_FILE, encoding="utf-8")
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-    raw_logger.addHandler(file_handler)
+# LLM logging is now handled by logging_config module
+# Import convenience functions for backward compatibility
+try:
+    from logging_config import log_llm_request, log_llm_response, get_llm_logger
+except ImportError:
+    # Fallback if logging_config not available (e.g., standalone script usage)
+    def log_llm_request(*args, **kwargs): pass
+    def log_llm_response(*args, **kwargs): pass
+    def get_llm_logger(): return logging.getLogger("saiverse.llm")
 
 
 class LLMClient:
@@ -96,4 +92,4 @@ class EmptyResponseError(RuntimeError):
     """Raised when LLM returns an empty response (no text or function call)."""
 
 
-__all__ = ["LLMClient", "raw_logger", "RAW_LOG_FILE", "IncompleteStreamError", "EmptyResponseError"]
+__all__ = ["LLMClient", "log_llm_request", "log_llm_response", "get_llm_logger", "IncompleteStreamError", "EmptyResponseError"]

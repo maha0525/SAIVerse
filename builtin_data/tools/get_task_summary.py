@@ -5,7 +5,7 @@ import logging
 from typing import List
 
 from tools.context import get_active_persona_id, get_active_manager
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 LOGGER = logging.getLogger(__name__)
 

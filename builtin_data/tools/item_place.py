@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional
 
 from tools.context import get_active_manager, get_active_persona_id
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 
 def item_place(item_id: str, building_id: Optional[str] = None) -> str:

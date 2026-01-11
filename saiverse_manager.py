@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import pandas as pd
 import importlib
-import tools.defs
+import tools.core
 from discord_gateway.mapping import ChannelMapping
 import os
 
@@ -152,10 +152,10 @@ class SAIVerseManager(
         }
         # Load default avatars with graceful fallback
         avatar_fallback_paths = [
-            Path("assets/icons/blank.png"),
-            Path("assets/icons/user.png"),
-            Path("assets/icons/host.png"),
-            Path("assets/icons/air.png"),
+            Path("builtin_data/icons/blank.png"),
+            Path("builtin_data/icons/user.png"),
+            Path("builtin_data/icons/host.png"),
+            Path("assets/icons/host.png"),  # Legacy fallback
         ]
         default_avatar_data = ""
         for avatar_path in avatar_fallback_paths:
@@ -165,7 +165,7 @@ class SAIVerseManager(
                 break
         self.default_avatar = default_avatar_data
 
-        host_avatar_data = self._load_avatar_data(Path("assets/icons/host.png"))
+        host_avatar_data = self._load_avatar_data(Path("builtin_data/icons/host.png"))
         self.host_avatar = host_avatar_data or self.default_avatar
         if getattr(self, "city_host_avatar_path", None):
             host_override = self._load_avatar_data(Path(self.city_host_avatar_path))
@@ -1719,7 +1719,7 @@ class SAIVerseManager(
                     arguments,
                 )
                 result = tool_function(**arguments)
-                content, _, _, _ = tools.defs.parse_tool_result(result)
+                content, _, _, _ = tools.core.parse_tool_result(result)
                 return str(content)
             except ImportError:
                 logging.error(

@@ -162,8 +162,8 @@ class NvidiaNIMClient(OpenAIClient):
                 else:
                     raise
 
-        from .base import raw_logger
-        raw_logger.debug("Nvidia NIM raw:\n%s", json.dumps(resp_json, indent=2, ensure_ascii=False))
+        from .base import get_llm_logger
+        get_llm_logger().debug("Nvidia NIM raw:\n%s", json.dumps(resp_json, indent=2, ensure_ascii=False))
 
         # Extract tool call arguments
         choices = resp_json.get("choices", [])
@@ -206,7 +206,7 @@ class NvidiaNIMClient(OpenAIClient):
         For structured output, uses guided_json in extra_body instead of response_format.
         """
         from tools import OPENAI_TOOLS_SPEC, TOOL_REGISTRY
-        from tools.defs import parse_tool_result
+        from tools.core import parse_tool_result
         from .openai import _prepare_openai_messages
 
         default_tools = OPENAI_TOOLS_SPEC if tools is None else tools

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from tools.context import get_active_manager, get_active_persona_id
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 
 def item_pickup(item_id: str) -> str:

@@ -16,7 +16,7 @@ import requests
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
 
-from tools.defs import ToolResult, ToolSchema
+from tools.core import ToolResult, ToolSchema
 
 # ---------------------------------------------------------------------------
 # Logging setup

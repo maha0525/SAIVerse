@@ -26,7 +26,7 @@ from manager.history import HistoryMixin
 from manager.persona import PersonaMixin
 from manager.state import CoreState
 from scripts.import_playbook import infer_scope_from_path
-from tools.defs.save_playbook import save_playbook
+from builtin_data.tools.save_playbook import save_playbook
 
 class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
     """Administrative operations for world editing and CRUD."""

@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types as gtypes
 from llm_clients.gemini_utils import build_gemini_clients
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 load_dotenv()
 

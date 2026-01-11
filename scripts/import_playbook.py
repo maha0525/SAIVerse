@@ -25,7 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from tools.defs.save_playbook import save_playbook  # type: ignore
+from builtin_data.tools.save_playbook import save_playbook  # type: ignore
 
 
 def infer_scope_from_path(path: Path) -> tuple[str, str | None, str | None]:

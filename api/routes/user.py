@@ -55,16 +55,13 @@ def get_user_status(manager = Depends(get_manager)):
 
 @router.post("/move", response_model=MoveResponse)
 def move_user(req: MoveRequest, manager = Depends(get_manager)):
-    # DEBUG LOGGING
-    debug_log_path = r"c:\Users\shuhe\workspace\SAIVerse\debug_chat.log"
-    from datetime import datetime
-    with open(debug_log_path, "a", encoding="utf-8") as f:
-        f.write(f"{datetime.now()}: [USER_MOVE] Request to move to {req.target_building_id}\n")
+    import logging
+    logging.debug("[USER_MOVE] Request to move to %s", req.target_building_id)
 
     success, message = manager.move_user(req.target_building_id)
     
-    with open(debug_log_path, "a", encoding="utf-8") as f:
-        f.write(f"{datetime.now()}: [USER_MOVE] Result success={success}, msg={message}, current_bid={manager.user_current_building_id}\n")
+    logging.debug("[USER_MOVE] Result success=%s, msg=%s, current_bid=%s", 
+                 success, message, manager.user_current_building_id)
         
     return {"success": success, "message": message}
 

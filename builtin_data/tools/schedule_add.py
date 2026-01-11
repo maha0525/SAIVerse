@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from database.models import PersonaSchedule, AI as AIModel, City as CityModel
 from tools.context import get_active_manager
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 LOGGER = logging.getLogger(__name__)
 

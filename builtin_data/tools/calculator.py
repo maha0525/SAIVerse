@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Callable
 from dataclasses import dataclass
 from google.genai import types
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 
 # ---------------------------------------------------------------------------

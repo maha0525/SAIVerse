@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from llm_clients.gemini_utils import build_gemini_clients
 from google.genai import types
 
-from tools.defs import ToolSchema, ToolResult
+from tools.core import ToolSchema, ToolResult
 from media_utils import store_image_bytes
 
 load_dotenv()
