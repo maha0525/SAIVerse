@@ -15,7 +15,7 @@ import pkgutil
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 from tools.adapters import openai as oa, gemini as gm
 
 LOGGER = logging.getLogger(__name__)

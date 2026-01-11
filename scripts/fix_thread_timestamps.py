@@ -51,11 +51,11 @@ def parse_datetime(dt_str: str) -> datetime:
     )
 
 
-def get_thread_messages(conn: sqlite3.Connection, thread_id: str) -> List[Tuple[str, int]]:
-    """スレッド内のメッセージを取得（ID, 現在のタイムスタンプ順）"""
+def get_thread_messages(conn: sqlite3.Connection, thread_id: str) -> List[Tuple[str, int, str]]:
+    """スレッド内のメッセージを取得（ID, 現在のタイムスタンプ, role順）"""
     cur = conn.execute(
         """
-        SELECT id, created_at FROM messages 
+        SELECT id, created_at, role FROM messages 
         WHERE thread_id = ? 
         ORDER BY created_at ASC, rowid ASC
         """,
@@ -65,7 +65,7 @@ def get_thread_messages(conn: sqlite3.Connection, thread_id: str) -> List[Tuple[
 
 
 def preview_changes(
-    messages: List[Tuple[str, int]], 
+    messages: List[Tuple[str, int, str]], 
     new_timestamps: List[int]
 ) -> None:
     """変更のプレビューを表示"""
@@ -73,37 +73,40 @@ def preview_changes(
     print(f"対象メッセージ数: {len(messages)}")
     
     if len(messages) <= 10:
-        for i, ((msg_id, old_ts), new_ts) in enumerate(zip(messages, new_timestamps)):
+        for i, ((msg_id, old_ts, role), new_ts) in enumerate(zip(messages, new_timestamps)):
             old_dt = datetime.fromtimestamp(old_ts).strftime("%Y-%m-%d %H:%M:%S")
             new_dt = datetime.fromtimestamp(new_ts).strftime("%Y-%m-%d %H:%M:%S")
-            print(f"  [{i+1:3d}] {msg_id[:8]}... : {old_dt} -> {new_dt}")
+            role_mark = "[U]" if role == "user" else "[A]"
+            print(f"  [{i+1:3d}] {role_mark} {msg_id[:8]}... : {old_dt} -> {new_dt}")
     else:
         # 最初と最後の5件だけ表示
         for i in range(5):
-            msg_id, old_ts = messages[i]
+            msg_id, old_ts, role = messages[i]
             new_ts = new_timestamps[i]
             old_dt = datetime.fromtimestamp(old_ts).strftime("%Y-%m-%d %H:%M:%S")
             new_dt = datetime.fromtimestamp(new_ts).strftime("%Y-%m-%d %H:%M:%S")
-            print(f"  [{i+1:3d}] {msg_id[:8]}... : {old_dt} -> {new_dt}")
+            role_mark = "[U]" if role == "user" else "[A]"
+            print(f"  [{i+1:3d}] {role_mark} {msg_id[:8]}... : {old_dt} -> {new_dt}")
         
         print(f"  ... (中略: {len(messages) - 10} 件) ...")
         
         for i in range(len(messages) - 5, len(messages)):
-            msg_id, old_ts = messages[i]
+            msg_id, old_ts, role = messages[i]
             new_ts = new_timestamps[i]
             old_dt = datetime.fromtimestamp(old_ts).strftime("%Y-%m-%d %H:%M:%S")
             new_dt = datetime.fromtimestamp(new_ts).strftime("%Y-%m-%d %H:%M:%S")
-            print(f"  [{i+1:3d}] {msg_id[:8]}... : {old_dt} -> {new_dt}")
+            role_mark = "[U]" if role == "user" else "[A]"
+            print(f"  [{i+1:3d}] {role_mark} {msg_id[:8]}... : {old_dt} -> {new_dt}")
 
 
 def apply_timestamps(
     conn: sqlite3.Connection, 
-    messages: List[Tuple[str, int]], 
+    messages: List[Tuple[str, int, str]], 
     new_timestamps: List[int]
 ) -> int:
     """新しいタイムスタンプを適用"""
     updated = 0
-    for (msg_id, _), new_ts in zip(messages, new_timestamps):
+    for (msg_id, _, _), new_ts in zip(messages, new_timestamps):
         conn.execute(
             "UPDATE messages SET created_at = ? WHERE id = ?",
             (new_ts, msg_id)
@@ -172,17 +175,41 @@ def main():
             print("エラー: 指定されたスレッドにメッセージがありません", file=sys.stderr)
             sys.exit(1)
         
-        # 新しいタイムスタンプを計算（均等配置）
-        if len(messages) == 1:
-            # 1件の場合は開始日時を使用
-            new_timestamps = [start_ts]
+        # ユーザー発言のインデックスを収集
+        user_indices = [i for i, (_, _, role) in enumerate(messages) if role == "user"]
+        
+        # 新しいタイムスタンプを計算
+        # - ユーザー発言: 均等配置
+        # - 非ユーザー発言: 直前の発言から60秒後
+        new_timestamps: List[int] = [0] * len(messages)
+        
+        if not user_indices:
+            # ユーザー発言がない場合は全て均等配置（フォールバック）
+            if len(messages) == 1:
+                new_timestamps = [start_ts]
+            else:
+                interval = (end_ts - start_ts) / (len(messages) - 1)
+                new_timestamps = [int(start_ts + i * interval) for i in range(len(messages))]
         else:
-            # 複数件の場合は均等に配置
-            interval = (end_ts - start_ts) / (len(messages) - 1)
-            new_timestamps = [
-                int(start_ts + i * interval) 
-                for i in range(len(messages))
-            ]
+            # ユーザー発言のタイムスタンプを均等配置
+            if len(user_indices) == 1:
+                user_timestamps = [start_ts]
+            else:
+                interval = (end_ts - start_ts) / (len(user_indices) - 1)
+                user_timestamps = [int(start_ts + i * interval) for i in range(len(user_indices))]
+            
+            # ユーザー発言のタイムスタンプを設定
+            for idx, user_idx in enumerate(user_indices):
+                new_timestamps[user_idx] = user_timestamps[idx]
+            
+            # 非ユーザー発言は直前の発言から60秒後
+            for i in range(len(messages)):
+                if new_timestamps[i] == 0:  # まだ設定されていない（非ユーザー発言）
+                    if i == 0:
+                        # 最初のメッセージが非ユーザー発言の場合、開始時刻を使用
+                        new_timestamps[i] = start_ts
+                    else:
+                        new_timestamps[i] = new_timestamps[i - 1] + 60
         
         # プレビュー表示
         preview_changes(messages, new_timestamps)

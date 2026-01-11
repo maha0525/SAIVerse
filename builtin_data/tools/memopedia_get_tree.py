@@ -6,7 +6,7 @@ from typing import Optional
 
 from saiverse_memory import SAIMemoryAdapter
 from tools.context import get_active_persona_id, get_active_persona_path
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 
 def memopedia_get_tree() -> str:

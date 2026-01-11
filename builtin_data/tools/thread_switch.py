@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional, Tuple
 from saiverse_memory import SAIMemoryAdapter
 from sai_memory.memory.storage import get_messages_last
 from tools.context import get_active_persona_id, get_active_persona_path
-from tools.defs import ToolResult, ToolSchema
+from tools.core import ToolResult, ToolSchema
 
 
 DEFAULT_RANGE_BEFORE = 8

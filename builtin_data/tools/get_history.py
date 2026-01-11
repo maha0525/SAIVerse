@@ -5,7 +5,7 @@ import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from tools.context import get_active_persona_id, get_active_manager
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 LOGGER = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ def get_history(
     # 1. Add system prompt
     if include_system_prompt:
         try:
-            from tools.defs.get_system_prompt import get_system_prompt
+            from builtin_data.tools.get_system_prompt import get_system_prompt
             system_prompt = get_system_prompt(
                 building_id=building_id,
                 include_inventory=include_inventory,
@@ -77,7 +77,7 @@ def get_history(
     # 1.5. Add visual context (Building/Persona images) right after system prompt
     if include_visual_context:
         try:
-            from tools.defs.get_visual_context import get_visual_context
+            from builtin_data.tools.get_visual_context import get_visual_context
             visual_context_messages = get_visual_context(building_id=building_id)
             if visual_context_messages:
                 messages.extend(visual_context_messages)

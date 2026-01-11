@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from database.paths import default_db_path
 from database.models import Base, Playbook
 from tools.context import get_active_persona_id, get_active_manager
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 
 def list_available_playbooks(persona_id: Optional[str] = None, building_id: Optional[str] = None) -> str:

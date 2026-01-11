@@ -55,6 +55,9 @@ def get_building_details(manager = Depends(get_manager)):
                     if avatar.startswith("user_data/icons/"):
                         # Convert user_data/icons path to API URL
                         avatar = "/api/static/user_icons/" + avatar[len("user_data/icons/"):]
+                    elif avatar.startswith("builtin_data/icons/"):
+                        # Convert builtin_data/icons path to API URL
+                        avatar = "/api/static/builtin_icons/" + avatar[len("builtin_data/icons/"):]
                     elif avatar.startswith("assets/"):
                         # Convert local path "assets/..." to API URL "/api/static/..."
                         avatar = "/api/static/" + avatar[7:]

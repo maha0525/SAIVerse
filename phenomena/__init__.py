@@ -19,7 +19,7 @@ import pkgutil
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-from phenomena.defs import PhenomenonSchema
+from phenomena.core import PhenomenonSchema
 
 LOGGER = logging.getLogger(__name__)
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from tools.context import get_active_manager, get_active_persona_id
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 
 def document_create(name: str, description: str, content: str) -> str:

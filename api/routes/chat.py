@@ -29,7 +29,7 @@ def get_persona_avatar(persona_id: str, manager = Depends(get_manager)):
     persona = manager.personas.get(persona_id)
     if not persona or not persona.avatar_image:
         # Return default or 404. For now default host
-        return FileResponse("assets/icons/host.png")
+        return FileResponse("builtin_data/icons/host.png")
     
     # Check if absolute path
     path = Path(persona.avatar_image)
@@ -40,7 +40,7 @@ def get_persona_avatar(persona_id: str, manager = Depends(get_manager)):
     
     if path.exists():
         return FileResponse(path)
-    return FileResponse("assets/icons/host.png")
+    return FileResponse("builtin_data/icons/host.png")
 
 import logging
 import hashlib
@@ -52,18 +52,11 @@ def get_chat_history(
     after: Optional[str] = None,
     manager = Depends(get_manager)
 ):
-    # DEBUG LOGGING SETUP
-    debug_log_path = r"c:\Users\shuhe\workspace\SAIVerse\debug_chat.log"
-    def log_debug(msg):
-        with open(debug_log_path, "a", encoding="utf-8") as f:
-            f.write(f"{datetime.now()}: {msg}\n")
-
     current_bid = manager.user_current_building_id
-    log_debug(f"Request: limit={limit}, before={before}, current_bid={current_bid}")
+    logging.debug("[CHAT_HISTORY] Request: limit=%s, before=%s, current_bid=%s", limit, before, current_bid)
     
     if not current_bid:
         logging.warning("get_chat_history: No user_current_building_id")
-        log_debug("ERROR: No user_current_building_id")
         return {"history": []}
         
     raw_history = manager.building_histories.get(current_bid, [])
@@ -71,9 +64,9 @@ def get_chat_history(
     # Filter out note-box messages before pagination to ensure consistent counts
     raw_history = [msg for msg in raw_history if '<div class="note-box">' not in str(msg.get("content", ""))]
     
-    log_debug(f"Found history items (after note-box filter): {len(raw_history)}")
+    logging.debug("[CHAT_HISTORY] Found history items (after note-box filter): %d", len(raw_history))
     if len(raw_history) == 0:
-        log_debug(f"Available building keys: {list(manager.building_histories.keys())}")
+        logging.debug("[CHAT_HISTORY] Available building keys: %s", list(manager.building_histories.keys()))
     
     # 1. Enrich/Normalize history with IDs
     # We must do this dynamically to support legacy messages without IDs
@@ -118,8 +111,9 @@ def get_chat_history(
         else:
             # ID not found - ID mismatch due to history changes
             # Return empty; client interprets <20 results as "no more history"
-            logging.warning(f"get_chat_history: 'before' ID {before} not found in history for {current_bid}")
-            log_debug(f"WARN: 'before' ID {before} NOT FOUND (ID mismatch). IDs available (first 5): {[x['virtual_id'] for x in enriched_history_objects[:5]]}")
+            logging.warning("get_chat_history: 'before' ID %s not found in history for %s", before, current_bid)
+            logging.debug("[CHAT_HISTORY] WARN: 'before' ID %s NOT FOUND (ID mismatch). IDs available (first 5): %s", 
+                         before, [x['virtual_id'] for x in enriched_history_objects[:5]])
             return {"history": []}
 
     if after:
@@ -137,16 +131,18 @@ def get_chat_history(
         else:
             # ID not found - maybe history was cleared or rolled over
             # Return empty for safety (client will need to refresh)
-            logging.warning(f"get_chat_history: 'after' ID {after} not found in history for {current_bid}")
-            log_debug(f"WARN: 'after' ID {after} NOT FOUND. Returning empty for polling.")
+            logging.warning("get_chat_history: 'after' ID %s not found in history for %s", after, current_bid)
+            logging.debug("[CHAT_HISTORY] WARN: 'after' ID %s NOT FOUND. Returning empty for polling.", after)
             return {"history": []}
 
     # Slice
     start_index = max(0, end_index - limit) if not after else start_index
     slice_history = enriched_history_objects[start_index:end_index]
     
-    log_debug(f"Slice calc: start={start_index}, end={end_index}, limit={limit}. Returning {len(slice_history)} items.")
-    logging.info(f"get_chat_history: bid={current_bid} total={len(raw_history)} limit={limit} before={before} returned={len(slice_history)}")
+    logging.debug("[CHAT_HISTORY] Slice calc: start=%d, end=%d, limit=%d. Returning %d items.", 
+                 start_index, end_index, limit, len(slice_history))
+    logging.info("get_chat_history: bid=%s total=%d limit=%d before=%s returned=%d", 
+                current_bid, len(raw_history), limit, before, len(slice_history))
 
     final_response = []
     
@@ -162,11 +158,11 @@ def get_chat_history(
         message_id = msg["virtual_id"] # Use the robust ID
         
         sender = "Unknown"
-        avatar = "/api/static/icons/host.png" 
+        avatar = "/api/static/builtin_icons/host.png" 
         
         if role == "user":
             sender = manager.user_display_name or "User"
-            avatar = manager.state.user_avatar_data or "/api/static/icons/user.png"
+            avatar = manager.state.user_avatar_data or "/api/static/builtin_icons/user.png"
         elif role == "assistant":
             pid = msg.get("persona_id")
             if pid:
@@ -179,6 +175,9 @@ def get_chat_history(
                         if avatar_path.startswith("user_data/icons/"):
                             # Convert user_data/icons path to API URL
                             avatar = "/api/static/user_icons/" + avatar_path[len("user_data/icons/"):]
+                        elif avatar_path.startswith("builtin_data/icons/"):
+                            # Convert builtin_data/icons path to API URL
+                            avatar = "/api/static/builtin_icons/" + avatar_path[len("builtin_data/icons/"):]
                         elif avatar_path.startswith("assets/"):
                             # Convert legacy assets path to API URL
                             avatar = "/api/static/" + avatar_path[7:]
@@ -187,12 +186,12 @@ def get_chat_history(
                             avatar = avatar_path
                     else:
                         # Fallback if no avatar set
-                        avatar = "/api/static/icons/host.png"
+                        avatar = "/api/static/builtin_icons/host.png"
             else:
                 sender = "Assistant"
         elif role == "host":
             sender = "System"
-            avatar = "/api/static/icons/host.png"
+            avatar = "/api/static/builtin_icons/host.png"
             
         # Extract images from metadata
         # Support both 'images' (user upload) and 'media' (tool-generated) keys

@@ -1,7 +1,0 @@
-{
-  "model": "gemini-2.5-flash",
-  "display_name": "Gemini 2.5 Flash",
-  "provider": "gemini",
-  "context_length": 128000,
-  "supports_images": true
-}

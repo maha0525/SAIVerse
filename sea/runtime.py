@@ -54,7 +54,6 @@ class SEARuntime:
         self.manager = manager_ref
         self.playbooks_dir = Path(__file__).parent / "playbooks"
         self._playbook_cache: Dict[str, PlaybookSchema] = {}
-        self._dump_path = os.getenv("SAIVERSE_SEA_DUMP")  # set to a filepath to capture LLM I/O
         self._trace = bool(os.getenv("SAIVERSE_SEA_TRACE"))
 
     # ---------------- meta entrypoints -----------------
@@ -687,21 +686,14 @@ class SEARuntime:
         messages: List[Dict[str, Any]],
         output_text: str,
     ) -> None:
-        if not self._dump_path:
-            return
+        """Log LLM I/O to the unified LLM log file."""
         try:
-            entry = {
-                "playbook": playbook_name,
-                "node": node_id,
-                "persona_id": getattr(persona, "persona_id", None),
-                "persona_name": getattr(persona, "persona_name", None),
-                "messages": messages,
-                "output": output_text,
-            }
-            Path(self._dump_path).parent.mkdir(parents=True, exist_ok=True)
-            with open(self._dump_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False))
-                f.write("\n")
+            from logging_config import log_llm_request, log_llm_response
+            persona_id = getattr(persona, "persona_id", None)
+            persona_name = getattr(persona, "persona_name", None)
+            source = f"sea/{playbook_name}"
+            log_llm_request(source, node_id, persona_id, persona_name, messages)
+            log_llm_response(source, node_id, persona_id, persona_name, output_text)
         except Exception:
             LOGGER.debug("failed to dump LLM io", exc_info=True)
 
@@ -1724,7 +1716,7 @@ class SEARuntime:
         LOGGER.info("[sea][prepare-context] memory_weave=%s", reqs.memory_weave)
         if reqs.memory_weave:
             try:
-                from tools.defs.get_memory_weave_context import get_memory_weave_context
+                from builtin_data.tools.get_memory_weave_context import get_memory_weave_context
                 from tools.context import persona_context
                 persona_id = getattr(persona, "persona_id", None)
                 
@@ -1747,7 +1739,7 @@ class SEARuntime:
         # Inserted right after system prompt but before conversation history
         if reqs.visual_context:
             try:
-                from tools.defs.get_visual_context import get_visual_context
+                from builtin_data.tools.get_visual_context import get_visual_context
                 from tools.context import persona_context, get_active_manager
                 persona_id = getattr(persona, "persona_id", None)
                 persona_dir = getattr(persona, "persona_dir", None)

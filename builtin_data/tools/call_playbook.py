@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from tools.context import get_active_persona_id, get_active_manager
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 
 def call_playbook(playbook_name: str) -> str:

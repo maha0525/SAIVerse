@@ -78,32 +78,33 @@ def _install_gemini_stream_patch() -> None:
     original_async_segments = HttpResponse.async_segments
 
     def _yield_json_chunks(iterator: Iterator[str]) -> Iterator[Any]:
+        _sse_logger = logging.getLogger("saiverse.llm")
         acc = _SSEAccumulator()
         for raw_line in iterator:
             cleaned = _clean_line(raw_line)
-            raw_logger.debug("Gemini SSE raw line: %s", cleaned)
+            _sse_logger.debug("Gemini SSE raw line: %s", cleaned)
             combined = acc.feed(cleaned)
             if combined:
-                raw_logger.debug("Gemini SSE payload: %s", combined)
+                _sse_logger.debug("Gemini SSE payload: %s", combined)
                 yield json.loads(combined)
         final = acc.flush()
         if final:
-            raw_logger.debug("Gemini SSE final payload: %s", final)
+            _sse_logger.debug("Gemini SSE final payload: %s", final)
             yield json.loads(final)
 
     async def _yield_json_chunks_async(iterator: Any) -> Any:
+        _sse_logger = logging.getLogger("saiverse.llm")
         acc = _SSEAccumulator()
         async for raw_line in iterator:
             cleaned = _clean_line(raw_line)
-            raw_logger.debug("Gemini SSE raw line (async): %s", cleaned)
+            _sse_logger.debug("Gemini SSE raw line (async): %s", cleaned)
             combined = acc.feed(cleaned)
             if combined:
-                raw_logger.debug("Gemini SSE payload (async): %s", combined)
+                _sse_logger.debug("Gemini SSE payload (async): %s", combined)
                 yield json.loads(combined)
         final = acc.flush()
         if final:
-            raw_logger.debug("Gemini SSE final payload (async): %s", final)
-            yield json.loads(final)
+            _sse_logger.debug("Gemini SSE final payload (async): %s", final)
 
     def _patched_segments(self) -> Iterator[Any]:
         if isinstance(self.response_stream, list) or self.response_stream is None:
@@ -154,10 +155,10 @@ from .gemini_utils import build_gemini_clients
 from media_utils import iter_image_media, load_image_bytes_for_llm
 from media_summary import ensure_image_summary
 from tools import GEMINI_TOOLS_SPEC, TOOL_REGISTRY
-from tools.defs import parse_tool_result
+from tools.core import parse_tool_result
 from llm_router import route
 
-from .base import EmptyResponseError, IncompleteStreamError, LLMClient, raw_logger
+from .base import EmptyResponseError, IncompleteStreamError, LLMClient, get_llm_logger
 from .utils import content_to_text, is_truthy_flag, merge_reasoning_strings
 
 GEMINI_SAFETY_CONFIG = [
@@ -556,7 +557,7 @@ class GeminiClient(LLMClient):
                         if schema_obj is not None:
                             cfg_kwargs["response_schema"] = schema_obj
 
-                raw_logger.debug(
+                get_llm_logger().debug(
                     "Gemini generate config model=%s use_tools=%s cfg=%s",
                     model_id,
                     use_tools,
@@ -567,7 +568,7 @@ class GeminiClient(LLMClient):
                     contents=contents,
                     config=types.GenerateContentConfig(**cfg_kwargs),
                 )
-                raw_logger.debug("Gemini raw:\n%s", resp)
+                get_llm_logger().debug("Gemini raw:\n%s", resp)
 
                 if not resp.candidates:
                     # No candidates: raise for retry
@@ -751,18 +752,18 @@ class GeminiClient(LLMClient):
         stream_completed = False
 
         for chunk in stream:
-            raw_logger.debug("Gemini stream chunk:\n%s", chunk)
+            get_llm_logger().debug("Gemini stream chunk:\n%s", chunk)
             if not chunk.candidates:
                 continue
             candidate = chunk.candidates[0]
-            raw_logger.debug("Gemini stream candidate:\n%s", candidate)
+            get_llm_logger().debug("Gemini stream candidate:\n%s", candidate)
             saw_chunks = True
             if not candidate.content or not candidate.content.parts:
                 continue
             candidate_index = getattr(candidate, "index", 0)
             for part_idx, part in enumerate(candidate.content.parts):
                 if getattr(part, "function_call", None) and fcall is None:
-                    raw_logger.debug("Gemini function_call (part %s): %s", part_idx, part.function_call)
+                    get_llm_logger().debug("Gemini function_call (part %s): %s", part_idx, part.function_call)
                     fcall = part.function_call
                 elif is_truthy_flag(getattr(part, "thought", None)):
                     text_val = getattr(part, "text", None) or ""
@@ -793,7 +794,7 @@ class GeminiClient(LLMClient):
             )
             if not new_text:
                 continue
-            raw_logger.debug("Gemini text delta: %s", new_text)
+            get_llm_logger().debug("Gemini text delta: %s", new_text)
             if not prefix_yielded and history_snippets:
                 yield "\n".join(history_snippets) + "\n"
                 prefix_yielded = True
@@ -882,7 +883,7 @@ class GeminiClient(LLMClient):
             cfg_kwargs["thinking_config"] = self._thinking_config
         if temperature is not None:
             cfg_kwargs["temperature"] = temperature
-        raw_logger.debug(
+        get_llm_logger().debug(
             "Gemini stream config model=%s use_tools=%s cfg=%s",
             self.model,
             use_tools,
@@ -933,11 +934,11 @@ class GeminiClient(LLMClient):
         stream_completed = False
 
         for chunk in stream:
-            raw_logger.debug("Gemini stream2 chunk:\n%s", chunk)
+            get_llm_logger().debug("Gemini stream2 chunk:\n%s", chunk)
             if not chunk.candidates:
                 continue
             candidate = chunk.candidates[0]
-            raw_logger.debug("Gemini stream2 candidate:\n%s", candidate)
+            get_llm_logger().debug("Gemini stream2 candidate:\n%s", candidate)
             saw_chunks = True
             if not candidate.content or not candidate.content.parts:
                 continue
@@ -971,7 +972,7 @@ class GeminiClient(LLMClient):
             )
             if not new_text:
                 continue
-            raw_logger.debug("Gemini text2 delta: %s", new_text)
+            get_llm_logger().debug("Gemini text2 delta: %s", new_text)
             if not prefix_yielded and history_snippets:
                 yield "\n".join(history_snippets) + "\n"
                 prefix_yielded = True
@@ -1048,7 +1049,7 @@ class GeminiClient(LLMClient):
                 logging.exception("Gemini call failed in generate_with_tool_detection")
                 return {"type": "text", "content": "エラーが発生しました。"}
 
-            raw_logger.debug("Gemini raw (tool detection):\n%s", resp)
+            get_llm_logger().debug("Gemini raw (tool detection):\n%s", resp)
 
             if not resp.candidates:
                 logging.warning("[gemini] No candidates in response (attempt %d/%d)", attempt + 1, max_empty_retries)

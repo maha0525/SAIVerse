@@ -25,7 +25,7 @@ from database.models import (
     ThinkingRequest,
     User as UserModel,
 )
-import tools.defs
+import tools.core
 
 # Import trigger types for phenomenon system
 try:
@@ -158,22 +158,16 @@ class RuntimeService(
             db.close()
 
     def move_user(self, target_building_id: str) -> Tuple[bool, str]:
-        # DEBUG LOGGING
-        debug_log_path = r"c:\Users\shuhe\workspace\SAIVerse\debug_chat.log"
-        from datetime import datetime
-        def log_debug(msg):
-            with open(debug_log_path, "a", encoding="utf-8") as f:
-                f.write(f"{datetime.now()}: [MANAGER_MOVE] {msg}\n")
-
-        log_debug(f"Attempting move to {target_building_id}. Current: {self.state.user_current_building_id}")
+        logging.debug("[MANAGER_MOVE] Attempting move to %s. Current: %s", 
+                     target_building_id, self.state.user_current_building_id)
 
         if target_building_id not in self.building_map:
-            log_debug(f"Target {target_building_id} invalid.")
+            logging.debug("[MANAGER_MOVE] Target %s invalid.", target_building_id)
             return False, "Invalid building ID"
 
         from_building_id = self.state.user_current_building_id
         if not from_building_id:
-            log_debug("Current building unknown.")
+            logging.debug("[MANAGER_MOVE] Current building unknown.")
             return False, "移動失敗: 現在地が不明です。"
         if from_building_id == target_building_id:
             return True, "同じ場所にいます。"
@@ -193,12 +187,12 @@ class RuntimeService(
         if success:
             self.state.user_current_building_id = target_building_id
             logging.debug("[runtime] move_user success: now %s", target_building_id)
-            log_debug(f"Move success. New state bid: {self.state.user_current_building_id}")
+            logging.debug("[MANAGER_MOVE] Move success. New state bid: %s", self.state.user_current_building_id)
             # Emit user_move trigger
             self._emit_user_move_trigger(from_building_id, target_building_id)
         else:
             logging.debug("[runtime] move_user failed: %s", message)
-            log_debug(f"Move failed: {message}")
+            logging.debug("[MANAGER_MOVE] Move failed: %s", message)
         return success, message
 
     def _emit_user_move_trigger(self, from_building: str, to_building: str) -> None:
@@ -542,7 +536,7 @@ class RuntimeService(
                 )
                 result = tool_function(**arguments)
 
-                content, _, _, _ = tools.defs.parse_tool_result(result)
+                content, _, _, _ = tools.core.parse_tool_result(result)
                 return str(content)
 
             except ImportError:

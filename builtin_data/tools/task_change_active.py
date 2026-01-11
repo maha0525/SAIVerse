@@ -5,7 +5,7 @@ from typing import Optional, Tuple
 
 from persona.tasks import TaskStorage, TaskNotFoundError
 from tools.context import get_active_persona_id, get_active_persona_path
-from tools.defs import ToolResult, ToolSchema
+from tools.core import ToolResult, ToolSchema
 
 
 def task_change_active(task_id: Optional[str] = None) -> Tuple[str, ToolResult, None]:

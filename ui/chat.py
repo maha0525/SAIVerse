@@ -43,7 +43,7 @@ def _filter_supported_parameter_values(model_name: str, values: Dict[str, Any]) 
             filtered[key] = value
     return filtered
 
-USER_AVATAR_ICON_PATH = Path("assets/icons/user.png")
+USER_AVATAR_ICON_PATH = Path("builtin_data/icons/user.png")
 _USER_AVATAR_DATA_URL: Optional[str] = None
 
 

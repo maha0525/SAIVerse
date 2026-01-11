@@ -13,7 +13,7 @@ from sqlalchemy.orm import sessionmaker
 from database.paths import default_db_path
 from database.models import Base, Playbook
 from tools.context import get_active_persona_id
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 
 def save_playbook(
