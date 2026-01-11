@@ -24,7 +24,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from saiverse_memory import SAIMemoryAdapter
 from sai_memory.memopedia import Memopedia
-from llm_clients import get_llm_client
+from model_configs import get_model_config, find_model_config
+# Import factory directly to avoid circular import
+from llm_clients.factory import get_llm_client
 
 
 def get_llm_response(client, prompt: str, response_schema: dict) -> dict:
@@ -214,7 +216,18 @@ JSON形式で回答してください。"""
 
     # Get LLM client
     print(f"\nAsking LLM ({args.model}) to select pages...")
-    client = get_llm_client(args.model)
+
+    # Find model config
+    model_config = find_model_config(args.model)
+    if not model_config:
+        print(f"Error: Model config not found for '{args.model}'")
+        sys.exit(1)
+
+    provider = model_config.get("provider", "gemini")
+    context_length = model_config.get("context_length", 32000)
+    actual_model_id = model_config.get("model", args.model)
+
+    client = get_llm_client(actual_model_id, provider, context_length, config=model_config)
 
     try:
         result = get_llm_response(client, prompt, response_schema)
