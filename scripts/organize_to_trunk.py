@@ -41,6 +41,9 @@ from model_configs import find_model_config
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOGGER = logging.getLogger(__name__)
 
+# Environment variable for default model
+ENV_MODEL = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.0-flash")
+
 
 def get_llm_response(client, prompt: str, response_schema: dict) -> dict:
     """Get structured response from LLM."""
@@ -100,8 +103,8 @@ def main():
     )
     parser.add_argument(
         "--model",
-        default="gemini-2.0-flash",
-        help="LLM model to use for selection (default: gemini-2.0-flash)"
+        default=ENV_MODEL,
+        help=f"LLM model to use for selection (default: {ENV_MODEL}, env: MEMORY_WEAVE_MODEL)"
     )
     parser.add_argument(
         "--dry-run",

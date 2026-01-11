@@ -163,6 +163,8 @@ def find_model_config(query: str) -> tuple[str, Dict]:
         return query, MODEL_CONFIGS[query]
 
     # 2. Check exact filename match - load config directly from file
+    from data_paths import MODELS_DIR
+
     if MODELS_DIR.exists() and MODELS_DIR.is_dir():
         config_file = MODELS_DIR / f"{query}.json"
         if config_file.exists():
