@@ -165,6 +165,26 @@ class UpdateMemopediaPageRequest(BaseModel):
     content: Optional[str] = None
     keywords: Optional[List[str]] = None
     vividness: Optional[str] = None
+    is_trunk: Optional[bool] = None
+
+
+class CreateMemopediaPageRequest(BaseModel):
+    parent_id: str
+    title: str
+    summary: str = ""
+    content: str = ""
+    keywords: Optional[List[str]] = None
+    vividness: str = "rough"
+    is_trunk: bool = False
+
+
+class SetTrunkRequest(BaseModel):
+    is_trunk: bool
+
+
+class MovePagesToTrunkRequest(BaseModel):
+    page_ids: List[str]
+    trunk_id: str
 
 
 # -----------------------------------------------------------------------------

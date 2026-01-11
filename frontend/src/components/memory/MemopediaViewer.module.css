@@ -630,3 +630,72 @@
     font-style: italic;
     opacity: 0.7;
 }
+
+/* Trunk Styles */
+.trunkItem {
+    background: rgba(255, 193, 7, 0.08);
+    border-left: 2px solid rgba(255, 193, 7, 0.5);
+}
+
+.trunkItem:hover {
+    background: rgba(255, 193, 7, 0.12);
+}
+
+.trunkItem.active {
+    background: rgba(255, 193, 7, 0.18);
+    border-left-color: #ffc107;
+}
+
+.trunkIcon {
+    color: #ffc107;
+    margin-right: 4px;
+    flex-shrink: 0;
+}
+
+.trunkTitle {
+    font-weight: 600;
+}
+
+/* Add Child Button (for trunks and roots) */
+.addChildBtn {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(77, 171, 247, 0.15);
+    border: 1px solid rgba(77, 171, 247, 0.3);
+    color: #4dabf7;
+    cursor: pointer;
+    padding: 2px;
+    border-radius: 4px;
+    margin-left: auto;
+    transition: all 0.2s;
+}
+
+.pageItem:hover .addChildBtn {
+    display: flex;
+}
+
+.addChildBtn:hover {
+    background: rgba(77, 171, 247, 0.25);
+    border-color: #4dabf7;
+}
+
+/* Create Page Modal */
+.createModal {
+    background: #1a1b1e;
+    border: 1px solid #444;
+    border-radius: 12px;
+    padding: 1.5rem;
+    width: 90%;
+    max-width: 500px;
+    max-height: 90vh;
+    overflow-y: auto;
+}
+
+.createModal h3 {
+    color: #e0e0e0;
+    margin-bottom: 1.25rem;
+    font-size: 1.2rem;
+    border-bottom: 1px solid #333;
+    padding-bottom: 0.75rem;
+}

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Book, ChevronRight, ChevronDown, ChevronLeft, History, Clock, GitCommit, Tag, Edit2, Trash2, Save, X } from 'lucide-react';
+import { Book, ChevronRight, ChevronDown, ChevronLeft, History, Clock, GitCommit, Tag, Edit2, Trash2, Save, X, Plus, FolderTree } from 'lucide-react';
 import styles from './MemopediaViewer.module.css';
 
 interface MemopediaPage {
@@ -9,6 +9,7 @@ interface MemopediaPage {
     summary: string;
     keywords: string[];
     vividness: string;
+    is_trunk: boolean;
     children: MemopediaPage[];
 }
 
@@ -74,6 +75,17 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     // Delete confirmation state
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const [isDeleting, setIsDeleting] = useState(false);
+
+    // Create page modal state
+    const [showCreateModal, setShowCreateModal] = useState(false);
+    const [createParentId, setCreateParentId] = useState<string>("");
+    const [createTitle, setCreateTitle] = useState("");
+    const [createSummary, setCreateSummary] = useState("");
+    const [createContent, setCreateContent] = useState("");
+    const [createKeywords, setCreateKeywords] = useState("");
+    const [createVividness, setCreateVividness] = useState("rough");
+    const [createIsTrunk, setCreateIsTrunk] = useState(false);
+    const [isCreating, setIsCreating] = useState(false);
 
     useEffect(() => {
         loadTree();
@@ -301,6 +313,85 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         }
     };
 
+    // Open create modal with parent set
+    const openCreateModal = (parentId: string) => {
+        setCreateParentId(parentId);
+        setCreateTitle("");
+        setCreateSummary("");
+        setCreateContent("");
+        setCreateKeywords("");
+        setCreateVividness("rough");
+        setCreateIsTrunk(false);
+        setShowCreateModal(true);
+    };
+
+    // Create new page
+    const createPage = async () => {
+        if (!createTitle.trim()) {
+            alert("タイトルを入力してください");
+            return;
+        }
+        setIsCreating(true);
+        try {
+            const keywords = createKeywords
+                .split(',')
+                .map(k => k.trim())
+                .filter(k => k.length > 0);
+
+            const res = await fetch(`/api/people/${personaId}/memopedia/pages`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    parent_id: createParentId,
+                    title: createTitle,
+                    summary: createSummary,
+                    content: createContent,
+                    keywords,
+                    vividness: createVividness,
+                    is_trunk: createIsTrunk,
+                }),
+            });
+
+            if (res.ok) {
+                const data = await res.json();
+                setShowCreateModal(false);
+                await loadTree();
+                // Select the newly created page
+                setSelectedPageId(data.page.id);
+                setShowList(false);
+            } else {
+                const err = await res.json();
+                alert(`作成に失敗しました: ${err.detail || 'Unknown error'}`);
+            }
+        } catch (error) {
+            console.error('Failed to create page', error);
+            alert('作成に失敗しました');
+        } finally {
+            setIsCreating(false);
+        }
+    };
+
+    // Toggle trunk flag
+    const handleTrunkToggle = async (pageId: string, isTrunk: boolean) => {
+        try {
+            const res = await fetch(`/api/people/${personaId}/memopedia/pages/${pageId}/trunk`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ is_trunk: isTrunk }),
+            });
+
+            if (res.ok) {
+                await loadTree();
+            } else {
+                const err = await res.json();
+                alert(`trunk設定に失敗しました: ${err.detail || 'Unknown error'}`);
+            }
+        } catch (error) {
+            console.error('Failed to toggle trunk', error);
+            alert('trunk設定に失敗しました');
+        }
+    };
+
     const toggleExpand = (pageId: string) => {
         setExpandedIds(prev => {
             const next = new Set(prev);
@@ -336,6 +427,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     const TreeItem = ({ page }: { page: MemopediaPage }) => {
         const hasChildren = page.children && page.children.length > 0;
         const isExpanded = expandedIds.has(page.id);
+        const isRoot = page.id.startsWith('root_');
 
         const handleChevronClick = (e: React.MouseEvent) => {
             e.stopPropagation();
@@ -344,7 +436,12 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
 
         const handlePageClick = () => {
             setSelectedPageId(page.id);
-            if (!hasChildren) setShowList(false); // Mobile: go to content if leaf
+            if (!hasChildren && !isRoot) setShowList(false); // Mobile: go to content if leaf
+        };
+
+        const handleAddClick = (e: React.MouseEvent) => {
+            e.stopPropagation();
+            openCreateModal(page.id);
         };
 
         // CSS class based on vividness
@@ -366,10 +463,10 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         return (
             <div>
                 <div
-                    className={`${styles.pageItem} ${selectedPageId === page.id ? styles.active : ''} ${getVividnessClass()}`}
+                    className={`${styles.pageItem} ${selectedPageId === page.id ? styles.active : ''} ${getVividnessClass()} ${page.is_trunk ? styles.trunkItem : ''}`}
                     onClick={handlePageClick}
                 >
-                    {hasChildren ? (
+                    {hasChildren || page.is_trunk || isRoot ? (
                         <span
                             className={styles.chevron}
                             onClick={handleChevronClick}
@@ -379,7 +476,17 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                     ) : (
                         <span style={{ display: 'inline-block', width: 16 }} />
                     )}
-                    {page.title}
+                    {page.is_trunk && <FolderTree size={14} className={styles.trunkIcon} />}
+                    <span className={page.is_trunk ? styles.trunkTitle : ''}>{page.title}</span>
+                    {(page.is_trunk || isRoot) && (
+                        <button
+                            className={styles.addChildBtn}
+                            onClick={handleAddClick}
+                            title="子ページを追加"
+                        >
+                            <Plus size={12} />
+                        </button>
+                    )}
                 </div>
                 {isExpanded && hasChildren && (
                     <div className={styles.pageChildren}>
@@ -422,8 +529,25 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         return page?.vividness || 'rough';
     };
 
+    // Helper to find selected page and get its is_trunk
+    const getSelectedPageIsTrunk = (): boolean => {
+        if (!tree || !selectedPageId) return false;
+        const allPages = [...tree.people, ...tree.terms, ...tree.plans];
+        const findPage = (pages: MemopediaPage[]): MemopediaPage | null => {
+            for (const p of pages) {
+                if (p.id === selectedPageId) return p;
+                const found = findPage(p.children);
+                if (found) return found;
+            }
+            return null;
+        };
+        const page = findPage(allPages);
+        return page?.is_trunk || false;
+    };
+
     const selectedKeywords = getSelectedPageKeywords();
     const selectedVividness = getSelectedPageVividness();
+    const selectedIsTrunk = getSelectedPageIsTrunk();
 
     const getVividnessLabel = (vividness: string) => {
         switch (vividness) {
@@ -640,7 +764,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                         </div>
                                     </div>
                                 )}
-                                <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                                     <label style={{ fontSize: '0.9em', fontWeight: 'bold', color: '#666' }}>鮮明度:</label>
                                     <select
                                         value={selectedVividness}
@@ -663,6 +787,23 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                         コンテキストに含める情報量
                                     </small>
                                 </div>
+                                {selectedPageId && !selectedPageId.startsWith('root_') && (
+                                    <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                            <input
+                                                type="checkbox"
+                                                checked={selectedIsTrunk}
+                                                onChange={e => handleTrunkToggle(selectedPageId, e.target.checked)}
+                                                style={{ cursor: 'pointer' }}
+                                            />
+                                            <FolderTree size={14} />
+                                            <span style={{ fontSize: '0.9em', fontWeight: 'bold', color: '#666' }}>Trunkとして設定</span>
+                                        </label>
+                                        <small style={{ color: '#888' }}>
+                                            子ページをまとめるカテゴリフォルダ
+                                        </small>
+                                    </div>
+                                )}
                                 <div className={styles.markdown}>
                                     <ReactMarkdown>{pageContent}</ReactMarkdown>
                                 </div>
@@ -698,6 +839,101 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                     disabled={isDeleting}
                                 >
                                     {isDeleting ? '削除中...' : '削除する'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* Create Page Modal */}
+                {showCreateModal && (
+                    <div className={styles.overlay}>
+                        <div className={styles.createModal}>
+                            <h3>新規ページ作成</h3>
+                            <div className={styles.formGroup}>
+                                <label>タイトル *</label>
+                                <input
+                                    type="text"
+                                    value={createTitle}
+                                    onChange={e => setCreateTitle(e.target.value)}
+                                    className={styles.formInput}
+                                    placeholder="ページタイトル"
+                                />
+                            </div>
+                            <div className={styles.formGroup}>
+                                <label>概要</label>
+                                <input
+                                    type="text"
+                                    value={createSummary}
+                                    onChange={e => setCreateSummary(e.target.value)}
+                                    className={styles.formInput}
+                                    placeholder="ページの概要"
+                                />
+                            </div>
+                            <div className={styles.formGroup}>
+                                <label>キーワード (カンマ区切り)</label>
+                                <input
+                                    type="text"
+                                    value={createKeywords}
+                                    onChange={e => setCreateKeywords(e.target.value)}
+                                    className={styles.formInput}
+                                    placeholder="キーワード1, キーワード2, ..."
+                                />
+                            </div>
+                            <div className={styles.formGroup}>
+                                <label>鮮明度</label>
+                                <select
+                                    value={createVividness}
+                                    onChange={e => setCreateVividness(e.target.value)}
+                                    className={styles.formInput}
+                                >
+                                    <option value="vivid">鮮明（全内容）</option>
+                                    <option value="rough">概要（デフォルト）</option>
+                                    <option value="faint">淡い（タイトルのみ）</option>
+                                    <option value="buried">埋没（非表示）</option>
+                                </select>
+                            </div>
+                            <div className={styles.formGroup}>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                    <input
+                                        type="checkbox"
+                                        checked={createIsTrunk}
+                                        onChange={e => setCreateIsTrunk(e.target.checked)}
+                                        style={{ cursor: 'pointer' }}
+                                    />
+                                    <FolderTree size={14} />
+                                    <span>Trunkとして作成</span>
+                                </label>
+                                <small style={{ color: '#888', display: 'block', marginTop: '4px' }}>
+                                    子ページをまとめるカテゴリフォルダとして作成
+                                </small>
+                            </div>
+                            <div className={styles.formGroup}>
+                                <label>本文</label>
+                                <textarea
+                                    value={createContent}
+                                    onChange={e => setCreateContent(e.target.value)}
+                                    className={styles.formTextarea}
+                                    rows={8}
+                                    placeholder="ページの本文..."
+                                />
+                            </div>
+                            <div className={styles.formActions}>
+                                <button
+                                    className={styles.cancelButton}
+                                    onClick={() => setShowCreateModal(false)}
+                                    disabled={isCreating}
+                                >
+                                    <X size={16} />
+                                    キャンセル
+                                </button>
+                                <button
+                                    className={styles.saveButton}
+                                    onClick={createPage}
+                                    disabled={isCreating || !createTitle.trim()}
+                                >
+                                    <Plus size={16} />
+                                    {isCreating ? '作成中...' : '作成'}
                                 </button>
                             </div>
                         </div>
