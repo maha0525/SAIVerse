@@ -210,13 +210,22 @@
     .sidebar {
         width: 100%;
         border-right: none;
-        height: 100%;
+        flex: 1;
+        min-height: 0;
+    }
+
+    .treeContainer {
+        flex: 1;
+        overflow-y: auto;
     }
 
     .contentArea {
         width: 100%;
-        height: 100%;
+        flex: 1;
+        min-height: 0;
         padding: 1rem;
+        overflow-x: hidden;
+        box-sizing: border-box;
     }
 
     .mobileHidden {
@@ -226,25 +235,9 @@
     .backButton {
         display: flex;
     }
-}
 
-/* Mobile Responsive */
-@media (max-width: 768px) {
-    .container {
-        flex-direction: column;
-    }
-
-    .sidebar {
-        width: 100%;
-        height: 200px;
-        flex: none;
-        border-right: none;
-        border-bottom: 1px solid #333;
-    }
-
-    .contentArea {
-        height: calc(100% - 200px);
-        padding: 1rem;
+    .contentBody {
+        overflow-x: hidden;
     }
 }
 
@@ -465,6 +458,9 @@
     color: #e0e0e0;
     font-size: 0.95rem;
     transition: border-color 0.2s;
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 100%;
 }
 
 .formInput:focus {
@@ -483,6 +479,9 @@
     resize: vertical;
     min-height: 200px;
     transition: border-color 0.2s;
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 100%;
 }
 
 .formTextarea:focus {
@@ -617,9 +616,7 @@
     color: #fff;
 }
 
-.pageVividRough {
-    /* Default - no extra styles needed */
-}
+/* pageVividRough: Default styling, no additional rules needed */
 
 .pageVividFaint {
     color: #666;

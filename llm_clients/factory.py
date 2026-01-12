@@ -125,7 +125,22 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
 
         logging.debug("Creating llama.cpp client for model path '%s' with kwargs: %s", model_path, extra_kwargs)
         client = LlamaCppClient(model_path, context_length, supports_images=supports_images, **extra_kwargs)
+    elif provider == "ollama":
+        extra_kwargs: Dict[str, object] = {}
+        if isinstance(config, dict):
+            base_url = config.get("base_url")
+            if isinstance(base_url, str) and base_url.strip():
+                extra_kwargs["base_url"] = base_url.strip()
+
+            request_kwargs = config.get("request_kwargs")
+            if isinstance(request_kwargs, dict):
+                extra_kwargs["request_kwargs"] = request_kwargs
+
+        logging.debug("Creating Ollama client for model '%s' with kwargs: %s", api_model, extra_kwargs)
+        client = OllamaClient(api_model, context_length, supports_images=supports_images, **extra_kwargs)
     else:
+        # Unknown provider - fallback to Ollama
+        logging.warning("Unknown provider '%s', falling back to Ollama", provider)
         client = OllamaClient(api_model, context_length, supports_images=supports_images)
 
     parameter_defaults = get_model_parameter_defaults(model)

@@ -148,25 +148,31 @@ def find_model_config(query: str) -> tuple[str, Dict]:
     """Find model config by model ID or filename.
 
     Searches in order:
-    1. Exact match on model ID
-    2. Exact match on filename (without .json) - loads config directly from file
-    3. Partial match on model ID (e.g., "qwen3-coder" matches "qwen/qwen3-coder-480b...")
+    1. Exact match on config key (filename without .json)
+    2. Exact match on config["model"] value (API model name)
+    3. Exact filename match from file system
+    4. Partial match on model ID suffix (e.g., "qwen3-coder" matches "qwen/qwen3-coder-480b...")
 
     Args:
         query: Model ID, filename, or partial match
 
     Returns:
-        Tuple of (model_id, config) or ("", {}) if not found
+        Tuple of (config_key, config) or ("", {}) if not found
     """
-    # 1. Exact match on model ID
+    # 1. Exact match on config key (filename)
     if query in MODEL_CONFIGS:
         return query, MODEL_CONFIGS[query]
 
-    # 2. Check exact filename match - load config directly from file
-    from data_paths import MODELS_DIR
+    # 2. Exact match on config["model"] value (API model name)
+    for config_key, config in MODEL_CONFIGS.items():
+        if config.get("model") == query:
+            return config_key, config
 
-    if MODELS_DIR.exists() and MODELS_DIR.is_dir():
-        config_file = MODELS_DIR / f"{query}.json"
+    # 3. Check exact filename match - load config directly from file
+    from data_paths import get_data_paths, MODELS_DIR
+
+    for models_path in get_data_paths(MODELS_DIR):
+        config_file = models_path / f"{query}.json"
         if config_file.exists():
             try:
                 config_data = json.loads(config_file.read_text(encoding="utf-8"))
@@ -177,7 +183,7 @@ def find_model_config(query: str) -> tuple[str, Dict]:
             except Exception:
                 pass
 
-    # 3. Partial match on model ID (query is suffix or contains)
+    # 4. Partial match on model ID (query is suffix or contains)
     for model_id, config in MODEL_CONFIGS.items():
         # Check if query matches the part after "/" (e.g., "qwen3-coder-480b" matches "qwen/qwen3-coder-480b")
         if "/" in model_id:

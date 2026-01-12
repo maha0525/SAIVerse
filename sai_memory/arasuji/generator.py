@@ -54,9 +54,6 @@ def _format_messages_for_prompt(messages: List[Message], *, include_timestamp: b
         content = (msg.content or "").strip()
         if not content:
             continue
-        # Truncate very long messages
-        if len(content) > 1500:
-            content = content[:1500] + "..."
         if include_timestamp:
             ts_str = _format_timestamp(msg.created_at)
             lines.append(f"[{ts_str}] [{role}]: {content}")

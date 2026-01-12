@@ -407,8 +407,13 @@ def main():
     from api.main import api_router
     app.include_router(api_router, prefix="/api")
 
-    logging.info(f"Starting SAIVerse on http://0.0.0.0:{manager.ui_port}")
-    logging.info(f"Old UI available at http://0.0.0.0:{manager.ui_port}/gradio")
+    logging.info(f"Starting SAIVerse backend on http://0.0.0.0:{manager.ui_port}")
+    logging.info(f"API endpoints available at http://0.0.0.0:{manager.ui_port}/api")
+    logging.info(f"Old UI (Gradio) available at http://0.0.0.0:{manager.ui_port}/gradio")
+    logging.info(f"")
+    logging.info(f"→ To use the new UI, start the Next.js frontend:")
+    logging.info(f"  cd frontend && npm run dev")
+    logging.info(f"  Then open http://localhost:3000 in your browser")
 
     uvicorn.run(
         app,

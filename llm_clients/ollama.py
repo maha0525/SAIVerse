@@ -13,15 +13,41 @@ from .base import LLMClient
 from .gemini import GeminiClient
 
 
+# Allowed request parameters for Ollama (similar to OpenAI)
+OLLAMA_ALLOWED_REQUEST_PARAMS = {
+    "temperature",
+    "top_p",
+    "top_k",
+    "num_predict",  # max_tokens equivalent
+    "stop",
+    "seed",
+    "repeat_penalty",
+    "presence_penalty",
+    "frequency_penalty",
+    "mirostat",
+    "mirostat_tau",
+    "mirostat_eta",
+}
+
+
 class OllamaClient(LLMClient):
     """Client for Ollama API."""
 
-    def __init__(self, model: str, context_length: int, supports_images: bool = False) -> None:
+    def __init__(
+        self,
+        model: str,
+        context_length: int,
+        supports_images: bool = False,
+        request_kwargs: Optional[Dict[str, Any]] = None,
+        base_url: Optional[str] = None,
+    ) -> None:
         super().__init__(supports_images=supports_images)
         self.model = model
         self.context_length = context_length
+        self._request_kwargs: Dict[str, Any] = dict(request_kwargs or {})
         self.fallback_client: Optional[LLMClient] = None
-        base_env = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST")
+        # Use explicit base_url parameter first, then environment variables
+        base_env = base_url or os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST")
         probed = self._probe_base(base_env)
         if probed is None:
             try:
@@ -102,6 +128,13 @@ class OllamaClient(LLMClient):
             )
 
         options: Dict[str, Any] = {"num_ctx": self.context_length}
+        # Apply request_kwargs to options
+        for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
+                    "repeat_penalty", "presence_penalty", "frequency_penalty",
+                    "mirostat", "mirostat_tau", "mirostat_eta"):
+            if key in self._request_kwargs:
+                options[key] = self._request_kwargs[key]
+        # Override with explicit temperature parameter if provided
         if temperature is not None:
             options["temperature"] = temperature
 
@@ -235,6 +268,13 @@ class OllamaClient(LLMClient):
             return
         try:
             stream_options: Dict[str, Any] = {"num_ctx": self.context_length}
+            # Apply request_kwargs to options
+            for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
+                        "repeat_penalty", "presence_penalty", "frequency_penalty",
+                        "mirostat", "mirostat_tau", "mirostat_eta"):
+                if key in self._request_kwargs:
+                    stream_options[key] = self._request_kwargs[key]
+            # Override with explicit temperature parameter if provided
             if temperature is not None:
                 stream_options["temperature"] = temperature
             stream_payload: Dict[str, Any] = {
@@ -313,6 +353,13 @@ class OllamaClient(LLMClient):
 
         tools_spec = tools or []
         options: Dict[str, Any] = {"num_ctx": self.context_length}
+        # Apply request_kwargs to options
+        for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
+                    "repeat_penalty", "presence_penalty", "frequency_penalty",
+                    "mirostat", "mirostat_tau", "mirostat_eta"):
+            if key in self._request_kwargs:
+                options[key] = self._request_kwargs[key]
+        # Override with explicit temperature parameter if provided
         if temperature is not None:
             options["temperature"] = temperature
 
@@ -379,6 +426,18 @@ class OllamaClient(LLMClient):
                 }
         else:
             return {"type": "text", "content": content}
+
+    def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
+        """Apply model-specific request parameters."""
+        if not isinstance(parameters, dict):
+            return
+        for key, value in parameters.items():
+            if key not in OLLAMA_ALLOWED_REQUEST_PARAMS:
+                continue
+            if value is None:
+                self._request_kwargs.pop(key, None)
+            else:
+                self._request_kwargs[key] = value
 
 
 __all__ = ["OllamaClient"]
