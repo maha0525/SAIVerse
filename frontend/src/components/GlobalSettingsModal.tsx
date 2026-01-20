@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, Settings, Database, Globe, Layers, Save, RefreshCw, Power, Play, Pause } from 'lucide-react';
 import styles from './GlobalSettingsModal.module.css';
 import WorldEditor from './settings/WorldEditor';
+import ModalOverlay from './common/ModalOverlay';
 
 interface GlobalSettingsModalProps {
     isOpen: boolean;
@@ -162,12 +163,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     if (!isOpen) return null;
 
     return (
-        <div
-            className={styles.overlay}
-            onClick={onClose}
-            onTouchStart={(e) => e.stopPropagation()}
-            onTouchMove={(e) => e.stopPropagation()}
-        >
+        <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div
                 className={styles.modal}
                 onClick={e => e.stopPropagation()}
@@ -323,6 +319,6 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                     </div>
                 </div>
             </div>
-        </div>
+        </ModalOverlay>
     );
 }

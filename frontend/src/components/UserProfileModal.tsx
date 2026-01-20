@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, Save, User as UserIcon, AlertCircle } from 'lucide-react';
 import styles from './UserProfileModal.module.css';
 import ImageUpload from './common/ImageUpload';
+import ModalOverlay from './common/ModalOverlay';
 
 interface UserProfileModalProps {
     isOpen: boolean;
@@ -65,12 +66,7 @@ export default function UserProfileModal({ isOpen, onClose, currentName, current
     };
 
     return (
-        <div
-            className={styles.overlay}
-            onClick={onClose}
-            onTouchStart={(e) => e.stopPropagation()}
-            onTouchMove={(e) => e.stopPropagation()}
-        >
+        <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
                     <h2 className={styles.title}>Edit Profile</h2>
@@ -133,6 +129,6 @@ export default function UserProfileModal({ isOpen, onClose, currentName, current
                     </button>
                 </div>
             </div>
-        </div>
+        </ModalOverlay>
     );
 }

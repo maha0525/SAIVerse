@@ -114,11 +114,6 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
             n_gpu_layers = config.get("n_gpu_layers", -1)
             if isinstance(n_gpu_layers, int):
                 extra_kwargs["n_gpu_layers"] = n_gpu_layers
-
-            # Fallback to Gemini on error (default: True)
-            fallback_on_error = config.get("fallback_on_error", True)
-            if isinstance(fallback_on_error, bool):
-                extra_kwargs["fallback_on_error"] = fallback_on_error
         else:
             # Fallback: use api_model as model_path
             model_path = api_model

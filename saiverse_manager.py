@@ -36,6 +36,9 @@ from manager.blueprints import BlueprintMixin
 from manager.persona import PersonaMixin
 from manager.visitors import VisitorMixin
 from manager.gateway import GatewayMixin
+from manager.user_state import UserStateMixin
+from manager.initialization import InitializationMixin
+from manager.persona_events import PersonaEventMixin
 from manager.state import CoreState
 from manager.runtime import RuntimeService
 from manager.admin import AdminService
@@ -68,6 +71,9 @@ def _get_default_model() -> str:
 
 
 class SAIVerseManager(
+    InitializationMixin,
+    UserStateMixin,
+    PersonaEventMixin,
     VisitorMixin,
     PersonaMixin,
     HistoryMixin,
@@ -85,118 +91,14 @@ class SAIVerseManager(
         model: Optional[str] = None,
         sds_url: str = os.getenv("SDS_URL", "http://127.0.0.1:8080"),
     ):
-        # --- Step 0: Database and Configuration Setup ---
-        self.db_path = db_path
-        self.city_model = CityModel
-        self.city_host_avatar_path: Optional[str] = None
-        DATABASE_URL = f"sqlite:///{db_path}"
-        engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-        self._ensure_city_timezone_column(engine)
-        self._ensure_user_avatar_column(engine)
-        self._ensure_city_host_avatar_column(engine)
-        self._ensure_item_tables(engine)
-        self._ensure_phenomenon_tables(engine)
-        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        
-        # --- Step 1: Load City Configuration from DB ---
-        db = self.SessionLocal()
-        try:
-            my_city_config = db.query(CityModel).filter(CityModel.CITYNAME == city_name).first()
-            if not my_city_config:
-                raise ValueError(f"City '{city_name}' not found in the database. Please run 'python database/seed.py' first.")
-            
-            self.city_id = my_city_config.CITYID # This is the integer PK
-            self.city_name = my_city_config.CITYNAME # This is the string identifier
-            self.user_room_id = f"user_room_{self.city_name}"
-            self.ui_port = my_city_config.UI_PORT
-            self.api_port = my_city_config.API_PORT
-            self.start_in_online_mode = my_city_config.START_IN_ONLINE_MODE
-            self._update_timezone_cache(getattr(my_city_config, "TIMEZONE", "UTC"))
-            self.city_host_avatar_path = getattr(my_city_config, "HOST_AVATAR_IMAGE", None)
-            
-            # Load other cities' configs for inter-city communication
-            other_cities = db.query(CityModel).filter(CityModel.CITYID != self.city_id).all()
-            self.cities_config = {
-                city.CITYNAME: {
-                    "city_id": city.CITYID,
-                    "api_base_url": f"http://127.0.0.1:{city.API_PORT}",
-                    "timezone": getattr(city, "TIMEZONE", "UTC") or "UTC",
-                } for city in other_cities
-            }
-            logging.info(f"Loaded config for '{self.city_name}' (ID: {self.city_id}). Found {len(self.cities_config)} other cities.")
-
-        finally:
-            db.close()
-
-        # --- Step 1: Load Static Assets from DB ---
-        # データベースから建物の静的な情報を読み込み、メモリ上にBuildingオブジェクトとして展開します。
-        self.buildings: List[Building] = self._load_and_create_buildings_from_db()
-        self.building_map: Dict[str, Building] = {b.building_id: b for b in self.buildings}
-        self.capacities: Dict[str, int] = {b.building_id: b.capacity for b in self.buildings}
-        self.items: Dict[str, Dict[str, Any]] = {}
-        self.item_locations: Dict[str, Dict[str, str]] = {}
-        self.items_by_building: Dict[str, List[str]] = defaultdict(list)
-        self.items_by_persona: Dict[str, List[str]] = defaultdict(list)
-        self.world_items: List[str] = []
-        # Note: Items are loaded after ItemService is initialized (line ~347)
-        self.persona_pending_events: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        self._load_persona_event_logs()
-
-        # --- Step 2: Setup File Paths and Default Avatars ---
-        # 各種ログファイルのパスや、デフォルトのアバター画像を設定します。
-        from data_paths import get_saiverse_home
-        self.saiverse_home = get_saiverse_home()
-        self.backup_dir = self.saiverse_home / "backups"
-        self.backup_dir.mkdir(parents=True, exist_ok=True)
-        self.building_memory_paths: Dict[str, Path] = {
-            b.building_id: self.saiverse_home / "cities" / self.city_name / "buildings" / b.building_id / "log.json"
-            for b in self.buildings
-        }
-        # Load default avatars with graceful fallback
-        avatar_fallback_paths = [
-            Path("builtin_data/icons/blank.png"),
-            Path("builtin_data/icons/user.png"),
-            Path("builtin_data/icons/host.png"),
-            Path("assets/icons/host.png"),  # Legacy fallback
-        ]
-        default_avatar_data = ""
-        for avatar_path in avatar_fallback_paths:
-            data_url = self._load_avatar_data(avatar_path)
-            if data_url:
-                default_avatar_data = data_url
-                break
-        self.default_avatar = default_avatar_data
-
-        host_avatar_data = self._load_avatar_data(Path("builtin_data/icons/host.png"))
-        self.host_avatar = host_avatar_data or self.default_avatar
-        if getattr(self, "city_host_avatar_path", None):
-            host_override = self._load_avatar_data(Path(self.city_host_avatar_path))
-            if host_override:
-                self.host_avatar = host_override
-        self.user_avatar_data = self.default_avatar
-
-        # --- Step 3: Load Conversation Histories ---
-        # 各建物の会話履歴をファイルから読み込みます。
-        self.building_histories: Dict[str, List[Dict[str, str]]] = {}
-        for b_id, path in self.building_memory_paths.items():
-            if path.exists():
-                try:
-                    self.building_histories[b_id] = json.loads(path.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    logging.warning("Failed to load building history %s", b_id)
-                    self.building_histories[b_id] = []
-            else:
-                self.building_histories[b_id] = []
-
-        # --- Step 4: Initialize Core Components and State Containers ---
-        # Resolve base model (for internal fallbacks), but start with no global override
-        # so that Chat Options shows "(Default)" on startup.
-        base_model = model or _get_default_model()
-        self.model = "None"  # No global override by default
-        self.context_length = get_context_length(base_model)
-        self.provider = get_model_provider(base_model)
-        self._base_model = base_model  # Internal fallback for personas without DB default
-        self.model_parameter_overrides: Dict[str, Any] = {}
+        # --- Phase 1: Data Loading ---
+        self._init_database(db_path)
+        self._init_city_config(city_name)
+        self._init_buildings()
+        self._init_file_paths()
+        self._init_avatars()
+        self._init_building_histories()
+        self._init_model_config(model)
 
         self.state = CoreState(
             session_factory=self.SessionLocal,
@@ -371,18 +273,6 @@ class SAIVerseManager(
             {"city_id": self.city_id, "city_name": self.city_name},
         )
 
-    def _update_timezone_cache(self, tz_name: Optional[str]) -> None:
-        """Update cached timezone information for this manager."""
-        name = (tz_name or "UTC").strip() or "UTC"
-        try:
-            tz = ZoneInfo(name)
-        except Exception:
-            logging.warning("Invalid timezone '%s'. Falling back to UTC.", name)
-            name = "UTC"
-            tz = ZoneInfo("UTC")
-        self.timezone_name = name
-        self.timezone_info = tz
-
     @staticmethod
     def _load_avatar_data(path: Path) -> Optional[str]:
         """Return a data URL for the given avatar path if it exists."""
@@ -396,35 +286,6 @@ class SAIVerseManager(
         except Exception:
             logging.warning("Failed to load avatar asset %s", path, exc_info=True)
             return None
-
-    def _refresh_user_state_cache(self) -> None:
-        """Mirror CoreState's user info onto the manager-level attributes."""
-        self.user_presence_status = self.state.user_presence_status
-        self.user_is_online = self.state.user_presence_status != "offline"  # Backward compat
-        self.user_display_name = self.state.user_display_name
-        self.user_current_building_id = self.state.user_current_building_id
-        self.user_current_city_id = self.state.user_current_city_id
-        self.user_avatar_data = getattr(self.state, "user_avatar_data", None) or self.default_avatar
-
-    def reload_user_profile(self) -> None:
-        """Reload the user's profile (name/avatar) from the database."""
-        self._load_user_state_from_db()
-        try:
-            from ui import chat as chat_ui
-
-            if hasattr(chat_ui, "reset_user_avatar_cache"):
-                chat_ui.reset_user_avatar_cache()
-        except ImportError:
-            pass
-
-    def reload_host_avatar(self, avatar_path: Optional[str]) -> None:
-        """Refresh the host avatar asset from the given path."""
-        self.city_host_avatar_path = avatar_path
-        data = None
-        if avatar_path:
-            data = self._load_avatar_data(Path(avatar_path))
-        self.host_avatar = data or self.default_avatar
-        self.state.host_avatar = self.host_avatar
 
     # Phenomenon trigger helpers -----------------------------------------------
     def _emit_trigger(self, trigger_type: TriggerType, data: Dict[str, Any]) -> None:
@@ -586,91 +447,8 @@ class SAIVerseManager(
         """Create a new picture item and place it in the specified building."""
         return self.item_service.create_picture_item(persona_id, name, description, file_path, building_id)
 
-    # --- Persona Event methods (not related to items) ---
-
-    def _load_persona_event_logs(self) -> None:
-        """Load pending persona events from the database."""
-        db = self.SessionLocal()
-        try:
-            rows = (
-                db.query(PersonaEventLog)
-                .join(AIModel, PersonaEventLog.PERSONA_ID == AIModel.AIID)
-                .filter(
-                    AIModel.HOME_CITYID == self.city_id,
-                    PersonaEventLog.STATUS == "pending",
-                )
-                .all()
-            )
-        except Exception as exc:
-            logging.error("Failed to load persona events: %s", exc, exc_info=True)
-            rows = []
-        finally:
-            db.close()
-
-        self.persona_pending_events = defaultdict(list)
-        for row in rows:
-            self.persona_pending_events[row.PERSONA_ID].append(
-                {
-                    "event_id": row.EVENT_ID,
-                    "content": row.CONTENT,
-                    "created_at": row.CREATED_AT,
-                }
-            )
-
-    def record_persona_event(self, persona_id: str, content: str) -> None:
-        """Add a new pending event for the specified persona."""
-        db = self.SessionLocal()
-        try:
-            entry = PersonaEventLog(PERSONA_ID=persona_id, CONTENT=content, STATUS="pending")
-            db.add(entry)
-            db.commit()
-            db.refresh(entry)
-            created_at = entry.CREATED_AT
-            event_id = entry.EVENT_ID
-        except Exception as exc:
-            logging.error("Failed to record persona event for %s: %s", persona_id, exc, exc_info=True)
-            db.rollback()
-            return
-        finally:
-            db.close()
-        self.persona_pending_events[persona_id].append(
-            {
-                "event_id": event_id,
-                "content": content,
-                "created_at": created_at,
-            }
-        )
-
-    def get_persona_pending_events(self, persona_id: str) -> List[Dict[str, Any]]:
-        events = list(self.persona_pending_events.get(persona_id, []))
-        events.sort(key=lambda e: e.get("created_at") or datetime.utcnow())
-        return events
-
-    def archive_persona_events(self, persona_id: str, event_ids: List[int]) -> None:
-        if not event_ids:
-            return
-        db = self.SessionLocal()
-        try:
-            (
-                db.query(PersonaEventLog)
-                .filter(PersonaEventLog.EVENT_ID.in_(event_ids))
-                .update({PersonaEventLog.STATUS: "archived"}, synchronize_session=False)
-            )
-            db.commit()
-        except Exception as exc:
-            logging.error("Failed to archive persona events %s: %s", event_ids, exc, exc_info=True)
-            db.rollback()
-            return
-        finally:
-            db.close()
-
-        pending = self.persona_pending_events.get(persona_id, [])
-        if pending:
-            remaining = [ev for ev in pending if ev.get("event_id") not in event_ids]
-            if remaining:
-                self.persona_pending_events[persona_id] = remaining
-            else:
-                self.persona_pending_events.pop(persona_id, None)
+    # Note: Persona event methods (_load_persona_event_logs, record_persona_event,
+    # get_persona_pending_events, archive_persona_events) are in PersonaEventMixin
 
     def _append_building_history_note(self, building_id: str, content: str) -> None:
         if not building_id:
@@ -688,58 +466,6 @@ class SAIVerseManager(
 
     def _explore_city(self, persona_id: str, target_city_id: str):
         self.runtime.explore_city(persona_id, target_city_id)
-
-    def _load_user_state_from_db(self):
-        if getattr(self, "runtime", None) is not None:
-            self.runtime.load_user_state_from_db()
-        else:
-            db = self.SessionLocal()
-            try:
-                user = (
-                    db.query(UserModel)
-                    .filter(UserModel.USERID == self.state.user_id)
-                    .first()
-                )
-                if user:
-                    # Map DB boolean to presence status string
-                    self.state.user_presence_status = "online" if user.LOGGED_IN else "offline"
-                    self.state.user_current_city_id = user.CURRENT_CITYID
-                    self.state.user_current_building_id = user.CURRENT_BUILDINGID
-                    self.state.user_display_name = (
-                        (user.USERNAME or "ユーザー").strip() or "ユーザー"
-                    )
-                    avatar_data = None
-                    if getattr(user, "AVATAR_IMAGE", None):
-                        avatar_data = self._load_avatar_data(Path(user.AVATAR_IMAGE))
-                    self.state.user_avatar_data = avatar_data or self.default_avatar
-                    self.id_to_name_map[str(self.state.user_id)] = (
-                        self.state.user_display_name
-                    )
-                else:
-                    self.state.user_presence_status = "offline"
-                    self.state.user_current_building_id = None
-                    self.state.user_current_building_id = None
-                    self.state.user_current_city_id = None
-                    self.state.user_display_name = "ユーザー"
-                    self.state.user_avatar_data = self.default_avatar
-                    self.id_to_name_map[str(self.state.user_id)] = (
-                        self.state.user_display_name
-                    )
-            except Exception as exc:
-                logging.error(
-                    "Failed to load user status from DB: %s", exc, exc_info=True
-                )
-                self.state.user_presence_status = "offline"
-                self.state.user_current_building_id = None
-                self.state.user_current_city_id = None
-                self.state.user_display_name = "ユーザー"
-                self.state.user_avatar_data = self.default_avatar
-                self.id_to_name_map[str(self.state.user_id)] = (
-                    self.state.user_display_name
-                )
-            finally:
-                db.close()
-        self._refresh_user_state_cache()
 
     def set_user_login_status(self, user_id: int, status: bool) -> str:
         """ユーザーのログイン状態を更新し、ログアウト時にメッセージを記録する"""

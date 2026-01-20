@@ -19,6 +19,33 @@
     border-bottom: 1px solid #333;
     font-weight: 600;
     color: #e0e0e0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+/* Generate Button (sidebar header) */
+.generateButton {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    background: rgba(255, 193, 7, 0.15);
+    border: 1px solid rgba(255, 193, 7, 0.4);
+    color: #ffc107;
+    cursor: pointer;
+    font-size: 0.75rem;
+    padding: 0.3rem 0.6rem;
+    border-radius: 4px;
+    transition: all 0.2s;
+}
+
+.generateButton:hover {
+    background: rgba(255, 193, 7, 0.25);
+    border-color: #ffc107;
+}
+
+.generateButton span {
+    font-weight: 500;
 }
 
 .treeContainer {
@@ -695,4 +722,64 @@
     font-size: 1.2rem;
     border-bottom: 1px solid #333;
     padding-bottom: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+/* Generation Modal States */
+.generatingState {
+    text-align: center;
+    padding: 2rem 1rem;
+}
+
+.spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid rgba(255, 193, 7, 0.2);
+    border-top-color: #ffc107;
+    border-radius: 50%;
+    margin: 0 auto 1rem;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.progressBar {
+    width: 100%;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+    margin-top: 1rem;
+    overflow: hidden;
+}
+
+.progressFill {
+    height: 100%;
+    background: linear-gradient(90deg, #ffc107, #ff9800);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+}
+
+.errorText {
+    color: #fa5252;
+    font-size: 0.9rem;
+    padding: 0.75rem;
+    background: rgba(250, 82, 82, 0.1);
+    border: 1px solid rgba(250, 82, 82, 0.3);
+    border-radius: 6px;
+    margin-bottom: 0.5rem;
+}
+
+.resultState {
+    text-align: center;
+    padding: 1.5rem 1rem;
+}
+
+.resultState p {
+    margin-bottom: 0.75rem;
 }

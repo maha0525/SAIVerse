@@ -6,6 +6,7 @@ import MemoryImport from './memory/MemoryImport';
 import MemopediaViewer from './memory/MemopediaViewer';
 import MemoryRecall from './memory/MemoryRecall';
 import ArasujiViewer from './memory/ArasujiViewer';
+import ModalOverlay from './common/ModalOverlay';
 
 interface MemoryModalProps {
     isOpen: boolean;
@@ -21,12 +22,7 @@ export default function MemoryModal({ isOpen, onClose, personaId }: MemoryModalP
     if (!isOpen) return null;
 
     return (
-        <div
-            className={styles.overlay}
-            onClick={onClose}
-            onTouchStart={(e) => e.stopPropagation()}
-            onTouchMove={(e) => e.stopPropagation()}
-        >
+        <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
                 <div className={styles.header}>
                     <h2 className={styles.title}>Memory & Knowledge: {personaId}</h2>
@@ -81,7 +77,7 @@ export default function MemoryModal({ isOpen, onClose, personaId }: MemoryModalP
                     {activeTab === 'arasuji' && <ArasujiViewer personaId={personaId} />}
                 </div>
             </div>
-        </div>
+        </ModalOverlay>
     );
 }
 

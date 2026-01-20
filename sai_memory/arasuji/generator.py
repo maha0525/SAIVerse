@@ -512,6 +512,11 @@ class ArasujiGenerator:
         # Process messages in batches
         for i in range(0, total, self.batch_size):
             batch = messages[i:i + self.batch_size]
+            
+            # Skip incomplete batches (less than batch_size messages)
+            if len(batch) < self.batch_size:
+                LOGGER.info(f"Skipping incomplete batch: {len(batch)} < {self.batch_size}")
+                continue
 
             if progress_callback:
                 progress_callback(i, total)

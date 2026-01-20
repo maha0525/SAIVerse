@@ -1,8 +1,8 @@
 {
-  "model": "z-ai/glm-4.6",
-  "display_name": "Z Ai Glm V4.6",
+  "model": "z-ai/glm-4.7",
+  "display_name": "Z Ai Glm V4.7",
   "provider": "openai",
-  "context_length": 32000,
+  "context_length": 131072,
   "base_url": "https://openrouter.ai/api/v1",
   "api_key_env": "OPENROUTER_API_KEY",
   "parameters": {

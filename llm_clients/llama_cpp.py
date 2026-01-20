@@ -7,7 +7,6 @@ import os
 from typing import Any, Dict, Iterator, List, Optional
 
 from .base import LLMClient
-from .gemini import GeminiClient
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +20,6 @@ class LlamaCppClient(LLMClient):
         context_length: int = 4096,
         n_gpu_layers: int = -1,
         supports_images: bool = False,
-        fallback_on_error: bool = True,
     ) -> None:
         """Initialize llama.cpp client.
 
@@ -30,15 +28,12 @@ class LlamaCppClient(LLMClient):
             context_length: Maximum context length (default: 4096)
             n_gpu_layers: Number of layers to offload to GPU (-1 = all, 0 = CPU only)
             supports_images: Whether model supports image inputs
-            fallback_on_error: Fall back to Gemini if model loading fails
         """
         super().__init__(supports_images=supports_images)
         self.model_path = model_path
         self.context_length = context_length
         self.n_gpu_layers = n_gpu_layers
-        self.fallback_on_error = fallback_on_error
         self._llm: Optional[Any] = None
-        self.fallback_client: Optional[LLMClient] = None
 
         # Temperature and other generation params
         self._temperature: float = 0.7
@@ -87,23 +82,10 @@ class LlamaCppClient(LLMClient):
             logger.error(
                 "llama-cpp-python not installed. Install with: pip install llama-cpp-python"
             )
-            if self.fallback_on_error:
-                self._setup_fallback()
-            return False
+            raise RuntimeError("llama-cpp-python not installed")
         except Exception as exc:
             logger.error("Failed to load GGUF model: %s", exc, exc_info=True)
-            if self.fallback_on_error:
-                self._setup_fallback()
-            return False
-
-    def _setup_fallback(self) -> None:
-        """Setup Gemini fallback client."""
-        if self.fallback_client is None:
-            try:
-                logger.info("Setting up Gemini fallback for llama.cpp")
-                self.fallback_client = GeminiClient("gemini-2.0-flash")
-            except Exception as exc:
-                logger.warning("Gemini fallback setup failed: %s", exc)
+            raise RuntimeError(f"Failed to load GGUF model: {exc}")
 
     def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
         """Apply model-specific request parameters."""
@@ -126,13 +108,7 @@ class LlamaCppClient(LLMClient):
         **_: Any,
     ) -> str:
         """Generate response using llama.cpp."""
-        if not self._ensure_model_loaded():
-            if self.fallback_client:
-                logger.info("Using Gemini fallback for generation")
-                return self.fallback_client.generate(
-                    messages, tools, response_schema, temperature=temperature
-                )
-            return "エラー: モデルの読み込みに失敗しました。"
+        self._ensure_model_loaded()
 
         try:
             # Use override temperature if provided
@@ -157,12 +133,7 @@ class LlamaCppClient(LLMClient):
 
         except Exception as exc:
             logger.error("llama.cpp generation failed: %s", exc, exc_info=True)
-            if self.fallback_client:
-                logger.info("Falling back to Gemini after llama.cpp error")
-                return self.fallback_client.generate(
-                    messages, tools, response_schema, temperature=temperature
-                )
-            return "エラーが発生しました。"
+            raise RuntimeError(f"llama.cpp API call failed: {exc}")
 
     def generate_stream(
         self,
@@ -174,15 +145,7 @@ class LlamaCppClient(LLMClient):
         **_: Any,
     ) -> Iterator[str]:
         """Generate streaming response using llama.cpp."""
-        if not self._ensure_model_loaded():
-            if self.fallback_client:
-                logger.info("Using Gemini fallback for streaming")
-                yield from self.fallback_client.generate_stream(
-                    messages, tools, response_schema, temperature=temperature
-                )
-            else:
-                yield "エラー: モデルの読み込みに失敗しました。"
-            return
+        self._ensure_model_loaded()
 
         try:
             temp = temperature if temperature is not None else self._temperature
@@ -207,13 +170,7 @@ class LlamaCppClient(LLMClient):
 
         except Exception as exc:
             logger.error("llama.cpp streaming failed: %s", exc, exc_info=True)
-            if self.fallback_client:
-                logger.info("Falling back to Gemini streaming after llama.cpp error")
-                yield from self.fallback_client.generate_stream(
-                    messages, tools, response_schema, temperature=temperature
-                )
-            else:
-                yield "エラーが発生しました。"
+            raise RuntimeError(f"llama.cpp streaming failed: {exc}")
 
     def generate_with_tool_detection(
         self,
@@ -229,13 +186,7 @@ class LlamaCppClient(LLMClient):
             {"type": "text", "content": str} if no tool call
             {"type": "tool_call", "tool_name": str, "tool_args": dict} if tool call detected
         """
-        if not self._ensure_model_loaded():
-            if self.fallback_client:
-                logger.info("Using Gemini fallback for tool detection")
-                return self.fallback_client.generate_with_tool_detection(
-                    messages, tools, temperature=temperature
-                )
-            return {"type": "text", "content": "エラー: モデルの読み込みに失敗しました。"}
+        self._ensure_model_loaded()
 
         try:
             temp = temperature if temperature is not None else self._temperature
@@ -286,12 +237,7 @@ class LlamaCppClient(LLMClient):
 
         except Exception as exc:
             logger.error("llama.cpp tool detection failed: %s", exc, exc_info=True)
-            if self.fallback_client:
-                logger.info("Falling back to Gemini for tool detection after error")
-                return self.fallback_client.generate_with_tool_detection(
-                    messages, tools, temperature=temperature
-                )
-            return {"type": "text", "content": "エラーが発生しました。"}
+            raise RuntimeError(f"llama.cpp tool detection call failed: {exc}")
 
 
 __all__ = ["LlamaCppClient"]

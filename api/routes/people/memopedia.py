@@ -1,14 +1,28 @@
-from fastapi import APIRouter, Depends, HTTPException
+import logging
+import os
+import threading
+import uuid
+from pathlib import Path
+from typing import Dict, Any
+
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from api.deps import get_manager
 from .models import (
     UpdateMemopediaPageRequest,
     CreateMemopediaPageRequest,
     SetTrunkRequest,
     MovePagesToTrunkRequest,
+    GenerateMemopediaRequest,
+    GenerationJobStatus,
 )
 from .utils import get_adapter
 
 router = APIRouter()
+LOGGER = logging.getLogger(__name__)
+
+# In-memory job store for Memopedia generation
+_memopedia_jobs: Dict[str, Dict[str, Any]] = {}
+_memopedia_jobs_lock = threading.Lock()
 
 
 def _get_memopedia(adapter):
@@ -278,3 +292,182 @@ def get_unorganized_pages(
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Memopedia error: {e}")
+
+
+# -----------------------------------------------------------------------------
+# Memopedia Generation API
+# -----------------------------------------------------------------------------
+
+def _update_memopedia_job(job_id: str, **kwargs) -> None:
+    """Update job status in the store."""
+    with _memopedia_jobs_lock:
+        if job_id in _memopedia_jobs:
+            _memopedia_jobs[job_id].update(kwargs)
+
+
+def _run_memopedia_generation(
+    job_id: str,
+    persona_id: str,
+    keyword: str,
+    directions: str | None,
+    category: str | None,
+    max_loops: int,
+    context_window: int,
+    with_chronicle: bool,
+    model_name: str | None,
+) -> None:
+    """Background worker for Memopedia page generation."""
+    from sai_memory.memory.storage import init_db
+    from sai_memory.memopedia import init_memopedia_tables
+    from sai_memory.memopedia.generator import generate_memopedia_page
+    from model_configs import find_model_config
+    from llm_clients.factory import get_llm_client
+    
+    try:
+        _update_memopedia_job(job_id, message="Initializing...")
+        
+        # Get persona database path
+        persona_dir = Path.home() / ".saiverse" / "personas" / persona_id
+        db_path = persona_dir / "memory.db"
+        
+        if not db_path.exists():
+            _update_memopedia_job(job_id, status="failed", error=f"Database not found: {db_path}")
+            return
+        
+        conn = init_db(str(db_path), check_same_thread=False)
+        init_memopedia_tables(conn)
+        
+        # Initialize LLM client
+        _update_memopedia_job(job_id, message="Initializing LLM client...")
+        
+        env_model = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.0-flash")
+        model_to_use = model_name or env_model
+        
+        resolved_model_id, model_config = find_model_config(model_to_use)
+        if not resolved_model_id:
+            _update_memopedia_job(job_id, status="failed", error=f"Model '{model_to_use}' not found")
+            conn.close()
+            return
+        
+        provider = model_config.get("provider", "gemini")
+        context_length = model_config.get("context_length", 128000)
+        actual_model_id = model_config.get("model", resolved_model_id)
+        
+        client = get_llm_client(actual_model_id, provider, context_length, config=model_config)
+        LOGGER.info(f"[Memopedia Gen] LLM client initialized: {actual_model_id} / {provider}")
+        
+        _update_memopedia_job(job_id, message=f"Searching for keyword: {keyword}")
+        
+        def progress_callback(loop: int, max_loops: int, message: str):
+            _update_memopedia_job(
+                job_id,
+                progress=loop,
+                total=max_loops,
+                message=message,
+            )
+        
+        # Run generation
+        result = generate_memopedia_page(
+            conn=conn,
+            client=client,
+            keyword=keyword,
+            directions=directions,
+            category=category,
+            persona_id=persona_id,
+            persona_dir=str(persona_dir),
+            max_loops=max_loops,
+            context_window=context_window,
+            with_chronicle=with_chronicle,
+            progress_callback=progress_callback,
+        )
+        
+        conn.close()
+        
+        if result:
+            _update_memopedia_job(
+                job_id,
+                status="completed",
+                progress=max_loops,
+                result=result,
+                message=f"Created page: {result.get('title', keyword)}"
+            )
+        else:
+            _update_memopedia_job(
+                job_id,
+                status="completed",
+                progress=max_loops,
+                message=f"No relevant information found for keyword: {keyword}"
+            )
+        
+    except Exception as e:
+        LOGGER.exception(f"Memopedia generation failed: {e}")
+        _update_memopedia_job(job_id, status="failed", error=str(e))
+
+
+@router.post("/{persona_id}/memopedia/generate", tags=["Memopedia"])
+async def start_memopedia_generation(
+    persona_id: str,
+    request: GenerateMemopediaRequest,
+    background_tasks: BackgroundTasks,
+    manager = Depends(get_manager),
+):
+    """Start Memopedia page generation as a background job.
+    
+    Uses a Deep Research-style loop:
+    1. Search with memory_recall for relevant messages
+    2. Expand context around found messages  
+    3. Extract knowledge via LLM
+    4. Check if information is sufficient
+    5. Repeat with different queries if needed
+    6. Save as Memopedia page
+    """
+    # Validate that persona exists
+    persona_dir = Path.home() / ".saiverse" / "personas" / persona_id
+    if not persona_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Persona not found: {persona_id}")
+    
+    # Create job
+    job_id = str(uuid.uuid4())
+    with _memopedia_jobs_lock:
+        _memopedia_jobs[job_id] = {
+            "job_id": job_id,
+            "status": "running",
+            "progress": 0,
+            "total": request.max_loops,
+            "message": "Starting...",
+            "keyword": request.keyword,
+            "result": None,
+            "error": None,
+        }
+    
+    # Start background task
+    background_tasks.add_task(
+        _run_memopedia_generation,
+        job_id=job_id,
+        persona_id=persona_id,
+        keyword=request.keyword,
+        directions=request.directions,
+        category=request.category,
+        max_loops=request.max_loops,
+        context_window=request.context_window,
+        with_chronicle=request.with_chronicle,
+        model_name=request.model,
+    )
+    
+    return {"job_id": job_id, "status": "running"}
+
+
+@router.get("/{persona_id}/memopedia/generate/{job_id}", tags=["Memopedia"])
+def get_memopedia_generation_status(
+    persona_id: str,
+    job_id: str,
+    manager = Depends(get_manager),
+):
+    """Get the status of a Memopedia generation job."""
+    with _memopedia_jobs_lock:
+        job = _memopedia_jobs.get(job_id)
+    
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    return job
