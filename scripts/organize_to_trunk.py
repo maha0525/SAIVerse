@@ -49,18 +49,14 @@ def get_llm_response(client, prompt: str, response_schema: dict) -> dict:
     """Get structured response from LLM."""
     messages = [{"role": "user", "content": prompt}]
 
-    response = client.chat(
+    # LLMClient uses generate(), not chat()
+    response = client.generate(
         messages=messages,
         response_schema=response_schema,
     )
 
-    # Parse response
-    if hasattr(response, 'content'):
-        content = response.content
-    elif isinstance(response, dict):
-        content = response.get('content', '')
-    else:
-        content = str(response)
+    # response is a string from generate()
+    content = response
 
     # Try to extract JSON from response
     try:
