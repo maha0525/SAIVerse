@@ -1,17 +1,21 @@
 {
-  "model": "z-ai/glm-4.6",
-  "display_name": "Z Ai Glm V4.6",
-  "provider": "openai",
-  "context_length": 32000,
-  "base_url": "https://openrouter.ai/api/v1",
-  "api_key_env": "OPENROUTER_API_KEY",
+  "model": "qwen3-next:80b",
+  "display_name": "Qwen3 Next 80B A3B(Ollama)",
+  "provider": "ollama",
+  "context_length": 262144,
+  "supports_structured_output": true,
+  "supports_images": false,
+  "parameter_defaults": {
+    "temperature": 0.6,
+    "top_p": 0.95
+  },
   "parameters": {
     "temperature": {
       "type": "float",
       "min": 0,
       "max": 2,
       "step": 0.1,
-      "default": 1,
+      "default": 0.6,
       "label": "Temperature",
       "description": "Controls randomness."
     },
@@ -27,9 +31,9 @@
     "max_tokens": {
       "type": "int",
       "min": 32,
-      "max": 120000,
+      "max": 8192,
       "step": 1,
-      "default": 8000,
+      "default": 4096,
       "label": "Max tokens",
       "description": "Upper bound on generated tokens."
     }

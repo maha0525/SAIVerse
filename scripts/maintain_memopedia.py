@@ -838,9 +838,10 @@ def main():
             context_length = model_config.get("context_length", 128000)
             provider = args.provider or model_config.get("provider", "gemini")
         else:
-            actual_model_id = args.model
-            context_length = 128000
-            provider = args.provider or "gemini"
+            LOGGER.error(f"Model '{args.model}' not found in config.")
+            LOGGER.error("Use --list-models to see available options.")
+            conn.close()
+            sys.exit(1)
 
         LOGGER.info(f"Using model: {actual_model_id}")
 

@@ -102,11 +102,26 @@ class Memopedia:
             "plans": [_annotate(p) for p in tree.get(CATEGORY_PLANS, [])],
         }
 
-    def get_tree_markdown(self, thread_id: Optional[str] = None) -> str:
+    def get_tree_markdown(
+        self,
+        thread_id: Optional[str] = None,
+        include_keywords: bool = False,
+        max_depth: Optional[int] = None,
+        show_markers: bool = True,
+    ) -> str:
         """
         Get the page tree as a Markdown outline.
 
-        Open pages are marked with [OPEN], closed with [-].
+        This is the unified method for formatting Memopedia content for LLM contexts.
+        
+        Args:
+            thread_id: Optional thread ID to include open/close states
+            include_keywords: If True, include keywords in output (default: False for lighter context)
+            max_depth: Maximum tree depth to include (None = unlimited, 0 = root only, 1 = root + children, etc.)
+            show_markers: If True, show [OPEN]/[-] markers (default: True for chat, False for analysis scripts)
+        
+        Returns:
+            Formatted Markdown string of the page tree
         """
         tree = self.get_tree(thread_id)
         lines: List[str] = []
@@ -117,21 +132,55 @@ class Memopedia:
             "plans": "予定",
         }
 
-        def _render_page(page: Dict[str, Any], depth: int = 0) -> None:
+        def _render_page(page: Dict[str, Any], depth: int = 0, current_depth: int = 0) -> None:
+            # Check depth limit
+            if max_depth is not None and current_depth > max_depth:
+                return
+            
+            # Skip root pages
+            if page.get("id", "").startswith("root_"):
+                # Still process children of root pages
+                for child in page.get("children", []):
+                    _render_page(child, depth, current_depth)
+                return
+            
             indent = "  " * depth
-            marker = "[OPEN]" if page.get("is_open") else "[-]"
+            
+            # Build line content
+            if show_markers:
+                marker = "[OPEN]" if page.get("is_open") else "[-]"
+                title_part = f"{marker} **{page['title']}**"
+            else:
+                title_part = page['title']
+            
             summary = page.get("summary", "")
-            summary_part = f" - {summary}" if summary else ""
-            lines.append(f"{indent}- {marker} **{page['title']}**{summary_part}")
-            for child in page.get("children", []):
-                _render_page(child, depth + 1)
+            summary_part = f": {summary}" if summary else ""
+            
+            # Add keywords if enabled
+            if include_keywords:
+                keywords = page.get("keywords", [])
+                if keywords:
+                    kw_str = f" [キーワード: {', '.join(keywords)}]"
+                    summary_part += kw_str
+            
+            lines.append(f"{indent}- {title_part}{summary_part}")
+            
+            # Process children (if within depth limit)
+            children = page.get("children", [])
+            if children and (max_depth is None or current_depth + 1 <= max_depth):
+                for child in children:
+                    _render_page(child, depth + 1, current_depth + 1)
 
         for category_key in ["people", "terms", "plans"]:
             category_name = category_names.get(category_key, category_key)
             pages = tree.get(category_key, [])
-            lines.append(f"\n## {category_name}\n")
-            for page in pages:
-                _render_page(page, depth=0)
+            if pages:
+                lines.append(f"\n### {category_name}")
+                for page in pages:
+                    _render_page(page, depth=0, current_depth=0)
+
+        if not lines:
+            return "(まだページはありません)"
 
         return "\n".join(lines)
 

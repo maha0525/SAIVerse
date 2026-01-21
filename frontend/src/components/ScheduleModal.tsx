@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Calendar, Play, Clock, Repeat, Trash2, Power, Plus, Edit2 } from 'lucide-react';
 import styles from './ScheduleModal.module.css';
+import ModalOverlay from './common/ModalOverlay';
 
 interface ScheduleItem {
     schedule_id: number;
@@ -198,12 +199,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
     if (!isOpen) return null;
 
     return (
-        <div
-            className={styles.overlay}
-            onClick={onClose}
-            onTouchStart={(e) => e.stopPropagation()}
-            onTouchMove={(e) => e.stopPropagation()}
-        >
+        <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
                     <h2 className={styles.title}>Schedule Management: {personaId}</h2>
@@ -386,6 +382,6 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                     </div>
                 </div>
             </div>
-        </div>
+        </ModalOverlay>
     );
 }

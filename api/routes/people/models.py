@@ -314,3 +314,38 @@ class SourceMessageItem(BaseModel):
     role: str
     content: str
     created_at: int
+
+
+# -----------------------------------------------------------------------------
+# Generation Job Models (Memory Weave)
+# -----------------------------------------------------------------------------
+
+class GenerateArasujiRequest(BaseModel):
+    """Chronicle生成リクエスト"""
+    max_messages: int = 500  # 最大処理メッセージ数
+    batch_size: int = 20     # バッチサイズ（これ未満のメッセージは処理しない）
+    consolidation_size: int = 10  # 統合サイズ
+    model: Optional[str] = None  # デフォルトはMEMORY_WEAVE_MODEL
+    with_memopedia: bool = False  # Memopedia同時生成
+
+
+class GenerateMemopediaRequest(BaseModel):
+    """Memopediaページ生成リクエスト（キーワード指定）"""
+    keyword: str
+    directions: Optional[str] = None  # 調査の方向性・まとめ方の指示
+    category: Optional[str] = None  # people, terms, plans (None = auto-detect)
+    max_loops: int = 5  # 最大検索ループ数
+    context_window: int = 5  # 周辺メッセージ取得数
+    with_chronicle: bool = True  # Chronicle（あらすじ）を参照するか
+    model: Optional[str] = None  # デフォルトはMEMORY_WEAVE_MODEL
+
+
+class GenerationJobStatus(BaseModel):
+    """生成ジョブのステータス"""
+    job_id: str
+    status: str  # "pending", "running", "completed", "failed"
+    progress: Optional[int] = None  # 処理済みメッセージ数
+    total: Optional[int] = None  # 総処理対象メッセージ数
+    message: Optional[str] = None  # ステータスメッセージ
+    entries_created: Optional[int] = None  # 作成されたエントリ数
+    error: Optional[str] = None  # エラーメッセージ

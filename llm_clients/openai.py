@@ -343,7 +343,7 @@ class OpenAIClient(LLMClient):
                 )
             except Exception:
                 logging.exception("OpenAI call failed")
-                return "エラーが発生しました。"
+                raise RuntimeError("OpenAI API call failed")
 
             get_llm_logger().debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
             choice = resp.choices[0]
@@ -443,7 +443,7 @@ class OpenAIClient(LLMClient):
             return "ツール呼び出しが 10 回を超えました。"
         except Exception:
             logging.exception("OpenAI call failed")
-            return "エラーが発生しました。"
+            raise RuntimeError("OpenAI API call failed")
 
     def generate_stream(
         self,
@@ -481,7 +481,7 @@ class OpenAIClient(LLMClient):
                 )
             except Exception:
                 logging.exception("OpenAI call failed")
-                yield "エラーが発生しました。"
+                raise RuntimeError("OpenAI streaming failed")
                 return
 
             choice = resp.choices[0]
@@ -520,7 +520,7 @@ class OpenAIClient(LLMClient):
             )
         except Exception:
             logging.exception("OpenAI call failed")
-            yield "エラーが発生しました。"
+            raise RuntimeError("OpenAI JSON mode call failed")
             return
 
         call_buffer: dict[str, dict] = {}
@@ -655,7 +655,7 @@ class OpenAIClient(LLMClient):
 
         except Exception:
             logging.exception("OpenAI stream call failed")
-            yield "エラーが発生しました。"
+            raise RuntimeError("OpenAI streaming call failed")
 
     def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
         if not isinstance(parameters, dict):
@@ -703,7 +703,7 @@ class OpenAIClient(LLMClient):
             )
         except Exception:
             logging.exception("OpenAI call failed in generate_with_tool_detection")
-            return {"type": "text", "content": "エラーが発生しました。"}
+            raise RuntimeError("OpenAI tool detection call failed")
 
         get_llm_logger().debug("OpenAI raw (tool detection):\n%s", resp.model_dump_json(indent=2))
         choice = resp.choices[0]

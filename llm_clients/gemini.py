@@ -5,8 +5,10 @@ import json
 import logging
 import mimetypes
 import os
+import time
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
+import httpx
 from google import genai
 from google.genai import types
 
@@ -314,6 +316,11 @@ class GeminiClient(LLMClient):
             or "unavailable" in msg
             or "overload" in msg
         )
+
+    @staticmethod
+    def _is_timeout_error(err: Exception) -> bool:
+        """Check if the error is a timeout that should be retried."""
+        return isinstance(err, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.WriteTimeout))
 
     def _convert_messages(
         self,
@@ -640,28 +647,43 @@ class GeminiClient(LLMClient):
 
         active_client = self.client
         model_id = self.model
-        max_empty_retries = 3
-        for attempt in range(max_empty_retries):
+        max_retries = 3
+        for attempt in range(max_retries):
             try:
                 result = _call(active_client, model_id)
                 if result:
                     return result
                 # If result is empty string but no exception, retry
-                logging.warning("Gemini returned empty result (attempt %d/%d)", attempt + 1, max_empty_retries)
+                logging.warning("Gemini returned empty result (attempt %d/%d)", attempt + 1, max_retries)
                 continue
             except EmptyResponseError as e:
-                logging.warning("Gemini empty response (attempt %d/%d): %s", attempt + 1, max_empty_retries, e)
+                logging.warning("Gemini empty response (attempt %d/%d): %s", attempt + 1, max_retries, e)
                 # Continue to retry
                 continue
             except Exception as exc:
+                # Check for timeout errors - these should be retried
+                if self._is_timeout_error(exc):
+                    logging.warning(
+                        "Gemini request timed out (attempt %d/%d): %s",
+                        attempt + 1, max_retries, type(exc).__name__
+                    )
+                    # If this was with free client, try paid client on timeout
+                    if active_client is self.free_client and self.paid_client:
+                        logging.info("Switching to paid Gemini API key after timeout")
+                        active_client = self.paid_client
+                    # Add a small delay before retry
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+                    continue
+                # Check for rate limit errors
                 if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
                     logging.info("Retrying with paid Gemini API key due to rate limit")
                     active_client = self.paid_client
                     continue
                 logging.exception("Gemini call failed")
-                return "エラーが発生しました。"
-        logging.error("Gemini returned empty response after %d retries", max_empty_retries)
-        return "エラーが発生しました。"
+                raise RuntimeError("Gemini API call failed") from exc
+        logging.error("Gemini API call failed after %d retries", max_retries)
+        raise RuntimeError("Gemini API call failed")
 
     def _separate_parts(self, parts: List[Any]) -> Tuple[str, List[Dict[str, str]]]:
         reasoning_entries: List[Dict[str, str]] = []
@@ -740,7 +762,7 @@ class GeminiClient(LLMClient):
                 stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature)
             else:
                 logging.exception("Gemini call failed")
-                yield "エラーが発生しました。"
+                raise RuntimeError("Gemini streaming failed")
                 return
 
         fcall: Optional[types.FunctionCall] = None
@@ -1047,7 +1069,7 @@ class GeminiClient(LLMClient):
                     active_client = self.paid_client
                     continue
                 logging.exception("Gemini call failed in generate_with_tool_detection")
-                return {"type": "text", "content": "エラーが発生しました。"}
+                raise RuntimeError("Gemini tool detection call failed")
 
             get_llm_logger().debug("Gemini raw (tool detection):\n%s", resp)
 

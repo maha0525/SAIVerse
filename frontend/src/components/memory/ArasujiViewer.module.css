@@ -494,3 +494,260 @@
         align-items: center;
     }
 }
+
+/* Generation Button & Progress */
+.headerActions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.generateBtn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background-color: rgba(64, 192, 87, 0.15);
+    border: 1px solid rgba(64, 192, 87, 0.3);
+    color: #40c057;
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: background-color 0.2s, border-color 0.2s;
+}
+
+.generateBtn:hover:not(:disabled) {
+    background-color: rgba(64, 192, 87, 0.25);
+    border-color: rgba(64, 192, 87, 0.5);
+}
+
+.generateBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.generateBtnLarge {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background-color: rgba(64, 192, 87, 0.2);
+    border: 1px solid rgba(64, 192, 87, 0.4);
+    color: #40c057;
+    padding: 12px 24px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1rem;
+    font-weight: 500;
+    transition: background-color 0.2s, border-color 0.2s, transform 0.2s;
+}
+
+.generateBtnLarge:hover {
+    background-color: rgba(64, 192, 87, 0.3);
+    border-color: rgba(64, 192, 87, 0.6);
+    transform: scale(1.02);
+}
+
+.progressBar {
+    padding: 0.75rem 1rem;
+    background-color: rgba(77, 171, 247, 0.1);
+    border-bottom: 1px solid rgba(77, 171, 247, 0.2);
+}
+
+.progressInfo {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.85rem;
+    color: #4dabf7;
+    margin-bottom: 8px;
+}
+
+.progressTrack {
+    height: 4px;
+    background-color: rgba(77, 171, 247, 0.2);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.progressFill {
+    height: 100%;
+    background-color: #4dabf7;
+    transition: width 0.3s ease;
+}
+
+.generationResult {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 1rem;
+    background-color: rgba(64, 192, 87, 0.1);
+    border-bottom: 1px solid rgba(64, 192, 87, 0.2);
+    font-size: 0.85rem;
+    color: #40c057;
+}
+
+.generationResult button,
+.generationError button {
+    background: none;
+    border: none;
+    color: inherit;
+    cursor: pointer;
+    font-size: 1.2rem;
+    padding: 0 4px;
+    opacity: 0.7;
+}
+
+.generationResult button:hover,
+.generationError button:hover {
+    opacity: 1;
+}
+
+.generationError {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 1rem;
+    background-color: rgba(250, 82, 82, 0.1);
+    border-bottom: 1px solid rgba(250, 82, 82, 0.2);
+    font-size: 0.85rem;
+    color: #fa5252;
+}
+
+/* Modal */
+.modalOverlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal {
+    background-color: #1f2023;
+    border: 1px solid #333;
+    border-radius: 12px;
+    padding: 1.5rem;
+    min-width: 400px;
+    max-width: 90vw;
+}
+
+.modal h3 {
+    margin: 0 0 1.5rem 0;
+    color: #e0e0e0;
+    font-size: 1.2rem;
+}
+
+.formGroup {
+    margin-bottom: 1.25rem;
+}
+
+.formGroup label {
+    display: block;
+    font-size: 0.9rem;
+    color: #aaa;
+    margin-bottom: 6px;
+}
+
+.formGroup input[type="number"] {
+    width: 100%;
+    padding: 10px 12px;
+    background-color: #2c2e33;
+    border: 1px solid #444;
+    color: #e0e0e0;
+    border-radius: 6px;
+    font-size: 0.95rem;
+}
+
+.formGroup input[type="number"]:focus {
+    outline: none;
+    border-color: #4dabf7;
+}
+
+.formGroup .hint {
+    display: block;
+    margin-top: 4px;
+    font-size: 0.8rem;
+    color: #666;
+}
+
+.checkboxLabel {
+    display: flex !important;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+}
+
+.checkboxLabel input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+}
+
+.modalActions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    margin-top: 1.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid #333;
+}
+
+.cancelBtn {
+    background-color: #2c2e33;
+    border: 1px solid #444;
+    color: #aaa;
+    padding: 10px 20px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: background-color 0.2s;
+}
+
+.cancelBtn:hover {
+    background-color: #35383f;
+}
+
+.startBtn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background-color: rgba(64, 192, 87, 0.2);
+    border: 1px solid rgba(64, 192, 87, 0.4);
+    color: #40c057;
+    padding: 10px 20px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-weight: 500;
+    transition: background-color 0.2s, border-color 0.2s;
+}
+
+.startBtn:hover {
+    background-color: rgba(64, 192, 87, 0.3);
+    border-color: rgba(64, 192, 87, 0.6);
+}
+
+.detailRegenerateBtn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background-color: rgba(77, 171, 247, 0.15);
+    border: 1px solid rgba(77, 171, 247, 0.3);
+    color: #4dabf7;
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    margin-right: 0.5rem;
+    transition: background-color 0.2s, border-color 0.2s;
+}
+
+.detailRegenerateBtn:hover {
+    background-color: rgba(77, 171, 247, 0.25);
+    border-color: rgba(77, 171, 247, 0.5);
+}

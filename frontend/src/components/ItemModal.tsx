@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { X, FileText, Code2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import styles from './ItemModal.module.css';
+import ModalOverlay from './common/ModalOverlay';
 
 interface Item {
     id: string;
@@ -46,7 +47,7 @@ export default function ItemModal({ isOpen, onClose, item }: ItemModalProps) {
     if (!isOpen || !item) return null;
 
     return (
-        <div className={styles.overlay} onClick={onClose}>
+        <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
                     <h2>{item.name}</h2>
@@ -116,6 +117,6 @@ export default function ItemModal({ isOpen, onClose, item }: ItemModalProps) {
                     )}
                 </div>
             </div>
-        </div>
+        </ModalOverlay>
     );
 }

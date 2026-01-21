@@ -239,7 +239,7 @@ class NvidiaNIMClient(OpenAIClient):
                 )
             except Exception:
                 logging.exception("Nvidia NIM structured output call failed")
-                return "エラーが発生しました。"
+                raise RuntimeError("NVIDIA NIM API call failed")
 
             self._store_reasoning([])
             if snippets:
