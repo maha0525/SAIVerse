@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Book, ChevronRight, ChevronDown, ChevronLeft, History, Clock, GitCommit, Tag, Edit2, Trash2, Save, X, Plus, FolderTree } from 'lucide-react';
+import { Book, ChevronRight, ChevronDown, ChevronLeft, History, Clock, GitCommit, Tag, Edit2, Trash2, Save, X, Plus, FolderTree, Sparkles } from 'lucide-react';
 import styles from './MemopediaViewer.module.css';
 
 interface MemopediaPage {
@@ -86,6 +86,19 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     const [createVividness, setCreateVividness] = useState("rough");
     const [createIsTrunk, setCreateIsTrunk] = useState(false);
     const [isCreating, setIsCreating] = useState(false);
+
+    // Generation state
+    const [showGenerateModal, setShowGenerateModal] = useState(false);
+    const [generateKeyword, setGenerateKeyword] = useState("");
+    const [generateDirections, setGenerateDirections] = useState("");
+    const [generateCategory, setGenerateCategory] = useState<string | null>(null);
+    const [isGenerating, setIsGenerating] = useState(false);
+    const [generateJobId, setGenerateJobId] = useState<string | null>(null);
+    const [generateStatus, setGenerateStatus] = useState<string>("");
+    const [generateProgress, setGenerateProgress] = useState<{ current: number, total: number } | null>(null);
+    const [generateError, setGenerateError] = useState<string | null>(null);
+    const [generateResult, setGenerateResult] = useState<any>(null);
+    const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
     useEffect(() => {
         loadTree();
@@ -392,6 +405,99 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         }
     };
 
+    // Generation handlers
+    const startGeneration = async () => {
+        if (!generateKeyword.trim()) return;
+
+        setIsGenerating(true);
+        setGenerateError(null);
+        setGenerateStatus("Starting generation...");
+
+        try {
+            const res = await fetch(`/api/people/${personaId}/memopedia/generate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    keyword: generateKeyword,
+                    directions: generateDirections || null,
+                    category: generateCategory,
+                    max_loops: 5,
+                    context_window: 5,
+                    with_chronicle: true,
+                }),
+            });
+
+            if (!res.ok) {
+                const err = await res.json();
+                throw new Error(err.detail || 'Failed to start generation');
+            }
+
+            const data = await res.json();
+            setGenerateJobId(data.job_id);
+
+            // Start polling
+            pollIntervalRef.current = setInterval(() => pollGenerationStatus(data.job_id), 2000);
+
+        } catch (error: any) {
+            console.error('Failed to start generation', error);
+            setGenerateError(error.message || 'Failed to start generation');
+            setIsGenerating(false);
+        }
+    };
+
+    const pollGenerationStatus = async (jobId: string) => {
+        try {
+            const res = await fetch(`/api/people/${personaId}/memopedia/generate/${jobId}`);
+            if (!res.ok) {
+                throw new Error('Failed to get job status');
+            }
+
+            const data = await res.json();
+            setGenerateStatus(data.message || 'Processing...');
+
+            if (data.progress !== undefined && data.total) {
+                setGenerateProgress({ current: data.progress, total: data.total });
+            }
+
+            if (data.status === 'completed') {
+                if (pollIntervalRef.current) {
+                    clearInterval(pollIntervalRef.current);
+                    pollIntervalRef.current = null;
+                }
+                setIsGenerating(false);
+                if (data.result) {
+                    setGenerateResult(data.result);
+                } else {
+                    setGenerateError(data.message || 'No result generated');
+                }
+            } else if (data.status === 'failed') {
+                if (pollIntervalRef.current) {
+                    clearInterval(pollIntervalRef.current);
+                    pollIntervalRef.current = null;
+                }
+                setIsGenerating(false);
+                setGenerateError(data.error || 'Generation failed');
+            }
+        } catch (error: any) {
+            console.error('Failed to poll status', error);
+            if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current);
+                pollIntervalRef.current = null;
+            }
+            setIsGenerating(false);
+            setGenerateError(error.message || 'Failed to poll status');
+        }
+    };
+
+    // Cleanup polling on unmount
+    useEffect(() => {
+        return () => {
+            if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current);
+            }
+        };
+    }, []);
+
     const toggleExpand = (pageId: string) => {
         setExpandedIds(prev => {
             const next = new Set(prev);
@@ -564,7 +670,24 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
     return (
         <div className={styles.container}>
             <div className={`${styles.sidebar} ${!showList ? styles.mobileHidden : ''}`}>
-                <div className={styles.sidebarHeader}>Knowledge Tree</div>
+                <div className={styles.sidebarHeader}>
+                    <span>Knowledge Tree</span>
+                    <button
+                        className={styles.generateButton}
+                        onClick={() => {
+                            setShowGenerateModal(true);
+                            setGenerateKeyword("");
+                            setGenerateDirections("");
+                            setGenerateCategory(null);
+                            setGenerateError(null);
+                            setGenerateResult(null);
+                        }}
+                        title="キーワードからページを生成"
+                    >
+                        <Sparkles size={14} />
+                        <span>生成</span>
+                    </button>
+                </div>
                 <div className={styles.treeContainer}>
                     <div className={styles.categoryTitle}>People</div>
                     {tree.people.map(p => <TreeItem key={p.id} page={p} />)}
@@ -936,6 +1059,105 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                     {isCreating ? '作成中...' : '作成'}
                                 </button>
                             </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* Generate Page Modal */}
+                {showGenerateModal && (
+                    <div className={styles.overlay}>
+                        <div className={styles.createModal}>
+                            <h3><Sparkles size={20} /> キーワードからページ生成</h3>
+                            {!isGenerating && !generateResult ? (
+                                <>
+                                    <div className={styles.formGroup}>
+                                        <label>キーワード *</label>
+                                        <input
+                                            type="text"
+                                            value={generateKeyword}
+                                            onChange={e => setGenerateKeyword(e.target.value)}
+                                            className={styles.formInput}
+                                            placeholder="例: Memory Weave"
+                                        />
+                                    </div>
+                                    <div className={styles.formGroup}>
+                                        <label>調査の方向性・まとめ方（任意）</label>
+                                        <textarea
+                                            value={generateDirections}
+                                            onChange={e => setGenerateDirections(e.target.value)}
+                                            className={styles.formTextarea}
+                                            rows={3}
+                                            placeholder="例: 技術的な詳細を中心にまとめてほしい / この人物の◯◯に関するエピソードを調べてほしい"
+                                        />
+                                    </div>
+                                    <div className={styles.formGroup}>
+                                        <label>カテゴリ (自動判定)</label>
+                                        <select
+                                            value={generateCategory || ""}
+                                            onChange={e => setGenerateCategory(e.target.value || null)}
+                                            className={styles.formInput}
+                                        >
+                                            <option value="">自動判定</option>
+                                            <option value="people">People</option>
+                                            <option value="terms">Terms</option>
+                                            <option value="plans">Plans</option>
+                                        </select>
+                                    </div>
+                                    {generateError && (
+                                        <div className={styles.errorText}>{generateError}</div>
+                                    )}
+                                    <div className={styles.formActions}>
+                                        <button
+                                            className={styles.cancelButton}
+                                            onClick={() => setShowGenerateModal(false)}
+                                        >
+                                            <X size={16} />
+                                            キャンセル
+                                        </button>
+                                        <button
+                                            className={styles.saveButton}
+                                            onClick={startGeneration}
+                                            disabled={!generateKeyword.trim()}
+                                        >
+                                            <Sparkles size={16} />
+                                            生成開始
+                                        </button>
+                                    </div>
+                                </>
+                            ) : isGenerating ? (
+                                <div className={styles.generatingState}>
+                                    <div className={styles.spinner} />
+                                    <p>{generateStatus}</p>
+                                    {generateProgress && (
+                                        <div className={styles.progressBar}>
+                                            <div
+                                                className={styles.progressFill}
+                                                style={{ width: `${(generateProgress.current / generateProgress.total) * 100}%` }}
+                                            />
+                                        </div>
+                                    )}
+                                </div>
+                            ) : generateResult ? (
+                                <div className={styles.resultState}>
+                                    <p>✅ ページを{generateResult.action === 'created' ? '作成' : '更新'}しました</p>
+                                    <p><strong>{generateResult.title}</strong></p>
+                                    <div className={styles.formActions}>
+                                        <button
+                                            className={styles.saveButton}
+                                            onClick={() => {
+                                                setShowGenerateModal(false);
+                                                if (generateResult.page_id) {
+                                                    setSelectedPageId(generateResult.page_id);
+                                                    setShowList(false);
+                                                }
+                                                loadTree();
+                                            }}
+                                        >
+                                            ページを表示
+                                        </button>
+                                    </div>
+                                </div>
+                            ) : null}
                         </div>
                     </div>
                 )}

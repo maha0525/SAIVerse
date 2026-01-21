@@ -135,49 +135,13 @@ def format_messages_for_prompt(messages: List[Message]) -> str:
         content = (msg.content or "").strip()
         if not content:
             continue
-        # Truncate very long messages
-        if len(content) > 1000:
-            content = content[:1000] + "..."
         lines.append(f"[{role}]: {content}")
     return "\n\n".join(lines)
 
 
-def format_existing_pages(memopedia: Memopedia) -> str:
-    """Format existing pages for the prompt, including keywords."""
-    tree = memopedia.get_tree()
-    lines: List[str] = []
-
-    category_names = {
-        "people": "人物",
-        "terms": "用語",
-        "plans": "予定",
-    }
-
-    def _list_pages(pages: List[Dict], prefix: str = "") -> None:
-        for page in pages:
-            # Skip root pages
-            if not page["id"].startswith("root_"):
-                keywords = page.get("keywords", [])
-                if keywords:
-                    kw_str = f" [キーワード: {', '.join(keywords)}]"
-                else:
-                    kw_str = ""
-                lines.append(f"{prefix}- {page['title']}: {page['summary']}{kw_str}")
-            children = page.get("children", [])
-            if children:
-                _list_pages(children, prefix + "  ")
-
-    for category in ["people", "terms", "plans"]:
-        pages = tree.get(category, [])
-        if pages:
-            lines.append(f"\n### {category_names[category]}")
-            _list_pages(pages)
-
-    if not lines:
-        return "(まだページはありません)"
-
-    return "\n".join(lines)
-
+# NOTE: format_existing_pages() has been removed and consolidated into
+# Memopedia.get_tree_markdown() in sai_memory/memopedia/core.py
+# Use: memopedia.get_tree_markdown(include_keywords=True, show_markers=False)
 
 def extract_knowledge_from_text(
     client,
@@ -188,7 +152,7 @@ def extract_knowledge_from_text(
     """Extract knowledge from arbitrary text (e.g., system prompt)."""
     LOGGER.info(f"Extracting knowledge from {source_type}...")
 
-    existing_pages = format_existing_pages(memopedia)
+    existing_pages = memopedia.get_tree_markdown(include_keywords=True, show_markers=False)
 
     prompt_template = load_prompt("memopedia_system_prompt_extraction")
     prompt = prompt_template.format(
@@ -465,7 +429,7 @@ def extract_knowledge(
         if not conversation.strip():
             continue
 
-        existing_pages = format_existing_pages(memopedia)
+        existing_pages = memopedia.get_tree_markdown(include_keywords=False, show_markers=False)
 
         prompt_template = load_prompt("memopedia_extraction")
         prompt = prompt_template.format(
@@ -809,11 +773,11 @@ def main():
         context_length = model_config.get("context_length", 128000)
         auto_provider = model_config.get("provider", "gemini")
     else:
-        # No config found, use as-is with defaults
-        LOGGER.warning(f"Model '{args.model}' not found in config, using default provider 'gemini'")
-        actual_model_id = args.model
-        context_length = 128000
-        auto_provider = "gemini"
+        # No config found - error out instead of falling back
+        LOGGER.error(f"Model '{args.model}' not found in config.")
+        LOGGER.error("Use --list-models to see available options.")
+        conn.close()
+        sys.exit(1)
 
     # Use explicit provider if specified, otherwise use auto-detected
     provider = args.provider if args.provider else auto_provider

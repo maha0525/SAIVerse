@@ -373,14 +373,13 @@ def regenerate_entry_from_messages(
     # Find model config
     model_id, model_config = find_model_config(model_name)
     
-    if model_config:
-        actual_model_id = model_config.get("model", model_name)
-        auto_provider = model_config.get("provider", "gemini")
-    else:
-        LOGGER.warning(f"Model '{model_name}' not found in config, using default provider 'gemini'")
-        actual_model_id = model_name
-        auto_provider = "gemini"
-        model_config = {}
+    if not model_config:
+        raise ValueError(f"Model '{model_name}' not found in config. Use --list-models to see available options.")
+    
+    actual_model_id = model_config.get("model", model_name)
+    auto_provider = model_config.get("provider")
+    if not auto_provider:
+        raise ValueError(f"Model '{model_name}' is missing 'provider' in config.")
     
     provider = auto_provider
     context_length = model_config.get("context_length", 128000)
@@ -635,10 +634,10 @@ def main():
         context_length = model_config.get("context_length", 128000)
         auto_provider = model_config.get("provider", "gemini")
     else:
-        LOGGER.warning(f"Model '{args.model}' not found in config, using default provider 'gemini'")
-        actual_model_id = args.model
-        context_length = 128000
-        auto_provider = "gemini"
+        LOGGER.error(f"Model '{args.model}' not found in config.")
+        LOGGER.error("Use --list-models to see available options.")
+        conn.close()
+        sys.exit(1)
 
     provider = args.provider if args.provider else auto_provider
 
@@ -664,11 +663,10 @@ def main():
     memopedia_context = None
     try:
         from sai_memory.memopedia import Memopedia, init_memopedia_tables
-        from scripts.build_memopedia import format_existing_pages
 
         init_memopedia_tables(conn)
         memopedia = Memopedia(conn)
-        memopedia_context = format_existing_pages(memopedia)
+        memopedia_context = memopedia.get_tree_markdown(include_keywords=False, show_markers=False)
         if memopedia_context and memopedia_context != "(まだページはありません)":
             LOGGER.info(f"Using Memopedia context for semantic memory ({len(memopedia_context)} chars)")
         else:
@@ -723,8 +721,7 @@ def main():
                 LOGGER.info(f"  [Memory Weave] Extracting Memopedia from batch ({len(batch_messages)} messages)...")
 
                 # Update Memopedia context for Generator (semantic memory gets updated per batch)
-                from scripts.build_memopedia import format_existing_pages
-                updated_memopedia_context = format_existing_pages(memopedia)
+                updated_memopedia_context = memopedia.get_tree_markdown(include_keywords=False, show_markers=False)
                 if updated_memopedia_context and updated_memopedia_context != "(まだページはありません)":
                     generator.memopedia_context = updated_memopedia_context
 

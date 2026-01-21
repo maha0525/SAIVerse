@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
-import { Loader2, ChevronLeft, BookOpen, Layers, Trash2 } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Loader2, ChevronLeft, BookOpen, Layers, Trash2, Play, Settings } from 'lucide-react';
 import styles from './ArasujiViewer.module.css';
+import ModalOverlay from '../common/ModalOverlay';
 
 interface ArasujiEntry {
     id: string;
@@ -44,6 +45,25 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     const [showList, setShowList] = useState(true);
     const [sourceMessages, setSourceMessages] = useState<SourceMessage[]>([]);
     const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+
+    // Generation state
+    const [showGenerateModal, setShowGenerateModal] = useState(false);
+    const [generateSettings, setGenerateSettings] = useState({
+        maxMessages: 500,
+        batchSize: 20,
+        consolidationSize: 10,
+        withMemopedia: false,
+    });
+    const [generationJob, setGenerationJob] = useState<{
+        jobId: string;
+        status: string;
+        progress: number | null;
+        total: number | null;
+        message: string | null;
+        entriesCreated: number | null;
+        error: string | null;
+    } | null>(null);
+    const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
     useEffect(() => {
         loadStats();
@@ -171,6 +191,78 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         }
     };
 
+    // Chronicle Generation
+    const startGeneration = async () => {
+        setShowGenerateModal(false);
+        try {
+            const res = await fetch(`/api/people/${personaId}/arasuji/generate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    max_messages: generateSettings.maxMessages,
+                    batch_size: generateSettings.batchSize,
+                    consolidation_size: generateSettings.consolidationSize,
+                    with_memopedia: generateSettings.withMemopedia,
+                }),
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setGenerationJob({
+                    jobId: data.job_id,
+                    status: 'started',
+                    progress: null,
+                    total: null,
+                    message: 'Starting...',
+                    entriesCreated: null,
+                    error: null,
+                });
+                startPolling(data.job_id);
+            } else {
+                const err = await res.json();
+                alert(`生成開始に失敗: ${err.detail || 'Unknown error'}`);
+            }
+        } catch (e) {
+            console.error('Failed to start generation', e);
+            alert('生成開始中にエラー');
+        }
+    };
+
+    const startPolling = useCallback((jobId: string) => {
+        if (pollingRef.current) clearInterval(pollingRef.current);
+        pollingRef.current = setInterval(async () => {
+            try {
+                const res = await fetch(`/api/people/${personaId}/arasuji/generate/${jobId}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    setGenerationJob({
+                        jobId: data.job_id,
+                        status: data.status,
+                        progress: data.progress,
+                        total: data.total,
+                        message: data.message,
+                        entriesCreated: data.entries_created,
+                        error: data.error,
+                    });
+                    if (data.status === 'completed' || data.status === 'failed') {
+                        if (pollingRef.current) clearInterval(pollingRef.current);
+                        // Refresh data
+                        loadStats();
+                        loadEntries(levelFilter);
+                    }
+                }
+            } catch (e) {
+                console.error('Polling error', e);
+            }
+        }, 2000);
+    }, [personaId, levelFilter]);
+
+    // Cleanup polling on unmount
+    useEffect(() => {
+        return () => {
+            if (pollingRef.current) clearInterval(pollingRef.current);
+        };
+    }, []);
+
 
     const formatMessageRange = (entry: ArasujiEntry): string => {
         if (entry.level !== 1) return "";
@@ -245,12 +337,55 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         <Layers size={18} />
                         <span>Chronicle 一覧 (Memory Weave)</span>
                     </div>
-                    {stats && (
-                        <div className={styles.statsInfo}>
-                            計 {stats.total_count} 件
-                        </div>
-                    )}
+                    <div className={styles.headerActions}>
+                        <button
+                            className={styles.generateBtn}
+                            onClick={() => setShowGenerateModal(true)}
+                            disabled={generationJob?.status === 'running'}
+                            title="Chronicleを生成"
+                        >
+                            <Play size={14} />
+                            生成
+                        </button>
+                        {stats && (
+                            <span className={styles.statsInfo}>
+                                計 {stats.total_count} 件
+                            </span>
+                        )}
+                    </div>
                 </div>
+
+                {/* Generation Progress */}
+                {generationJob && (generationJob.status === 'running' || generationJob.status === 'started') && (
+                    <div className={styles.progressBar}>
+                        <div className={styles.progressInfo}>
+                            <Loader2 className={styles.loader} size={14} />
+                            <span>{generationJob.message || 'Processing...'}</span>
+                        </div>
+                        {generationJob.total && generationJob.total > 0 && (
+                            <div className={styles.progressTrack}>
+                                <div
+                                    className={styles.progressFill}
+                                    style={{ width: `${((generationJob.progress || 0) / generationJob.total) * 100}%` }}
+                                />
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* Generation Result */}
+                {generationJob && generationJob.status === 'completed' && (
+                    <div className={styles.generationResult}>
+                        <span>✅ {generationJob.message}</span>
+                        <button onClick={() => setGenerationJob(null)}>×</button>
+                    </div>
+                )}
+                {generationJob && generationJob.status === 'failed' && (
+                    <div className={styles.generationError}>
+                        <span>❌ {generationJob.error || 'Generation failed'}</span>
+                        <button onClick={() => setGenerationJob(null)}>×</button>
+                    </div>
+                )}
 
                 {/* Level Filter */}
                 {stats && stats.max_level > 0 && (
@@ -279,9 +414,13 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         <div className={styles.emptyState}>
                             <BookOpen size={48} />
                             <p>Chronicle がまだ生成されていません</p>
-                            <p className={styles.hint}>
-                                build_arasuji.py スクリプトを使用して Chronicle を生成し、Memory Weave を構築できます
-                            </p>
+                            <button
+                                className={styles.generateBtnLarge}
+                                onClick={() => setShowGenerateModal(true)}
+                            >
+                                <Play size={16} />
+                                Chronicle を生成
+                            </button>
                         </div>
                     ) : (
                         entries.map((entry) => (
@@ -490,6 +629,70 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     )}
                 </div>
             </div>
+
+            {/* Generation Settings Modal */}
+            {showGenerateModal && (
+                <ModalOverlay onClose={() => setShowGenerateModal(false)} className={styles.modalOverlay}>
+                    <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
+                        <h3>Chronicle 生成設定</h3>
+                        <div className={styles.formGroup}>
+                            <label>最大処理メッセージ数</label>
+                            <input
+                                type="number"
+                                value={generateSettings.maxMessages || ''}
+                                onChange={(e) => setGenerateSettings(s => ({ ...s, maxMessages: parseInt(e.target.value) || 0 }))}
+                                min={20}
+                                step={100}
+                                placeholder="500"
+                            />
+                            <span className={styles.hint}>未処理メッセージを古い順に最大この件数まで処理</span>
+                        </div>
+                        <div className={styles.formGroup}>
+                            <label>バッチサイズ</label>
+                            <input
+                                type="number"
+                                value={generateSettings.batchSize || ''}
+                                onChange={(e) => setGenerateSettings(s => ({ ...s, batchSize: parseInt(e.target.value) || 0 }))}
+                                min={5}
+                                max={50}
+                                placeholder="20"
+                            />
+                            <span className={styles.hint}>1つのChronicleにまとめるメッセージ数（未処理がこれ未満なら処理しない）</span>
+                        </div>
+                        <div className={styles.formGroup}>
+                            <label>統合サイズ</label>
+                            <input
+                                type="number"
+                                value={generateSettings.consolidationSize || ''}
+                                onChange={(e) => setGenerateSettings(s => ({ ...s, consolidationSize: parseInt(e.target.value) || 0 }))}
+                                min={3}
+                                max={20}
+                                placeholder="10"
+                            />
+                            <span className={styles.hint}>上位レベルにまとめるエントリ数</span>
+                        </div>
+                        <div className={styles.formGroup}>
+                            <label className={styles.checkboxLabel}>
+                                <input
+                                    type="checkbox"
+                                    checked={generateSettings.withMemopedia}
+                                    onChange={(e) => setGenerateSettings(s => ({ ...s, withMemopedia: e.target.checked }))}
+                                />
+                                Memopedia も同時生成
+                            </label>
+                        </div>
+                        <div className={styles.modalActions}>
+                            <button className={styles.cancelBtn} onClick={() => setShowGenerateModal(false)}>
+                                キャンセル
+                            </button>
+                            <button className={styles.startBtn} onClick={startGeneration}>
+                                <Play size={14} />
+                                生成開始
+                            </button>
+                        </div>
+                    </div>
+                </ModalOverlay>
+            )}
         </div>
     );
 }

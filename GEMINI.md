@@ -69,4 +69,22 @@ python scripts/migrate_to_user_data.py
 - **Playbooks**: JSON in `builtin_data/playbooks/` or `user_data/playbooks/`
 - **Tools**: Defined in `tools/defs/` or `user_data/tools/`
 
+## UI Conventions
+
+### Modal Components
+
+When creating modal dialogs, **always use the shared `ModalOverlay` component**:
+
+```tsx
+import ModalOverlay from '@/components/common/ModalOverlay';
+
+<ModalOverlay onClose={handleClose} className={styles.overlay}>
+    <div className={styles.modal} onClick={e => e.stopPropagation()}>
+        {/* modal content */}
+    </div>
+</ModalOverlay>
+```
+
+**Do NOT** use direct `onClick={onClose}` on overlay divs — this causes modals to close unexpectedly when users drag from input fields.
+
 For detailed documentation, see `CLAUDE.md`.

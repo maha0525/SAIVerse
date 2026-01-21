@@ -1,4 +1,4 @@
-"""Ollama client with automatic Gemini fallback."""
+"""Ollama client."""
 from __future__ import annotations
 
 import copy
@@ -10,35 +10,51 @@ from typing import Any, Dict, Iterator, List, Optional
 import requests
 
 from .base import LLMClient
-from .gemini import GeminiClient
+
+
+# Allowed request parameters for Ollama (similar to OpenAI)
+OLLAMA_ALLOWED_REQUEST_PARAMS = {
+    "temperature",
+    "top_p",
+    "top_k",
+    "num_predict",  # max_tokens equivalent
+    "stop",
+    "seed",
+    "repeat_penalty",
+    "presence_penalty",
+    "frequency_penalty",
+    "mirostat",
+    "mirostat_tau",
+    "mirostat_eta",
+}
 
 
 class OllamaClient(LLMClient):
     """Client for Ollama API."""
 
-    def __init__(self, model: str, context_length: int, supports_images: bool = False) -> None:
+    def __init__(
+        self,
+        model: str,
+        context_length: int,
+        supports_images: bool = False,
+        request_kwargs: Optional[Dict[str, Any]] = None,
+        base_url: Optional[str] = None,
+    ) -> None:
         super().__init__(supports_images=supports_images)
         self.model = model
         self.context_length = context_length
-        self.fallback_client: Optional[LLMClient] = None
-        base_env = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST")
+        self._request_kwargs: Dict[str, Any] = dict(request_kwargs or {})
+        # Use explicit base_url parameter first, then environment variables
+        base_env = base_url or os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST")
         probed = self._probe_base(base_env)
         if probed is None:
-            try:
-                logging.info("No reachable Ollama; falling back to Gemini 1.5 Flash")
-                self.fallback_client = GeminiClient("gemini-1.5-flash")
-                self.base = ""
-                self.url = ""
-                self.chat_url = ""
-            except Exception as exc:
-                logging.warning("Gemini fallback unavailable: %s", exc)
-                self.base = "http://127.0.0.1:11434"
-                self.url = f"{self.base}/v1/chat/completions"
-                self.chat_url = f"{self.base}/api/chat"
+            # No fallback - just set default URL and let calls fail with clear error
+            logging.warning("No responsive Ollama endpoint found during initialization")
+            self.base = "http://127.0.0.1:11434"
         else:
             self.base = probed
-            self.url = f"{self.base}/v1/chat/completions"
-            self.chat_url = f"{self.base}/api/chat"
+        self.url = f"{self.base}/v1/chat/completions"
+        self.chat_url = f"{self.base}/api/chat"
 
     def _probe_base(self, preferred: Optional[str]) -> Optional[str]:
         """Pick a reachable Ollama base URL with quick connect timeouts."""
@@ -93,15 +109,14 @@ class OllamaClient(LLMClient):
             len(messages),
         )
 
-        if self.fallback_client is not None and not self.url:
-            return self.fallback_client.generate(
-                messages,
-                tools,
-                response_schema=response_schema,
-                temperature=temperature,
-            )
-
         options: Dict[str, Any] = {"num_ctx": self.context_length}
+        # Apply request_kwargs to options
+        for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
+                    "repeat_penalty", "presence_penalty", "frequency_penalty",
+                    "mirostat", "mirostat_tau", "mirostat_eta"):
+            if key in self._request_kwargs:
+                options[key] = self._request_kwargs[key]
+        # Override with explicit temperature parameter if provided
         if temperature is not None:
             options["temperature"] = temperature
 
@@ -173,15 +188,8 @@ class OllamaClient(LLMClient):
             return content
         except Exception:
             logging.exception("Ollama v1 endpoint failed")
-            if self.fallback_client is not None:
-                return self.fallback_client.generate(
-                    messages,
-                    tools,
-                    response_schema=response_schema,
-                    temperature=temperature,
-                )
             if not self.chat_url:
-                return "エラーが発生しました。"
+                raise RuntimeError("Ollama v1 endpoint failed and no fallback available")
             try:
                 legacy_payload: Dict[str, Any] = {
                     "model": self.model,
@@ -215,7 +223,7 @@ class OllamaClient(LLMClient):
                 return content
             except Exception:
                 logging.exception("Ollama fallback /api/chat failed")
-                return "エラーが発生しました。"
+                raise RuntimeError("Ollama API call failed on all endpoints")
 
     def generate_stream(
         self,
@@ -225,16 +233,15 @@ class OllamaClient(LLMClient):
         *,
         temperature: float | None = None,
     ) -> Iterator[str]:
-        if self.fallback_client is not None and not self.url:
-            yield from self.fallback_client.generate_stream(
-                messages,
-                tools,
-                response_schema=response_schema,
-                temperature=temperature,
-            )
-            return
         try:
             stream_options: Dict[str, Any] = {"num_ctx": self.context_length}
+            # Apply request_kwargs to options
+            for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
+                        "repeat_penalty", "presence_penalty", "frequency_penalty",
+                        "mirostat", "mirostat_tau", "mirostat_eta"):
+                if key in self._request_kwargs:
+                    stream_options[key] = self._request_kwargs[key]
+            # Override with explicit temperature parameter if provided
             if temperature is not None:
                 stream_options["temperature"] = temperature
             stream_payload: Dict[str, Any] = {
@@ -278,15 +285,7 @@ class OllamaClient(LLMClient):
                     logging.warning("Failed to parse stream chunk: %s", chunk)
         except Exception:
             logging.exception("Ollama call failed")
-            if self.fallback_client is not None:
-                yield from self.fallback_client.generate_stream(
-                    messages,
-                    tools,
-                    response_schema=response_schema,
-                    temperature=temperature,
-                )
-            else:
-                yield "エラーが発生しました。"
+            raise RuntimeError("Ollama streaming failed")
 
     def generate_with_tool_detection(
         self,
@@ -303,16 +302,15 @@ class OllamaClient(LLMClient):
             {"type": "tool_call", "tool_name": str, "tool_args": dict} if tool call detected
             {"type": "both", "content": str, "tool_name": str, "tool_args": dict} if both
         """
-        # Delegate to fallback client if available
-        if self.fallback_client is not None and not self.url:
-            return self.fallback_client.generate_with_tool_detection(
-                messages,
-                tools,
-                temperature=temperature,
-            )
-
         tools_spec = tools or []
         options: Dict[str, Any] = {"num_ctx": self.context_length}
+        # Apply request_kwargs to options
+        for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
+                    "repeat_penalty", "presence_penalty", "frequency_penalty",
+                    "mirostat", "mirostat_tau", "mirostat_eta"):
+            if key in self._request_kwargs:
+                options[key] = self._request_kwargs[key]
+        # Override with explicit temperature parameter if provided
         if temperature is not None:
             options["temperature"] = temperature
 
@@ -339,13 +337,7 @@ class OllamaClient(LLMClient):
             data = response.json()
         except Exception:
             logging.exception("Ollama tool detection call failed")
-            if self.fallback_client is not None:
-                return self.fallback_client.generate_with_tool_detection(
-                    messages,
-                    tools,
-                    temperature=temperature,
-                )
-            return {"type": "text", "content": "エラーが発生しました。"}
+            raise RuntimeError("Ollama tool detection call failed")
 
         choice = data.get("choices", [{}])[0]
         message = choice.get("message", {})
@@ -379,6 +371,18 @@ class OllamaClient(LLMClient):
                 }
         else:
             return {"type": "text", "content": content}
+
+    def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
+        """Apply model-specific request parameters."""
+        if not isinstance(parameters, dict):
+            return
+        for key, value in parameters.items():
+            if key not in OLLAMA_ALLOWED_REQUEST_PARAMS:
+                continue
+            if value is None:
+                self._request_kwargs.pop(key, None)
+            else:
+                self._request_kwargs[key] = value
 
 
 __all__ = ["OllamaClient"]

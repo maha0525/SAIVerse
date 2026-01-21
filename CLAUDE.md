@@ -59,8 +59,9 @@ python sds_server.py
 
 # Launch a city instance
 python main.py city_a
-# city_a runs on http://127.0.0.1:8000 (UI) and port 8001 (API)
-# city_b runs on http://127.0.0.1:9000 (UI) and port 9001 (API)
+# city_a backend runs on http://127.0.0.1:8000 (includes /api and /gradio)
+# city_b backend runs on http://127.0.0.1:9000 (includes /api and /gradio)
+# Frontend (Next.js) runs on http://localhost:3000
 
 # With custom options
 python main.py city_a --db-file database/data/saiverse.db --sds-url http://127.0.0.1:8080

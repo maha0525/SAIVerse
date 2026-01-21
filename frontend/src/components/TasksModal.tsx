@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, CheckCircle, Clock, AlertCircle, Plus, RefreshCw, ChevronRight } from 'lucide-react';
 import styles from './TasksModal.module.css';
+import ModalOverlay from './common/ModalOverlay';
 
 interface TaskStep {
     id: string;
@@ -118,12 +119,7 @@ export default function TasksModal({ isOpen, onClose, personaId }: TasksModalPro
     if (!isOpen) return null;
 
     return (
-        <div
-            className={styles.overlay}
-            onClick={onClose}
-            onTouchStart={(e) => e.stopPropagation()}
-            onTouchMove={(e) => e.stopPropagation()}
-        >
+        <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
                     <h2 className={styles.title}>Tasks: {personaId}</h2>
@@ -243,6 +239,6 @@ export default function TasksModal({ isOpen, onClose, personaId }: TasksModalPro
                     </div>
                 </div>
             </div>
-        </div>
+        </ModalOverlay>
     );
 }

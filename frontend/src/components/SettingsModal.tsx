@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { X, Save, Loader2, Settings } from 'lucide-react';
 import styles from './SettingsModal.module.css';
 import ImageUpload from './common/ImageUpload';
+import ModalOverlay from './common/ModalOverlay';
 
 interface SettingsModalProps {
     isOpen: boolean;
@@ -145,12 +146,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     if (!isOpen) return null;
 
     return (
-        <div
-            className={styles.overlay}
-            onClick={onClose}
-            onTouchStart={(e) => e.stopPropagation()}
-            onTouchMove={(e) => e.stopPropagation()}
-        >
+        <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
                     <h2><Settings size={22} /> Persona Settings</h2>
@@ -297,6 +293,6 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     </button>
                 </div>
             </div>
-        </div>
+        </ModalOverlay>
     );
 }
