@@ -163,6 +163,14 @@ from llm_router import route
 from .base import EmptyResponseError, IncompleteStreamError, LLMClient, get_llm_logger
 from .utils import content_to_text, is_truthy_flag, merge_reasoning_strings
 
+
+class ChunkTimeoutError(RuntimeError):
+    """Raised when no chunks are received within the timeout period (socket stall)."""
+
+
+# Timeout for receiving chunks during streaming (detects socket stalls)
+CHUNK_TIMEOUT_SECONDS = int(os.getenv("GEMINI_CHUNK_TIMEOUT_SECONDS", "60"))
+
 GEMINI_SAFETY_CONFIG = [
     types.SafetySetting(
         category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
@@ -320,7 +328,7 @@ class GeminiClient(LLMClient):
     @staticmethod
     def _is_timeout_error(err: Exception) -> bool:
         """Check if the error is a timeout that should be retried."""
-        return isinstance(err, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.WriteTimeout))
+        return isinstance(err, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.WriteTimeout, ChunkTimeoutError))
 
     def _convert_messages(
         self,
@@ -570,38 +578,79 @@ class GeminiClient(LLMClient):
                     use_tools,
                     cfg_kwargs,
                 )
-                resp = client.models.generate_content(
-                    model=model_id,
-                    contents=contents,
-                    config=types.GenerateContentConfig(**cfg_kwargs),
-                )
-                get_llm_logger().debug("Gemini raw:\n%s", resp)
 
-                if not resp.candidates:
-                    # No candidates: raise for retry
-                    logging.warning("Gemini returned no candidates (empty response)")
-                    raise EmptyResponseError("No candidates in response")
+                # Use streaming internally to detect socket stalls (no data for CHUNK_TIMEOUT_SECONDS)
+                # For tool calls, we still need to use non-streaming to handle function_call properly
+                if use_tools:
+                    # Non-streaming for tool calls
+                    resp = client.models.generate_content(
+                        model=model_id,
+                        contents=contents,
+                        config=types.GenerateContentConfig(**cfg_kwargs),
+                    )
+                    get_llm_logger().debug("Gemini raw:\n%s", resp)
+                    
+                    if not resp.candidates:
+                        logging.warning("Gemini returned no candidates (empty response)")
+                        raise EmptyResponseError("No candidates in response")
 
-                candidate = resp.candidates[0]
-                if not candidate.content or not candidate.content.parts:
-                    # Empty content/parts: raise for retry
-                    logging.warning("Gemini returned empty content/parts")
-                    raise EmptyResponseError("Empty content or parts in response")
+                    candidate = resp.candidates[0]
+                    if not candidate.content or not candidate.content.parts:
+                        logging.warning("Gemini returned empty content/parts")
+                        raise EmptyResponseError("Empty content or parts in response")
 
-                text, reasoning_entries = self._separate_parts(candidate.content.parts)
-                if not text and not candidate.function_call:
-                    # No text and no function call: raise for retry
+                    text, reasoning_entries = self._separate_parts(candidate.content.parts)
+                    fcall = getattr(candidate, "function_call", None)
+                else:
+                    # Streaming with chunk timeout for non-tool calls
+                    stream = client.models.generate_content_stream(
+                        model=model_id,
+                        contents=contents,
+                        config=types.GenerateContentConfig(**cfg_kwargs),
+                    )
+                    
+                    # Collect chunks with timeout monitoring
+                    all_parts: List[Any] = []
+                    last_chunk_time = time.time()
+                    saw_any_chunk = False
+                    
+                    for chunk in stream:
+                        now = time.time()
+                        if now - last_chunk_time > CHUNK_TIMEOUT_SECONDS and not saw_any_chunk:
+                            raise ChunkTimeoutError(
+                                f"No response received within {CHUNK_TIMEOUT_SECONDS} seconds (socket stall)"
+                            )
+                        last_chunk_time = now
+                        saw_any_chunk = True
+                        get_llm_logger().debug("Gemini stream chunk:\n%s", chunk)
+                        
+                        if chunk.candidates:
+                            candidate = chunk.candidates[0]
+                            if candidate.content and candidate.content.parts:
+                                all_parts.extend(candidate.content.parts)
+                    
+                    if not saw_any_chunk:
+                        logging.warning("Gemini returned no chunks at all")
+                        raise EmptyResponseError("No chunks received from stream")
+                    
+                    if not all_parts:
+                        logging.warning("Gemini stream had no parts")
+                        raise EmptyResponseError("No parts in stream response")
+                    
+                    text, reasoning_entries = self._separate_parts(all_parts)
+                    fcall = None  # No function calls in non-tool mode
+
+                if not text and not fcall:
                     logging.warning("Gemini returned no text and no function call")
                     raise EmptyResponseError("No text or function call in response")
 
-                fcall = getattr(candidate, "function_call", None)
-                fcall_name = getattr(fcall, "name", None)
+                fcall_name = getattr(fcall, "name", None) if fcall else None
                 if not fcall_name or not isinstance(fcall_name, str):
                     self._store_reasoning(reasoning_entries)
                     prefix = "\n".join(snippets)
                     return prefix + ("\n" if prefix and text else "") + text
 
-                # tool call branch
+                # tool call branch (only reachable if use_tools=True)
                 fn = TOOL_REGISTRY.get(fcall_name)
                 if fn is None:
                     logging.warning("Unknown tool '%s' from Gemini; abort", fcall_name)

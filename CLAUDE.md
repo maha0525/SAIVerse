@@ -43,7 +43,7 @@ python scripts/import_all_playbooks.py --force
 python scripts/import_all_playbooks.py --dry-run
 
 # Run migrations (for schema changes - preserves data)
-python database/migrate.py --db database/data/saiverse.db
+python database/migrate.py --db user_data/database/saiverse.db
 ```
 
 **Safety Notes:**
@@ -64,7 +64,7 @@ python main.py city_a
 # Frontend (Next.js) runs on http://localhost:3000
 
 # With custom options
-python main.py city_a --db-file database/data/saiverse.db --sds-url http://127.0.0.1:8080
+python main.py city_a --db-file user_data/database/saiverse.db --sds-url http://127.0.0.1:8080
 ```
 
 ### Testing
@@ -118,7 +118,7 @@ python test_fixtures/setup_test_env.py --clean
 
 SAIVerse automatically backs up both saiverse.db and persona memory.db files on startup:
 
-- **saiverse.db**: Backed up to `database/data/saiverse.db_backup_YYYYMMDD_HHMMSS_mmm.bak`
+- **saiverse.db**: Backed up to `user_data/database/saiverse.db_backup_YYYYMMDD_HHMMSS_mmm.bak`
   - Keeps last 10 backups by default (configurable via `SAIVERSE_DB_BACKUP_KEEP`)
   - Enable/disable: `SAIVERSE_DB_BACKUP_ON_START=true` (enabled by default)
 
@@ -507,7 +507,7 @@ Critical settings (see `.env.example`):
   1. **MUST update** `sea/playbook_models.py` node definitions (`LLMNodeDef`, `ToolNodeDef`, etc.) with the new field
   2. Without this, `save_playbook` tool and `import_playbook.py` will silently drop the field during Pydantic validation
   3. After updating the schema, **re-import all affected playbooks** using `python scripts/import_playbook.py --file <path>`
-  4. Verify the field is stored in DB: `sqlite3 database/data/saiverse.db "SELECT nodes_json FROM playbooks WHERE name='<playbook_name>'"`
+   4. Verify the field is stored in DB: `sqlite3 user_data/database/saiverse.db "SELECT nodes_json FROM playbooks WHERE name='<playbook_name>'"`
 
 **Debug LLM calls**: Check `raw_llm_responses.txt` or set `SAIVERSE_SEA_DUMP` for playbook traces
 

@@ -329,19 +329,22 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         try:
             query = db.query(BuildingModel)
             df = pd.read_sql(query.statement, query.session.bind)
-            return df[
-                [
-                    "BUILDINGID",
-                    "BUILDINGNAME",
-                    "CAPACITY",
-                    "DESCRIPTION",
-                    "SYSTEM_INSTRUCTION",
-                    "CITYID",
-                    "AUTO_INTERVAL_SEC",
-                ]
+            # Select columns, handling missing columns gracefully
+            columns = [
+                "BUILDINGID",
+                "BUILDINGNAME",
+                "CAPACITY",
+                "DESCRIPTION",
+                "SYSTEM_INSTRUCTION",
+                "CITYID",
+                "AUTO_INTERVAL_SEC",
+                "EXTRA_PROMPT_FILES",
             ]
+            existing_cols = [c for c in columns if c in df.columns]
+            return df[existing_cols]
         finally:
             db.close()
+
 
     def create_building(
         self,
@@ -439,6 +442,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         tool_ids: List[int],
         interval: int,
         image_path: Optional[str] = None,
+        extra_prompt_files: Optional[List[str]] = None,
     ) -> str:
         db = self.SessionLocal()
         try:
@@ -466,6 +470,10 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             # Update image path if provided (allow clearing by passing empty string)
             if image_path is not None:
                 building.IMAGE_PATH = image_path.strip() if image_path.strip() else None
+            # Update extra prompt files
+            if extra_prompt_files is not None:
+                import json
+                building.EXTRA_PROMPT_FILES = json.dumps(extra_prompt_files) if extra_prompt_files else None
 
             db.query(BuildingToolLink).filter_by(BUILDINGID=building_id).delete(
                 synchronize_session=False
@@ -489,6 +497,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             return f"Error: {exc}"
         finally:
             db.close()
+
 
     # --- Item management ---
 

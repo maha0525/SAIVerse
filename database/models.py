@@ -59,7 +59,9 @@ class Building(Base):
     DESCRIPTION = Column(String(1024), default="", nullable=False)
     AUTO_INTERVAL_SEC = Column(Integer, default=10, nullable=False)
     IMAGE_PATH = Column(String(512), nullable=True)  # Building interior image for LLM visual context
+    EXTRA_PROMPT_FILES = Column(Text, nullable=True)  # JSON: ["body_control.txt", "other.txt"]
     __table_args__ = (UniqueConstraint('CITYID', 'BUILDINGNAME', name='uq_city_building_name'),)
+
 
 class City(Base):
     __tablename__ = "city"

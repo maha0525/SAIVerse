@@ -32,6 +32,7 @@ interface Building {
     CITYID: number;
     AUTO_INTERVAL_SEC: number;
     IMAGE_PATH?: string;  // Building interior image for visual context
+    EXTRA_PROMPT_FILES?: string;  // JSON array of extra prompt file names
 }
 
 interface Tool {
@@ -110,6 +111,7 @@ export default function WorldEditor() {
     const [blueprints, setBlueprints] = useState<Blueprint[]>([]);
     const [modelChoices, setModelChoices] = useState<ModelChoice[]>([]);
     const [playbooks, setPlaybooks] = useState<Playbook[]>([]);
+    const [availablePrompts, setAvailablePrompts] = useState<string[]>([]);
 
     // Selection State
     const [selectedCity, setSelectedCity] = useState<City | null>(null);
@@ -126,7 +128,7 @@ export default function WorldEditor() {
     // Load Data
     useEffect(() => {
         loadCities(); // Always load cities as they are needed for ID resolution
-        if (subTab === 'building') { loadBuildings(); loadTools(); }
+        if (subTab === 'building') { loadBuildings(); loadTools(); loadAvailablePrompts(); }
         if (subTab === 'ai') { loadBuildings(); loadAIs(); loadModels(); }
         if (subTab === 'item') { loadItems(); loadBuildings(); loadAIs(); }
         if (subTab === 'blueprint') { loadBlueprints(); loadBuildings(); } // Buildings for spawn
@@ -142,6 +144,7 @@ export default function WorldEditor() {
     const loadBlueprints = async () => { try { const res = await fetch('/api/db/tables/blueprint'); if (res.ok) setBlueprints(await res.json()); } catch (e) { } };
     const loadModels = async () => { try { const res = await fetch('/api/info/models'); if (res.ok) setModelChoices(await res.json()); } catch (e) { } };
     const loadPlaybooks = async () => { try { const res = await fetch('/api/world/playbooks'); if (res.ok) setPlaybooks(await res.json()); } catch (e) { } };
+    const loadAvailablePrompts = async () => { try { const res = await fetch('/api/world/prompts/available'); if (res.ok) setAvailablePrompts(await res.json()); } catch (e) { } };
 
     // --- City Handlers ---
     const handleCitySelect = (city: City) => {
@@ -155,10 +158,15 @@ export default function WorldEditor() {
     // --- Building Handlers ---
     const handleBuildingSelect = (b: Building) => {
         setSelectedBuilding(b);
+        // Parse extra prompt files from JSON
+        let extraPrompts: string[] = [];
+        if (b.EXTRA_PROMPT_FILES) {
+            try { extraPrompts = JSON.parse(b.EXTRA_PROMPT_FILES); } catch { extraPrompts = []; }
+        }
         // Fetch tools ... (simplified for now to empty list or need separate fetch)
         fetch(`/api/db/tables/building_tool_link`).then(r => r.json()).then(links => {
             const ids = links.filter((l: any) => l.BUILDINGID === b.BUILDINGID).map((l: any) => l.TOOLID);
-            setFormData({ name: b.BUILDINGNAME, description: b.DESCRIPTION, capacity: b.CAPACITY, system_instruction: b.SYSTEM_INSTRUCTION, city_id: b.CITYID, auto_interval: b.AUTO_INTERVAL_SEC, tool_ids: ids, image_path: b.IMAGE_PATH || '' });
+            setFormData({ name: b.BUILDINGNAME, description: b.DESCRIPTION, capacity: b.CAPACITY, system_instruction: b.SYSTEM_INSTRUCTION, city_id: b.CITYID, auto_interval: b.AUTO_INTERVAL_SEC, tool_ids: ids, image_path: b.IMAGE_PATH || '', extra_prompt_files: extraPrompts });
         });
     };
     const handleCreateBuilding = async () => { try { await fetch('/api/world/buildings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, description: formData.description || "", capacity: formData.capacity || 1, system_instruction: formData.system_instruction || "", city_id: formData.city_id, building_id: formData.building_id || null }) }); loadBuildings(); setFormData({}); } catch (e) { } };
@@ -349,6 +357,45 @@ export default function WorldEditor() {
                                 />
                                 <small style={{ color: '#666', fontSize: '0.8rem' }}>Building interior image for LLM visual context</small>
                             </Field>}
+                            {selectedBuilding && <div className={styles.field}>
+                                <label>Extra Prompt Files</label>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                                    {(formData.extra_prompt_files || []).map((file: string, idx: number) => (
+                                        <div key={idx} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                                            <Select
+                                                value={file}
+                                                onChange={(e: any) => {
+                                                    const updated = [...(formData.extra_prompt_files || [])];
+                                                    updated[idx] = e.target.value;
+                                                    setFormData({ ...formData, extra_prompt_files: updated });
+                                                }}
+                                                style={{ flex: 1 }}
+                                            >
+                                                <option value="">Select prompt file...</option>
+                                                {availablePrompts.map(p => <option key={p} value={p}>{p}</option>)}
+                                            </Select>
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    const updated = (formData.extra_prompt_files || []).filter((_: string, i: number) => i !== idx);
+                                                    setFormData({ ...formData, extra_prompt_files: updated });
+                                                }}
+                                                style={{ padding: '0.25rem 0.5rem', background: '#f87171', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+                                            >
+                                                ×
+                                            </button>
+                                        </div>
+                                    ))}
+                                    <button
+                                        type="button"
+                                        onClick={() => setFormData({ ...formData, extra_prompt_files: [...(formData.extra_prompt_files || []), ''] })}
+                                        style={{ padding: '0.5rem', background: '#e2e8f0', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+                                    >
+                                        + Add Prompt File
+                                    </button>
+                                </div>
+                                <small style={{ color: '#666', fontSize: '0.8rem' }}>Additional system prompts to include when personas are in this building</small>
+                            </div>}
                             {selectedBuilding && <div className={styles.field}><label>Tools</label><div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>{tools.map(t => (<label key={t.TOOLID} style={{ background: '#f1f5f9', padding: '0.25rem' }}><input type="checkbox" checked={(formData.tool_ids || []).includes(t.TOOLID)} onChange={e => { const c = formData.tool_ids || []; if (e.target.checked) setFormData({ ...formData, tool_ids: [...c, t.TOOLID] }); else setFormData({ ...formData, tool_ids: c.filter((id: any) => id !== t.TOOLID) }); }} /> {t.TOOLNAME}</label>))}</div></div>}
                             {renderFormActions(selectedBuilding, handleCreateBuilding, handleUpdateBuilding, handleDeleteBuilding)}
                         </div>

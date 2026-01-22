@@ -359,6 +359,17 @@ class SAIVerseManager(
             db_buildings = db.query(BuildingModel).filter(BuildingModel.CITYID == self.city_id).all()
             buildings = []
             for db_b in db_buildings:
+                # Parse extra prompt files from JSON
+                extra_prompts: List[str] = []
+                raw_extra = getattr(db_b, 'EXTRA_PROMPT_FILES', None)
+                if raw_extra:
+                    try:
+                        extra_prompts = json.loads(raw_extra)
+                        if not isinstance(extra_prompts, list):
+                            extra_prompts = []
+                    except json.JSONDecodeError:
+                        extra_prompts = []
+
                 building = Building(
                     building_id=db_b.BUILDINGID,
                     name=db_b.BUILDINGNAME,
@@ -367,7 +378,8 @@ class SAIVerseManager(
                     entry_prompt=db_b.ENTRY_PROMPT or "",
                     auto_prompt=db_b.AUTO_PROMPT or "",
                     description=db_b.DESCRIPTION or "", # 探索結果で説明を表示するために追加
-                    auto_interval_sec=db_b.AUTO_INTERVAL_SEC if hasattr(db_b, 'AUTO_INTERVAL_SEC') else 10
+                    auto_interval_sec=db_b.AUTO_INTERVAL_SEC if hasattr(db_b, 'AUTO_INTERVAL_SEC') else 10,
+                    extra_prompt_files=extra_prompts,
                 )
                 buildings.append(building)
             logging.info(f"Loaded and created {len(buildings)} buildings from database.")
@@ -377,6 +389,7 @@ class SAIVerseManager(
             return [] # エラー時は空リストを返す
         finally:
             db.close()
+
 
     def _ensure_item_tables(self, engine) -> None:
         """Ensure newly introduced item-related tables exist."""

@@ -112,12 +112,29 @@ class PersonaGenerationMixin:
             attitude_var=self.emotion["attitude"]["variance"],
         )
         system_text = system_text + "\n" + emotion_text
+
+        # Load extra prompt files from Building configuration
+        extra_prompt_files = getattr(building, "extra_prompt_files", []) or []
+        if extra_prompt_files:
+            from data_paths import find_file, PROMPTS_DIR
+            for filename in extra_prompt_files:
+                prompt_path = find_file(PROMPTS_DIR, filename)
+                if prompt_path:
+                    try:
+                        extra_content = prompt_path.read_text(encoding="utf-8")
+                        system_text += "\n\n" + extra_content
+                    except Exception as exc:
+                        logging.warning("Failed to load extra prompt '%s': %s", filename, exc)
+                else:
+                    logging.warning("Extra prompt file not found: %s", filename)
+
         if info_text:
             system_text += (
                 "\n\n## 追加情報\n"
                 "常時稼働モジュールから以下の情報が提供されています。今回の発話にこの情報を利用してください。\n"
                 f"{info_text}"
             )
+
 
         base_chars = len(system_text)
         if extra_system_prompt:
