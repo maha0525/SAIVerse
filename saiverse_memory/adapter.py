@@ -25,6 +25,17 @@ from sai_memory.memory.storage import (
     init_db,
     compose_message_content,
     replace_message_embeddings,
+    # Stelis thread management
+    StelisThread,
+    create_stelis_thread,
+    get_stelis_thread,
+    get_stelis_thread_depth,
+    get_stelis_children,
+    get_active_stelis_threads,
+    complete_stelis_thread,
+    get_stelis_ancestor_chain,
+    calculate_stelis_window_tokens,
+    delete_stelis_thread,
 )
 from sai_memory.backup import BackupError, run_backup
 
@@ -741,11 +752,245 @@ class SAIMemoryAdapter:
 
     def get_current_thread(self) -> Optional[str]:
         """Get the current active thread suffix.
-        
+
         Returns:
             The thread suffix (not the full thread_id), or None if not set
         """
         return self._active_persona_suffix()
+
+    # ------------------------------------------------------------------
+    # Stelis Thread Management
+    # ------------------------------------------------------------------
+
+    def start_stelis_thread(
+        self,
+        parent_thread_id: Optional[str] = None,
+        window_ratio: float = 0.8,
+        chronicle_prompt: Optional[str] = None,
+        max_depth: int = 3,
+    ) -> Optional[StelisThread]:
+        """Create and activate a new Stelis thread.
+
+        Args:
+            parent_thread_id: Parent thread ID (uses current active if None)
+            window_ratio: Portion of parent's window to allocate (default 0.8)
+            chronicle_prompt: Prompt for Chronicle generation on completion
+            max_depth: Maximum nesting depth allowed
+
+        Returns:
+            Created StelisThread, or None if max depth exceeded or error
+        """
+        if not self._ready:
+            return None
+
+        # Resolve parent thread
+        if parent_thread_id is None:
+            suffix = self._active_persona_suffix()
+            parent_thread_id = self._thread_id(None, thread_suffix=suffix)
+
+        try:
+            with self._db_lock:
+                # Check depth limit
+                current_depth = get_stelis_thread_depth(self.conn, parent_thread_id)
+                # -1 means not a Stelis thread (root), so effective depth is 0
+                effective_depth = max(0, current_depth + 1) if current_depth >= 0 else 0
+
+                if effective_depth >= max_depth:
+                    LOGGER.warning(
+                        "Cannot create Stelis thread: depth %d >= max %d",
+                        effective_depth, max_depth
+                    )
+                    return None
+
+                # Generate new thread ID
+                import uuid
+                stelis_suffix = f"stelis_{uuid.uuid4().hex[:8]}"
+                new_thread_id = self._thread_id(None, thread_suffix=stelis_suffix)
+
+                # Create the Stelis thread record
+                stelis = create_stelis_thread(
+                    self.conn,
+                    thread_id=new_thread_id,
+                    parent_thread_id=parent_thread_id,
+                    window_ratio=window_ratio,
+                    chronicle_prompt=chronicle_prompt,
+                )
+
+                # Also create the regular thread entry
+                get_or_create_thread(self.conn, new_thread_id, self.settings.resource_id)
+
+                LOGGER.info(
+                    "Created Stelis thread %s (parent=%s, depth=%d, ratio=%.2f)",
+                    new_thread_id, parent_thread_id, stelis.depth, window_ratio
+                )
+
+                return stelis
+
+        except Exception as exc:
+            LOGGER.warning("Failed to create Stelis thread: %s", exc)
+            return None
+
+    def end_stelis_thread(
+        self,
+        thread_id: Optional[str] = None,
+        status: str = "completed",
+        chronicle_summary: Optional[str] = None,
+    ) -> bool:
+        """End a Stelis thread and optionally store Chronicle summary.
+
+        Args:
+            thread_id: Thread ID to end (uses current active if None)
+            status: Final status ('completed' or 'aborted')
+            chronicle_summary: Summary text to store
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self._ready:
+            return False
+
+        if thread_id is None:
+            suffix = self._active_persona_suffix()
+            thread_id = self._thread_id(None, thread_suffix=suffix)
+
+        try:
+            with self._db_lock:
+                stelis = get_stelis_thread(self.conn, thread_id)
+                if not stelis:
+                    LOGGER.warning("Not a Stelis thread: %s", thread_id)
+                    return False
+
+                success = complete_stelis_thread(
+                    self.conn,
+                    thread_id,
+                    status=status,
+                    chronicle_summary=chronicle_summary,
+                )
+
+                if success:
+                    LOGGER.info(
+                        "Ended Stelis thread %s with status=%s",
+                        thread_id, status
+                    )
+
+                return success
+
+        except Exception as exc:
+            LOGGER.warning("Failed to end Stelis thread %s: %s", thread_id, exc)
+            return False
+
+    def get_stelis_info(self, thread_id: Optional[str] = None) -> Optional[StelisThread]:
+        """Get Stelis thread information.
+
+        Args:
+            thread_id: Thread ID to query (uses current active if None)
+
+        Returns:
+            StelisThread object or None if not a Stelis thread
+        """
+        if not self._ready:
+            return None
+
+        if thread_id is None:
+            suffix = self._active_persona_suffix()
+            thread_id = self._thread_id(None, thread_suffix=suffix)
+
+        try:
+            with self._db_lock:
+                return get_stelis_thread(self.conn, thread_id)
+        except Exception as exc:
+            LOGGER.warning("Failed to get Stelis info for %s: %s", thread_id, exc)
+            return None
+
+    def can_start_stelis(self, max_depth: int = 3, parent_thread_id: Optional[str] = None) -> bool:
+        """Check if a new Stelis thread can be started.
+
+        Args:
+            max_depth: Maximum allowed depth
+            parent_thread_id: Parent thread to check (uses current active if None)
+
+        Returns:
+            True if a new Stelis thread can be created
+        """
+        if not self._ready:
+            return False
+
+        if parent_thread_id is None:
+            suffix = self._active_persona_suffix()
+            parent_thread_id = self._thread_id(None, thread_suffix=suffix)
+
+        try:
+            with self._db_lock:
+                depth = get_stelis_thread_depth(self.conn, parent_thread_id)
+                # -1 means not a Stelis thread, so next would be depth 0
+                effective_next_depth = max(0, depth + 1) if depth >= 0 else 0
+                return effective_next_depth < max_depth
+        except Exception as exc:
+            LOGGER.warning("Failed to check Stelis depth: %s", exc)
+            return False
+
+    def get_stelis_window_tokens(
+        self,
+        model_context_length: int,
+        thread_id: Optional[str] = None,
+    ) -> int:
+        """Calculate available window tokens for a thread.
+
+        Args:
+            model_context_length: Full model context length
+            thread_id: Thread to calculate for (uses current active if None)
+
+        Returns:
+            Available tokens for this thread
+        """
+        if not self._ready:
+            return model_context_length
+
+        if thread_id is None:
+            suffix = self._active_persona_suffix()
+            thread_id = self._thread_id(None, thread_suffix=suffix)
+
+        try:
+            with self._db_lock:
+                return calculate_stelis_window_tokens(
+                    self.conn, thread_id, model_context_length
+                )
+        except Exception as exc:
+            LOGGER.warning("Failed to calculate Stelis window: %s", exc)
+            return model_context_length
+
+    def get_stelis_parent_thread(self, thread_id: Optional[str] = None) -> Optional[str]:
+        """Get the parent thread ID of a Stelis thread.
+
+        Args:
+            thread_id: Thread to query (uses current active if None)
+
+        Returns:
+            Parent thread ID or None if not a Stelis thread
+        """
+        stelis = self.get_stelis_info(thread_id)
+        if stelis:
+            return stelis.parent_thread_id
+        return None
+
+    def list_active_stelis_threads(self, parent_thread_id: Optional[str] = None) -> List[StelisThread]:
+        """List all active Stelis threads.
+
+        Args:
+            parent_thread_id: Filter by parent (None for all active threads)
+
+        Returns:
+            List of active StelisThread objects
+        """
+        if not self._ready:
+            return []
+
+        try:
+            with self._db_lock:
+                return get_active_stelis_threads(self.conn, parent_thread_id)
+        except Exception as exc:
+            LOGGER.warning("Failed to list active Stelis threads: %s", exc)
+            return []
 
     def _append_message(
         self,
