@@ -397,10 +397,10 @@ class SEARuntime:
                 LOGGER.info("[DEBUG] available_tools = %s", available_tools)
                 
                 if available_tools:
-                    LOGGER.info("[DEBUG] Entering tools mode (generate_with_tool_detection)")
-                    # Tool calling mode
+                    LOGGER.info("[DEBUG] Entering tools mode (generate with tools)")
+                    # Tool calling mode - use unified generate() with tools
                     tools_spec = self._build_tools_spec(available_tools, llm_client)
-                    result = llm_client.generate_with_tool_detection(
+                    result = llm_client.generate(
                         messages,
                         tools=tools_spec,
                         temperature=self._default_temperature(persona),

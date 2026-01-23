@@ -106,15 +106,70 @@ class LlamaCppClient(LLMClient):
         *,
         temperature: float | None = None,
         **_: Any,
-    ) -> str:
-        """Generate response using llama.cpp."""
+    ) -> str | Dict[str, Any]:
+        """Unified generate method.
+        
+        Args:
+            messages: Conversation messages
+            tools: Tool specifications. If provided, returns Dict with tool detection.
+                   If None or empty, returns str with text response.
+            response_schema: Optional JSON schema for structured output
+            temperature: Optional temperature override
+            
+        Returns:
+            str: Text response when tools is None or empty
+            Dict: Tool detection result when tools is provided
+        """
         self._ensure_model_loaded()
+        tools_spec = tools or []
+        use_tools = bool(tools_spec)
+        temp = temperature if temperature is not None else self._temperature
 
         try:
-            # Use override temperature if provided
-            temp = temperature if temperature is not None else self._temperature
+            if use_tools:
+                # Tool mode: return Dict with tool detection
+                response = self._llm.create_chat_completion(
+                    messages=messages,
+                    temperature=temp,
+                    top_p=self._top_p,
+                    max_tokens=self._max_tokens,
+                    tools=tools_spec,
+                )
 
-            # llama-cpp-python expects OpenAI-style messages
+                choice = response["choices"][0]
+                message = choice["message"]
+                content = message.get("content", "") or ""
+                tool_calls = message.get("tool_calls", [])
+
+                if tool_calls:
+                    tc = tool_calls[0]
+                    func = tc.get("function", {})
+                    tool_name = func.get("name", "")
+                    try:
+                        tool_args = json.loads(func.get("arguments", "{}"))
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "Tool call arguments invalid JSON: %s", func.get("arguments")
+                        )
+                        tool_args = {}
+
+                    if content.strip():
+                        return {
+                            "type": "both",
+                            "content": content,
+                            "tool_name": tool_name,
+                            "tool_args": tool_args,
+                        }
+                    else:
+                        return {
+                            "type": "tool_call",
+                            "tool_name": tool_name,
+                            "tool_args": tool_args,
+                        }
+                else:
+                    return {"type": "text", "content": content}
+
+            # Non-tool mode: return str
             response = self._llm.create_chat_completion(
                 messages=messages,
                 temperature=temp,
@@ -180,64 +235,24 @@ class LlamaCppClient(LLMClient):
         temperature: float | None = None,
         **_: Any,
     ) -> Dict[str, Any]:
-        """Generate response with tool call detection.
-
-        Returns:
-            {"type": "text", "content": str} if no tool call
-            {"type": "tool_call", "tool_name": str, "tool_args": dict} if tool call detected
+        """DEPRECATED: Use generate(messages, tools=[...]) instead.
+        
+        This method is kept for backward compatibility with existing code.
+        It simply delegates to generate() with tools specified.
         """
-        self._ensure_model_loaded()
-
-        try:
-            temp = temperature if temperature is not None else self._temperature
-
-            # Convert tools to OpenAI format if needed
-            tools_spec = tools or []
-
-            response = self._llm.create_chat_completion(
-                messages=messages,
-                temperature=temp,
-                top_p=self._top_p,
-                max_tokens=self._max_tokens,
-                tools=tools_spec if tools_spec else None,
-            )
-
-            choice = response["choices"][0]
-            message = choice["message"]
-            content = message.get("content", "") or ""
-            tool_calls = message.get("tool_calls", [])
-
-            if tool_calls:
-                tc = tool_calls[0]
-                func = tc.get("function", {})
-                tool_name = func.get("name", "")
-                try:
-                    tool_args = json.loads(func.get("arguments", "{}"))
-                except json.JSONDecodeError:
-                    logger.warning(
-                        "Tool call arguments invalid JSON: %s", func.get("arguments")
-                    )
-                    tool_args = {}
-
-                if content.strip():
-                    return {
-                        "type": "both",
-                        "content": content,
-                        "tool_name": tool_name,
-                        "tool_args": tool_args,
-                    }
-                else:
-                    return {
-                        "type": "tool_call",
-                        "tool_name": tool_name,
-                        "tool_args": tool_args,
-                    }
-            else:
-                return {"type": "text", "content": content}
-
-        except Exception as exc:
-            logger.error("llama.cpp tool detection failed: %s", exc, exc_info=True)
-            raise RuntimeError(f"llama.cpp tool detection call failed: {exc}")
+        import warnings
+        warnings.warn(
+            "generate_with_tool_detection() is deprecated. Use generate(messages, tools=[...]) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        tools_spec = tools or []
+        if not tools_spec:
+            result = self.generate(messages, temperature=temperature)
+            if isinstance(result, str):
+                return {"type": "text", "content": result}
+            return result
+        return self.generate(messages, tools=tools_spec, temperature=temperature)
 
 
 __all__ = ["LlamaCppClient"]
