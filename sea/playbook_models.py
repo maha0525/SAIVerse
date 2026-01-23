@@ -31,6 +31,8 @@ class NodeType(str, Enum):
     SUBPLAY = "subplay"
     SET = "set"
     EXEC = "exec"
+    STELIS_START = "stelis_start"
+    STELIS_END = "stelis_end"
 
 
 class LLMNodeDef(BaseModel):
@@ -219,7 +221,65 @@ class ExecNodeDef(BaseModel):
     )
 
 
-NodeDef = Union[LLMNodeDef, ToolNodeDef, SpeakNodeDef, ThinkNodeDef, MemorizeNodeDef, SayNodeDef, PassNodeDef, SubPlayNodeDef, SetNodeDef, ExecNodeDef]
+class StelisConfig(BaseModel):
+    """Configuration for Stelis thread creation."""
+    window_ratio: float = Field(
+        default=0.8,
+        description="Portion of parent's context window to allocate to this Stelis thread (0.0-1.0)."
+    )
+    max_depth: int = Field(
+        default=3,
+        description="Maximum allowed nesting depth for Stelis threads."
+    )
+    chronicle_prompt: Optional[str] = Field(
+        default=None,
+        description="Prompt to use when generating Chronicle summary on completion."
+    )
+
+
+class StelisStartNodeDef(BaseModel):
+    """Node that starts a new Stelis thread for hierarchical context management."""
+    id: str
+    type: Literal[NodeType.STELIS_START]
+    label: Optional[str] = Field(
+        default=None,
+        description="Human-readable label for this Stelis session (e.g., 'Coding Session')."
+    )
+    stelis_config: Optional[StelisConfig] = Field(
+        default=None,
+        description="Configuration for the Stelis thread. Uses defaults if not specified."
+    )
+    next: Optional[str] = None
+    conditional_next: Optional[ConditionalNext] = Field(
+        default=None,
+        description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
+
+
+class StelisEndNodeDef(BaseModel):
+    """Node that ends the current Stelis thread and returns to parent context."""
+    id: str
+    type: Literal[NodeType.STELIS_END]
+    label: Optional[str] = Field(
+        default=None,
+        description="Human-readable label for logging purposes."
+    )
+    generate_chronicle: bool = Field(
+        default=True,
+        description="Whether to generate a Chronicle summary when ending the Stelis thread."
+    )
+    next: Optional[str] = None
+    conditional_next: Optional[ConditionalNext] = Field(
+        default=None,
+        description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
+
+
+NodeDef = Union[
+    LLMNodeDef, ToolNodeDef, SpeakNodeDef, ThinkNodeDef, MemorizeNodeDef,
+    SayNodeDef, PassNodeDef, SubPlayNodeDef, SetNodeDef, ExecNodeDef,
+    StelisStartNodeDef, StelisEndNodeDef
+]
 
 class InputParam(BaseModel):
     name: str

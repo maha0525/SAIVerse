@@ -97,6 +97,27 @@ def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_thread_created ON messages(thread_id, created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_resource_created ON messages(resource_id, created_at)")
     _ensure_column(conn, "messages", "metadata", "TEXT")
+
+    # Stelis threads table for hierarchical context management
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS stelis_threads (
+            thread_id TEXT PRIMARY KEY,
+            parent_thread_id TEXT,
+            depth INTEGER NOT NULL DEFAULT 0,
+            window_ratio REAL NOT NULL DEFAULT 0.8,
+            status TEXT NOT NULL DEFAULT 'active',
+            chronicle_prompt TEXT,
+            chronicle_summary TEXT,
+            created_at INTEGER,
+            completed_at INTEGER,
+            FOREIGN KEY (parent_thread_id) REFERENCES stelis_threads(thread_id)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_stelis_parent ON stelis_threads(parent_thread_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_stelis_status ON stelis_threads(status)")
+
     conn.commit()
     return conn
 
@@ -473,7 +494,7 @@ def delete_thread(conn: sqlite3.Connection, thread_id: str) -> bool:
         # 1. Get message IDs to delete embeddings
         cur = conn.execute("SELECT id FROM messages WHERE thread_id=?", (thread_id,))
         msg_ids = [row[0] for row in cur.fetchall()]
-        
+
         if not msg_ids:
             # Maybe just thread record exists
             conn.execute("DELETE FROM threads WHERE id=?", (thread_id,))
@@ -489,13 +510,219 @@ def delete_thread(conn: sqlite3.Connection, thread_id: str) -> bool:
 
         # 3. Delete messages
         conn.execute("DELETE FROM messages WHERE thread_id=?", (thread_id,))
-        
+
         # 4. Delete thread record
         conn.execute("DELETE FROM threads WHERE id=?", (thread_id,))
-        
+
         conn.commit()
         return True
     except Exception as e:
         debug(f"Error deleting thread {thread_id}: {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Stelis Thread Management
+# ---------------------------------------------------------------------------
+
+@dataclass
+class StelisThread:
+    """Represents a Stelis thread for hierarchical context management."""
+    thread_id: str
+    parent_thread_id: Optional[str]
+    depth: int
+    window_ratio: float
+    status: str  # 'active', 'completed', 'aborted'
+    chronicle_prompt: Optional[str]
+    chronicle_summary: Optional[str]
+    created_at: Optional[int]
+    completed_at: Optional[int]
+
+
+def _row_to_stelis_thread(row: Tuple[Any, ...]) -> StelisThread:
+    return StelisThread(
+        thread_id=row[0],
+        parent_thread_id=row[1],
+        depth=int(row[2]),
+        window_ratio=float(row[3]),
+        status=row[4],
+        chronicle_prompt=row[5],
+        chronicle_summary=row[6],
+        created_at=int(row[7]) if row[7] is not None else None,
+        completed_at=int(row[8]) if row[8] is not None else None,
+    )
+
+
+def create_stelis_thread(
+    conn: sqlite3.Connection,
+    thread_id: str,
+    parent_thread_id: Optional[str] = None,
+    window_ratio: float = 0.8,
+    chronicle_prompt: Optional[str] = None,
+) -> StelisThread:
+    """Create a new Stelis thread with parent relationship."""
+    # Calculate depth from parent
+    depth = 0
+    if parent_thread_id:
+        parent = get_stelis_thread(conn, parent_thread_id)
+        if parent:
+            depth = parent.depth + 1
+
+    created_at = int(time.time())
+    conn.execute(
+        """
+        INSERT INTO stelis_threads
+        (thread_id, parent_thread_id, depth, window_ratio, status, chronicle_prompt, created_at)
+        VALUES (?, ?, ?, ?, 'active', ?, ?)
+        """,
+        (thread_id, parent_thread_id, depth, window_ratio, chronicle_prompt, created_at),
+    )
+    conn.commit()
+
+    return StelisThread(
+        thread_id=thread_id,
+        parent_thread_id=parent_thread_id,
+        depth=depth,
+        window_ratio=window_ratio,
+        status="active",
+        chronicle_prompt=chronicle_prompt,
+        chronicle_summary=None,
+        created_at=created_at,
+        completed_at=None,
+    )
+
+
+def get_stelis_thread(conn: sqlite3.Connection, thread_id: str) -> Optional[StelisThread]:
+    """Get a Stelis thread by ID."""
+    cur = conn.execute(
+        """
+        SELECT thread_id, parent_thread_id, depth, window_ratio, status,
+               chronicle_prompt, chronicle_summary, created_at, completed_at
+        FROM stelis_threads WHERE thread_id = ?
+        """,
+        (thread_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    return _row_to_stelis_thread(row)
+
+
+def get_stelis_thread_depth(conn: sqlite3.Connection, thread_id: str) -> int:
+    """Get the depth of a thread (0 for root, -1 if not a Stelis thread)."""
+    stelis = get_stelis_thread(conn, thread_id)
+    if stelis:
+        return stelis.depth
+    return -1  # Not a Stelis thread (could be root or regular thread)
+
+
+def get_stelis_children(conn: sqlite3.Connection, parent_thread_id: str) -> List[StelisThread]:
+    """Get all direct child Stelis threads."""
+    cur = conn.execute(
+        """
+        SELECT thread_id, parent_thread_id, depth, window_ratio, status,
+               chronicle_prompt, chronicle_summary, created_at, completed_at
+        FROM stelis_threads WHERE parent_thread_id = ?
+        ORDER BY created_at ASC
+        """,
+        (parent_thread_id,),
+    )
+    return [_row_to_stelis_thread(row) for row in cur.fetchall()]
+
+
+def get_active_stelis_threads(conn: sqlite3.Connection, parent_thread_id: Optional[str] = None) -> List[StelisThread]:
+    """Get all active Stelis threads, optionally filtered by parent."""
+    if parent_thread_id:
+        cur = conn.execute(
+            """
+            SELECT thread_id, parent_thread_id, depth, window_ratio, status,
+                   chronicle_prompt, chronicle_summary, created_at, completed_at
+            FROM stelis_threads WHERE status = 'active' AND parent_thread_id = ?
+            ORDER BY created_at ASC
+            """,
+            (parent_thread_id,),
+        )
+    else:
+        cur = conn.execute(
+            """
+            SELECT thread_id, parent_thread_id, depth, window_ratio, status,
+                   chronicle_prompt, chronicle_summary, created_at, completed_at
+            FROM stelis_threads WHERE status = 'active'
+            ORDER BY created_at ASC
+            """
+        )
+    return [_row_to_stelis_thread(row) for row in cur.fetchall()]
+
+
+def complete_stelis_thread(
+    conn: sqlite3.Connection,
+    thread_id: str,
+    status: str = "completed",
+    chronicle_summary: Optional[str] = None,
+) -> bool:
+    """Mark a Stelis thread as completed or aborted."""
+    if status not in ("completed", "aborted"):
+        status = "completed"
+
+    completed_at = int(time.time())
+    cur = conn.execute(
+        """
+        UPDATE stelis_threads
+        SET status = ?, chronicle_summary = ?, completed_at = ?
+        WHERE thread_id = ?
+        """,
+        (status, chronicle_summary, completed_at, thread_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def get_stelis_ancestor_chain(conn: sqlite3.Connection, thread_id: str) -> List[StelisThread]:
+    """Get the chain of ancestors from root to the given thread (inclusive)."""
+    chain: List[StelisThread] = []
+    current_id: Optional[str] = thread_id
+
+    while current_id:
+        stelis = get_stelis_thread(conn, current_id)
+        if not stelis:
+            break
+        chain.append(stelis)
+        current_id = stelis.parent_thread_id
+
+    return chain[::-1]  # Reverse to get root-first order
+
+
+def calculate_stelis_window_tokens(
+    conn: sqlite3.Connection,
+    thread_id: str,
+    model_context_length: int,
+) -> int:
+    """Calculate the available window tokens for a Stelis thread."""
+    chain = get_stelis_ancestor_chain(conn, thread_id)
+    if not chain:
+        # Not a Stelis thread, use full context
+        return model_context_length
+
+    window_size = model_context_length
+    for stelis in chain:
+        window_size = int(window_size * stelis.window_ratio)
+
+    return window_size
+
+
+def delete_stelis_thread(conn: sqlite3.Connection, thread_id: str, cascade: bool = False) -> bool:
+    """Delete a Stelis thread record (does not delete messages)."""
+    try:
+        if cascade:
+            # Delete all descendants first
+            children = get_stelis_children(conn, thread_id)
+            for child in children:
+                delete_stelis_thread(conn, child.thread_id, cascade=True)
+
+        conn.execute("DELETE FROM stelis_threads WHERE thread_id = ?", (thread_id,))
+        conn.commit()
+        return True
+    except Exception as e:
+        debug(f"Error deleting stelis thread {thread_id}: {e}")
         return False
 

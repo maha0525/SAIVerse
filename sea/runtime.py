@@ -250,6 +250,8 @@ class SEARuntime:
             exec_node_factory=lambda node_def: self._lg_exec_node(node_def, playbook, persona, building_id, auto_mode, _lg_outputs, event_callback),
             subplay_node_factory=lambda node_def: self._lg_subplay_node(node_def, persona, building_id, playbook, auto_mode, _lg_outputs, event_callback),
             set_node_factory=lambda node_def: self._lg_set_node(node_def, playbook, event_callback),
+            stelis_start_node_factory=lambda node_def: self._lg_stelis_start_node(node_def, persona, playbook, event_callback),
+            stelis_end_node_factory=lambda node_def: self._lg_stelis_end_node(node_def, persona, playbook, event_callback),
         )
         if not compiled:
             # Update execution state: compilation failed, reset to idle
@@ -1300,6 +1302,293 @@ class SEARuntime:
         except Exception as exc:
             LOGGER.warning("[sea][set] Failed to evaluate expression '%s': %s", expr, exc)
             return 0
+
+    # ---------------- Stelis Thread Nodes -----------------
+
+    def _lg_stelis_start_node(
+        self,
+        node_def: Any,
+        persona: Any,
+        playbook: PlaybookSchema,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+    ):
+        """Create a node that starts a new Stelis thread for hierarchical context management."""
+
+        async def node(state: dict):
+            # Check for cancellation
+            cancellation_token = state.get("_cancellation_token")
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
+
+            node_id = getattr(node_def, "id", "stelis_start")
+            label = getattr(node_def, "label", None) or "Stelis Session"
+
+            # Send status event
+            if event_callback:
+                event_callback({
+                    "type": "status",
+                    "content": f"{playbook.name} / {node_id}",
+                    "playbook": playbook.name,
+                    "node": node_id
+                })
+
+            # Get Stelis configuration
+            stelis_config = getattr(node_def, "stelis_config", None) or {}
+            if hasattr(stelis_config, "__dict__"):
+                # Convert Pydantic model to dict if needed
+                stelis_config = {
+                    "window_ratio": getattr(stelis_config, "window_ratio", 0.8),
+                    "max_depth": getattr(stelis_config, "max_depth", 3),
+                    "chronicle_prompt": getattr(stelis_config, "chronicle_prompt", None),
+                }
+
+            window_ratio = stelis_config.get("window_ratio", 0.8)
+            max_depth = stelis_config.get("max_depth", 3)
+            chronicle_prompt = stelis_config.get("chronicle_prompt")
+
+            # Get memory adapter from persona
+            memory_adapter = getattr(persona, "memory_adapter", None)
+            if not memory_adapter:
+                LOGGER.warning("[stelis] No memory adapter found for persona %s", persona.persona_id)
+                state["stelis_error"] = "No memory adapter available"
+                state["stelis_available"] = False
+                return state
+
+            # Check if we can start a new Stelis thread
+            if not memory_adapter.can_start_stelis(max_depth=max_depth):
+                error_msg = f"Stelis max depth exceeded (max={max_depth})"
+                LOGGER.warning("[stelis] %s for persona %s", error_msg, persona.persona_id)
+                state["stelis_error"] = error_msg
+                state["stelis_available"] = False
+                return state
+
+            # Get current thread as parent
+            current_suffix = memory_adapter.get_current_thread()
+            parent_thread_id = memory_adapter._thread_id(None, thread_suffix=current_suffix)
+
+            # Create new Stelis thread
+            stelis = memory_adapter.start_stelis_thread(
+                parent_thread_id=parent_thread_id,
+                window_ratio=window_ratio,
+                chronicle_prompt=chronicle_prompt,
+                max_depth=max_depth,
+            )
+
+            if not stelis:
+                LOGGER.error("[stelis] Failed to create Stelis thread for persona %s", persona.persona_id)
+                state["stelis_error"] = "Failed to create Stelis thread"
+                state["stelis_available"] = False
+                return state
+
+            # Switch to new Stelis thread
+            memory_adapter.set_active_thread(stelis.thread_id)
+
+            # Update state with Stelis info
+            state["stelis_thread_id"] = stelis.thread_id
+            state["stelis_parent_thread_id"] = parent_thread_id
+            state["stelis_depth"] = stelis.depth
+            state["stelis_window_ratio"] = window_ratio
+            state["stelis_label"] = label
+            state["stelis_available"] = True
+
+            LOGGER.info(
+                "[stelis] Started Stelis thread %s (parent=%s, depth=%d, ratio=%.2f, label=%s)",
+                stelis.thread_id, parent_thread_id, stelis.depth, window_ratio, label
+            )
+
+            # Emit event for UI
+            if event_callback:
+                event_callback({
+                    "type": "stelis_start",
+                    "thread_id": stelis.thread_id,
+                    "parent_thread_id": parent_thread_id,
+                    "depth": stelis.depth,
+                    "label": label,
+                })
+
+            return state
+
+        return node
+
+    def _lg_stelis_end_node(
+        self,
+        node_def: Any,
+        persona: Any,
+        playbook: PlaybookSchema,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+    ):
+        """Create a node that ends the current Stelis thread and returns to parent context."""
+
+        async def node(state: dict):
+            # Check for cancellation
+            cancellation_token = state.get("_cancellation_token")
+            if cancellation_token:
+                cancellation_token.raise_if_cancelled()
+
+            node_id = getattr(node_def, "id", "stelis_end")
+            label = getattr(node_def, "label", None) or "End Stelis Session"
+            generate_chronicle = getattr(node_def, "generate_chronicle", True)
+
+            # Send status event
+            if event_callback:
+                event_callback({
+                    "type": "status",
+                    "content": f"{playbook.name} / {node_id}",
+                    "playbook": playbook.name,
+                    "node": node_id
+                })
+
+            # Get memory adapter from persona
+            memory_adapter = getattr(persona, "memory_adapter", None)
+            if not memory_adapter:
+                LOGGER.warning("[stelis] No memory adapter found for persona %s", persona.persona_id)
+                return state
+
+            # Get current Stelis thread info from state
+            current_thread_id = state.get("stelis_thread_id")
+            parent_thread_id = state.get("stelis_parent_thread_id")
+
+            if not current_thread_id or not parent_thread_id:
+                LOGGER.warning("[stelis] STELIS_END called without active Stelis context")
+                return state
+
+            # Verify we're in a Stelis thread
+            stelis_info = memory_adapter.get_stelis_info(current_thread_id)
+            if not stelis_info:
+                LOGGER.warning("[stelis] Current thread %s is not a Stelis thread", current_thread_id)
+                return state
+
+            # Generate Chronicle summary if requested
+            chronicle_summary = None
+            if generate_chronicle:
+                chronicle_summary = self._generate_stelis_chronicle(
+                    persona,
+                    current_thread_id,
+                    stelis_info.chronicle_prompt
+                )
+                LOGGER.info(
+                    "[stelis] Generated Chronicle for thread %s: %s...",
+                    current_thread_id,
+                    chronicle_summary[:100] if chronicle_summary else "(empty)"
+                )
+
+            # End the Stelis thread
+            success = memory_adapter.end_stelis_thread(
+                thread_id=current_thread_id,
+                status="completed",
+                chronicle_summary=chronicle_summary,
+            )
+
+            if not success:
+                LOGGER.error("[stelis] Failed to end Stelis thread %s", current_thread_id)
+
+            # Switch back to parent thread
+            memory_adapter.set_active_thread(parent_thread_id)
+
+            # Store Chronicle in state for potential use
+            if chronicle_summary:
+                state["stelis_chronicle"] = chronicle_summary
+
+            # Clear Stelis state
+            state["stelis_thread_id"] = None
+            state["stelis_parent_thread_id"] = None
+            state["stelis_depth"] = None
+
+            LOGGER.info(
+                "[stelis] Ended Stelis thread %s, returned to parent %s",
+                current_thread_id, parent_thread_id
+            )
+
+            # Emit event for UI
+            if event_callback:
+                event_callback({
+                    "type": "stelis_end",
+                    "thread_id": current_thread_id,
+                    "parent_thread_id": parent_thread_id,
+                    "chronicle_generated": generate_chronicle,
+                })
+
+            return state
+
+        return node
+
+    def _generate_stelis_chronicle(
+        self,
+        persona: Any,
+        thread_id: str,
+        chronicle_prompt: Optional[str] = None,
+    ) -> Optional[str]:
+        """Generate a Chronicle summary for a Stelis thread.
+
+        This creates a concise summary of the conversation/work done in the
+        Stelis thread, which will be stored and can be referenced later.
+        """
+        memory_adapter = getattr(persona, "memory_adapter", None)
+        if not memory_adapter:
+            return None
+
+        # Get messages from the Stelis thread
+        try:
+            messages = memory_adapter.get_thread_messages(thread_id, page=0, page_size=1000)
+        except Exception as exc:
+            LOGGER.warning("[stelis] Failed to get messages for Chronicle: %s", exc)
+            return None
+
+        if not messages:
+            return None
+
+        # Build content for summarization
+        content_parts = []
+        for msg in messages:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if content:
+                content_parts.append(f"[{role}]: {content[:500]}")
+
+        if not content_parts:
+            return None
+
+        conversation_text = "\n".join(content_parts[-50:])  # Last 50 messages
+
+        # Use default prompt if not specified
+        if not chronicle_prompt:
+            chronicle_prompt = (
+                "Please summarize the following conversation/work session concisely. "
+                "Focus on: what was done, key decisions made, and any important outcomes. "
+                "Keep the summary under 500 characters."
+            )
+
+        # Get LLM client for summarization
+        try:
+            from llm_clients import get_llm_client
+            from model_configs import get_model_config
+
+            # Use lightweight model for summarization
+            lightweight_model = getattr(persona, "lightweight_model", None)
+            if not lightweight_model:
+                import os
+                lightweight_model = os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gemini-2.0-flash-lite")
+
+            model_config = get_model_config(lightweight_model)
+            if not model_config:
+                LOGGER.warning("[stelis] Could not get model config for Chronicle generation")
+                return None
+
+            client = get_llm_client(lightweight_model, model_config)
+
+            summary_messages = [
+                {"role": "system", "content": chronicle_prompt},
+                {"role": "user", "content": f"Session content:\n\n{conversation_text}"}
+            ]
+
+            response, _ = client.generate(summary_messages, temperature=0.3)
+            if response and isinstance(response, str):
+                return response.strip()[:1000]  # Cap at 1000 chars
+
+        except Exception as exc:
+            LOGGER.warning("[stelis] Chronicle generation failed: %s", exc)
+
+        return None
 
     # ---------------- context helpers -----------------
     def _append_router_function_call(
