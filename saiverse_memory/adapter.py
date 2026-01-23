@@ -193,7 +193,7 @@ class SAIMemoryAdapter:
         try:
             with self._db_lock:
                 rows = get_messages_last(self.conn, thread_id, self.settings.last_messages)  # type: ignore[arg-type]
-                payloads = [self._payload_from_message_locked(msg) for msg in rows]
+                payloads = [self._payload_from_message_locked(msg, viewing_thread_id=thread_id) for msg in rows]
         except Exception as exc:
             LOGGER.warning("Failed to fetch recent messages for %s: %s", thread_id, exc)
             return []
@@ -236,7 +236,7 @@ class SAIMemoryAdapter:
         try:
             with self._db_lock:
                 all_rows = _fetch_all_messages(self.conn, thread_id)
-                payloads = [self._payload_from_message_locked(msg) for msg in all_rows]
+                payloads = [self._payload_from_message_locked(msg, viewing_thread_id=thread_id) for msg in all_rows]
         except Exception as exc:
             LOGGER.warning("Failed to fetch persona messages for %s: %s", thread_id, exc)
             return []
@@ -300,7 +300,7 @@ class SAIMemoryAdapter:
         try:
             with self._db_lock:
                 all_rows = _fetch_all_messages(self.conn, thread_id)
-                payloads = [self._payload_from_message_locked(msg) for msg in all_rows]
+                payloads = [self._payload_from_message_locked(msg, viewing_thread_id=thread_id) for msg in all_rows]
         except Exception as exc:
             LOGGER.warning("Failed to fetch persona messages for balancing: %s", exc)
             return []
@@ -408,7 +408,7 @@ class SAIMemoryAdapter:
         try:
             with self._db_lock:
                 msgs = get_messages_paginated(self.conn, thread_id, page=page, page_size=page_size)  # type: ignore[arg-type]
-                return [self._payload_from_message_locked(msg) for msg in msgs]
+                return [self._payload_from_message_locked(msg, viewing_thread_id=thread_id) for msg in msgs]
         except Exception as exc:
             LOGGER.warning("Failed to get messages for thread %s: %s", thread_id, exc)
             return []
@@ -668,11 +668,13 @@ class SAIMemoryAdapter:
                 suffix = self._active_persona_suffix() or self._PERSONA_THREAD_SUFFIX
         return f"{self.persona_id}:{suffix}"
 
-    def _payload_from_message_locked(self, msg) -> dict:
+    def _payload_from_message_locked(self, msg, viewing_thread_id: Optional[str] = None) -> dict:
         if self.conn is None:
             content = msg.content or ""
         else:
-            content = compose_message_content(self.conn, msg) or ""
+            content = compose_message_content(
+                self.conn, msg, viewing_thread_id=viewing_thread_id
+            ) or ""
         original_role = msg.role
         role = "assistant" if original_role == "model" else original_role
         if isinstance(role, str) and role.lower() == "system":

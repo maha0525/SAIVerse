@@ -377,12 +377,26 @@ def compose_message_content(
     message: Message,
     *,
     per_message_char_limit: int = 800,
+    viewing_thread_id: Optional[str] = None,
 ) -> str:
-    """Compose a message's textual content including linked thread snippets."""
-    base = (message.content or "").strip()
+    """Compose a message's textual content including linked thread snippets.
+
+    Args:
+        conn: Database connection
+        message: The message to compose
+        per_message_char_limit: Character limit for linked thread excerpts
+        viewing_thread_id: The thread from which this message is being viewed.
+                          Used for Stelis anchor expansion to determine display mode.
+    """
     metadata = message.metadata or {}
     if not isinstance(metadata, dict):
-        return base
+        return (message.content or "").strip()
+
+    # Check for Stelis anchor message
+    if metadata.get("type") == "stelis_anchor":
+        return _render_stelis_anchor(conn, metadata, viewing_thread_id)
+
+    base = (message.content or "").strip()
 
     extras = _render_other_thread_messages(
         conn,
@@ -395,6 +409,102 @@ def compose_message_content(
     if base:
         return f"{base}\n\n{extras}"
     return extras
+
+
+def _render_stelis_anchor(
+    conn: sqlite3.Connection,
+    metadata: Dict[str, Any],
+    viewing_thread_id: Optional[str],
+) -> str:
+    """Render a Stelis anchor message with dynamic content.
+
+    If viewing from a descendant thread (child, grandchild, etc.), shows simple message.
+    If viewing from parent thread or unrelated thread, shows full details.
+    """
+    stelis_thread_id = metadata.get("stelis_thread_id")
+    stelis_label = metadata.get("stelis_label", "Stelis Session")
+
+    if not stelis_thread_id:
+        return f"[Stelisスレッド: {stelis_label}]"
+
+    # Check if viewing from a descendant thread
+    if viewing_thread_id and _is_descendant_of_stelis(conn, viewing_thread_id, stelis_thread_id):
+        # Simple display for descendants (avoid duplication)
+        return f"[Stelisスレッド {stelis_label} ({stelis_thread_id}) が開始しました]"
+
+    # Full display for parent thread or unrelated threads
+    return _render_stelis_anchor_full(conn, stelis_thread_id, stelis_label)
+
+
+def _is_descendant_of_stelis(
+    conn: sqlite3.Connection,
+    viewing_thread_id: str,
+    stelis_thread_id: str,
+) -> bool:
+    """Check if viewing_thread_id is the same as or a descendant of stelis_thread_id."""
+    if viewing_thread_id == stelis_thread_id:
+        return True
+
+    # Get ancestor chain for viewing thread
+    ancestor_chain = get_stelis_ancestor_chain(conn, viewing_thread_id)
+    ancestor_ids = {s.thread_id for s in ancestor_chain}
+
+    return stelis_thread_id in ancestor_ids
+
+
+def _render_stelis_anchor_full(
+    conn: sqlite3.Connection,
+    stelis_thread_id: str,
+    stelis_label: str,
+) -> str:
+    """Render full Stelis anchor content with Chronicle, timestamps, and recent messages."""
+    stelis = get_stelis_thread(conn, stelis_thread_id)
+
+    lines = [f"[Stelisスレッド: {stelis_label}]"]
+    lines.append(f"- ID: {stelis_thread_id}")
+
+    if stelis:
+        # Timestamps
+        if stelis.created_at:
+            start_dt = datetime.fromtimestamp(stelis.created_at)
+            lines.append(f"- 開始: {start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        if stelis.completed_at:
+            end_dt = datetime.fromtimestamp(stelis.completed_at)
+            lines.append(f"- 終了: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        else:
+            lines.append("- 終了: 進行中")
+
+        # Message count
+        cur = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE thread_id = ?",
+            (stelis_thread_id,)
+        )
+        msg_count = cur.fetchone()[0]
+        lines.append(f"- メッセージ数: {msg_count}")
+
+        # Chronicle summary
+        if stelis.chronicle_summary:
+            lines.append("")
+            lines.append("## Chronicle")
+            lines.append(stelis.chronicle_summary)
+
+        # Recent messages (last 3)
+        recent_msgs = get_messages_last(conn, stelis_thread_id, 3)
+        if recent_msgs:
+            lines.append("")
+            lines.append("## 最新のやり取り")
+            for msg in recent_msgs:
+                role = "assistant" if msg.role == "model" else msg.role
+                content = (msg.content or "").strip()
+                if len(content) > 200:
+                    content = content[:197] + "..."
+                if content:
+                    lines.append(f"[{role}]: {content}")
+    else:
+        lines.append("- 状態: 情報取得不可")
+
+    return "\n".join(lines)
 
 
 def _render_other_thread_messages(

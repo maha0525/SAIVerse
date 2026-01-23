@@ -1380,6 +1380,29 @@ class SEARuntime:
                 state["stelis_available"] = False
                 return state
 
+            # Add anchor message to PARENT thread (before switching)
+            # This message will be dynamically expanded when viewing parent thread
+            import time
+            anchor_message = {
+                "role": "system",
+                "content": "",  # Content is dynamically generated
+                "metadata": {
+                    "type": "stelis_anchor",
+                    "stelis_thread_id": stelis.thread_id,
+                    "stelis_label": label,
+                    "created_at": int(time.time()),
+                },
+                "embedding_chunks": 0,  # Don't embed this message
+            }
+            memory_adapter.append_persona_message(
+                anchor_message,
+                thread_suffix=parent_thread_id.split(":")[-1] if ":" in parent_thread_id else parent_thread_id,
+            )
+            LOGGER.debug(
+                "[stelis] Added anchor message to parent thread %s for Stelis %s",
+                parent_thread_id, stelis.thread_id
+            )
+
             # Switch to new Stelis thread
             memory_adapter.set_active_thread(stelis.thread_id)
 
