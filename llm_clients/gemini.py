@@ -161,6 +161,7 @@ from tools.core import parse_tool_result
 from llm_router import route
 
 from .base import EmptyResponseError, IncompleteStreamError, LLMClient, get_llm_logger
+from logging_config import log_timeout_event
 from .utils import content_to_text, is_truthy_flag, merge_reasoning_strings
 
 
@@ -497,6 +498,8 @@ class GeminiClient(LLMClient):
         if tools_spec:
             cfg_kwargs["tools"] = merge_tools_for_gemini(tools_spec)
             cfg_kwargs["tool_config"] = tool_cfg
+        # Always disable AFC - SAIVerse handles function calls manually
+        cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
         if self._thinking_config is not None:
             cfg_kwargs["thinking_config"] = self._thinking_config
         return client.models.generate_content(
@@ -558,9 +561,8 @@ class GeminiClient(LLMClient):
                 if use_tools:
                     cfg_kwargs["tools"] = merge_tools_for_gemini(tools_spec)
                     cfg_kwargs["tool_config"] = tool_cfg
-                else:
-                    # Disable Automatic Function Calling when not using tools
-                    cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
+                # Always disable AFC - SAIVerse handles function calls manually via TOOL_REGISTRY
+                cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
                 if self._thinking_config is not None:
                     cfg_kwargs["thinking_config"] = self._thinking_config
                 if response_schema:
@@ -716,6 +718,32 @@ class GeminiClient(LLMClient):
                         "Gemini request timed out (attempt %d/%d): %s",
                         attempt + 1, max_retries, type(exc).__name__
                     )
+                    # Log detailed timeout diagnostics
+                    try:
+                        total_chars = sum(
+                            len(m.get("content", "") or "") if isinstance(m, dict) else 0
+                            for m in messages
+                        )
+                        image_count = sum(
+                            len(iter_image_media(m.get("metadata")) or [])
+                            if isinstance(m, dict) else 0
+                            for m in messages
+                        )
+                        client_type = "paid" if active_client is self.paid_client else "free"
+                        log_timeout_event(
+                            timeout_type=type(exc).__name__,
+                            model=model_id,
+                            wait_duration_sec=600.0,  # httpx default ReadTimeout
+                            message_count=len(messages),
+                            total_chars=total_chars,
+                            image_count=image_count,
+                            has_tools=use_tools,
+                            use_stream=not use_tools,
+                            client_type=client_type,
+                            retry_attempt=attempt + 1,
+                        )
+                    except Exception as log_exc:
+                        logging.debug("Failed to log timeout diagnostics: %s", log_exc)
                     # If this was with free client, try paid client on timeout
                     if active_client is self.free_client and self.paid_client:
                         logging.info("Switching to paid Gemini API key after timeout")
@@ -948,8 +976,8 @@ class GeminiClient(LLMClient):
         if use_tools:
             cfg_kwargs["tools"] = merge_tools_for_gemini(tools_spec)
             cfg_kwargs["tool_config"] = tool_cfg
-        else:
-            cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
+        # Always disable AFC - SAIVerse handles function calls manually via TOOL_REGISTRY
+        cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
         if self._thinking_config is not None:
             cfg_kwargs["thinking_config"] = self._thinking_config
         if temperature is not None:
@@ -985,6 +1013,8 @@ class GeminiClient(LLMClient):
             "safety_settings": GEMINI_SAFETY_CONFIG,
             "tools": merge_tools_for_gemini(tools_spec or []),
             "tool_config": tool_cfg_none,
+            # Always disable AFC - SAIVerse handles function calls manually
+            "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
         }
         if self._thinking_config is not None:
             cfg_kwargs["thinking_config"] = self._thinking_config
@@ -1102,6 +1132,8 @@ class GeminiClient(LLMClient):
                         logging.info("[gemini]   - %s: %s", decl.name, decl.description[:80] if decl.description else "")
         if self._thinking_config is not None:
             cfg_kwargs["thinking_config"] = self._thinking_config
+        # Always disable AFC - SAIVerse handles function calls manually
+        cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
 
         max_empty_retries = 3
         resp = None
