@@ -287,17 +287,31 @@ class OpenAIClient(LLMClient):
     def generate(
         self,
         messages: List[Dict[str, Any]],
-        tools: Optional[list] | None = None,
-        history_snippets: Optional[List[str]] | None = None,
+        tools: Optional[list] = None,
+        history_snippets: Optional[List[str]] = None,
         response_schema: Optional[Dict[str, Any]] = None,
         *,
         temperature: float | None = None,
-    ) -> str:
-        default_tools = OPENAI_TOOLS_SPEC if tools is None else tools
-        if response_schema is not None and tools is None:
-            tools_spec: List[Dict[str, Any]] | list = []
-        else:
-            tools_spec = default_tools
+    ) -> str | Dict[str, Any]:
+        """Unified generate method.
+        
+        Args:
+            messages: Conversation messages
+            tools: Tool specifications. If provided, returns Dict with tool detection.
+                   If None or empty, returns str with text response.
+            history_snippets: Optional history context
+            response_schema: Optional JSON schema for structured output
+            temperature: Optional temperature override
+            
+        Returns:
+            str: Text response when tools is None or empty
+            Dict: Tool detection result when tools is provided, with keys:
+                  - type: "text" | "tool_call"
+                  - content: Generated text (if type is "text")
+                  - tool_name: Tool name (if type is "tool_call")
+                  - tool_args: Tool arguments dict (if type is "tool_call")
+        """
+        tools_spec = tools or []
         use_tools = bool(tools_spec)
         snippets: List[str] = list(history_snippets or [])
         self._store_reasoning([])
@@ -312,7 +326,6 @@ class OpenAIClient(LLMClient):
                 req["temperature"] = temperature
             if response_schema:
                 schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
-                # Add additionalProperties: false recursively for OpenAI strict mode
                 openai_schema = self._add_additional_properties(response_schema)
                 json_schema_config: Dict[str, Any] = {
                     "name": schema_name or "saiverse_structured_output",
@@ -323,8 +336,6 @@ class OpenAIClient(LLMClient):
                     "type": "json_schema",
                     "json_schema": json_schema_config,
                 }
-                # Add structured output backend if specified (for Nvidia NIM, etc.)
-                # Try both locations: inside json_schema and at response_format level
                 if self.structured_output_backend:
                     json_schema_config["backend"] = self.structured_output_backend
                     response_format_config["backend"] = self.structured_output_backend
@@ -333,6 +344,7 @@ class OpenAIClient(LLMClient):
                 logging.debug("response_format: %s", req["response_format"])
             return req
 
+        # Non-tool mode: return str
         if not use_tools:
             try:
                 resp = self._create_completion(
@@ -356,94 +368,48 @@ class OpenAIClient(LLMClient):
                 return prefix + ("\n" if text_body and prefix else "") + text_body
             return text_body
 
-        user_msg = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-        decision = route(user_msg, tools_spec)
+        # Tool mode: return Dict with tool detection (no execution)
+        logging.info("[openai] Sending %d tools to API", len(tools_spec))
+        for i, tool in enumerate(tools_spec):
+            logging.info("[openai] Tool[%d]: %s", i, tool)
 
         try:
-            logging.info("Router decision:\n%s", json.dumps(decision, indent=2, ensure_ascii=False))
-        except Exception:
-            logging.warning("Router decision could not be serialized")
-
-        if decision["call"] == "yes" and decision["tool"]:
-            forced_tool_choice: Any = {"type": "function", "function": {"name": decision["tool"]}}
-        else:
-            forced_tool_choice = "auto"
-
-        try:
-            if tools:
-                try:
-                    logging.info("tools JSON:\n%s", json.dumps(tools, indent=2, ensure_ascii=False))
-                except TypeError:
-                    logging.info("tools contain non-serializable values")
-
-            for i in range(10):
-                tool_choice = forced_tool_choice if i == 0 else "auto"
-
-                resp = self._create_completion(
-                    model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
-                    tools=tools_spec,
-                    tool_choice=tool_choice,
-                    n=1,
-                    **_build_request_kwargs(),
-                )
-                get_llm_logger().debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
-
-                target_choice = next(
-                    (c for c in resp.choices if getattr(c.message, "tool_calls", [])),
-                    resp.choices[0],
-                )
-                tool_calls = getattr(target_choice.message, "tool_calls", [])
-
-                if not isinstance(tool_calls, list) or len(tool_calls) == 0:
-                    text_body, reasoning_entries = _extract_reasoning_from_openai_message(target_choice.message)
-                    if not text_body:
-                        text_body = target_choice.message.content or ""
-                    self._store_reasoning(reasoning_entries)
-                    prefix = "".join(s + "\n" for s in snippets)
-                    return prefix + text_body
-
-                messages.append(target_choice.message)
-                for tc in tool_calls:
-                    fn = TOOL_REGISTRY.get(tc.function.name)
-                    if fn is None:
-                        raise RuntimeError(f"Unsupported tool: {tc.function.name}")
-                    args = json.loads(tc.function.arguments)
-                    result_text, snippet, file_path, metadata = parse_tool_result(fn(**args))
-                    if snippet:
-                        snippets.append(snippet)
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "name": tc.function.name,
-                            "content": result_text,
-                        }
-                    )
-                    if file_path:
-                        try:
-                            with open(file_path, "rb") as file_handler:
-                                img_bytes = file_handler.read()
-                            b64 = base64.b64encode(img_bytes).decode("ascii")
-                            mime = mimetypes.guess_type(file_path)[0] or "image/png"
-                            data_url = f"data:{mime};base64,{b64}"
-                            messages.append(
-                                {
-                                    "role": "assistant",
-                                    "content": [
-                                        {"type": "image_url", "image_url": {"url": data_url}}
-                                    ],
-                                }
-                            )
-                        except Exception:
-                            logging.exception("Failed to load file %s", file_path)
-                    if metadata:
-                        self._store_attachment(metadata)
-                continue
-            return "ツール呼び出しが 10 回を超えました。"
+            resp = self._create_completion(
+                model=self.model,
+                messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
+                tools=tools_spec,
+                tool_choice="auto",
+                n=1,
+                **_build_request_kwargs(),
+            )
         except Exception:
             logging.exception("OpenAI call failed")
             raise RuntimeError("OpenAI API call failed")
+
+        get_llm_logger().debug("OpenAI raw (tool detection):\n%s", resp.model_dump_json(indent=2))
+        choice = resp.choices[0]
+        tool_calls = getattr(choice.message, "tool_calls", [])
+
+        # Extract reasoning if present
+        text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
+        self._store_reasoning(reasoning_entries)
+
+        if tool_calls and len(tool_calls) > 0:
+            tc = tool_calls[0]
+            try:
+                args = json.loads(tc.function.arguments)
+            except json.JSONDecodeError:
+                logging.warning("Tool call arguments invalid JSON: %s", tc.function.arguments)
+                args = {}
+            return {
+                "type": "tool_call",
+                "tool_name": tc.function.name,
+                "tool_args": args,
+                "raw_message": choice.message,
+            }
+        else:
+            content = text_body or choice.message.content or ""
+            return {"type": "text", "content": content}
 
     def generate_stream(
         self,
@@ -676,60 +642,25 @@ class OpenAIClient(LLMClient):
         temperature: float | None = None,
         **_: Any,
     ) -> Dict[str, Any]:
-        """Generate response with tool call detection (do not execute tools)."""
+        """DEPRECATED: Use generate(messages, tools=[...]) instead.
+        
+        This method is kept for backward compatibility with existing code.
+        It simply delegates to generate() with tools specified.
+        """
+        import warnings
+        warnings.warn(
+            "generate_with_tool_detection() is deprecated. Use generate(messages, tools=[...]) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         tools_spec = tools or []
-        self._store_reasoning([])
-
-        req_kwargs = dict(self._request_kwargs)
-        if temperature is not None:
-            req_kwargs["temperature"] = temperature
-
-        # Log tools being sent to OpenAI
-        if tools_spec:
-            logging.info("[openai] Sending %d tools to API", len(tools_spec))
-            for i, tool in enumerate(tools_spec):
-                logging.info("[openai] Tool[%d]: %s", i, tool)
-        else:
-            logging.info("[openai] No tools specified")
-
-        try:
-            resp = self._create_completion(
-                model=self.model,
-                messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
-                tools=tools_spec if tools_spec else None,
-                tool_choice="auto" if tools_spec else None,
-                n=1,
-                **req_kwargs,
-            )
-        except Exception:
-            logging.exception("OpenAI call failed in generate_with_tool_detection")
-            raise RuntimeError("OpenAI tool detection call failed")
-
-        get_llm_logger().debug("OpenAI raw (tool detection):\n%s", resp.model_dump_json(indent=2))
-        choice = resp.choices[0]
-        tool_calls = getattr(choice.message, "tool_calls", [])
-
-        # Extract reasoning if present
-        text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
-        self._store_reasoning(reasoning_entries)
-
-        if tool_calls and len(tool_calls) > 0:
-            tc = tool_calls[0]
-            try:
-                args = json.loads(tc.function.arguments)
-            except json.JSONDecodeError:
-                logging.warning("Tool call arguments invalid JSON: %s", tc.function.arguments)
-                args = {}
-            return {
-                "type": "tool_call",
-                "tool_name": tc.function.name,
-                "tool_args": args,
-                "raw_message": choice.message,
-            }
-        else:
-            content = text_body or choice.message.content or ""
-            return {"type": "text", "content": content}
-
+        if not tools_spec:
+            # If no tools, return text-only format for compatibility
+            result = self.generate(messages, temperature=temperature)
+            if isinstance(result, str):
+                return {"type": "text", "content": result}
+            return result
+        return self.generate(messages, tools=tools_spec, temperature=temperature)
 
 __all__ = ["OpenAIClient", "OpenAI"]
 OPENAI_ALLOWED_REQUEST_PARAMS = {

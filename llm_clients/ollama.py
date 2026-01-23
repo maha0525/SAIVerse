@@ -97,29 +97,99 @@ class OllamaClient(LLMClient):
     def generate(
         self,
         messages: List[Dict[str, str]],
-        tools: Optional[list] | None = None,
+        tools: Optional[list] = None,
         response_schema: Optional[Dict[str, Any]] = None,
         *,
         temperature: float | None = None,
-    ) -> str:
+    ) -> str | Dict[str, Any]:
+        """Unified generate method.
+        
+        Args:
+            messages: Conversation messages
+            tools: Tool specifications. If provided, returns Dict with tool detection.
+                   If None or empty, returns str with text response.
+            response_schema: Optional JSON schema for structured output
+            temperature: Optional temperature override
+            
+        Returns:
+            str: Text response when tools is None or empty
+            Dict: Tool detection result when tools is provided
+        """
+        tools_spec = tools or []
+        use_tools = bool(tools_spec)
+        
         logging.info(
-            "OllamaClient.generate invoked (model=%s supports_schema=%s messages=%d)",
+            "OllamaClient.generate invoked (model=%s use_tools=%s supports_schema=%s messages=%d)",
             self.model,
+            use_tools,
             bool(response_schema),
             len(messages),
         )
 
         options: Dict[str, Any] = {"num_ctx": self.context_length}
-        # Apply request_kwargs to options
         for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
                     "repeat_penalty", "presence_penalty", "frequency_penalty",
                     "mirostat", "mirostat_tau", "mirostat_eta"):
             if key in self._request_kwargs:
                 options[key] = self._request_kwargs[key]
-        # Override with explicit temperature parameter if provided
         if temperature is not None:
             options["temperature"] = temperature
 
+        # Tool mode: return Dict with tool detection
+        if use_tools:
+            payload: Dict[str, Any] = {
+                "model": self.model,
+                "messages": messages,
+                "stream": False,
+                "options": options,
+                "tools": tools_spec,
+            }
+            try:
+                response = requests.post(self.url, json=payload, timeout=(3, 300))
+                preview = response.text[:500] if response.text else "(empty)"
+                logging.debug(
+                    "Ollama v1 tool detection response status=%s preview=%s",
+                    response.status_code,
+                    preview,
+                )
+                response.raise_for_status()
+                data = response.json()
+            except Exception:
+                logging.exception("Ollama tool detection call failed")
+                raise RuntimeError("Ollama tool detection call failed")
+
+            choice = data.get("choices", [{}])[0]
+            message = choice.get("message", {})
+            content = message.get("content", "") or ""
+            tool_calls = message.get("tool_calls", [])
+
+            if tool_calls:
+                tc = tool_calls[0]
+                func = tc.get("function", {})
+                tool_name = func.get("name", "")
+                try:
+                    tool_args = json.loads(func.get("arguments", "{}"))
+                except json.JSONDecodeError:
+                    logging.warning("Tool call arguments invalid JSON: %s", func.get("arguments"))
+                    tool_args = {}
+
+                if content.strip():
+                    return {
+                        "type": "both",
+                        "content": content,
+                        "tool_name": tool_name,
+                        "tool_args": tool_args,
+                    }
+                else:
+                    return {
+                        "type": "tool_call",
+                        "tool_name": tool_name,
+                        "tool_args": tool_args,
+                    }
+            else:
+                return {"type": "text", "content": content}
+
+        # Non-tool mode: return str
         schema_payload: Optional[Dict[str, Any]] = copy.deepcopy(response_schema) if isinstance(response_schema, dict) else None
         format_payload_v1: Optional[Dict[str, Any]] = None
         if schema_payload is not None:
@@ -295,82 +365,24 @@ class OllamaClient(LLMClient):
         temperature: float | None = None,
         **_: Any,
     ) -> Dict[str, Any]:
-        """Generate response with tool call detection (do not execute tools).
-
-        Returns:
-            {"type": "text", "content": str} if no tool call
-            {"type": "tool_call", "tool_name": str, "tool_args": dict} if tool call detected
-            {"type": "both", "content": str, "tool_name": str, "tool_args": dict} if both
+        """DEPRECATED: Use generate(messages, tools=[...]) instead.
+        
+        This method is kept for backward compatibility with existing code.
+        It simply delegates to generate() with tools specified.
         """
+        import warnings
+        warnings.warn(
+            "generate_with_tool_detection() is deprecated. Use generate(messages, tools=[...]) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         tools_spec = tools or []
-        options: Dict[str, Any] = {"num_ctx": self.context_length}
-        # Apply request_kwargs to options
-        for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
-                    "repeat_penalty", "presence_penalty", "frequency_penalty",
-                    "mirostat", "mirostat_tau", "mirostat_eta"):
-            if key in self._request_kwargs:
-                options[key] = self._request_kwargs[key]
-        # Override with explicit temperature parameter if provided
-        if temperature is not None:
-            options["temperature"] = temperature
-
-        payload: Dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False,
-            "options": options,
-        }
-
-        if tools_spec:
-            payload["tools"] = tools_spec
-            # Note: Ollama v1 API doesn't have tool_choice parameter
-
-        try:
-            response = requests.post(self.url, json=payload, timeout=(3, 300))
-            preview = response.text[:500] if response.text else "(empty)"
-            logging.debug(
-                "Ollama v1 tool detection response status=%s preview=%s",
-                response.status_code,
-                preview,
-            )
-            response.raise_for_status()
-            data = response.json()
-        except Exception:
-            logging.exception("Ollama tool detection call failed")
-            raise RuntimeError("Ollama tool detection call failed")
-
-        choice = data.get("choices", [{}])[0]
-        message = choice.get("message", {})
-        content = message.get("content", "") or ""
-        tool_calls = message.get("tool_calls", [])
-
-        if tool_calls:
-            tc = tool_calls[0]
-            func = tc.get("function", {})
-            tool_name = func.get("name", "")
-            try:
-                tool_args = json.loads(func.get("arguments", "{}"))
-            except json.JSONDecodeError:
-                logging.warning("Tool call arguments invalid JSON: %s", func.get("arguments"))
-                tool_args = {}
-
-            if content.strip():
-                # Both text and tool call
-                return {
-                    "type": "both",
-                    "content": content,
-                    "tool_name": tool_name,
-                    "tool_args": tool_args,
-                }
-            else:
-                # Tool call only
-                return {
-                    "type": "tool_call",
-                    "tool_name": tool_name,
-                    "tool_args": tool_args,
-                }
-        else:
-            return {"type": "text", "content": content}
+        if not tools_spec:
+            result = self.generate(messages, temperature=temperature)
+            if isinstance(result, str):
+                return {"type": "text", "content": result}
+            return result
+        return self.generate(messages, tools=tools_spec, temperature=temperature)
 
     def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
         """Apply model-specific request parameters."""
