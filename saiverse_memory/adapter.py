@@ -388,15 +388,27 @@ class SAIMemoryAdapter:
                         if max_preview_chars > 0 and len(preview) > max_preview_chars:
                             preview = preview[: max_preview_chars - 1] + "…"
                     suffix = thread_id.split(":", 1)[1] if ":" in thread_id else thread_id
-                    summaries.append(
-                        {
-                            "thread_id": thread_id,
-                            "suffix": suffix,
-                            "preview": preview.strip(),
-                            "first_message_id": first_id,
-                            "active": bool(active_suffix and suffix == active_suffix),
-                        }
-                    )
+
+                    # Get Stelis thread info
+                    stelis_info = get_stelis_thread(self.conn, thread_id)
+                    is_stelis = stelis_info is not None
+
+                    summary: Dict[str, Any] = {
+                        "thread_id": thread_id,
+                        "suffix": suffix,
+                        "preview": preview.strip(),
+                        "first_message_id": first_id,
+                        "active": bool(active_suffix and suffix == active_suffix),
+                        "is_stelis": is_stelis,
+                    }
+
+                    if is_stelis and stelis_info:
+                        summary["stelis_parent_id"] = stelis_info.parent_thread_id
+                        summary["stelis_depth"] = stelis_info.depth
+                        summary["stelis_status"] = stelis_info.status
+                        summary["stelis_label"] = stelis_info.label
+
+                    summaries.append(summary)
                 return summaries
         except Exception as exc:
             LOGGER.warning("Failed to list threads for persona %s: %s", self.persona_id, exc)

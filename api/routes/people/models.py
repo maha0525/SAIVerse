@@ -25,6 +25,12 @@ class ThreadSummary(BaseModel):
     suffix: str
     preview: str
     active: bool
+    # Stelis thread info
+    is_stelis: bool = False
+    stelis_parent_id: Optional[str] = None
+    stelis_depth: Optional[int] = None
+    stelis_status: Optional[str] = None  # "active", "completed", "aborted"
+    stelis_label: Optional[str] = None
 
 class MessageItem(BaseModel):
     id: str

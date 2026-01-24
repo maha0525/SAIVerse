@@ -62,6 +62,34 @@
     border-radius: 4px;
 }
 
+/* Stelis thread styles */
+.stelisThread {
+    border-left: 3px solid #9775fa;
+    background-color: rgba(151, 117, 250, 0.05);
+}
+
+.stelisBadge {
+    font-size: 0.65rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+}
+
+.stelisActive {
+    background-color: #9775fa;
+    color: #fff;
+}
+
+.stelisCompleted {
+    background-color: #2b8a3e;
+    color: #d3f9d8;
+}
+
+.stelisAborted {
+    background-color: #c92a2a;
+    color: #ffc9c9;
+}
+
 .threadActions {
     display: flex;
     align-items: center;

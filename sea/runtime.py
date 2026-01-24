@@ -1357,7 +1357,7 @@ class SEARuntime:
             chronicle_prompt = stelis_config.get("chronicle_prompt")
 
             # Get memory adapter from persona
-            memory_adapter = getattr(persona, "memory_adapter", None)
+            memory_adapter = getattr(persona, "sai_memory", None)
             if not memory_adapter:
                 LOGGER.warning("[stelis] No memory adapter found for persona %s", persona.persona_id)
                 state["stelis_error"] = "No memory adapter available"
@@ -1472,7 +1472,7 @@ class SEARuntime:
                 })
 
             # Get memory adapter from persona
-            memory_adapter = getattr(persona, "memory_adapter", None)
+            memory_adapter = getattr(persona, "sai_memory", None)
             if not memory_adapter:
                 LOGGER.warning("[stelis] No memory adapter found for persona %s", persona.persona_id)
                 return state
@@ -1556,7 +1556,7 @@ class SEARuntime:
         This creates a concise summary of the conversation/work done in the
         Stelis thread, which will be stored and can be referenced later.
         """
-        memory_adapter = getattr(persona, "memory_adapter", None)
+        memory_adapter = getattr(persona, "sai_memory", None)
         if not memory_adapter:
             return None
 

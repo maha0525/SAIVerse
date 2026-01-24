@@ -23,7 +23,12 @@ def list_persona_threads(persona_id: str, manager = Depends(get_manager)):
                 thread_id=s["thread_id"],
                 suffix=s["suffix"],
                 preview=s["preview"] or "",
-                active=s["active"]
+                active=s["active"],
+                is_stelis=s.get("is_stelis", False),
+                stelis_parent_id=s.get("stelis_parent_id"),
+                stelis_depth=s.get("stelis_depth"),
+                stelis_status=s.get("stelis_status"),
+                stelis_label=s.get("stelis_label"),
             )
             for s in summaries
         ]

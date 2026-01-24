@@ -7,6 +7,12 @@ interface ThreadSummary {
     suffix: string;
     preview: string;
     active: boolean;
+    // Stelis thread info
+    is_stelis?: boolean;
+    stelis_parent_id?: string;
+    stelis_depth?: number;
+    stelis_status?: string;
+    stelis_label?: string;
 }
 
 interface MessageItem {
@@ -309,14 +315,24 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                         threads.map((thread) => (
                             <div
                                 key={thread.thread_id}
-                                className={`${styles.threadItem} ${selectedThreadId === thread.thread_id ? styles.active : ''}`}
+                                className={`${styles.threadItem} ${selectedThreadId === thread.thread_id ? styles.active : ''} ${thread.is_stelis ? styles.stelisThread : ''}`}
                                 onClick={() => handleThreadSelect(thread.thread_id)}
                             >
                                 <div className={styles.threadMeta}>
-                                    <span className={styles.threadId}>{thread.suffix}</span>
+                                    <span className={styles.threadId}>
+                                        {thread.is_stelis && thread.stelis_depth !== undefined && (
+                                            <span style={{ marginRight: 4 }}>{'  '.repeat(thread.stelis_depth)}</span>
+                                        )}
+                                        {thread.suffix}
+                                    </span>
                                     <div className={styles.threadActions}>
+                                        {thread.is_stelis && (
+                                            <span className={`${styles.stelisBadge} ${thread.stelis_status === 'completed' ? styles.stelisCompleted : thread.stelis_status === 'aborted' ? styles.stelisAborted : styles.stelisActive}`}>
+                                                {thread.stelis_label || 'Stelis'}
+                                            </span>
+                                        )}
                                         {thread.active && <span className={styles.activeBadge}>Active</span>}
-                                        {!thread.active && (
+                                        {!thread.active && !thread.is_stelis && (
                                             <button
                                                 className={styles.setActiveBtn}
                                                 onClick={(e) => handleSetActiveThread(thread.thread_id, e)}
