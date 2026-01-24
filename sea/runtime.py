@@ -26,25 +26,30 @@ def _get_default_lightweight_model() -> str:
 
 def _format(template: str, variables: Dict[str, Any]) -> str:
     """Format template with variables, supporting dot notation keys.
-    
-    Python's .format() interprets {a.b} as attribute access on 'a'.
-    This function first replaces dot-notation keys manually, then falls back to .format().
+
+    Uses regex-based replacement to safely handle templates where variable values
+    may contain curly braces (e.g., LLM-generated text with {}).
     """
-    try:
-        result = template
-        # First pass: replace dot-notation keys manually (e.g., {finalize_output.content})
-        # Sort by key length descending to replace longer keys first
-        dot_keys = sorted([k for k in variables.keys() if '.' in str(k)], key=len, reverse=True)
-        for key in dot_keys:
-            placeholder = "{" + str(key) + "}"
-            if placeholder in result:
-                value = variables[key]
-                result = result.replace(placeholder, str(value) if value is not None else "")
-        # Second pass: use .format() for remaining simple keys
-        return result.format(**variables)
-    except Exception:
-        # 安全側でそのまま返す
-        return template
+    result = template
+
+    # Build a lookup dict with all keys (including nested access via dot notation)
+    lookup: Dict[str, str] = {}
+    for key, value in variables.items():
+        lookup[str(key)] = str(value) if value is not None else ""
+
+    # Replace {key} patterns with corresponding values
+    # Only replace if the key exists in our lookup
+    def replacer(match: re.Match) -> str:
+        key = match.group(1)
+        if key in lookup:
+            return lookup[key]
+        # Key not found, leave placeholder as-is
+        return match.group(0)
+
+    # Pattern: {word_chars_and_dots} but not empty
+    result = re.sub(r"\{([\w.]+)\}", replacer, result)
+
+    return result
 
 
 class SEARuntime:
@@ -1251,8 +1256,13 @@ class SEARuntime:
 
         # Simple template expansion
         try:
-            return _format(value_template, state)
-        except Exception:
+            result = _format(value_template, state)
+            if result == value_template and "{" in value_template:
+                # Template was not expanded - log for debugging
+                LOGGER.debug("[sea][set] Template not expanded. Keys in state: %s", list(state.keys())[:20])
+            return result
+        except Exception as exc:
+            LOGGER.warning("[sea][set] _format failed: %s", exc)
             return value_template
 
     def _eval_arithmetic_expression(self, expr: str, state: Dict[str, Any]) -> Any:
