@@ -303,6 +303,42 @@ class OllamaClient(LLMClient):
         *,
         temperature: float | None = None,
     ) -> Iterator[str]:
+        # For structured output, use non-streaming to get complete JSON
+        if response_schema:
+            try:
+                stream_options: Dict[str, Any] = {"num_ctx": self.context_length}
+                for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
+                            "repeat_penalty", "presence_penalty", "frequency_penalty",
+                            "mirostat", "mirostat_tau", "mirostat_eta"):
+                    if key in self._request_kwargs:
+                        stream_options[key] = self._request_kwargs[key]
+                if temperature is not None:
+                    stream_options["temperature"] = temperature
+                stream_payload: Dict[str, Any] = {
+                    "model": self.model,
+                    "messages": messages,
+                    "stream": False,
+                    "options": stream_options,
+                    "format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": response_schema.get("title") or "saiverse_structured_output",
+                            "schema": response_schema,
+                            "strict": True,
+                        },
+                    },
+                }
+                response = requests.post(self.url, json=stream_payload, timeout=(3, 300))
+                response.raise_for_status()
+                data = response.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                yield ""
+                return
+            except Exception:
+                logging.exception("Ollama structured output call failed")
+                raise RuntimeError("Ollama structured output failed")
+        
+        # Normal streaming mode (no response_schema)
         try:
             stream_options: Dict[str, Any] = {"num_ctx": self.context_length}
             # Apply request_kwargs to options
@@ -320,15 +356,6 @@ class OllamaClient(LLMClient):
                 "stream": True,
                 "options": stream_options,
             }
-            if response_schema:
-                stream_payload["format"] = {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": response_schema.get("title") or "saiverse_structured_output",
-                        "schema": response_schema,
-                        "strict": True,
-                    },
-                }
             # When no schema is requested we allow plain-text responses. Ollama defaults to
             # unstructured text, so we intentionally avoid forcing any response_format.
 

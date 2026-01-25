@@ -242,7 +242,7 @@ if copy_candidate(src_dir / "searx" / "limiter.toml"):
     sys.exit(0)
 
 # Last resort
-dest.write_text("""[botdetection]\n\nipv4_prefix = 32\nipv6_prefix = 48\n\n[botdetection.ip_limit]\nfilter_link_local = false\nlink_token = false\n\n[botdetection.ip_lists]\nblock_ip = [\n]\npass_ip = [\n]\npass_searxng_org = true\n""", encoding="utf-8")
+dest.write_text("""[botdetection]\n\nipv4_prefix = 32\nipv6_prefix = 48\n\n[botdetection.ip_limit]\nfilter_link_local = false\nlink_token = false\n\n[botdetection.ip_lists]\nblock_ip = [\n]\npass_ip = [\n  '127.0.0.0/8',\n]\npass_searxng_org = true\n\n[botdetection]\nlink_token = false\nip_limit = false\n""", encoding="utf-8")
 "@
 
 $limiterScriptPath = Join-Path $ScriptRoot "prepare_limiter_temp.py"
@@ -255,6 +255,7 @@ $env:SEARXNG_SETTINGS_PATH = "$SETTINGS_PATH"
 $env:SEARXNG_PORT = "$PORT"
 $env:SEARXNG_BIND_ADDRESS = "$BIND_ADDRESS"
 $env:FLASK_SKIP_DOTENV = "1"
+# $env:SEARXNG_DEBUG = "1"  # Disabled to prevent log flooding in piped mode
 
 Write-Host "[INFO] Starting SearXNG at http://${BIND_ADDRESS}:${PORT}"
 & $venvPython -m searx.webapp

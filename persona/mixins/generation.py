@@ -19,6 +19,21 @@ from llm_clients import get_llm_client
 from llm_clients.base import IncompleteStreamError
 
 
+def _truncate_messages_for_logging(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Truncate base64 image data in messages for logging."""
+    truncated = copy.deepcopy(messages)
+    for msg in truncated:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    url = part.get("image_url", {}).get("url", "")
+                    if url.startswith("data:") and "base64," in url:
+                        mime, _, b64 = url.partition(";base64,")
+                        part["image_url"]["url"] = f"{mime};base64,<{len(b64)} bytes>"
+    return truncated
+
+
 class PersonaGenerationMixin:
     """Shared behaviours for building prompts and handling LLM responses."""
 
@@ -390,7 +405,7 @@ class PersonaGenerationMixin:
             user_metadata=user_metadata if actual_user_message == user_message else None,
         )
         self._dump_llm_context("generate", messages)
-        logging.debug("Messages sent to API: %s", messages)
+        logging.debug("Messages sent to API: %s", _truncate_messages_for_logging(messages))
 
         content = self.llm_client.generate(messages, tools=[])
         attempt = 1
@@ -480,7 +495,7 @@ class PersonaGenerationMixin:
             include_current_user=include_current_user,
         )
         self._dump_llm_context("generate_stream", messages)
-        logging.debug("Messages sent to API: %s", messages)
+        logging.debug("Messages sent to API: %s", _truncate_messages_for_logging(messages))
 
         content_accumulator = ""
         tokens: List[str] = []

@@ -625,6 +625,16 @@ class GeminiClient(LLMClient):
                     
                     text, reasoning_entries = self._separate_parts(all_parts)
                     self._store_reasoning(reasoning_entries)
+                    
+                    if response_schema:
+                        try:
+                            parsed = json.loads(text)
+                            if isinstance(parsed, dict):
+                                return parsed
+                        except json.JSONDecodeError as e:
+                            logging.warning("[gemini] Failed to parse structured output: %s", e)
+                            raise RuntimeError("Failed to parse JSON response from structured output") from e
+                    
                     prefix = "\n".join(history_snippets)
                     return prefix + ("\n" if prefix and text else "") + text
 
@@ -791,8 +801,6 @@ class GeminiClient(LLMClient):
         use_tools = bool(tools_spec)
         history_snippets = history_snippets or []
         self._store_reasoning([])
-        if response_schema:
-            logging.warning("Structured streaming output is not yet supported for GeminiClient; ignoring response_schema.")
         reasoning_chunks: List[str] = []
 
         if use_tools:
@@ -816,12 +824,12 @@ class GeminiClient(LLMClient):
 
         active_client = self.client
         try:
-            stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature)
+            stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema)
         except Exception as exc:
             if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
                 logging.info("Retrying with paid Gemini API key due to rate limit")
                 active_client = self.paid_client
-                stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature)
+                stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema)
             else:
                 logging.exception("Gemini call failed")
                 raise RuntimeError("Gemini streaming failed")
@@ -952,6 +960,7 @@ class GeminiClient(LLMClient):
         tool_cfg: Optional[types.ToolConfig],
         use_tools: bool,
         temperature: float | None,
+        response_schema: Optional[Dict[str, Any]] = None,
     ):
         sys_msg, contents = self._convert_messages(messages)
         cfg_kwargs: Dict[str, Any] = {
@@ -961,6 +970,15 @@ class GeminiClient(LLMClient):
         if use_tools:
             cfg_kwargs["tools"] = merge_tools_for_gemini(tools_spec)
             cfg_kwargs["tool_config"] = tool_cfg
+        # Response schema configuration
+        if response_schema and not use_tools:
+            cfg_kwargs["response_mime_type"] = "application/json"
+            if isinstance(response_schema, dict) and self._requires_json_schema(response_schema):
+                cfg_kwargs["response_json_schema"] = response_schema
+            else:
+                schema_obj = self._schema_from_json(response_schema)
+                if schema_obj is not None:
+                    cfg_kwargs["response_schema"] = schema_obj
         # Always disable AFC - SAIVerse handles function calls manually via TOOL_REGISTRY
         cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
         if self._thinking_config is not None:

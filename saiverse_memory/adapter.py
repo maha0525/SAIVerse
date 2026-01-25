@@ -782,6 +782,7 @@ class SAIMemoryAdapter:
         window_ratio: float = 0.8,
         chronicle_prompt: Optional[str] = None,
         max_depth: int = 3,
+        label: Optional[str] = None,
     ) -> Optional[StelisThread]:
         """Create and activate a new Stelis thread.
 
@@ -790,6 +791,7 @@ class SAIMemoryAdapter:
             window_ratio: Portion of parent's window to allocate (default 0.8)
             chronicle_prompt: Prompt for Chronicle generation on completion
             max_depth: Maximum nesting depth allowed
+            label: Human-readable label for the Stelis thread
 
         Returns:
             Created StelisThread, or None if max depth exceeded or error
@@ -828,6 +830,7 @@ class SAIMemoryAdapter:
                     parent_thread_id=parent_thread_id,
                     window_ratio=window_ratio,
                     chronicle_prompt=chronicle_prompt,
+                    label=label,
                 )
 
                 # Also create the regular thread entry

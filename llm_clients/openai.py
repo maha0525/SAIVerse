@@ -105,7 +105,7 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
             continue
 
         text = content_to_text(msg.get("content"))
-        if supports_images:
+        if supports_images and role == "user":
             parts: List[Dict[str, Any]] = []
             if text:
                 parts.append({"type": "text", "text": text})
@@ -344,7 +344,7 @@ class OpenAIClient(LLMClient):
                 logging.debug("response_format: %s", req["response_format"])
             return req
 
-        # Non-tool mode: return str
+        # Non-tool mode: return str or dict (if response_schema)
         if not use_tools:
             try:
                 resp = self._create_completion(
@@ -363,10 +363,20 @@ class OpenAIClient(LLMClient):
             if not text_body:
                 text_body = choice.message.content or ""
             self._store_reasoning(reasoning_entries)
-            if snippets:
-                prefix = "\n".join(snippets)
-                return prefix + ("\n" if text_body and prefix else "") + text_body
-            return text_body
+            
+            if response_schema:
+                try:
+                    parsed = json.loads(text_body)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except json.JSONDecodeError as e:
+                    logging.warning("[openai] Failed to parse structured output: %s", e)
+                    raise RuntimeError("Failed to parse JSON response from structured output") from e
+            else:
+                if snippets:
+                    prefix = "\n".join(snippets)
+                    return prefix + ("\n" if text_body and prefix else "") + text_body
+                return text_body
 
         # Tool mode: return Dict with tool detection (no execution)
         logging.info("[openai] Sending %d tools to API", len(tools_spec))
@@ -426,8 +436,6 @@ class OpenAIClient(LLMClient):
         - force_tool_choice: 初回のみ {"type":"function","function":{"name":..}} か "auto"
         - 再帰呼び出し時はデフォルト None → 自動で "auto"
         """
-        if response_schema is not None:
-            logging.warning("Structured streaming output is not supported for OpenAIClient; ignoring response_schema.")
         tools_spec = OPENAI_TOOLS_SPEC if tools is None else tools
         use_tools = bool(tools_spec)
         history_snippets = list(history_snippets or [])
@@ -439,6 +447,25 @@ class OpenAIClient(LLMClient):
                 req_kwargs = dict(self._request_kwargs)
                 if temperature is not None:
                     req_kwargs["temperature"] = temperature
+                if response_schema:
+                    schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
+                    openai_schema = self._add_additional_properties(response_schema)
+                    json_schema_config: Dict[str, Any] = {
+                        "name": schema_name or "saiverse_structured_output",
+                        "schema": openai_schema,
+                        "strict": True,
+                    }
+                    response_format_config: Dict[str, Any] = {
+                        "type": "json_schema",
+                        "json_schema": json_schema_config,
+                    }
+                    if self.structured_output_backend:
+                        json_schema_config["backend"] = self.structured_output_backend
+                        response_format_config["backend"] = self.structured_output_backend
+                        logging.info("Applying structured_output_backend='%s' to request (stream)", self.structured_output_backend)
+                    req_kwargs["response_format"] = response_format_config
+                else:
+                    req_kwargs["stream"] = True
                 resp = self._create_completion(
                     model=self.model,
                     messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
@@ -590,20 +617,7 @@ class OpenAIClient(LLMClient):
                         "content": result_text,
                     })
                     if file_path:
-                        try:
-                            with open(file_path, "rb") as f:
-                                img_bytes = f.read()
-                            b64 = base64.b64encode(img_bytes).decode("ascii")
-                            mime = mimetypes.guess_type(file_path)[0] or "image/png"
-                            data_url = f"data:{mime};base64,{b64}"
-                            messages.append({
-                                "role": "assistant",
-                                "content": [
-                                    {"type": "image_url", "image_url": {"url": data_url}}
-                                ],
-                            })
-                        except Exception:
-                            logging.exception("Failed to load file %s", file_path)
+                        logging.debug("Tool result includes file: %s (not included in OpenAI messages per API restrictions)", file_path)
                     if metadata:
                         self._store_attachment(metadata)
                 insert_pos = len(messages) - len(call_buffer)

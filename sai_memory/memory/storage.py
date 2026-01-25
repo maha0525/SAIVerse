@@ -111,10 +111,13 @@ def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
             chronicle_summary TEXT,
             created_at INTEGER,
             completed_at INTEGER,
+            label TEXT,
             FOREIGN KEY (parent_thread_id) REFERENCES stelis_threads(thread_id)
         )
         """
     )
+    # Ensure label column exists (for existing databases)
+    _ensure_column(conn, "stelis_threads", "label", "TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_stelis_parent ON stelis_threads(parent_thread_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_stelis_status ON stelis_threads(status)")
 
@@ -647,6 +650,7 @@ class StelisThread:
     chronicle_summary: Optional[str]
     created_at: Optional[int]
     completed_at: Optional[int]
+    label: Optional[str] = None
 
 
 def _row_to_stelis_thread(row: Tuple[Any, ...]) -> StelisThread:
@@ -660,6 +664,7 @@ def _row_to_stelis_thread(row: Tuple[Any, ...]) -> StelisThread:
         chronicle_summary=row[6],
         created_at=int(row[7]) if row[7] is not None else None,
         completed_at=int(row[8]) if row[8] is not None else None,
+        label=row[9] if len(row) > 9 else None,
     )
 
 
@@ -669,6 +674,7 @@ def create_stelis_thread(
     parent_thread_id: Optional[str] = None,
     window_ratio: float = 0.8,
     chronicle_prompt: Optional[str] = None,
+    label: Optional[str] = None,
 ) -> StelisThread:
     """Create a new Stelis thread with parent relationship."""
     # Calculate depth from parent
@@ -682,10 +688,10 @@ def create_stelis_thread(
     conn.execute(
         """
         INSERT INTO stelis_threads
-        (thread_id, parent_thread_id, depth, window_ratio, status, chronicle_prompt, created_at)
-        VALUES (?, ?, ?, ?, 'active', ?, ?)
+        (thread_id, parent_thread_id, depth, window_ratio, status, chronicle_prompt, created_at, label)
+        VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
         """,
-        (thread_id, parent_thread_id, depth, window_ratio, chronicle_prompt, created_at),
+        (thread_id, parent_thread_id, depth, window_ratio, chronicle_prompt, created_at, label),
     )
     conn.commit()
 
@@ -699,6 +705,7 @@ def create_stelis_thread(
         chronicle_summary=None,
         created_at=created_at,
         completed_at=None,
+        label=label,
     )
 
 
@@ -707,7 +714,7 @@ def get_stelis_thread(conn: sqlite3.Connection, thread_id: str) -> Optional[Stel
     cur = conn.execute(
         """
         SELECT thread_id, parent_thread_id, depth, window_ratio, status,
-               chronicle_prompt, chronicle_summary, created_at, completed_at
+               chronicle_prompt, chronicle_summary, created_at, completed_at, label
         FROM stelis_threads WHERE thread_id = ?
         """,
         (thread_id,),
@@ -731,7 +738,7 @@ def get_stelis_children(conn: sqlite3.Connection, parent_thread_id: str) -> List
     cur = conn.execute(
         """
         SELECT thread_id, parent_thread_id, depth, window_ratio, status,
-               chronicle_prompt, chronicle_summary, created_at, completed_at
+               chronicle_prompt, chronicle_summary, created_at, completed_at, label
         FROM stelis_threads WHERE parent_thread_id = ?
         ORDER BY created_at ASC
         """,
@@ -746,7 +753,7 @@ def get_active_stelis_threads(conn: sqlite3.Connection, parent_thread_id: Option
         cur = conn.execute(
             """
             SELECT thread_id, parent_thread_id, depth, window_ratio, status,
-                   chronicle_prompt, chronicle_summary, created_at, completed_at
+                   chronicle_prompt, chronicle_summary, created_at, completed_at, label
             FROM stelis_threads WHERE status = 'active' AND parent_thread_id = ?
             ORDER BY created_at ASC
             """,
@@ -756,7 +763,7 @@ def get_active_stelis_threads(conn: sqlite3.Connection, parent_thread_id: Option
         cur = conn.execute(
             """
             SELECT thread_id, parent_thread_id, depth, window_ratio, status,
-                   chronicle_prompt, chronicle_summary, created_at, completed_at
+                   chronicle_prompt, chronicle_summary, created_at, completed_at, label
             FROM stelis_threads WHERE status = 'active'
             ORDER BY created_at ASC
             """

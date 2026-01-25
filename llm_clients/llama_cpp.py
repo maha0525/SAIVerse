@@ -200,10 +200,30 @@ class LlamaCppClient(LLMClient):
         **_: Any,
     ) -> Iterator[str]:
         """Generate streaming response using llama.cpp."""
-        self._ensure_model_loaded()
+        self._ensure_model_loaded() 
 
+        # For structured output, use non-streaming to get complete JSON
+        if response_schema:
+            try:
+                temp = temperature if temperature is not None else self._temperature
+                response = self._llm.create_chat_completion(
+                    messages=messages,
+                    temperature=temp,
+                    top_p=self._top_p,
+                    max_tokens=self._max_tokens,
+                    stream=False,
+                    response_format={"type": "json_object", "schema": response_schema},
+                )
+                content = response["choices"][0]["message"]["content"]
+                yield ""
+                return
+            except Exception as exc:
+                logger.error("llama.cpp structured output failed: %s", exc, exc_info=True)
+                raise RuntimeError(f"llama.cpp structured output failed: {exc}")
+
+        # Normal streaming mode (no response_schema)
         try:
-            temp = temperature if temperature is not None else self._temperature
+            temp = temperature if temperature is not None else self._temperature 
 
             stream = self._llm.create_chat_completion(
                 messages=messages,
@@ -211,11 +231,6 @@ class LlamaCppClient(LLMClient):
                 top_p=self._top_p,
                 max_tokens=self._max_tokens,
                 stream=True,
-                response_format=(
-                    {"type": "json_object", "schema": response_schema}
-                    if response_schema
-                    else None
-                ),
             )
 
             for chunk in stream:

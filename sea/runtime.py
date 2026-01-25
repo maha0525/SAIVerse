@@ -379,6 +379,7 @@ class SEARuntime:
             }
             text = ""
             schema_consumed = False
+            prompt = None  # Will store the expanded prompt for memorize
             try:
                 base_msgs = state.get("messages", [])
                 action_template = getattr(node_def, "action", None)
@@ -530,6 +531,14 @@ class SEARuntime:
                     self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                     schema_consumed = self._process_structured_output(node_def, text, state)
                     
+                    # If output_key is specified but no response_schema, store the raw text
+                    if not schema_consumed:
+                        output_key = getattr(node_def, "output_key", None)
+                        if output_key:
+                            state[output_key] = text
+                            content_preview = text[:200] + "..." if len(text) > 200 else text
+                            LOGGER.info("[sea][llm] Stored plain text to state['%s'] = %s", output_key, content_preview)
+                    
                     # Process output_keys even in normal mode (no tools)
                     output_keys_spec = getattr(node_def, "output_keys", None)
                     if output_keys_spec:
@@ -547,6 +556,38 @@ class SEARuntime:
                 state["tool_called"] = False
             state["last"] = text
             state["messages"] = messages + [{"role": "assistant", "content": text}]
+
+            # Handle memorize option - save prompt and response to SAIMemory
+            memorize_config = getattr(node_def, "memorize", None)
+            if memorize_config:
+                pulse_id = state.get("pulse_id")
+                # Parse memorize config - can be True or {"tags": [...]}
+                if isinstance(memorize_config, dict):
+                    memorize_tags = memorize_config.get("tags", [])
+                else:
+                    memorize_tags = []
+                
+                # Save prompt (user role) - use the pre-expanded prompt variable
+                if prompt:
+                    self._store_memory(
+                        persona,
+                        prompt,
+                        role="user",
+                        tags=list(memorize_tags),
+                        pulse_id=pulse_id,
+                    )
+                    LOGGER.debug("[sea][llm] Memorized prompt (user): %s...", prompt[:100])
+                
+                # Save response (assistant role)
+                if text and text != "(error in llm node)":
+                    self._store_memory(
+                        persona,
+                        text,
+                        role="assistant",
+                        tags=list(memorize_tags),
+                        pulse_id=pulse_id,
+                    )
+                    LOGGER.debug("[sea][llm] Memorized response (assistant): %s...", text[:100])
 
             # Debug: log speak_content at end of LLM node
             speak_content = state.get("speak_content", "")
@@ -760,10 +801,17 @@ class SEARuntime:
         schema = getattr(node_def, "response_schema", None)
         if not schema:
             return False
-        parsed = self._extract_structured_json(text)
+        
+        # Check if text is already a dict (already parsed by LLM client with response_schema)
+        if isinstance(text, dict):
+            parsed = text
+        else:
+            parsed = self._extract_structured_json(text)
+        
         if parsed is None:
             LOGGER.warning("[sea] structured output parse failed for node %s", getattr(node_def, "id", "?"))
             return False
+        
         key = getattr(node_def, "output_key", None) or getattr(node_def, "id", "") or "node"
         self._store_structured_result(state, key, parsed)
 
@@ -1382,6 +1430,7 @@ class SEARuntime:
                 window_ratio=window_ratio,
                 chronicle_prompt=chronicle_prompt,
                 max_depth=max_depth,
+                label=label,
             )
 
             if not stelis:
