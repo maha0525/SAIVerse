@@ -18,7 +18,7 @@ Start-Process -FilePath "cmd.exe" -ArgumentList "/k conda activate SAIVerse && p
 # Start SearXNG in a new window with output redirected to log
 Write-Host "Starting SearXNG..."
 $SearXNGLogPath = Join-Path $LogDir "searxng.log"
-Start-Process -FilePath "powershell.exe" -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", "& { . scripts\run_searxng_server.ps1 2>&1 | Tee-Object -FilePath '$SearXNGLogPath' }"
+Start-Process -FilePath "powershell.exe" -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", "& { Start-Transcript -Path '$SearXNGLogPath' -Force; . scripts\run_searxng_server.ps1; Stop-Transcript }"
 
 # Start Frontend in the current window with output captured
 Write-Host "Starting Frontend..."

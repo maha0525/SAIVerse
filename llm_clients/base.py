@@ -32,7 +32,7 @@ class LLMClient:
         *,
         temperature: float | None = None,
         **_: Any,
-    ) -> str:
+    ) -> str | Dict[str, Any]:
         raise NotImplementedError
 
     def generate_stream(
