@@ -36,12 +36,26 @@
     justify-content: space-between;
     align-items: center;
     background: #111827;
+    gap: 0.75rem;
+    min-width: 0; /* Allow flex children to shrink */
 }
 
 .header h2 {
     margin: 0;
     font-size: 1.25rem;
     font-weight: 600;
+    flex: 1;
+    min-width: 0; /* Allow text truncation */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.headerActions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0; /* Prevent buttons from being pushed out */
 }
 
 .closeBtn {
@@ -59,13 +73,40 @@
     color: #fff;
 }
 
+.metaEditBtn {
+    background: none;
+    border: none;
+    color: #9ca3af;
+    cursor: pointer;
+    padding: 6px;
+    border-radius: 4px;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.metaEditBtn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #60a5fa;
+}
+
 .meta {
     padding: 1rem 1.5rem 0.5rem;
     display: flex;
-    gap: 1rem;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
     align-items: center;
     font-size: 0.85rem;
     color: #9ca3af;
+}
+
+.id {
+    word-break: break-all;
+}
+
+.id code {
+    font-size: 0.75rem;
 }
 
 .badge {
@@ -89,6 +130,91 @@
     overflow-y: auto;
     background: rgba(0, 0, 0, 0.2);
     border-radius: 6px;
+}
+
+.location {
+    display: flex;
+    align-items: center;
+    color: #60a5fa;
+    font-size: 0.8rem;
+}
+
+/* Meta editing section */
+.metaEditSection {
+    padding: 1rem 1.5rem;
+    background: rgba(0, 0, 0, 0.2);
+    border-bottom: 1px solid #374151;
+}
+
+.metaEditForm {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.formGroup {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+}
+
+.formGroup label {
+    font-size: 0.85rem;
+    color: #9ca3af;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+}
+
+.input,
+.select,
+.descriptionTextarea {
+    width: 100%;
+    padding: 0.625rem 0.75rem;
+    background: #111827;
+    border: 1px solid #374151;
+    border-radius: 6px;
+    color: #e5e7eb;
+    font-size: 0.9rem;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.input:focus,
+.select:focus,
+.descriptionTextarea:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+.input:disabled,
+.select:disabled,
+.descriptionTextarea:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.select {
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.75rem center;
+    padding-right: 2.5rem;
+}
+
+.descriptionTextarea {
+    resize: vertical;
+    min-height: 80px;
+    font-family: inherit;
+    line-height: 1.5;
+}
+
+.metaEditActions {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+    margin-top: 0.5rem;
 }
 
 .body {
@@ -128,10 +254,22 @@
 
 .documentHeader {
     display: flex;
+    justify-content: space-between;
+    align-items: center;
     gap: 0.5rem;
     margin-bottom: 1rem;
     padding-bottom: 0.75rem;
     border-bottom: 1px solid #374151;
+}
+
+.viewToggle {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.editActions {
+    display: flex;
+    gap: 0.5rem;
 }
 
 .toggleBtn {
@@ -157,6 +295,57 @@
     background: #3b82f6;
     border-color: #2563eb;
     color: #fff;
+}
+
+.toggleBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.editBtn:hover:not(:disabled) {
+    background: #4b5563;
+    color: #fbbf24;
+}
+
+.saveBtn {
+    background: #059669;
+    border-color: #047857;
+    color: #fff;
+}
+
+.saveBtn:hover:not(:disabled) {
+    background: #10b981;
+}
+
+.cancelBtn:hover:not(:disabled) {
+    background: #dc2626;
+    border-color: #b91c1c;
+    color: #fff;
+}
+
+.editTextarea {
+    width: 100%;
+    min-height: 400px;
+    padding: 1rem;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid #4b5563;
+    border-radius: 6px;
+    color: #e5e7eb;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 0.9rem;
+    line-height: 1.5;
+    resize: vertical;
+}
+
+.editTextarea:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3);
+}
+
+.editTextarea:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
 }
 
 .markdownContent {

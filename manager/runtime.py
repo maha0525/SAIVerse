@@ -389,12 +389,14 @@ class RuntimeService(
         return replies
 
     def handle_user_input_stream(
-        self, message: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None
+        self, message: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None,
+        playbook_params: Optional[Dict[str, Any]] = None
     ) -> Iterator[str]:
         logging.debug(
-            "[runtime] handle_user_input_stream called (metadata_present=%s, meta_playbook=%s)",
+            "[runtime] handle_user_input_stream called (metadata_present=%s, meta_playbook=%s, playbook_params=%s)",
             bool(metadata),
             meta_playbook,
+            bool(playbook_params),
         )
         if not message or not str(message).strip():
             logging.error("[runtime] handle_user_input_stream got empty message; aborting to avoid corrupt routing")
@@ -434,6 +436,7 @@ class RuntimeService(
                         persona, building_id, message,
                         metadata=metadata,
                         meta_playbook=meta_playbook,
+                        playbook_params=playbook_params,
                         event_callback=response_queue.put
                     )
             except Exception as e:

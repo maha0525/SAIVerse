@@ -109,6 +109,12 @@
     text-align: right;
 }
 
+.optional {
+    font-size: 0.75rem;
+    color: #888;
+    font-weight: 400;
+}
+
 .footer {
     padding: 1rem 1.5rem;
     border-top: 1px solid rgba(0, 0, 0, 0.1);

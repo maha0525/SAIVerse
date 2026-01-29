@@ -758,7 +758,7 @@ class SAIMemoryAdapter:
                 "updated_at": datetime.now().isoformat()
             }
             path.write_text(json.dumps(state_data, ensure_ascii=False, indent=2), encoding="utf-8")
-            LOGGER.info("Set active thread for %s to %s", self.persona_id, suffix)
+            LOGGER.info("Set active thread for %s to %s (full_id=%s)", self.persona_id, suffix, thread_id)
             return True
         except Exception as exc:
             LOGGER.warning("Failed to set active thread for %s: %s", self.persona_id, exc)
@@ -770,7 +770,10 @@ class SAIMemoryAdapter:
         Returns:
             The thread suffix (not the full thread_id), or None if not set
         """
-        return self._active_persona_suffix()
+        suffix = self._active_persona_suffix()
+        if suffix:
+            return f"{self.persona_id}:{suffix}"
+        return None
 
     # ------------------------------------------------------------------
     # Stelis Thread Management
@@ -1035,6 +1038,11 @@ class SAIMemoryAdapter:
                     skip_embedding = int(embedding_chunks) == 0
                 except (TypeError, ValueError):
                     skip_embedding = False
+
+            LOGGER.debug(
+                "[_append_message] thread_suffix=%s, building_id=%s, thread_id=%s",
+                thread_suffix, building_id, thread_id
+            )
 
             with self._db_lock:
                 get_or_create_thread(self.conn, thread_id, resource_id)  # type: ignore[arg-type]

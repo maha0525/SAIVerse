@@ -213,6 +213,9 @@ class PersonaSchedule(Base):
     INTERVAL_SECONDS = Column(Integer, nullable=True)
     LAST_EXECUTED_AT = Column(DateTime, nullable=True)
 
+    # Playbook parameters (JSON)
+    PLAYBOOK_PARAMS = Column(Text, nullable=True)  # JSON string: {"selected_playbook": "xxx", ...}
+
     CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
     UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 

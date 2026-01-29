@@ -206,3 +206,25 @@
     color: #666;
     padding: 2rem;
 }
+
+/* Playbook Parameters */
+.paramGrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 1rem;
+    background-color: #1f2024;
+    padding: 1rem;
+    border-radius: 6px;
+    border: 1px solid #383a3f;
+}
+
+.paramItem {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.paramLabel {
+    font-size: 0.85rem;
+    color: #9ca3af;
+}

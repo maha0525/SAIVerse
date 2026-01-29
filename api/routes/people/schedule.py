@@ -43,6 +43,13 @@ def list_schedules(persona_id: str, manager = Depends(get_manager)):
                     days = json.loads(s.DAYS_OF_WEEK)
                 except: pass
             
+            # Parse playbook_params JSON
+            playbook_params = None
+            if s.PLAYBOOK_PARAMS:
+                try:
+                    playbook_params = json.loads(s.PLAYBOOK_PARAMS)
+                except: pass
+
             results.append(ScheduleItem(
                 schedule_id=s.SCHEDULE_ID,
                 schedule_type=s.SCHEDULE_TYPE,
@@ -55,7 +62,8 @@ def list_schedules(persona_id: str, manager = Depends(get_manager)):
                 scheduled_datetime=s.SCHEDULED_DATETIME,
                 interval_seconds=s.INTERVAL_SECONDS,
                 last_executed_at=s.LAST_EXECUTED_AT,
-                completed=s.COMPLETED
+                completed=s.COMPLETED,
+                playbook_params=playbook_params
             ))
         return results
     finally:
@@ -77,6 +85,7 @@ def create_schedule(
             DESCRIPTION=req.description,
             PRIORITY=req.priority,
             ENABLED=req.enabled,
+            PLAYBOOK_PARAMS=json.dumps(req.playbook_params) if req.playbook_params else None,
         )
 
         if req.schedule_type == "periodic":
@@ -157,6 +166,8 @@ def update_schedule(
             schedule.PRIORITY = req.priority
         if req.enabled is not None:
             schedule.ENABLED = req.enabled
+        if req.playbook_params is not None:
+            schedule.PLAYBOOK_PARAMS = json.dumps(req.playbook_params) if req.playbook_params else None
 
         # Update type-specific fields based on schedule type
         schedule_type = req.schedule_type if req.schedule_type is not None else schedule.SCHEDULE_TYPE

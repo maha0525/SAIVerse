@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag } from 'lucide-react';
+import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag, Plus } from 'lucide-react';
 import styles from './MemoryBrowser.module.css';
 
 interface ThreadSummary {
@@ -47,6 +47,13 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
     // Selection state for bulk delete
     const [selectionMode, setSelectionMode] = useState(false);
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+    // Add message state
+    const [showAddForm, setShowAddForm] = useState(false);
+    const [newMsgRole, setNewMsgRole] = useState<string>("user");
+    const [newMsgContent, setNewMsgContent] = useState("");
+    const [newMsgTimestamp, setNewMsgTimestamp] = useState<string>("");
+    const [isAddingMessage, setIsAddingMessage] = useState(false);
 
     // Load threads on mount
     useEffect(() => {
@@ -297,6 +304,67 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
         setSelectedIds(new Set());
     };
 
+    // Add message handlers
+    const handleShowAddForm = () => {
+        setShowAddForm(true);
+        setNewMsgRole("user");
+        setNewMsgContent("");
+        // Default to current time in datetime-local format
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = (now.getMonth() + 1).toString().padStart(2, '0');
+        const day = now.getDate().toString().padStart(2, '0');
+        const hours = now.getHours().toString().padStart(2, '0');
+        const minutes = now.getMinutes().toString().padStart(2, '0');
+        setNewMsgTimestamp(`${year}-${month}-${day}T${hours}:${minutes}`);
+    };
+
+    const handleCancelAdd = () => {
+        setShowAddForm(false);
+        setNewMsgRole("user");
+        setNewMsgContent("");
+        setNewMsgTimestamp("");
+    };
+
+    const handleAddMessage = async () => {
+        if (!selectedThreadId || !newMsgContent.trim()) return;
+
+        setIsAddingMessage(true);
+        try {
+            const body: { role: string; content: string; created_at?: number } = {
+                role: newMsgRole,
+                content: newMsgContent.trim(),
+            };
+            if (newMsgTimestamp) {
+                body.created_at = new Date(newMsgTimestamp).getTime() / 1000;
+            }
+
+            const res = await fetch(
+                `/api/people/${personaId}/threads/${encodeURIComponent(selectedThreadId)}/messages`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                }
+            );
+
+            if (res.ok) {
+                handleCancelAdd();
+                // Reload to show the new message (go to last page)
+                setPage(-1);
+                if (selectedThreadId) loadMessages(selectedThreadId, -1);
+            } else {
+                const err = await res.json().catch(() => ({}));
+                alert(`Failed to add message: ${err.detail || 'Unknown error'}`);
+            }
+        } catch (e) {
+            console.error(e);
+            alert("Error adding message");
+        } finally {
+            setIsAddingMessage(false);
+        }
+    };
+
     const totalPages = Math.ceil(totalMessages / pageSize);
 
     return (
@@ -397,17 +465,77 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                 </button>
                             </>
                         ) : (
-                            <button
-                                className={styles.selectModeBtn}
-                                onClick={() => setSelectionMode(true)}
-                                title="Select messages"
-                            >
-                                <CheckSquare size={16} />
-                            </button>
+                            <>
+                                <button
+                                    className={styles.addMsgBtn}
+                                    onClick={handleShowAddForm}
+                                    title="Add message"
+                                    disabled={!selectedThreadId}
+                                >
+                                    <Plus size={16} />
+                                </button>
+                                <button
+                                    className={styles.selectModeBtn}
+                                    onClick={() => setSelectionMode(true)}
+                                    title="Select messages"
+                                >
+                                    <CheckSquare size={16} />
+                                </button>
+                            </>
                         )}
                         <span className={styles.msgCount}>{totalMessages} msgs</span>
                     </div>
                 </div>
+
+                {/* Add Message Form */}
+                {showAddForm && (
+                    <div className={styles.addMessageForm}>
+                        <div className={styles.addFormHeader}>
+                            <span>Add New Message</span>
+                            <button onClick={handleCancelAdd} className={styles.cancelAddBtn}>
+                                <X size={16} />
+                            </button>
+                        </div>
+                        <div className={styles.addFormRow}>
+                            <label>Role:</label>
+                            <select
+                                value={newMsgRole}
+                                onChange={(e) => setNewMsgRole(e.target.value)}
+                                className={styles.roleSelect}
+                            >
+                                <option value="user">user</option>
+                                <option value="assistant">assistant</option>
+                                <option value="system">system</option>
+                            </select>
+                        </div>
+                        <div className={styles.addFormRow}>
+                            <label>Timestamp:</label>
+                            <input
+                                type="datetime-local"
+                                value={newMsgTimestamp}
+                                onChange={(e) => setNewMsgTimestamp(e.target.value)}
+                                className={styles.timestampInput}
+                            />
+                        </div>
+                        <textarea
+                            className={styles.addTextarea}
+                            placeholder="Message content..."
+                            value={newMsgContent}
+                            onChange={(e) => setNewMsgContent(e.target.value)}
+                            rows={4}
+                        />
+                        <div className={styles.addFormActions}>
+                            <button
+                                onClick={handleAddMessage}
+                                disabled={!newMsgContent.trim() || isAddingMessage}
+                                className={styles.submitAddBtn}
+                            >
+                                {isAddingMessage ? <Loader2 className={styles.loader} size={14} /> : <Plus size={14} />}
+                                Add Message
+                            </button>
+                        </div>
+                    </div>
+                )}
 
                 <div className={styles.messageList}>
                     {isLoadingMessages ? (

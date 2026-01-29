@@ -90,6 +90,7 @@ export default function Home() {
     }, [inputValue, adjustTextareaHeight]);
     const [isPeopleModalOpen, setIsPeopleModalOpen] = useState(false);
     const [selectedPlaybook, setSelectedPlaybook] = useState<string | null>(null);
+    const [playbookParams, setPlaybookParams] = useState<Record<string, any>>({});
     const [attachment, setAttachment] = useState<string | null>(null); // Base64
     const [attachmentName, setAttachmentName] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -211,9 +212,12 @@ export default function Home() {
             if (res.ok) {
                 const data = await res.json();
                 const newMessages: Message[] = data.history || [];
-                console.log(`[DEBUG] Fetched ${newMessages.length} items`);
+                // Use server-provided has_more flag if available, fallback to count-based heuristic
+                const serverHasMore = data.has_more;
+                const effectiveHasMore = serverHasMore !== undefined ? serverHasMore : (newMessages.length >= 20);
+                console.log(`[DEBUG] Fetched ${newMessages.length} items (beforeId=${beforeId}, server has_more=${serverHasMore}, effectiveHasMore=${effectiveHasMore})`);
 
-                if (newMessages.length < 20) {
+                if (!effectiveHasMore) {
                     setHasMore(false);
                 }
 
@@ -258,9 +262,13 @@ export default function Home() {
         if (chatAreaRef.current) {
             const { scrollTop } = chatAreaRef.current;
             // Use a threshold (e.g. 10px) to catch scrolls near the top
+            if (scrollTop < 10) {
+                console.log(`[DEBUG] Scroll near top: hasMore=${hasMore}, isLoadingMore=${isLoadingMore}, messages.length=${messages.length}, isHistoryLoaded=${isHistoryLoaded}`);
+            }
             if (scrollTop < 10 && hasMore && !isLoadingMore && messages.length > 0 && isHistoryLoaded) {
                 // Determine the oldest message ID
                 const oldestId = messages[0].id;
+                console.log(`[DEBUG] Triggering fetchHistory with before=${oldestId}`);
                 if (oldestId) {
                     fetchHistory(oldestId);
                 }
@@ -270,12 +278,17 @@ export default function Home() {
 
     useEffect(() => {
         fetchHistory();
-        // Fetch saved playbook setting from server
+        // Fetch saved playbook setting and params from server
         fetch('/api/config/playbook')
             .then(res => res.ok ? res.json() : null)
             .then(data => {
-                if (data && data.playbook) {
-                    setSelectedPlaybook(data.playbook);
+                if (data) {
+                    if (data.playbook) {
+                        setSelectedPlaybook(data.playbook);
+                    }
+                    if (data.playbook_params && Object.keys(data.playbook_params).length > 0) {
+                        setPlaybookParams(data.playbook_params);
+                    }
                 }
             })
             .catch(err => console.error('Failed to load playbook setting', err));
@@ -337,9 +350,12 @@ export default function Home() {
 
         const currentAttachment = attachment;
         const currentPlaybook = selectedPlaybook;
+        const currentPlaybookParams = playbookParams;
 
         setAttachment(null);
         setAttachmentName(null);
+        // Reset playbook params after sending
+        setPlaybookParams({});
 
         try {
             const res = await fetch('/api/chat/send', {
@@ -348,7 +364,8 @@ export default function Home() {
                 body: JSON.stringify({
                     message: userMsg.content,
                     attachment: currentAttachment,
-                    meta_playbook: currentPlaybook
+                    meta_playbook: currentPlaybook,
+                    playbook_params: Object.keys(currentPlaybookParams).length > 0 ? currentPlaybookParams : undefined
                 })
             });
 
@@ -613,6 +630,8 @@ export default function Home() {
                 onClose={() => setIsOptionsOpen(false)}
                 currentPlaybook={selectedPlaybook}
                 onPlaybookChange={setSelectedPlaybook}
+                playbookParams={playbookParams}
+                onPlaybookParamsChange={setPlaybookParams}
             />
 
             <PeopleModal

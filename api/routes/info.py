@@ -247,7 +247,7 @@ def list_available_models():
 @router.post("/item/{item_id}/toggle-open")
 def toggle_item_open(item_id: str, manager = Depends(get_manager)):
     """Toggle the open/close state of an item.
-    
+
     When an item is open, its content is included in the AI's visual context.
     - Picture items: Added as images
     - Document items: Added as text in prompt
@@ -257,5 +257,68 @@ def toggle_item_open(item_id: str, manager = Depends(get_manager)):
         return {"success": True, "is_open": new_state, "item_id": item_id}
     except RuntimeError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class DocumentContentUpdate(BaseModel):
+    content: str
+
+
+@router.put("/item/{item_id}/content")
+def update_item_content(item_id: str, body: DocumentContentUpdate, manager = Depends(get_manager)):
+    """Update the content of a document item."""
+    # Get item data
+    items_map = {}
+    if hasattr(manager, 'state') and hasattr(manager.state, 'items'):
+        items_map = manager.state.items
+    elif hasattr(manager, 'items'):
+        items_map = manager.items
+
+    if item_id not in items_map:
+        if hasattr(manager, 'item_registry') and item_id in manager.item_registry:
+            items_map = manager.item_registry
+        else:
+            raise HTTPException(status_code=404, detail=f"Item not found: {item_id}")
+
+    item_data = items_map[item_id]
+    item_type = item_data.get("type", "object")
+
+    if item_type != "document":
+        raise HTTPException(status_code=400, detail="Only document items can be edited")
+
+    file_path = item_data.get("file_path")
+    if not file_path:
+        raise HTTPException(status_code=400, detail="No file path for this item")
+
+    path = Path(file_path)
+
+    # Handle relative paths
+    if not path.is_absolute() and hasattr(manager, 'saiverse_home'):
+        path = manager.saiverse_home / file_path
+
+    # Legacy path recovery (same logic as get_item_content)
+    if not path.exists() and hasattr(manager, 'saiverse_home'):
+        home = manager.saiverse_home
+        parts = Path(file_path).parts
+
+        if 'documents' in parts:
+            idx = parts.index('documents')
+            rel = Path(*parts[idx:])
+            candidate = home / rel
+            if candidate.exists():
+                path = candidate
+
+        if not path.exists():
+            candidate = home / "documents" / Path(file_path).name
+            if candidate.exists():
+                path = candidate
+
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+
+    try:
+        path.write_text(body.content, encoding="utf-8")
+        return {"success": True, "message": "Content updated successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

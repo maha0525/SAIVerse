@@ -7,9 +7,29 @@ interface ModelInfo {
     name: string;
 }
 
+interface PlaybookParamOption {
+    value: string;
+    label: string;
+}
+
+interface PlaybookParam {
+    name: string;
+    description: string;
+    param_type: string;
+    required: boolean;
+    default: any;
+    enum_values?: string[];
+    enum_source?: string;
+    user_configurable: boolean;
+    ui_widget?: string;
+    resolved_options?: PlaybookParamOption[];
+}
+
 interface PlaybookInfo {
     id: string;
     name: string;
+    description?: string;
+    input_schema?: PlaybookParam[];
 }
 
 interface ParamSpec {
@@ -28,15 +48,18 @@ interface ChatOptionsProps {
     onClose: () => void;
     currentPlaybook: string | null;
     onPlaybookChange: (id: string | null) => void;
+    playbookParams: Record<string, any>;
+    onPlaybookParamsChange: (params: Record<string, any>) => void;
 }
 
-export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybookChange }: ChatOptionsProps) {
+export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybookChange, playbookParams, onPlaybookParamsChange }: ChatOptionsProps) {
     const [models, setModels] = useState<ModelInfo[]>([]);
     const [playbooks, setPlaybooks] = useState<PlaybookInfo[]>([]);
     const [currentModel, setCurrentModel] = useState<string>('');
     const [params, setParams] = useState<Record<string, any>>({});
     const [paramSpecs, setParamSpecs] = useState<Record<string, ParamSpec>>({});
     const [loading, setLoading] = useState(false);
+    const [playbookParamSpecs, setPlaybookParamSpecs] = useState<PlaybookParam[]>([]);
 
     useEffect(() => {
         if (isOpen) {
@@ -61,6 +84,15 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
                 setCurrentModel(config.current_model || '');
                 setParamSpecs(config.parameters || {});
                 setParams(config.current_values || {});
+            }
+
+            // If a playbook is already selected, fetch its parameters
+            if (currentPlaybook) {
+                const paramsRes = await fetch(`/api/config/playbooks/${encodeURIComponent(currentPlaybook)}/params`);
+                if (paramsRes.ok) {
+                    const data = await paramsRes.json();
+                    setPlaybookParamSpecs(data.params || []);
+                }
             }
         } catch (e) {
             console.error("Failed to load config", e);
@@ -96,15 +128,51 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
 
     const handlePlaybookChange = async (playbookId: string | null) => {
         onPlaybookChange(playbookId);
+        // Reset playbook params when changing playbook
+        onPlaybookParamsChange({});
+        setPlaybookParamSpecs([]);
+
+        // Save to server immediately (include empty params to reset server-side)
+        try {
+            await fetch('/api/config/playbook', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ playbook: playbookId, playbook_params: {} })
+            });
+        } catch (e) {
+            console.error("Failed to save playbook", e);
+        }
+
+        // Fetch playbook params if a playbook is selected
+        if (playbookId) {
+            try {
+                const res = await fetch(`/api/config/playbooks/${encodeURIComponent(playbookId)}/params`);
+                if (res.ok) {
+                    const data = await res.json();
+                    setPlaybookParamSpecs(data.params || []);
+                }
+            } catch (e) {
+                console.error("Failed to fetch playbook params", e);
+            }
+        }
+    };
+
+    const handlePlaybookParamChange = async (paramName: string, value: any) => {
+        const newParams = { ...playbookParams, [paramName]: value };
+        onPlaybookParamsChange(newParams);
+
         // Save to server immediately
         try {
             await fetch('/api/config/playbook', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ playbook: playbookId })
+                body: JSON.stringify({
+                    playbook: currentPlaybook,
+                    playbook_params: newParams
+                })
             });
         } catch (e) {
-            console.error("Failed to save playbook", e);
+            console.error("Failed to save playbook params", e);
         }
     };
 
@@ -165,6 +233,54 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
                                     </select>
                                 </div>
                             </div>
+
+                            {playbookParamSpecs.length > 0 && (
+                                <div className={styles.section}>
+                                    <div className={styles.sectionTitle}>Playbook Parameters</div>
+                                    {playbookParamSpecs.map(param => (
+                                        <div key={param.name} className={styles.formGroup}>
+                                            <label>
+                                                {param.description || param.name}
+                                                {!param.required && <span className={styles.optional}> (optional)</span>}
+                                            </label>
+
+                                            {param.resolved_options && param.resolved_options.length > 0 ? (
+                                                <select
+                                                    className={styles.select}
+                                                    value={playbookParams[param.name] ?? param.default ?? ''}
+                                                    onChange={(e) => handlePlaybookParamChange(param.name, e.target.value || null)}
+                                                >
+                                                    <option value="">{param.required ? '(Select...)' : '(Auto)'}</option>
+                                                    {param.resolved_options.map(opt => (
+                                                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                                    ))}
+                                                </select>
+                                            ) : param.param_type === 'boolean' ? (
+                                                <input
+                                                    type="checkbox"
+                                                    checked={playbookParams[param.name] ?? param.default ?? false}
+                                                    onChange={(e) => handlePlaybookParamChange(param.name, e.target.checked)}
+                                                />
+                                            ) : param.param_type === 'number' ? (
+                                                <input
+                                                    type="number"
+                                                    className={styles.input}
+                                                    value={playbookParams[param.name] ?? param.default ?? ''}
+                                                    onChange={(e) => handlePlaybookParamChange(param.name, parseFloat(e.target.value))}
+                                                />
+                                            ) : (
+                                                <input
+                                                    type="text"
+                                                    className={styles.input}
+                                                    value={playbookParams[param.name] ?? param.default ?? ''}
+                                                    onChange={(e) => handlePlaybookParamChange(param.name, e.target.value)}
+                                                    placeholder={param.description}
+                                                />
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
 
                             {Object.keys(paramSpecs).length > 0 && (
                                 <div className={styles.section}>

@@ -441,6 +441,138 @@
     background-color: #212529;
 }
 
+/* Add Message Button */
+.addMsgBtn {
+    background: none;
+    border: none;
+    color: #51cf66;
+    padding: 6px;
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    transition: color 0.2s, background-color 0.2s;
+}
+
+.addMsgBtn:hover:not(:disabled) {
+    color: #69db7c;
+    background-color: rgba(81, 207, 102, 0.1);
+}
+
+.addMsgBtn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* Add Message Form */
+.addMessageForm {
+    background-color: #1f2023;
+    border: 1px solid #51cf66;
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 0 1rem 1rem 1rem;
+    max-width: 900px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.addFormHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+    font-weight: 600;
+    color: #51cf66;
+}
+
+.cancelAddBtn {
+    background: none;
+    border: none;
+    color: #888;
+    padding: 4px;
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+}
+
+.cancelAddBtn:hover {
+    color: #e0e0e0;
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+.addFormRow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 0.75rem;
+    font-size: 0.9rem;
+    color: #aaa;
+}
+
+.addFormRow label {
+    min-width: 80px;
+    flex-shrink: 0;
+}
+
+.roleSelect {
+    background-color: #141517;
+    border: 1px solid #444;
+    color: #e0e0e0;
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 0.9rem;
+}
+
+.timestampInput {
+    background-color: #141517;
+    border: 1px solid #444;
+    color: #e0e0e0;
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-family: monospace;
+}
+
+.addTextarea {
+    width: 100%;
+    min-height: 100px;
+    background-color: #141517;
+    border: 1px solid #444;
+    color: #e0e0e0;
+    padding: 8px;
+    border-radius: 4px;
+    font-family: inherit;
+    resize: vertical;
+    margin-bottom: 0.75rem;
+}
+
+.addFormActions {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.submitAddBtn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    background-color: #2b8a3e;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.submitAddBtn:hover:not(:disabled) {
+    background-color: #237032;
+}
+
+.submitAddBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
 
 .pagination {
     padding: 1rem;

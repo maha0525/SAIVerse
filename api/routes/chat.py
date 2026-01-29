@@ -23,6 +23,7 @@ class ChatMessage(BaseModel):
 
 class ChatHistoryResponse(BaseModel):
     history: List[ChatMessage]
+    has_more: bool = True  # Whether there are older messages available
 
 @router.get("/persona/{persona_id}/avatar")
 def get_persona_avatar(persona_id: str, manager = Depends(get_manager)):
@@ -139,10 +140,13 @@ def get_chat_history(
     start_index = max(0, end_index - limit) if not after else start_index
     slice_history = enriched_history_objects[start_index:end_index]
     
-    logging.debug("[CHAT_HISTORY] Slice calc: start=%d, end=%d, limit=%d. Returning %d items.", 
-                 start_index, end_index, limit, len(slice_history))
-    logging.info("get_chat_history: bid=%s total=%d limit=%d before=%s returned=%d", 
-                current_bid, len(raw_history), limit, before, len(slice_history))
+    # Determine if there are older messages (for pagination)
+    has_more_old = start_index > 0
+
+    logging.debug("[CHAT_HISTORY] Slice calc: start=%d, end=%d, limit=%d. Returning %d items. has_more=%s",
+                 start_index, end_index, limit, len(slice_history), has_more_old)
+    logging.info("get_chat_history: bid=%s total=%d limit=%d before=%s returned=%d has_more=%s",
+                current_bid, len(raw_history), limit, before, len(slice_history), has_more_old)
 
     final_response = []
     
@@ -226,8 +230,8 @@ def get_chat_history(
             avatar=avatar,
             images=images_list
         ))
-        
-    return {"history": final_response}
+
+    return {"history": final_response, "has_more": has_more_old}
 
 import shutil
 import mimetypes
@@ -240,6 +244,7 @@ class SendMessageRequest(BaseModel):
     message: str
     attachment: Optional[str] = None # Base64 encoded file
     meta_playbook: Optional[str] = None
+    playbook_params: Optional[Dict[str, Any]] = None  # Parameters for meta playbook
     metadata: Optional[Dict[str, Any]] = None
 
 def _store_uploaded_attachment(base64_data: str) -> Optional[Dict[str, str]]:
@@ -322,9 +327,10 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
             yield json.dumps({"type": "status", "content": "processing"}, ensure_ascii=False) + " " * 2048 + "\n"
             
             stream = manager.handle_user_input_stream(
-                req.message, 
-                metadata=metadata, 
-                meta_playbook=req.meta_playbook
+                req.message,
+                metadata=metadata,
+                meta_playbook=req.meta_playbook,
+                playbook_params=req.playbook_params
             )
             
             for chunk in stream:

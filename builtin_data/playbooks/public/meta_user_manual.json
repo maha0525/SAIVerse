@@ -1,11 +1,21 @@
 {
-  "name": "meta_user",
-  "description": "Router -> sub-playbook -> speak (exec handled by runtime). Automatically retrieves context from previous autonomous activity.",
+  "name": "meta_user_manual",
+  "description": "ユーザーがPlaybookを手動選択して実行。未選択時は自動ルーティング。",
   "input_schema": [
     {
       "name": "input",
       "description": "User input",
       "source": null
+    },
+    {
+      "name": "selected_playbook",
+      "description": "実行するPlaybook（未選択時は自動判定）",
+      "param_type": "enum",
+      "enum_source": "playbooks:router_callable",
+      "user_configurable": true,
+      "required": false,
+      "default": null,
+      "ui_widget": "dropdown"
     }
   ],
   "output_schema": null,
@@ -24,18 +34,30 @@
       "id": "get_context",
       "type": "tool",
       "action": "get_since_last_user_conversation",
-      "args": {
+      "args_input": {
         "include_raw_log": true,
         "max_raw_messages": 10
       },
       "output_key": "autonomous_context",
-      "next": "list_playbooks"
+      "next": "check_selection"
+    },
+    {
+      "id": "check_selection",
+      "type": "pass",
+      "conditional_next": {
+        "field": "selected_playbook",
+        "operator": "eq",
+        "cases": {
+          "": "list_playbooks",
+          "default": "exec"
+        }
+      }
     },
     {
       "id": "list_playbooks",
       "type": "tool",
       "action": "list_available_playbooks",
-      "args": {},
+      "args_input": {},
       "output_key": "available_playbooks",
       "next": "router"
     },

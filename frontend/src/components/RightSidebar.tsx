@@ -286,6 +286,10 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
                     isOpen={!!selectedItem}
                     onClose={() => setSelectedItem(null)}
                     item={selectedItem}
+                    onItemUpdated={() => {
+                        fetchDetails();
+                        setSelectedItem(null);  // Close modal after update
+                    }}
                 />
 
                 {selectedPersona && (

@@ -60,17 +60,23 @@ class LLMNodeDef(BaseModel):
         default=None,
         description="Map structured output fields to state variables. "
                     "Example: {'router.playbook': 'selected_playbook', 'router.args': 'selected_args'}. "
-                    "Keys are dot-notated paths in the structured output, values are target state variable names."
+                    "Keys are dot-notated paths in structured output, values are target state variable names."
     )
     available_tools: Optional[List[str]] = Field(
         default=None,
-        description="List of tool names that the LLM can call. If specified, enables tool calling for this node."
+        description="List of tool names that LLM can call. If specified, enables tool calling for this node."
     )
     output_keys: Optional[List[Dict[str, str]]] = Field(
         default=None,
         description="Map output types to state keys. Examples: [{'text': 'speak_content'}, {'function_call': 'tool_call'}]. "
                     "Supported types: 'text', 'function_call', 'thought'. "
                     "Function calls are stored as nested keys: '<key>.name', '<key>.args.<arg_name>'."
+    )
+    memorize: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="If specified, save prompt and response to SAIMemory. "
+                    "Example: {'tags': ['conversation']}. "
+                    "Tags will be applied to both user (prompt) and assistant (response) messages."
     )
 
 
@@ -287,6 +293,43 @@ class InputParam(BaseModel):
     source: Optional[str] = Field(
         default=None,
         description="Optional parent state key (e.g., 'parent.input', 'router.query'). If not specified, defaults to 'input'."
+    )
+
+    # Type and validation
+    param_type: str = Field(
+        default="string",
+        description="Parameter type: 'string', 'number', 'boolean', 'enum'"
+    )
+    required: bool = Field(
+        default=True,
+        description="Whether this parameter is required"
+    )
+    default: Optional[Any] = Field(
+        default=None,
+        description="Default value if not provided"
+    )
+
+    # Enum options (for param_type='enum')
+    enum_values: Optional[List[str]] = Field(
+        default=None,
+        description="Static list of allowed values for enum type"
+    )
+    enum_source: Optional[str] = Field(
+        default=None,
+        description="Dynamic enum source in format 'collection:scope'. "
+                    "Examples: 'playbooks:router_callable', 'buildings:current_city', "
+                    "'items:current_building', 'personas:current_city', 'tools:available'"
+    )
+
+    # UI display control
+    user_configurable: bool = Field(
+        default=False,
+        description="If true, this parameter is shown in UI for user input"
+    )
+    ui_widget: Optional[str] = Field(
+        default=None,
+        description="UI widget type: 'text', 'textarea', 'dropdown', 'radio'. "
+                    "Defaults to 'dropdown' for enum, 'text' for string."
     )
 
 

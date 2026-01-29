@@ -61,3 +61,4 @@ class CoreState:
     autonomous_conversation_running: bool = False
     global_auto_enabled: bool = False  # Global ON/OFF for ConversationManager
     current_playbook: Optional[str] = None  # Selected playbook override for Chat Options
+    playbook_params: Dict[str, Any] = field(default_factory=dict)  # Parameters for the selected playbook

@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List
+import time
 from api.deps import get_manager
 from .models import (
-    ThreadSummary, MessageItem, MessagesResponse, UpdateMessageRequest
+    ThreadSummary, MessageItem, MessagesResponse, UpdateMessageRequest, CreateMessageRequest
 )
 from .utils import get_adapter
 import math
@@ -92,6 +93,69 @@ def list_thread_messages(
             first_created_at=first_created_at,
             last_created_at=last_created_at,
         )
+
+@router.post("/{persona_id}/threads/{thread_id}/messages", response_model=MessageItem)
+def create_message(
+    persona_id: str,
+    thread_id: str,
+    request: CreateMessageRequest,
+    manager = Depends(get_manager)
+):
+    """Add a new message to a thread."""
+    with get_adapter(persona_id, manager) as adapter:
+        # Prepare message dict
+        created_at = request.created_at if request.created_at is not None else time.time()
+
+        message = {
+            "role": request.role,
+            "content": request.content,
+            "timestamp": None,  # Will use created_at
+            "metadata": request.metadata,
+        }
+
+        # Extract suffix from thread_id (e.g., "persona:suffix" -> "suffix")
+        thread_suffix = thread_id.split(":", 1)[1] if ":" in thread_id else thread_id
+
+        # Use internal method to append message
+        # We need to manually create the message to get its ID back
+        from sai_memory.memory.storage import get_or_create_thread, add_message, replace_message_embeddings
+        from sai_memory.memory.chunking import chunk_text
+
+        with adapter._db_lock:
+            resource_id = adapter.settings.resource_id
+            get_or_create_thread(adapter.conn, thread_id, resource_id)
+
+            mid = add_message(
+                adapter.conn,
+                thread_id=thread_id,
+                role=request.role,
+                content=request.content,
+                resource_id=resource_id,
+                created_at=int(created_at),
+                metadata=request.metadata,
+            )
+
+            # Add embeddings if content is not empty
+            if request.content and request.content.strip() and adapter.embedder is not None:
+                chunks = chunk_text(
+                    request.content,
+                    min_chars=adapter.settings.chunk_min_chars,
+                    max_chars=adapter.settings.chunk_max_chars,
+                )
+                payload = [c.strip() for c in chunks if c and c.strip()]
+                if payload:
+                    vectors = adapter.embedder.embed(payload, is_query=False)
+                    replace_message_embeddings(adapter.conn, mid, vectors)
+
+        return MessageItem(
+            id=mid,
+            thread_id=thread_id,
+            role=request.role,
+            content=request.content,
+            created_at=int(created_at),
+            metadata=request.metadata,
+        )
+
 
 @router.patch("/{persona_id}/messages/{message_id}")
 def update_message(

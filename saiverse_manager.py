@@ -322,7 +322,7 @@ class SAIVerseManager(
         except Exception as exc:
             logging.exception("SEA auto run failed: %s", exc)
 
-    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[str]:
+    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, playbook_params: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[str]:
         """Run user input via PulseController."""
         try:
             result = self.pulse_controller.submit_user(
@@ -331,6 +331,7 @@ class SAIVerseManager(
                 user_input=user_input,
                 metadata=metadata,
                 meta_playbook=meta_playbook,
+                playbook_params=playbook_params,
                 event_callback=event_callback,
             )
             return result if result else []
@@ -591,9 +592,12 @@ class SAIVerseManager(
 
 
     def handle_user_input_stream(
-        self, message: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None
+        self, message: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None,
+        playbook_params: Optional[Dict[str, Any]] = None
     ) -> Iterator[str]:
-        yield from self.runtime.handle_user_input_stream(message, metadata=metadata, meta_playbook=meta_playbook)
+        yield from self.runtime.handle_user_input_stream(
+            message, metadata=metadata, meta_playbook=meta_playbook, playbook_params=playbook_params
+        )
 
     def get_summonable_personas(self) -> List[str]:
         """Returns a list of persona names that can be summoned to the user's current location."""

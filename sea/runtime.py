@@ -69,6 +69,7 @@ class SEARuntime:
         building_id: str,
         metadata: Optional[Dict[str, Any]] = None,
         meta_playbook: Optional[str] = None,
+        playbook_params: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         cancellation_token: Optional[CancellationToken] = None,
         pulse_type: str = "user",
@@ -106,6 +107,7 @@ class SEARuntime:
             playbook, persona, building_id, user_input,
             auto_mode=False, record_history=True, event_callback=event_callback,
             cancellation_token=cancellation_token, pulse_type=pulse_type,
+            initial_params=playbook_params,
         )
         return result
 
@@ -147,13 +149,19 @@ class SEARuntime:
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         cancellation_token: Optional[CancellationToken] = None,
         pulse_type: Optional[str] = None,
+        initial_params: Optional[Dict[str, Any]] = None,
     ) -> List[str]:
         # Check for cancellation at start
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
-        
+
         # Generate or inherit pulse_id
         parent = parent_state or {}
+
+        # Merge initial_params into parent state (these are user-provided playbook parameters)
+        if initial_params:
+            LOGGER.debug("[sea] _run_playbook merging initial_params: %s", list(initial_params.keys()))
+            parent.update(initial_params)
         LOGGER.debug("[sea] _run_playbook called for %s, parent_state keys: %s", playbook.name, list(parent.keys()) if parent else "(none)")
         if "pulse_id" in parent:
             pulse_id = str(parent["pulse_id"])
@@ -272,8 +280,13 @@ class SEARuntime:
             param_name = param.name
             source_key = param.source if param.source else "input"
 
+            # If this param already exists in parent (e.g., from initial_params/playbook_params),
+            # use that value instead of resolving from source
+            if param_name in parent and parent[param_name] is not None:
+                value = parent[param_name]
+                LOGGER.debug("[sea][LangGraph] Using existing value for %s from parent: %s", param_name, str(value)[:200] if value else "(empty)")
             # Resolve value from parent_state or fallback
-            if source_key.startswith("parent."):
+            elif source_key.startswith("parent."):
                 actual_key = source_key[7:]  # strip "parent."
                 value = parent.get(actual_key, "")
                 LOGGER.debug("[sea][LangGraph] Resolved %s from parent.%s: %s", param_name, actual_key, str(value)[:200] if value else "(empty)")
@@ -369,6 +382,8 @@ class SEARuntime:
                              (action_dbg[:120] + '...') if isinstance(action_dbg, str) and len(action_dbg) > 120 else action_dbg,
                              getattr(node_def, 'model_type', None),
                              len(str(state.get('available_playbooks'))) if state.get('available_playbooks') is not None else None)
+
+            # Build variables for template formatting
             variables = {
                 "input": state.get("inputs", {}).get("input", ""),
                 "last": state.get("last", ""),
@@ -377,6 +392,15 @@ class SEARuntime:
                 "context_bundle_text": state.get("context_bundle_text", ""),
                 **{k: v for k, v in state.items() if k not in ["messages", "inputs", "outputs", "persona_obj", "_cancellation_token"]},  # Include all other state variables
             }
+
+            # Debug: log template variables for novel_writing playbook
+            if playbook.name == "novel_writing":
+                node_id = getattr(node_def, "id", "")
+                if node_id.startswith("chapter_"):
+                    # Log specific variables used in chapter templates
+                    relevant_keys = ["novel_title", "chapter_1_title", "chapter_2_title", "chapter_3_title", "chapter_4_title"]
+                    relevant_vars = {k: variables.get(k) for k in relevant_keys}
+                    LOGGER.debug("[sea][novel_writing] Node %s: relevant variables = %s", node_id, relevant_vars)
             text = ""
             schema_consumed = False
             prompt = None  # Will store the expanded prompt for memorize
@@ -531,6 +555,14 @@ class SEARuntime:
                     self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                     schema_consumed = self._process_structured_output(node_def, text, state)
                     
+                    # Set has_speak_content based on schema_consumed
+                    # If structured output was consumed, we need to set this flag
+                    # Otherwise, it's already set in the tool handling code above
+                    if schema_consumed:
+                        # Structured output means we have usable data, set flag to True
+                        # This allows conditional_next to proceed correctly
+                        state["has_speak_content"] = True
+                    
                     # If output_key is specified but no response_schema, store the raw text
                     if not schema_consumed:
                         output_key = getattr(node_def, "output_key", None)
@@ -559,6 +591,8 @@ class SEARuntime:
 
             # Handle memorize option - save prompt and response to SAIMemory
             memorize_config = getattr(node_def, "memorize", None)
+            LOGGER.debug("[_lg_llm_node] node=%s memorize_config=%s type=%s schema_consumed=%s", 
+                       getattr(node_def, "id", "?"), memorize_config, type(memorize_config), schema_consumed)
             if memorize_config:
                 pulse_id = state.get("pulse_id")
                 # Parse memorize config - can be True or {"tags": [...]}
@@ -580,14 +614,21 @@ class SEARuntime:
                 
                 # Save response (assistant role)
                 if text and text != "(error in llm node)":
+                    # If structured output was consumed, format as JSON string for memory
+                    content_to_save = text
+                    if schema_consumed and isinstance(text, dict):
+                        import json
+                        content_to_save = json.dumps(text, ensure_ascii=False, indent=2)
+                        LOGGER.debug("[sea][llm] Structured output formatted as JSON for memory")
+
                     self._store_memory(
                         persona,
-                        text,
+                        content_to_save,
                         role="assistant",
                         tags=list(memorize_tags),
                         pulse_id=pulse_id,
                     )
-                    LOGGER.debug("[sea][llm] Memorized response (assistant): %s...", text[:100])
+                    LOGGER.debug("[sea][llm] Memorized response (assistant): %s...", str(content_to_save)[:100])
 
             # Debug: log speak_content at end of LLM node
             speak_content = state.get("speak_content", "")
@@ -801,23 +842,33 @@ class SEARuntime:
         schema = getattr(node_def, "response_schema", None)
         if not schema:
             return False
-        
+
+        node_id = getattr(node_def, "id", "?")
+        LOGGER.debug("[sea] _process_structured_output: node=%s, text type=%s",
+                    node_id, type(text).__name__)
+
         # Check if text is already a dict (already parsed by LLM client with response_schema)
         if isinstance(text, dict):
             parsed = text
+            LOGGER.debug("[sea] _process_structured_output: text is already a dict, keys=%s",
+                        list(parsed.keys()) if isinstance(parsed, dict) else "(not a dict)")
         else:
             parsed = self._extract_structured_json(text)
-        
+            LOGGER.debug("[sea] _process_structured_output: extracted JSON, parsed=%s",
+                        parsed is not None)
+
         if parsed is None:
-            LOGGER.warning("[sea] structured output parse failed for node %s", getattr(node_def, "id", "?"))
+            LOGGER.warning("[sea] structured output parse failed for node %s", node_id)
             return False
-        
+
         key = getattr(node_def, "output_key", None) or getattr(node_def, "id", "") or "node"
+        LOGGER.debug("[sea] _process_structured_output: storing to state['%s']", key)
         self._store_structured_result(state, key, parsed)
 
         # Apply output_mapping if defined
         output_mapping = getattr(node_def, "output_mapping", None)
         if output_mapping:
+            LOGGER.debug("[sea] _process_structured_output: applying output_mapping: %s", output_mapping)
             self._apply_output_mapping(state, key, output_mapping)
 
         return True
@@ -831,21 +882,67 @@ class SEARuntime:
             mapping: Dict mapping source paths to target state keys
                      e.g., {"router.playbook": "selected_playbook"}
         """
+        # Get the structured output data
+        output_data = state.get(output_key)
+        if output_data is None:
+            LOGGER.warning("[sea] output_mapping: output_key %s not found in state (available keys: %s)",
+                          output_key, list(state.keys())[:20])
+            return
+
+        LOGGER.debug("[sea] output_mapping: output_data type=%s, keys=%s",
+                    type(output_data).__name__, list(output_data.keys()) if isinstance(output_data, dict) else "(not a dict)")
+
         for source_path, target_key in mapping.items():
             # Source path can be either:
             # 1. Absolute path like "router.playbook" (starts with output_key)
-            # 2. Relative path like "playbook" (within the output_key namespace)
+            # 2. Relative path like "playbook" (within output_key namespace)
             if source_path.startswith(f"{output_key}."):
-                # Already absolute path
-                full_path = source_path
+                # Already absolute path - need to parse it correctly
+                # Remove output_key prefix from source_path
+                # e.g., "structure.novel_title" -> "novel_title"
+                relative_path = source_path[len(output_key) + 1:]
+                value = self._resolve_nested_value(output_data, relative_path)
             else:
-                # Relative path, prepend output_key
-                full_path = f"{output_key}.{source_path}"
+                # Relative path, resolve from output_data
+                value = self._resolve_nested_value(output_data, source_path)
 
-            value = state.get(full_path)
             if value is not None:
                 state[target_key] = value
-                LOGGER.debug("[sea] output_mapping: %s -> %s = %s", full_path, target_key, str(value)[:100])
+                LOGGER.debug("[sea] output_mapping: %s -> %s = %s", source_path, target_key, str(value)[:100])
+            else:
+                LOGGER.warning("[sea] output_mapping: failed to resolve %s from %s (keys: %s)",
+                             source_path, output_key,
+                             list(output_data.keys()) if isinstance(output_data, dict) else "(not a dict)")
+
+
+    def _resolve_nested_value(self, data: Any, path: str) -> Any:
+        """Resolve a nested key from data using dot notation.
+
+        Args:
+            data: The data structure to traverse (dict or list)
+            path: Dot-notated path (e.g., "novel_title" or "items.0.name")
+
+        Returns:
+            The value at the path, or None if not found
+        """
+        if path == "":
+            return data
+        keys = path.split(".")
+        current = data
+        for key in keys:
+            if isinstance(current, dict):
+                current = current.get(key)
+            elif isinstance(current, list) and key.isdigit():
+                idx = int(key)
+                if idx < len(current):
+                    current = current[idx]
+                else:
+                    return None
+            else:
+                return None
+            if current is None:
+                return None
+        return current
 
     def _store_structured_result(self, state: Dict[str, Any], key: str, data: Any) -> None:
         state[key] = data
@@ -1421,8 +1518,12 @@ class SEARuntime:
                 return state
 
             # Get current thread as parent
-            current_suffix = memory_adapter.get_current_thread()
-            parent_thread_id = memory_adapter._thread_id(None, thread_suffix=current_suffix)
+            # get_current_thread() returns full thread ID (e.g., "air_city_a:__persona__")
+            # Use it directly as parent_thread_id, don't pass to _thread_id which adds prefix
+            parent_thread_id = memory_adapter.get_current_thread()
+            if parent_thread_id is None:
+                # Fallback to default persona thread if no active thread set
+                parent_thread_id = memory_adapter._thread_id(None)
 
             # Create new Stelis thread
             stelis = memory_adapter.start_stelis_thread(
@@ -1767,6 +1868,8 @@ class SEARuntime:
         adapter = getattr(persona, "sai_memory", None)
         try:
             if adapter and adapter.is_ready():
+                current_thread = adapter.get_current_thread()
+                LOGGER.debug("[_store_memory] Active thread: %s (persona_id=%s)", current_thread, getattr(persona, "persona_id", None))
                 message = {"role": role or "assistant", "content": text}
                 clean_tags = [str(tag) for tag in (tags or []) if tag]
                 # Add pulse:uuid tag
@@ -1787,7 +1890,9 @@ class SEARuntime:
                             msg_metadata[key] = value
                 if msg_metadata:
                     message["metadata"] = msg_metadata
-                adapter.append_persona_message(message)
+                # Pass thread_suffix to ensure message is saved to correct thread
+                thread_suffix = current_thread.split(":", 1)[1] if ":" in current_thread else current_thread
+                adapter.append_persona_message(message, thread_suffix=thread_suffix)
         except Exception:
             LOGGER.debug("memorize node not stored", exc_info=True)
 
