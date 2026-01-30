@@ -895,7 +895,8 @@ class GeminiClient(LLMClient):
                 stream_completed = True
 
         if fcall is None and saw_chunks and not stream_completed:
-            raise IncompleteStreamError("Gemini stream ended without completion signal.")
+            # Log as warning but continue with received content
+            logging.warning("Gemini stream ended without completion signal, but content was received. Continuing with partial response.")
 
         # Store reasoning
         self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
