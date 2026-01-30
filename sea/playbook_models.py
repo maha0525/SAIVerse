@@ -78,6 +78,12 @@ class LLMNodeDef(BaseModel):
                     "Example: {'tags': ['conversation']}. "
                     "Tags will be applied to both user (prompt) and assistant (response) messages."
     )
+    speak: Optional[bool] = Field(
+        default=None,
+        description="If True, output response to Building (UI). "
+                    "When SAIVERSE_LLM_STREAMING=true (default), streams response chunks in real-time. "
+                    "When false, sends complete response after generation."
+    )
 
 
 class ToolNodeDef(BaseModel):

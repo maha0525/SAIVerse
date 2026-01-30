@@ -12,8 +12,7 @@ import openai
 from openai import OpenAI
 
 from media_utils import iter_image_media, load_image_bytes_for_llm
-from tools import OPENAI_TOOLS_SPEC, TOOL_REGISTRY
-from tools.core import parse_tool_result
+from tools import OPENAI_TOOLS_SPEC
 from llm_router import route
 
 from .base import LLMClient, get_llm_logger
@@ -569,69 +568,41 @@ class OpenAIClient(LLMClient):
                 if additional_reasoning:
                     reasoning_chunks.extend(additional_reasoning)
 
-            if not call_buffer:
-                self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
+            # Store reasoning
+            self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
+
+            # Store tool detection result if tool calls were detected
             if call_buffer:
                 logging.debug("call_buffer final: %s", json.dumps(call_buffer, indent=2, ensure_ascii=False))
-                assistant_call_msg = {"role": "assistant", "content": None, "tool_calls": []}
-                for tc in call_buffer.values():
-                    name = tc["name"].strip()
-                    arg_str = tc["arguments"].strip()
+                # Get the first tool call (for now, only support single tool call)
+                first_tc = next(iter(call_buffer.values()), None)
+                if first_tc:
+                    name = first_tc["name"].strip()
+                    arg_str = first_tc["arguments"].strip()
 
-                    if not name:
-                        logging.warning("tool_call %s has empty name; skipping", tc["id"])
-                        continue
-                    if not arg_str:
-                        logging.warning("tool_call %s has empty arguments; skipping", tc["id"])
-                        continue
-                    try:
-                        args = json.loads(arg_str)
-                    except json.JSONDecodeError:
-                        logging.warning("tool_call %s arguments invalid JSON: %s", tc["id"], arg_str)
-                        continue
+                    if name and arg_str:
+                        try:
+                            args = json.loads(arg_str)
+                        except json.JSONDecodeError:
+                            logging.warning("tool_call arguments invalid JSON: %s", arg_str)
+                            args = {}
 
-                    fn = TOOL_REGISTRY.get(name)
-                    if fn is None:
-                        logging.warning("tool_call %s unknown tool '%s'; skipping", tc["id"], name)
-                        continue
-
-                    try:
-                        result_text, snippet, file_path, metadata = parse_tool_result(fn(**args))
-                        logging.info("tool_call %s executed -> %s", tc["id"], result_text)
-                        if snippet:
-                            history_snippets.append(snippet)
-                    except Exception:
-                        logging.exception("tool_call %s execution failed", tc["id"])
-                        continue
-
-                    assistant_call_msg["tool_calls"].append({
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {"name": name, "arguments": json.dumps(args)}
-                    })
-
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "name": name,
-                        "content": result_text,
-                    })
-                    if file_path:
-                        logging.debug("Tool result includes file: %s (not included in OpenAI messages per API restrictions)", file_path)
-                    if metadata:
-                        self._store_attachment(metadata)
-                insert_pos = len(messages) - len(call_buffer)
-                messages.insert(insert_pos, assistant_call_msg)
-
-                yield from self.generate_stream(
-                    messages,
-                    tools,
-                    force_tool_choice="auto",
-                    history_snippets=history_snippets,
-                    response_schema=response_schema,
-                    temperature=temperature,
-                )
-                return
+                        # Collect all text that was yielded (approximation)
+                        # Note: We don't have a perfect way to collect yielded text here,
+                        # but in most cases tool_call doesn't come with text
+                        self._store_tool_detection({
+                            "type": "tool_call",
+                            "tool_name": name,
+                            "tool_args": args,
+                            "raw_tool_call": first_tc,
+                        })
+                        logging.info("[openai] Tool detection stored: %s", name)
+                    else:
+                        logging.warning("tool_call has empty name or arguments; not storing")
+                        self._store_tool_detection({"type": "text", "content": ""})
+            else:
+                # No tool call - store text-only result
+                self._store_tool_detection({"type": "text", "content": ""})
 
         except Exception:
             logging.exception("OpenAI stream call failed")

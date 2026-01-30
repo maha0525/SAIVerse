@@ -24,6 +24,12 @@ def _get_default_lightweight_model() -> str:
     return os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gemini-2.5-flash-lite")
 
 
+def _is_llm_streaming_enabled() -> bool:
+    """Check if LLM streaming is enabled (default: True)."""
+    val = os.getenv("SAIVERSE_LLM_STREAMING", "true")
+    return val.lower() not in ("false", "0", "off", "no")
+
+
 def _format(template: str, variables: Dict[str, Any]) -> str:
     """Format template with variables, supporting dot notation keys.
 
@@ -546,15 +552,59 @@ class SEARuntime:
                     LOGGER.info("[DEBUG] Entering normal mode (no tools)")
                     # Normal mode (no tools)
                     state["tool_called"] = False
-                    text = llm_client.generate(
-                        messages,
-                        tools=[],
-                        temperature=self._default_temperature(persona),
-                        response_schema=response_schema,
+
+                    # Check speak flag for streaming output
+                    speak_flag = getattr(node_def, "speak", None)
+                    use_streaming = (
+                        speak_flag is True
+                        and response_schema is None
+                        and _is_llm_streaming_enabled()
+                        and event_callback is not None
                     )
+
+                    if use_streaming:
+                        LOGGER.info("[DEBUG] Using streaming generation (speak=true)")
+                        # Streaming mode: yield chunks to UI
+                        text_chunks = []
+                        for chunk in llm_client.generate_stream(
+                            messages,
+                            tools=[],
+                            temperature=self._default_temperature(persona),
+                        ):
+                            text_chunks.append(chunk)
+                            # Send each chunk to UI
+                            event_callback({
+                                "type": "streaming_chunk",
+                                "content": chunk,
+                                "persona_id": getattr(persona, "persona_id", None),
+                                "node_id": getattr(node_def, "id", "llm"),
+                            })
+                        text = "".join(text_chunks)
+                        # Send completion event
+                        event_callback({
+                            "type": "streaming_complete",
+                            "persona_id": getattr(persona, "persona_id", None),
+                            "node_id": getattr(node_def, "id", "llm"),
+                        })
+                    else:
+                        # Non-streaming mode
+                        text = llm_client.generate(
+                            messages,
+                            tools=[],
+                            temperature=self._default_temperature(persona),
+                            response_schema=response_schema,
+                        )
+                        # If speak=true but streaming disabled, send complete text
+                        if speak_flag is True and event_callback is not None:
+                            event_callback({
+                                "type": "say",
+                                "content": text,
+                                "persona_id": getattr(persona, "persona_id", None),
+                            })
+
                     self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                     schema_consumed = self._process_structured_output(node_def, text, state)
-                    
+
                     # Set has_speak_content based on schema_consumed
                     # If structured output was consumed, we need to set this flag
                     # Otherwise, it's already set in the tool handling code above
@@ -562,7 +612,7 @@ class SEARuntime:
                         # Structured output means we have usable data, set flag to True
                         # This allows conditional_next to proceed correctly
                         state["has_speak_content"] = True
-                    
+
                     # If output_key is specified but no response_schema, store the raw text
                     if not schema_consumed:
                         output_key = getattr(node_def, "output_key", None)
@@ -570,7 +620,7 @@ class SEARuntime:
                             state[output_key] = text
                             content_preview = text[:200] + "..." if len(text) > 200 else text
                             LOGGER.info("[sea][llm] Stored plain text to state['%s'] = %s", output_key, content_preview)
-                    
+
                     # Process output_keys even in normal mode (no tools)
                     output_keys_spec = getattr(node_def, "output_keys", None)
                     if output_keys_spec:
