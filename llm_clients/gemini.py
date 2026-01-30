@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import logging
-import mimetypes
 import os
 import time
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
@@ -156,8 +155,7 @@ from .gemini_utils import build_gemini_clients
 
 from media_utils import iter_image_media, load_image_bytes_for_llm
 from media_summary import ensure_image_summary
-from tools import GEMINI_TOOLS_SPEC, TOOL_REGISTRY
-from tools.core import parse_tool_result
+from tools import GEMINI_TOOLS_SPEC
 from llm_router import route
 
 from .base import EmptyResponseError, IncompleteStreamError, LLMClient, get_llm_logger
@@ -899,58 +897,39 @@ class GeminiClient(LLMClient):
         if fcall is None and saw_chunks and not stream_completed:
             raise IncompleteStreamError("Gemini stream ended without completion signal.")
 
-        if fcall is None:
-            self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
-            return
+        # Store reasoning
+        self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
 
-        fn = TOOL_REGISTRY.get(fcall.name)
-        if fn is None:
-            logging.warning("Unknown tool '%s' from Gemini; abort", fcall.name)
-            return
+        # Store tool detection result if function call was detected
+        if fcall is not None:
+            # Collect all text that was yielded
+            all_text = "".join(seen_stream_texts.values())
+            fcall_name = getattr(fcall, "name", None)
+            fcall_args = getattr(fcall, "args", {}) or {}
 
-        try:
-            result_text, snippet, file_path, metadata = parse_tool_result(fn(**fcall.args))
-            if snippet:
-                history_snippets.append(snippet)
-            result = result_text
-        except Exception:
-            logging.exception("Tool '%s' execution failed", fcall.name)
-            yield "エラー: ツール実行に失敗しました。"
-            return
-
-        logging.info("Gemini tool '%s' executed -> %s", fcall.name, result)
-
-        parts = [types.Part(function_call=fcall)]
-        file_parts = [
-            types.Part(
-                function_response=types.FunctionResponse(
-                    name=fcall.name,
-                    response={"result": result},
-                )
-            )
-        ]
-        if file_path:
-            with open(file_path, "rb") as file_handler:
-                img_bytes = file_handler.read()
-            mime = mimetypes.guess_type(file_path)[0] or "image/png"
-            file_parts.append(types.Part.from_bytes(data=img_bytes, mime_type=mime))
-        if metadata:
-            self._store_attachment(metadata)
-
-        messages.extend([
-            types.Content(role="model", parts=parts),
-            types.Content(role="tool", parts=file_parts),
-        ])
-
-        yield from self._stream_follow_up(
-            active_client,
-            messages,
-            tools_spec,
-            history_snippets,
-            reasoning_chunks,
-            result,
-            temperature,
-        )
+            if all_text.strip():
+                self._store_tool_detection({
+                    "type": "both",
+                    "content": all_text,
+                    "tool_name": fcall_name,
+                    "tool_args": dict(fcall_args),
+                    "raw_function_call": fcall,
+                })
+            else:
+                self._store_tool_detection({
+                    "type": "tool_call",
+                    "tool_name": fcall_name,
+                    "tool_args": dict(fcall_args),
+                    "raw_function_call": fcall,
+                })
+            logging.info("[gemini] Tool detection stored: %s", fcall_name)
+        else:
+            # No tool call - store text-only result
+            all_text = "".join(seen_stream_texts.values())
+            self._store_tool_detection({
+                "type": "text",
+                "content": all_text,
+            })
 
     def _start_stream(
         self,
@@ -979,7 +958,7 @@ class GeminiClient(LLMClient):
                 schema_obj = self._schema_from_json(response_schema)
                 if schema_obj is not None:
                     cfg_kwargs["response_schema"] = schema_obj
-        # Always disable AFC - SAIVerse handles function calls manually via TOOL_REGISTRY
+        # Always disable AFC - SAIVerse handles function calls manually via Playbook
         cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
         if self._thinking_config is not None:
             cfg_kwargs["thinking_config"] = self._thinking_config
@@ -998,107 +977,6 @@ class GeminiClient(LLMClient):
             contents=contents,
             config=types.GenerateContentConfig(**cfg_kwargs),
         )
-
-    def _stream_follow_up(
-        self,
-        client: genai.Client,
-        messages: List[Any],
-        tools_spec: Optional[list],
-        history_snippets: List[str],
-        reasoning_chunks: List[str],
-        fallback_result: str,
-        temperature: float | None,
-    ) -> Iterator[str]:
-        tool_cfg_none = types.ToolConfig(functionCallingConfig=types.FunctionCallingConfig(mode="NONE"))
-        sys_msg, contents = self._convert_messages(messages)
-        cfg_kwargs: Dict[str, Any] = {
-            "system_instruction": sys_msg,
-            "safety_settings": GEMINI_SAFETY_CONFIG,
-            "tools": merge_tools_for_gemini(tools_spec or []),
-            "tool_config": tool_cfg_none,
-            # Always disable AFC - SAIVerse handles function calls manually
-            "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
-        }
-        if self._thinking_config is not None:
-            cfg_kwargs["thinking_config"] = self._thinking_config
-        if temperature is not None:
-            cfg_kwargs["temperature"] = temperature
-        stream = client.models.generate_content_stream(
-            model=self.model,
-            contents=contents,
-            config=types.GenerateContentConfig(**cfg_kwargs),
-        )
-
-        prefix_yielded = False
-        seen_stream_texts: Dict[int, str] = {}
-        thought_seen: Dict[int, str] = {}
-        yielded = False
-
-        saw_chunks = False
-        stream_completed = False
-
-        for chunk in stream:
-            get_llm_logger().debug("Gemini stream2 chunk:\n%s", chunk)
-            if not chunk.candidates:
-                continue
-            candidate = chunk.candidates[0]
-            get_llm_logger().debug("Gemini stream2 candidate:\n%s", candidate)
-            saw_chunks = True
-            if not candidate.content or not candidate.content.parts:
-                continue
-            candidate_index = getattr(candidate, "index", 0)
-            for part in candidate.content.parts:
-                if is_truthy_flag(getattr(part, "thought", None)):
-                    text_val = getattr(part, "text", None) or ""
-                    if text_val:
-                        prev = thought_seen.get(candidate_index, "")
-                        if text_val.startswith(prev):
-                            delta = text_val[len(prev) :]
-                            if delta:
-                                reasoning_chunks.append(delta)
-                                thought_seen[candidate_index] = prev + delta
-                        else:
-                            reasoning_chunks.append(text_val)
-                            thought_seen[candidate_index] = prev + text_val
-            combined_text = "".join(
-                getattr(part, "text", None) or ""
-                for part in candidate.content.parts
-                if getattr(part, "text", None) and not is_truthy_flag(getattr(part, "thought", None))
-            )
-            if not combined_text:
-                continue
-
-            previous_text = seen_stream_texts.get(candidate_index, "")
-            new_text = (
-                combined_text[len(previous_text) :]
-                if combined_text.startswith(previous_text)
-                else combined_text
-            )
-            if not new_text:
-                continue
-            get_llm_logger().debug("Gemini text2 delta: %s", new_text)
-            if not prefix_yielded and history_snippets:
-                yield "\n".join(history_snippets) + "\n"
-                prefix_yielded = True
-            yield new_text
-            seen_stream_texts[candidate_index] = combined_text
-            yielded = True
-            finish_reason = getattr(candidate, "finish_reason", None)
-            if finish_reason:
-                stream_completed = True
-
-        if not yielded:
-            if history_snippets:
-                yield "\n".join(history_snippets) + "\n" + fallback_result
-            else:
-                yield fallback_result
-            self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
-            return
-
-        if saw_chunks and not stream_completed:
-            raise IncompleteStreamError("Gemini follow-up stream ended without completion signal.")
-
-        self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
 
     def generate_with_tool_detection(
         self,

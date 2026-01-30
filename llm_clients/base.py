@@ -22,6 +22,7 @@ class LLMClient:
     def __init__(self, supports_images: bool = False) -> None:
         self._latest_reasoning: List[Dict[str, str]] = []
         self._latest_attachments: List[Dict[str, Any]] = []
+        self._latest_tool_detection: Dict[str, Any] | None = None
         self.supports_images = supports_images
 
     def generate(
@@ -69,6 +70,25 @@ class LLMClient:
         entries = self._latest_reasoning
         self._latest_reasoning = []
         return entries
+
+    def _store_tool_detection(self, result: Dict[str, Any] | None) -> None:
+        """Store tool detection result for later retrieval."""
+        self._latest_tool_detection = result
+
+    def consume_tool_detection(self) -> Dict[str, Any] | None:
+        """Retrieve and clear the latest tool detection result.
+
+        Returns:
+            Dict with keys:
+                - type: "text" | "tool_call" | "both"
+                - content: Generated text (if type is "text" or "both")
+                - tool_name: Tool name (if type is "tool_call" or "both")
+                - tool_args: Tool arguments dict (if type is "tool_call" or "both")
+            Or None if no tool detection was performed.
+        """
+        result = self._latest_tool_detection
+        self._latest_tool_detection = None
+        return result
 
     def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
         """Apply model-specific request parameters (subclasses may override)."""

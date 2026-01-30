@@ -400,6 +400,42 @@ export default function Home() {
                             setLoadingStatus(event.content === 'processing' ? 'Processing...' : event.content);
                         } else if (event.type === 'think') {
                             setLoadingStatus(`Thinking: ${event.content.substring(0, 50)}${event.content.length > 50 ? '...' : ''}`);
+                        } else if (event.type === 'streaming_chunk') {
+                            // Streaming: append chunk to last message or create new one
+                            const avatarUrl = event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined;
+                            setMessages(prev => {
+                                const last = prev[prev.length - 1];
+                                // Check if last message is a streaming message from same persona
+                                if (last && last.role === 'assistant' && last._streaming) {
+                                    // Append to existing streaming message
+                                    return [...prev.slice(0, -1), {
+                                        ...last,
+                                        content: last.content + event.content
+                                    }];
+                                } else {
+                                    // Create new streaming message
+                                    return [...prev, {
+                                        role: 'assistant',
+                                        content: event.content,
+                                        sender: event.persona_name || 'Assistant',
+                                        avatar: avatarUrl,
+                                        timestamp: new Date().toISOString(),
+                                        _streaming: true  // Mark as streaming in progress
+                                    }];
+                                }
+                            });
+                            setLoadingStatus('Streaming...');
+                        } else if (event.type === 'streaming_complete') {
+                            // Mark streaming message as complete
+                            setMessages(prev => {
+                                const last = prev[prev.length - 1];
+                                if (last && last._streaming) {
+                                    const { _streaming, ...rest } = last;
+                                    return [...prev.slice(0, -1), rest];
+                                }
+                                return prev;
+                            });
+                            setLoadingStatus('Thinking...');
                         } else if (event.type === 'say') {
                             const avatarUrl = event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined;
 
