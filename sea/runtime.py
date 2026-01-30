@@ -27,7 +27,9 @@ def _get_default_lightweight_model() -> str:
 def _is_llm_streaming_enabled() -> bool:
     """Check if LLM streaming is enabled (default: True)."""
     val = os.getenv("SAIVERSE_LLM_STREAMING", "true")
-    return val.lower() not in ("false", "0", "off", "no")
+    result = val.lower() not in ("false", "0", "off", "no")
+    logging.info("[DEBUG] _is_llm_streaming_enabled: raw_val=%r, result=%s", val, result)
+    return result
 
 
 def _format(template: str, variables: Dict[str, Any]) -> str:
@@ -260,7 +262,7 @@ class SEARuntime:
 
         compiled = compile_playbook(
             playbook,
-            llm_node_factory=lambda node_def: self._lg_llm_node(node_def, persona, playbook, event_callback),
+            llm_node_factory=lambda node_def: self._lg_llm_node(node_def, persona, building_id, playbook, event_callback),
             tool_node_factory=lambda node_def: self._lg_tool_node(node_def, persona, playbook, event_callback),
             speak_node=lambda state: self._lg_speak_node(state, persona, building_id, playbook, _lg_outputs, event_callback),
             think_node=lambda state: self._lg_think_node(state, persona, playbook, _lg_outputs, event_callback),
@@ -370,7 +372,7 @@ class SEARuntime:
         # speak/think nodes already emitted; return collected texts for UI consistency
         return list(_lg_outputs)
 
-    def _lg_llm_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
+    def _lg_llm_node(self, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         async def node(state: dict):
             # Check for cancellation at start of node
             cancellation_token = state.get("_cancellation_token")
@@ -555,10 +557,13 @@ class SEARuntime:
 
                     # Check speak flag for streaming output
                     speak_flag = getattr(node_def, "speak", None)
+                    streaming_enabled = _is_llm_streaming_enabled()
+                    LOGGER.info("[DEBUG] Streaming check: speak_flag=%s, response_schema=%s, streaming_enabled=%s, event_callback=%s",
+                               speak_flag, response_schema is None, streaming_enabled, event_callback is not None)
                     use_streaming = (
                         speak_flag is True
                         and response_schema is None
-                        and _is_llm_streaming_enabled()
+                        and streaming_enabled
                         and event_callback is not None
                     )
 
@@ -586,6 +591,9 @@ class SEARuntime:
                             "persona_id": getattr(persona, "persona_id", None),
                             "node_id": getattr(node_def, "id", "llm"),
                         })
+                        # Record to Building history
+                        pulse_id = state.get("pulse_id")
+                        self._emit_say(persona, building_id, text, pulse_id=pulse_id)
                     else:
                         # Non-streaming mode
                         text = llm_client.generate(
@@ -594,13 +602,19 @@ class SEARuntime:
                             temperature=self._default_temperature(persona),
                             response_schema=response_schema,
                         )
-                        # If speak=true but streaming disabled, send complete text
-                        if speak_flag is True and event_callback is not None:
-                            event_callback({
-                                "type": "say",
-                                "content": text,
-                                "persona_id": getattr(persona, "persona_id", None),
-                            })
+                        # If speak=true but streaming disabled, send complete text and record to Building history
+                        LOGGER.info("[DEBUG] speak_flag=%s, event_callback=%s, text_len=%d",
+                                   speak_flag, event_callback is not None, len(text) if text else 0)
+                        if speak_flag is True:
+                            pulse_id = state.get("pulse_id")
+                            self._emit_say(persona, building_id, text, pulse_id=pulse_id)
+                            if event_callback is not None:
+                                LOGGER.info("[DEBUG] Sending 'say' event with content: %s", text[:100] if text else "(empty)")
+                                event_callback({
+                                    "type": "say",
+                                    "content": text,
+                                    "persona_id": getattr(persona, "persona_id", None),
+                                })
 
                     self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                     schema_consumed = self._process_structured_output(node_def, text, state)

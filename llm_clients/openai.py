@@ -476,16 +476,29 @@ class OpenAIClient(LLMClient):
                 raise RuntimeError("OpenAI streaming failed")
                 return
 
-            choice = resp.choices[0]
-            text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
-            if not text_body:
-                text_body = choice.message.content or ""
-            self._store_reasoning(reasoning_entries)
-            prefix = "\n".join(history_snippets) + ("\n" if history_snippets and text_body else "")
-            if prefix:
-                yield prefix
-            if text_body:
-                yield text_body
+            # Handle streaming vs non-streaming response
+            if req_kwargs.get("stream"):
+                # Streaming mode: iterate over chunks
+                prefix = "\n".join(history_snippets)
+                if prefix:
+                    yield prefix + "\n"
+                for chunk in resp:
+                    if chunk.choices and chunk.choices[0].delta:
+                        content = chunk.choices[0].delta.content
+                        if content:
+                            yield content
+            else:
+                # Non-streaming mode (response_schema case)
+                choice = resp.choices[0]
+                text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
+                if not text_body:
+                    text_body = choice.message.content or ""
+                self._store_reasoning(reasoning_entries)
+                prefix = "\n".join(history_snippets) + ("\n" if history_snippets and text_body else "")
+                if prefix:
+                    yield prefix
+                if text_body:
+                    yield text_body
             return
 
         if force_tool_choice is None:

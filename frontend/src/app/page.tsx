@@ -437,6 +437,7 @@ export default function Home() {
                             });
                             setLoadingStatus('Thinking...');
                         } else if (event.type === 'say') {
+                            console.log('[DEBUG] Received say event:', event);
                             const avatarUrl = event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined;
 
                             setMessages(prev => [...prev, {
