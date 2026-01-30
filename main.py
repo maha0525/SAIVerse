@@ -15,9 +15,6 @@ from pathlib import Path
 
 load_dotenv()
 
-os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "0")
-os.environ.setdefault("GRADIO_TELEMETRY_ENABLED", "0")
-
 try:
     import psutil  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
@@ -27,8 +24,7 @@ from saiverse_manager import SAIVerseManager
 from database.paths import default_db_path
 from database.backup import run_startup_backup
 from model_configs import get_model_choices, get_model_choices_with_display_names
-from ui import state as ui_state
-from ui.app import build_app
+import app_state
 try:
     from discord_gateway import ensure_gateway_runtime
 except ImportError:  # pragma: no cover - optional dependency
@@ -61,55 +57,6 @@ logging.info("Loaded %d model choices with display names", len(MODEL_CHOICES))
 logging.debug("Sample model choices: %s", MODEL_CHOICES[:5])
 
 VERSION = time.strftime("%Y%m%d%H%M%S")  # 例: 20251008121530
-
-HEAD_VIEWPORT = '''<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<style>
-/* Critical CSS: Override Gradio sidebar padding and width without scoping */
-div.wrap.sidebar-parent[style] {
-  padding-left: 0 !important;
-  padding-right: 0 !important;
-}
-
-/* Left sidebar width */
-.sidebar.saiverse-sidebar:not(.right) {
-  width: 240px !important;
-  left: -240px !important;
-}
-
-/* Right sidebar width */
-.sidebar.saiverse-sidebar.right {
-  width: 400px !important;
-  right: -400px !important;
-}
-
-@media screen and (min-width: 769px) {
-  div.wrap.sidebar-parent[style] {
-    padding-left: 240px !important;
-    padding-right: 400px !important;
-    transition: padding-left 0.3s ease, padding-right 0.3s ease;
-  }
-}
-
-/* Mobile sidebar widths */
-@media (max-width: 768px) {
-  .sidebar.saiverse-sidebar:not(.right) {
-    width: 60vw !important;
-    left: -60vw !important;
-  }
-  .sidebar.saiverse-sidebar.right {
-    width: 70vw !important;
-    right: -70vw !important;
-  }
-}
-</style>'''
-
-
-CSS_PATH = Path("assets/css/chat.css")
-try:
-    NOTE_CSS = CSS_PATH.read_text(encoding="utf-8")
-except OSError:
-    logging.warning("Failed to load CSS from %s", CSS_PATH)
-    NOTE_CSS = ""
 
 
 
@@ -294,11 +241,10 @@ def main():
     if ensure_gateway_runtime:
         ensure_gateway_runtime(manager)
 
-    ui_state.bind_manager(manager)
-    ui_state.set_model_choices(MODEL_CHOICES)
-    ui_state.set_chat_history_limit(CHAT_HISTORY_LIMIT)
-    ui_state.set_version(VERSION)
-    ui_state.refresh_building_caches()
+    app_state.bind_manager(manager)
+    app_state.set_model_choices(MODEL_CHOICES)
+    app_state.set_chat_history_limit(CHAT_HISTORY_LIMIT)
+    app_state.set_version(VERSION)
 
     # Unity Gateway の起動（オプション）
     unity_gateway_port = int(os.getenv("UNITY_GATEWAY_PORT", "8765"))
@@ -354,14 +300,12 @@ def main():
     signal.signal(signal.SIGTERM, handle_sigterm)
     atexit.register(shutdown_everything)
 
-    # --- FastAPIとGradioの統合 ---
-    # --- FastAPIとGradioの統合 ---
-    
-    # 1. FastAPIの作成
+    # --- FastAPI Server Setup ---
     from fastapi import FastAPI
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.staticfiles import StaticFiles
     import uvicorn
-    
+
     app = FastAPI()
 
     # CORS settings (Allow frontend access)
@@ -373,45 +317,36 @@ def main():
         allow_headers=["*"],
     )
 
-    from fastapi.staticfiles import StaticFiles
-    
     # Mount uploads directory for user-attached images FIRST (more specific path)
     # Access via /api/static/uploads/filename.png
     uploads_dir = Path.home() / ".saiverse" / "image"
     uploads_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/api/static/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
-    
+
     # Mount user_data/icons for user-uploaded avatars (new structure)
     # Access via /api/static/user_icons/filename.webp
     user_icons_dir = Path(__file__).parent / "user_data" / "icons"
     user_icons_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/api/static/user_icons", StaticFiles(directory=str(user_icons_dir)), name="user_icons")
-    
+
     # Mount builtin_data/icons for default icons (host.png, user.png)
     # Access via /api/static/builtin_icons/host.png
     builtin_icons_dir = Path(__file__).parent / "builtin_data" / "icons"
     builtin_icons_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/api/static/builtin_icons", StaticFiles(directory=str(builtin_icons_dir)), name="builtin_icons")
-    
+
     # Mount assets directory for static files (legacy fallback)
     # Access via /api/static/icons/user.png
     app.mount("/api/static", StaticFiles(directory="assets"), name="static")
 
-    # 2. Gradio UIを作成
-    # NOTE: Mount at /gradio to allow new UI at root or /api
-    import gradio as gr
-    demo = build_app(args.city_name, NOTE_CSS, HEAD_VIEWPORT)
-    app = gr.mount_gradio_app(app, demo, path="/gradio")
-
-    # 3. Mount API Routes
+    # Mount API Routes
     from api.main import api_router
     app.include_router(api_router, prefix="/api")
 
     logging.info(f"Starting SAIVerse backend on http://0.0.0.0:{manager.ui_port}")
     logging.info(f"API endpoints available at http://0.0.0.0:{manager.ui_port}/api")
-    logging.info(f"Old UI (Gradio) available at http://0.0.0.0:{manager.ui_port}/gradio")
     logging.info(f"")
-    logging.info(f"→ To use the new UI, start the Next.js frontend:")
+    logging.info(f"To use the UI, start the Next.js frontend:")
     logging.info(f"  cd frontend && npm run dev")
     logging.info(f"  Then open http://localhost:3000 in your browser")
 

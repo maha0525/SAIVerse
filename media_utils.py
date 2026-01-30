@@ -16,6 +16,9 @@ except ImportError:  # pragma: no cover
 LOGGER = logging.getLogger(__name__)
 IMAGE_URI_PREFIX = "saiverse://image/"
 DOCUMENT_URI_PREFIX = "saiverse://document/"
+ITEM_IMAGE_URI_PREFIX = "saiverse://item/"
+PERSONA_URI_PREFIX = "saiverse://persona/"
+BUILDING_URI_PREFIX = "saiverse://building/"
 SUPPORTED_LLM_IMAGE_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 SUMMARY_SUFFIX = ".summary.txt"
 
@@ -49,6 +52,226 @@ def resolve_media_uri(uri: str) -> Optional[Path]:
             return None
         return _ensure_document_dir() / filename
     return None
+
+
+def resolve_extended_media_uri(
+    uri: str,
+    persona_id: Optional[str] = None,
+    building_id: Optional[str] = None,
+) -> Optional[Path]:
+    """Resolve extended SAIVerse media URIs including context-dependent ones.
+
+    Supported URI formats:
+    - saiverse://image/<filename> - Generated image file
+    - saiverse://item/<item_id>/image - Picture item's image
+    - saiverse://persona/<persona_id>/image - Persona's avatar
+    - saiverse://persona/self/image - Current persona's avatar (requires persona_id)
+    - saiverse://building/<building_id>/image - Building's interior image
+    - saiverse://building/current/image - Current building's interior (requires building_id)
+
+    Args:
+        uri: The SAIVerse URI to resolve
+        persona_id: Current persona ID (for resolving 'self')
+        building_id: Current building ID (for resolving 'current')
+
+    Returns:
+        Path to the image file, or None if not found/invalid
+    """
+    if not isinstance(uri, str):
+        return None
+
+    # Try basic resolution first
+    basic_result = resolve_media_uri(uri)
+    if basic_result is not None:
+        return basic_result
+
+    from data_paths import get_saiverse_home
+    saiverse_home = get_saiverse_home()
+
+    # saiverse://item/<item_id>/image
+    if uri.startswith(ITEM_IMAGE_URI_PREFIX):
+        remainder = uri[len(ITEM_IMAGE_URI_PREFIX):]
+        if remainder.endswith("/image"):
+            item_id = remainder[:-6]  # Remove "/image"
+            return _resolve_item_image(item_id, saiverse_home)
+
+    # saiverse://persona/<persona_id>/image or saiverse://persona/self/image
+    if uri.startswith(PERSONA_URI_PREFIX):
+        remainder = uri[len(PERSONA_URI_PREFIX):]
+        if remainder.endswith("/image"):
+            target_id = remainder[:-6]  # Remove "/image"
+            if target_id == "self":
+                if not persona_id:
+                    LOGGER.warning("Cannot resolve 'self' without persona_id context")
+                    return None
+                target_id = persona_id
+            return _resolve_persona_image(target_id, saiverse_home)
+
+    # saiverse://building/<building_id>/image or saiverse://building/current/image
+    if uri.startswith(BUILDING_URI_PREFIX):
+        remainder = uri[len(BUILDING_URI_PREFIX):]
+        if remainder.endswith("/image"):
+            target_id = remainder[:-6]  # Remove "/image"
+            if target_id == "current":
+                if not building_id:
+                    LOGGER.warning("Cannot resolve 'current' without building_id context")
+                    return None
+                target_id = building_id
+            return _resolve_building_image(target_id, saiverse_home)
+
+    return None
+
+
+def _resolve_item_image(item_id: str, saiverse_home: Path) -> Optional[Path]:
+    """Resolve an item's image path from the database."""
+    try:
+        from database.session import SessionLocal
+        from database.models import Item
+
+        session = SessionLocal()
+        try:
+            item = session.query(Item).filter(Item.ITEM_ID == item_id).first()
+            if not item or not item.FILE_PATH:
+                LOGGER.debug("Item %s not found or has no file_path", item_id)
+                return None
+            if item.TYPE and item.TYPE.lower() != "picture":
+                LOGGER.debug("Item %s is not a picture type (type=%s)", item_id, item.TYPE)
+                return None
+
+            file_path = Path(item.FILE_PATH)
+            # Handle relative paths
+            if not file_path.is_absolute():
+                file_path = saiverse_home / item.FILE_PATH
+
+            if file_path.exists():
+                return file_path
+
+            # Try recovery for legacy paths
+            if "image" in file_path.parts:
+                idx = file_path.parts.index("image")
+                rel = Path(*file_path.parts[idx:])
+                candidate = saiverse_home / rel
+                if candidate.exists():
+                    return candidate
+
+            # Fallback: just filename
+            candidate = saiverse_home / "image" / file_path.name
+            if candidate.exists():
+                return candidate
+
+            LOGGER.debug("Item %s file not found: %s", item_id, item.FILE_PATH)
+            return None
+        finally:
+            session.close()
+    except Exception as exc:
+        LOGGER.warning("Failed to resolve item image for %s: %s", item_id, exc)
+        return None
+
+
+def _resolve_persona_image(persona_id: str, saiverse_home: Path) -> Optional[Path]:
+    """Resolve a persona's avatar image path from the database."""
+    try:
+        from database.session import SessionLocal
+        from database.models import AI
+
+        session = SessionLocal()
+        try:
+            ai = session.query(AI).filter(AI.AIID == persona_id).first()
+            if not ai or not ai.APPEARANCE_IMAGE_PATH:
+                LOGGER.debug("Persona %s not found or has no appearance image", persona_id)
+                return None
+
+            image_path = ai.APPEARANCE_IMAGE_PATH
+
+            # Handle API URL format
+            if image_path.startswith("/api/media/images/"):
+                filename = image_path[len("/api/media/images/"):]
+                return saiverse_home / "image" / filename
+
+            # Handle saiverse:// URI
+            if image_path.startswith("saiverse://"):
+                return resolve_media_uri(image_path)
+
+            # Handle filesystem path
+            file_path = Path(image_path)
+            if not file_path.is_absolute():
+                file_path = saiverse_home / image_path
+
+            if file_path.exists():
+                return file_path
+
+            # Try recovery
+            if "image" in file_path.parts:
+                idx = file_path.parts.index("image")
+                rel = Path(*file_path.parts[idx:])
+                candidate = saiverse_home / rel
+                if candidate.exists():
+                    return candidate
+
+            candidate = saiverse_home / "image" / file_path.name
+            if candidate.exists():
+                return candidate
+
+            LOGGER.debug("Persona %s image not found: %s", persona_id, image_path)
+            return None
+        finally:
+            session.close()
+    except Exception as exc:
+        LOGGER.warning("Failed to resolve persona image for %s: %s", persona_id, exc)
+        return None
+
+
+def _resolve_building_image(building_id: str, saiverse_home: Path) -> Optional[Path]:
+    """Resolve a building's interior image path from the database."""
+    try:
+        from database.session import SessionLocal
+        from database.models import Building
+
+        session = SessionLocal()
+        try:
+            building = session.query(Building).filter(Building.BUILDINGID == building_id).first()
+            if not building or not building.IMAGE_PATH:
+                LOGGER.debug("Building %s not found or has no image", building_id)
+                return None
+
+            image_path = building.IMAGE_PATH
+
+            # Handle API URL format
+            if image_path.startswith("/api/media/images/"):
+                filename = image_path[len("/api/media/images/"):]
+                return saiverse_home / "image" / filename
+
+            # Handle saiverse:// URI
+            if image_path.startswith("saiverse://"):
+                return resolve_media_uri(image_path)
+
+            # Handle filesystem path
+            file_path = Path(image_path)
+            if not file_path.is_absolute():
+                file_path = saiverse_home / image_path
+
+            if file_path.exists():
+                return file_path
+
+            # Try recovery
+            if "image" in file_path.parts:
+                idx = file_path.parts.index("image")
+                rel = Path(*file_path.parts[idx:])
+                candidate = saiverse_home / rel
+                if candidate.exists():
+                    return candidate
+
+            candidate = saiverse_home / "image" / file_path.name
+            if candidate.exists():
+                return candidate
+
+            LOGGER.debug("Building %s image not found: %s", building_id, image_path)
+            return None
+        finally:
+            session.close()
+    except Exception as exc:
+        LOGGER.warning("Failed to resolve building image for %s: %s", building_id, exc)
+        return None
 
 
 def iter_image_media(metadata: Any) -> List[Dict[str, Any]]:

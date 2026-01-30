@@ -33,7 +33,6 @@ def get_saiverse_home() -> Path:
         - personas/<id>/: SAIMemory databases and logs
         - cities/<city>/buildings/<building>/: Building logs
         - image/: Uploaded images
-        - qdrant/: Qdrant vector database
         - backups/: Backup files
     """
     env_home = os.getenv("SAIVERSE_HOME")
