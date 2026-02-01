@@ -2,9 +2,10 @@
 
 import { useEffect, useState, useRef } from 'react';
 import styles from './Sidebar.module.css';
-import { Settings, Zap, BarChart2 } from 'lucide-react';
+import { Settings, Zap, BarChart2, UserPlus } from 'lucide-react';
 import GlobalSettingsModal from './GlobalSettingsModal';
 import UserProfileModal from './UserProfileModal';
+import PersonaWizard from './PersonaWizard';
 
 interface UserStatus {
     is_online: boolean;  // Backward compatibility
@@ -32,6 +33,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
     const [buildings, setBuildings] = useState<Building[]>([]);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+    const [isWizardOpen, setIsWizardOpen] = useState(false);
 
     // Swipe Logic for Control
     const startX = useRef<number | null>(null);
@@ -215,6 +217,17 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
                     </div>
                 </div>
 
+                {/* Create Persona Button */}
+                <div style={{ padding: '0 1rem', marginBottom: '1rem' }}>
+                    <button
+                        onClick={() => setIsWizardOpen(true)}
+                        className={styles.createPersonaBtn}
+                    >
+                        <UserPlus size={18} />
+                        ペルソナを作成
+                    </button>
+                </div>
+
                 {/* Navigation */}
                 <div className={styles.sectionTitle}>Locations</div>
                 <div className={styles.buildingList}>
@@ -279,6 +292,18 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
                     currentAvatar={status?.avatar ?? null}
                     currentEmail={status?.email}
                     onSaveSuccess={refreshData}
+                />
+
+                <PersonaWizard
+                    isOpen={isWizardOpen}
+                    onClose={() => {
+                        setIsWizardOpen(false);
+                        refreshData();
+                    }}
+                    onComplete={() => {
+                        refreshData();
+                        if (onMove) onMove();
+                    }}
                 />
             </aside>
         </>

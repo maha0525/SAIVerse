@@ -750,13 +750,15 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         finally:
             db.close()
 
-    def create_ai(self, name: str, system_prompt: str, home_city_id: int) -> str:
+    def create_ai(
+        self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None
+    ) -> str:
         if home_city_id != self.state.city_id:
             return (
                 "Error: Creating personas in a different city is not supported. "
                 "Use dispatch to move personas between cities."
             )
-        success, message = self._create_persona(name, system_prompt)
+        success, message = self._create_persona(name, system_prompt, custom_ai_id)
         if success:
             return (
                 f"AI '{name}' and their room created successfully. "

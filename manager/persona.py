@@ -196,10 +196,18 @@ class PersonaMixin:
         finally:
             db.close()
 
-    def _create_persona(self, name: str, system_prompt: str) -> Tuple[bool, str]:
+    def _create_persona(
+        self, name: str, system_prompt: str, custom_ai_id: Optional[str] = None
+    ) -> Tuple[bool, str]:
         """
         Dynamically creates a new persona, their private room, and places them in it.
         This is triggered by an AI action.
+
+        Args:
+            name: Display name for the persona
+            system_prompt: System prompt for the persona
+            custom_ai_id: Optional custom ID (alphanumeric + underscore). If not provided,
+                          auto-generated from name.
         """
         db = self.SessionLocal()
         try:
@@ -214,14 +222,23 @@ class PersonaMixin:
             if existing_ai:
                 return False, f"A persona named '{name}' already exists in this city."
 
-            new_ai_id = f"{name.lower().replace(' ', '_')}_{self.city_name}"
+            # Use custom ID if provided, otherwise auto-generate from name
+            if custom_ai_id:
+                new_ai_id = f"{custom_ai_id}_{self.city_name}"
+            else:
+                new_ai_id = f"{name.lower().replace(' ', '_')}_{self.city_name}"
+
             if db.query(AIModel).filter_by(AIID=new_ai_id).first():
                 return (
                     False,
-                    f"A persona with the generated ID '{new_ai_id}' already exists.",
+                    f"A persona with the ID '{new_ai_id}' already exists.",
                 )
 
-            new_building_id = f"{name.lower().replace(' ', '_')}_{self.city_name}_room"
+            # Building ID based on AI ID
+            if custom_ai_id:
+                new_building_id = f"{custom_ai_id}_{self.city_name}_room"
+            else:
+                new_building_id = f"{name.lower().replace(' ', '_')}_{self.city_name}_room"
 
             new_ai_model = AIModel(
                 AIID=new_ai_id,

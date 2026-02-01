@@ -50,6 +50,7 @@ class AICreate(BaseModel):
     name: str
     system_prompt: str
     home_city_id: int
+    ai_id: Optional[str] = None  # Custom ID (optional, auto-generated if not provided)
 
 class AIUpdate(BaseModel):
     name: str
@@ -141,7 +142,7 @@ def get_available_prompts():
 # AI
 @router.post("/ais")
 def create_ai(ai: AICreate, manager: SAIVerseManager = Depends(get_manager)):
-    return manager.create_ai(ai.name, ai.system_prompt, ai.home_city_id)
+    return manager.create_ai(ai.name, ai.system_prompt, ai.home_city_id, ai.ai_id)
 
 @router.put("/ais/{ai_id}")
 def update_ai(ai_id: str, ai: AIUpdate, manager: SAIVerseManager = Depends(get_manager)):

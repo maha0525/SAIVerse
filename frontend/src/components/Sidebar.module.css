@@ -127,6 +127,31 @@
     font-weight: 600;
 }
 
+/* Create Persona Button */
+.createPersonaBtn {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    background: linear-gradient(135deg, #4dabf7 0%, #339af0 100%);
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    color: #fff;
+    font-weight: 600;
+    font-size: 0.9rem;
+    transition: all 0.2s;
+    box-shadow: 0 2px 8px rgba(77, 171, 247, 0.3);
+}
+
+.createPersonaBtn:hover {
+    background: linear-gradient(135deg, #339af0 0%, #228be6 100%);
+    box-shadow: 0 4px 12px rgba(77, 171, 247, 0.4);
+    transform: translateY(-1px);
+}
+
 /* Mobile Overlay */
 .overlay {
     position: fixed;
@@ -191,6 +216,16 @@
     .settingsBtn {
         border-color: rgba(255, 255, 255, 0.1);
         color: #94a3b8;
+    }
+
+    .createPersonaBtn {
+        background: linear-gradient(135deg, #4dabf7 0%, #339af0 100%);
+        box-shadow: 0 2px 8px rgba(77, 171, 247, 0.2);
+    }
+
+    .createPersonaBtn:hover {
+        background: linear-gradient(135deg, #339af0 0%, #228be6 100%);
+        box-shadow: 0 4px 12px rgba(77, 171, 247, 0.3);
     }
 }
 

@@ -911,9 +911,11 @@ class SAIVerseManager(
         """Get full details for a single AI for the edit form."""
         return self.admin.get_ai_details(ai_id)
 
-    def create_ai(self, name: str, system_prompt: str, home_city_id: int) -> str:
+    def create_ai(
+        self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None
+    ) -> str:
         """Creates a new AI and their private room."""
-        return self.admin.create_ai(name, system_prompt, home_city_id)
+        return self.admin.create_ai(name, system_prompt, home_city_id, custom_ai_id)
 
     def update_ai(
         self,

@@ -1,9 +1,17 @@
 import React, { useState, useRef } from 'react';
-import { Upload, CheckCircle, AlertCircle, Loader2, CheckSquare, Square, RefreshCw } from 'lucide-react';
+import { Upload, CheckCircle, AlertCircle, Loader2, CheckSquare, Square, RefreshCw, MessageSquare } from 'lucide-react';
 import styles from './MemoryImport.module.css';
 
 interface MemoryImportProps {
     personaId: string;
+    onImportComplete?: () => void;
+}
+
+interface ThreadSummary {
+    thread_id: string;
+    suffix: string;
+    preview: string;
+    active: boolean;
 }
 
 interface ConversationSummary {
@@ -23,9 +31,9 @@ interface PreviewData {
     total_count: number;
 }
 
-type Step = 'upload' | 'select' | 'embedding-dialog' | 'importing';
+type Step = 'upload' | 'select' | 'embedding-dialog' | 'importing' | 'thread-select';
 
-export default function MemoryImport({ personaId }: MemoryImportProps) {
+export default function MemoryImport({ personaId, onImportComplete }: MemoryImportProps) {
     const [activeSubTab, setActiveSubTab] = useState<'official' | 'extension'>('official');
     const [isLoading, setIsLoading] = useState(false);
     const [result, setResult] = useState<{ type: 'success' | 'error', message: string } | null>(null);
@@ -42,6 +50,10 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
     // Import progress
     const [importProgress, setImportProgress] = useState<string | null>(null);
 
+    // Thread selection state
+    const [threads, setThreads] = useState<ThreadSummary[]>([]);
+    const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+
     const resetState = () => {
         setStep('upload');
         setPreviewData(null);
@@ -49,6 +61,67 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
         setResult(null);
         setPendingExtensionFile(null);
         setImportProgress(null);
+        setThreads([]);
+        setSelectedThreadId(null);
+    };
+
+    // Fetch threads and handle thread selection after import
+    const handleImportSuccess = async (message: string) => {
+        try {
+            const res = await fetch(`/api/people/${personaId}/threads`);
+            if (res.ok) {
+                const threadList: ThreadSummary[] = await res.json();
+
+                if (threadList.length === 0) {
+                    // No threads - just show success
+                    setStep('upload');
+                    setResult({ type: 'success', message });
+                } else if (threadList.length === 1) {
+                    // Single thread - auto-activate
+                    await activateThread(threadList[0].thread_id);
+                    setStep('upload');
+                    setResult({ type: 'success', message: `${message} スレッドを自動設定しました。` });
+                    if (onImportComplete) onImportComplete();
+                } else {
+                    // Multiple threads - show selection
+                    // Sort by preview length (approximation for recency - ideally we'd have timestamp)
+                    // Default select the first one (which should be most recent based on API)
+                    setThreads(threadList);
+                    setSelectedThreadId(threadList[0].thread_id);
+                    setStep('thread-select');
+                    setResult({ type: 'success', message });
+                }
+            } else {
+                setStep('upload');
+                setResult({ type: 'success', message });
+            }
+        } catch (error) {
+            setStep('upload');
+            setResult({ type: 'success', message });
+        }
+        setPreviewData(null);
+        setSelectedIds(new Set());
+    };
+
+    const activateThread = async (threadId: string) => {
+        try {
+            await fetch(`/api/people/${personaId}/threads/${encodeURIComponent(threadId)}/activate`, {
+                method: 'PUT',
+            });
+        } catch (error) {
+            console.error('Failed to activate thread', error);
+        }
+    };
+
+    const handleThreadSelectConfirm = async () => {
+        if (!selectedThreadId) return;
+
+        setIsLoading(true);
+        await activateThread(selectedThreadId);
+        setIsLoading(false);
+        setStep('upload');
+        setResult({ type: 'success', message: 'インポート完了！アクティブスレッドを設定しました。' });
+        if (onImportComplete) onImportComplete();
     };
 
     // Polling for import status
@@ -62,14 +135,12 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
                 setTimeout(() => pollImportStatus(type), 1000);
             } else {
                 // Task completed
-                setStep('upload');
                 setImportProgress(null);
                 setIsLoading(false);
                 if (data.success) {
-                    setResult({ type: 'success', message: data.message || 'Import successful' });
-                    setPreviewData(null);
-                    setSelectedIds(new Set());
+                    await handleImportSuccess(data.message || 'Import successful');
                 } else {
+                    setStep('upload');
                     setResult({ type: 'error', message: data.message || 'Import failed' });
                 }
             }
@@ -354,6 +425,61 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
         </div>
     );
 
+    const renderThreadSelect = () => (
+        <div className={styles.threadSelectContainer}>
+            <div className={styles.threadSelectHeader}>
+                <MessageSquare size={24} />
+                <h3>どのスレッドから会話を続けますか？</h3>
+            </div>
+            <p className={styles.threadSelectSubtext}>
+                複数のスレッドがインポートされました。アクティブにするスレッドを選択してください。
+            </p>
+
+            <div className={styles.threadList}>
+                {threads.map((thread) => (
+                    <div
+                        key={thread.thread_id}
+                        className={`${styles.threadItem} ${selectedThreadId === thread.thread_id ? styles.selected : ''}`}
+                        onClick={() => setSelectedThreadId(thread.thread_id)}
+                    >
+                        <div className={styles.threadRadio}>
+                            <div className={`${styles.radioCircle} ${selectedThreadId === thread.thread_id ? styles.checked : ''}`} />
+                        </div>
+                        <div className={styles.threadContent}>
+                            <div className={styles.threadName}>
+                                {thread.suffix || thread.thread_id}
+                                {thread.active && <span className={styles.activeBadge}>現在アクティブ</span>}
+                            </div>
+                            <div className={styles.threadPreview}>
+                                {thread.preview || '(プレビューなし)'}
+                            </div>
+                        </div>
+                    </div>
+                ))}
+            </div>
+
+            <div className={styles.actions}>
+                <button
+                    className={styles.cancelButton}
+                    onClick={() => {
+                        setStep('upload');
+                        if (onImportComplete) onImportComplete();
+                    }}
+                >
+                    スキップ
+                </button>
+                <button
+                    className={styles.importButton}
+                    onClick={handleThreadSelectConfirm}
+                    disabled={!selectedThreadId || isLoading}
+                >
+                    {isLoading ? <Loader2 size={16} className={styles.loader} /> : null}
+                    このスレッドを使用
+                </button>
+            </div>
+        </div>
+    );
+
     const renderConversationTable = () => {
         if (!previewData) return null;
 
@@ -419,6 +545,9 @@ export default function MemoryImport({ personaId }: MemoryImportProps) {
     };
 
     const renderMainContent = () => {
+        if (step === 'thread-select') {
+            return renderThreadSelect();
+        }
         if (step === 'embedding-dialog') {
             return renderEmbeddingDialog();
         }
