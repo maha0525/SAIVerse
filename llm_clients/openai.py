@@ -357,6 +357,14 @@ class OpenAIClient(LLMClient):
                 raise RuntimeError("OpenAI API call failed")
 
             get_llm_logger().debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
+
+            # Store usage information
+            if resp.usage:
+                self._store_usage(
+                    input_tokens=resp.usage.prompt_tokens or 0,
+                    output_tokens=resp.usage.completion_tokens or 0,
+                )
+
             choice = resp.choices[0]
             text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
             if not text_body:
@@ -396,6 +404,15 @@ class OpenAIClient(LLMClient):
             raise RuntimeError("OpenAI API call failed")
 
         get_llm_logger().debug("OpenAI raw (tool detection):\n%s", resp.model_dump_json(indent=2))
+
+        # Store usage information
+        if resp.usage:
+            self._store_usage(
+                input_tokens=resp.usage.prompt_tokens or 0,
+                output_tokens=resp.usage.completion_tokens or 0,
+                model=self.model,
+            )
+
         choice = resp.choices[0]
         tool_calls = getattr(choice.message, "tool_calls", [])
 
@@ -465,6 +482,7 @@ class OpenAIClient(LLMClient):
                     req_kwargs["response_format"] = response_format_config
                 else:
                     req_kwargs["stream"] = True
+                    req_kwargs["stream_options"] = {"include_usage": True}
                 resp = self._create_completion(
                     model=self.model,
                     messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
@@ -482,11 +500,19 @@ class OpenAIClient(LLMClient):
                 prefix = "\n".join(history_snippets)
                 if prefix:
                     yield prefix + "\n"
+                last_chunk = None
                 for chunk in resp:
+                    last_chunk = chunk
                     if chunk.choices and chunk.choices[0].delta:
                         content = chunk.choices[0].delta.content
                         if content:
                             yield content
+                # Store usage from last chunk (when stream_options.include_usage=True)
+                if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
+                    self._store_usage(
+                        input_tokens=last_chunk.usage.prompt_tokens or 0,
+                        output_tokens=last_chunk.usage.completion_tokens or 0,
+                    )
             else:
                 # Non-streaming mode (response_schema case)
                 choice = resp.choices[0]
@@ -515,13 +541,15 @@ class OpenAIClient(LLMClient):
                 force_tool_choice = "auto"
 
         try:
+            stream_req_kwargs = dict(self._request_kwargs)
+            stream_req_kwargs["stream_options"] = {"include_usage": True}
             resp = self._create_completion(
                 model=self.model,
                 messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
                 tools=tools_spec,
                 tool_choice=force_tool_choice,
                 stream=True,
-                **self._request_kwargs,
+                **stream_req_kwargs,
             )
         except Exception:
             logging.exception("OpenAI call failed")
@@ -534,8 +562,10 @@ class OpenAIClient(LLMClient):
 
         try:
             current_call_id = None
+            last_chunk = None
 
             for chunk in resp:
+                last_chunk = chunk
                 delta = chunk.choices[0].delta
 
                 if delta.tool_calls:
@@ -580,6 +610,13 @@ class OpenAIClient(LLMClient):
                 additional_reasoning = _extract_reasoning_from_delta(delta)
                 if additional_reasoning:
                     reasoning_chunks.extend(additional_reasoning)
+
+            # Store usage from last chunk (when stream_options.include_usage=True)
+            if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
+                self._store_usage(
+                    input_tokens=last_chunk.usage.prompt_tokens or 0,
+                    output_tokens=last_chunk.usage.completion_tokens or 0,
+                )
 
             # Store reasoning
             self._store_reasoning(merge_reasoning_strings(reasoning_chunks))

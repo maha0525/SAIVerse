@@ -1,8 +1,13 @@
 {
-  "model": "gemini-2.5-pro",
-  "display_name": "Gemini V2.5 Pro",
+  "model": "gemini-2.5-pro-paid",
+  "display_name": "Gemini 2.5 Pro (Paid)",
   "provider": "gemini",
   "context_length": 128000,
   "supports_images": true,
-  "prefer_paid": false
+  "prefer_paid": true,
+  "pricing": {
+    "input_per_1m_tokens": 1.25,
+    "output_per_1m_tokens": 10.00,
+    "currency": "USD"
+  }
 }

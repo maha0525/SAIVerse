@@ -600,8 +600,10 @@ class GeminiClient(LLMClient):
                     all_parts: List[Any] = []
                     last_chunk_time = time.time()
                     saw_any_chunk = False
-                    
+                    last_chunk = None
+
                     for chunk in stream:
+                        last_chunk = chunk
                         now = time.time()
                         if now - last_chunk_time > CHUNK_TIMEOUT_SECONDS and not saw_any_chunk:
                             raise ChunkTimeoutError(
@@ -620,7 +622,22 @@ class GeminiClient(LLMClient):
                         raise EmptyResponseError("No chunks received from stream")
                     if not all_parts:
                         raise EmptyResponseError("No parts in stream response")
-                    
+
+                    # Store usage from last chunk (uses self.config_key for pricing)
+                    if last_chunk:
+                        usage = getattr(last_chunk, "usage_metadata", None)
+                        if usage:
+                            # Debug: log all usage_metadata fields
+                            logging.info("[DEBUG] Gemini usage_metadata fields: %s", dir(usage))
+                            logging.info("[DEBUG] Gemini usage_metadata: prompt=%s, candidates=%s, cached=%s",
+                                        getattr(usage, "prompt_token_count", None),
+                                        getattr(usage, "candidates_token_count", None),
+                                        getattr(usage, "cached_content_token_count", None))
+                            self._store_usage(
+                                input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
+                                output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+                            )
+
                     text, reasoning_entries = self._separate_parts(all_parts)
                     self._store_reasoning(reasoning_entries)
                     
@@ -638,7 +655,15 @@ class GeminiClient(LLMClient):
 
                 # Process non-streaming response (tool mode)
                 get_llm_logger().debug("Gemini raw:\n%s", resp)
-                
+
+                # Store usage information (uses self.config_key for pricing)
+                usage = getattr(resp, "usage_metadata", None)
+                if usage:
+                    self._store_usage(
+                        input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
+                        output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+                    )
+
                 if not resp.candidates:
                     logging.warning("[gemini] No candidates (attempt %d/%d)", attempt + 1, max_retries)
                     continue
@@ -840,8 +865,10 @@ class GeminiClient(LLMClient):
 
         saw_chunks = False
         stream_completed = False
+        last_chunk = None
 
         for chunk in stream:
+            last_chunk = chunk
             get_llm_logger().debug("Gemini stream chunk:\n%s", chunk)
             if not chunk.candidates:
                 continue
@@ -897,6 +924,15 @@ class GeminiClient(LLMClient):
         if fcall is None and saw_chunks and not stream_completed:
             # Log as warning but continue with received content
             logging.warning("Gemini stream ended without completion signal, but content was received. Continuing with partial response.")
+
+        # Store usage from last chunk (uses self.config_key for pricing)
+        if last_chunk:
+            usage = getattr(last_chunk, "usage_metadata", None)
+            if usage:
+                self._store_usage(
+                    input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
+                    output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+                )
 
         # Store reasoning
         self._store_reasoning(merge_reasoning_strings(reasoning_chunks))

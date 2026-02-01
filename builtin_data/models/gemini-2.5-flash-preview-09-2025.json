@@ -3,5 +3,10 @@
   "display_name": "Gemini V2.5 Flash Preview 09 2025",
   "provider": "gemini",
   "context_length": 128000,
-  "supports_images": true
+  "supports_images": true,
+  "pricing": {
+    "input_per_1m_tokens": 0.30,
+    "output_per_1m_tokens": 2.50,
+    "currency": "USD"
+  }
 }

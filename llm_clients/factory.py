@@ -138,6 +138,10 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
         logging.warning("Unknown provider '%s', falling back to Ollama", provider)
         client = OllamaClient(api_model, context_length, supports_images=supports_images)
 
+    # Set config_key for pricing lookup (model param is the config key/filename)
+    client.config_key = model
+    logging.debug("[factory] Set client.config_key='%s' for pricing lookup", model)
+
     parameter_defaults = get_model_parameter_defaults(model)
     if parameter_defaults:
         try:

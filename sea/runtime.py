@@ -15,6 +15,7 @@ from sea.langgraph_runner import compile_playbook
 from sea.cancellation import CancellationToken, ExecutionCancelledException
 from database.models import Playbook as PlaybookModel
 from model_configs import get_model_parameter_defaults
+from usage_tracker import get_usage_tracker
 
 LOGGER = logging.getLogger(__name__)
 
@@ -317,6 +318,13 @@ class SEARuntime:
             "pulse_id": pulse_id,
             "pulse_type": pulse_type,  # user/schedule/auto
             "_cancellation_token": cancellation_token,  # For node-level cancellation checks
+            "pulse_usage_accumulator": {  # Accumulate LLM usage across all nodes in this pulse
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "total_cost_usd": 0.0,
+                "call_count": 0,
+                "models_used": [],
+            },
             **inherited_vars,  # Add inherited variables from input_schema
         }
 
@@ -443,6 +451,23 @@ class SEARuntime:
                         tools=tools_spec,
                         temperature=self._default_temperature(persona),
                     )
+
+                    # Record usage
+                    usage = llm_client.consume_usage()
+                    if usage:
+                        get_usage_tracker().record_usage(
+                            model_id=usage.model,
+                            input_tokens=usage.input_tokens,
+                            output_tokens=usage.output_tokens,
+                            persona_id=getattr(persona, "persona_id", None),
+                            building_id=building_id,
+                            node_type="llm_tool",
+                            playbook_name=playbook.name,
+                        )
+                        # Accumulate into pulse total
+                        from model_configs import calculate_cost
+                        cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens)
+                        self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost)
 
                     # Parse output_keys to determine where to store results
                     output_keys_spec = getattr(node_def, "output_keys", None)
@@ -585,15 +610,52 @@ class SEARuntime:
                                 "node_id": getattr(node_def, "id", "llm"),
                             })
                         text = "".join(text_chunks)
+
+                        # Record usage
+                        usage = llm_client.consume_usage()
+                        LOGGER.info("[DEBUG] consume_usage returned: %s", usage)
+                        llm_usage_metadata: Dict[str, Any] | None = None
+                        if usage:
+                            get_usage_tracker().record_usage(
+                                model_id=usage.model,
+                                input_tokens=usage.input_tokens,
+                                output_tokens=usage.output_tokens,
+                                persona_id=getattr(persona, "persona_id", None),
+                                building_id=building_id,
+                                node_type="llm_stream",
+                                playbook_name=playbook.name,
+                            )
+                            LOGGER.info("[DEBUG] Usage recorded: model=%s in=%d out=%d", usage.model, usage.input_tokens, usage.output_tokens)
+                            # Build llm_usage metadata for message
+                            from model_configs import calculate_cost, get_model_display_name
+                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens)
+                            llm_usage_metadata = {
+                                "model": usage.model,
+                                "model_display_name": get_model_display_name(usage.model),
+                                "input_tokens": usage.input_tokens,
+                                "output_tokens": usage.output_tokens,
+                                "cost_usd": cost,
+                            }
+                            # Accumulate into pulse total
+                            self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost)
+                        else:
+                            LOGGER.warning("[DEBUG] No usage data from LLM client")
+
                         # Send completion event
                         event_callback({
                             "type": "streaming_complete",
                             "persona_id": getattr(persona, "persona_id", None),
                             "node_id": getattr(node_def, "id", "llm"),
                         })
-                        # Record to Building history
+                        # Record to Building history with usage metadata (include pulse total)
                         pulse_id = state.get("pulse_id")
-                        self._emit_say(persona, building_id, text, pulse_id=pulse_id)
+                        msg_metadata: Dict[str, Any] = {}
+                        if llm_usage_metadata:
+                            msg_metadata["llm_usage"] = llm_usage_metadata
+                        accumulator = state.get("pulse_usage_accumulator")
+                        if accumulator:
+                            msg_metadata["llm_usage_total"] = dict(accumulator)
+                        self._emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
                     else:
                         # Non-streaming mode
                         text = llm_client.generate(
@@ -602,12 +664,45 @@ class SEARuntime:
                             temperature=self._default_temperature(persona),
                             response_schema=response_schema,
                         )
+
+                        # Record usage
+                        usage = llm_client.consume_usage()
+                        llm_usage_metadata: Dict[str, Any] | None = None
+                        if usage:
+                            get_usage_tracker().record_usage(
+                                model_id=usage.model,
+                                input_tokens=usage.input_tokens,
+                                output_tokens=usage.output_tokens,
+                                persona_id=getattr(persona, "persona_id", None),
+                                building_id=building_id,
+                                node_type="llm",
+                                playbook_name=playbook.name,
+                            )
+                            # Build llm_usage metadata for message
+                            from model_configs import calculate_cost, get_model_display_name
+                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens)
+                            llm_usage_metadata = {
+                                "model": usage.model,
+                                "model_display_name": get_model_display_name(usage.model),
+                                "input_tokens": usage.input_tokens,
+                                "output_tokens": usage.output_tokens,
+                                "cost_usd": cost,
+                            }
+                            # Accumulate into pulse total
+                            self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost)
+
                         # If speak=true but streaming disabled, send complete text and record to Building history
                         LOGGER.info("[DEBUG] speak_flag=%s, event_callback=%s, text_len=%d",
                                    speak_flag, event_callback is not None, len(text) if text else 0)
                         if speak_flag is True:
                             pulse_id = state.get("pulse_id")
-                            self._emit_say(persona, building_id, text, pulse_id=pulse_id)
+                            msg_metadata: Dict[str, Any] = {}
+                            if llm_usage_metadata:
+                                msg_metadata["llm_usage"] = llm_usage_metadata
+                            accumulator = state.get("pulse_usage_accumulator")
+                            if accumulator:
+                                msg_metadata["llm_usage_total"] = dict(accumulator)
+                            self._emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
                             if event_callback is not None:
                                 LOGGER.info("[DEBUG] Sending 'say' event with content: %s", text[:100] if text else "(empty)")
                                 event_callback({
@@ -720,6 +815,33 @@ class SEARuntime:
                 return None
         except Exception:
             return None
+
+    def _accumulate_usage(
+        self,
+        state: Dict[str, Any],
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float,
+    ) -> None:
+        """Accumulate LLM usage into the pulse-level accumulator.
+
+        Args:
+            state: Current state dict containing pulse_usage_accumulator
+            model: Model identifier
+            input_tokens: Number of input tokens
+            output_tokens: Number of output tokens
+            cost_usd: Cost in USD
+        """
+        accumulator = state.get("pulse_usage_accumulator")
+        if accumulator is None:
+            return
+        accumulator["total_input_tokens"] += input_tokens
+        accumulator["total_output_tokens"] += output_tokens
+        accumulator["total_cost_usd"] += cost_usd
+        accumulator["call_count"] += 1
+        if model and model not in accumulator["models_used"]:
+            accumulator["models_used"].append(model)
 
     def _select_llm_client(self, node_def: Any, persona: Any, needs_structured_output: bool = False) -> Any:
         """Select the appropriate LLM client based on node's model_type and structured output needs.

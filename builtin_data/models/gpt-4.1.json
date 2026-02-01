@@ -1,6 +1,6 @@
 {
   "model": "gpt-4.1",
-  "display_name": "Gpt V4.1",
+  "display_name": "GPT-4.1",
   "provider": "openai",
   "context_length": 32000,
   "supports_images": true,
@@ -32,5 +32,10 @@
       "label": "Max completion tokens",
       "description": "Upper bound on reply length."
     }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 2,
+    "output_per_1m_tokens": 8.00,
+    "currency": "USD"
   }
 }

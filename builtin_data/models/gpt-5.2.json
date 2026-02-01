@@ -40,5 +40,10 @@
       "label": "Max completion tokens",
       "description": "Upper bound on how many tokens the reply can use."
     }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 1.75,
+    "output_per_1m_tokens": 14.00,
+    "currency": "USD"
   }
 }

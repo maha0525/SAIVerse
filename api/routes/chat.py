@@ -12,6 +12,22 @@ class ChatMessageImage(BaseModel):
     url: str  # URL to access the image
     mime_type: Optional[str] = None
 
+class ChatMessageLLMUsage(BaseModel):
+    """LLM usage information for a message."""
+    model: str
+    model_display_name: Optional[str] = None
+    input_tokens: int
+    output_tokens: int
+    cost_usd: Optional[float] = None
+
+class ChatMessageLLMUsageTotal(BaseModel):
+    """Accumulated LLM usage for entire pulse (all LLM calls leading to this message)."""
+    total_input_tokens: int
+    total_output_tokens: int
+    total_cost_usd: float
+    call_count: int
+    models_used: List[str] = []
+
 class ChatMessage(BaseModel):
     id: Optional[str] = None
     role: str
@@ -20,6 +36,8 @@ class ChatMessage(BaseModel):
     sender: Optional[str] = None
     avatar: Optional[str] = None
     images: Optional[List[ChatMessageImage]] = None
+    llm_usage: Optional[ChatMessageLLMUsage] = None
+    llm_usage_total: Optional[ChatMessageLLMUsageTotal] = None
 
 class ChatHistoryResponse(BaseModel):
     history: List[ChatMessage]
@@ -220,7 +238,33 @@ def get_chat_history(
                         url=f"/api/static/uploads/{Path(img_path).name}",
                         mime_type=img.get("mime_type")
                     ))
-        
+
+        # Extract LLM usage from metadata
+        llm_usage_data = None
+        if metadata and "llm_usage" in metadata:
+            usage_raw = metadata["llm_usage"]
+            if isinstance(usage_raw, dict):
+                llm_usage_data = ChatMessageLLMUsage(
+                    model=usage_raw.get("model", "unknown"),
+                    model_display_name=usage_raw.get("model_display_name"),
+                    input_tokens=usage_raw.get("input_tokens", 0),
+                    output_tokens=usage_raw.get("output_tokens", 0),
+                    cost_usd=usage_raw.get("cost_usd"),
+                )
+
+        # Extract LLM usage total (accumulated across all LLM calls in pulse)
+        llm_usage_total_data = None
+        if metadata and "llm_usage_total" in metadata:
+            total_raw = metadata["llm_usage_total"]
+            if isinstance(total_raw, dict):
+                llm_usage_total_data = ChatMessageLLMUsageTotal(
+                    total_input_tokens=total_raw.get("total_input_tokens", 0),
+                    total_output_tokens=total_raw.get("total_output_tokens", 0),
+                    total_cost_usd=total_raw.get("total_cost_usd", 0.0),
+                    call_count=total_raw.get("call_count", 0),
+                    models_used=total_raw.get("models_used", []),
+                )
+
         final_response.append(ChatMessage(
             id=message_id,
             role=role,
@@ -228,7 +272,9 @@ def get_chat_history(
             timestamp=timestamp,
             sender=sender,
             avatar=avatar,
-            images=images_list
+            images=images_list,
+            llm_usage=llm_usage_data,
+            llm_usage_total=llm_usage_total_data
         ))
 
     return {"history": final_response, "has_more": has_more_old}

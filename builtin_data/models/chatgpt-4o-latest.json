@@ -32,5 +32,10 @@
       "label": "Max completion tokens",
       "description": "Upper bound on reply length."
     }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 5.00,
+    "output_per_1m_tokens": 15.00,
+    "currency": "USD"
   }
 }

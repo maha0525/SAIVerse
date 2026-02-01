@@ -158,6 +158,14 @@ class OllamaClient(LLMClient):
                 logging.exception("Ollama tool detection call failed")
                 raise RuntimeError("Ollama tool detection call failed")
 
+            # Store usage if available (Ollama may include it in OpenAI-compatible response)
+            usage = data.get("usage")
+            if usage:
+                self._store_usage(
+                    input_tokens=usage.get("prompt_tokens", 0) or 0,
+                    output_tokens=usage.get("completion_tokens", 0) or 0,
+                )
+
             choice = data.get("choices", [{}])[0]
             message = choice.get("message", {})
             content = message.get("content", "") or ""
@@ -247,6 +255,15 @@ class OllamaClient(LLMClient):
             )
             response.raise_for_status()
             data = response.json()
+
+            # Store usage if available
+            usage = data.get("usage")
+            if usage:
+                self._store_usage(
+                    input_tokens=usage.get("prompt_tokens", 0) or 0,
+                    output_tokens=usage.get("completion_tokens", 0) or 0,
+                )
+
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
             if not content:
                 logging.warning(
@@ -331,7 +348,7 @@ class OllamaClient(LLMClient):
                 response = requests.post(self.url, json=stream_payload, timeout=(3, 300))
                 response.raise_for_status()
                 data = response.json()
-                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                _ = data.get("choices", [{}])[0].get("message", {}).get("content", "")  # Structured output captured but not yielded
                 yield ""
                 return
             except Exception:

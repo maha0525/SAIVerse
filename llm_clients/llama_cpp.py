@@ -136,6 +136,14 @@ class LlamaCppClient(LLMClient):
                     tools=tools_spec,
                 )
 
+                # Store usage if available
+                usage = response.get("usage")
+                if usage:
+                    self._store_usage(
+                        input_tokens=usage.get("prompt_tokens", 0) or 0,
+                        output_tokens=usage.get("completion_tokens", 0) or 0,
+                    )
+
                 choice = response["choices"][0]
                 message = choice["message"]
                 content = message.get("content", "") or ""
@@ -182,6 +190,14 @@ class LlamaCppClient(LLMClient):
                 ),
             )
 
+            # Store usage if available
+            usage = response.get("usage")
+            if usage:
+                self._store_usage(
+                    input_tokens=usage.get("prompt_tokens", 0) or 0,
+                    output_tokens=usage.get("completion_tokens", 0) or 0,
+                )
+
             content = response["choices"][0]["message"]["content"]
             logger.debug("llama.cpp response: %s", content[:200])
             return content
@@ -214,7 +230,7 @@ class LlamaCppClient(LLMClient):
                     stream=False,
                     response_format={"type": "json_object", "schema": response_schema},
                 )
-                content = response["choices"][0]["message"]["content"]
+                _ = response["choices"][0]["message"]["content"]  # Structured output captured but not yielded
                 yield ""
                 return
             except Exception as exc:

@@ -16,6 +16,22 @@ interface MessageImage {
     mime_type?: string;
 }
 
+interface MessageLLMUsage {
+    model: string;
+    model_display_name?: string;
+    input_tokens: number;
+    output_tokens: number;
+    cost_usd?: number;
+}
+
+interface MessageLLMUsageTotal {
+    total_input_tokens: number;
+    total_output_tokens: number;
+    total_cost_usd: number;
+    call_count: number;
+    models_used: string[];
+}
+
 interface Message {
     id?: string;
     role: 'user' | 'assistant';
@@ -24,6 +40,8 @@ interface Message {
     avatar?: string;
     sender?: string;
     images?: MessageImage[];
+    llm_usage?: MessageLLMUsage;
+    llm_usage_total?: MessageLLMUsageTotal;
 }
 
 // File attachment types for upload
@@ -640,9 +658,20 @@ export default function Home() {
                                     )}
                                     <ReactMarkdown remarkPlugins={[remarkBreaks]}>{msg.content}</ReactMarkdown>
                                 </div>
-                                {msg.timestamp && (
+                                {(msg.timestamp || msg.llm_usage || msg.llm_usage_total) && (
                                     <div className={styles.cardFooter}>
-                                        {new Date(msg.timestamp).toLocaleString()}
+                                        {msg.timestamp && <span>{new Date(msg.timestamp).toLocaleString()}</span>}
+                                        {msg.llm_usage_total && msg.llm_usage_total.call_count > 1 ? (
+                                            // Show total usage when multiple LLM calls were made
+                                            <span className={styles.llmUsage} title={`Models: ${msg.llm_usage_total.models_used.join(', ')}\nLLM Calls: ${msg.llm_usage_total.call_count}\nTotal Input: ${msg.llm_usage_total.total_input_tokens.toLocaleString()} tokens\nTotal Output: ${msg.llm_usage_total.total_output_tokens.toLocaleString()} tokens\nTotal Cost: $${msg.llm_usage_total.total_cost_usd.toFixed(4)}`}>
+                                                {msg.llm_usage_total.call_count} calls · {(msg.llm_usage_total.total_input_tokens + msg.llm_usage_total.total_output_tokens).toLocaleString()} tokens · ${msg.llm_usage_total.total_cost_usd.toFixed(4)}
+                                            </span>
+                                        ) : msg.llm_usage && (
+                                            // Show single call usage
+                                            <span className={styles.llmUsage} title={`Model: ${msg.llm_usage.model}\nInput: ${msg.llm_usage.input_tokens.toLocaleString()} tokens\nOutput: ${msg.llm_usage.output_tokens.toLocaleString()} tokens\nCost: $${(msg.llm_usage.cost_usd || 0).toFixed(4)}`}>
+                                                {msg.llm_usage.model_display_name || msg.llm_usage.model} · {(msg.llm_usage.input_tokens + msg.llm_usage.output_tokens).toLocaleString()} tokens
+                                            </span>
+                                        )}
                                     </div>
                                 )}
                             </div>

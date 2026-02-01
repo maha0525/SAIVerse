@@ -203,3 +203,68 @@ def get_agentic_model() -> str:
     """
     import os
     return os.environ.get("SAIVERSE_AGENTIC_MODEL", "gemini-2.0-flash")
+
+
+def get_model_pricing(model: str) -> Dict[str, Any] | None:
+    """Get pricing information for a model.
+
+    Uses find_model_config to search by both config key and model ID.
+
+    Returns:
+        Dict with keys:
+            - input_per_1m_tokens: float (USD per 1M input tokens)
+            - output_per_1m_tokens: float (USD per 1M output tokens)
+            - currency: str (e.g., "USD")
+        Or None if pricing not configured.
+    """
+    # First try direct lookup
+    config = get_model_config(model)
+    pricing = config.get("pricing")
+    if isinstance(pricing, dict):
+        return pricing
+
+    # Fall back to find_model_config which searches by model ID too
+    _, config = find_model_config(model)
+    if config:
+        pricing = config.get("pricing")
+        if isinstance(pricing, dict):
+            return pricing
+
+    return None
+
+
+def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+    """Calculate cost in USD for a given token usage.
+
+    Args:
+        model: Model ID
+        input_tokens: Number of input tokens
+        output_tokens: Number of output tokens
+
+    Returns:
+        Cost in USD. Returns 0.0 if pricing not configured (e.g., local models).
+    """
+    pricing = get_model_pricing(model)
+    LOGGER.info("[DEBUG] calculate_cost: model=%s, pricing=%s", model, pricing)
+    if not pricing:
+        LOGGER.warning("[DEBUG] No pricing found for model: %s", model)
+        return 0.0
+
+    input_rate = pricing.get("input_per_1m_tokens", 0.0)
+    output_rate = pricing.get("output_per_1m_tokens", 0.0)
+
+    input_cost = (input_tokens / 1_000_000) * input_rate
+    output_cost = (output_tokens / 1_000_000) * output_rate
+
+    total = input_cost + output_cost
+    LOGGER.info("[DEBUG] Cost calculated: $%.6f (in=%d, out=%d)", total, input_tokens, output_tokens)
+    return total
+
+
+def is_local_model(model: str) -> bool:
+    """Check if a model is a local model (Ollama or llama.cpp).
+
+    Local models have zero API cost.
+    """
+    provider = get_model_provider(model)
+    return provider in ("ollama", "llama_cpp")

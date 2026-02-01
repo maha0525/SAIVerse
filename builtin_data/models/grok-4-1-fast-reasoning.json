@@ -1,6 +1,6 @@
 {
   "model": "grok-4-1-fast-reasoning",
-  "display_name": "Grok 4 1 Fast Reasoning",
+  "display_name": "Grok 4.1 Fast Reasoning",
   "provider": "openai",
   "context_length": 128000,
   "base_url": "https://api.x.ai/v1",
@@ -33,5 +33,10 @@
       "label": "Max tokens",
       "description": "Upper bound on generated tokens."
     }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 0.2,
+    "output_per_1m_tokens": 0.5,
+    "currency": "USD"
   }
 }

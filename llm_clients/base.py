@@ -3,7 +3,18 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, Iterator, List
+import time
+from dataclasses import dataclass
+from typing import Any, Dict, Iterator, List, Optional
+
+
+@dataclass
+class UsageInfo:
+    """Token usage information from LLM API response."""
+    model: str
+    input_tokens: int
+    output_tokens: int
+    timestamp: float  # time.time() when recorded
 
 # LLM logging is now handled by logging_config module
 # Import convenience functions for backward compatibility
@@ -23,7 +34,10 @@ class LLMClient:
         self._latest_reasoning: List[Dict[str, str]] = []
         self._latest_attachments: List[Dict[str, Any]] = []
         self._latest_tool_detection: Dict[str, Any] | None = None
+        self._latest_usage: Optional[UsageInfo] = None
         self.supports_images = supports_images
+        self.model: str = ""  # Set by subclasses (API model name)
+        self.config_key: str = ""  # Config file key for pricing lookup
 
     def generate(
         self,
@@ -103,6 +117,43 @@ class LLMClient:
         self._latest_attachments = []
         return attachments
 
+    def _store_usage(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        model: str | None = None,
+    ) -> None:
+        """Store token usage information for later retrieval.
+
+        Args:
+            input_tokens: Number of input/prompt tokens
+            output_tokens: Number of output/completion tokens
+            model: Model ID (uses self.config_key or self.model if not provided)
+        """
+        # Prefer config_key for pricing lookup, fall back to model
+        import logging
+        logging.info("[DEBUG] _store_usage: model param=%s, self.config_key=%s, self.model=%s",
+                    model, self.config_key, self.model)
+        model_for_pricing = model or self.config_key or self.model
+        logging.info("[DEBUG] _store_usage: model_for_pricing=%s", model_for_pricing)
+        self._latest_usage = UsageInfo(
+            model=model_for_pricing,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            timestamp=time.time(),
+        )
+
+    def consume_usage(self) -> Optional[UsageInfo]:
+        """Retrieve and clear the latest token usage information.
+
+        Returns:
+            UsageInfo with model, input_tokens, output_tokens, timestamp
+            Or None if no usage was recorded.
+        """
+        usage = self._latest_usage
+        self._latest_usage = None
+        return usage
+
 
 class IncompleteStreamError(RuntimeError):
     """Raised when a streamed response ends without a completion signal."""
@@ -112,4 +163,4 @@ class EmptyResponseError(RuntimeError):
     """Raised when LLM returns an empty response (no text or function call)."""
 
 
-__all__ = ["LLMClient", "log_llm_request", "log_llm_response", "get_llm_logger", "IncompleteStreamError", "EmptyResponseError"]
+__all__ = ["LLMClient", "UsageInfo", "log_llm_request", "log_llm_response", "get_llm_logger", "IncompleteStreamError", "EmptyResponseError"]

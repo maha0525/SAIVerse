@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from 'react';
 import styles from './Sidebar.module.css';
-import { Settings, Zap } from 'lucide-react';
+import { Settings, Zap, BarChart2 } from 'lucide-react';
 import GlobalSettingsModal from './GlobalSettingsModal';
 import UserProfileModal from './UserProfileModal';
 
@@ -242,6 +242,17 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
                     >
                         <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                             <Zap size={16} /> Phenomenon Rules
+                        </span>
+                    </div>
+                    <div
+                        className={styles.buildingItem}
+                        onClick={() => {
+                            window.location.href = '/usage';
+                            if (onClose) onClose();
+                        }}
+                    >
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <BarChart2 size={16} /> API Usage
                         </span>
                     </div>
                 </div>

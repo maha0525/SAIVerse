@@ -1,9 +1,10 @@
 {
   "model": "gpt-4o",
-  "display_name": "Gpt 4o",
+  "display_name": "GPT-4o (2024-08-06)",
   "provider": "openai",
   "context_length": 32000,
   "supports_images": true,
+  "supports_structured_output": true,
   "parameters": {
     "temperature": {
       "type": "float",
@@ -32,5 +33,10 @@
       "label": "Max completion tokens",
       "description": "Upper bound on reply length."
     }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 2.50,
+    "output_per_1m_tokens": 10.00,
+    "currency": "USD"
   }
 }

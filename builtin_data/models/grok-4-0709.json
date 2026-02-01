@@ -33,5 +33,10 @@
       "label": "Max tokens",
       "description": "Upper bound on generated tokens."
     }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 3,
+    "output_per_1m_tokens": 15,
+    "currency": "USD"
   }
 }

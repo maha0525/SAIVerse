@@ -1,6 +1,6 @@
 {
   "model": "gpt-5",
-  "display_name": "Gpt 5",
+  "display_name": "GPT-5",
   "provider": "openai",
   "context_length": 32000,
   "supports_images": true,
@@ -40,5 +40,10 @@
       "label": "Max completion tokens",
       "description": "Upper bound on how many tokens the reply can use."
     }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 1.25,
+    "output_per_1m_tokens": 10.00,
+    "currency": "USD"
   }
 }

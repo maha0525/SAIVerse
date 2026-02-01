@@ -1,8 +1,13 @@
 {
-  "model": "gemini-3-pro-preview",
-  "display_name": "Gemini 3 Pro Preview",
+  "model": "gemini-3-pro-preview-paid",
+  "display_name": "Gemini 3 Pro (Paid, <200k)",
   "provider": "gemini",
   "context_length": 128000,
   "supports_images": true,
-  "prefer_paid": true
+  "prefer_paid": true,
+  "pricing": {
+    "input_per_1m_tokens": 2,
+    "output_per_1m_tokens": 12.00,
+    "currency": "USD"
+  }
 }

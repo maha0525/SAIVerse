@@ -8,6 +8,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
     Text,
+    Float,
 )
 from sqlalchemy.orm import declarative_base
 
@@ -242,4 +243,22 @@ class PhenomenonRule(Base):
     DESCRIPTION = Column(String(1024), default="", nullable=False)
     CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
     UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class LLMUsageLog(Base):
+    """LLM API使用量ログテーブル。
+
+    各LLM呼び出しのトークン使用量とコストを記録する。
+    """
+    __tablename__ = "llm_usage_log"
+    ID = Column(Integer, primary_key=True, autoincrement=True)
+    TIMESTAMP = Column(DateTime, server_default=func.now(), nullable=False)
+    PERSONA_ID = Column(String(255), nullable=True)  # Null = System/User call
+    BUILDING_ID = Column(String(255), nullable=True)
+    MODEL_ID = Column(String(255), nullable=False)
+    INPUT_TOKENS = Column(Integer, nullable=False)
+    OUTPUT_TOKENS = Column(Integer, nullable=False)
+    COST_USD = Column(Float, nullable=True)  # Calculated cost in USD
+    NODE_TYPE = Column(String(64), nullable=True)  # llm, router, tool_detection, etc.
+    PLAYBOOK_NAME = Column(String(255), nullable=True)
 
