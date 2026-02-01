@@ -485,10 +485,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             logging.info(
                 "Updated building '%s' (%s) and its tool links.", name, building_id
             )
-            return (
-                f"Building '{name}' and its tool links updated successfully. "
-                "A restart is required for the changes to take full effect."
-            )
+            return f"Building '{name}' updated successfully."
         except Exception as exc:
             db.rollback()
             logging.error(
@@ -886,6 +883,29 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 persona.persona_system_instruction = system_prompt
                 persona.interaction_mode = ai.INTERACTION_MODE
                 persona.lightweight_model = lightweight_model
+
+                # Update default model and recreate LLM client if model changed
+                new_model = default_model or self.model
+                if persona.model != new_model:
+                    persona.model = new_model
+                    from llm_clients import get_llm_client
+                    from model_configs import get_context_length, get_model_provider, model_supports_images
+                    try:
+                        context_len = get_context_length(new_model)
+                        provider = get_model_provider(new_model)
+                        persona.llm_client = get_llm_client(new_model, provider, context_len)
+                        persona.model_supports_images = model_supports_images(new_model)
+                        logging.info(
+                            "Recreated LLM client for persona '%s' with model '%s'.",
+                            name,
+                            new_model,
+                        )
+                    except Exception as exc:
+                        logging.error(
+                            "Failed to recreate LLM client for '%s': %s",
+                            name,
+                            exc,
+                        )
 
                 # Recreate lightweight LLM client if model changed
                 if lightweight_model:

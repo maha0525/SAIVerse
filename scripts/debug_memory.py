@@ -44,7 +44,7 @@ def debug_threads(persona_id):
                     if key not in content_counts:
                         content_counts[key] = []
                     content_counts[key].append(suffix)
-            except Exception as e:
+            except Exception:
                 print(f"Failed to read {suffix}")
 
         # Report findings

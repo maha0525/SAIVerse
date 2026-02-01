@@ -461,6 +461,14 @@ class SAIVerseManager(
         """Create a new picture item and place it in the specified building."""
         return self.item_service.create_picture_item(persona_id, name, description, file_path, building_id)
 
+    def create_picture_item_for_user(self, name: str, description: str, file_path: str, building_id: str) -> str:
+        """Create a picture item from user upload and place it in the specified building."""
+        return self.item_service.create_picture_item_for_user(name, description, file_path, building_id)
+
+    def create_document_item_for_user(self, name: str, description: str, file_path: str, building_id: str, is_open: bool = True) -> str:
+        """Create a document item from user upload and place it in the specified building."""
+        return self.item_service.create_document_item_for_user(name, description, file_path, building_id, is_open)
+
     # Note: Persona event methods (_load_persona_event_logs, record_persona_event,
     # get_persona_pending_events, archive_persona_events) are in PersonaEventMixin
 
@@ -959,9 +967,10 @@ class SAIVerseManager(
         tool_ids: List[int],
         interval: int,
         image_path: Optional[str] = None,
+        extra_prompt_files: Optional[List[str]] = None,
     ) -> str:
         """ワールドエディタからBuildingの設定を更新する"""
-        return self.admin.update_building(
+        result = self.admin.update_building(
             building_id,
             name,
             capacity,
@@ -971,7 +980,25 @@ class SAIVerseManager(
             tool_ids,
             interval,
             image_path,
+            extra_prompt_files,
         )
+
+        # Update in-memory Building object if DB update succeeded
+        if not result.startswith("Error") and building_id in self.building_map:
+            building = self.building_map[building_id]
+            building.name = name
+            building.capacity = capacity
+            building.description = description
+            building.base_system_instruction = system_instruction
+            building.system_instruction = system_instruction
+            building.auto_interval_sec = interval
+            building.extra_prompt_files = extra_prompt_files or []
+            # Update capacities dict used by OccupancyManager
+            if hasattr(self, 'capacities') and building_id in self.capacities:
+                self.capacities[building_id] = capacity
+            logging.info(f"Updated in-memory Building object: {building_id}")
+
+        return result
 
     def get_items_df(self) -> pd.DataFrame:
         return self.admin.get_items_df()

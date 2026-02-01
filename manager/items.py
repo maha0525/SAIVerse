@@ -381,8 +381,12 @@ class ItemService:
         if not item:
             raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
         location = self.item_locations.get(item_id)
-        if not location or location.get("owner_kind") != "persona" or location.get("owner_id") != persona_id:
-            raise RuntimeError("このアイテムは現在あなたのインベントリにありません。")
+        owner_kind = location.get("owner_kind") if location else None
+        owner_id = location.get("owner_id") if location else None
+        in_inventory = owner_kind == "persona" and owner_id == persona_id
+        in_current_building = owner_kind == "building" and owner_id == persona.current_building_id
+        if not location or not (in_inventory or in_current_building):
+            raise RuntimeError("このアイテムは現在あなたのインベントリまたは現在いる建物にありません。")
 
         try:
             action_data = json.loads(action_json)
@@ -760,6 +764,160 @@ class ItemService:
         )
         self.manager._append_building_history_note(building_id, note)
 
+        return item_id
+
+    def create_picture_item_for_user(
+        self, name: str, description: str, file_path: str, building_id: str
+    ) -> str:
+        """Create a picture item from user upload and place it in the specified building.
+
+        Unlike create_picture_item, this does not require a persona and is for user uploads.
+        """
+        item_id = str(uuid.uuid4())
+        timestamp = datetime.utcnow()
+
+        file_path_obj = Path(file_path)
+        if file_path_obj.is_absolute():
+            try:
+                relative_path = str(file_path_obj.relative_to(self.manager.saiverse_home))
+            except ValueError:
+                relative_path = file_path
+        else:
+            relative_path = file_path
+
+        db = self.manager.SessionLocal()
+        try:
+            item_row = ItemModel(
+                ITEM_ID=item_id,
+                NAME=name,
+                TYPE="picture",
+                DESCRIPTION=description,
+                FILE_PATH=relative_path,
+                CREATED_AT=timestamp,
+                UPDATED_AT=timestamp,
+            )
+            db.add(item_row)
+
+            location_row = ItemLocationModel(
+                ITEM_ID=item_id,
+                OWNER_KIND="building",
+                OWNER_ID=building_id,
+                UPDATED_AT=timestamp,
+            )
+            db.add(location_row)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"Failed to create picture item: {exc}") from exc
+        finally:
+            db.close()
+
+        self.items[item_id] = {
+            "item_id": item_id,
+            "name": name,
+            "type": "picture",
+            "description": description,
+            "file_path": relative_path,
+            "state": {},
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+        self.item_locations[item_id] = {
+            "owner_kind": "building",
+            "owner_id": building_id,
+            "updated_at": timestamp,
+            "location_id": None,
+        }
+        self.items_by_building[building_id].append(item_id)
+        self.refresh_building_system_instruction(building_id)
+
+        building_name = self.manager.building_map.get(building_id).name if building_id in self.manager.building_map else building_id
+        note = (
+            '<div class="note-box">🖼 User Upload:<br>'
+            f'<b>User uploaded picture "{name}" to {building_name}.</b></div>'
+        )
+        self.manager._append_building_history_note(building_id, note)
+
+        LOGGER.info(f"Created picture item {item_id} from user upload in {building_id}")
+        return item_id
+
+    def create_document_item_for_user(
+        self, name: str, description: str, file_path: str, building_id: str, is_open: bool = True
+    ) -> str:
+        """Create a document item from user upload and place it in the specified building.
+
+        Unlike create_document_item, this does not require a persona and is for user uploads.
+        The document is created as is_open=True by default so it will be included in visual context.
+        """
+        item_id = str(uuid.uuid4())
+        timestamp = datetime.utcnow()
+
+        file_path_obj = Path(file_path)
+        if file_path_obj.is_absolute():
+            try:
+                relative_path = str(file_path_obj.relative_to(self.manager.saiverse_home))
+            except ValueError:
+                relative_path = file_path
+        else:
+            relative_path = file_path
+
+        initial_state = {"is_open": is_open}
+
+        db = self.manager.SessionLocal()
+        try:
+            item_row = ItemModel(
+                ITEM_ID=item_id,
+                NAME=name,
+                TYPE="document",
+                DESCRIPTION=description,
+                FILE_PATH=relative_path,
+                STATE_JSON=json.dumps(initial_state),
+                CREATED_AT=timestamp,
+                UPDATED_AT=timestamp,
+            )
+            db.add(item_row)
+
+            location_row = ItemLocationModel(
+                ITEM_ID=item_id,
+                OWNER_KIND="building",
+                OWNER_ID=building_id,
+                UPDATED_AT=timestamp,
+            )
+            db.add(location_row)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"Failed to create document item: {exc}") from exc
+        finally:
+            db.close()
+
+        self.items[item_id] = {
+            "item_id": item_id,
+            "name": name,
+            "type": "document",
+            "description": description,
+            "file_path": relative_path,
+            "state": initial_state,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+        self.item_locations[item_id] = {
+            "owner_kind": "building",
+            "owner_id": building_id,
+            "updated_at": timestamp,
+            "location_id": None,
+        }
+        self.items_by_building[building_id].append(item_id)
+        self.refresh_building_system_instruction(building_id)
+
+        building_name = self.manager.building_map.get(building_id).name if building_id in self.manager.building_map else building_id
+        note = (
+            '<div class="note-box">📄 User Upload:<br>'
+            f'<b>User uploaded document "{name}" to {building_name}.</b></div>'
+        )
+        self.manager._append_building_history_note(building_id, note)
+
+        LOGGER.info(f"Created document item {item_id} from user upload in {building_id}")
         return item_id
 
 

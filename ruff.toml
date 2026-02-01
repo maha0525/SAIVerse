@@ -1,0 +1,40 @@
+# Ruff configuration for SAIVerse
+# https://docs.astral.sh/ruff/configuration/
+
+# Target Python version
+target-version = "py311"
+
+# Line length (relaxed for this project)
+line-length = 200
+
+# Exclude directories
+exclude = [
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "node_modules",
+    "frontend",
+    "scripts/.searxng-src",
+    "test_fixtures",
+    "%temp%",
+]
+
+[lint]
+# Enable specific rule sets
+select = [
+    "F",      # Pyflakes - catches undefined names, unused imports, etc.
+    "E9",     # Runtime errors (syntax errors, etc.)
+]
+
+# Rules to ignore (can be adjusted as codebase improves)
+ignore = [
+    "F401",   # Unused imports (too noisy for now, enable later)
+    "F403",   # Star imports (used in some places)
+    "F405",   # Name may be undefined from star import
+]
+
+# Per-file ignores
+[lint.per-file-ignores]
+"__init__.py" = ["F401"]  # Unused imports OK in __init__.py
+"tools/defs/*.py" = ["F401"]  # Tool definitions may have unused imports

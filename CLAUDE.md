@@ -79,6 +79,20 @@ python -m pytest tests/test_llm_clients.py
 python -m unittest discover tests
 ```
 
+### Linting
+```bash
+# Check for errors (undefined names, syntax errors, etc.)
+ruff check .
+
+# Auto-fix what can be fixed
+ruff check --fix .
+
+# Check specific file
+ruff check path/to/file.py
+```
+
+**IMPORTANT for Claude Code**: After writing or modifying Python code, always run `ruff check` on the changed files before considering the task complete. This catches undefined variables (like `LOGGER` instead of `logging`), unused imports, and other common errors that would cause runtime failures.
+
 ### Test Environment (Isolated Backend Testing)
 
 For testing the backend without affecting production data, use the isolated test environment:

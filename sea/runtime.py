@@ -2336,11 +2336,55 @@ class SEARuntime:
                             pulse_id=pulse_id,
                         )
                     LOGGER.debug("[sea][prepare-context] Got %d history messages", len(recent))
-                    messages.extend(recent)
+                    # Enrich messages with attachment context
+                    enriched_recent = self._enrich_history_with_attachments(recent)
+                    messages.extend(enriched_recent)
                 except Exception as exc:
                     LOGGER.exception("[sea][prepare-context] Failed to get history: %s", exc)
 
         return messages
+
+    def _enrich_history_with_attachments(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Enrich history messages with attachment context.
+
+        If a message has metadata with attached items (images/documents),
+        append a system note about the created items to help persona understand context.
+        """
+        enriched = []
+        for msg in messages:
+            metadata = msg.get("metadata", {})
+            if not metadata:
+                enriched.append(msg)
+                continue
+
+            # Collect attachment info
+            attachment_notes = []
+
+            # Check for images with item_name
+            images = metadata.get("images", [])
+            for img in images:
+                item_name = img.get("item_name")
+                if item_name:
+                    attachment_notes.append(f"画像「{item_name}」")
+
+            # Check for documents with item_name
+            documents = metadata.get("documents", [])
+            for doc in documents:
+                item_name = doc.get("item_name")
+                if item_name:
+                    attachment_notes.append(f"ドキュメント「{item_name}」")
+
+            if attachment_notes:
+                # Append system note to content
+                original_content = msg.get("content", "")
+                items_str = "、".join(attachment_notes)
+                note = f"\n<system>添付アイテム作成: {items_str}</system>"
+                enriched_msg = {**msg, "content": original_content + note}
+                enriched.append(enriched_msg)
+            else:
+                enriched.append(msg)
+
+        return enriched
 
     def _choose_playbook(self, kind: str, persona: Any, building_id: str) -> PlaybookSchema:
         """Resolve playbook by kind with DB→disk→fallback."""

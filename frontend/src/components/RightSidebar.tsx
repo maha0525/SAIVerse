@@ -6,7 +6,8 @@ import {
     Image as ImageIcon,
     File,
     Eye,
-    EyeOff
+    EyeOff,
+    Settings
 } from 'lucide-react';
 import ItemModal from './ItemModal';
 import PersonaMenu from './PersonaMenu';
@@ -15,6 +16,7 @@ import ScheduleModal from './ScheduleModal';
 import TasksModal from './TasksModal';
 import SettingsModal from './SettingsModal';
 import InventoryModal from './InventoryModal';
+import BuildingSettingsModal from './BuildingSettingsModal';
 
 interface RightSidebarProps {
     isOpen: boolean;
@@ -56,6 +58,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
     const [showTasks, setShowTasks] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
     const [showInventory, setShowInventory] = useState(false);
+    const [showBuildingSettings, setShowBuildingSettings] = useState(false);
 
     // Keep track of which persona is active for modals
     // When opening a modal, we use selectedPersona's ID.
@@ -183,7 +186,16 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
                         <div className={styles.section}>
                             <h3 className={styles.heading}>Current Location</h3>
                             <div className={styles.content}>
-                                <div className={styles.buildingName}>{details.name}</div>
+                                <div className={styles.buildingHeader}>
+                                    <div className={styles.buildingName}>{details.name}</div>
+                                    <button
+                                        className={styles.settingsBtn}
+                                        onClick={() => setShowBuildingSettings(true)}
+                                        title="Building Settings"
+                                    >
+                                        <Settings size={16} />
+                                    </button>
+                                </div>
                                 <div className={styles.description}>
                                     {details.description || "No description available."}
                                 </div>
@@ -336,6 +348,16 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
                             personaId={activeModalPersonaId}
                         />
                     </>
+                )}
+
+                {/* Building Settings Modal */}
+                {details && (
+                    <BuildingSettingsModal
+                        isOpen={showBuildingSettings}
+                        onClose={() => setShowBuildingSettings(false)}
+                        buildingId={details.id}
+                        onSaved={() => fetchDetails()}
+                    />
                 )}
             </div>
         </>

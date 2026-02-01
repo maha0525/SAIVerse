@@ -138,9 +138,9 @@ def get_item_content(item_id: str, manager = Depends(get_manager)):
         # Fallback to registry if needed (for admin/seed items not yet in memory?)
         if hasattr(manager, 'item_registry') and item_id in manager.item_registry:
             items_map = manager.item_registry
-            print(f"DEBUG: Found in registry")
+            print("DEBUG: Found in registry")
         else:
-            print(f"DEBUG: Not found in any map")
+            print("DEBUG: Not found in any map")
             raise HTTPException(status_code=404, detail=f"Item not found: {item_id}")
 
     item_data = items_map[item_id]

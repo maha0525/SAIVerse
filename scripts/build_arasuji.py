@@ -30,9 +30,10 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sqlite3
 import sys
 from pathlib import Path
-from typing import List
+from typing import Any, List, Optional
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -206,7 +207,7 @@ def print_context_preview(conn, max_entries: int = 100, debug: bool = False) -> 
             print(f"  ... and {len(all_arasuji) - 10} more")
 
         # Step through algorithm
-        print(f"\n[3] Algorithm execution:")
+        print("\n[3] Algorithm execution:")
         read_ids = set()
         current_level = 0  # Start at level 0
         position_time = all_arasuji[0].end_time if all_arasuji else 0

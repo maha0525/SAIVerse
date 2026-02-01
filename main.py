@@ -345,10 +345,10 @@ def main():
 
     logging.info(f"Starting SAIVerse backend on http://0.0.0.0:{manager.ui_port}")
     logging.info(f"API endpoints available at http://0.0.0.0:{manager.ui_port}/api")
-    logging.info(f"")
-    logging.info(f"To use the UI, start the Next.js frontend:")
-    logging.info(f"  cd frontend && npm run dev")
-    logging.info(f"  Then open http://localhost:3000 in your browser")
+    logging.info("")
+    logging.info("To use the UI, start the Next.js frontend:")
+    logging.info("  cd frontend && npm run dev")
+    logging.info("  Then open http://localhost:3000 in your browser")
 
     uvicorn.run(
         app,

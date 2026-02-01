@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, KeyboardEvent, ChangeEvent, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
+import remarkBreaks from 'remark-breaks';
 import styles from './page.module.css';
 import Sidebar from '@/components/Sidebar';
 import ChatOptions from '@/components/ChatOptions';
@@ -23,6 +24,31 @@ interface Message {
     avatar?: string;
     sender?: string;
     images?: MessageImage[];
+}
+
+// File attachment types for upload
+interface FileAttachment {
+    base64: string;
+    name: string;
+    type: 'image' | 'document' | 'unknown';
+    mimeType: string;
+}
+
+// File type detection
+const TEXT_EXTENSIONS = new Set(['txt', 'md', 'py', 'js', 'ts', 'tsx', 'json', 'yaml', 'yml', 'csv',
+    'html', 'css', 'xml', 'log', 'sh', 'bat', 'sql', 'java', 'c', 'cpp',
+    'h', 'hpp', 'go', 'rs', 'rb', 'swift', 'kt', 'scala', 'r', 'lua', 'pl']);
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']);
+
+function getFileType(filename: string, mimeType: string): 'image' | 'document' | 'unknown' {
+    const ext = filename.split('.').pop()?.toLowerCase() || '';
+    if (IMAGE_EXTENSIONS.has(ext) || mimeType.startsWith('image/')) {
+        return 'image';
+    }
+    if (TEXT_EXTENSIONS.has(ext) || mimeType.startsWith('text/')) {
+        return 'document';
+    }
+    return 'unknown';
 }
 
 export default function Home() {
@@ -91,8 +117,7 @@ export default function Home() {
     const [isPeopleModalOpen, setIsPeopleModalOpen] = useState(false);
     const [selectedPlaybook, setSelectedPlaybook] = useState<string | null>(null);
     const [playbookParams, setPlaybookParams] = useState<Record<string, any>>({});
-    const [attachment, setAttachment] = useState<string | null>(null); // Base64
-    const [attachmentName, setAttachmentName] = useState<string | null>(null);
+    const [attachments, setAttachments] = useState<FileAttachment[]>([]); // Multiple attachments
     const fileInputRef = useRef<HTMLInputElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const [isMobile, setIsMobile] = useState(false);
@@ -338,7 +363,7 @@ export default function Home() {
     }, [isHistoryLoaded]);
 
     const handleSendMessage = async () => {
-        if ((!inputValue.trim() && !attachment) || loadingStatus) return;
+        if ((!inputValue.trim() && attachments.length === 0) || loadingStatus) return;
 
         // Optimistic update
         // Temporary ID for key prop until refreshed
@@ -348,12 +373,11 @@ export default function Home() {
         setInputValue('');
         setLoadingStatus('Thinking...');
 
-        const currentAttachment = attachment;
+        const currentAttachments = attachments;
         const currentPlaybook = selectedPlaybook;
         const currentPlaybookParams = playbookParams;
 
-        setAttachment(null);
-        setAttachmentName(null);
+        setAttachments([]);
         // Reset playbook params after sending
         setPlaybookParams({});
 
@@ -363,7 +387,12 @@ export default function Home() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     message: userMsg.content,
-                    attachment: currentAttachment,
+                    attachments: currentAttachments.length > 0 ? currentAttachments.map(a => ({
+                        data: a.base64,
+                        filename: a.name,
+                        type: a.type,
+                        mime_type: a.mimeType
+                    })) : undefined,
                     meta_playbook: currentPlaybook,
                     playbook_params: Object.keys(currentPlaybookParams).length > 0 ? currentPlaybookParams : undefined
                 })
@@ -488,20 +517,37 @@ export default function Home() {
     };
 
     const handleFileUpload = (e: ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files && e.target.files[0]) {
-            const file = e.target.files[0];
-            const reader = new FileReader();
-            reader.onloadend = () => {
-                setAttachment(reader.result as string);
-                setAttachmentName(file.name);
-            };
-            reader.readAsDataURL(file);
+        if (e.target.files && e.target.files.length > 0) {
+            const files = Array.from(e.target.files);
+
+            files.forEach(file => {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    const base64 = reader.result as string;
+                    const mimeType = file.type || 'application/octet-stream';
+                    const fileType = getFileType(file.name, mimeType);
+
+                    setAttachments(prev => [...prev, {
+                        base64,
+                        name: file.name,
+                        type: fileType,
+                        mimeType
+                    }]);
+                };
+                reader.readAsDataURL(file);
+            });
+
+            // Reset input to allow selecting the same files again
+            if (fileInputRef.current) fileInputRef.current.value = '';
         }
     };
 
-    const clearAttachment = () => {
-        setAttachment(null);
-        setAttachmentName(null);
+    const removeAttachment = (index: number) => {
+        setAttachments(prev => prev.filter((_, i) => i !== index));
+    };
+
+    const clearAllAttachments = () => {
+        setAttachments([]);
         if (fileInputRef.current) fileInputRef.current.value = '';
     };
 
@@ -592,7 +638,7 @@ export default function Home() {
                                             ))}
                                         </div>
                                     )}
-                                    <ReactMarkdown>{msg.content}</ReactMarkdown>
+                                    <ReactMarkdown remarkPlugins={[remarkBreaks]}>{msg.content}</ReactMarkdown>
                                 </div>
                                 {msg.timestamp && (
                                     <div className={styles.cardFooter}>
@@ -607,20 +653,39 @@ export default function Home() {
                 </div>
 
                 <div className={styles.inputArea}>
-                    {attachmentName && (
+                    {attachments.length > 0 && (
                         <div style={{
                             fontSize: '0.8rem',
                             marginBottom: '0.5rem',
-                            padding: '0.25rem 0.5rem',
-                            background: '#eee',
-                            borderRadius: '4px',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: '0.5rem',
-                            color: '#333'
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            gap: '0.5rem'
                         }}>
-                            <span>📎 {attachmentName}</span>
-                            <button onClick={clearAttachment} style={{ border: 'none', background: 'none', cursor: 'pointer', padding: '0 4px' }}><X size={14} /></button>
+                            {attachments.map((att, idx) => (
+                                <div key={idx} style={{
+                                    padding: '0.25rem 0.5rem',
+                                    background: '#eee',
+                                    borderRadius: '4px',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '0.5rem',
+                                    color: '#333'
+                                }}>
+                                    <span>{att.type === 'image' ? '🖼' : '📄'} {att.name}</span>
+                                    <button onClick={() => removeAttachment(idx)} style={{ border: 'none', background: 'none', cursor: 'pointer', padding: '0 4px' }}><X size={14} /></button>
+                                </div>
+                            ))}
+                            {attachments.length > 1 && (
+                                <button onClick={clearAllAttachments} style={{
+                                    fontSize: '0.75rem',
+                                    padding: '0.25rem 0.5rem',
+                                    background: '#ddd',
+                                    border: 'none',
+                                    borderRadius: '4px',
+                                    cursor: 'pointer',
+                                    color: '#666'
+                                }}>Clear All</button>
+                            )}
                         </div>
                     )}
                     <div className={styles.inputWrapper}>
@@ -636,6 +701,8 @@ export default function Home() {
                             ref={fileInputRef}
                             style={{ display: 'none' }}
                             onChange={handleFileUpload}
+                            multiple
+                            accept="image/*,.txt,.md,.py,.js,.ts,.tsx,.json,.yaml,.yml,.csv,.html,.css,.xml,.log,.sh,.sql,.java,.c,.cpp,.go,.rs,.rb"
                         />
                         <textarea
                             ref={textareaRef}
@@ -648,7 +715,7 @@ export default function Home() {
                         <button
                             className={styles.sendBtn}
                             onClick={handleSendMessage}
-                            disabled={!!loadingStatus || (!inputValue.trim() && !attachment)}
+                            disabled={!!loadingStatus || (!inputValue.trim() && attachments.length === 0)}
                         >
                             <Send size={20} />
                         </button>

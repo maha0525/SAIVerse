@@ -70,7 +70,7 @@ def main():
         sys.exit(0)
     
     print(f"\n{'='*60}")
-    print(f"Memopedia Context Statistics")
+    print("Memopedia Context Statistics")
     print(f"{'='*60}")
     print(f"Total characters: {char_count:,}")
     print(f"Total lines: {line_count:,}")
@@ -96,7 +96,7 @@ def main():
                 categories[cat_name] = len(section)
     
     if any(categories.values()):
-        print(f"\nBreakdown by category:")
+        print("\nBreakdown by category:")
         for cat_name, size in categories.items():
             if size > 0:
                 percentage = (size / char_count) * 100

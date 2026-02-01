@@ -293,13 +293,13 @@ JSON形式で回答してください。"""
         print(f"   内容長: {len(child['content'])} 文字")
         
         if args.verbose:
-            print(f"\n   --- 内容プレビュー ---")
+            print("\n   --- 内容プレビュー ---")
             preview = child['content'][:500]
             print(f"   {preview}...")
-            print(f"   --- (以下省略) ---")
+            print("   --- (以下省略) ---")
 
     # Stage 2: Check for missing important information
-    print(f"\n[Stage 2] Checking for information lost during split...")
+    print("\n[Stage 2] Checking for information lost during split...")
     
     # Combine all child content
     all_children_content = "\n\n---\n\n".join([
@@ -369,7 +369,7 @@ JSON形式で回答してください。"""
     assessment = missing_result.get("assessment", "")
     
     if has_missing_info and missing_section:
-        print(f"\n⚠ Important information was lost during split.")
+        print("\n⚠ Important information was lost during split.")
         if assessment:
             print(f"評価: {assessment}")
         
@@ -434,7 +434,7 @@ JSON形式で回答してください。"""
             summary=page.summary  # Keep original summary
         )
         
-        print(f"\n✓ Split complete!")
+        print("\n✓ Split complete!")
         print(f"  Parent page updated: {page.title}")
         print(f"  Created {len(created_pages)} child pages")
 

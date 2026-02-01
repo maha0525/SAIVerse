@@ -196,7 +196,7 @@ def main():
         unorganized = []
         for cat in all_categories:
             unorganized.extend(memopedia.get_unorganized_pages(cat))
-        print(f"Searching across all categories...")
+        print("Searching across all categories...")
     else:
         unorganized = memopedia.get_unorganized_pages(category)
 
@@ -352,7 +352,7 @@ JSON形式で回答してください。"""
         print(f"Reasoning: {reasoning}")
 
     # Stage 2: Verify each candidate by reading full content
-    print(f"\n[Stage 2] Verifying candidates with full content...")
+    print("\n[Stage 2] Verifying candidates with full content...")
 
     # Build verification prompt with all context
     candidate_pages = [p for p in unorganized if p.id in candidate_ids]

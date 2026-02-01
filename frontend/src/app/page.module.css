@@ -125,9 +125,8 @@
 }
 
 .card {
-    max-width: 80%;
     min-width: 300px;
-    padding: 0.8rem;
+    padding: 1.5rem 2rem;
     border-radius: 0.5rem;
     box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
     display: flex;
@@ -157,14 +156,19 @@
 }
 
 .cardBody {
-    font-size: 0.95rem;
-    line-height: 1.6;
+    font-size: 1rem;
+    line-height: 1.75;
     word-break: break-word;
+    max-width: 768px;
 }
 
 /* Markdown styles */
 .cardBody p {
-    margin: 0 0 0.5em 0;
+    margin: 1em 0;
+}
+
+.cardBody p:first-child {
+    margin-top: 0;
 }
 
 .cardBody p:last-child {
@@ -244,7 +248,7 @@
 .cardBody hr {
     border: none;
     border-top: 1px solid rgba(255, 255, 255, 0.2);
-    margin: 1em 0;
+    margin: 1.75em 0;
 }
 
 .cardBody table {
@@ -298,6 +302,10 @@
     background: #4b5563;
     color: #fff;
     border-top-right-radius: 0.2rem;
+}
+
+.user .cardBody {
+    max-width: 512px;
 }
 
 /* Assistant Card Styles */

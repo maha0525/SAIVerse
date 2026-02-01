@@ -240,9 +240,17 @@ import base64
 from datetime import datetime
 from pathlib import Path
 
+class AttachmentData(BaseModel):
+    """Attachment data from frontend."""
+    data: str  # Base64 encoded
+    filename: str
+    type: str  # 'image' | 'document' | 'unknown'
+    mime_type: str
+
 class SendMessageRequest(BaseModel):
     message: str
-    attachment: Optional[str] = None # Base64 encoded file
+    attachment: Optional[str] = None  # Base64 encoded file (legacy, single attachment)
+    attachments: Optional[List[AttachmentData]] = None  # New: multiple attachments
     meta_playbook: Optional[str] = None
     playbook_params: Optional[Dict[str, Any]] = None  # Parameters for meta playbook
     metadata: Optional[Dict[str, Any]] = None
@@ -287,30 +295,179 @@ def _store_uploaded_attachment(base64_data: str) -> Optional[Dict[str, str]]:
         logging.error(f"Failed to process attachment: {e}")
         return None
 
+# File type detection constants
+TEXT_EXTENSIONS = {'txt', 'md', 'py', 'js', 'ts', 'tsx', 'json', 'yaml', 'yml', 'csv',
+                   'html', 'css', 'xml', 'log', 'sh', 'bat', 'sql', 'java', 'c', 'cpp',
+                   'h', 'hpp', 'go', 'rs', 'rb', 'swift', 'kt', 'scala', 'r', 'lua', 'pl'}
+IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'}
+
+def _store_image_attachment(
+    data: bytes,
+    att: AttachmentData,
+    manager,
+    building_id: str
+) -> Dict[str, Any]:
+    """Store image and create picture Item."""
+    dest_dir = Path.home() / ".saiverse" / "image"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # Determine extension from mime_type
+    ext = ".bin"
+    if "image/png" in att.mime_type: ext = ".png"
+    elif "image/jpeg" in att.mime_type or "image/jpg" in att.mime_type: ext = ".jpg"
+    elif "image/gif" in att.mime_type: ext = ".gif"
+    elif "image/webp" in att.mime_type: ext = ".webp"
+    elif "image/bmp" in att.mime_type: ext = ".bmp"
+
+    dest_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}{ext}"
+    dest_path = dest_dir / dest_name
+    dest_path.write_bytes(data)
+
+    # Create picture Item
+    item_id = None
+    try:
+        item_id = manager.create_picture_item_for_user(
+            name=att.filename,
+            description=f"User uploaded image: {att.filename}",
+            file_path=str(dest_path),
+            building_id=building_id
+        )
+    except Exception as e:
+        logging.warning(f"Failed to create picture item: {e}")
+
+    return {
+        "type": "image",
+        "uri": f"saiverse://image/{dest_name}",
+        "mime_type": att.mime_type,
+        "source": "user_upload",
+        "path": str(dest_path),
+        "item_id": item_id
+    }
+
+def _store_document_attachment(
+    data: bytes,
+    att: AttachmentData,
+    manager,
+    building_id: str
+) -> Dict[str, Any]:
+    """Store document and create document Item."""
+    dest_dir = Path.home() / ".saiverse" / "documents"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # Preserve original extension
+    ext = Path(att.filename).suffix or ".txt"
+    dest_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}_{att.filename}"
+    dest_path = dest_dir / dest_name
+    dest_path.write_bytes(data)
+
+    # Read content for summary
+    try:
+        content = data.decode('utf-8')
+    except UnicodeDecodeError:
+        content = data.decode('utf-8', errors='replace')
+
+    # Generate summary (first 200 chars)
+    summary = content[:200].strip()
+    if len(content) > 200:
+        summary += "..."
+
+    # Create document Item
+    item_id = None
+    try:
+        item_id = manager.create_document_item_for_user(
+            name=att.filename,
+            description=summary,
+            file_path=str(dest_path),
+            building_id=building_id,
+            is_open=True  # Auto-open so it appears in visual context
+        )
+    except Exception as e:
+        logging.warning(f"Failed to create document item: {e}")
+
+    return {
+        "type": "document",
+        "uri": f"saiverse://document/{dest_name}",
+        "mime_type": att.mime_type,
+        "source": "user_upload",
+        "path": str(dest_path),
+        "item_id": item_id,
+        "content_preview": content[:500] if len(content) > 500 else content
+    }
+
+def _store_uploaded_attachment_v2(
+    att: AttachmentData,
+    manager,
+    building_id: str
+) -> Optional[Dict[str, Any]]:
+    """Process attachment and create appropriate Item type."""
+    try:
+        # Decode base64
+        header, encoded = att.data.split(",", 1) if "," in att.data else ("", att.data)
+        data = base64.b64decode(encoded)
+
+        if att.type == 'image':
+            return _store_image_attachment(data, att, manager, building_id)
+        elif att.type == 'document':
+            return _store_document_attachment(data, att, manager, building_id)
+        else:
+            # Unknown type: determine from extension
+            ext = Path(att.filename).suffix.lower().lstrip('.')
+            if ext in IMAGE_EXTENSIONS:
+                return _store_image_attachment(data, att, manager, building_id)
+            elif ext in TEXT_EXTENSIONS:
+                return _store_document_attachment(data, att, manager, building_id)
+            else:
+                # Default to image for compatibility
+                return _store_image_attachment(data, att, manager, building_id)
+    except Exception as e:
+        logging.error(f"Failed to process attachment: {e}")
+        return None
+
 @router.post("/send")
 def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
     if not manager.user_current_building_id:
         raise HTTPException(status_code=400, detail="User is not in any building")
 
-    if not req.message and not req.attachment:
+    if not req.message and not req.attachment and not req.attachments:
         raise HTTPException(status_code=400, detail="Message or attachment required")
 
     # Combine metadata
     metadata = req.metadata or {}
-    
-    # Handle attachment
-    if req.attachment:
+    building_id = manager.user_current_building_id
+
+    # Handle new multi-attachment format
+    if req.attachments:
+        images = []
+        documents = []
+        for att in req.attachments:
+            result = _store_uploaded_attachment_v2(att, manager, building_id)
+            if result:
+                if result["type"] == "image":
+                    images.append({
+                        "uri": result["uri"],
+                        "path": result["path"],
+                        "mime_type": result["mime_type"],
+                        "item_id": result.get("item_id"),
+                        "item_name": att.filename  # For history context
+                    })
+                elif result["type"] == "document":
+                    documents.append({
+                        "uri": result["uri"],
+                        "path": result["path"],
+                        "mime_type": result["mime_type"],
+                        "item_id": result.get("item_id"),
+                        "item_name": att.filename,  # For history context
+                        "content_preview": result.get("content_preview")
+                    })
+        if images:
+            metadata["images"] = images
+        if documents:
+            metadata["documents"] = documents
+
+    # Handle legacy single attachment format (backwards compatibility)
+    elif req.attachment:
         attachment_info = _store_uploaded_attachment(req.attachment)
         if attachment_info:
-            # Add to metadata in format SAIVerse expects (usually list of attachments or single)
-            # Checking ui/chat.py: input_files -> metadata={"images": [...]} or similar
-            # ui/chat.py logic is: metadata = {"images": [path, ...]}
-            # But here we have full info. Let's provide a list of media objects.
-            # Standardizing on "media" list or "images" list for legacy support.
-            
-            # Legacy support: SAIVerse often looks for 'images': [{'path': ...}] ?
-            # Let's check manager.runtime logic. It mostly passes metadata through.
-            # ui/chat.py passes: {"path": path, "mime_type": mime}
             metadata["images"] = [
                 {"uri": attachment_info["uri"], "path": attachment_info["path"], "mime_type": attachment_info["mime_type"]}
             ]

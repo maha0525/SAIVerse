@@ -101,8 +101,8 @@ def create_schedule(
                     dt_local = dt_naive.replace(tzinfo=tz)
                     dt_utc = dt_local.astimezone(timezone.utc)
                     new_schedule.SCHEDULED_DATETIME = dt_utc
-                except ValueError as e:
-                    raise HTTPException(status_code=400, detail=f"Invalid datetime format: YYYY-MM-DD HH:MM")
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid datetime format: YYYY-MM-DD HH:MM")
 
         elif req.schedule_type == "interval":
             new_schedule.INTERVAL_SECONDS = req.interval_seconds

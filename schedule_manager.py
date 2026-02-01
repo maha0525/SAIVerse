@@ -42,7 +42,6 @@ class ScheduleManager:
         self._thread.start()
         LOGGER.info("[ScheduleManager] Started background schedule checker thread (check_interval=%ds).", self.check_interval)
         # スレッドが実際に起動したか少し待って確認
-        import time
         time.sleep(0.1)
         if self._thread.is_alive():
             LOGGER.info("[ScheduleManager] Thread is confirmed alive.")

@@ -90,7 +90,7 @@ def main():
         print(f"  ✅ Migrated {model_id} -> {filename}")
         migrated_count += 1
 
-    print(f"\n✨ Migration complete!")
+    print("\n✨ Migration complete!")
     print(f"   Migrated: {migrated_count}")
     print(f"   Skipped (already exist): {skipped_count}")
     print(f"   Total models: {len(models)}")

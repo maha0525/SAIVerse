@@ -45,10 +45,38 @@
     gap: 0.5rem;
 }
 
+.buildingHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
 .buildingName {
     font-size: 1.2rem;
     font-weight: 700;
     color: #f3f4f6;
+}
+
+.settingsBtn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 6px;
+    background: #374151;
+    color: #9ca3af;
+    cursor: pointer;
+    transition: all 0.2s;
+    flex-shrink: 0;
+}
+
+.settingsBtn:hover {
+    background: #4b5563;
+    color: #f3f4f6;
+    transform: rotate(45deg);
 }
 
 .description {

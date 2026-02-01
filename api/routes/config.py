@@ -177,7 +177,7 @@ def get_playbook_params(name: str, manager=Depends(get_manager)):
             if enum_source:
                 try:
                     param_info["resolved_options"] = resolve_enum_source(enum_source, context)
-                except ValueError as e:
+                except ValueError:
                     # Log but don't fail - just return empty options
                     param_info["resolved_options"] = []
 
