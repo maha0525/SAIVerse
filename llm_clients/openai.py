@@ -360,9 +360,14 @@ class OpenAIClient(LLMClient):
 
             # Store usage information
             if resp.usage:
+                # Check for cached tokens (OpenAI Prompt Caching)
+                cached = 0
+                if hasattr(resp.usage, "prompt_tokens_details") and resp.usage.prompt_tokens_details:
+                    cached = getattr(resp.usage.prompt_tokens_details, "cached_tokens", 0) or 0
                 self._store_usage(
                     input_tokens=resp.usage.prompt_tokens or 0,
                     output_tokens=resp.usage.completion_tokens or 0,
+                    cached_tokens=cached,
                 )
 
             choice = resp.choices[0]
@@ -407,10 +412,14 @@ class OpenAIClient(LLMClient):
 
         # Store usage information
         if resp.usage:
+            # Check for cached tokens (OpenAI Prompt Caching)
+            cached = 0
+            if hasattr(resp.usage, "prompt_tokens_details") and resp.usage.prompt_tokens_details:
+                cached = getattr(resp.usage.prompt_tokens_details, "cached_tokens", 0) or 0
             self._store_usage(
                 input_tokens=resp.usage.prompt_tokens or 0,
                 output_tokens=resp.usage.completion_tokens or 0,
-                model=self.model,
+                cached_tokens=cached,
             )
 
         choice = resp.choices[0]
@@ -509,9 +518,14 @@ class OpenAIClient(LLMClient):
                             yield content
                 # Store usage from last chunk (when stream_options.include_usage=True)
                 if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
+                    # Check for cached tokens (OpenAI Prompt Caching)
+                    cached = 0
+                    if hasattr(last_chunk.usage, "prompt_tokens_details") and last_chunk.usage.prompt_tokens_details:
+                        cached = getattr(last_chunk.usage.prompt_tokens_details, "cached_tokens", 0) or 0
                     self._store_usage(
                         input_tokens=last_chunk.usage.prompt_tokens or 0,
                         output_tokens=last_chunk.usage.completion_tokens or 0,
+                        cached_tokens=cached,
                     )
             else:
                 # Non-streaming mode (response_schema case)
@@ -613,9 +627,14 @@ class OpenAIClient(LLMClient):
 
             # Store usage from last chunk (when stream_options.include_usage=True)
             if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
+                # Check for cached tokens (OpenAI Prompt Caching)
+                cached = 0
+                if hasattr(last_chunk.usage, "prompt_tokens_details") and last_chunk.usage.prompt_tokens_details:
+                    cached = getattr(last_chunk.usage.prompt_tokens_details, "cached_tokens", 0) or 0
                 self._store_usage(
                     input_tokens=last_chunk.usage.prompt_tokens or 0,
                     output_tokens=last_chunk.usage.completion_tokens or 0,
+                    cached_tokens=cached,
                 )
 
             # Store reasoning

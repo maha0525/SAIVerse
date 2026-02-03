@@ -164,3 +164,162 @@
     font-family: 'Consolas', 'Monaco', monospace;
     line-height: 1.5;
 }
+
+/* Debug Mode Toggle */
+.modeToggle {
+    margin-bottom: 1.5rem;
+    padding: 0.75rem 1rem;
+    background-color: rgba(77, 171, 247, 0.05);
+    border: 1px solid rgba(77, 171, 247, 0.2);
+    border-radius: 8px;
+}
+
+.toggleLabel {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    font-size: 0.95rem;
+    color: #ccc;
+}
+
+.toggleLabel input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: #4dabf7;
+}
+
+.toggleHint {
+    color: #888;
+    font-size: 0.85rem;
+    margin-left: 0.5rem;
+}
+
+/* Debug Table */
+.debugTable {
+    background-color: #1a1b1e;
+    border: 1px solid #444;
+    border-radius: 8px;
+    overflow: hidden;
+    max-height: 600px;
+    overflow-y: auto;
+}
+
+.debugTable table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+
+.debugTable thead {
+    position: sticky;
+    top: 0;
+    background-color: #252628;
+    z-index: 1;
+}
+
+.debugTable th {
+    text-align: left;
+    padding: 0.75rem;
+    font-weight: 500;
+    color: #aaa;
+    border-bottom: 1px solid #444;
+}
+
+.debugTable td {
+    padding: 0.75rem;
+    border-bottom: 1px solid #2a2b2e;
+    vertical-align: top;
+}
+
+.debugTable tbody tr:hover {
+    background-color: rgba(255, 255, 255, 0.03);
+}
+
+.rankCol {
+    width: 40px;
+    text-align: center;
+    color: #888;
+}
+
+.scoreCol {
+    width: 80px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-weight: 600;
+}
+
+.roleCol {
+    width: 60px;
+    color: #aaa;
+}
+
+.dateCol {
+    width: 140px;
+    color: #888;
+    font-size: 0.8rem;
+    white-space: nowrap;
+}
+
+.contentCol {
+    min-width: 200px;
+}
+
+.contentPreview {
+    max-height: 100px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.4;
+    color: #e0e0e0;
+}
+
+.keywordHint {
+    margin-top: 0.5rem;
+    font-size: 0.8rem;
+    color: #888;
+}
+
+.dateRangeSection {
+    margin-bottom: 1.5rem;
+}
+
+.dateInputs {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.dateInput {
+    padding: 0.6rem 0.75rem;
+    background-color: #1a1b1e;
+    border: 1px solid #444;
+    border-radius: 6px;
+    color: #e0e0e0;
+    font-size: 0.9rem;
+}
+
+.dateInput:focus {
+    outline: none;
+    border-color: #4dabf7;
+}
+
+.dateSeparator {
+    color: #888;
+}
+
+.clearDateBtn {
+    background: none;
+    border: 1px solid #444;
+    color: #888;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: all 0.2s;
+}
+
+.clearDateBtn:hover {
+    border-color: #666;
+    color: #ccc;
+}

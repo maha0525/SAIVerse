@@ -21,12 +21,14 @@ interface MessageLLMUsage {
     model_display_name?: string;
     input_tokens: number;
     output_tokens: number;
+    cached_tokens?: number;  // Tokens served from cache
     cost_usd?: number;
 }
 
 interface MessageLLMUsageTotal {
     total_input_tokens: number;
     total_output_tokens: number;
+    total_cached_tokens?: number;  // Total cached tokens across all calls
     total_cost_usd: number;
     call_count: number;
     models_used: string[];
@@ -663,12 +665,12 @@ export default function Home() {
                                         {msg.timestamp && <span>{new Date(msg.timestamp).toLocaleString()}</span>}
                                         {msg.llm_usage_total && msg.llm_usage_total.call_count > 1 ? (
                                             // Show total usage when multiple LLM calls were made
-                                            <span className={styles.llmUsage} title={`Models: ${msg.llm_usage_total.models_used.join(', ')}\nLLM Calls: ${msg.llm_usage_total.call_count}\nTotal Input: ${msg.llm_usage_total.total_input_tokens.toLocaleString()} tokens\nTotal Output: ${msg.llm_usage_total.total_output_tokens.toLocaleString()} tokens\nTotal Cost: $${msg.llm_usage_total.total_cost_usd.toFixed(4)}`}>
+                                            <span className={styles.llmUsage} title={`Models: ${msg.llm_usage_total.models_used.join(', ')}\nLLM Calls: ${msg.llm_usage_total.call_count}\nTotal Input: ${msg.llm_usage_total.total_input_tokens.toLocaleString()} tokens${msg.llm_usage_total.total_cached_tokens ? ` (${msg.llm_usage_total.total_cached_tokens.toLocaleString()} cached)` : ''}\nTotal Output: ${msg.llm_usage_total.total_output_tokens.toLocaleString()} tokens\nTotal Cost: $${msg.llm_usage_total.total_cost_usd.toFixed(4)}`}>
                                                 {msg.llm_usage_total.call_count} calls · {(msg.llm_usage_total.total_input_tokens + msg.llm_usage_total.total_output_tokens).toLocaleString()} tokens · ${msg.llm_usage_total.total_cost_usd.toFixed(4)}
                                             </span>
                                         ) : msg.llm_usage && (
                                             // Show single call usage
-                                            <span className={styles.llmUsage} title={`Model: ${msg.llm_usage.model}\nInput: ${msg.llm_usage.input_tokens.toLocaleString()} tokens\nOutput: ${msg.llm_usage.output_tokens.toLocaleString()} tokens\nCost: $${(msg.llm_usage.cost_usd || 0).toFixed(4)}`}>
+                                            <span className={styles.llmUsage} title={`Model: ${msg.llm_usage.model}\nInput: ${msg.llm_usage.input_tokens.toLocaleString()} tokens${msg.llm_usage.cached_tokens ? ` (${msg.llm_usage.cached_tokens.toLocaleString()} cached)` : ''}\nOutput: ${msg.llm_usage.output_tokens.toLocaleString()} tokens\nCost: $${(msg.llm_usage.cost_usd || 0).toFixed(4)}`}>
                                                 {msg.llm_usage.model_display_name || msg.llm_usage.model} · {(msg.llm_usage.input_tokens + msg.llm_usage.output_tokens).toLocaleString()} tokens
                                             </span>
                                         )}
