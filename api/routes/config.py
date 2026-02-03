@@ -9,6 +9,7 @@ from model_configs import (
     get_model_choices_with_display_names,
     get_model_parameters,
     get_model_parameter_defaults,
+    get_cache_config,
 )
 
 router = APIRouter()
@@ -361,4 +362,65 @@ def set_playbook(req: PlaybookOverrideRequest, manager = Depends(get_manager)):
         "success": True,
         "playbook": manager.state.current_playbook,
         "playbook_params": manager.state.playbook_params,
+    }
+
+
+class CacheConfigResponse(BaseModel):
+    """Cache configuration response."""
+    enabled: bool
+    ttl: str
+    supported: bool  # Whether current model supports explicit caching
+    ttl_options: List[str]  # Available TTL options for current model
+    cache_type: Optional[str] = None  # "explicit" or "implicit"
+
+
+class CacheConfigRequest(BaseModel):
+    """Cache configuration update request."""
+    enabled: Optional[bool] = None
+    ttl: Optional[str] = None
+
+
+@router.get("/cache", response_model=CacheConfigResponse)
+def get_cache_settings(manager = Depends(get_manager)):
+    """Get current cache settings and model cache support info."""
+    current_model = manager.model if manager.model != "None" else None
+
+    # Get cache config for current model
+    cache_config = {}
+    if current_model:
+        cache_config = get_cache_config(current_model) or {}
+
+    supported = cache_config.get("supported", False)
+    cache_type = cache_config.get("type", None)
+    ttl_options = cache_config.get("ttl_options", ["5m"])
+
+    # Only show explicit cache controls for explicit caching models (Anthropic)
+    if cache_type != "explicit":
+        supported = False
+        ttl_options = []
+
+    return {
+        "enabled": manager.state.cache_enabled,
+        "ttl": manager.state.cache_ttl,
+        "supported": supported,
+        "ttl_options": ttl_options,
+        "cache_type": cache_type,
+    }
+
+
+@router.post("/cache")
+def set_cache_settings(req: CacheConfigRequest, manager = Depends(get_manager)):
+    """Update cache settings."""
+    if req.enabled is not None:
+        manager.state.cache_enabled = req.enabled
+    if req.ttl is not None:
+        # Validate TTL value
+        if req.ttl not in ["5m", "1h"]:
+            raise HTTPException(status_code=400, detail="Invalid TTL value. Must be '5m' or '1h'")
+        manager.state.cache_ttl = req.ttl
+
+    return {
+        "success": True,
+        "enabled": manager.state.cache_enabled,
+        "ttl": manager.state.cache_ttl,
     }

@@ -19,6 +19,12 @@ interface AIConfig {
     interaction_mode: string;
     avatar_path: string | null;
     appearance_image_path: string | null;  // Visual context appearance image
+    linked_user_id: number | null;  // First linked user ID
+}
+
+interface UserChoice {
+    id: number;
+    name: string;
 }
 
 interface ModelChoice {
@@ -41,6 +47,7 @@ interface AutonomousStatus {
 export default function SettingsModal({ isOpen, onClose, personaId }: SettingsModalProps) {
     const [config, setConfig] = useState<AIConfig | null>(null);
     const [availableModels, setAvailableModels] = useState<ModelChoice[]>([]);
+    const [availableUsers, setAvailableUsers] = useState<UserChoice[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
     const [autonomousStatus, setAutonomousStatus] = useState<AutonomousStatus | null>(null);
@@ -53,10 +60,12 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [interactionMode, setInteractionMode] = useState<string>('auto');
     const [avatarPath, setAvatarPath] = useState('');
     const [appearanceImagePath, setAppearanceImagePath] = useState('');
+    const [linkedUserId, setLinkedUserId] = useState<string>('');
 
     useEffect(() => {
         if (isOpen) {
             loadModels();
+            loadUsers();
         }
     }, [isOpen]);
 
@@ -78,6 +87,18 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
         }
     };
 
+    const loadUsers = async () => {
+        try {
+            const res = await fetch('/api/user/list');
+            if (res.ok) {
+                const data = await res.json();
+                setAvailableUsers(data);
+            }
+        } catch (e) {
+            console.error("Failed to load users", e);
+        }
+    };
+
     const loadConfig = async () => {
         setIsLoading(true);
         try {
@@ -92,6 +113,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setInteractionMode(data.interaction_mode || 'auto');
                 setAvatarPath(data.avatar_path || '');
                 setAppearanceImagePath(data.appearance_image_path || '');
+                setLinkedUserId(data.linked_user_id ? String(data.linked_user_id) : '');
             } else {
                 console.error("Failed to load config");
             }
@@ -123,7 +145,8 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     lightweight_model: lightweightModel,  // empty string = clear to None
                     interaction_mode: interactionMode,
                     avatar_path: avatarPath || null,
-                    appearance_image_path: appearanceImagePath || null
+                    appearance_image_path: appearanceImagePath || null,
+                    linked_user_id: linkedUserId ? parseInt(linkedUserId) : 0  // 0 = clear link
                 })
             });
 
@@ -230,6 +253,23 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         )}
                                     </div>
                                 )}
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>Linked User</label>
+                                <select
+                                    className={styles.select}
+                                    value={linkedUserId}
+                                    onChange={(e) => setLinkedUserId(e.target.value)}
+                                >
+                                    <option value="">None (Use "the user")</option>
+                                    {availableUsers.map(u => (
+                                        <option key={u.id} value={u.id}>{u.name}</option>
+                                    ))}
+                                </select>
+                                <div className={styles.description}>
+                                    The user this persona is linked to. Their name appears in the system prompt.
+                                </div>
                             </div>
 
                             <div className={styles.fieldGroup}>

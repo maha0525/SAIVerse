@@ -141,6 +141,7 @@ export default function Home() {
     const fileInputRef = useRef<HTMLInputElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const [isMobile, setIsMobile] = useState(false);
+    const [currentBuildingName, setCurrentBuildingName] = useState<string>('SAIVerse');
     const swipeStartX = useRef<number | null>(null);
     const swipeStartY = useRef<number | null>(null);
     const swipeStartTime = useRef<number | null>(null);
@@ -321,8 +322,21 @@ export default function Home() {
         }
     };
 
+    const fetchBuildingInfo = async () => {
+        try {
+            const res = await fetch('/api/info/details');
+            if (res.ok) {
+                const data = await res.json();
+                setCurrentBuildingName(data.name || 'SAIVerse');
+            }
+        } catch (err) {
+            console.error('Failed to fetch building info', err);
+        }
+    };
+
     useEffect(() => {
         fetchHistory();
+        fetchBuildingInfo();
         // Fetch saved playbook setting and params from server
         fetch('/api/config/playbook')
             .then(res => res.ok ? res.json() : null)
@@ -582,6 +596,7 @@ export default function Home() {
                     setMessages([]);
                     setIsHistoryLoaded(false);
                     fetchHistory();
+                    fetchBuildingInfo();
                     setMoveTrigger(prev => prev + 1);
                 }}
                 isOpen={isLeftOpen}
@@ -593,14 +608,13 @@ export default function Home() {
                 <header className={styles.header}>
                     <div className={styles.headerLeft}>
                         <button
-                            className={styles.mobileMenuBtn} // New class needed
+                            className={styles.mobileMenuBtn}
                             onClick={() => setIsLeftOpen(true)}
                             title="Open Menu"
                         >
                             <Menu size={20} />
                         </button>
-                        <h1>SAIVerse City</h1>
-                        <span className={styles.status}>● Online</span>
+                        <h1>{currentBuildingName}</h1>
                     </div>
                     <div className={styles.headerRight}>
                         <button

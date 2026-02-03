@@ -195,30 +195,8 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
                 onTouchStart={handleSidebarTouchStart}
                 onTouchMove={handleSidebarTouchMove}
             >
-                {/* Profile Section */}
-                <div
-                    className={styles.profileSection}
-                    onClick={() => setIsProfileModalOpen(true)}
-                    style={{ cursor: 'pointer' }}
-                >
-                    <img
-                        src={status?.avatar || "/api/static/icons/user.png"}
-                        alt="User"
-                        className={styles.avatar}
-                        onError={(e) => { e.currentTarget.src = "https://placehold.co/48x48?text=U"; }}
-                    />
-                    <div className={styles.userInfo}>
-                        <span className={styles.userName}>{status?.display_name || "Guest"}</span>
-                        <div className={`${styles.userStatus} ${styles[status?.presence_status || 'offline']}`}>
-                            <span style={{ fontSize: '1.2em' }}>•</span>
-                            {status?.presence_status === 'online' ? 'Online' :
-                                status?.presence_status === 'away' ? 'Away' : 'Offline'}
-                        </div>
-                    </div>
-                </div>
-
                 {/* Create Persona Button */}
-                <div style={{ padding: '0 1rem', marginBottom: '1rem' }}>
+                <div style={{ padding: '0 1rem 1rem 1rem' }}>
                     <button
                         onClick={() => setIsWizardOpen(true)}
                         className={styles.createPersonaBtn}
@@ -270,14 +248,30 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
                     </div>
                 </div>
 
-                {/* Global Settings Trigger */}
+                {/* Footer: Settings + Profile */}
                 <div className={styles.settingsFooter}>
-                    <button
-                        onClick={() => setIsSettingsOpen(true)}
-                        className={styles.settingsBtn}
-                    >
-                        <Settings size={18} /> Settings
-                    </button>
+                    <div className={styles.footerRow}>
+                        <button
+                            onClick={() => setIsSettingsOpen(true)}
+                            className={styles.settingsBtnIcon}
+                            title="Settings"
+                        >
+                            <Settings size={20} />
+                        </button>
+                        <div
+                            className={styles.profileCompact}
+                            onClick={() => setIsProfileModalOpen(true)}
+                        >
+                            <img
+                                src={status?.avatar || "/api/static/icons/user.png"}
+                                alt="User"
+                                className={styles.avatarSmall}
+                                onError={(e) => { e.currentTarget.src = "https://placehold.co/32x32?text=U"; }}
+                            />
+                            <span className={styles.userNameSmall}>{status?.display_name || "Guest"}</span>
+                            <span className={`${styles.statusDot} ${styles[status?.presence_status || 'offline']}`} />
+                        </div>
+                    </div>
                 </div>
 
                 <GlobalSettingsModal

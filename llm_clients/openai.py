@@ -6,6 +6,7 @@ import json
 import logging
 import mimetypes
 import os
+import time
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import openai
@@ -17,6 +18,47 @@ from llm_router import route
 
 from .base import LLMClient, get_llm_logger
 from .utils import content_to_text, merge_reasoning_strings, obj_to_dict
+
+
+# Retry configuration
+MAX_RETRIES = 3
+INITIAL_BACKOFF = 1.0  # seconds
+
+
+def _is_rate_limit_error(err: Exception) -> bool:
+    """Check if the error is a rate limit that should be retried."""
+    if isinstance(err, openai.RateLimitError):
+        return True
+    msg = str(err).lower()
+    return (
+        "rate" in msg
+        or "429" in msg
+        or "quota" in msg
+        or "overload" in msg
+    )
+
+
+def _is_server_error(err: Exception) -> bool:
+    """Check if the error is a server error (5xx) that should be retried."""
+    if isinstance(err, openai.APIStatusError):
+        return err.status_code >= 500
+    msg = str(err).lower()
+    return "503" in msg or "502" in msg or "504" in msg or "unavailable" in msg
+
+
+def _is_timeout_error(err: Exception) -> bool:
+    """Check if the error is a timeout that should be retried."""
+    if isinstance(err, openai.APITimeoutError):
+        return True
+    if isinstance(err, openai.APIConnectionError):
+        return True
+    msg = str(err).lower()
+    return "timeout" in msg or "timed out" in msg
+
+
+def _should_retry(err: Exception) -> bool:
+    """Check if the error should trigger a retry."""
+    return _is_rate_limit_error(err) or _is_server_error(err) or _is_timeout_error(err)
 
 
 def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_image_bytes: Optional[int] = None, convert_system_to_user: bool = False) -> List[Any]:
@@ -291,6 +333,7 @@ class OpenAIClient(LLMClient):
         response_schema: Optional[Dict[str, Any]] = None,
         *,
         temperature: float | None = None,
+        **_: Any,
     ) -> str | Dict[str, Any]:
         """Unified generate method.
         
@@ -345,16 +388,33 @@ class OpenAIClient(LLMClient):
 
         # Non-tool mode: return str or dict (if response_schema)
         if not use_tools:
-            try:
-                resp = self._create_completion(
-                    model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
-                    n=1,
-                    **_build_request_kwargs(),
-                )
-            except Exception:
-                logging.exception("OpenAI call failed")
-                raise RuntimeError("OpenAI API call failed")
+            resp = None
+            last_error: Optional[Exception] = None
+
+            for attempt in range(MAX_RETRIES):
+                try:
+                    resp = self._create_completion(
+                        model=self.model,
+                        messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
+                        n=1,
+                        **_build_request_kwargs(),
+                    )
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    last_error = e
+                    if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                        backoff = INITIAL_BACKOFF * (2 ** attempt)
+                        logging.warning(
+                            "[openai] Retryable error (attempt %d/%d): %s. Retrying in %.1fs...",
+                            attempt + 1, MAX_RETRIES, type(e).__name__, backoff
+                        )
+                        time.sleep(backoff)
+                        continue
+                    logging.exception("OpenAI call failed")
+                    raise RuntimeError("OpenAI API call failed")
+
+            if resp is None:
+                raise RuntimeError(f"OpenAI API call failed after {MAX_RETRIES} retries: {last_error}")
 
             get_llm_logger().debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
 
@@ -385,6 +445,14 @@ class OpenAIClient(LLMClient):
                     logging.warning("[openai] Failed to parse structured output: %s", e)
                     raise RuntimeError("Failed to parse JSON response from structured output") from e
             else:
+                # Check for empty response
+                if not text_body.strip():
+                    logging.error(
+                        "[openai] Empty text response. "
+                        "Model returned empty content. finish_reason=%s",
+                        choice.finish_reason
+                    )
+                    raise RuntimeError("OpenAI returned empty response")
                 if snippets:
                     prefix = "\n".join(snippets)
                     return prefix + ("\n" if text_body and prefix else "") + text_body
@@ -395,18 +463,35 @@ class OpenAIClient(LLMClient):
         for i, tool in enumerate(tools_spec):
             logging.info("[openai] Tool[%d]: %s", i, tool)
 
-        try:
-            resp = self._create_completion(
-                model=self.model,
-                messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
-                tools=tools_spec,
-                tool_choice="auto",
-                n=1,
-                **_build_request_kwargs(),
-            )
-        except Exception:
-            logging.exception("OpenAI call failed")
-            raise RuntimeError("OpenAI API call failed")
+        resp = None
+        last_error_tool: Optional[Exception] = None
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                resp = self._create_completion(
+                    model=self.model,
+                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
+                    tools=tools_spec,
+                    tool_choice="auto",
+                    n=1,
+                    **_build_request_kwargs(),
+                )
+                break  # Success, exit retry loop
+            except Exception as e:
+                last_error_tool = e
+                if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                    backoff = INITIAL_BACKOFF * (2 ** attempt)
+                    logging.warning(
+                        "[openai] Retryable error in tool mode (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, MAX_RETRIES, type(e).__name__, backoff
+                    )
+                    time.sleep(backoff)
+                    continue
+                logging.exception("OpenAI call failed")
+                raise RuntimeError("OpenAI API call failed")
+
+        if resp is None:
+            raise RuntimeError(f"OpenAI API call failed after {MAX_RETRIES} retries: {last_error_tool}")
 
         get_llm_logger().debug("OpenAI raw (tool detection):\n%s", resp.model_dump_json(indent=2))
 
@@ -444,6 +529,14 @@ class OpenAIClient(LLMClient):
             }
         else:
             content = text_body or choice.message.content or ""
+            # Check for empty text response without tool call
+            if not content.strip():
+                logging.error(
+                    "[openai] Empty text response without tool call. "
+                    "Model returned empty content. finish_reason=%s",
+                    choice.finish_reason
+                )
+                raise RuntimeError("OpenAI returned empty response without tool call")
             return {"type": "text", "content": content}
 
     def generate_stream(
@@ -455,6 +548,7 @@ class OpenAIClient(LLMClient):
         response_schema: Optional[Dict[str, Any]] = None,
         *,
         temperature: float | None = None,
+        **_: Any,
     ) -> Iterator[str]:
         """
         ユーザ向けに逐次テキストを yield するストリーム版。
@@ -468,40 +562,56 @@ class OpenAIClient(LLMClient):
         reasoning_chunks: List[str] = []
 
         if not use_tools:
-            try:
-                req_kwargs = dict(self._request_kwargs)
-                if temperature is not None:
-                    req_kwargs["temperature"] = temperature
-                if response_schema:
-                    schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
-                    openai_schema = self._add_additional_properties(response_schema)
-                    json_schema_config: Dict[str, Any] = {
-                        "name": schema_name or "saiverse_structured_output",
-                        "schema": openai_schema,
-                        "strict": True,
-                    }
-                    response_format_config: Dict[str, Any] = {
-                        "type": "json_schema",
-                        "json_schema": json_schema_config,
-                    }
-                    if self.structured_output_backend:
-                        json_schema_config["backend"] = self.structured_output_backend
-                        response_format_config["backend"] = self.structured_output_backend
-                        logging.info("Applying structured_output_backend='%s' to request (stream)", self.structured_output_backend)
-                    req_kwargs["response_format"] = response_format_config
-                else:
-                    req_kwargs["stream"] = True
-                    req_kwargs["stream_options"] = {"include_usage": True}
-                resp = self._create_completion(
-                    model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
-                    n=1,
-                    **req_kwargs,
-                )
-            except Exception:
-                logging.exception("OpenAI call failed")
-                raise RuntimeError("OpenAI streaming failed")
-                return
+            resp = None
+            last_stream_error: Optional[Exception] = None
+
+            for attempt in range(MAX_RETRIES):
+                try:
+                    req_kwargs = dict(self._request_kwargs)
+                    if temperature is not None:
+                        req_kwargs["temperature"] = temperature
+                    if response_schema:
+                        schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
+                        openai_schema = self._add_additional_properties(response_schema)
+                        json_schema_config: Dict[str, Any] = {
+                            "name": schema_name or "saiverse_structured_output",
+                            "schema": openai_schema,
+                            "strict": True,
+                        }
+                        response_format_config: Dict[str, Any] = {
+                            "type": "json_schema",
+                            "json_schema": json_schema_config,
+                        }
+                        if self.structured_output_backend:
+                            json_schema_config["backend"] = self.structured_output_backend
+                            response_format_config["backend"] = self.structured_output_backend
+                            logging.info("Applying structured_output_backend='%s' to request (stream)", self.structured_output_backend)
+                        req_kwargs["response_format"] = response_format_config
+                    else:
+                        req_kwargs["stream"] = True
+                        req_kwargs["stream_options"] = {"include_usage": True}
+                    resp = self._create_completion(
+                        model=self.model,
+                        messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
+                        n=1,
+                        **req_kwargs,
+                    )
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    last_stream_error = e
+                    if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                        backoff = INITIAL_BACKOFF * (2 ** attempt)
+                        logging.warning(
+                            "[openai] Retryable streaming error (attempt %d/%d): %s. Retrying in %.1fs...",
+                            attempt + 1, MAX_RETRIES, type(e).__name__, backoff
+                        )
+                        time.sleep(backoff)
+                        continue
+                    logging.exception("OpenAI call failed")
+                    raise RuntimeError("OpenAI streaming failed")
+
+            if resp is None:
+                raise RuntimeError(f"OpenAI streaming failed after {MAX_RETRIES} retries: {last_stream_error}")
 
             # Handle streaming vs non-streaming response
             if req_kwargs.get("stream"):
@@ -554,21 +664,37 @@ class OpenAIClient(LLMClient):
             else:
                 force_tool_choice = "auto"
 
-        try:
-            stream_req_kwargs = dict(self._request_kwargs)
-            stream_req_kwargs["stream_options"] = {"include_usage": True}
-            resp = self._create_completion(
-                model=self.model,
-                messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
-                tools=tools_spec,
-                tool_choice=force_tool_choice,
-                stream=True,
-                **stream_req_kwargs,
-            )
-        except Exception:
-            logging.exception("OpenAI call failed")
-            raise RuntimeError("OpenAI JSON mode call failed")
-            return
+        resp = None
+        last_tool_stream_error: Optional[Exception] = None
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                stream_req_kwargs = dict(self._request_kwargs)
+                stream_req_kwargs["stream_options"] = {"include_usage": True}
+                resp = self._create_completion(
+                    model=self.model,
+                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
+                    tools=tools_spec,
+                    tool_choice=force_tool_choice,
+                    stream=True,
+                    **stream_req_kwargs,
+                )
+                break  # Success, exit retry loop
+            except Exception as e:
+                last_tool_stream_error = e
+                if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                    backoff = INITIAL_BACKOFF * (2 ** attempt)
+                    logging.warning(
+                        "[openai] Retryable tool streaming error (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, MAX_RETRIES, type(e).__name__, backoff
+                    )
+                    time.sleep(backoff)
+                    continue
+                logging.exception("OpenAI call failed")
+                raise RuntimeError("OpenAI JSON mode call failed")
+
+        if resp is None:
+            raise RuntimeError(f"OpenAI JSON mode call failed after {MAX_RETRIES} retries: {last_tool_stream_error}")
 
         call_buffer: dict[str, dict] = {}
         state = "TEXT"

@@ -18,7 +18,8 @@ class ChatMessageLLMUsage(BaseModel):
     model_display_name: Optional[str] = None
     input_tokens: int
     output_tokens: int
-    cached_tokens: int = 0  # Tokens served from cache (e.g., Gemini context caching)
+    cached_tokens: int = 0  # Tokens served from cache (cache read)
+    cache_write_tokens: int = 0  # Tokens written to cache (Anthropic: 1.25x cost)
     cost_usd: Optional[float] = None
 
 class ChatMessageLLMUsageTotal(BaseModel):
@@ -26,6 +27,7 @@ class ChatMessageLLMUsageTotal(BaseModel):
     total_input_tokens: int
     total_output_tokens: int
     total_cached_tokens: int = 0  # Total cached tokens across all calls
+    total_cache_write_tokens: int = 0  # Total cache write tokens across all calls
     total_cost_usd: float
     call_count: int
     models_used: List[str] = []
@@ -252,6 +254,7 @@ def get_chat_history(
                     input_tokens=usage_raw.get("input_tokens", 0),
                     output_tokens=usage_raw.get("output_tokens", 0),
                     cached_tokens=usage_raw.get("cached_tokens", 0),
+                    cache_write_tokens=usage_raw.get("cache_write_tokens", 0),
                     cost_usd=usage_raw.get("cost_usd"),
                 )
 
@@ -264,6 +267,7 @@ def get_chat_history(
                     total_input_tokens=total_raw.get("total_input_tokens", 0),
                     total_output_tokens=total_raw.get("total_output_tokens", 0),
                     total_cached_tokens=total_raw.get("total_cached_tokens", 0),
+                    total_cache_write_tokens=total_raw.get("total_cache_write_tokens", 0),
                     total_cost_usd=total_raw.get("total_cost_usd", 0.0),
                     call_count=total_raw.get("call_count", 0),
                     models_used=total_raw.get("models_used", []),

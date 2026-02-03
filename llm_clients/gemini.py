@@ -514,6 +514,7 @@ class GeminiClient(LLMClient):
         response_schema: Optional[Dict[str, Any]] = None,
         *,
         temperature: float | None = None,
+        **_: Any,
     ) -> str | Dict[str, Any]:
         """Unified generate method.
         
@@ -653,7 +654,16 @@ class GeminiClient(LLMClient):
                         except json.JSONDecodeError as e:
                             logging.warning("[gemini] Failed to parse structured output: %s", e)
                             raise RuntimeError("Failed to parse JSON response from structured output") from e
-                    
+
+                    # Check for empty streaming response (no response_schema and empty/whitespace-only text)
+                    if not text.strip():
+                        logging.error(
+                            "[gemini] Empty streaming response (attempt %d/%d). "
+                            "Received parts but text is empty/whitespace-only.",
+                            attempt + 1, max_retries
+                        )
+                        continue
+
                     prefix = "\n".join(history_snippets)
                     return prefix + ("\n" if prefix and text else "") + text
 
@@ -738,6 +748,18 @@ class GeminiClient(LLMClient):
                             }
 
                 # Text-only response in tool mode
+                # Check for empty text response (no tool call and empty/whitespace-only text)
+                if not text.strip():
+                    logging.error(
+                        "[gemini] Empty text response without tool call (attempt %d/%d). "
+                        "Model returned Part(text='') with finish_reason=STOP. "
+                        "prompt_tokens=%s, response_id=%s",
+                        attempt + 1, max_retries,
+                        getattr(usage, "prompt_token_count", None) if usage else None,
+                        getattr(resp, "response_id", None)
+                    )
+                    continue
+
                 logging.info("[gemini] Returning text response")
                 return {"type": "text", "content": text}
 
@@ -819,6 +841,7 @@ class GeminiClient(LLMClient):
         response_schema: Optional[Dict[str, Any]] = None,
         *,
         temperature: float | None = None,
+        **_: Any,
     ) -> Iterator[str]:
         disable_stream = os.getenv("SAIVERSE_DISABLE_GEMINI_STREAMING")
         if disable_stream and disable_stream.lower() not in {"0", "false", "off"}:

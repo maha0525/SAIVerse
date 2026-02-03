@@ -77,8 +77,10 @@ class PersonaCore(
         persona_event_fetcher: Optional[Callable[[str], List[Dict[str, Any]]]] = None,
         persona_event_ack: Optional[Callable[[str, List[int]], None]] = None,
         manager_ref: Optional[Any] = None,
+        linked_user_name: str = "the user",
     ):
         self.city_name = city_name
+        self.linked_user_name = linked_user_name
         self.is_visitor = is_visitor
         self.is_dispatched = is_dispatched
         self.interaction_mode = interaction_mode

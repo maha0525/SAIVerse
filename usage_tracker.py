@@ -46,6 +46,7 @@ class UsageTracker:
         output_tokens: int,
         *,
         cached_tokens: int = 0,
+        cache_write_tokens: int = 0,
         persona_id: Optional[str] = None,
         building_id: Optional[str] = None,
         node_type: Optional[str] = None,
@@ -58,15 +59,18 @@ class UsageTracker:
             model_id: The model identifier
             input_tokens: Number of input tokens
             output_tokens: Number of output tokens
-            cached_tokens: Number of tokens served from cache (e.g., Gemini context caching)
+            cached_tokens: Number of tokens served FROM cache (cache read)
+            cache_write_tokens: Number of tokens written TO cache (Anthropic: 1.25x cost)
             persona_id: Optional persona ID
             building_id: Optional building ID
             node_type: Type of node (llm, router, etc.)
             playbook_name: Name of the playbook if applicable
             timestamp: Optional timestamp (defaults to now)
         """
-        # Calculate cost (with cache discount if applicable)
-        cost_usd = calculate_cost(model_id, input_tokens, output_tokens, cached_tokens)
+        # Calculate cost (with cache discount and write premium if applicable)
+        cost_usd = calculate_cost(
+            model_id, input_tokens, output_tokens, cached_tokens, cache_write_tokens
+        )
 
         record = {
             "timestamp": timestamp or datetime.now(),
@@ -76,6 +80,7 @@ class UsageTracker:
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cached_tokens": cached_tokens,
+            "cache_write_tokens": cache_write_tokens,
             "cost_usd": cost_usd if cost_usd > 0 else None,
             "node_type": node_type,
             "playbook_name": playbook_name,
@@ -87,11 +92,12 @@ class UsageTracker:
                 self._flush_to_db()
 
         LOGGER.debug(
-            "Usage recorded: model=%s input=%d output=%d cached=%d cost=$%.6f persona=%s",
+            "Usage recorded: model=%s input=%d output=%d cached=%d cache_write=%d cost=$%.6f persona=%s",
             model_id,
             input_tokens,
             output_tokens,
             cached_tokens,
+            cache_write_tokens,
             cost_usd,
             persona_id,
         )

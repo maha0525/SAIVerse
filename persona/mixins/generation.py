@@ -103,6 +103,7 @@ class PersonaGenerationMixin:
             "{current_persona_system_instruction}": self.persona_system_instruction,
             "{current_time}": current_time,
             "{current_city_name}": self.city_name,
+            "{linked_user_name}": getattr(self, "linked_user_name", "the user"),
         }
         for placeholder, value in replacements.items():
             system_text = system_text.replace(placeholder, value)

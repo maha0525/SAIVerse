@@ -5,11 +5,51 @@ import copy
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, Iterator, List, Optional
 
 import requests
 
 from .base import LLMClient
+
+
+# Retry configuration
+MAX_RETRIES = 3
+INITIAL_BACKOFF = 1.0  # seconds
+
+
+def _is_rate_limit_error(err: Exception) -> bool:
+    """Check if the error is a rate limit that should be retried."""
+    msg = str(err).lower()
+    return (
+        "rate" in msg
+        or "429" in msg
+        or "quota" in msg
+        or "overload" in msg
+    )
+
+
+def _is_server_error(err: Exception) -> bool:
+    """Check if the error is a server error (5xx) that should be retried."""
+    if isinstance(err, requests.exceptions.HTTPError):
+        response = getattr(err, 'response', None)
+        if response is not None and response.status_code >= 500:
+            return True
+    msg = str(err).lower()
+    return "503" in msg or "502" in msg or "504" in msg or "unavailable" in msg
+
+
+def _is_timeout_error(err: Exception) -> bool:
+    """Check if the error is a timeout that should be retried."""
+    if isinstance(err, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+    msg = str(err).lower()
+    return "timeout" in msg or "timed out" in msg
+
+
+def _should_retry(err: Exception) -> bool:
+    """Check if the error should trigger a retry."""
+    return _is_rate_limit_error(err) or _is_server_error(err) or _is_timeout_error(err)
 
 
 # Allowed request parameters for Ollama (similar to OpenAI)
@@ -101,6 +141,7 @@ class OllamaClient(LLMClient):
         response_schema: Optional[Dict[str, Any]] = None,
         *,
         temperature: float | None = None,
+        **_: Any,
     ) -> str | Dict[str, Any]:
         """Unified generate method.
         
@@ -144,19 +185,35 @@ class OllamaClient(LLMClient):
                 "options": options,
                 "tools": tools_spec,
             }
-            try:
-                response = requests.post(self.url, json=payload, timeout=(3, 300))
-                preview = response.text[:500] if response.text else "(empty)"
-                logging.debug(
-                    "Ollama v1 tool detection response status=%s preview=%s",
-                    response.status_code,
-                    preview,
-                )
-                response.raise_for_status()
-                data = response.json()
-            except Exception:
-                logging.exception("Ollama tool detection call failed")
-                raise RuntimeError("Ollama tool detection call failed")
+            data = None
+            last_tool_error: Optional[Exception] = None
+
+            for attempt in range(MAX_RETRIES):
+                try:
+                    response = requests.post(self.url, json=payload, timeout=(3, 300))
+                    preview = response.text[:500] if response.text else "(empty)"
+                    logging.debug(
+                        "Ollama v1 tool detection response (attempt %d/%d) status=%s preview=%s",
+                        attempt + 1, MAX_RETRIES, response.status_code, preview,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    last_tool_error = e
+                    if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                        backoff = INITIAL_BACKOFF * (2 ** attempt)
+                        logging.warning(
+                            "[ollama] Retryable tool detection error (attempt %d/%d): %s. Retrying in %.1fs...",
+                            attempt + 1, MAX_RETRIES, type(e).__name__, backoff
+                        )
+                        time.sleep(backoff)
+                        continue
+                    logging.exception("Ollama tool detection call failed")
+                    raise RuntimeError("Ollama tool detection call failed")
+
+            if data is None:
+                raise RuntimeError(f"Ollama tool detection call failed after {MAX_RETRIES} retries: {last_tool_error}")
 
             # Store usage if available (Ollama may include it in OpenAI-compatible response)
             usage = data.get("usage")
@@ -195,6 +252,13 @@ class OllamaClient(LLMClient):
                         "tool_args": tool_args,
                     }
             else:
+                # Check for empty text response without tool call
+                if not content.strip():
+                    logging.error(
+                        "[ollama] Empty text response without tool call. "
+                        "Model returned empty content."
+                    )
+                    raise RuntimeError("Ollama returned empty response without tool call")
                 return {"type": "text", "content": content}
 
         # Non-tool mode: return str
@@ -211,30 +275,41 @@ class OllamaClient(LLMClient):
             }
 
         if schema_payload is not None and self.chat_url:
-            try:
-                payload_chat: Dict[str, Any] = {
-                    "model": self.model,
-                    "messages": messages,
-                    "stream": False,
-                    "options": options,
-                    "format": schema_payload,
-                }
-                response = requests.post(self.chat_url, json=payload_chat, timeout=(3, 300))
-                chat_preview = response.text[:400] + "…" if response.text and len(response.text) > 400 else response.text
-                logging.debug(
-                    "Ollama /api/chat response status=%s body_preview=%s",
-                    response.status_code,
-                    chat_preview if chat_preview is not None else "(None)",
-                )
-                response.raise_for_status()
-                data = response.json()
-                content = data.get("message", {}).get("content", "")
-                if content:
-                    logging.debug("Raw ollama /api/chat response: %s", content)
-                    return content
-                logging.warning("Ollama /api/chat returned empty content. raw=%s", chat_preview)
-            except Exception:
-                logging.exception("Ollama /api/chat structured call failed; falling back to /v1 endpoint")
+            for attempt in range(MAX_RETRIES):
+                try:
+                    payload_chat: Dict[str, Any] = {
+                        "model": self.model,
+                        "messages": messages,
+                        "stream": False,
+                        "options": options,
+                        "format": schema_payload,
+                    }
+                    response = requests.post(self.chat_url, json=payload_chat, timeout=(3, 300))
+                    chat_preview = response.text[:400] + "…" if response.text and len(response.text) > 400 else response.text
+                    logging.debug(
+                        "Ollama /api/chat response (attempt %d/%d) status=%s body_preview=%s",
+                        attempt + 1, MAX_RETRIES, response.status_code,
+                        chat_preview if chat_preview is not None else "(None)",
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    content = data.get("message", {}).get("content", "")
+                    if content:
+                        logging.debug("Raw ollama /api/chat response: %s", content)
+                        return content
+                    logging.warning("Ollama /api/chat returned empty content. raw=%s", chat_preview)
+                    break  # Got response but empty - fall through to v1 endpoint
+                except Exception as e:
+                    if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                        backoff = INITIAL_BACKOFF * (2 ** attempt)
+                        logging.warning(
+                            "[ollama] Retryable /api/chat error (attempt %d/%d): %s. Retrying in %.1fs...",
+                            attempt + 1, MAX_RETRIES, type(e).__name__, backoff
+                        )
+                        time.sleep(backoff)
+                        continue
+                    logging.exception("Ollama /api/chat structured call failed; falling back to /v1 endpoint")
+                    break  # Fall through to v1 endpoint
 
         payload_v1: Dict[str, Any] = {
             "model": self.model,
@@ -245,38 +320,58 @@ class OllamaClient(LLMClient):
         if format_payload_v1:
             payload_v1["format"] = format_payload_v1
 
-        try:
-            response = requests.post(self.url, json=payload_v1, timeout=(3, 300))
-            preview = response.text[:400] + "…" if response.text and len(response.text) > 400 else response.text
-            logging.debug(
-                "Ollama v1 response status=%s body_preview=%s",
-                response.status_code,
-                preview if preview is not None else "(None)",
-            )
-            response.raise_for_status()
-            data = response.json()
+        last_v1_error: Optional[Exception] = None
 
-            # Store usage if available
-            usage = data.get("usage")
-            if usage:
-                self._store_usage(
-                    input_tokens=usage.get("prompt_tokens", 0) or 0,
-                    output_tokens=usage.get("completion_tokens", 0) or 0,
-                )
-
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            if not content:
-                logging.warning(
-                    "Ollama v1 returned empty content. keys=%s raw=%s",
-                    list(data.keys()),
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = requests.post(self.url, json=payload_v1, timeout=(3, 300))
+                preview = response.text[:400] + "…" if response.text and len(response.text) > 400 else response.text
+                logging.debug(
+                    "Ollama v1 response (attempt %d/%d) status=%s body_preview=%s",
+                    attempt + 1, MAX_RETRIES, response.status_code,
                     preview if preview is not None else "(None)",
                 )
-            logging.debug("Raw ollama v1 response: %s", content)
-            return content
-        except Exception:
-            logging.exception("Ollama v1 endpoint failed")
-            if not self.chat_url:
-                raise RuntimeError("Ollama v1 endpoint failed and no fallback available")
+                response.raise_for_status()
+                data = response.json()
+
+                # Store usage if available
+                usage = data.get("usage")
+                if usage:
+                    self._store_usage(
+                        input_tokens=usage.get("prompt_tokens", 0) or 0,
+                        output_tokens=usage.get("completion_tokens", 0) or 0,
+                    )
+
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                if not content.strip():
+                    logging.error(
+                        "[ollama] Empty text response. "
+                        "Model returned empty content. keys=%s raw=%s",
+                        list(data.keys()),
+                        preview if preview is not None else "(None)",
+                    )
+                    raise RuntimeError("Ollama returned empty response")
+                logging.debug("Raw ollama v1 response: %s", content)
+                return content
+            except Exception as e:
+                last_v1_error = e
+                if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                    backoff = INITIAL_BACKOFF * (2 ** attempt)
+                    logging.warning(
+                        "[ollama] Retryable v1 error (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, MAX_RETRIES, type(e).__name__, backoff
+                    )
+                    time.sleep(backoff)
+                    continue
+                logging.exception("Ollama v1 endpoint failed")
+                break  # Fall through to legacy fallback
+
+        # Legacy fallback to /api/chat
+        if not self.chat_url:
+            raise RuntimeError(f"Ollama v1 endpoint failed and no fallback available: {last_v1_error}")
+
+        last_legacy_error: Optional[Exception] = None
+        for attempt in range(MAX_RETRIES):
             try:
                 legacy_payload: Dict[str, Any] = {
                     "model": self.model,
@@ -293,8 +388,8 @@ class OllamaClient(LLMClient):
                 )
                 legacy_preview = response.text[:400] + "…" if response.text and len(response.text) > 400 else response.text
                 logging.debug(
-                    "Ollama fallback /api/chat status=%s body_preview=%s",
-                    response.status_code,
+                    "Ollama fallback /api/chat (attempt %d/%d) status=%s body_preview=%s",
+                    attempt + 1, MAX_RETRIES, response.status_code,
                     legacy_preview if legacy_preview is not None else "(None)",
                 )
                 response.raise_for_status()
@@ -308,9 +403,20 @@ class OllamaClient(LLMClient):
                     )
                 logging.debug("Raw ollama fallback /api/chat response: %s", content)
                 return content
-            except Exception:
+            except Exception as e:
+                last_legacy_error = e
+                if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                    backoff = INITIAL_BACKOFF * (2 ** attempt)
+                    logging.warning(
+                        "[ollama] Retryable fallback error (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, MAX_RETRIES, type(e).__name__, backoff
+                    )
+                    time.sleep(backoff)
+                    continue
                 logging.exception("Ollama fallback /api/chat failed")
                 raise RuntimeError("Ollama API call failed on all endpoints")
+
+        raise RuntimeError(f"Ollama API call failed after {MAX_RETRIES} retries: {last_legacy_error}")
 
     def generate_stream(
         self,
@@ -319,87 +425,115 @@ class OllamaClient(LLMClient):
         response_schema: Optional[Dict[str, Any]] = None,
         *,
         temperature: float | None = None,
+        **_: Any,
     ) -> Iterator[str]:
         # For structured output, use non-streaming to get complete JSON
         if response_schema:
+            last_schema_error: Optional[Exception] = None
+            for attempt in range(MAX_RETRIES):
+                try:
+                    stream_options: Dict[str, Any] = {"num_ctx": self.context_length}
+                    for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
+                                "repeat_penalty", "presence_penalty", "frequency_penalty",
+                                "mirostat", "mirostat_tau", "mirostat_eta"):
+                        if key in self._request_kwargs:
+                            stream_options[key] = self._request_kwargs[key]
+                    if temperature is not None:
+                        stream_options["temperature"] = temperature
+                    stream_payload: Dict[str, Any] = {
+                        "model": self.model,
+                        "messages": messages,
+                        "stream": False,
+                        "options": stream_options,
+                        "format": {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": response_schema.get("title") or "saiverse_structured_output",
+                                "schema": response_schema,
+                                "strict": True,
+                            },
+                        },
+                    }
+                    response = requests.post(self.url, json=stream_payload, timeout=(3, 300))
+                    response.raise_for_status()
+                    data = response.json()
+                    _ = data.get("choices", [{}])[0].get("message", {}).get("content", "")  # Structured output captured but not yielded
+                    yield ""
+                    return
+                except Exception as e:
+                    last_schema_error = e
+                    if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                        backoff = INITIAL_BACKOFF * (2 ** attempt)
+                        logging.warning(
+                            "[ollama] Retryable structured output error (attempt %d/%d): %s. Retrying in %.1fs...",
+                            attempt + 1, MAX_RETRIES, type(e).__name__, backoff
+                        )
+                        time.sleep(backoff)
+                        continue
+                    logging.exception("Ollama structured output call failed")
+                    raise RuntimeError("Ollama structured output failed")
+            raise RuntimeError(f"Ollama structured output failed after {MAX_RETRIES} retries: {last_schema_error}")
+        
+        # Normal streaming mode (no response_schema)
+        last_stream_error: Optional[Exception] = None
+
+        for attempt in range(MAX_RETRIES):
             try:
                 stream_options: Dict[str, Any] = {"num_ctx": self.context_length}
+                # Apply request_kwargs to options
                 for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
                             "repeat_penalty", "presence_penalty", "frequency_penalty",
                             "mirostat", "mirostat_tau", "mirostat_eta"):
                     if key in self._request_kwargs:
                         stream_options[key] = self._request_kwargs[key]
+                # Override with explicit temperature parameter if provided
                 if temperature is not None:
                     stream_options["temperature"] = temperature
                 stream_payload: Dict[str, Any] = {
                     "model": self.model,
                     "messages": messages,
-                    "stream": False,
+                    "stream": True,
                     "options": stream_options,
-                    "format": {
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": response_schema.get("title") or "saiverse_structured_output",
-                            "schema": response_schema,
-                            "strict": True,
-                        },
-                    },
                 }
-                response = requests.post(self.url, json=stream_payload, timeout=(3, 300))
-                response.raise_for_status()
-                data = response.json()
-                _ = data.get("choices", [{}])[0].get("message", {}).get("content", "")  # Structured output captured but not yielded
-                yield ""
-                return
-            except Exception:
-                logging.exception("Ollama structured output call failed")
-                raise RuntimeError("Ollama structured output failed")
-        
-        # Normal streaming mode (no response_schema)
-        try:
-            stream_options: Dict[str, Any] = {"num_ctx": self.context_length}
-            # Apply request_kwargs to options
-            for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
-                        "repeat_penalty", "presence_penalty", "frequency_penalty",
-                        "mirostat", "mirostat_tau", "mirostat_eta"):
-                if key in self._request_kwargs:
-                    stream_options[key] = self._request_kwargs[key]
-            # Override with explicit temperature parameter if provided
-            if temperature is not None:
-                stream_options["temperature"] = temperature
-            stream_payload: Dict[str, Any] = {
-                "model": self.model,
-                "messages": messages,
-                "stream": True,
-                "options": stream_options,
-            }
-            # When no schema is requested we allow plain-text responses. Ollama defaults to
-            # unstructured text, so we intentionally avoid forcing any response_format.
+                # When no schema is requested we allow plain-text responses. Ollama defaults to
+                # unstructured text, so we intentionally avoid forcing any response_format.
 
-            response = requests.post(
-                self.url,
-                json=stream_payload,
-                timeout=(3, 300),
-                stream=True,
-            )
-            response.raise_for_status()
-            for line in response.iter_lines():
-                if not line:
+                response = requests.post(
+                    self.url,
+                    json=stream_payload,
+                    timeout=(3, 300),
+                    stream=True,
+                )
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    chunk = line.decode("utf-8")
+                    if chunk.startswith("data: "):
+                        chunk = chunk[len("data: ") :]
+                    if chunk.strip() == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(chunk)
+                        delta = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                        yield delta
+                    except json.JSONDecodeError:
+                        logging.warning("Failed to parse stream chunk: %s", chunk)
+                return  # Stream completed successfully
+            except Exception as e:
+                last_stream_error = e
+                if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                    backoff = INITIAL_BACKOFF * (2 ** attempt)
+                    logging.warning(
+                        "[ollama] Retryable streaming error (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, MAX_RETRIES, type(e).__name__, backoff
+                    )
+                    time.sleep(backoff)
                     continue
-                chunk = line.decode("utf-8")
-                if chunk.startswith("data: "):
-                    chunk = chunk[len("data: ") :]
-                if chunk.strip() == "[DONE]":
-                    break
-                try:
-                    data = json.loads(chunk)
-                    delta = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                    yield delta
-                except json.JSONDecodeError:
-                    logging.warning("Failed to parse stream chunk: %s", chunk)
-        except Exception:
-            logging.exception("Ollama call failed")
-            raise RuntimeError("Ollama streaming failed")
+                logging.exception("Ollama call failed")
+                raise RuntimeError("Ollama streaming failed")
+
+        raise RuntimeError(f"Ollama streaming failed after {MAX_RETRIES} retries: {last_stream_error}")
 
     def generate_with_tool_detection(
         self,
