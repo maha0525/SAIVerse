@@ -321,6 +321,7 @@ class SEARuntime:
             "pulse_usage_accumulator": {  # Accumulate LLM usage across all nodes in this pulse
                 "total_input_tokens": 0,
                 "total_output_tokens": 0,
+                "total_cached_tokens": 0,
                 "total_cost_usd": 0.0,
                 "call_count": 0,
                 "models_used": [],
@@ -459,6 +460,7 @@ class SEARuntime:
                             model_id=usage.model,
                             input_tokens=usage.input_tokens,
                             output_tokens=usage.output_tokens,
+                            cached_tokens=usage.cached_tokens,
                             persona_id=getattr(persona, "persona_id", None),
                             building_id=building_id,
                             node_type="llm_tool",
@@ -466,8 +468,8 @@ class SEARuntime:
                         )
                         # Accumulate into pulse total
                         from model_configs import calculate_cost
-                        cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens)
-                        self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost)
+                        cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens)
+                        self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens)
 
                     # Parse output_keys to determine where to store results
                     output_keys_spec = getattr(node_def, "output_keys", None)
@@ -620,24 +622,26 @@ class SEARuntime:
                                 model_id=usage.model,
                                 input_tokens=usage.input_tokens,
                                 output_tokens=usage.output_tokens,
+                                cached_tokens=usage.cached_tokens,
                                 persona_id=getattr(persona, "persona_id", None),
                                 building_id=building_id,
                                 node_type="llm_stream",
                                 playbook_name=playbook.name,
                             )
-                            LOGGER.info("[DEBUG] Usage recorded: model=%s in=%d out=%d", usage.model, usage.input_tokens, usage.output_tokens)
+                            LOGGER.info("[DEBUG] Usage recorded: model=%s in=%d out=%d cached=%d", usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens)
                             # Build llm_usage metadata for message
                             from model_configs import calculate_cost, get_model_display_name
-                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens)
+                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens)
                             llm_usage_metadata = {
                                 "model": usage.model,
                                 "model_display_name": get_model_display_name(usage.model),
                                 "input_tokens": usage.input_tokens,
                                 "output_tokens": usage.output_tokens,
+                                "cached_tokens": usage.cached_tokens,
                                 "cost_usd": cost,
                             }
                             # Accumulate into pulse total
-                            self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost)
+                            self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens)
                         else:
                             LOGGER.warning("[DEBUG] No usage data from LLM client")
 
@@ -673,6 +677,7 @@ class SEARuntime:
                                 model_id=usage.model,
                                 input_tokens=usage.input_tokens,
                                 output_tokens=usage.output_tokens,
+                                cached_tokens=usage.cached_tokens,
                                 persona_id=getattr(persona, "persona_id", None),
                                 building_id=building_id,
                                 node_type="llm",
@@ -680,16 +685,17 @@ class SEARuntime:
                             )
                             # Build llm_usage metadata for message
                             from model_configs import calculate_cost, get_model_display_name
-                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens)
+                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens)
                             llm_usage_metadata = {
                                 "model": usage.model,
                                 "model_display_name": get_model_display_name(usage.model),
                                 "input_tokens": usage.input_tokens,
                                 "output_tokens": usage.output_tokens,
+                                "cached_tokens": usage.cached_tokens,
                                 "cost_usd": cost,
                             }
                             # Accumulate into pulse total
-                            self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost)
+                            self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens)
 
                         # If speak=true but streaming disabled, send complete text and record to Building history
                         LOGGER.info("[DEBUG] speak_flag=%s, event_callback=%s, text_len=%d",
@@ -823,6 +829,7 @@ class SEARuntime:
         input_tokens: int,
         output_tokens: int,
         cost_usd: float,
+        cached_tokens: int = 0,
     ) -> None:
         """Accumulate LLM usage into the pulse-level accumulator.
 
@@ -832,12 +839,14 @@ class SEARuntime:
             input_tokens: Number of input tokens
             output_tokens: Number of output tokens
             cost_usd: Cost in USD
+            cached_tokens: Number of tokens served from cache
         """
         accumulator = state.get("pulse_usage_accumulator")
         if accumulator is None:
             return
         accumulator["total_input_tokens"] += input_tokens
         accumulator["total_output_tokens"] += output_tokens
+        accumulator["total_cached_tokens"] += cached_tokens
         accumulator["total_cost_usd"] += cost_usd
         accumulator["call_count"] += 1
         if model and model not in accumulator["models_used"]:
@@ -2271,21 +2280,13 @@ class SEARuntime:
                 if building_obj:
                     building_section_parts: List[str] = []
 
-                    # Building system instruction (with variable expansion)
+                    # Building system instruction
+                    # NOTE: Datetime variables ({current_time}, etc.) are no longer expanded here.
+                    # Time information is now provided via Realtime Context at the end of messages
+                    # to improve LLM context caching efficiency.
                     building_sys = getattr(building_obj, "system_instruction", None)
                     if building_sys:
-                        # Get current time in persona's timezone
-                        from datetime import datetime
-                        now = datetime.now(persona.timezone)
-                        time_vars = {
-                            "current_time": now.strftime("%H:%M"),
-                            "current_date": now.strftime("%Y年%m月%d日"),
-                            "current_datetime": now.strftime("%Y年%m月%d日 %H:%M"),
-                            "current_weekday": ["月", "火", "水", "木", "金", "土", "日"][now.weekday()],
-                        }
-                        # Expand variables in building system instruction
-                        expanded_sys = _format(str(building_sys), time_vars)
-                        building_section_parts.append(expanded_sys.strip())
+                        building_section_parts.append(str(building_sys).strip())
 
                     # Building items
                     if reqs.building_items:
@@ -2346,28 +2347,8 @@ class SEARuntime:
                 except Exception as exc:
                     LOGGER.debug("Failed to add working_memory section: %s", exc)
 
-            # 6. "## 空間情報" section (Unity spatial context - volatile, real-time)
-            try:
-                unity_gateway = getattr(self.manager, "unity_gateway", None)
-                if unity_gateway and getattr(unity_gateway, "is_running", False):
-                    persona_id = getattr(persona, "persona_id", None)
-                    spatial_state = unity_gateway.spatial_state.get(persona_id) if persona_id else None
-                    if spatial_state:
-                        distance = getattr(spatial_state, "distance_to_player", None)
-                        is_visible = getattr(spatial_state, "is_visible", None)
-                        
-                        spatial_lines = []
-                        if distance is not None:
-                            spatial_lines.append(f"- プレイヤーとの距離: {distance:.1f}m")
-                        if is_visible is not None:
-                            visibility_text = "はい" if is_visible else "いいえ"
-                            spatial_lines.append(f"- 視界内にプレイヤーがいるか: {visibility_text}")
-                        
-                        if spatial_lines:
-                            system_sections.append("## 空間情報（リアルタイム）\n" + "\n".join(spatial_lines))
-                            LOGGER.debug("[sea][prepare-context] Added spatial context section: distance=%.1f, visible=%s", distance, is_visible)
-            except Exception as exc:
-                LOGGER.debug("Failed to add spatial context section: %s", exc)
+            # NOTE: Spatial context (Unity) has been moved to Realtime Context
+            # to improve LLM context caching efficiency.
 
             system_text = "\n\n---\n\n".join([s for s in system_sections if s])
             if system_text:
@@ -2464,6 +2445,31 @@ class SEARuntime:
                 except Exception as exc:
                     LOGGER.exception("[sea][prepare-context] Failed to get history: %s", exc)
 
+        # ---- Realtime Context ----
+        # Time-sensitive info placed just BEFORE the last user message to improve LLM caching.
+        # This ensures LLM responds to user input, not the realtime context.
+        if reqs.realtime_context:
+            try:
+                realtime_msg = self._build_realtime_context(persona, building_id, messages)
+                if realtime_msg:
+                    # Find the last user message and insert realtime context before it
+                    last_user_idx = None
+                    for i in range(len(messages) - 1, -1, -1):
+                        if messages[i].get("role") == "user" and not messages[i].get("metadata", {}).get("__realtime_context__"):
+                            last_user_idx = i
+                            break
+
+                    if last_user_idx is not None:
+                        # Insert before last user message
+                        messages.insert(last_user_idx, realtime_msg)
+                        LOGGER.debug("[sea][prepare-context] Added realtime context before last user message (idx=%d)", last_user_idx)
+                    else:
+                        # No user message found, append at end
+                        messages.append(realtime_msg)
+                        LOGGER.debug("[sea][prepare-context] Added realtime context at end (no user message found)")
+            except Exception as exc:
+                LOGGER.debug("[sea][prepare-context] Failed to build realtime context: %s", exc)
+
         return messages
 
     def _enrich_history_with_attachments(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -2507,6 +2513,99 @@ class SEARuntime:
                 enriched.append(msg)
 
         return enriched
+
+    def _build_realtime_context(
+        self,
+        persona: Any,
+        building_id: str,
+        history_messages: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Build realtime context message with time-sensitive information.
+
+        This message is placed near the end of context (before the current prompt)
+        to improve LLM context caching efficiency. Time-sensitive info here doesn't
+        invalidate the cached prefix (system prompt, persona info, building info, etc.).
+
+        Contents:
+        - Current timestamp (year/month/day, weekday, hour:minute)
+        - Previous AI response timestamp (for time passage awareness)
+        - Spatial info from Unity gateway (if connected)
+        - (Future) Auto-recalled memory content
+
+        Returns:
+            Message dict with role="user" and <system> wrapper, or None if no content.
+        """
+        from datetime import datetime
+
+        sections: List[str] = []
+
+        # 1. Current timestamp
+        now = datetime.now(persona.timezone)
+        weekday_names = ["月", "火", "水", "木", "金", "土", "日"]
+        current_time_str = now.strftime(f"%Y年%m月%d日({weekday_names[now.weekday()]}) %H:%M")
+        sections.append(f"現在時刻: {current_time_str}")
+
+        # 2. Previous AI response timestamp
+        # Find the last assistant/persona message in history with a timestamp
+        prev_ai_timestamp = None
+        persona_id = getattr(persona, "persona_id", None)
+        persona_name = getattr(persona, "persona_name", None)
+        for msg in reversed(history_messages):
+            role = msg.get("role", "")
+            # Check if this is an assistant message or a message from this persona
+            if role == "assistant" or (persona_name and msg.get("sender") == persona_name):
+                # Try 'created_at' first (SAIMemory format), then 'timestamp' (fallback)
+                ts_str = msg.get("created_at") or msg.get("timestamp")
+                if ts_str:
+                    try:
+                        # Handle both ISO format and datetime objects
+                        if isinstance(ts_str, datetime):
+                            prev_ai_timestamp = ts_str
+                        else:
+                            prev_ai_timestamp = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+                        break
+                    except (ValueError, TypeError):
+                        pass
+
+        if prev_ai_timestamp:
+            # Convert to persona's timezone for display
+            if prev_ai_timestamp.tzinfo is not None:
+                prev_ai_timestamp = prev_ai_timestamp.astimezone(persona.timezone)
+            prev_time_str = prev_ai_timestamp.strftime(f"%Y年%m月%d日({weekday_names[prev_ai_timestamp.weekday()]}) %H:%M")
+            sections.append(f"あなたの前回発言: {prev_time_str}")
+
+        # 3. Spatial context (Unity gateway)
+        try:
+            unity_gateway = getattr(self.manager, "unity_gateway", None)
+            if unity_gateway and getattr(unity_gateway, "is_running", False):
+                spatial_state = unity_gateway.spatial_state.get(persona_id) if persona_id else None
+                if spatial_state:
+                    distance = getattr(spatial_state, "distance_to_player", None)
+                    is_visible = getattr(spatial_state, "is_visible", None)
+
+                    spatial_lines = []
+                    if distance is not None:
+                        spatial_lines.append(f"プレイヤーとの距離: {distance:.1f}m")
+                    if is_visible is not None:
+                        visibility_text = "見える" if is_visible else "見えない"
+                        spatial_lines.append(f"プレイヤーの視認: {visibility_text}")
+
+                    if spatial_lines:
+                        sections.append("空間情報: " + " / ".join(spatial_lines))
+                        LOGGER.debug("[sea][realtime-context] Added spatial info: distance=%.1f, visible=%s", distance, is_visible)
+        except Exception as exc:
+            LOGGER.debug("[sea][realtime-context] Failed to get spatial context: %s", exc)
+
+        if not sections:
+            return None
+
+        # Format as user message with <system> wrapper (compatible with all LLM providers)
+        content = "<system>\n## リアルタイム情報\n" + "\n".join(f"- {s}" for s in sections) + "\n</system>"
+        return {
+            "role": "user",
+            "content": content,
+            "metadata": {"__realtime_context__": True},  # Mark for identification
+        }
 
     def _choose_playbook(self, kind: str, persona: Any, building_id: str) -> PlaybookSchema:
         """Resolve playbook by kind with DB→disk→fallback."""

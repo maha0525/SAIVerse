@@ -258,6 +258,7 @@ class LLMUsageLog(Base):
     MODEL_ID = Column(String(255), nullable=False)
     INPUT_TOKENS = Column(Integer, nullable=False)
     OUTPUT_TOKENS = Column(Integer, nullable=False)
+    CACHED_TOKENS = Column(Integer, nullable=True, default=0)  # Tokens served from cache
     COST_USD = Column(Float, nullable=True)  # Calculated cost in USD
     NODE_TYPE = Column(String(64), nullable=True)  # llm, router, tool_detection, etc.
     PLAYBOOK_NAME = Column(String(255), nullable=True)

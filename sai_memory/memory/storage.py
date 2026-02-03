@@ -276,6 +276,35 @@ def get_messages_by_resource(conn: sqlite3.Connection, resource_id: str) -> List
     return [_row_to_message(row) for row in cur.fetchall()]
 
 
+def get_all_messages_for_search(
+    conn: sqlite3.Connection,
+    required_tags: Optional[List[str]] = None,
+) -> List[Message]:
+    """Get all messages for keyword search, optionally filtered by tags."""
+    params = []
+
+    if required_tags:
+        # Build tag filter
+        tag_conditions = []
+        for tag in required_tags:
+            tag_conditions.append(
+                "EXISTS (SELECT 1 FROM json_each(metadata, '$.tags') WHERE json_each.value = ?)"
+            )
+            params.append(tag)
+        tags_clause = " WHERE " + " OR ".join(tag_conditions)
+    else:
+        tags_clause = ""
+
+    query = f"""
+        SELECT id, thread_id, role, content, resource_id, created_at, metadata
+        FROM messages
+        {tags_clause}
+        ORDER BY created_at DESC
+    """
+    cur = conn.execute(query, params)
+    return [_row_to_message(row) for row in cur.fetchall()]
+
+
 def get_embeddings_for_scope(
     conn: sqlite3.Connection,
     thread_id: Optional[str] = None,

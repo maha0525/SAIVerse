@@ -627,15 +627,19 @@ class GeminiClient(LLMClient):
                     if last_chunk:
                         usage = getattr(last_chunk, "usage_metadata", None)
                         if usage:
-                            # Debug: log all usage_metadata fields
-                            logging.info("[DEBUG] Gemini usage_metadata fields: %s", dir(usage))
-                            logging.info("[DEBUG] Gemini usage_metadata: prompt=%s, candidates=%s, cached=%s",
+                            # Debug: log available fields in usage_metadata
+                            logging.info("[DEBUG] Gemini usage_metadata attrs: %s",
+                                        [a for a in dir(usage) if not a.startswith('_')])
+                            logging.info("[DEBUG] Gemini usage_metadata values: prompt=%s, candidates=%s, cached=%s, total=%s",
                                         getattr(usage, "prompt_token_count", None),
                                         getattr(usage, "candidates_token_count", None),
-                                        getattr(usage, "cached_content_token_count", None))
+                                        getattr(usage, "cached_content_token_count", None),
+                                        getattr(usage, "total_token_count", None))
+                            cached = getattr(usage, "cached_content_token_count", 0) or 0
                             self._store_usage(
                                 input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
                                 output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+                                cached_tokens=cached,
                             )
 
                     text, reasoning_entries = self._separate_parts(all_parts)
@@ -658,10 +662,19 @@ class GeminiClient(LLMClient):
 
                 # Store usage information (uses self.config_key for pricing)
                 usage = getattr(resp, "usage_metadata", None)
+                logging.info("[DEBUG] Gemini non-stream usage_metadata: %s", usage)
                 if usage:
+                    logging.info("[DEBUG] Gemini non-stream usage attrs: %s",
+                                [a for a in dir(usage) if not a.startswith('_')])
+                    logging.info("[DEBUG] Gemini non-stream usage values: prompt=%s, candidates=%s, cached=%s",
+                                getattr(usage, "prompt_token_count", None),
+                                getattr(usage, "candidates_token_count", None),
+                                getattr(usage, "cached_content_token_count", None))
+                    cached = getattr(usage, "cached_content_token_count", 0) or 0
                     self._store_usage(
                         input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
                         output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+                        cached_tokens=cached,
                     )
 
                 if not resp.candidates:
@@ -926,12 +939,22 @@ class GeminiClient(LLMClient):
             logging.warning("Gemini stream ended without completion signal, but content was received. Continuing with partial response.")
 
         # Store usage from last chunk (uses self.config_key for pricing)
+        logging.info("[DEBUG] generate_stream last_chunk exists: %s", last_chunk is not None)
         if last_chunk:
             usage = getattr(last_chunk, "usage_metadata", None)
+            logging.info("[DEBUG] generate_stream usage_metadata: %s", usage)
             if usage:
+                logging.info("[DEBUG] generate_stream usage attrs: %s",
+                            [a for a in dir(usage) if not a.startswith('_')])
+                logging.info("[DEBUG] generate_stream usage values: prompt=%s, candidates=%s, cached=%s",
+                            getattr(usage, "prompt_token_count", None),
+                            getattr(usage, "candidates_token_count", None),
+                            getattr(usage, "cached_content_token_count", None))
+                cached = getattr(usage, "cached_content_token_count", 0) or 0
                 self._store_usage(
                     input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
                     output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+                    cached_tokens=cached,
                 )
 
         # Store reasoning

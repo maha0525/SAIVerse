@@ -233,31 +233,51 @@ def get_model_pricing(model: str) -> Dict[str, Any] | None:
     return None
 
 
-def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+def calculate_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cached_tokens: int = 0,
+) -> float:
     """Calculate cost in USD for a given token usage.
 
     Args:
-        model: Model ID
-        input_tokens: Number of input tokens
+        model: Model ID (config key)
+        input_tokens: Number of input tokens (including cached tokens)
         output_tokens: Number of output tokens
+        cached_tokens: Number of tokens served from cache (subset of input_tokens)
 
     Returns:
         Cost in USD. Returns 0.0 if pricing not configured (e.g., local models).
+
+    Note:
+        For Gemini context caching, cached_tokens are charged at a discounted rate.
+        The pricing config can specify:
+        - cached_input_per_1m_tokens: Rate for cached tokens (default: input_per_1m_tokens * 0.25)
     """
     pricing = get_model_pricing(model)
-    LOGGER.info("[DEBUG] calculate_cost: model=%s, pricing=%s", model, pricing)
+    LOGGER.debug("[DEBUG] calculate_cost: model=%s, pricing=%s", model, pricing)
     if not pricing:
-        LOGGER.warning("[DEBUG] No pricing found for model: %s", model)
+        LOGGER.debug("[DEBUG] No pricing found for model: %s", model)
         return 0.0
 
     input_rate = pricing.get("input_per_1m_tokens", 0.0)
     output_rate = pricing.get("output_per_1m_tokens", 0.0)
+    # Cached tokens: use explicit cached rate if configured, otherwise same as input rate
+    cached_rate = pricing.get("cached_input_per_1m_tokens", input_rate)
 
-    input_cost = (input_tokens / 1_000_000) * input_rate
+    # Non-cached input tokens (input_tokens includes cached, so subtract)
+    non_cached_input = max(0, input_tokens - cached_tokens)
+
+    non_cached_cost = (non_cached_input / 1_000_000) * input_rate
+    cached_cost = (cached_tokens / 1_000_000) * cached_rate
     output_cost = (output_tokens / 1_000_000) * output_rate
 
-    total = input_cost + output_cost
-    LOGGER.info("[DEBUG] Cost calculated: $%.6f (in=%d, out=%d)", total, input_tokens, output_tokens)
+    total = non_cached_cost + cached_cost + output_cost
+    LOGGER.debug(
+        "[DEBUG] Cost calculated: $%.6f (non_cached_in=%d @ $%.4f, cached=%d @ $%.4f, out=%d @ $%.4f)",
+        total, non_cached_input, input_rate, cached_tokens, cached_rate, output_tokens, output_rate
+    )
     return total
 
 

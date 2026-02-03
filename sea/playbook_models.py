@@ -360,6 +360,11 @@ class ContextRequirements(BaseModel):
     visual_context: bool = Field(default=False, description="Include visual context (Building/Persona images) after system prompt")
     memory_weave: bool = Field(default=False, description="Include Memory Weave context (Chronicle + Memopedia) after system prompt")
     working_memory: bool = Field(default=False, description="Include working memory contents in system prompt")
+    realtime_context: bool = Field(
+        default=True,
+        description="Include realtime context (current time, previous AI response time, spatial info) near end of context. "
+                    "Placing time-sensitive info at the end improves LLM context caching efficiency."
+    )
 
 
 class PlaybookSchema(BaseModel):

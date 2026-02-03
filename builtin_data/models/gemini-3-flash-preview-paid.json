@@ -7,6 +7,7 @@
   "prefer_paid": true,
   "pricing": {
     "input_per_1m_tokens": 0.5,
+    "cached_input_per_1m_tokens": 0.05,
     "output_per_1m_tokens": 3.00,
     "currency": "USD"
   }

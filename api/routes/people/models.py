@@ -76,6 +76,38 @@ class MemoryRecallResponse(BaseModel):
     max_chars: int
 
 
+class MemoryRecallDebugRequest(BaseModel):
+    """Debug-friendly recall request: returns raw search results with scores."""
+    query: str = ""  # Semantic query (can be empty if using keywords only)
+    keywords: List[str] = []  # Keywords for BM25-like matching
+    topk: int = 50  # Allow higher values for debugging
+    use_rrf: bool = False  # Enable Reciprocal Rank Fusion (split query by spaces)
+    use_hybrid: bool = False  # Enable hybrid search (keywords + semantic)
+    rrf_k: int = 60  # RRF constant (higher = more weight to lower ranks)
+    start_date: Optional[str] = None  # Filter: start date (YYYY-MM-DD)
+    end_date: Optional[str] = None  # Filter: end date (YYYY-MM-DD)
+
+
+class MemoryRecallDebugHit(BaseModel):
+    """A single search hit with its metadata."""
+    rank: int
+    score: float
+    message_id: str
+    thread_id: str
+    role: str
+    content: str
+    created_at: float  # Unix timestamp
+    created_at_str: str  # Human-readable datetime
+
+
+class MemoryRecallDebugResponse(BaseModel):
+    """Debug-friendly recall response with raw search results."""
+    query: str
+    topk: int
+    total_hits: int
+    hits: List[MemoryRecallDebugHit]
+
+
 # -----------------------------------------------------------------------------
 # Configuration Models
 # -----------------------------------------------------------------------------

@@ -7,8 +7,9 @@
   "thinking_budget": 4096,
   "supports_images": true,
   "pricing": {
-    "input_per_1m_tokens": 3.00,
-    "output_per_1m_tokens": 15.00,
+    "input_per_1m_tokens": 3,
+    "cached_input_per_1m_tokens": 0.3,
+    "output_per_1m_tokens": 15,
     "currency": "USD"
   }
 }

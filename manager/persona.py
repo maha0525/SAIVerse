@@ -247,9 +247,9 @@ class PersonaMixin:
                 SYSTEMPROMPT=system_prompt,
                 DESCRIPTION=f"A new persona named {name}.",
                 AUTO_COUNT=0,
-                INTERACTION_MODE="auto",
+                INTERACTION_MODE="manual",
                 IS_DISPATCHED=False,
-                DEFAULT_MODEL=self.model,
+                DEFAULT_MODEL=self.model or self._base_model,
                 PRIVATE_ROOM_ID=new_building_id,
             )
             db.add(new_ai_model)
