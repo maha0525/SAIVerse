@@ -43,6 +43,14 @@ interface ParamSpec {
     description?: string;
 }
 
+interface CacheConfig {
+    enabled: boolean;
+    ttl: string;
+    supported: boolean;
+    ttl_options: string[];
+    cache_type: string | null;
+}
+
 interface ChatOptionsProps {
     isOpen: boolean;
     onClose: () => void;
@@ -60,6 +68,13 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
     const [paramSpecs, setParamSpecs] = useState<Record<string, ParamSpec>>({});
     const [loading, setLoading] = useState(false);
     const [playbookParamSpecs, setPlaybookParamSpecs] = useState<PlaybookParam[]>([]);
+    const [cacheConfig, setCacheConfig] = useState<CacheConfig>({
+        enabled: true,
+        ttl: '5m',
+        supported: false,
+        ttl_options: [],
+        cache_type: null
+    });
 
     useEffect(() => {
         if (isOpen) {
@@ -70,10 +85,11 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
     const fetchData = async () => {
         setLoading(true);
         try {
-            const [modelsRes, playbooksRes, configRes] = await Promise.all([
+            const [modelsRes, playbooksRes, configRes, cacheRes] = await Promise.all([
                 fetch('/api/config/models'),
                 fetch('/api/config/playbooks'),
-                fetch('/api/config/config')
+                fetch('/api/config/config'),
+                fetch('/api/config/cache')
             ]);
 
             if (modelsRes.ok) setModels(await modelsRes.json());
@@ -84,6 +100,11 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
                 setCurrentModel(config.current_model || '');
                 setParamSpecs(config.parameters || {});
                 setParams(config.current_values || {});
+            }
+
+            if (cacheRes.ok) {
+                const cache = await cacheRes.json();
+                setCacheConfig(cache);
             }
 
             // If a playbook is already selected, fetch its parameters
@@ -115,6 +136,12 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
                 const data = await res.json();
                 setParamSpecs(data.parameters || {});
                 setParams(data.current_values || {});
+            }
+
+            // Refetch cache config since it depends on selected model
+            const cacheRes = await fetch('/api/config/cache');
+            if (cacheRes.ok) {
+                setCacheConfig(await cacheRes.json());
             }
         } catch (e) {
             console.error("Failed to set model", e);
@@ -176,6 +203,34 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
         }
     };
 
+    const handleCacheEnabledChange = async (enabled: boolean) => {
+        const newConfig = { ...cacheConfig, enabled };
+        setCacheConfig(newConfig);
+        try {
+            await fetch('/api/config/cache', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled })
+            });
+        } catch (e) {
+            console.error("Failed to update cache settings", e);
+        }
+    };
+
+    const handleCacheTtlChange = async (ttl: string) => {
+        const newConfig = { ...cacheConfig, ttl };
+        setCacheConfig(newConfig);
+        try {
+            await fetch('/api/config/cache', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ttl })
+            });
+        } catch (e) {
+            console.error("Failed to update cache TTL", e);
+        }
+    };
+
     const saveParams = async () => {
         try {
             await fetch('/api/config/parameters', {
@@ -233,6 +288,41 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
                                     </select>
                                 </div>
                             </div>
+
+                            {cacheConfig.supported && (
+                                <div className={styles.section}>
+                                    <div className={styles.sectionTitle}>Prompt Cache (Anthropic)</div>
+                                    <div className={styles.formGroup}>
+                                        <label className={styles.checkboxLabel}>
+                                            <input
+                                                type="checkbox"
+                                                checked={cacheConfig.enabled}
+                                                onChange={(e) => handleCacheEnabledChange(e.target.checked)}
+                                            />
+                                            Enable prompt caching
+                                        </label>
+                                        <span className={styles.hint}>
+                                            Caches system prompt and conversation history to reduce costs (read: 0.1x, write: 1.25x)
+                                        </span>
+                                    </div>
+                                    {cacheConfig.enabled && cacheConfig.ttl_options.length > 0 && (
+                                        <div className={styles.formGroup}>
+                                            <label>Cache TTL</label>
+                                            <select
+                                                className={styles.select}
+                                                value={cacheConfig.ttl}
+                                                onChange={(e) => handleCacheTtlChange(e.target.value)}
+                                            >
+                                                {cacheConfig.ttl_options.map(ttl => (
+                                                    <option key={ttl} value={ttl}>
+                                                        {ttl === '5m' ? '5 minutes (1.25x write cost)' : '1 hour (2x write cost)'}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
 
                             {playbookParamSpecs.length > 0 && (
                                 <div className={styles.section}>

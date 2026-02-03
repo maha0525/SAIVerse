@@ -15,6 +15,8 @@ from database.models import (
     Building as BuildingModel,
     BuildingOccupancyLog,
     BuildingToolLink,
+    User,
+    UserAiLink,
 )
 from persona_core import PersonaCore
 from model_configs import get_context_length, get_model_provider
@@ -110,6 +112,18 @@ class PersonaMixin:
 
                 from data_paths import find_file, PROMPTS_DIR
                 common_prompt_file = find_file(PROMPTS_DIR, "common.txt") or Path("system_prompts/common.txt")
+
+                # Get linked user name (first linked user, or "the user" as fallback)
+                linked_user_name = "the user"
+                linked_user = (
+                    db.query(User)
+                    .join(UserAiLink, User.USERID == UserAiLink.USERID)
+                    .filter(UserAiLink.AIID == pid)
+                    .first()
+                )
+                if linked_user:
+                    linked_user_name = linked_user.USERNAME
+
                 persona = PersonaCore(
                     city_name=self.city_name,
                     persona_id=pid,
@@ -142,6 +156,7 @@ class PersonaMixin:
                     persona_event_fetcher=self.get_persona_pending_events,
                     persona_event_ack=self.archive_persona_events,
                     manager_ref=self,
+                    linked_user_name=linked_user_name,
                 )
 
                 persona.private_room_id = private_room_id

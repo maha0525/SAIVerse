@@ -322,6 +322,7 @@ class SEARuntime:
                 "total_input_tokens": 0,
                 "total_output_tokens": 0,
                 "total_cached_tokens": 0,
+                "total_cache_write_tokens": 0,
                 "total_cost_usd": 0.0,
                 "call_count": 0,
                 "models_used": [],
@@ -451,6 +452,7 @@ class SEARuntime:
                         messages,
                         tools=tools_spec,
                         temperature=self._default_temperature(persona),
+                        **self._get_cache_kwargs(),
                     )
 
                     # Record usage
@@ -461,6 +463,7 @@ class SEARuntime:
                             input_tokens=usage.input_tokens,
                             output_tokens=usage.output_tokens,
                             cached_tokens=usage.cached_tokens,
+                            cache_write_tokens=usage.cache_write_tokens,
                             persona_id=getattr(persona, "persona_id", None),
                             building_id=building_id,
                             node_type="llm_tool",
@@ -468,8 +471,8 @@ class SEARuntime:
                         )
                         # Accumulate into pulse total
                         from model_configs import calculate_cost
-                        cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens)
-                        self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens)
+                        cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens)
+                        self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
 
                     # Parse output_keys to determine where to store results
                     output_keys_spec = getattr(node_def, "output_keys", None)
@@ -602,6 +605,7 @@ class SEARuntime:
                             messages,
                             tools=[],
                             temperature=self._default_temperature(persona),
+                            **self._get_cache_kwargs(),
                         ):
                             text_chunks.append(chunk)
                             # Send each chunk to UI
@@ -623,25 +627,27 @@ class SEARuntime:
                                 input_tokens=usage.input_tokens,
                                 output_tokens=usage.output_tokens,
                                 cached_tokens=usage.cached_tokens,
+                                cache_write_tokens=usage.cache_write_tokens,
                                 persona_id=getattr(persona, "persona_id", None),
                                 building_id=building_id,
                                 node_type="llm_stream",
                                 playbook_name=playbook.name,
                             )
-                            LOGGER.info("[DEBUG] Usage recorded: model=%s in=%d out=%d cached=%d", usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens)
+                            LOGGER.info("[DEBUG] Usage recorded: model=%s in=%d out=%d cached=%d cache_write=%d", usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens)
                             # Build llm_usage metadata for message
                             from model_configs import calculate_cost, get_model_display_name
-                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens)
+                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens)
                             llm_usage_metadata = {
                                 "model": usage.model,
                                 "model_display_name": get_model_display_name(usage.model),
                                 "input_tokens": usage.input_tokens,
                                 "output_tokens": usage.output_tokens,
                                 "cached_tokens": usage.cached_tokens,
+                                "cache_write_tokens": usage.cache_write_tokens,
                                 "cost_usd": cost,
                             }
                             # Accumulate into pulse total
-                            self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens)
+                            self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
                         else:
                             LOGGER.warning("[DEBUG] No usage data from LLM client")
 
@@ -667,6 +673,7 @@ class SEARuntime:
                             tools=[],
                             temperature=self._default_temperature(persona),
                             response_schema=response_schema,
+                            **self._get_cache_kwargs(),
                         )
 
                         # Record usage
@@ -678,6 +685,7 @@ class SEARuntime:
                                 input_tokens=usage.input_tokens,
                                 output_tokens=usage.output_tokens,
                                 cached_tokens=usage.cached_tokens,
+                                cache_write_tokens=usage.cache_write_tokens,
                                 persona_id=getattr(persona, "persona_id", None),
                                 building_id=building_id,
                                 node_type="llm",
@@ -685,17 +693,18 @@ class SEARuntime:
                             )
                             # Build llm_usage metadata for message
                             from model_configs import calculate_cost, get_model_display_name
-                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens)
+                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens)
                             llm_usage_metadata = {
                                 "model": usage.model,
                                 "model_display_name": get_model_display_name(usage.model),
                                 "input_tokens": usage.input_tokens,
                                 "output_tokens": usage.output_tokens,
                                 "cached_tokens": usage.cached_tokens,
+                                "cache_write_tokens": usage.cache_write_tokens,
                                 "cost_usd": cost,
                             }
                             # Accumulate into pulse total
-                            self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens)
+                            self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
 
                         # If speak=true but streaming disabled, send complete text and record to Building history
                         LOGGER.info("[DEBUG] speak_flag=%s, event_callback=%s, text_len=%d",
@@ -830,6 +839,7 @@ class SEARuntime:
         output_tokens: int,
         cost_usd: float,
         cached_tokens: int = 0,
+        cache_write_tokens: int = 0,
     ) -> None:
         """Accumulate LLM usage into the pulse-level accumulator.
 
@@ -840,6 +850,7 @@ class SEARuntime:
             output_tokens: Number of output tokens
             cost_usd: Cost in USD
             cached_tokens: Number of tokens served from cache
+            cache_write_tokens: Number of tokens written to cache
         """
         accumulator = state.get("pulse_usage_accumulator")
         if accumulator is None:
@@ -847,10 +858,25 @@ class SEARuntime:
         accumulator["total_input_tokens"] += input_tokens
         accumulator["total_output_tokens"] += output_tokens
         accumulator["total_cached_tokens"] += cached_tokens
+        accumulator["total_cache_write_tokens"] += cache_write_tokens
         accumulator["total_cost_usd"] += cost_usd
         accumulator["call_count"] += 1
         if model and model not in accumulator["models_used"]:
             accumulator["models_used"].append(model)
+
+    def _get_cache_kwargs(self) -> Dict[str, Any]:
+        """Get cache settings from manager state for LLM client calls.
+
+        Returns:
+            Dict with enable_cache and cache_ttl kwargs for Anthropic client.
+            Non-Anthropic clients will ignore these kwargs.
+        """
+        if self.manager and hasattr(self.manager, "state"):
+            return {
+                "enable_cache": getattr(self.manager.state, "cache_enabled", True),
+                "cache_ttl": getattr(self.manager.state, "cache_ttl", "5m"),
+            }
+        return {"enable_cache": True, "cache_ttl": "5m"}
 
     def _select_llm_client(self, node_def: Any, persona: Any, needs_structured_output: bool = False) -> Any:
         """Select the appropriate LLM client based on node's model_type and structured output needs.
@@ -2248,6 +2274,7 @@ class SEARuntime:
                         "{current_city_name}": city_name,
                         "{current_persona_system_instruction}": getattr(persona, "persona_system_instruction", ""),
                         "{current_building_system_instruction}": getattr(building_obj, "system_instruction", "") if building_obj else "",
+                        "{linked_user_name}": getattr(persona, "linked_user_name", "the user"),
                     }
                     for placeholder, value in replacements.items():
                         common_text = common_text.replace(placeholder, value)

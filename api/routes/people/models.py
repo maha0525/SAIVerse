@@ -122,6 +122,7 @@ class AIConfigResponse(BaseModel):
     avatar_path: Optional[str] = None
     appearance_image_path: Optional[str] = None  # Visual context appearance image
     home_city_id: int
+    linked_user_id: Optional[int] = None  # First linked user ID
 
 class UpdateAIConfigRequest(BaseModel):
     description: Optional[str] = None
@@ -131,6 +132,7 @@ class UpdateAIConfigRequest(BaseModel):
     interaction_mode: Optional[str] = None
     avatar_path: Optional[str] = None
     appearance_image_path: Optional[str] = None  # Visual context appearance image
+    linked_user_id: Optional[int] = None  # Set linked user (None = no change, 0 = clear)
 
 
 # -----------------------------------------------------------------------------

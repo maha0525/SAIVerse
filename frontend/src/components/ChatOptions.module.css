@@ -115,6 +115,25 @@
     font-weight: 400;
 }
 
+.checkboxLabel {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+}
+
+.checkboxLabel input[type="checkbox"] {
+    width: 1rem;
+    height: 1rem;
+    cursor: pointer;
+}
+
+.hint {
+    font-size: 0.75rem;
+    color: #888;
+    line-height: 1.4;
+}
+
 .footer {
     padding: 1rem 1.5rem;
     border-top: 1px solid rgba(0, 0, 0, 0.1);

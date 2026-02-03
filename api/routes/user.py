@@ -12,6 +12,7 @@ class UserStatusResponse(BaseModel):
     current_building_id: Optional[str]
     avatar: Optional[str]
     display_name: str
+    email: Optional[str] = None
 
 class MoveRequest(BaseModel):
     target_building_id: str
@@ -141,3 +142,25 @@ def visibility(req: VisibilityRequest, manager = Depends(get_manager)):
     # Sync manager-level cache so SEA runtime sees the updated status
     manager._refresh_user_state_cache()
     return {"status": "ok", "presence_status": manager.state.user_presence_status}
+
+
+# --- User List Endpoint (for linked user selection) ---
+
+class UserListItem(BaseModel):
+    id: int
+    name: str
+
+@router.get("/list", response_model=List[UserListItem])
+def list_users(manager = Depends(get_manager)):
+    """Get list of all users for linked user selection."""
+    from database.models import User
+
+    session = manager.SessionLocal()
+    try:
+        users = session.query(User).all()
+        return [
+            UserListItem(id=u.USERID, name=u.USERNAME)
+            for u in users
+        ]
+    finally:
+        session.close()

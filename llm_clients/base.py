@@ -15,7 +15,8 @@ class UsageInfo:
     input_tokens: int
     output_tokens: int
     timestamp: float  # time.time() when recorded
-    cached_tokens: int = 0  # Tokens served from cache (e.g., Gemini context caching)
+    cached_tokens: int = 0  # Tokens served FROM cache (cache read)
+    cache_write_tokens: int = 0  # Tokens written TO cache (Anthropic: 1.25x cost)
 
 # LLM logging is now handled by logging_config module
 # Import convenience functions for backward compatibility
@@ -124,28 +125,31 @@ class LLMClient:
         output_tokens: int,
         model: str | None = None,
         cached_tokens: int = 0,
+        cache_write_tokens: int = 0,
     ) -> None:
         """Store token usage information for later retrieval.
 
         Args:
-            input_tokens: Number of input/prompt tokens
+            input_tokens: Number of input/prompt tokens (total)
             output_tokens: Number of output/completion tokens
             model: Model ID (uses self.config_key or self.model if not provided)
-            cached_tokens: Number of tokens served from cache (Gemini context caching)
+            cached_tokens: Number of tokens served FROM cache (cache read)
+            cache_write_tokens: Number of tokens written TO cache (Anthropic: 1.25x cost)
         """
         # Prefer config_key for pricing lookup, fall back to model
         import logging
         logging.debug("[DEBUG] _store_usage: model param=%s, self.config_key=%s, self.model=%s",
                     model, self.config_key, self.model)
         model_for_pricing = model or self.config_key or self.model
-        logging.debug("[DEBUG] _store_usage: model_for_pricing=%s, cached_tokens=%s",
-                    model_for_pricing, cached_tokens)
+        logging.debug("[DEBUG] _store_usage: model_for_pricing=%s, cached_tokens=%s, cache_write_tokens=%s",
+                    model_for_pricing, cached_tokens, cache_write_tokens)
         self._latest_usage = UsageInfo(
             model=model_for_pricing,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             timestamp=time.time(),
             cached_tokens=cached_tokens,
+            cache_write_tokens=cache_write_tokens,
         )
 
     def consume_usage(self) -> Optional[UsageInfo]:

@@ -242,6 +242,13 @@ class NvidiaNIMClient(OpenAIClient):
                 raise RuntimeError("NVIDIA NIM API call failed")
 
             self._store_reasoning([])
+            # Check for empty response (structured output should have content)
+            if not text_body.strip():
+                logging.error(
+                    "[nvidia_nim] Empty structured output response. "
+                    "Model returned empty content."
+                )
+                raise RuntimeError("Nvidia NIM returned empty structured output response")
             if snippets:
                 prefix = "\n".join(snippets)
                 return prefix + ("\n" if text_body and prefix else "") + text_body

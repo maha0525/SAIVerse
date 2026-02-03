@@ -107,11 +107,93 @@
 /* Footer Settings */
 .settingsFooter {
     margin-top: auto;
-    padding: 1rem 1rem 1.2rem 1rem;
+    padding: 0.75rem 1rem;
     border-top: 1px solid rgba(0, 0, 0, 0.05);
-    padding-bottom: max(1.2rem, env(safe-area-inset-bottom));
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
 }
 
+.footerRow {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.settingsBtnIcon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    background: transparent;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    cursor: pointer;
+    color: #64748b;
+    flex-shrink: 0;
+    transition: all 0.2s;
+}
+
+.settingsBtnIcon:hover {
+    background: rgba(0, 0, 0, 0.03);
+    color: #475569;
+}
+
+.profileCompact {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1;
+    min-width: 0;
+    padding: 0.4rem 0.6rem;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.profileCompact:hover {
+    background: rgba(0, 0, 0, 0.03);
+}
+
+.avatarSmall {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    background: #e2e8f0;
+    object-fit: cover;
+    flex-shrink: 0;
+}
+
+.userNameSmall {
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: #475569;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
+}
+
+.statusDot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.statusDot.online {
+    background: #10b981;
+}
+
+.statusDot.away {
+    background: #f59e0b;
+}
+
+.statusDot.offline {
+    background: #94a3b8;
+}
+
+/* Legacy settingsBtn kept for backward compatibility */
 .settingsBtn {
     width: 100%;
     display: flex;
@@ -216,6 +298,28 @@
     .settingsBtn {
         border-color: rgba(255, 255, 255, 0.1);
         color: #94a3b8;
+    }
+
+    .settingsBtnIcon {
+        border-color: rgba(255, 255, 255, 0.1);
+        color: #94a3b8;
+    }
+
+    .settingsBtnIcon:hover {
+        background: rgba(255, 255, 255, 0.05);
+        color: #f3f4f6;
+    }
+
+    .profileCompact:hover {
+        background: rgba(255, 255, 255, 0.05);
+    }
+
+    .avatarSmall {
+        background: #333;
+    }
+
+    .userNameSmall {
+        color: #9ca3af;
     }
 
     .createPersonaBtn {

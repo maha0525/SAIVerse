@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List, Optional
 from api.deps import get_manager
+from database.models import UserAiLink
 from .models import AIConfigResponse, UpdateAIConfigRequest
 
 router = APIRouter()
@@ -11,7 +12,15 @@ def get_persona_config(persona_id: str, manager = Depends(get_manager)):
     details = manager.get_ai_details(persona_id)
     if not details:
         raise HTTPException(status_code=404, detail="Persona not found")
-    
+
+    # Get linked user ID (first linked user)
+    session = manager.SessionLocal()
+    try:
+        link = session.query(UserAiLink).filter(UserAiLink.AIID == persona_id).first()
+        linked_user_id = link.USERID if link else None
+    finally:
+        session.close()
+
     return AIConfigResponse(
         name=details["AINAME"],
         description=details["DESCRIPTION"] or "",
@@ -21,7 +30,8 @@ def get_persona_config(persona_id: str, manager = Depends(get_manager)):
         interaction_mode=details["INTERACTION_MODE"],
         avatar_path=details.get("AVATAR_IMAGE"),
         appearance_image_path=details.get("APPEARANCE_IMAGE_PATH"),
-        home_city_id=details["HOME_CITYID"]
+        home_city_id=details["HOME_CITYID"],
+        linked_user_id=linked_user_id,
     )
 
 @router.patch("/{persona_id}/config")
@@ -60,12 +70,41 @@ def update_persona_config(
         default_model=new_model,
         lightweight_model=new_lightweight_model,
         interaction_mode=new_mode,
-        avatar_path=new_avatar, 
+        avatar_path=new_avatar,
         avatar_upload=None,
         appearance_image_path=new_appearance,
     )
-    
+
     if result.startswith("Error:"):
         raise HTTPException(status_code=400, detail=result)
-        
+
+    # Handle linked user update
+    if req.linked_user_id is not None:
+        session = manager.SessionLocal()
+        try:
+            # Remove existing links for this persona
+            session.query(UserAiLink).filter(UserAiLink.AIID == persona_id).delete()
+
+            # Add new link if not clearing (0 = clear)
+            if req.linked_user_id > 0:
+                new_link = UserAiLink(USERID=req.linked_user_id, AIID=persona_id)
+                session.add(new_link)
+
+            session.commit()
+
+            # Update PersonaCore's linked_user_name if persona is loaded
+            persona = manager.personas.get(persona_id)
+            if persona:
+                if req.linked_user_id > 0:
+                    from database.models import User
+                    user = session.query(User).filter(User.USERID == req.linked_user_id).first()
+                    persona.linked_user_name = user.USERNAME if user else "the user"
+                else:
+                    persona.linked_user_name = "the user"
+        except Exception as e:
+            session.rollback()
+            raise HTTPException(status_code=500, detail=f"Failed to update linked user: {e}")
+        finally:
+            session.close()
+
     return {"success": True, "message": result}

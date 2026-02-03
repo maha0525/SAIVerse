@@ -238,22 +238,29 @@ def calculate_cost(
     input_tokens: int,
     output_tokens: int,
     cached_tokens: int = 0,
+    cache_write_tokens: int = 0,
 ) -> float:
     """Calculate cost in USD for a given token usage.
 
     Args:
         model: Model ID (config key)
-        input_tokens: Number of input tokens (including cached tokens)
+        input_tokens: Number of input tokens (total including cached and cache_write)
         output_tokens: Number of output tokens
-        cached_tokens: Number of tokens served from cache (subset of input_tokens)
+        cached_tokens: Number of tokens served FROM cache (cache read, discounted rate)
+        cache_write_tokens: Number of tokens written TO cache (Anthropic: 1.25x rate)
 
     Returns:
         Cost in USD. Returns 0.0 if pricing not configured (e.g., local models).
 
     Note:
-        For Gemini context caching, cached_tokens are charged at a discounted rate.
-        The pricing config can specify:
-        - cached_input_per_1m_tokens: Rate for cached tokens (default: input_per_1m_tokens * 0.25)
+        Token breakdown for Anthropic:
+        - cached_tokens: Read from cache (0.1x rate)
+        - cache_write_tokens: Written to cache (1.25x rate for 5m TTL)
+        - remaining: Regular input tokens (1x rate)
+
+        For Gemini/OpenAI (implicit caching):
+        - cached_tokens: Read from cache (discounted rate)
+        - cache_write_tokens: 0 (no explicit write cost)
     """
     pricing = get_model_pricing(model)
     LOGGER.debug("[DEBUG] calculate_cost: model=%s, pricing=%s", model, pricing)
@@ -263,20 +270,23 @@ def calculate_cost(
 
     input_rate = pricing.get("input_per_1m_tokens", 0.0)
     output_rate = pricing.get("output_per_1m_tokens", 0.0)
-    # Cached tokens: use explicit cached rate if configured, otherwise same as input rate
+    # Cached tokens (read): use explicit cached rate if configured, otherwise same as input rate
     cached_rate = pricing.get("cached_input_per_1m_tokens", input_rate)
+    # Cache write tokens: use explicit write rate if configured, otherwise same as input rate
+    cache_write_rate = pricing.get("cache_write_per_1m_tokens", input_rate)
 
-    # Non-cached input tokens (input_tokens includes cached, so subtract)
-    non_cached_input = max(0, input_tokens - cached_tokens)
+    # Non-cached input tokens (input_tokens includes cached + cache_write, so subtract both)
+    non_cached_input = max(0, input_tokens - cached_tokens - cache_write_tokens)
 
     non_cached_cost = (non_cached_input / 1_000_000) * input_rate
     cached_cost = (cached_tokens / 1_000_000) * cached_rate
+    cache_write_cost = (cache_write_tokens / 1_000_000) * cache_write_rate
     output_cost = (output_tokens / 1_000_000) * output_rate
 
-    total = non_cached_cost + cached_cost + output_cost
+    total = non_cached_cost + cached_cost + cache_write_cost + output_cost
     LOGGER.debug(
-        "[DEBUG] Cost calculated: $%.6f (non_cached_in=%d @ $%.4f, cached=%d @ $%.4f, out=%d @ $%.4f)",
-        total, non_cached_input, input_rate, cached_tokens, cached_rate, output_tokens, output_rate
+        "[DEBUG] Cost calculated: $%.6f (non_cached_in=%d @ $%.4f, cached=%d @ $%.4f, cache_write=%d @ $%.4f, out=%d @ $%.4f)",
+        total, non_cached_input, input_rate, cached_tokens, cached_rate, cache_write_tokens, cache_write_rate, output_tokens, output_rate
     )
     return total
 
@@ -288,3 +298,57 @@ def is_local_model(model: str) -> bool:
     """
     provider = get_model_provider(model)
     return provider in ("ollama", "llama_cpp")
+
+
+def get_cache_config(model: str) -> Dict[str, Any]:
+    """Get cache configuration for a model.
+
+    Returns:
+        Dict with keys:
+            - supported: bool (whether model supports caching)
+            - default_enabled: bool (default cache state)
+            - default_ttl: str (e.g., "5m", "1h")
+            - ttl_options: list[str] (available TTL options)
+            - type: str ("explicit" or "implicit")
+            - min_tokens: int (minimum tokens for caching)
+    """
+    config = get_model_config(model)
+    cache = config.get("cache", {})
+
+    # Determine if caching is supported based on provider
+    provider = get_model_provider(model)
+    default_supported = provider in ("anthropic", "gemini", "openai")
+
+    return {
+        "supported": cache.get("supported", default_supported),
+        "default_enabled": cache.get("default_enabled", True),
+        "default_ttl": cache.get("default_ttl", "5m"),
+        "ttl_options": cache.get("ttl_options", ["5m"]),
+        "type": cache.get("type", "explicit" if provider == "anthropic" else "implicit"),
+        "min_tokens": cache.get("min_tokens", 1024),
+    }
+
+
+def supports_cache(model: str) -> bool:
+    """Check if a model supports prompt caching."""
+    return get_cache_config(model).get("supported", False)
+
+
+def get_cache_ttl_options(model: str) -> list:
+    """Get available cache TTL options for a model."""
+    return get_cache_config(model).get("ttl_options", ["5m"])
+
+
+def get_cache_write_rate(model: str) -> float:
+    """Get cache write cost rate per 1M tokens.
+
+    For Anthropic:
+        - 5m TTL: 1.25x input rate
+        - 1h TTL: 2x input rate (not yet supported)
+
+    Returns 0.0 if not configured (implicit caching has no write cost).
+    """
+    pricing = get_model_pricing(model)
+    if not pricing:
+        return 0.0
+    return pricing.get("cache_write_per_1m_tokens", 0.0)

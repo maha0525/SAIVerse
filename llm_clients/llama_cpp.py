@@ -4,11 +4,28 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, Iterator, List, Optional
 
 from .base import LLMClient
 
 logger = logging.getLogger(__name__)
+
+# Retry configuration (fewer retries for local models)
+MAX_RETRIES = 2
+INITIAL_BACKOFF = 0.5  # seconds
+
+
+def _should_retry(err: Exception) -> bool:
+    """Check if the error should trigger a retry (for local models, only transient errors)."""
+    msg = str(err).lower()
+    # Retry on OOM, resource exhaustion, or temporary failures
+    return (
+        "memory" in msg
+        or "resource" in msg
+        or "busy" in msg
+        or "temporarily" in msg
+    )
 
 
 class LlamaCppClient(LLMClient):
@@ -125,15 +142,79 @@ class LlamaCppClient(LLMClient):
         use_tools = bool(tools_spec)
         temp = temperature if temperature is not None else self._temperature
 
-        try:
-            if use_tools:
-                # Tool mode: return Dict with tool detection
+        last_error: Optional[Exception] = None
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                if use_tools:
+                    # Tool mode: return Dict with tool detection
+                    response = self._llm.create_chat_completion(
+                        messages=messages,
+                        temperature=temp,
+                        top_p=self._top_p,
+                        max_tokens=self._max_tokens,
+                        tools=tools_spec,
+                    )
+
+                    # Store usage if available
+                    usage = response.get("usage")
+                    if usage:
+                        self._store_usage(
+                            input_tokens=usage.get("prompt_tokens", 0) or 0,
+                            output_tokens=usage.get("completion_tokens", 0) or 0,
+                        )
+
+                    choice = response["choices"][0]
+                    message = choice["message"]
+                    content = message.get("content", "") or ""
+                    tool_calls = message.get("tool_calls", [])
+
+                    if tool_calls:
+                        tc = tool_calls[0]
+                        func = tc.get("function", {})
+                        tool_name = func.get("name", "")
+                        try:
+                            tool_args = json.loads(func.get("arguments", "{}"))
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                "Tool call arguments invalid JSON: %s", func.get("arguments")
+                            )
+                            tool_args = {}
+
+                        if content.strip():
+                            return {
+                                "type": "both",
+                                "content": content,
+                                "tool_name": tool_name,
+                                "tool_args": tool_args,
+                            }
+                        else:
+                            return {
+                                "type": "tool_call",
+                                "tool_name": tool_name,
+                                "tool_args": tool_args,
+                            }
+                    else:
+                        # Check for empty text response without tool call
+                        if not content.strip():
+                            logger.error(
+                                "[llama.cpp] Empty text response without tool call. "
+                                "Model returned empty content."
+                            )
+                            raise RuntimeError("llama.cpp returned empty response without tool call")
+                        return {"type": "text", "content": content}
+
+                # Non-tool mode: return str
                 response = self._llm.create_chat_completion(
                     messages=messages,
                     temperature=temp,
                     top_p=self._top_p,
                     max_tokens=self._max_tokens,
-                    tools=tools_spec,
+                    response_format=(
+                        {"type": "json_object", "schema": response_schema}
+                        if response_schema
+                        else None
+                    ),
                 )
 
                 # Store usage if available
@@ -144,67 +225,31 @@ class LlamaCppClient(LLMClient):
                         output_tokens=usage.get("completion_tokens", 0) or 0,
                     )
 
-                choice = response["choices"][0]
-                message = choice["message"]
-                content = message.get("content", "") or ""
-                tool_calls = message.get("tool_calls", [])
+                content = response["choices"][0]["message"]["content"] or ""
+                # Check for empty response
+                if not content.strip():
+                    logger.error(
+                        "[llama.cpp] Empty text response. "
+                        "Model returned empty content."
+                    )
+                    raise RuntimeError("llama.cpp returned empty response")
+                logger.debug("llama.cpp response: %s", content[:200])
+                return content
 
-                if tool_calls:
-                    tc = tool_calls[0]
-                    func = tc.get("function", {})
-                    tool_name = func.get("name", "")
-                    try:
-                        tool_args = json.loads(func.get("arguments", "{}"))
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            "Tool call arguments invalid JSON: %s", func.get("arguments")
-                        )
-                        tool_args = {}
+            except Exception as exc:
+                last_error = exc
+                if _should_retry(exc) and attempt < MAX_RETRIES - 1:
+                    backoff = INITIAL_BACKOFF * (2 ** attempt)
+                    logger.warning(
+                        "[llama.cpp] Retryable error (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, MAX_RETRIES, type(exc).__name__, backoff
+                    )
+                    time.sleep(backoff)
+                    continue
+                logger.error("llama.cpp generation failed: %s", exc, exc_info=True)
+                raise RuntimeError(f"llama.cpp API call failed: {exc}")
 
-                    if content.strip():
-                        return {
-                            "type": "both",
-                            "content": content,
-                            "tool_name": tool_name,
-                            "tool_args": tool_args,
-                        }
-                    else:
-                        return {
-                            "type": "tool_call",
-                            "tool_name": tool_name,
-                            "tool_args": tool_args,
-                        }
-                else:
-                    return {"type": "text", "content": content}
-
-            # Non-tool mode: return str
-            response = self._llm.create_chat_completion(
-                messages=messages,
-                temperature=temp,
-                top_p=self._top_p,
-                max_tokens=self._max_tokens,
-                response_format=(
-                    {"type": "json_object", "schema": response_schema}
-                    if response_schema
-                    else None
-                ),
-            )
-
-            # Store usage if available
-            usage = response.get("usage")
-            if usage:
-                self._store_usage(
-                    input_tokens=usage.get("prompt_tokens", 0) or 0,
-                    output_tokens=usage.get("completion_tokens", 0) or 0,
-                )
-
-            content = response["choices"][0]["message"]["content"]
-            logger.debug("llama.cpp response: %s", content[:200])
-            return content
-
-        except Exception as exc:
-            logger.error("llama.cpp generation failed: %s", exc, exc_info=True)
-            raise RuntimeError(f"llama.cpp API call failed: {exc}")
+        raise RuntimeError(f"llama.cpp API call failed after {MAX_RETRIES} retries: {last_error}")
 
     def generate_stream(
         self,
@@ -216,47 +261,73 @@ class LlamaCppClient(LLMClient):
         **_: Any,
     ) -> Iterator[str]:
         """Generate streaming response using llama.cpp."""
-        self._ensure_model_loaded() 
+        self._ensure_model_loaded()
 
         # For structured output, use non-streaming to get complete JSON
         if response_schema:
+            last_schema_error: Optional[Exception] = None
+            for attempt in range(MAX_RETRIES):
+                try:
+                    temp = temperature if temperature is not None else self._temperature
+                    response = self._llm.create_chat_completion(
+                        messages=messages,
+                        temperature=temp,
+                        top_p=self._top_p,
+                        max_tokens=self._max_tokens,
+                        stream=False,
+                        response_format={"type": "json_object", "schema": response_schema},
+                    )
+                    _ = response["choices"][0]["message"]["content"]  # Structured output captured but not yielded
+                    yield ""
+                    return
+                except Exception as exc:
+                    last_schema_error = exc
+                    if _should_retry(exc) and attempt < MAX_RETRIES - 1:
+                        backoff = INITIAL_BACKOFF * (2 ** attempt)
+                        logger.warning(
+                            "[llama.cpp] Retryable structured output error (attempt %d/%d): %s. Retrying in %.1fs...",
+                            attempt + 1, MAX_RETRIES, type(exc).__name__, backoff
+                        )
+                        time.sleep(backoff)
+                        continue
+                    logger.error("llama.cpp structured output failed: %s", exc, exc_info=True)
+                    raise RuntimeError(f"llama.cpp structured output failed: {exc}")
+            raise RuntimeError(f"llama.cpp structured output failed after {MAX_RETRIES} retries: {last_schema_error}")
+
+        # Normal streaming mode (no response_schema)
+        last_stream_error: Optional[Exception] = None
+        for attempt in range(MAX_RETRIES):
             try:
                 temp = temperature if temperature is not None else self._temperature
-                response = self._llm.create_chat_completion(
+
+                stream = self._llm.create_chat_completion(
                     messages=messages,
                     temperature=temp,
                     top_p=self._top_p,
                     max_tokens=self._max_tokens,
-                    stream=False,
-                    response_format={"type": "json_object", "schema": response_schema},
+                    stream=True,
                 )
-                _ = response["choices"][0]["message"]["content"]  # Structured output captured but not yielded
-                yield ""
-                return
+
+                for chunk in stream:
+                    delta = chunk["choices"][0]["delta"]
+                    if "content" in delta:
+                        yield delta["content"]
+                return  # Stream completed successfully
+
             except Exception as exc:
-                logger.error("llama.cpp structured output failed: %s", exc, exc_info=True)
-                raise RuntimeError(f"llama.cpp structured output failed: {exc}")
+                last_stream_error = exc
+                if _should_retry(exc) and attempt < MAX_RETRIES - 1:
+                    backoff = INITIAL_BACKOFF * (2 ** attempt)
+                    logger.warning(
+                        "[llama.cpp] Retryable streaming error (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, MAX_RETRIES, type(exc).__name__, backoff
+                    )
+                    time.sleep(backoff)
+                    continue
+                logger.error("llama.cpp streaming failed: %s", exc, exc_info=True)
+                raise RuntimeError(f"llama.cpp streaming failed: {exc}")
 
-        # Normal streaming mode (no response_schema)
-        try:
-            temp = temperature if temperature is not None else self._temperature 
-
-            stream = self._llm.create_chat_completion(
-                messages=messages,
-                temperature=temp,
-                top_p=self._top_p,
-                max_tokens=self._max_tokens,
-                stream=True,
-            )
-
-            for chunk in stream:
-                delta = chunk["choices"][0]["delta"]
-                if "content" in delta:
-                    yield delta["content"]
-
-        except Exception as exc:
-            logger.error("llama.cpp streaming failed: %s", exc, exc_info=True)
-            raise RuntimeError(f"llama.cpp streaming failed: {exc}")
+        raise RuntimeError(f"llama.cpp streaming failed after {MAX_RETRIES} retries: {last_stream_error}")
 
     def generate_with_tool_detection(
         self,
