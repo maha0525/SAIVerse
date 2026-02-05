@@ -111,7 +111,7 @@ export default function PeopleModal({ isOpen, onClose }: PeopleModalProps) {
         >
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
-                    <h2><UserPlus className={styles.icon} size={24} /> Manage Personas</h2>
+                    <h2><UserPlus className={styles.icon} size={24} /> ペルソナ管理</h2>
                     <button className={styles.closeBtn} onClick={onClose}><X size={24} /></button>
                 </div>
 
@@ -122,14 +122,14 @@ export default function PeopleModal({ isOpen, onClose }: PeopleModalProps) {
                         onClick={() => setActiveTab('call')}
                     >
                         <UserPlus size={16} />
-                        Call ({personas.length})
+                        呼び出し ({personas.length})
                     </button>
                     <button
                         className={`${styles.tab} ${activeTab === 'here' ? styles.active : ''}`}
                         onClick={() => setActiveTab('here')}
                     >
                         <Home size={16} />
-                        Here ({occupants.length})
+                        帰ってもらう ({occupants.length})
                     </button>
                 </div>
 
@@ -137,7 +137,7 @@ export default function PeopleModal({ isOpen, onClose }: PeopleModalProps) {
                     {loading ? (
                         <div className={styles.loading}>
                             <RefreshCw className={styles.spinner} size={24} />
-                            <span>Loading...</span>
+                            <span>読み込み中...</span>
                         </div>
                     ) : activeTab === 'call' ? (
                         // Call tab - summonable personas
@@ -160,10 +160,10 @@ export default function PeopleModal({ isOpen, onClose }: PeopleModalProps) {
                                         </div>
                                         <div className={styles.info}>
                                             <div className={styles.name}>{p.name}</div>
-                                            <div className={styles.status}>Available</div>
+                                            <div className={styles.status}>呼び出し可能</div>
                                         </div>
                                         <button className={styles.summonBtn} disabled={!!summoningId}>
-                                            Summon
+                                            呼ぶ
                                         </button>
                                     </div>
                                 ))}
@@ -174,7 +174,7 @@ export default function PeopleModal({ isOpen, onClose }: PeopleModalProps) {
                         occupants.length === 0 ? (
                             <div className={styles.empty}>
                                 <p>ここには誰もいません。</p>
-                                <span className={styles.subtext}>Callタブからペルソナを呼び出しましょう。</span>
+                                <span className={styles.subtext}>「呼び出し」タブからペルソナを呼び出しましょう。</span>
                             </div>
                         ) : (
                             <div className={styles.grid}>
@@ -194,13 +194,13 @@ export default function PeopleModal({ isOpen, onClose }: PeopleModalProps) {
                                         </div>
                                         <div className={styles.info}>
                                             <div className={styles.name}>{p.name}</div>
-                                            <div className={styles.status}>Here</div>
+                                            <div className={styles.status}>滞在中</div>
                                         </div>
                                         <button
                                             className={styles.dismissBtn}
                                             onClick={() => handleDismiss(p.id, p.name)}
                                             disabled={!!dismissingId}
-                                            title="Return to Room"
+                                            title="自室に戻す"
                                         >
                                             <Home size={16} />
                                         </button>

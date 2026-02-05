@@ -390,24 +390,24 @@ class RuntimeService(
 
     def handle_user_input_stream(
         self, message: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None,
-        playbook_params: Optional[Dict[str, Any]] = None
+        playbook_params: Optional[Dict[str, Any]] = None, building_id: Optional[str] = None,
     ) -> Iterator[str]:
         logging.debug(
-            "[runtime] handle_user_input_stream called (metadata_present=%s, meta_playbook=%s, playbook_params=%s)",
+            "[runtime] handle_user_input_stream called (metadata_present=%s, meta_playbook=%s, playbook_params=%s, building_id=%s)",
             bool(metadata),
             meta_playbook,
             bool(playbook_params),
+            building_id,
         )
         if not message or not str(message).strip():
             logging.error("[runtime] handle_user_input_stream got empty message; aborting to avoid corrupt routing")
             yield '<div class="note-box">入力が空でした。再送してください。</div>'
             return
 
-        if not self.state.user_current_building_id:
+        building_id = building_id or self.state.user_current_building_id
+        if not building_id:
             yield '<div class="note-box">エラー: ユーザーの現在地が不明です。</div>'
             return
-
-        building_id = self.state.user_current_building_id
         logging.debug("[runtime] handle_user_input_stream building_id=%s", building_id)
         responding_personas = [
             self.personas[pid]

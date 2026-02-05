@@ -155,25 +155,11 @@ class PersonaCore(
         self.provider = provider
         self.context_length = context_length
         self.model_supports_images = model_supports_images(model)
-        self.llm_client = get_llm_client(model, provider, self.context_length)
-
-        # Initialize lightweight LLM client if lightweight_model is provided
-        if lightweight_model and str(lightweight_model).strip():
-            try:
-                from model_configs import get_context_length, get_model_provider
-                lw_context_length = get_context_length(lightweight_model)
-                lw_provider = get_model_provider(lightweight_model)  # Get correct provider for lightweight model
-                self.lightweight_llm_client = get_llm_client(lightweight_model, lw_provider, lw_context_length)
-            except Exception as exc:
-                logging.warning(
-                    "Failed to initialize lightweight LLM client for persona '%s' with model '%s': %s",
-                    persona_id,
-                    lightweight_model,
-                    exc,
-                )
-                self.lightweight_llm_client = None
-        else:
-            self.lightweight_llm_client = None
+        # LLM clients are created lazily on first access (see properties below)
+        self._llm_client = None
+        self._lightweight_llm_client = None
+        self._lightweight_llm_client_initialized = False
+        self._pending_parameter_overrides: Optional[Dict[str, Any]] = None
 
         self.emotion_module = EmotionControlModule()
         tz_label = (timezone_name or "UTC").strip() or "UTC"
@@ -243,6 +229,55 @@ class PersonaCore(
     def get_execution_state(self) -> Dict[str, Any]:
         """Get the current playbook execution state for UI display."""
         return dict(self.execution_state)
+
+    # -- Lazy LLM client properties ------------------------------------------
+    # Clients are created on first access rather than at startup, which avoids
+    # heavy initialisation (API probes, SDK setup) for every persona at boot.
+
+    @property
+    def llm_client(self):
+        if self._llm_client is None:
+            logging.info("Lazy-creating LLM client for persona '%s' (model=%s)", self.persona_id, self.model)
+            self._llm_client = get_llm_client(self.model, self.provider, self.context_length)
+            # Apply any stored parameter overrides from set_model() or apply_parameter_overrides()
+            overrides = getattr(self, "_pending_parameter_overrides", None)
+            if overrides:
+                self.apply_parameter_overrides(overrides)
+        return self._llm_client
+
+    @llm_client.setter
+    def llm_client(self, value):
+        self._llm_client = value
+
+    @property
+    def lightweight_llm_client(self):
+        if not self._lightweight_llm_client_initialized:
+            self._lightweight_llm_client_initialized = True
+            if self.lightweight_model and str(self.lightweight_model).strip():
+                try:
+                    from model_configs import get_context_length, get_model_provider
+                    lw_context_length = get_context_length(self.lightweight_model)
+                    lw_provider = get_model_provider(self.lightweight_model)
+                    logging.info(
+                        "Lazy-creating lightweight LLM client for persona '%s' (model=%s)",
+                        self.persona_id, self.lightweight_model,
+                    )
+                    self._lightweight_llm_client = get_llm_client(
+                        self.lightweight_model, lw_provider, lw_context_length,
+                    )
+                except Exception as exc:
+                    logging.warning(
+                        "Failed to initialize lightweight LLM client for persona '%s' with model '%s': %s",
+                        self.persona_id, self.lightweight_model, exc,
+                    )
+                    self._lightweight_llm_client = None
+
+        return self._lightweight_llm_client
+
+    @lightweight_llm_client.setter
+    def lightweight_llm_client(self, value):
+        self._lightweight_llm_client = value
+        self._lightweight_llm_client_initialized = True
 
     @property
     def common_prompt(self) -> str:

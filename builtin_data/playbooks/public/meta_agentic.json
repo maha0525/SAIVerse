@@ -67,7 +67,7 @@
       "id": "inc_loop",
       "type": "set",
       "assignments": {
-        "loop_count": "{loop_count} + 1"
+        "loop_count": "={loop_count} + 1"
       },
       "next": "check_loop"
     },

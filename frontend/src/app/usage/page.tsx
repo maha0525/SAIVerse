@@ -27,6 +27,20 @@ interface Persona {
     persona_name: string;
 }
 
+interface Category {
+    category_id: string;
+    category_name: string;
+}
+
+interface CategoryUsage {
+    category: string;
+    category_name: string;
+    total_cost_usd: number;
+    total_input_tokens: number;
+    total_output_tokens: number;
+    call_count: number;
+}
+
 // Color palette for models
 const MODEL_COLORS: Record<string, string> = {
     'gemini-2.5-flash': '#4285F4',
@@ -57,7 +71,10 @@ export default function UsagePage() {
     const [summary, setSummary] = useState<UsageSummary | null>(null);
     const [dailyData, setDailyData] = useState<DailyUsage[]>([]);
     const [personas, setPersonas] = useState<Persona[]>([]);
+    const [categories, setCategories] = useState<Category[]>([]);
+    const [categoryUsage, setCategoryUsage] = useState<CategoryUsage[]>([]);
     const [selectedPersona, setSelectedPersona] = useState<string>('');
+    const [selectedCategory, setSelectedCategory] = useState<string>('');
     const [days, setDays] = useState(30);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -67,11 +84,14 @@ export default function UsagePage() {
         setError(null);
         try {
             const personaParam = selectedPersona ? `&persona_id=${selectedPersona}` : '';
+            const categoryParam = selectedCategory ? `&category=${selectedCategory}` : '';
 
-            const [summaryRes, dailyRes, personasRes] = await Promise.all([
-                fetch(`/api/usage/summary?days=${days}${personaParam}`),
-                fetch(`/api/usage/daily?${personaParam}`),
+            const [summaryRes, dailyRes, personasRes, categoriesRes, categoryUsageRes] = await Promise.all([
+                fetch(`/api/usage/summary?days=${days}${personaParam}${categoryParam}`),
+                fetch(`/api/usage/daily?${personaParam}${categoryParam}`),
                 fetch('/api/usage/personas'),
+                fetch('/api/usage/categories'),
+                fetch(`/api/usage/by-category?days=${days}${personaParam}`),
             ]);
 
             if (!summaryRes.ok || !dailyRes.ok) {
@@ -81,10 +101,14 @@ export default function UsagePage() {
             const summaryData = await summaryRes.json();
             const dailyDataRaw = await dailyRes.json();
             const personasData = personasRes.ok ? await personasRes.json() : [];
+            const categoriesData = categoriesRes.ok ? await categoriesRes.json() : [];
+            const categoryUsageData = categoryUsageRes.ok ? await categoryUsageRes.json() : [];
 
             setSummary(summaryData);
             setDailyData(dailyDataRaw);
             setPersonas(personasData);
+            setCategories(categoriesData);
+            setCategoryUsage(categoryUsageData);
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Unknown error');
         } finally {
@@ -94,7 +118,7 @@ export default function UsagePage() {
 
     useEffect(() => {
         fetchData();
-    }, [selectedPersona, days]);
+    }, [selectedPersona, selectedCategory, days]);
 
     // Transform daily data for stacked bar chart
     const chartData = (() => {
@@ -137,9 +161,9 @@ export default function UsagePage() {
                     onClick={() => window.location.href = '/'}
                 >
                     <ArrowLeft size={20} />
-                    Back
+                    戻る
                 </button>
-                <h1 className={styles.title}>API Usage Monitor</h1>
+                <h1 className={styles.title}>API 使用状況モニター</h1>
                 <button
                     className={styles.refreshButton}
                     onClick={fetchData}
@@ -158,28 +182,43 @@ export default function UsagePage() {
             {/* Filters */}
             <div className={styles.filters}>
                 <div className={styles.filterGroup}>
-                    <label>Period:</label>
+                    <label>期間:</label>
                     <select
                         value={days}
                         onChange={(e) => setDays(Number(e.target.value))}
                         className={styles.select}
                     >
-                        <option value={7}>Last 7 days</option>
-                        <option value={30}>Last 30 days</option>
-                        <option value={90}>Last 90 days</option>
+                        <option value={7}>過去7日間</option>
+                        <option value={30}>過去30日間</option>
+                        <option value={90}>過去90日間</option>
                     </select>
                 </div>
                 <div className={styles.filterGroup}>
-                    <label>Persona:</label>
+                    <label>ペルソナ:</label>
                     <select
                         value={selectedPersona}
                         onChange={(e) => setSelectedPersona(e.target.value)}
                         className={styles.select}
                     >
-                        <option value="">All Personas</option>
+                        <option value="">全ペルソナ</option>
                         {personas.map((p) => (
                             <option key={p.persona_id} value={p.persona_id}>
                                 {p.persona_name}
+                            </option>
+                        ))}
+                    </select>
+                </div>
+                <div className={styles.filterGroup}>
+                    <label>カテゴリ:</label>
+                    <select
+                        value={selectedCategory}
+                        onChange={(e) => setSelectedCategory(e.target.value)}
+                        className={styles.select}
+                    >
+                        <option value="">全カテゴリ</option>
+                        {categories.map((c) => (
+                            <option key={c.category_id} value={c.category_id}>
+                                {c.category_name}
                             </option>
                         ))}
                     </select>
@@ -190,19 +229,19 @@ export default function UsagePage() {
             {summary && (
                 <div className={styles.summaryCards}>
                     <div className={styles.card}>
-                        <div className={styles.cardLabel}>Total Cost</div>
+                        <div className={styles.cardLabel}>合計コスト</div>
                         <div className={styles.cardValue}>{formatCurrency(summary.total_cost_usd)}</div>
                     </div>
                     <div className={styles.card}>
-                        <div className={styles.cardLabel}>Input Tokens</div>
+                        <div className={styles.cardLabel}>入力トークン</div>
                         <div className={styles.cardValue}>{formatTokens(summary.total_input_tokens)}</div>
                     </div>
                     <div className={styles.card}>
-                        <div className={styles.cardLabel}>Output Tokens</div>
+                        <div className={styles.cardLabel}>出力トークン</div>
                         <div className={styles.cardValue}>{formatTokens(summary.total_output_tokens)}</div>
                     </div>
                     <div className={styles.card}>
-                        <div className={styles.cardLabel}>API Calls</div>
+                        <div className={styles.cardLabel}>API呼び出し</div>
                         <div className={styles.cardValue}>{summary.call_count.toLocaleString()}</div>
                     </div>
                 </div>
@@ -210,7 +249,7 @@ export default function UsagePage() {
 
             {/* Chart */}
             <div className={styles.chartContainer}>
-                <h2 className={styles.chartTitle}>Daily Cost by Model</h2>
+                <h2 className={styles.chartTitle}>モデル別日次コスト</h2>
                 {chartData.data.length > 0 ? (
                     <ResponsiveContainer width="100%" height={400}>
                         <BarChart data={chartData.data}>
@@ -249,10 +288,40 @@ export default function UsagePage() {
                     </ResponsiveContainer>
                 ) : (
                     <div className={styles.noData}>
-                        {loading ? 'Loading...' : 'No usage data available'}
+                        {loading ? '読み込み中...' : '使用データがありません'}
                     </div>
                 )}
             </div>
+
+            {/* Category Breakdown */}
+            {categoryUsage.length > 0 && (
+                <div className={styles.categorySection}>
+                    <h2 className={styles.chartTitle}>カテゴリ別使用状況</h2>
+                    <div className={styles.categoryGrid}>
+                        {categoryUsage.map((cat) => (
+                            <div key={cat.category} className={styles.categoryCard}>
+                                <div className={styles.categoryName}>{cat.category_name}</div>
+                                <div className={styles.categoryStats}>
+                                    <div className={styles.categoryStat}>
+                                        <span className={styles.statLabel}>コスト</span>
+                                        <span className={styles.statValue}>{formatCurrency(cat.total_cost_usd)}</span>
+                                    </div>
+                                    <div className={styles.categoryStat}>
+                                        <span className={styles.statLabel}>呼び出し</span>
+                                        <span className={styles.statValue}>{cat.call_count.toLocaleString()}</span>
+                                    </div>
+                                    <div className={styles.categoryStat}>
+                                        <span className={styles.statLabel}>トークン</span>
+                                        <span className={styles.statValue}>
+                                            {formatTokens(cat.total_input_tokens + cat.total_output_tokens)}
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

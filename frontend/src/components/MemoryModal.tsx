@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, MessageSquare, Upload, Book, Search, Layers } from 'lucide-react';
+import { X, MessageSquare, Upload, Book, Bug, Layers } from 'lucide-react';
 import styles from './MemoryModal.module.css';
 import MemoryBrowser from './memory/MemoryBrowser';
 import MemoryImport from './memory/MemoryImport';
@@ -12,11 +12,12 @@ interface MemoryModalProps {
     isOpen: boolean;
     onClose: () => void;
     personaId: string;
+    personaName?: string;
 }
 
-type Tab = 'browser' | 'import' | 'memopedia' | 'recall' | 'arasuji';
+type Tab = 'browser' | 'arasuji' | 'memopedia' | 'import' | 'debug';
 
-export default function MemoryModal({ isOpen, onClose, personaId }: MemoryModalProps) {
+export default function MemoryModal({ isOpen, onClose, personaId, personaName }: MemoryModalProps) {
     const [activeTab, setActiveTab] = useState<Tab>('browser');
 
     if (!isOpen) return null;
@@ -25,7 +26,7 @@ export default function MemoryModal({ isOpen, onClose, personaId }: MemoryModalP
         <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
                 <div className={styles.header}>
-                    <h2 className={styles.title}>Memory & Knowledge: {personaId}</h2>
+                    <h2 className={styles.title}>{personaName || personaId} のメモリー</h2>
                     <button className={styles.closeButton} onClick={onClose}>
                         <X size={20} />
                     </button>
@@ -37,14 +38,14 @@ export default function MemoryModal({ isOpen, onClose, personaId }: MemoryModalP
                         onClick={() => setActiveTab('browser')}
                     >
                         <MessageSquare size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
-                        Chat Logs
+                        チャットログ
                     </button>
                     <button
-                        className={`${styles.tab} ${activeTab === 'import' ? styles.activeTab : ''}`}
-                        onClick={() => setActiveTab('import')}
+                        className={`${styles.tab} ${activeTab === 'arasuji' ? styles.activeTab : ''}`}
+                        onClick={() => setActiveTab('arasuji')}
                     >
-                        <Upload size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
-                        Import Logs
+                        <Layers size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
+                        Chronicle
                     </button>
                     <button
                         className={`${styles.tab} ${activeTab === 'memopedia' ? styles.activeTab : ''}`}
@@ -54,27 +55,27 @@ export default function MemoryModal({ isOpen, onClose, personaId }: MemoryModalP
                         Memopedia
                     </button>
                     <button
-                        className={`${styles.tab} ${activeTab === 'recall' ? styles.activeTab : ''}`}
-                        onClick={() => setActiveTab('recall')}
+                        className={`${styles.tab} ${activeTab === 'import' ? styles.activeTab : ''}`}
+                        onClick={() => setActiveTab('import')}
                     >
-                        <Search size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
-                        Recall Test
+                        <Upload size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
+                        インポート
                     </button>
                     <button
-                        className={`${styles.tab} ${activeTab === 'arasuji' ? styles.activeTab : ''}`}
-                        onClick={() => setActiveTab('arasuji')}
+                        className={`${styles.tab} ${activeTab === 'debug' ? styles.activeTab : ''}`}
+                        onClick={() => setActiveTab('debug')}
                     >
-                        <Layers size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
-                        あらすじ
+                        <Bug size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
+                        デバッグ
                     </button>
                 </div>
 
                 <div className={styles.content}>
                     {activeTab === 'browser' && <MemoryBrowser personaId={personaId} />}
-                    {activeTab === 'import' && <MemoryImport personaId={personaId} />}
-                    {activeTab === 'memopedia' && <MemopediaViewer personaId={personaId} />}
-                    {activeTab === 'recall' && <MemoryRecall personaId={personaId} />}
                     {activeTab === 'arasuji' && <ArasujiViewer personaId={personaId} />}
+                    {activeTab === 'memopedia' && <MemopediaViewer personaId={personaId} />}
+                    {activeTab === 'import' && <MemoryImport personaId={personaId} />}
+                    {activeTab === 'debug' && <MemoryRecall personaId={personaId} />}
                 </div>
             </div>
         </ModalOverlay>

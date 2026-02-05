@@ -29,9 +29,9 @@ class BuildingDetailsResponse(BaseModel):
     items: List[ItemInfo]
 
 @router.get("/details", response_model=BuildingDetailsResponse)
-def get_building_details(manager = Depends(get_manager)):
+def get_building_details(building_id: Optional[str] = None, manager = Depends(get_manager)):
     """Get detailed info about current building: occupants, items."""
-    building_id = manager.user_current_building_id
+    building_id = building_id or manager.user_current_building_id
     if not building_id or building_id not in manager.building_map:
         return {
             "id": "unknown", 

@@ -11,6 +11,7 @@ from .models import (
     UpdateMemopediaPageRequest,
     CreateMemopediaPageRequest,
     SetTrunkRequest,
+    SetImportantRequest,
     MovePagesToTrunkRequest,
     GenerateMemopediaRequest,
     GenerationJobStatus,
@@ -245,6 +246,37 @@ def set_memopedia_page_trunk(
             raise HTTPException(status_code=500, detail=f"Memopedia error: {e}")
 
 
+@router.put("/{persona_id}/memopedia/pages/{page_id}/important")
+def set_memopedia_page_important(
+    persona_id: str,
+    page_id: str,
+    request: SetImportantRequest,
+    manager = Depends(get_manager)
+):
+    """Set or unset the important flag for a page."""
+    if page_id.startswith("root_"):
+        raise HTTPException(status_code=400, detail="Cannot modify root pages")
+
+    with get_adapter(persona_id, manager) as adapter:
+        try:
+            memopedia = _get_memopedia(adapter)
+            updated = memopedia.set_important(page_id, request.is_important)
+            if not updated:
+                raise HTTPException(status_code=404, detail="Page not found")
+            return {
+                "success": True,
+                "page": {
+                    "id": updated.id,
+                    "title": updated.title,
+                    "is_important": updated.is_important,
+                }
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Memopedia error: {e}")
+
+
 @router.post("/{persona_id}/memopedia/pages/move")
 def move_memopedia_pages(
     persona_id: str,
@@ -384,19 +416,37 @@ def _run_memopedia_generation(
         conn.close()
         
         if result:
-            _update_memopedia_job(
-                job_id,
-                status="completed",
-                progress=max_loops,
-                result=result,
-                message=f"Created page: {result.get('title', keyword)}"
-            )
+            # Check if it's an error diagnostic or a successful result
+            if result.get("error") == "no_info_collected":
+                # Generation completed but no info was collected
+                loops = result.get("loops_completed", 0)
+                msgs = result.get("messages_processed", 0)
+                queries = result.get("queries_tried", [])
+                detail = f"ループ{loops}回、メッセージ{msgs}件を処理したが情報を抽出できませんでした。"
+                if queries:
+                    detail += f" 試したクエリ: {', '.join(queries[:3])}"
+                _update_memopedia_job(
+                    job_id,
+                    status="completed",
+                    progress=max_loops,
+                    result=result,
+                    message=detail
+                )
+            else:
+                # Successful page creation
+                _update_memopedia_job(
+                    job_id,
+                    status="completed",
+                    progress=max_loops,
+                    result=result,
+                    message=f"Created page: {result.get('title', keyword)}"
+                )
         else:
             _update_memopedia_job(
                 job_id,
                 status="completed",
                 progress=max_loops,
-                message=f"No relevant information found for keyword: {keyword}"
+                message=f"生成に失敗しました: {keyword}"
             )
         
     except Exception as e:

@@ -51,6 +51,7 @@ class ModelInfo(BaseModel):
 def get_usage_summary(
     days: int = Query(30, ge=1, le=365, description="過去何日分を集計するか"),
     persona_id: Optional[str] = Query(None, description="ペルソナIDでフィルタ"),
+    category: Optional[str] = Query(None, description="カテゴリでフィルタ"),
     manager=Depends(get_manager),
 ):
     """使用量サマリーを取得"""
@@ -66,6 +67,8 @@ def get_usage_summary(
 
         if persona_id:
             query = query.filter(LLMUsageLog.PERSONA_ID == persona_id)
+        if category:
+            query = query.filter(LLMUsageLog.CATEGORY == category)
 
         result = query.one()
         return UsageSummary(
@@ -83,6 +86,7 @@ def get_daily_usage(
     start_date: Optional[str] = Query(None, description="開始日 (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="終了日 (YYYY-MM-DD)"),
     persona_id: Optional[str] = Query(None, description="ペルソナIDでフィルタ"),
+    category: Optional[str] = Query(None, description="カテゴリでフィルタ"),
     manager=Depends(get_manager),
 ):
     """日別・モデル別の使用量を取得（グラフ用）"""
@@ -120,6 +124,8 @@ def get_daily_usage(
 
         if persona_id:
             query = query.filter(LLMUsageLog.PERSONA_ID == persona_id)
+        if category:
+            query = query.filter(LLMUsageLog.CATEGORY == category)
 
         results = query.all()
         return [
@@ -211,6 +217,82 @@ def get_personas_list(manager=Depends(get_manager)):
         return [
             {"persona_id": p.AIID, "persona_name": p.AINAME}
             for p in personas
+        ]
+    finally:
+        session.close()
+
+
+@router.get("/categories")
+def get_categories_list(manager=Depends(get_manager)):
+    """使用量フィルタ用のカテゴリ一覧を取得"""
+    session = manager.SessionLocal()
+    try:
+        # Get distinct categories from usage log
+        results = session.query(LLMUsageLog.CATEGORY).distinct().filter(
+            LLMUsageLog.CATEGORY.isnot(None)
+        ).all()
+        categories = [r.CATEGORY for r in results if r.CATEGORY]
+        # Add display names for known categories
+        category_display = {
+            "persona_speak": "Persona Speech",
+            "memory_weave_generate": "Memory Weave (Generate)",
+        }
+        return [
+            {
+                "category_id": cat,
+                "category_name": category_display.get(cat, cat),
+            }
+            for cat in sorted(categories)
+        ]
+    finally:
+        session.close()
+
+
+@router.get("/by-category")
+def get_usage_by_category(
+    days: int = Query(30, ge=1, le=365, description="過去何日分を集計するか"),
+    persona_id: Optional[str] = Query(None, description="ペルソナIDでフィルタ"),
+    manager=Depends(get_manager),
+):
+    """カテゴリ別の使用量を取得"""
+    session = manager.SessionLocal()
+    try:
+        start_date = datetime.now() - timedelta(days=days)
+        query = session.query(
+            LLMUsageLog.CATEGORY,
+            func.coalesce(func.sum(LLMUsageLog.COST_USD), 0.0).label("total_cost"),
+            func.coalesce(func.sum(LLMUsageLog.INPUT_TOKENS), 0).label("total_input"),
+            func.coalesce(func.sum(LLMUsageLog.OUTPUT_TOKENS), 0).label("total_output"),
+            func.count(LLMUsageLog.ID).label("call_count"),
+        ).filter(
+            LLMUsageLog.TIMESTAMP >= start_date,
+        ).group_by(
+            LLMUsageLog.CATEGORY,
+        ).order_by(
+            func.sum(LLMUsageLog.COST_USD).desc(),
+        )
+
+        if persona_id:
+            query = query.filter(LLMUsageLog.PERSONA_ID == persona_id)
+
+        results = query.all()
+
+        # Add display names for known categories
+        category_display = {
+            "persona_speak": "Persona Speech",
+            "memory_weave_generate": "Memory Weave (Generate)",
+        }
+
+        return [
+            {
+                "category": r.CATEGORY or "uncategorized",
+                "category_name": category_display.get(r.CATEGORY, r.CATEGORY or "Uncategorized"),
+                "total_cost_usd": float(r.total_cost or 0),
+                "total_input_tokens": int(r.total_input or 0),
+                "total_output_tokens": int(r.total_output or 0),
+                "call_count": int(r.call_count or 0),
+            }
+            for r in results
         ]
     finally:
         session.close()

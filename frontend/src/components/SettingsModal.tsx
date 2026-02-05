@@ -33,9 +33,9 @@ interface ModelChoice {
 }
 
 const INTERACTION_MODES = [
-    { value: 'auto', label: '🟢 Auto - Speaks autonomously' },
-    { value: 'manual', label: '🟡 Manual - Only responds to user' },
-    { value: 'sleep', label: '🔴 Sleep - Currently inactive' },
+    { value: 'auto', label: '🟢 Auto - 自発的に発言' },
+    { value: 'manual', label: '🟡 Manual - ユーザーの入力のみ応答' },
+    { value: 'sleep', label: '🔴 Sleep - 現在非アクティブ' },
 ];
 
 interface AutonomousStatus {
@@ -156,11 +156,11 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 onClose();
             } else {
                 const err = await res.json();
-                alert(`Failed to save: ${err.detail}`);
+                alert(`保存に失敗しました: ${err.detail}`);
             }
         } catch (error) {
             console.error(error);
-            alert("Error saving config");
+            alert("設定の保存中にエラーが発生しました");
         } finally {
             setIsSaving(false);
         }
@@ -172,7 +172,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
         <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
-                    <h2><Settings size={22} /> Persona Settings</h2>
+                    <h2><Settings size={22} /> ペルソナ設定</h2>
                     <button className={styles.closeBtn} onClick={onClose}><X size={20} /></button>
                 </div>
 
@@ -184,23 +184,23 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     ) : (
                         <>
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>AI Name</label>
+                                <label className={styles.label}>名前</label>
                                 <div className={styles.input} style={{ background: 'rgba(0,0,0,0.05)', color: '#888' }}>
                                     {config?.name}
                                 </div>
-                                <div className={styles.description}>Name cannot be changed here.</div>
+                                <div className={styles.description}>名前はここでは変更できません。</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>Default Model</label>
+                                <label className={styles.label}>デフォルトモデル</label>
                                 <select
                                     className={styles.select}
                                     value={defaultModel}
                                     onChange={(e) => setDefaultModel(e.target.value)}
                                 >
-                                    <option value="">Use System Default</option>
+                                    <option value="">システムデフォルトを使用</option>
                                     {defaultModel && !availableModels.some(m => m.id === defaultModel) && (
-                                        <option value={defaultModel}>⚠️ Unknown: {defaultModel}</option>
+                                        <option value={defaultModel}>⚠️ 不明: {defaultModel}</option>
                                     )}
                                     {availableModels.map(m => (
                                         <option key={m.id} value={m.id}>{m.name}</option>
@@ -209,25 +209,25 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>Lightweight Model (Optional)</label>
+                                <label className={styles.label}>軽量モデル（任意）</label>
                                 <select
                                     className={styles.select}
                                     value={lightweightModel}
                                     onChange={(e) => setLightweightModel(e.target.value)}
                                 >
-                                    <option value="">None (Use Default)</option>
+                                    <option value="">なし（デフォルトを使用）</option>
                                     {lightweightModel && !availableModels.some(m => m.id === lightweightModel) && (
-                                        <option value={lightweightModel}>⚠️ Unknown: {lightweightModel}</option>
+                                        <option value={lightweightModel}>⚠️ 不明: {lightweightModel}</option>
                                     )}
                                     {availableModels.map(m => (
                                         <option key={m.id} value={m.id}>{m.name}</option>
                                     ))}
                                 </select>
-                                <div className={styles.description}>Used for faster/cheaper responses if applicable.</div>
+                                <div className={styles.description}>該当する場合、より高速で安価なレスポンスに使用されます。</div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>Interaction Mode</label>
+                                <label className={styles.label}>インタラクションモード</label>
                                 <select
                                     className={styles.select}
                                     value={interactionMode}
@@ -245,76 +245,76 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         borderRadius: '4px'
                                     }}>
                                         {autonomousStatus.is_active ? (
-                                            <span>✅ <strong>Autonomous mode active</strong> - This persona will speak on its own.</span>
+                                            <span>✅ <strong>自律モードアクティブ</strong> - このペルソナは自発的に発言します。</span>
                                         ) : autonomousStatus.system_running ? (
-                                            <span>⏸️ Autonomous system is running, but this persona is in {interactionMode} mode.</span>
+                                            <span>⏸️ 自律システムは動作中ですが、このペルソナは {interactionMode} モードです。</span>
                                         ) : (
-                                            <span>⚠️ Autonomous system is not running.</span>
+                                            <span>⚠️ 自律システムは動作していません。</span>
                                         )}
                                     </div>
                                 )}
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>Linked User</label>
+                                <label className={styles.label}>リンクユーザー</label>
                                 <select
                                     className={styles.select}
                                     value={linkedUserId}
                                     onChange={(e) => setLinkedUserId(e.target.value)}
                                 >
-                                    <option value="">None (Use "the user")</option>
+                                    <option value="">なし（「ユーザー」と表示）</option>
                                     {availableUsers.map(u => (
                                         <option key={u.id} value={u.id}>{u.name}</option>
                                     ))}
                                 </select>
                                 <div className={styles.description}>
-                                    The user this persona is linked to. Their name appears in the system prompt.
+                                    このペルソナがリンクするユーザー。システムプロンプトに名前が表示されます。
                                 </div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>Avatar</label>
+                                <label className={styles.label}>アバター</label>
                                 <ImageUpload
                                     value={avatarPath}
                                     onChange={setAvatarPath}
                                     circle={true}
                                 />
                                 <div className={styles.description}>
-                                    Upload a new avatar image.
+                                    新しいアバター画像をアップロードします。
                                 </div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>Appearance Image (Visual Context)</label>
+                                <label className={styles.label}>外見画像（ビジュアルコンテキスト）</label>
                                 <ImageUpload
                                     value={appearanceImagePath}
                                     onChange={setAppearanceImagePath}
                                 />
                                 <div className={styles.description}>
-                                    Detailed appearance image for LLM visual context. Separate from avatar.
+                                    LLMのビジュアルコンテキスト用の詳細な外見画像。アバターとは別です。
                                 </div>
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>Description</label>
+                                <label className={styles.label}>説明</label>
                                 <input
                                     className={styles.input}
                                     value={description}
                                     onChange={(e) => setDescription(e.target.value)}
-                                    placeholder="Short description of the persona"
+                                    placeholder="ペルソナの短い説明"
                                 />
                             </div>
 
                             <div className={styles.fieldGroup}>
-                                <label className={styles.label}>System Instructions</label>
+                                <label className={styles.label}>システムプロンプト</label>
                                 <textarea
                                     className={styles.textarea}
                                     value={systemPrompt}
                                     onChange={(e) => setSystemPrompt(e.target.value)}
-                                    placeholder="You are..."
+                                    placeholder="あなたは..."
                                 />
                                 <div className={styles.description}>
-                                    Core instructions defining behavior, personality, and capabilities.
+                                    行動、性格、能力を定義するコアな指示。
                                 </div>
                             </div>
                         </>
@@ -322,14 +322,14 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 </div>
 
                 <div className={styles.footer}>
-                    <button className={styles.cancelBtn} onClick={onClose}>Cancel</button>
+                    <button className={styles.cancelBtn} onClick={onClose}>キャンセル</button>
                     <button
                         className={styles.saveBtn}
                         onClick={handleSave}
                         disabled={isLoading || isSaving}
                     >
                         {isSaving ? <Loader2 size={16} className="spin" /> : <Save size={16} />}
-                        Save Changes
+                        保存
                     </button>
                 </div>
             </div>

@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { Upload, CheckCircle, AlertCircle, Loader2, CheckSquare, Square, RefreshCw, MessageSquare } from 'lucide-react';
+import { Upload, CheckCircle, AlertCircle, Loader2, CheckSquare, Square, RefreshCw, MessageSquare, Download } from 'lucide-react';
 import styles from './MemoryImport.module.css';
 
 interface MemoryImportProps {
@@ -33,8 +33,24 @@ interface PreviewData {
 
 type Step = 'upload' | 'select' | 'embedding-dialog' | 'importing' | 'thread-select';
 
+interface NativePreviewThread {
+    thread_id: string;
+    message_count: number;
+    has_stelis: boolean;
+    preview: string;
+}
+
+interface NativePreviewData {
+    format: string;
+    source_persona: string;
+    exported_at: string | null;
+    thread_count: number;
+    total_messages: number;
+    threads: NativePreviewThread[];
+}
+
 export default function MemoryImport({ personaId, onImportComplete }: MemoryImportProps) {
-    const [activeSubTab, setActiveSubTab] = useState<'official' | 'extension'>('official');
+    const [activeSubTab, setActiveSubTab] = useState<'official' | 'extension' | 'native'>('official');
     const [isLoading, setIsLoading] = useState(false);
     const [result, setResult] = useState<{ type: 'success' | 'error', message: string } | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -54,6 +70,11 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
     const [threads, setThreads] = useState<ThreadSummary[]>([]);
     const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
 
+    // Native import state
+    const [nativePreview, setNativePreview] = useState<NativePreviewData | null>(null);
+    const [pendingNativeFile, setPendingNativeFile] = useState<File | null>(null);
+    const nativeFileInputRef = useRef<HTMLInputElement>(null);
+
     const resetState = () => {
         setStep('upload');
         setPreviewData(null);
@@ -63,6 +84,8 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
         setImportProgress(null);
         setThreads([]);
         setSelectedThreadId(null);
+        setNativePreview(null);
+        setPendingNativeFile(null);
     };
 
     // Fetch threads and handle thread selection after import
@@ -177,7 +200,7 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
                         setSelectedIds(new Set());
                         setStep('select');
                     } else {
-                        setResult({ type: 'error', message: 'No conversations found in the file.' });
+                        setResult({ type: 'error', message: 'ファイルに会話が見つかりませんでした。' });
                     }
                 } else {
                     setResult({ type: 'error', message: data.detail || 'Preview failed' });
@@ -203,7 +226,7 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
         setStep('importing');
         setIsLoading(true);
         setResult(null);
-        setImportProgress('Starting import...');
+        setImportProgress('インポート開始...');
 
         const formData = new FormData();
         formData.append('file', pendingExtensionFile);
@@ -258,7 +281,7 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
 
     const handleOfficialImportClick = () => {
         if (!previewData || selectedIds.size === 0) {
-            setResult({ type: 'error', message: 'Please select at least one conversation to import.' });
+            setResult({ type: 'error', message: 'インポートする会話を1つ以上選択してください。' });
             return;
         }
         // Show embedding dialog
@@ -271,7 +294,7 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
         setStep('importing');
         setIsLoading(true);
         setResult(null);
-        setImportProgress('Starting import...');
+        setImportProgress('インポート開始...');
 
         try {
             const res = await fetch(`/api/people/${personaId}/import/official`, {
@@ -355,6 +378,196 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
     };
 
 
+    // --- Native import handlers ---
+
+    const handleNativeFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        setIsLoading(true);
+        setResult(null);
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+            const res = await fetch(`/api/people/${personaId}/import/native/preview`, {
+                method: 'POST',
+                body: formData,
+            });
+            const data = await res.json();
+
+            if (res.ok) {
+                setNativePreview(data);
+                setPendingNativeFile(file);
+                setStep('select');
+            } else {
+                setResult({ type: 'error', message: data.detail || 'Preview failed' });
+            }
+        } catch (error) {
+            setResult({ type: 'error', message: 'Network error occurred.' });
+        } finally {
+            setIsLoading(false);
+            if (nativeFileInputRef.current) nativeFileInputRef.current.value = '';
+        }
+    };
+
+    const executeNativeImport = async (skipEmbedding: boolean) => {
+        if (!pendingNativeFile) return;
+
+        setStep('importing');
+        setIsLoading(true);
+        setResult(null);
+        setImportProgress('Nativeインポート開始...');
+
+        const formData = new FormData();
+        formData.append('file', pendingNativeFile);
+        formData.append('skip_embedding', skipEmbedding.toString());
+
+        try {
+            const res = await fetch(`/api/people/${personaId}/import/native`, {
+                method: 'POST',
+                body: formData,
+            });
+            const data = await res.json();
+
+            if (res.ok) {
+                setTimeout(() => pollNativeImportStatus(), 1000);
+            } else {
+                setStep('upload');
+                setIsLoading(false);
+                setImportProgress(null);
+                setResult({ type: 'error', message: data.detail || 'Import failed' });
+            }
+        } catch (error) {
+            setStep('upload');
+            setIsLoading(false);
+            setImportProgress(null);
+            setResult({ type: 'error', message: 'Network error occurred.' });
+        } finally {
+            setPendingNativeFile(null);
+            setNativePreview(null);
+        }
+    };
+
+    const pollNativeImportStatus = async () => {
+        try {
+            const res = await fetch(`/api/people/${personaId}/import/native/status`);
+            const data = await res.json();
+
+            if (data.running) {
+                setImportProgress(data.message || `Processing ${data.progress || 0}/${data.total || 0}...`);
+                setTimeout(pollNativeImportStatus, 1000);
+            } else {
+                setImportProgress(null);
+                setIsLoading(false);
+                if (data.success) {
+                    setStep('upload');
+                    setResult({ type: 'success', message: data.message || 'Native import complete' });
+                    if (onImportComplete) onImportComplete();
+                } else {
+                    setStep('upload');
+                    setResult({ type: 'error', message: data.message || 'Import failed' });
+                }
+            }
+        } catch (error) {
+            setStep('upload');
+            setImportProgress(null);
+            setIsLoading(false);
+            setResult({ type: 'error', message: 'Failed to get import status.' });
+        }
+    };
+
+    const renderNativeUploadArea = () => (
+        <div className={styles.uploadArea} onClick={() => nativeFileInputRef.current?.click()}>
+            {isLoading ? (
+                <Loader2 className={`${styles.uploadIcon} ${styles.loader}`} size={48} />
+            ) : (
+                <Download className={styles.uploadIcon} size={48} />
+            )}
+            <div className={styles.uploadText}>
+                {isLoading ? '読み込み中...' : 'クリックしてSAIVerse Native JSONをアップロード'}
+            </div>
+            <div className={styles.uploadSubtext}>
+                SAIVerse Native形式 (.json) - チャットログタブからエクスポート
+            </div>
+            <input
+                type="file"
+                ref={nativeFileInputRef}
+                className={styles.fileInput}
+                onChange={handleNativeFileSelect}
+                accept=".json"
+                disabled={isLoading}
+            />
+        </div>
+    );
+
+    const renderNativePreview = () => {
+        if (!nativePreview) return null;
+
+        return (
+            <div className={styles.selectionContainer}>
+                <div className={styles.selectionHeader}>
+                    <h3>Native インポートプレビュー</h3>
+                    <span className={styles.selectionCount}>
+                        {nativePreview.thread_count}スレッド, {nativePreview.total_messages}メッセージ
+                    </span>
+                </div>
+
+                {nativePreview.source_persona !== personaId && (
+                    <div className={`${styles.result} ${styles.error}`} style={{ margin: '0 0 1rem 0' }}>
+                        <AlertCircle size={16} />
+                        <span>
+                            元のペルソナ ({nativePreview.source_persona}) とインポート先 ({personaId}) が異なります。
+                            スレッドIDはそのまま保持されます。
+                        </span>
+                    </div>
+                )}
+
+                <div className={styles.tableContainer}>
+                    <table className={styles.table}>
+                        <thead>
+                            <tr>
+                                <th>スレッドID</th>
+                                <th>メッセージ数</th>
+                                <th>Stelis</th>
+                                <th>プレビュー</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {nativePreview.threads.map((t, idx) => (
+                                <tr key={idx}>
+                                    <td className={styles.titleCell}>{t.thread_id}</td>
+                                    <td>{t.message_count}</td>
+                                    <td>{t.has_stelis ? 'あり' : '-'}</td>
+                                    <td className={styles.previewCell}>{t.preview || '-'}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+
+                <div className={`${styles.result} ${styles.error}`} style={{ margin: '1rem 0 0 0' }}>
+                    <AlertCircle size={16} />
+                    <span>同じIDのスレッドが既に存在する場合は上書きされます。</span>
+                </div>
+
+                <div className={styles.actions}>
+                    <button className={styles.cancelButton} onClick={resetState}>
+                        キャンセル
+                    </button>
+                    <button
+                        className={styles.importButton}
+                        onClick={() => setStep('embedding-dialog')}
+                        disabled={isLoading}
+                    >
+                        インポート
+                    </button>
+                </div>
+            </div>
+        );
+    };
+
     const renderUploadArea = () => (
         <div className={styles.uploadArea} onClick={() => fileInputRef.current?.click()}>
             {isLoading ? (
@@ -363,12 +576,12 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
                 <Upload className={styles.uploadIcon} size={48} />
             )}
             <div className={styles.uploadText}>
-                {isLoading ? 'Loading...' : 'Click to upload file'}
+                {isLoading ? '読み込み中...' : 'クリックしてファイルをアップロード'}
             </div>
             <div className={styles.uploadSubtext}>
                 {activeSubTab === 'official'
-                    ? 'Supports conversations.json or export ZIP'
-                    : 'Supports JSON or Markdown files from extensions'}
+                    ? 'conversations.json またはエクスポートZIPに対応'
+                    : '拡張機能のJSON・Markdownファイルに対応'}
             </div>
             <input
                 type="file"
@@ -393,7 +606,9 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
                 <button
                     className={styles.cancelButton}
                     onClick={() => {
-                        if (activeSubTab === 'extension') {
+                        if (activeSubTab === 'native') {
+                            executeNativeImport(true);
+                        } else if (activeSubTab === 'extension') {
                             executeExtensionImport(true);
                         } else {
                             executeOfficialImport(true);
@@ -405,7 +620,9 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
                 <button
                     className={styles.importButton}
                     onClick={() => {
-                        if (activeSubTab === 'extension') {
+                        if (activeSubTab === 'native') {
+                            executeNativeImport(false);
+                        } else if (activeSubTab === 'extension') {
                             executeExtensionImport(false);
                         } else {
                             executeOfficialImport(false);
@@ -421,7 +638,7 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
     const renderImportingProgress = () => (
         <div className={styles.importingProgress}>
             <Loader2 className={styles.loader} size={48} />
-            <div className={styles.progressText}>{importProgress || 'Importing...'}</div>
+            <div className={styles.progressText}>{importProgress || 'インポート中...'}</div>
         </div>
     );
 
@@ -488,9 +705,9 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
         return (
             <div className={styles.selectionContainer}>
                 <div className={styles.selectionHeader}>
-                    <h3>Select Conversations to Import</h3>
+                    <h3>インポートする会話を選択</h3>
                     <span className={styles.selectionCount}>
-                        {selectedIds.size} of {previewData.total_count} selected
+                        {previewData.total_count}件中 {selectedIds.size}件選択
                     </span>
                 </div>
 
@@ -501,10 +718,10 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
                                 <th className={styles.checkboxCell} onClick={toggleSelectAll}>
                                     {allSelected ? <CheckSquare size={18} /> : <Square size={18} />}
                                 </th>
-                                <th>Title</th>
-                                <th>Messages</th>
-                                <th>Created</th>
-                                <th>Preview</th>
+                                <th>タイトル</th>
+                                <th>メッセージ数</th>
+                                <th>作成日</th>
+                                <th>プレビュー</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -517,7 +734,7 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
                                     <td className={styles.checkboxCell}>
                                         {selectedIds.has(conv.idx) ? <CheckSquare size={18} /> : <Square size={18} />}
                                     </td>
-                                    <td className={styles.titleCell}>{conv.title || '(Untitled)'}</td>
+                                    <td className={styles.titleCell}>{conv.title || '(無題)'}</td>
                                     <td>{conv.message_count}</td>
                                     <td>{conv.create_time || '-'}</td>
                                     <td className={styles.previewCell}>{conv.preview || '-'}</td>
@@ -529,7 +746,7 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
 
                 <div className={styles.actions}>
                     <button className={styles.cancelButton} onClick={resetState}>
-                        Cancel
+                        キャンセル
                     </button>
                     <button
                         className={styles.importButton}
@@ -537,7 +754,7 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
                         disabled={selectedIds.size === 0 || isLoading}
                     >
                         {isLoading ? <Loader2 size={16} className={styles.loader} /> : null}
-                        Import {selectedIds.size} Conversation{selectedIds.size !== 1 ? 's' : ''}
+                        {selectedIds.size}件をインポート
                     </button>
                 </div>
             </div>
@@ -554,6 +771,12 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
         if (step === 'importing') {
             return renderImportingProgress();
         }
+        if (activeSubTab === 'native') {
+            if (step === 'select' && nativePreview) {
+                return renderNativePreview();
+            }
+            return renderNativeUploadArea();
+        }
         if (activeSubTab === 'official' && step === 'select') {
             return renderConversationTable();
         }
@@ -562,7 +785,7 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
 
     return (
         <div className={styles.container}>
-            <h2 className={styles.title}>Import Chat Logs</h2>
+            <h2 className={styles.title}>チャットログをインポート</h2>
 
             <div className={styles.subTabs}>
                 <button
@@ -570,14 +793,21 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
                     onClick={() => { setActiveSubTab('official'); resetState(); }}
                     disabled={step === 'importing'}
                 >
-                    Official Data Export
+                    ChatGPT 公式エクスポート
                 </button>
                 <button
                     className={`${styles.subTab} ${activeSubTab === 'extension' ? styles.active : ''}`}
                     onClick={() => { setActiveSubTab('extension'); resetState(); }}
                     disabled={step === 'importing'}
                 >
-                    Extension Export
+                    拡張機能エクスポート
+                </button>
+                <button
+                    className={`${styles.subTab} ${activeSubTab === 'native' ? styles.active : ''}`}
+                    onClick={() => { setActiveSubTab('native'); resetState(); }}
+                    disabled={step === 'importing'}
+                >
+                    Native (SAIVerse)
                 </button>
             </div>
 
@@ -592,8 +822,8 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
 
             {/* Re-embed Section */}
             <div className={styles.reembedSection}>
-                <h3>Embedding Maintenance</h3>
-                <p>Run embedding on messages that are missing vector embeddings (e.g., imported with "Skip embedding").</p>
+                <h3>エンベディング管理</h3>
+                <p>エンベディングが未作成のメッセージに対して処理を実行します（「スキップ」でインポートした場合など）。</p>
                 <div className={styles.reembedActions}>
                     <button
                         className={styles.reembedButton}
@@ -601,7 +831,7 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
                         disabled={isReembedding}
                     >
                         {isReembedding ? <Loader2 size={16} className={styles.loader} /> : <RefreshCw size={16} />}
-                        Fill Missing Embeddings
+                        未処理を埋める
                     </button>
                     <button
                         className={styles.reembedButtonSecondary}
@@ -609,7 +839,7 @@ export default function MemoryImport({ personaId, onImportComplete }: MemoryImpo
                         disabled={isReembedding}
                     >
                         {isReembedding ? <Loader2 size={16} className={styles.loader} /> : <RefreshCw size={16} />}
-                        Re-embed All
+                        全て再作成
                     </button>
                 </div>
                 {reembedProgress && (

@@ -25,6 +25,34 @@
     overflow-y: auto;
 }
 
+.threadSection {
+    border-bottom: 1px solid #333;
+}
+
+.threadSection:last-child {
+    border-bottom: none;
+}
+
+.threadSectionHeader {
+    padding: 0.5rem 1rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    background-color: rgba(0, 0, 0, 0.2);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.noActiveThread {
+    padding: 0.75rem 1rem;
+    font-size: 0.85rem;
+    color: #666;
+    font-style: italic;
+}
+
 .threadItem {
     padding: 0.75rem 1rem;
     border-bottom: 1px solid #2c2d32;
@@ -52,14 +80,6 @@
     font-size: 0.85rem;
     color: #4dabf7;
     font-family: monospace;
-}
-
-.activeBadge {
-    font-size: 0.7rem;
-    background-color: #2b8a3e;
-    color: #d3f9d8;
-    padding: 2px 6px;
-    border-radius: 4px;
 }
 
 /* Stelis thread styles */
@@ -117,22 +137,6 @@
 .deleteThreadBtn:hover {
     color: #fa5252;
     background-color: rgba(250, 82, 82, 0.1);
-}
-
-.setActiveBtn {
-    background: none;
-    border: 1px solid #4dabf7;
-    color: #4dabf7;
-    padding: 2px 8px;
-    font-size: 0.7rem;
-    cursor: pointer;
-    border-radius: 4px;
-    transition: background-color 0.2s, color 0.2s;
-}
-
-.setActiveBtn:hover {
-    background-color: rgba(77, 171, 247, 0.15);
-    color: #74c0fc;
 }
 
 .threadPreview {
@@ -439,6 +443,47 @@
 
 .cancelBtn:hover {
     background-color: #212529;
+}
+
+/* Set Active Header Button */
+.setActiveHeaderBtn {
+    background: none;
+    border: 1px solid #2b8a3e;
+    color: #51cf66;
+    padding: 4px 10px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background-color 0.2s, color 0.2s;
+    white-space: nowrap;
+}
+
+.setActiveHeaderBtn:hover {
+    background-color: rgba(43, 138, 62, 0.15);
+    color: #69db7c;
+}
+
+/* Export Button */
+.exportBtn {
+    background: none;
+    border: none;
+    color: #888;
+    padding: 6px;
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    transition: color 0.2s, background-color 0.2s;
+}
+
+.exportBtn:hover:not(:disabled) {
+    color: #4dabf7;
+    background-color: rgba(77, 171, 247, 0.1);
+}
+
+.exportBtn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
 }
 
 /* Add Message Button */

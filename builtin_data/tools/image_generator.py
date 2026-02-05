@@ -1,8 +1,8 @@
 """Unified image generation tool supporting multiple backends.
 
 Supported models:
-- nano_banana: Gemini 2.5 Flash Image (fast, standard quality)
-- nano_banana_pro: Gemini 3 Pro Image (high quality, aspect ratio control)
+- nano_banana: Gemini 2.5 Flash Image (fast, aspect ratio control)
+- nano_banana_pro: Gemini 3 Pro Image (high quality, aspect ratio + resolution control)
 - gpt_image_1_5: OpenAI GPT Image 1.5 (state of the art)
 
 Input image URI formats:
@@ -87,6 +87,7 @@ def _load_image_bytes(path: Path) -> Tuple[bytes, str]:
 
 def _generate_with_nano_banana(
     prompt: str,
+    aspect_ratio: str = "1:1",
     input_image_paths: Optional[List[Path]] = None,
 ) -> Tuple[bytes, str]:
     """Generate image using Gemini 2.5 Flash Image (nano banana)."""
@@ -110,7 +111,10 @@ def _generate_with_nano_banana(
         model="gemini-2.5-flash-image",
         contents=contents,
         config=types.GenerateContentConfig(
-            response_modalities=["TEXT", "IMAGE"]
+            response_modalities=["TEXT", "IMAGE"],
+            image_config=types.ImageConfig(
+                aspect_ratio=aspect_ratio
+            )
         )
     )
 
@@ -285,8 +289,8 @@ def generate_image(
     Args:
         prompt: Image generation prompt describing what to create.
         model: Which image generation model to use:
-            - nano_banana: Fast, standard quality (Gemini 2.5 Flash)
-            - nano_banana_pro: High quality with aspect ratio control (Gemini 3 Pro)
+            - nano_banana: Fast with aspect ratio control (Gemini 2.5 Flash)
+            - nano_banana_pro: High quality with aspect ratio + resolution control (Gemini 3 Pro)
             - gpt_image_1_5: State of the art quality (OpenAI GPT Image 1.5)
         aspect_ratio: Image aspect ratio ("1:1", "16:9", "9:16", "4:3", "3:4")
         quality: Image quality level ("low", "medium", "high", "auto")
@@ -333,7 +337,9 @@ def generate_image(
 
     try:
         if model == "nano_banana":
-            image_data, mime = _generate_with_nano_banana(prompt, input_image_paths)
+            image_data, mime = _generate_with_nano_banana(
+                prompt, aspect_ratio, input_image_paths
+            )
         elif model == "nano_banana_pro":
             image_data, mime = _generate_with_nano_banana_pro(
                 prompt, aspect_ratio, quality, input_image_paths
@@ -397,8 +403,8 @@ def schema() -> ToolSchema:
         description=(
             "Generate an image from a text prompt, optionally using reference images. "
             "Supports multiple AI models:\n"
-            "- nano_banana: Fast generation (Gemini 2.5 Flash)\n"
-            "- nano_banana_pro: High quality with aspect ratio control (Gemini 3 Pro)\n"
+            "- nano_banana: Fast generation with aspect ratio control (Gemini 2.5 Flash)\n"
+            "- nano_banana_pro: High quality with aspect ratio and resolution control (Gemini 3 Pro)\n"
             "- gpt_image_1_5: State of the art photorealistic quality (OpenAI)\n\n"
             "Prompt tips:\n"
             "- Be specific and detailed about what you want\n"
@@ -423,7 +429,7 @@ def schema() -> ToolSchema:
                     "enum": ["nano_banana", "nano_banana_pro", "gpt_image_1_5"],
                     "description": (
                         "Image generation model: "
-                        "nano_banana (fast), nano_banana_pro (high quality), "
+                        "nano_banana (fast, aspect ratio), nano_banana_pro (high quality, aspect ratio + resolution), "
                         "gpt_image_1_5 (state of the art)"
                     ),
                     "default": "nano_banana_pro"

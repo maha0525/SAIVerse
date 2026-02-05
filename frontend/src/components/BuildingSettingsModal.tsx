@@ -107,7 +107,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
             }
 
         } catch (err) {
-            setError('Failed to load building data');
+            setError('Building データの読み込みに失敗しました');
             console.error(err);
         } finally {
             setLoading(false);
@@ -139,10 +139,10 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                 onClose();
             } else {
                 const data = await res.json();
-                setError(data.detail || 'Failed to save');
+                setError(data.detail || '保存に失敗しました');
             }
         } catch (err) {
-            setError('Failed to save building settings');
+            setError('Building 設定の保存に失敗しました');
             console.error(err);
         } finally {
             setSaving(false);
@@ -177,7 +177,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
         <div className={styles.overlay} onClick={onClose}>
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
-                    <h2>Building Settings</h2>
+                    <h2>Building 設定</h2>
                     <button className={styles.closeBtn} onClick={onClose}>
                         <X size={20} />
                     </button>
@@ -186,14 +186,14 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                 {loading ? (
                     <div className={styles.loading}>
                         <Loader2 size={24} className={styles.spinner} />
-                        <span>Loading...</span>
+                        <span>読み込み中...</span>
                     </div>
                 ) : (
                     <div className={styles.content}>
                         {error && <div className={styles.error}>{error}</div>}
 
                         <div className={styles.field}>
-                            <label>Name</label>
+                            <label>名前</label>
                             <input
                                 type="text"
                                 value={name}
@@ -212,7 +212,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                         </div>
 
                         <div className={styles.field}>
-                            <label>City</label>
+                            <label>都市</label>
                             <select value={cityId} onChange={e => setCityId(parseInt(e.target.value))}>
                                 {cities.map(c => (
                                     <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME}</option>
@@ -222,7 +222,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
 
                         <div className={styles.row}>
                             <div className={styles.field}>
-                                <label>Capacity</label>
+                                <label>定員</label>
                                 <input
                                     type="number"
                                     value={capacity}
@@ -231,7 +231,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                                 />
                             </div>
                             <div className={styles.field}>
-                                <label>Auto Interval (sec)</label>
+                                <label>自動インターバル（秒）</label>
                                 <input
                                     type="number"
                                     value={autoInterval}
@@ -242,7 +242,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                         </div>
 
                         <div className={styles.field}>
-                            <label>Description</label>
+                            <label>説明</label>
                             <textarea
                                 value={description}
                                 onChange={e => setDescription(e.target.value)}
@@ -251,7 +251,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                         </div>
 
                         <div className={styles.field}>
-                            <label>System Instruction</label>
+                            <label>システムプロンプト</label>
                             <textarea
                                 value={systemInstruction}
                                 onChange={e => setSystemInstruction(e.target.value)}
@@ -261,16 +261,16 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                         </div>
 
                         <div className={styles.field}>
-                            <label>Interior Image</label>
+                            <label>インテリア画像</label>
                             <ImageUpload
                                 value={imagePath}
                                 onChange={setImagePath}
                             />
-                            <small className={styles.hint}>Building interior image for LLM visual context</small>
+                            <small className={styles.hint}>LLMのビジュアルコンテキスト用の Building インテリア画像</small>
                         </div>
 
                         <div className={styles.field}>
-                            <label>Extra Prompt Files</label>
+                            <label>追加プロンプトファイル</label>
                             <div className={styles.promptList}>
                                 {extraPromptFiles.map((file, idx) => (
                                     <div key={idx} className={styles.promptItem}>
@@ -278,7 +278,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                                             value={file}
                                             onChange={e => handlePromptFileChange(idx, e.target.value)}
                                         >
-                                            <option value="">Select prompt file...</option>
+                                            <option value="">プロンプトファイルを選択...</option>
                                             {availablePrompts.map(p => (
                                                 <option key={p} value={p}>{p}</option>
                                             ))}
@@ -297,14 +297,14 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                                     className={styles.addBtn}
                                     onClick={handleAddPromptFile}
                                 >
-                                    + Add Prompt File
+                                    + プロンプトファイルを追加
                                 </button>
                             </div>
-                            <small className={styles.hint}>Additional system prompts for personas in this building</small>
+                            <small className={styles.hint}>この Building 内のペルソナ用の追加システムプロンプト</small>
                         </div>
 
                         <div className={styles.field}>
-                            <label>Available Tools</label>
+                            <label>利用可能なツール</label>
                             <div className={styles.toolGrid}>
                                 {tools.map(t => (
                                     <label key={t.TOOLID} className={styles.toolItem}>
@@ -328,12 +328,12 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                                 {saving ? (
                                     <>
                                         <Loader2 size={16} className={styles.spinner} />
-                                        Saving...
+                                        保存中...
                                     </>
                                 ) : (
                                     <>
                                         <Save size={16} />
-                                        Save Changes
+                                        保存
                                     </>
                                 )}
                             </button>

@@ -93,6 +93,30 @@ ruff check path/to/file.py
 
 **IMPORTANT for Claude Code**: After writing or modifying Python code, always run `ruff check` on the changed files before considering the task complete. This catches undefined variables (like `LOGGER` instead of `logging`), unused imports, and other common errors that would cause runtime failures.
 
+### GPU Setup (Optional)
+
+SAIMemory's embedding computation can be accelerated with NVIDIA CUDA:
+
+```bash
+# Install GPU dependencies (requires CUDA Toolkit + cuDNN pre-installed)
+pip uninstall onnxruntime -y
+pip install -r requirements-gpu.txt
+
+# Verify CUDA is available
+python -c "import onnxruntime as ort; print(ort.get_available_providers())"
+# Should include 'CUDAExecutionProvider'
+```
+
+**Environment variable control**:
+- `SAIMEMORY_EMBED_CUDA=1` - Force GPU
+- `SAIMEMORY_EMBED_CUDA=0` - Force CPU
+- Unset - Auto-detect (use GPU if available)
+
+**Files involved**:
+- `sai_memory/memory/recall.py` - Embedder class with CUDA detection
+- `requirements-gpu.txt` - GPU-specific dependencies
+- `docs/getting-started/gpu-setup.md` - Full setup guide
+
 ### Test Environment (Isolated Backend Testing)
 
 For testing the backend without affecting production data, use the isolated test environment:

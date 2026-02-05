@@ -601,10 +601,11 @@ class SAIVerseManager(
 
     def handle_user_input_stream(
         self, message: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None,
-        playbook_params: Optional[Dict[str, Any]] = None
+        playbook_params: Optional[Dict[str, Any]] = None, building_id: Optional[str] = None,
     ) -> Iterator[str]:
         yield from self.runtime.handle_user_input_stream(
-            message, metadata=metadata, meta_playbook=meta_playbook, playbook_params=playbook_params
+            message, metadata=metadata, meta_playbook=meta_playbook,
+            playbook_params=playbook_params, building_id=building_id,
         )
 
     def get_summonable_personas(self) -> List[str]:
@@ -891,11 +892,47 @@ class SAIVerseManager(
         self, name: str, description: str, capacity: int, system_instruction: str, city_id: int, building_id: str = None
     ) -> str:
         """Creates a new building in a specified city."""
-        return self.admin.create_building(name, description, capacity, system_instruction, city_id, building_id)
+        result = self.admin.create_building(name, description, capacity, system_instruction, city_id, building_id)
+        # If creation succeeded and it's in our city, reload buildings list
+        if not result.startswith("Error") and city_id == self.city_id:
+            self._reload_buildings()
+        return result
+
+    def _reload_buildings(self) -> None:
+        """Reload buildings list from database to reflect recent changes."""
+        self.buildings = self._load_and_create_buildings_from_db()
+
+        # Update existing dicts in-place to preserve references held by OccupancyManager
+        new_building_map = {b.building_id: b for b in self.buildings}
+        self.building_map.clear()
+        self.building_map.update(new_building_map)
+
+        new_capacities = {b.building_id: b.capacity for b in self.buildings}
+        self.capacities.clear()
+        self.capacities.update(new_capacities)
+
+        # Update building memory paths
+        self.building_memory_paths = {
+            b.building_id: self.saiverse_home / "cities" / self.city_name / "buildings" / b.building_id / "log.json"
+            for b in self.buildings
+        }
+
+        # Initialize occupants and building_histories for new buildings
+        for building_id in self.building_map:
+            if building_id not in self.occupants:
+                self.occupants[building_id] = []
+            if building_id not in self.building_histories:
+                self.building_histories[building_id] = []
 
     def delete_building(self, building_id: str) -> str:
         """Deletes a building after checking for occupants."""
-        return self.admin.delete_building(building_id)
+        # Check if building is in our city before deletion
+        was_in_city = building_id in self.building_map
+        result = self.admin.delete_building(building_id)
+        # If deletion succeeded and it was in our city, reload buildings list
+        if not result.startswith("Error") and was_in_city:
+            self._reload_buildings()
+        return result
 
     def move_ai_from_editor(self, ai_id: str, target_building_id: str) -> str:
         """

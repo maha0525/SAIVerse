@@ -643,10 +643,22 @@ class GeminiClient(LLMClient):
                                 cached_tokens=cached,
                             )
 
+                    # Debug: log what's in all_parts before processing
+                    for i, part in enumerate(all_parts):
+                        logging.info(
+                            "[gemini] all_parts[%d]: type=%s, thought=%s, text=%r, attrs=%s",
+                            i,
+                            type(part).__name__,
+                            getattr(part, "thought", "N/A"),
+                            (getattr(part, "text", None) or "")[:100] if getattr(part, "text", None) else None,
+                            [a for a in dir(part) if not a.startswith("_")]
+                        )
+
                     text, reasoning_entries = self._separate_parts(all_parts)
                     self._store_reasoning(reasoning_entries)
-                    
+
                     if response_schema:
+                        logging.info("[gemini] Structured output: text=%r, len=%d", text[:200] if text else "(empty)", len(text))
                         try:
                             parsed = json.loads(text)
                             if isinstance(parsed, dict):

@@ -212,7 +212,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     status: 'started',
                     progress: null,
                     total: null,
-                    message: 'Starting...',
+                    message: '開始中...',
                     entriesCreated: null,
                     error: null,
                 });
@@ -360,7 +360,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     <div className={styles.progressBar}>
                         <div className={styles.progressInfo}>
                             <Loader2 className={styles.loader} size={14} />
-                            <span>{generationJob.message || 'Processing...'}</span>
+                            <span>{generationJob.message || '処理中...'}</span>
                         </div>
                         {generationJob.total && generationJob.total > 0 && (
                             <div className={styles.progressTrack}>
@@ -382,7 +382,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 )}
                 {generationJob && generationJob.status === 'failed' && (
                     <div className={styles.generationError}>
-                        <span>❌ {generationJob.error || 'Generation failed'}</span>
+                        <span>❌ {generationJob.error || '生成に失敗しました'}</span>
                         <button onClick={() => setGenerationJob(null)}>×</button>
                     </div>
                 )}

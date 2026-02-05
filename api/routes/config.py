@@ -70,6 +70,19 @@ def get_models():
     choices = get_model_choices_with_display_names()
     return [{"id": mid, "name": name} for mid, name in choices]
 
+
+@router.post("/reload-models")
+def reload_models():
+    """Reload model configurations from disk without restarting the server."""
+    from model_configs import reload_configs
+
+    reload_configs()
+    choices = get_model_choices_with_display_names()
+    return {
+        "reloaded": len(choices),
+        "models": [{"id": mid, "name": name} for mid, name in choices],
+    }
+
 @router.get("/playbooks", response_model=List[PlaybookInfo])
 def get_playbooks():
     """List available user-selectable playbooks with input_schema."""

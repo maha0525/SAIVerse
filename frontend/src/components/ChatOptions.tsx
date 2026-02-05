@@ -58,9 +58,11 @@ interface ChatOptionsProps {
     onPlaybookChange: (id: string | null) => void;
     playbookParams: Record<string, any>;
     onPlaybookParamsChange: (params: Record<string, any>) => void;
+    currentModel: string;
+    onModelChange: (model: string, displayName: string) => void;
 }
 
-export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybookChange, playbookParams, onPlaybookParamsChange }: ChatOptionsProps) {
+export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybookChange, playbookParams, onPlaybookParamsChange, currentModel: propCurrentModel, onModelChange }: ChatOptionsProps) {
     const [models, setModels] = useState<ModelInfo[]>([]);
     const [playbooks, setPlaybooks] = useState<PlaybookInfo[]>([]);
     const [currentModel, setCurrentModel] = useState<string>('');
@@ -92,12 +94,20 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
                 fetch('/api/config/cache')
             ]);
 
-            if (modelsRes.ok) setModels(await modelsRes.json());
+            let fetchedModels: ModelInfo[] = [];
+            if (modelsRes.ok) {
+                fetchedModels = await modelsRes.json();
+                setModels(fetchedModels);
+            }
             if (playbooksRes.ok) setPlaybooks(await playbooksRes.json());
 
             if (configRes.ok) {
                 const config = await configRes.json();
-                setCurrentModel(config.current_model || '');
+                const modelId = config.current_model || '';
+                setCurrentModel(modelId);
+                // Find display name from models list
+                const modelInfo = fetchedModels.find(m => m.id === modelId);
+                onModelChange(modelId, modelInfo?.name || ''); // Sync with parent
                 setParamSpecs(config.parameters || {});
                 setParams(config.current_values || {});
             }
@@ -124,6 +134,9 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
 
     const handleModelChange = async (modelId: string) => {
         setCurrentModel(modelId);
+        // Find display name from models list
+        const modelInfo = models.find(m => m.id === modelId);
+        onModelChange(modelId, modelInfo?.name || ''); // Notify parent component
         // Save immediately
         try {
             const res = await fetch('/api/config/model', {
@@ -250,38 +263,38 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
         <div className={styles.overlay}>
             <div className={styles.modal}>
                 <div className={styles.header}>
-                    <h2>Chat Options</h2>
+                    <h2>チャットオプション</h2>
                     <button className={styles.closeBtn} onClick={onClose}><X size={24} /></button>
                 </div>
 
                 <div className={styles.content}>
                     {loading ? (
-                        <div>Loading configuration...</div>
+                        <div>設定を読み込み中...</div>
                     ) : (
                         <>
                             <div className={styles.section}>
-                                <div className={styles.sectionTitle}>General</div>
+                                <div className={styles.sectionTitle}>一般</div>
                                 <div className={styles.formGroup}>
-                                    <label>Model</label>
+                                    <label>モデル</label>
                                     <select
                                         className={styles.select}
                                         value={currentModel}
                                         onChange={(e) => handleModelChange(e.target.value)}
                                     >
-                                        <option value="">(Default)</option>
+                                        <option value="">（デフォルト）</option>
                                         {models.map(m => (
                                             <option key={m.id} value={m.id}>{m.name}</option>
                                         ))}
                                     </select>
                                 </div>
                                 <div className={styles.formGroup}>
-                                    <label>Playbook (Active for next message)</label>
+                                    <label>Playbook（次のメッセージに適用）</label>
                                     <select
                                         className={styles.select}
                                         value={currentPlaybook || ''}
                                         onChange={(e) => handlePlaybookChange(e.target.value || null)}
                                     >
-                                        <option value="">(Auto Detect)</option>
+                                        <option value="">（自動検出）</option>
                                         {playbooks.map(p => (
                                             <option key={p.id} value={p.id}>{p.name}</option>
                                         ))}
@@ -291,7 +304,7 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
 
                             {cacheConfig.supported && (
                                 <div className={styles.section}>
-                                    <div className={styles.sectionTitle}>Prompt Cache (Anthropic)</div>
+                                    <div className={styles.sectionTitle}>プロンプトキャッシュ (Anthropic)</div>
                                     <div className={styles.formGroup}>
                                         <label className={styles.checkboxLabel}>
                                             <input
@@ -299,15 +312,15 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
                                                 checked={cacheConfig.enabled}
                                                 onChange={(e) => handleCacheEnabledChange(e.target.checked)}
                                             />
-                                            Enable prompt caching
+                                            プロンプトキャッシュを有効化
                                         </label>
                                         <span className={styles.hint}>
-                                            Caches system prompt and conversation history to reduce costs (read: 0.1x, write: 1.25x)
+                                            ON: プロンプトをキャッシュしてコスト削減（読取 0.1倍、書込 1.25倍〜2倍）。OFF: キャッシュなし（Anthropic APIは読取専用モード非対応）。
                                         </span>
                                     </div>
                                     {cacheConfig.enabled && cacheConfig.ttl_options.length > 0 && (
                                         <div className={styles.formGroup}>
-                                            <label>Cache TTL</label>
+                                            <label>キャッシュ TTL</label>
                                             <select
                                                 className={styles.select}
                                                 value={cacheConfig.ttl}
@@ -315,7 +328,7 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
                                             >
                                                 {cacheConfig.ttl_options.map(ttl => (
                                                     <option key={ttl} value={ttl}>
-                                                        {ttl === '5m' ? '5 minutes (1.25x write cost)' : '1 hour (2x write cost)'}
+                                                        {ttl === '5m' ? '5分（書込コスト 1.25倍）' : '1時間（書込コスト 2倍）'}
                                                     </option>
                                                 ))}
                                             </select>
@@ -326,12 +339,12 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
 
                             {playbookParamSpecs.length > 0 && (
                                 <div className={styles.section}>
-                                    <div className={styles.sectionTitle}>Playbook Parameters</div>
+                                    <div className={styles.sectionTitle}>Playbook パラメータ</div>
                                     {playbookParamSpecs.map(param => (
                                         <div key={param.name} className={styles.formGroup}>
                                             <label>
                                                 {param.description || param.name}
-                                                {!param.required && <span className={styles.optional}> (optional)</span>}
+                                                {!param.required && <span className={styles.optional}> （任意）</span>}
                                             </label>
 
                                             {param.resolved_options && param.resolved_options.length > 0 ? (
@@ -340,7 +353,7 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
                                                     value={playbookParams[param.name] ?? param.default ?? ''}
                                                     onChange={(e) => handlePlaybookParamChange(param.name, e.target.value || null)}
                                                 >
-                                                    <option value="">{param.required ? '(Select...)' : '(Auto)'}</option>
+                                                    <option value="">{param.required ? '（選択...）' : '（自動）'}</option>
                                                     {param.resolved_options.map(opt => (
                                                         <option key={opt.value} value={opt.value}>{opt.label}</option>
                                                     ))}
@@ -374,7 +387,7 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
 
                             {Object.keys(paramSpecs).length > 0 && (
                                 <div className={styles.section}>
-                                    <div className={styles.sectionTitle}>Parameters</div>
+                                    <div className={styles.sectionTitle}>パラメータ</div>
                                     {Object.entries(paramSpecs).map(([key, spec]) => (
                                         <div key={key} className={styles.formGroup}>
                                             <label>
@@ -422,8 +435,8 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
                 </div>
 
                 <div className={styles.footer}>
-                    <button className={styles.cancelBtn} onClick={onClose}>Close</button>
-                    <button className={styles.saveBtn} onClick={saveParams}>Apply Settings</button>
+                    <button className={styles.cancelBtn} onClick={onClose}>閉じる</button>
+                    <button className={styles.saveBtn} onClick={saveParams}>設定を適用</button>
                 </div>
             </div>
         </div>

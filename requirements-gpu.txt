@@ -1,0 +1,22 @@
+# GPU (CUDA) support for SAIVerse
+# Install this AFTER requirements.txt:
+#   pip install -r requirements.txt
+#   pip install -r requirements-gpu.txt
+#
+# Prerequisites:
+#   - NVIDIA GPU with CUDA support
+#   - CUDA Toolkit 12.x installed
+#   - cuDNN 9.x installed
+#
+# See docs/getting-started/gpu-setup.md for detailed instructions.
+
+# Replace CPU-only onnxruntime with GPU version
+# Note: You may need to uninstall onnxruntime first:
+#   pip uninstall onnxruntime -y
+onnxruntime-gpu>=1.21.0
+
+# Optional: PyTorch with CUDA support
+# Uncomment if you need PyTorch GPU acceleration
+# Install manually with:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# torch

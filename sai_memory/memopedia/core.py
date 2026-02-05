@@ -37,6 +37,8 @@ from sai_memory.memopedia.storage import (
     get_trunks as storage_get_trunks,
     move_pages_to_parent,
     get_unorganized_pages as storage_get_unorganized_pages,
+    # Important flag
+    set_important_flag,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -90,6 +92,7 @@ class Memopedia:
                 "keywords": page.keywords,
                 "vividness": page.vividness,
                 "is_trunk": page.is_trunk,
+                "is_important": page.is_important,
                 "content": page.content,  # Include content for vivid pages
                 "is_open": states.get(page.id, False),
                 "children": [_annotate(c) for c in page.children],
@@ -314,7 +317,10 @@ class Memopedia:
                         ref_end_message_id=ref_end_message_id,
                         edit_source=edit_source,
                     )
-            return result
+
+        # Update reference timestamp
+        self.touch_page(page_id)
+        return result
 
     def append_to_content(
         self,
@@ -425,12 +431,20 @@ class Memopedia:
             if page is None:
                 return {"error": f"Page not found: {page_id}"}
             children = get_children(self.conn, page_id)
-            return {
-                "title": page.title,
-                "summary": page.summary,
-                "content": page.content,
-                "children": [{"id": c.id, "title": c.title, "summary": c.summary} for c in children],
-            }
+
+        # Update reference timestamp (outside lock to avoid deadlock)
+        self.touch_page(page_id)
+
+        # Promote buried/faint pages when opened
+        if page.vividness in ("buried", "faint"):
+            self.update_page(page_id, vividness="rough")
+
+        return {
+            "title": page.title,
+            "summary": page.summary,
+            "content": page.content,
+            "children": [{"id": c.id, "title": c.title, "summary": c.summary} for c in children],
+        }
 
     def close_page(self, thread_id: str, page_id: str) -> Dict[str, Any]:
         """Close a page for a thread."""
@@ -464,6 +478,74 @@ class Memopedia:
             sections.append("\n".join(section_lines))
 
         return "\n\n---\n\n".join(sections)
+
+    # ----- Reference tracking (vividness management) -----
+
+    def touch_page(self, page_id: str) -> None:
+        """Update last_referenced_at timestamp for a page.
+
+        Called automatically when a page is opened or updated,
+        used by apply_vividness_decay() to determine decay timing.
+        """
+        import time
+        now = int(time.time())
+        with self._lock:
+            self.conn.execute(
+                "UPDATE memopedia_pages SET last_referenced_at = ? WHERE id = ?",
+                (now, page_id),
+            )
+            self.conn.commit()
+
+    def apply_vividness_decay(self) -> int:
+        """Apply time-based vividness decay to all non-root pages.
+
+        Decay rules:
+        - vivid → rough after 14 days without reference
+        - rough → faint after 30 days without reference (skipped for important pages)
+        - faint → buried after 60 days without reference (skipped for important pages)
+
+        Important pages (is_important=1) will never decay below 'rough'.
+
+        Returns:
+            Number of pages whose vividness was changed
+        """
+        import time as _time
+
+        now = int(_time.time())
+        # (from_level, to_level, threshold_secs, skip_important)
+        decay_rules = [
+            ("vivid", "rough", 14 * 86400, False),
+            ("rough", "faint", 30 * 86400, True),
+            ("faint", "buried", 60 * 86400, True),
+        ]
+
+        changed = 0
+        with self._lock:
+            for from_level, to_level, threshold_secs, skip_important in decay_rules:
+                cutoff = now - threshold_secs
+                important_clause = "AND (is_important = 0 OR is_important IS NULL)" if skip_important else ""
+                cur = self.conn.execute(
+                    f"""
+                    UPDATE memopedia_pages
+                    SET vividness = ?, updated_at = ?
+                    WHERE vividness = ?
+                      AND (last_referenced_at IS NOT NULL AND last_referenced_at < ?)
+                      AND id NOT LIKE 'root_%'
+                      AND (is_deleted = 0 OR is_deleted IS NULL)
+                      {important_clause}
+                    """,
+                    (to_level, now, from_level, cutoff),
+                )
+                count = cur.rowcount
+                if count > 0:
+                    LOGGER.info(
+                        "Vividness decay: %d pages %s → %s",
+                        count, from_level, to_level,
+                    )
+                    changed += count
+            if changed > 0:
+                self.conn.commit()
+        return changed
 
     # ----- Update tracking -----
 
@@ -720,6 +802,30 @@ class Memopedia:
             result = set_trunk_flag(self.conn, page_id, is_trunk)
             if result:
                 LOGGER.info("Set trunk flag for page %s to %s", page_id, is_trunk)
+            return result
+
+    def set_important(self, page_id: str, is_important: bool) -> Optional[MemopediaPage]:
+        """
+        Set or unset the important flag for a page.
+
+        Important pages will not decay below 'rough' vividness,
+        ensuring they remain visible in the persona's context.
+
+        Args:
+            page_id: ID of the page to modify
+            is_important: True to mark as important
+
+        Returns:
+            The updated page, or None if not found
+        """
+        if page_id.startswith("root_"):
+            LOGGER.warning("Cannot modify important status of root page: %s", page_id)
+            return None
+
+        with self._lock:
+            result = set_important_flag(self.conn, page_id, is_important)
+            if result:
+                LOGGER.info("Set important flag for page %s to %s", page_id, is_important)
             return result
 
     def get_trunks(self, category: Optional[str] = None) -> List[MemopediaPage]:

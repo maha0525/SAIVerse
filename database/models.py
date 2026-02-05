@@ -262,4 +262,5 @@ class LLMUsageLog(Base):
     COST_USD = Column(Float, nullable=True)  # Calculated cost in USD
     NODE_TYPE = Column(String(64), nullable=True)  # llm, router, tool_detection, etc.
     PLAYBOOK_NAME = Column(String(255), nullable=True)
+    CATEGORY = Column(String(64), nullable=True)  # persona_speak, memory_weave_generate, etc.
 

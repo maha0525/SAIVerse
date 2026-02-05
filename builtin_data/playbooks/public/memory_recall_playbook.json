@@ -19,19 +19,32 @@
       "id": "generate_query",
       "type": "llm",
       "model_type": "lightweight",
-      "action": "memory_recallツールの引数を決定します。思い出したい内容を、web検索のクエリのようにスペース区切り等で入力してください。",
+      "action": "memory_recallツールの引数を決定します。\n\n以下のルールに従って、検索パラメータを生成してください：\n- query: 思い出したい内容を自然文で記述（意味的な検索に使われます）\n- keywords: メッセージ本文に含まれているはずの具体的な単語・固有名詞・日付を配列で指定（部分一致検索に使われます）\n- start_date / end_date: 時期が分かっている場合のみ YYYY-MM-DD 形式で指定（不要なら空文字）\n\nqueryとkeywordsの両方を指定すると検索精度が上がります。\nqueryには概念的な説明を、keywordsにはメッセージに直接出現しそうな単語を書いてください。\n\n例：「まはーの誕生日を祝ったときの会話を思い出したい」\n→ query: \"誕生日を祝った会話\", keywords: [\"誕生日\", \"おめでとう\", \"1月14日\"], start_date: \"2026-01-01\", end_date: \"2026-01-31\"",
       "next": "log",
       "response_schema": {
         "type": "object",
         "properties": {
           "query": {
             "type": "string",
-            "description": "Optimized search query for memory recall"
+            "description": "Semantic search query in natural language"
+          },
+          "keywords": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Exact keywords to match in message content"
+          },
+          "start_date": {
+            "type": "string",
+            "description": "Start date filter (YYYY-MM-DD), empty if not needed"
+          },
+          "end_date": {
+            "type": "string",
+            "description": "End date filter (YYYY-MM-DD), empty if not needed"
           }
         },
-        "required": ["query"]
+        "required": ["query", "keywords"]
       },
-      "output_key": "search_query"
+      "output_key": "search_params"
     },
     {
       "id": "log",
@@ -49,7 +62,10 @@
       "type": "tool",
       "action": "memory_recall",
       "args_input": {
-        "query": "search_query.query",
+        "query": "search_params.query",
+        "keywords": "search_params.keywords",
+        "start_date": "search_params.start_date",
+        "end_date": "search_params.end_date",
         "max_chars": 10000,
         "topk": 5
       },

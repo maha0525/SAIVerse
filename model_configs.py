@@ -79,6 +79,18 @@ def load_configs() -> Dict[str, Dict]:
 MODEL_CONFIGS = load_configs()
 
 
+def reload_configs() -> Dict[str, Dict]:
+    """Reload model configurations from disk and update the global cache.
+
+    Call this after adding, editing, or removing model JSON files
+    to pick up changes without restarting the server.
+    """
+    global MODEL_CONFIGS
+    MODEL_CONFIGS = load_configs()
+    LOGGER.info("Model configurations reloaded: %d models", len(MODEL_CONFIGS))
+    return MODEL_CONFIGS
+
+
 def get_model_provider(model: str) -> str:
     return MODEL_CONFIGS.get(model, {}).get("provider", "ollama")
 

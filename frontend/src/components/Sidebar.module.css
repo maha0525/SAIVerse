@@ -60,13 +60,86 @@
     color: #f59e0b;
 }
 
+.sectionTitleRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.8rem;
+}
+
 .sectionTitle {
     font-size: 0.8rem;
     text-transform: uppercase;
     color: #64748b;
     font-weight: 700;
-    margin-bottom: 0.8rem;
     letter-spacing: 0.05em;
+}
+
+.addBuildingBtn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    border: 1px solid #e2e8f0;
+    background: transparent;
+    color: #64748b;
+    cursor: pointer;
+    transition: all 0.2s;
+    padding: 0;
+}
+
+.addBuildingBtn:hover {
+    background: rgba(0, 0, 0, 0.05);
+    color: #475569;
+    border-color: #cbd5e1;
+}
+
+.createBuildingForm {
+    display: flex;
+    gap: 0.4rem;
+    margin-bottom: 0.6rem;
+    padding: 0 0.2rem;
+}
+
+.createBuildingInput {
+    flex: 1;
+    min-width: 0;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    background: #fff;
+    color: #1e293b;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+.createBuildingInput:focus {
+    border-color: #4dabf7;
+}
+
+.createBuildingSubmit {
+    padding: 0.4rem 0.7rem;
+    border: none;
+    border-radius: 6px;
+    background: #4dabf7;
+    color: #fff;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.2s;
+}
+
+.createBuildingSubmit:hover:not(:disabled) {
+    background: #339af0;
+}
+
+.createBuildingSubmit:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 .buildingList {
@@ -289,6 +362,27 @@
 
     .active:hover {
         background: rgba(67, 56, 202, 0.4);
+    }
+
+    .addBuildingBtn {
+        border-color: rgba(255, 255, 255, 0.15);
+        color: #94a3b8;
+    }
+
+    .addBuildingBtn:hover {
+        background: rgba(255, 255, 255, 0.05);
+        color: #f3f4f6;
+        border-color: rgba(255, 255, 255, 0.25);
+    }
+
+    .createBuildingInput {
+        background: #262626;
+        border-color: rgba(255, 255, 255, 0.15);
+        color: #f3f4f6;
+    }
+
+    .createBuildingInput:focus {
+        border-color: #4dabf7;
     }
 
     .settingsFooter {

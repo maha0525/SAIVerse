@@ -64,6 +64,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
     // When opening a modal, we use selectedPersona's ID.
     // We need to keep the ID even if selectedPersona is cleared (though typically we might close menu first).
     const [activeModalPersonaId, setActiveModalPersonaId] = useState<string | null>(null);
+    const [activeModalPersonaName, setActiveModalPersonaName] = useState<string | null>(null);
 
     const startX = useRef<number | null>(null);
     const startY = useRef<number | null>(null);
@@ -153,6 +154,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
     const openModal = (type: 'memory' | 'schedule' | 'tasks' | 'settings' | 'inventory') => {
         if (selectedPersona) {
             setActiveModalPersonaId(selectedPersona.id);
+            setActiveModalPersonaName(selectedPersona.name);
             if (type === 'memory') setShowMemory(true);
             if (type === 'schedule') setShowSchedule(true);
             if (type === 'tasks') setShowTasks(true);
@@ -184,20 +186,20 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
                 {details ? (
                     <>
                         <div className={styles.section}>
-                            <h3 className={styles.heading}>Current Location</h3>
+                            <h3 className={styles.heading}>現在地</h3>
                             <div className={styles.content}>
                                 <div className={styles.buildingHeader}>
                                     <div className={styles.buildingName}>{details.name}</div>
                                     <button
                                         className={styles.settingsBtn}
                                         onClick={() => setShowBuildingSettings(true)}
-                                        title="Building Settings"
+                                        title="Building設定"
                                     >
                                         <Settings size={16} />
                                     </button>
                                 </div>
                                 <div className={styles.description}>
-                                    {details.description || "No description available."}
+                                    {details.description || "説明がありません"}
                                 </div>
                             </div>
                         </div>
@@ -206,7 +208,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
                         {details.image_path && (
                             <div className={styles.section}>
                                 <h3 className={styles.heading}>
-                                    <ImageIcon size={16} /> Interior
+                                    <ImageIcon size={16} /> インテリア
                                 </h3>
                                 <div className={styles.buildingImage}>
                                     <img
@@ -222,7 +224,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
 
                         <div className={styles.section}>
                             <h3 className={styles.heading}>
-                                <Users size={16} /> Occupants ({details.occupants.length})
+                                <Users size={16} /> 滞在ペルソナ ({details.occupants.length})
                             </h3>
                             <div className={styles.occupantList}>
                                 {details.occupants.length > 0 ? (
@@ -243,14 +245,14 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
                                         </div>
                                     ))
                                 ) : (
-                                    <div className={styles.empty}>No one is here.</div>
+                                    <div className={styles.empty}>ここには誰もいません</div>
                                 )}
                             </div>
                         </div>
 
                         <div className={styles.section}>
                             <h3 className={styles.heading}>
-                                <FileText size={16} /> Items ({details.items.length})
+                                <FileText size={16} /> アイテム ({details.items.length})
                             </h3>
                             <div className={styles.grid}>
                                 {details.items.length > 0 ? (
@@ -281,13 +283,13 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
                                         </div>
                                     ))
                                 ) : (
-                                    <div className={styles.empty}>No items found.</div>
+                                    <div className={styles.empty}>アイテムはありません</div>
                                 )}
                             </div>
                         </div>
                     </>
                 ) : (
-                    <div style={{ padding: '1rem', color: '#6b7280' }}>Loading location info...</div>
+                    <div style={{ padding: '1rem', color: '#6b7280' }}>読み込み中...</div>
                 )}
             </aside>
 
@@ -326,6 +328,7 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
                             isOpen={showMemory}
                             onClose={() => setShowMemory(false)}
                             personaId={activeModalPersonaId}
+                            personaName={activeModalPersonaName || undefined}
                         />
                         <ScheduleModal
                             isOpen={showSchedule}

@@ -19,6 +19,8 @@ from sai_memory.memory.recall import (
 from sai_memory.memory.storage import (
     add_message,
     Message,
+    get_all_messages_for_search,
+    get_messages_around,
     get_messages_last,
     get_messages_paginated,
     get_or_create_thread,
@@ -37,7 +39,7 @@ from sai_memory.memory.storage import (
     calculate_stelis_window_tokens,
     delete_stelis_thread,
 )
-from sai_memory.backup import BackupError, run_backup
+from sai_memory.backup import BackupError, run_backup_auto
 
 LOGGER = logging.getLogger(__name__)
 
@@ -215,11 +217,20 @@ class SAIMemoryAdapter:
     def _run_startup_backup(self) -> None:
         db_path = Path(self.settings.db_path)
         rdiff_path = os.getenv("SAIMEMORY_RDIFF_PATH")
+        prefer_simple = os.getenv("SAIMEMORY_BACKUP_SIMPLE", "").strip().lower() in {"1", "true", "yes", "on"}
         try:
-            run_backup(persona_id=self.persona_id, db_path=db_path, rdiff_path=rdiff_path)
-            LOGGER.info("Auto SAIMemory backup completed for persona=%s", self.persona_id)
+            result = run_backup_auto(
+                persona_id=self.persona_id,
+                db_path=db_path,
+                rdiff_path=rdiff_path,
+                prefer_simple=prefer_simple,
+            )
+            if result is None:
+                LOGGER.info("Auto SAIMemory backup skipped for persona=%s (no changes)", self.persona_id)
+            else:
+                LOGGER.info("Auto SAIMemory backup completed for persona=%s: %s", self.persona_id, result)
         except BackupError as exc:
-            LOGGER.warning("Auto SAIMemory backup skipped for persona=%s: %s", self.persona_id, exc)
+            LOGGER.warning("Auto SAIMemory backup failed for persona=%s: %s", self.persona_id, exc)
         except Exception:
             LOGGER.exception("Unexpected error during auto SAIMemory backup for %s", self.persona_id)
 
@@ -269,6 +280,51 @@ class SAIMemoryAdapter:
             if consumed > max_chars:
                 break
             selected.insert(0, payload)
+        return selected
+
+    def recent_persona_messages_by_count(
+        self,
+        max_messages: int,
+        *,
+        required_tags: Optional[List[str]] = None,
+        pulse_id: Optional[str] = None,
+    ) -> List[dict]:
+        """Get recent persona messages limited by message count instead of characters."""
+        if not self._ready:
+            return []
+        thread_id = self._thread_id(None)
+        try:
+            with self._db_lock:
+                all_rows = _fetch_all_messages(self.conn, thread_id)
+                payloads = [self._payload_from_message_locked(msg, viewing_thread_id=thread_id) for msg in all_rows]
+        except Exception as exc:
+            LOGGER.warning("Failed to fetch persona messages for %s: %s", thread_id, exc)
+            return []
+
+        selected: List[dict] = []
+        required_tags = required_tags or []
+        pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
+
+        for payload in reversed(payloads):
+            tags = []
+            metadata = payload.get("metadata")
+            if isinstance(metadata, dict):
+                raw_tags = metadata.get("tags")
+                if isinstance(raw_tags, list):
+                    tags = [str(tag) for tag in raw_tags if tag]
+
+            include = True
+            if required_tags:
+                include = any(tag in tags for tag in required_tags)
+            if pulse_tag and pulse_tag in tags:
+                include = True
+            if not tags and required_tags:
+                include = not required_tags or "conversation" not in required_tags
+            if not include:
+                continue
+            selected.insert(0, payload)
+            if len(selected) >= max_messages:
+                break
         return selected
 
     def recent_persona_messages_balanced(
@@ -622,6 +678,153 @@ class SAIMemoryAdapter:
                 entry = f"- {role} @ {ts}: {content}"
                 if score is not None and msg.id == seed.id:
                     entry = f"- {role} @ {ts} (score={score:.3f}): {content}"
+                candidate = lines + [entry]
+                combined = "\n".join(candidate)
+                if len(combined) > max_chars:
+                    return "\n".join(lines)
+                lines.append(entry)
+
+        return "" if len(lines) == 1 else "\n".join(lines)
+
+    def recall_hybrid(
+        self,
+        query_text: str = "",
+        keywords: Optional[List[str]] = None,
+        *,
+        max_chars: int = 800,
+        topk: Optional[int] = None,
+        range_before: Optional[int] = None,
+        range_after: Optional[int] = None,
+        start_ts: Optional[int] = None,
+        end_ts: Optional[int] = None,
+    ) -> str:
+        """Hybrid recall: keyword matching + semantic search, combined with RRF."""
+        if not self._ready:
+            return ""
+        if not query_text and not keywords:
+            return ""
+
+        from collections import defaultdict
+
+        recall_topk = self.settings.topk if topk is None else max(1, int(topk))
+        before = self.settings.range_before if range_before is None else max(0, int(range_before))
+        after = self.settings.range_after if range_after is None else max(0, int(range_after))
+        rrf_k = 60
+
+        # Guard: exclude recent messages
+        thread_id = self._thread_id(None)
+        guard_ids: set[str] = set()
+        guard_count = max(0, self.settings.last_messages)
+        if guard_count > 0:
+            with self._db_lock:
+                recent_msgs = get_messages_last(self.conn, thread_id, guard_count)
+                guard_ids = {m.id for m in recent_msgs}
+
+        message_scores: dict[str, float] = defaultdict(float)
+        message_data: dict[str, Any] = {}  # msg_id -> Message object
+
+        # 1. Keyword search
+        if keywords:
+            with self._db_lock:
+                all_msgs = get_all_messages_for_search(
+                    self.conn,
+                    required_tags=["conversation"],
+                )
+            keyword_scored = []
+            for msg in all_msgs:
+                if msg.id in guard_ids:
+                    continue
+                if start_ts and msg.created_at < start_ts:
+                    continue
+                if end_ts and msg.created_at > end_ts:
+                    continue
+                content_lower = msg.content.lower() if msg.content else ""
+                match_count = sum(1 for kw in keywords if kw.lower() in content_lower)
+                if match_count > 0:
+                    keyword_scored.append((msg, match_count))
+
+            keyword_scored.sort(key=lambda x: x[1], reverse=True)
+            for rank, (msg, _count) in enumerate(keyword_scored[:recall_topk * 2], start=1):
+                if msg.id not in message_data:
+                    message_data[msg.id] = msg
+                message_scores[msg.id] += 1.0 / (rrf_k + rank)
+
+        # 2. Semantic search
+        if query_text and query_text.strip():
+            search_topk = recall_topk * 2 + len(guard_ids)
+            with self._db_lock:
+                groups_raw = semantic_recall_groups(
+                    self.conn,
+                    self.embedder,
+                    query_text,
+                    thread_id=None,
+                    resource_id=None,
+                    topk=search_topk,
+                    range_before=0,
+                    range_after=0,
+                    scope=self.settings.scope,
+                    exclude_message_ids=guard_ids,
+                    required_tags=["conversation"],
+                )
+            rank_counter = 0
+            for seed, _bundle, _score in groups_raw:
+                if start_ts and seed.created_at < start_ts:
+                    continue
+                if end_ts and seed.created_at > end_ts:
+                    continue
+                rank_counter += 1
+                if seed.id not in message_data:
+                    message_data[seed.id] = seed
+                message_scores[seed.id] += 1.0 / (rrf_k + rank_counter)
+
+        if not message_scores:
+            return ""
+
+        # Sort by RRF score and pick top-k
+        sorted_ids = sorted(message_scores.keys(), key=lambda x: message_scores[x], reverse=True)
+        top_ids = sorted_ids[:recall_topk]
+
+        # Expand context around each seed
+        groups = []
+        try:
+            with self._db_lock:
+                for msg_id in top_ids:
+                    msg = message_data[msg_id]
+                    score = message_scores[msg_id]
+                    if before > 0 or after > 0:
+                        around = get_messages_around(self.conn, msg.thread_id, msg.id, before, after)
+                        bundle = [*around[:before], msg, *around[before:]]
+                        bundle.sort(key=lambda m: m.created_at)
+                    else:
+                        bundle = [msg]
+                    formatted = [
+                        (m, compose_message_content(self.conn, m))
+                        for m in bundle
+                    ]
+                    groups.append((msg, formatted, score))
+        except Exception as exc:
+            LOGGER.warning("SAIMemory hybrid recall context expansion failed: %s", exc)
+            return ""
+
+        # Format output (same format as recall_snippet)
+        lines: List[str] = ["[Memory Recall]"]
+        seen: set[str] = set()
+        for seed, bundle, score in groups:
+            for msg, rendered in bundle:
+                if msg.id in seen or msg.id in guard_ids:
+                    continue
+                seen.add(msg.id)
+                if msg.role == "system":
+                    continue
+                content = (rendered or "").strip()
+                if not content:
+                    continue
+                dt = datetime.fromtimestamp(msg.created_at)
+                ts = dt.strftime("%Y-%m-%d %H:%M")
+                role = msg.role
+                entry = f"- {role} @ {ts}: {content}"
+                if msg.id == seed.id:
+                    entry = f"- {role} @ {ts} (score={score:.4f}): {content}"
                 candidate = lines + [entry]
                 combined = "\n".join(candidate)
                 if len(combined) > max_chars:

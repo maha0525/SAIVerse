@@ -27,6 +27,7 @@ class BuildingInfo(BaseModel):
 
 class BuildingsResponse(BaseModel):
     buildings: List[BuildingInfo]
+    city_id: Optional[int] = None
 
 @router.get("/status", response_model=UserStatusResponse)
 def get_user_status(manager = Depends(get_manager)):
@@ -72,9 +73,10 @@ def get_buildings(manager = Depends(get_manager)):
     sorted_buildings = sorted(manager.buildings, key=lambda b: b.name)
     return {
         "buildings": [
-            {"id": b.building_id, "name": b.name} 
+            {"id": b.building_id, "name": b.name}
             for b in sorted_buildings
-        ]
+        ],
+        "city_id": getattr(manager, 'city_id', None)
     }
 
 class UpdateProfileRequest(BaseModel):

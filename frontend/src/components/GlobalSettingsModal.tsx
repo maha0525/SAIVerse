@@ -138,10 +138,10 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                 body: JSON.stringify({ updates: editedEnv })
             });
             if (res.ok) {
-                alert("Environment variables saved.");
+                alert("環境変数を保存しました。");
                 loadEnvVars(); // Reload to confirm
             } else {
-                alert("Failed to save.");
+                alert("保存に失敗しました。");
             }
         } catch (e) {
             console.error("Save error", e);
@@ -151,10 +151,10 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     };
 
     const restartServer = async () => {
-        if (!confirm("Are you sure you want to restart the server? This will temporarily disconnect the UI.")) return;
+        if (!confirm("サーバーを再起動しますか？UIが一時的に切断されます。")) return;
         try {
             await fetch('/api/admin/restart', { method: 'POST' });
-            alert("Server is restarting. Please reload the page in a few seconds.");
+            alert("サーバーを再起動中です。数秒後にページを再読み込みしてください。");
         } catch (e) {
             console.error(e);
         }
@@ -173,7 +173,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                 onTouchMove={(e) => e.stopPropagation()}
             >
                 <div className={styles.header}>
-                    <h2><Settings /> Global Settings</h2>
+                    <h2><Settings /> グローバル設定</h2>
                     <button className={styles.closeBtn} onClick={onClose}><X size={24} /></button>
                 </div>
 
@@ -184,19 +184,19 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                             className={`${styles.navItem} ${activeTab === 'env' ? styles.active : ''}`}
                             onClick={() => setActiveTab('env')}
                         >
-                            <Settings size={18} /> Environment
+                            <Settings size={18} /> 環境
                         </div>
                         <div
                             className={`${styles.navItem} ${activeTab === 'world' ? styles.active : ''}`}
                             onClick={() => setActiveTab('world')}
                         >
-                            <Globe size={18} /> World Editor
+                            <Globe size={18} /> ワールドエディタ
                         </div>
                         <div
                             className={`${styles.navItem} ${activeTab === 'db' ? styles.active : ''}`}
                             onClick={() => setActiveTab('db')}
                         >
-                            <Database size={18} /> Database Manager
+                            <Database size={18} /> データベース管理
                         </div>
                     </div>
 
@@ -222,14 +222,14 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                 </div>
 
                                 <div className={styles.sectionHeader}>
-                                    <h3>Server Environment Variables (.env)</h3>
+                                    <h3>サーバー環境変数 (.env)</h3>
                                     <button className={styles.restartBtn} onClick={restartServer}>
-                                        <Power size={16} /> Restart Server
+                                        <Power size={16} /> サーバー再起動
                                     </button>
                                 </div>
 
                                 {isLoading ? (
-                                    <div>Loading...</div>
+                                    <div>読み込み中...</div>
                                 ) : (
                                     <>
                                         <div className={styles.envList}>
@@ -240,7 +240,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                         className={styles.envInput}
                                                         type={item.is_sensitive ? "password" : "text"}
                                                         defaultValue={item.is_sensitive ? "" : item.value}
-                                                        placeholder={item.is_sensitive ? "(Hidden/Unchanged)" : ""}
+                                                        placeholder={item.is_sensitive ? "（非表示/変更なし）" : ""}
                                                         onChange={(e) => handleEnvChange(item.key, e.target.value)}
                                                     />
                                                 </div>
@@ -252,7 +252,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                                 onClick={saveEnv}
                                                 disabled={isSaving || Object.keys(editedEnv).length === 0}
                                             >
-                                                {isSaving ? <RefreshCw className="spin" /> : <Save />} Save Changes
+                                                {isSaving ? <RefreshCw className="spin" /> : <Save />} 保存
                                             </button>
                                         </div>
                                     </>
@@ -267,14 +267,14 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                         {activeTab === 'db' && (
                             <div className={styles.dbContainer}>
                                 <div className={styles.sectionHeader}>
-                                    <h3>Database Manager</h3>
+                                    <h3>データベース管理</h3>
                                     <div className={styles.selectWrapper}>
                                         <select
                                             className={styles.dbSelect}
                                             onChange={(e) => loadTableData(e.target.value)}
                                             value={selectedTable || ""}
                                         >
-                                            <option value="" disabled>Select a table...</option>
+                                            <option value="" disabled>テーブルを選択...</option>
                                             {tables.map(t => (
                                                 <option key={t.name} value={t.name}>{t.name}</option>
                                             ))}
@@ -282,10 +282,10 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                     </div>
                                 </div>
 
-                                {dbLoading && <div>Loading data...</div>}
+                                {dbLoading && <div>データ読み込み中...</div>}
 
                                 {!dbLoading && selectedTable && tableData.length === 0 && (
-                                    <div style={{ padding: '1rem', color: '#888' }}>No records found.</div>
+                                    <div style={{ padding: '1rem', color: '#888' }}>レコードが見つかりません。</div>
                                 )}
 
                                 {!dbLoading && selectedTable && tableData.length > 0 && (

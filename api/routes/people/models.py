@@ -187,6 +187,15 @@ class ExtensionImportStatusResponse(BaseModel):
     success: Optional[bool] = None
     title: Optional[str] = None
 
+class NativeImportStatusResponse(BaseModel):
+    running: bool
+    progress: Optional[int] = None
+    total: Optional[int] = None
+    message: Optional[str] = None
+    success: Optional[bool] = None
+    threads_imported: Optional[int] = None
+    messages_imported: Optional[int] = None
+
 
 # -----------------------------------------------------------------------------
 # Re-embed Models
@@ -227,6 +236,10 @@ class CreateMemopediaPageRequest(BaseModel):
 
 class SetTrunkRequest(BaseModel):
     is_trunk: bool
+
+
+class SetImportantRequest(BaseModel):
+    is_important: bool
 
 
 class MovePagesToTrunkRequest(BaseModel):

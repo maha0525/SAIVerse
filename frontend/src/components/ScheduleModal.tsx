@@ -233,7 +233,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
     };
 
     const handleDelete = async (id: number) => {
-        if (!confirm('Are you sure?')) return;
+        if (!confirm('このスケジュールを削除しますか？')) return;
         try {
             await fetch(`/api/people/${personaId}/schedules/${id}`, { method: 'DELETE' });
             loadSchedules();
@@ -242,15 +242,15 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
     const formatDetail = (s: ScheduleItem) => {
         if (s.schedule_type === 'periodic') {
-            const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-            const ds = s.days_of_week ? s.days_of_week.map(d => days[d]).join(', ') : 'Daily';
+            const days = ["月", "火", "水", "木", "金", "土", "日"];
+            const ds = s.days_of_week ? s.days_of_week.map(d => days[d]).join(', ') : '毎日';
             return `${ds} @ ${s.time_of_day}`;
         }
         if (s.schedule_type === 'oneshot') {
-            return `${new Date(s.scheduled_datetime || '').toLocaleString()} ${s.completed ? '(Done)' : ''}`;
+            return `${new Date(s.scheduled_datetime || '').toLocaleString()} ${s.completed ? '(完了)' : ''}`;
         }
         if (s.schedule_type === 'interval') {
-            return `Every ${s.interval_seconds}s`;
+            return `${s.interval_seconds}秒ごと`;
         }
         return '?';
     };
@@ -268,7 +268,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
         <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
-                    <h2 className={styles.title}>Schedule Management: {personaId}</h2>
+                    <h2 className={styles.title}>スケジュール管理: {personaId}</h2>
                     <button className={styles.closeButton} onClick={onClose}><X size={20} /></button>
                 </div>
 
@@ -276,23 +276,23 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                     {/* List Section */}
                     <div className={styles.listSection}>
                         <div className={styles.sectionTitle}>
-                            <span>Current Schedules</span>
-                            <button onClick={loadSchedules} style={{ background: 'none', border: 'none', color: '#4dabf7', cursor: 'pointer' }}>Refresh</button>
+                            <span>登録済みスケジュール</span>
+                            <button onClick={loadSchedules} style={{ background: 'none', border: 'none', color: '#4dabf7', cursor: 'pointer' }}>更新</button>
                         </div>
                         <div className={styles.tableContainer}>
                             {schedules.length === 0 ? (
-                                <div className={styles.emptyState}>No schedules found.</div>
+                                <div className={styles.emptyState}>スケジュールがありません</div>
                             ) : (
                                 <table className={styles.table}>
                                     <thead>
                                         <tr>
-                                            <th>Type</th>
+                                            <th>種別</th>
                                             <th>Playbook</th>
-                                            <th>Description</th>
-                                            <th>Detail</th>
-                                            <th>Params</th>
-                                            <th>State</th>
-                                            <th>Actions</th>
+                                            <th>説明</th>
+                                            <th>詳細</th>
+                                            <th>パラメータ</th>
+                                            <th>状態</th>
+                                            <th>操作</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -307,18 +307,18 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                                                 </td>
                                                 <td>
                                                     <span className={s.enabled ? styles.enabled : styles.disabled}>
-                                                        {s.enabled ? 'Enabled' : 'Disabled'}
+                                                        {s.enabled ? '有効' : '無効'}
                                                     </span>
                                                 </td>
                                                 <td>
                                                     <div className={styles.actions}>
-                                                        <button className={`${styles.actionBtn} ${styles.editBtn}`} onClick={() => handleEdit(s)} title="Edit">
+                                                        <button className={`${styles.actionBtn} ${styles.editBtn}`} onClick={() => handleEdit(s)} title="編集">
                                                             <Edit2 size={14} />
                                                         </button>
-                                                        <button className={`${styles.actionBtn} ${styles.toggleBtn}`} onClick={() => handleToggle(s.schedule_id)} title="Toggle">
+                                                        <button className={`${styles.actionBtn} ${styles.toggleBtn}`} onClick={() => handleToggle(s.schedule_id)} title="切替">
                                                             <Power size={14} />
                                                         </button>
-                                                        <button className={`${styles.actionBtn} ${styles.deleteBtn}`} onClick={() => handleDelete(s.schedule_id)} title="Delete">
+                                                        <button className={`${styles.actionBtn} ${styles.deleteBtn}`} onClick={() => handleDelete(s.schedule_id)} title="削除">
                                                             <Trash2 size={14} />
                                                         </button>
                                                     </div>
@@ -334,27 +334,27 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                     {/* Form Section */}
                     <div className={styles.formSection}>
                         <div className={styles.sectionTitle}>
-                            {editingId !== null ? 'Edit Schedule' : 'Add New Schedule'}
+                            {editingId !== null ? 'スケジュールを編集' : '新規スケジュール追加'}
                             {editingId !== null && (
                                 <button
                                     onClick={resetForm}
                                     style={{ marginLeft: '10px', background: 'none', border: 'none', color: '#868e96', cursor: 'pointer', fontSize: '0.9em' }}
                                 >
-                                    (Cancel)
+                                    (キャンセル)
                                 </button>
                             )}
                         </div>
                         <div className={styles.formGrid}>
                             <div className={styles.formGroup}>
-                                <label className={styles.label}>Schedule Type</label>
+                                <label className={styles.label}>スケジュール種別</label>
                                 <select
                                     className={styles.select}
                                     value={formType}
                                     onChange={e => setFormType(e.target.value as any)}
                                 >
-                                    <option value="periodic">Periodic (Weekly)</option>
-                                    <option value="oneshot">One-shot (Once)</option>
-                                    <option value="interval">Interval (Recurring)</option>
+                                    <option value="periodic">定期（週次）</option>
+                                    <option value="oneshot">単発（1回のみ）</option>
+                                    <option value="interval">インターバル（繰り返し）</option>
                                 </select>
                             </div>
 
@@ -373,25 +373,25 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                             </div>
 
                             <div className={styles.formGroup} style={{ gridColumn: '1 / -1' }}>
-                                <label className={styles.label}>Description</label>
+                                <label className={styles.label}>説明</label>
                                 <input
                                     className={styles.input}
                                     value={formDesc}
                                     onChange={e => setFormDesc(e.target.value)}
-                                    placeholder="Task description..."
+                                    placeholder="タスクの説明..."
                                 />
                             </div>
 
                             {/* Playbook Parameters Section */}
                             {playbookParamSpecs.length > 0 && (
                                 <div className={styles.formGroup} style={{ gridColumn: '1 / -1' }}>
-                                    <label className={styles.label}>Playbook Parameters</label>
+                                    <label className={styles.label}>Playbook パラメータ</label>
                                     <div className={styles.paramGrid}>
                                         {playbookParamSpecs.map(param => (
                                             <div key={param.name} className={styles.paramItem}>
                                                 <label className={styles.paramLabel}>
                                                     {param.description || param.name}
-                                                    {!param.required && <span style={{ fontSize: '0.8em', color: '#888' }}> (optional)</span>}
+                                                    {!param.required && <span style={{ fontSize: '0.8em', color: '#888' }}> （任意）</span>}
                                                 </label>
 
                                                 {param.resolved_options && param.resolved_options.length > 0 ? (
@@ -400,7 +400,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                                                         value={formPlaybookParams[param.name] ?? param.default ?? ''}
                                                         onChange={e => handlePlaybookParamChange(param.name, e.target.value || null)}
                                                     >
-                                                        <option value="">{param.required ? '(Select...)' : '(Auto)'}</option>
+                                                        <option value="">{param.required ? '（選択...）' : '（自動）'}</option>
                                                         {param.resolved_options.map(opt => (
                                                             <option key={opt.value} value={opt.value}>{opt.label}</option>
                                                         ))}
@@ -436,9 +436,9 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                             {formType === 'periodic' && (
                                 <>
                                     <div className={styles.formGroup} style={{ gridColumn: '1 / -1' }}>
-                                        <label className={styles.label}>Days of Week</label>
+                                        <label className={styles.label}>曜日</label>
                                         <div className={styles.checkboxGroup}>
-                                            {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day, idx) => (
+                                            {["月", "火", "水", "木", "金", "土", "日"].map((day, idx) => (
                                                 <label key={day} className={styles.checkboxLabel}>
                                                     <input
                                                         type="checkbox"
@@ -454,7 +454,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                                         </div>
                                     </div>
                                     <div className={styles.formGroup}>
-                                        <label className={styles.label}>Time (HH:MM)</label>
+                                        <label className={styles.label}>時刻 (HH:MM)</label>
                                         <input
                                             className={styles.input}
                                             value={formTime}
@@ -467,7 +467,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
                             {formType === 'oneshot' && (
                                 <div className={styles.formGroup}>
-                                    <label className={styles.label}>DateTime (YYYY-MM-DD HH:MM)</label>
+                                    <label className={styles.label}>日時 (YYYY-MM-DD HH:MM)</label>
                                     <input
                                         className={styles.input}
                                         value={formDateTime}
@@ -479,7 +479,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
 
                             {formType === 'interval' && (
                                 <div className={styles.formGroup}>
-                                    <label className={styles.label}>Interval (Seconds)</label>
+                                    <label className={styles.label}>インターバル（秒）</label>
                                     <input
                                         className={styles.input}
                                         type="number"
@@ -490,7 +490,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                             )}
 
                             <div className={styles.formGroup}>
-                                <label className={styles.label}>Priority</label>
+                                <label className={styles.label}>優先度</label>
                                 <input
                                     className={styles.input}
                                     type="number"
@@ -501,7 +501,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                         </div>
 
                         <button className={styles.submitBtn} onClick={handleSave}>
-                            {editingId !== null ? 'Update Schedule' : 'Add Schedule'}
+                            {editingId !== null ? 'スケジュールを更新' : 'スケジュールを追加'}
                         </button>
                     </div>
                 </div>

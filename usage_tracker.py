@@ -51,6 +51,7 @@ class UsageTracker:
         building_id: Optional[str] = None,
         node_type: Optional[str] = None,
         playbook_name: Optional[str] = None,
+        category: Optional[str] = None,
         timestamp: Optional[datetime] = None,
     ) -> None:
         """Record a single LLM usage event.
@@ -65,6 +66,7 @@ class UsageTracker:
             building_id: Optional building ID
             node_type: Type of node (llm, router, etc.)
             playbook_name: Name of the playbook if applicable
+            category: Usage category (persona_speak, memory_weave_generate, etc.)
             timestamp: Optional timestamp (defaults to now)
         """
         # Calculate cost (with cache discount and write premium if applicable)
@@ -84,6 +86,7 @@ class UsageTracker:
             "cost_usd": cost_usd if cost_usd > 0 else None,
             "node_type": node_type,
             "playbook_name": playbook_name,
+            "category": category,
         }
 
         with self._pending_lock:
@@ -134,6 +137,7 @@ class UsageTracker:
                         COST_USD=record["cost_usd"],
                         NODE_TYPE=record["node_type"],
                         PLAYBOOK_NAME=record["playbook_name"],
+                        CATEGORY=record.get("category"),
                     )
                     session.add(log_entry)
                 session.commit()

@@ -72,6 +72,10 @@ OLLAMA_ALLOWED_REQUEST_PARAMS = {
 class OllamaClient(LLMClient):
     """Client for Ollama API."""
 
+    # Class-level probe cache: avoids re-probing on every instance creation
+    _probe_cache: Optional[str] = None
+    _probe_done: bool = False
+
     def __init__(
         self,
         model: str,
@@ -86,15 +90,29 @@ class OllamaClient(LLMClient):
         self._request_kwargs: Dict[str, Any] = dict(request_kwargs or {})
         # Use explicit base_url parameter first, then environment variables
         base_env = base_url or os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST")
-        probed = self._probe_base(base_env)
+
+        # Reuse cached probe result if available (class-level cache)
+        if OllamaClient._probe_done and not base_url:
+            probed = OllamaClient._probe_cache
+        else:
+            probed = self._probe_base(base_env)
+            if not base_url:
+                OllamaClient._probe_cache = probed
+                OllamaClient._probe_done = True
+
         if probed is None:
-            # No fallback - just set default URL and let calls fail with clear error
             logging.warning("No responsive Ollama endpoint found during initialization")
             self.base = "http://127.0.0.1:11434"
         else:
             self.base = probed
         self.url = f"{self.base}/v1/chat/completions"
         self.chat_url = f"{self.base}/api/chat"
+
+    @classmethod
+    def reset_probe_cache(cls) -> None:
+        """Reset the cached probe result so the next instance will re-probe."""
+        cls._probe_cache = None
+        cls._probe_done = False
 
     def _probe_base(self, preferred: Optional[str]) -> Optional[str]:
         """Pick a reachable Ollama base URL with quick connect timeouts."""

@@ -31,7 +31,12 @@ cp .env.example .env
 # 4. データベース初期化
 python database/seed.py
 
-# 5. 起動
+# 5. (オプション) GPU アクセラレーション
+# NVIDIA GPU がある場合、Embedding処理を高速化できます
+# 詳細: docs/getting-started/gpu-setup.md
+pip install -r requirements-gpu.txt
+
+# 6. 起動
 python main.py city_a
 ```
 

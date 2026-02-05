@@ -343,7 +343,8 @@ class ContextRequirements(BaseModel):
     """Defines what context should be loaded when running a playbook."""
     history_depth: Union[int, str] = Field(
         default="full",
-        description="History depth: number (character count), 'full' (use persona's context_length), or 0/'none' (no history)"
+        description="History depth: 'full' (use persona's context_length), number (character count), "
+                    "'Nmessages' (e.g., '10messages' for 10 recent messages), or 0/'none' (no history)"
     )
     history_balanced: bool = Field(
         default=False,

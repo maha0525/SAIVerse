@@ -1,0 +1,382 @@
+{
+    "name": "memopedia_write",
+    "description": "記憶を調査してMemopediaページを生成・更新する（Deep Research方式）",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "調査・記録したいトピック（人物名、用語、イベントなど）"
+        }
+    ],
+    "context_requirements": {
+        "history_depth": "10messages",
+        "inventory": true,
+        "building_items": true,
+        "system_prompt": true,
+        "available_playbooks": false,
+        "visual_context": false,
+        "memory_weave": true
+    },
+    "router_callable": true,
+    "nodes": [
+        {
+            "id": "init",
+            "type": "set",
+            "assignments": {
+                "loop_count": 0,
+                "max_loops": 3,
+                "accumulated_info": "",
+                "queries_tried": "",
+                "processed_ids": "",
+                "research_topic": "{input}"
+            },
+            "next": "get_existing"
+        },
+        {
+            "id": "get_existing",
+            "type": "tool",
+            "action": "memopedia_get_tree",
+            "args_input": {},
+            "output_key": "existing_pages",
+            "next": "build_query"
+        },
+        {
+            "id": "build_query",
+            "type": "llm",
+            "model_type": "lightweight",
+            "action": "<system>トピック「{research_topic}」について記憶を検索するためのクエリとキーワードを生成してください。\n\n既存Memopediaページ:\n{existing_pages}\n\nこれまでに収集した情報:\n{accumulated_info}\n\n過去のクエリ:\n{queries_tried}\n\nルール:\n- query: 思い出したい内容を自然文で記述（意味的な検索に使われます）\n- keywords: メッセージ本文に含まれているはずの具体的な単語・固有名詞を配列で指定（部分一致検索）\n- queryとkeywordsの両方を指定すると検索精度が上がります\n- 過去のクエリとは異なる観点で検索してください\n- 既存ページにない新情報を得られるようなクエリにしてください</system>",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "意味検索クエリ"
+                    },
+                    "keywords": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "部分一致キーワード"
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "description": "このクエリを選んだ理由"
+                    }
+                },
+                "required": [
+                    "query",
+                    "keywords"
+                ]
+            },
+            "output_key": "search_params",
+            "next": "log_query"
+        },
+        {
+            "id": "log_query",
+            "type": "memorize",
+            "action": "Memopedia調査: query={search_params.query}, keywords={search_params.keywords}",
+            "role": "assistant",
+            "tags": [
+                "tool",
+                "memopedia_write"
+            ],
+            "next": "search"
+        },
+        {
+            "id": "search",
+            "type": "tool",
+            "action": "memory_search_brief",
+            "args_input": {
+                "query": "search_params.query",
+                "keywords": "search_params.keywords",
+                "topk": 10,
+                "max_snippet_chars": 100
+            },
+            "output_key": "search_results",
+            "next": "update_queries"
+        },
+        {
+            "id": "update_queries",
+            "type": "set",
+            "assignments": {
+                "queries_tried": "{queries_tried}\n- {search_params.query} [{search_params.keywords}]"
+            },
+            "next": "select_hits"
+        },
+        {
+            "id": "select_hits",
+            "type": "llm",
+            "model_type": "lightweight",
+            "action": "<system>検索結果から、トピック「{research_topic}」に関連する有望なメッセージを最大2件選んでください。\n\n検索結果:\n{search_results}\n\n処理済みID（除外してください）:\n{processed_ids}\n\nこれまでに収集した情報:\n{accumulated_info}\n\n各結果の形式: [番号] (メッセージID) 日時 ロール: スニペット (スコア)\nメッセージIDは括弧内の文字列です（例: msg_xxxxx）。\n新しい情報が得られそうなメッセージを優先してください。</system>",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "selected_ids": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "選択したメッセージIDのリスト（最大2件）"
+                    },
+                    "skip_reason": {
+                        "type": "string",
+                        "description": "選択しなかった場合の理由"
+                    }
+                },
+                "required": [
+                    "selected_ids"
+                ]
+            },
+            "output_key": "hit_selection",
+            "next": "check_selection"
+        },
+        {
+            "id": "check_selection",
+            "type": "pass",
+            "conditional_next": {
+                "field": "hit_selection.selected_ids.length",
+                "operator": "gte",
+                "cases": {
+                    "1": "read_context_1",
+                    "default": "check_done"
+                }
+            }
+        },
+        {
+            "id": "read_context_1",
+            "type": "tool",
+            "action": "memory_read_around",
+            "args_input": {
+                "message_id": "hit_selection.selected_ids.0",
+                "window": 10
+            },
+            "output_key": "context_1",
+            "next": "extract_1"
+        },
+        {
+            "id": "extract_1",
+            "type": "llm",
+            "model_type": "lightweight",
+            "action": "<system>以下の会話ログから、トピック「{research_topic}」に関する知識を抽出してください。\n\n会話ログ:\n{context_1}\n\nこれまでに収集済みの情報:\n{accumulated_info}\n\nルール:\n- 収集済み情報と重複しない新しい情報のみ抽出してください\n- 事実、エピソード、具体的な日付や数値を優先してください\n- 関連する人物や概念があれば記録してください</system>",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "extracted_info": {
+                        "type": "string",
+                        "description": "抽出した情報の要約"
+                    },
+                    "key_facts": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "重要な事実のリスト"
+                    }
+                },
+                "required": [
+                    "extracted_info"
+                ]
+            },
+            "output_key": "extraction_1",
+            "next": "accumulate_1"
+        },
+        {
+            "id": "accumulate_1",
+            "type": "set",
+            "assignments": {
+                "accumulated_info": "{accumulated_info}\n\n---\n{extraction_1.extracted_info}",
+                "processed_ids": "{processed_ids},{hit_selection.selected_ids.0}"
+            },
+            "next": "check_more"
+        },
+        {
+            "id": "check_more",
+            "type": "pass",
+            "conditional_next": {
+                "field": "hit_selection.selected_ids.length",
+                "operator": "gte",
+                "cases": {
+                    "2": "read_context_2",
+                    "default": "check_done"
+                }
+            }
+        },
+        {
+            "id": "read_context_2",
+            "type": "tool",
+            "action": "memory_read_around",
+            "args_input": {
+                "message_id": "hit_selection.selected_ids.1",
+                "window": 10
+            },
+            "output_key": "context_2",
+            "next": "extract_2"
+        },
+        {
+            "id": "extract_2",
+            "type": "llm",
+            "model_type": "lightweight",
+            "action": "<system>以下の会話ログから、トピック「{research_topic}」に関する知識を抽出してください。\n\n会話ログ:\n{context_2}\n\nこれまでに収集済みの情報:\n{accumulated_info}\n\nルール:\n- 収集済み情報と重複しない新しい情報のみ抽出してください\n- 事実、エピソード、具体的な日付や数値を優先してください\n- 関連する人物や概念があれば記録してください</system>",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "extracted_info": {
+                        "type": "string",
+                        "description": "抽出した情報の要約"
+                    },
+                    "key_facts": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "重要な事実のリスト"
+                    }
+                },
+                "required": [
+                    "extracted_info"
+                ]
+            },
+            "output_key": "extraction_2",
+            "next": "accumulate_2"
+        },
+        {
+            "id": "accumulate_2",
+            "type": "set",
+            "assignments": {
+                "accumulated_info": "{accumulated_info}\n\n---\n{extraction_2.extracted_info}",
+                "processed_ids": "{processed_ids},{hit_selection.selected_ids.1}"
+            },
+            "next": "check_done"
+        },
+        {
+            "id": "check_done",
+            "type": "llm",
+            "model_type": "lightweight",
+            "action": "<system>トピック「{research_topic}」について、収集した情報がMemopediaページを書くのに十分かどうか判断してください。\n\n収集済み情報:\n{accumulated_info}\n\nループ回数: {loop_count}/{max_loops}\n\n判断基準:\n- トピックの基本的な情報（誰/何/いつ/どのような）が揃っているか\n- 具体的なエピソードや詳細があるか\n- 情報が全くない場合は不十分と判断してください</system>",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "is_sufficient": {
+                        "type": "boolean",
+                        "description": "情報が十分かどうか"
+                    },
+                    "missing_aspects": {
+                        "type": "string",
+                        "description": "不足している観点"
+                    },
+                    "next_search_suggestion": {
+                        "type": "string",
+                        "description": "次に検索すべき内容"
+                    }
+                },
+                "required": [
+                    "is_sufficient"
+                ]
+            },
+            "output_key": "sufficiency_check",
+            "next": "decide_continue"
+        },
+        {
+            "id": "decide_continue",
+            "type": "pass",
+            "conditional_next": {
+                "field": "sufficiency_check.is_sufficient",
+                "operator": "eq",
+                "cases": {
+                    "true": "generate_page",
+                    "default": "inc_loop"
+                }
+            }
+        },
+        {
+            "id": "inc_loop",
+            "type": "set",
+            "assignments": {
+                "loop_count": "={loop_count} + 1"
+            },
+            "next": "check_loop_limit"
+        },
+        {
+            "id": "check_loop_limit",
+            "type": "pass",
+            "conditional_next": {
+                "field": "loop_count",
+                "operator": "gte",
+                "cases": {
+                    "3": "generate_page",
+                    "default": "build_query"
+                }
+            }
+        },
+        {
+            "id": "generate_page",
+            "type": "llm",
+            "model_type": "normal",
+            "action": "<system>トピック「{research_topic}」について、収集した情報を基にMemopediaページを生成してください。\n\n収集済み情報:\n{accumulated_info}\n\n既存Memopediaページ:\n{existing_pages}\n\nページ生成ルール:\n- category: 人物なら\"people\"、用語・概念なら\"terms\"、予定・計画なら\"plans\"\n- title: 簡潔で分かりやすいタイトル\n- summary: 1-2文の要約\n- content: 本文（Markdown形式）。具体的なエピソードや日付を含める\n- keywords: 検索に使えるキーワード（3-5個）\n- 既存ページと重複する内容は避け、新しい情報を中心に記述してください\n- 情報が不十分な場合でも、分かっている範囲で記述してください</system>",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "description": "カテゴリ: people, terms, plans"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "ページタイトル"
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "1-2文の要約"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "本文（Markdown形式）"
+                    },
+                    "keywords": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "検索用キーワード"
+                    }
+                },
+                "required": [
+                    "category",
+                    "title",
+                    "summary",
+                    "content",
+                    "keywords"
+                ]
+            },
+            "output_key": "page_content",
+            "next": "save_page"
+        },
+        {
+            "id": "save_page",
+            "type": "tool",
+            "action": "memopedia_save_page",
+            "args_input": {
+                "title": "page_content.title",
+                "summary": "page_content.summary",
+                "content": "page_content.content",
+                "category": "page_content.category",
+                "keywords": "page_content.keywords"
+            },
+            "output_key": "save_result",
+            "next": "record"
+        },
+        {
+            "id": "record",
+            "type": "memorize",
+            "action": "<system>Memopediaページ生成完了\n\nトピック: {research_topic}\n結果: {save_result}\n調査ループ: {loop_count}回\n過去のクエリ: {queries_tried}</system>",
+            "role": "user",
+            "tags": [
+                "tool",
+                "memopedia_write",
+                "complete"
+            ],
+            "next": null
+        }
+    ],
+    "start_node": "init"
+}

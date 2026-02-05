@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag, Plus } from 'lucide-react';
+import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag, Plus, Download } from 'lucide-react';
 import styles from './MemoryBrowser.module.css';
 
 interface ThreadSummary {
@@ -114,7 +114,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
 
     const handleDeleteThread = async (threadId: string, e: React.MouseEvent) => {
         e.stopPropagation();
-        if (!confirm("Are you sure you want to delete this thread? This action cannot be undone.")) {
+        if (!confirm("このスレッドを削除しますか？この操作は取り消せません。")) {
             return;
         }
 
@@ -131,11 +131,11 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                     setMessages([]);
                 }
             } else {
-                alert("Failed to delete thread");
+                alert("スレッドの削除に失敗しました");
             }
         } catch (error) {
             console.error(error);
-            alert("Error deleting thread");
+            alert("エラーが発生しました");
         }
     };
 
@@ -150,11 +150,11 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                 // Refresh threads to update active status
                 await loadThreads();
             } else {
-                alert("Failed to set active thread");
+                alert("アクティブスレッドの設定に失敗しました");
             }
         } catch (error) {
             console.error(error);
-            alert("Error setting active thread");
+            alert("エラーが発生しました");
         }
     };
 
@@ -230,15 +230,15 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                 // Refresh current page
                 if (selectedThreadId) loadMessages(selectedThreadId, page);
             } else {
-                alert("Failed to update message");
+                alert("メッセージの更新に失敗しました");
             }
         } catch (e) {
-            alert("Error updating message");
+            alert("エラーが発生しました");
         }
     };
 
     const handleDeleteMessage = async (msgId: string) => {
-        if (!confirm("Delete this message?")) return;
+        if (!confirm("このメッセージを削除しますか？")) return;
         try {
             const res = await fetch(`/api/people/${personaId}/messages/${msgId}`, {
                 method: 'DELETE'
@@ -253,10 +253,10 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                     return next;
                 });
             } else {
-                alert("Failed to delete message");
+                alert("メッセージの削除に失敗しました");
             }
         } catch (e) {
-            alert("Error deleting message");
+            alert("エラーが発生しました");
         }
     };
 
@@ -274,7 +274,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
 
     const handleDeleteSelected = async () => {
         if (selectedIds.size === 0) return;
-        if (!confirm(`Delete ${selectedIds.size} messages?`)) return;
+        if (!confirm(`${selectedIds.size}件のメッセージを削除しますか？`)) return;
 
         const idsToDelete = Array.from(selectedIds);
         let deletedCount = 0;
@@ -355,24 +355,98 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                 if (selectedThreadId) loadMessages(selectedThreadId, -1);
             } else {
                 const err = await res.json().catch(() => ({}));
-                alert(`Failed to add message: ${err.detail || 'Unknown error'}`);
+                alert(`メッセージの追加に失敗しました: ${err.detail || ''}`)
             }
         } catch (e) {
             console.error(e);
-            alert("Error adding message");
+            alert("エラーが発生しました");
         } finally {
             setIsAddingMessage(false);
         }
     };
 
+    // Export handler
+    const handleExportThread = async () => {
+        if (!selectedThreadId) return;
+        try {
+            const res = await fetch(`/api/people/${personaId}/threads/${encodeURIComponent(selectedThreadId)}/export-native`);
+            if (!res.ok) {
+                alert("エクスポートに失敗しました");
+                return;
+            }
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            // Extract filename from Content-Disposition or generate one
+            const disposition = res.headers.get("Content-Disposition");
+            let filename = "export.json";
+            if (disposition) {
+                const match = disposition.match(/filename="?([^"]+)"?/);
+                if (match) filename = match[1];
+            }
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (error) {
+            console.error("Export failed", error);
+            alert("エラーが発生しました");
+        }
+    };
+
     const totalPages = Math.ceil(totalMessages / pageSize);
+
+    // Helper to check if selected thread can be set as active
+    const selectedThread = selectedThreadId ? threads.find(t => t.thread_id === selectedThreadId) : null;
+    const canSetActive = selectedThread && !selectedThread.active && !selectedThread.is_stelis;
+
+    // Split threads into active and inactive
+    const activeThread = threads.find(t => t.active);
+    const inactiveThreads = threads.filter(t => !t.active);
+
+    // Render a single thread item
+    const renderThreadItem = (thread: ThreadSummary) => (
+        <div
+            key={thread.thread_id}
+            className={`${styles.threadItem} ${selectedThreadId === thread.thread_id ? styles.active : ''} ${thread.is_stelis ? styles.stelisThread : ''}`}
+            onClick={() => handleThreadSelect(thread.thread_id)}
+        >
+            <div className={styles.threadMeta}>
+                <span className={styles.threadId}>
+                    {thread.is_stelis && thread.stelis_depth !== undefined && (
+                        <span style={{ marginRight: 4 }}>{'  '.repeat(thread.stelis_depth)}</span>
+                    )}
+                    {thread.suffix}
+                </span>
+                <div className={styles.threadActions}>
+                    {thread.is_stelis && (
+                        <span className={`${styles.stelisBadge} ${thread.stelis_status === 'completed' ? styles.stelisCompleted : thread.stelis_status === 'aborted' ? styles.stelisAborted : styles.stelisActive}`}>
+                            {thread.stelis_label || 'Stelis'}
+                        </span>
+                    )}
+                    <button
+                        className={styles.deleteThreadBtn}
+                        onClick={(e) => handleDeleteThread(thread.thread_id, e)}
+                        title="スレッドを削除"
+                    >
+                        <Trash2 size={14} />
+                    </button>
+                </div>
+            </div>
+            <div className={styles.threadPreview}>
+                {thread.preview || "プレビューなし"}
+            </div>
+        </div>
+    );
 
     return (
         <div className={styles.container}>
             {/* Sidebar: Thread List */}
             <div className={`${styles.sidebar} ${!showList ? styles.mobileHidden : ''}`}>
                 <div className={styles.sidebarHeader}>
-                    Conversation Threads
+                    スレッド一覧
                 </div>
                 <div className={styles.threadList}>
                     {isLoadingThreads ? (
@@ -380,49 +454,25 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                             <Loader2 className={styles.loader} />
                         </div>
                     ) : (
-                        threads.map((thread) => (
-                            <div
-                                key={thread.thread_id}
-                                className={`${styles.threadItem} ${selectedThreadId === thread.thread_id ? styles.active : ''} ${thread.is_stelis ? styles.stelisThread : ''}`}
-                                onClick={() => handleThreadSelect(thread.thread_id)}
-                            >
-                                <div className={styles.threadMeta}>
-                                    <span className={styles.threadId}>
-                                        {thread.is_stelis && thread.stelis_depth !== undefined && (
-                                            <span style={{ marginRight: 4 }}>{'  '.repeat(thread.stelis_depth)}</span>
-                                        )}
-                                        {thread.suffix}
-                                    </span>
-                                    <div className={styles.threadActions}>
-                                        {thread.is_stelis && (
-                                            <span className={`${styles.stelisBadge} ${thread.stelis_status === 'completed' ? styles.stelisCompleted : thread.stelis_status === 'aborted' ? styles.stelisAborted : styles.stelisActive}`}>
-                                                {thread.stelis_label || 'Stelis'}
-                                            </span>
-                                        )}
-                                        {thread.active && <span className={styles.activeBadge}>Active</span>}
-                                        {!thread.active && !thread.is_stelis && (
-                                            <button
-                                                className={styles.setActiveBtn}
-                                                onClick={(e) => handleSetActiveThread(thread.thread_id, e)}
-                                                title="Set as Active Thread"
-                                            >
-                                                Set Active
-                                            </button>
-                                        )}
-                                        <button
-                                            className={styles.deleteThreadBtn}
-                                            onClick={(e) => handleDeleteThread(thread.thread_id, e)}
-                                            title="Delete Thread"
-                                        >
-                                            <Trash2 size={14} />
-                                        </button>
-                                    </div>
-                                </div>
-                                <div className={styles.threadPreview}>
-                                    {thread.preview || "No preview"}
-                                </div>
+                        <>
+                            {/* Active Thread Section */}
+                            <div className={styles.threadSection}>
+                                <div className={styles.threadSectionHeader}>アクティブスレッド</div>
+                                {activeThread ? (
+                                    renderThreadItem(activeThread)
+                                ) : (
+                                    <div className={styles.noActiveThread}>なし</div>
+                                )}
                             </div>
-                        ))
+
+                            {/* Inactive Threads Section */}
+                            {inactiveThreads.length > 0 && (
+                                <div className={styles.threadSection}>
+                                    <div className={styles.threadSectionHeader}>その他のスレッド</div>
+                                    {inactiveThreads.map(renderThreadItem)}
+                                </div>
+                            )}
+                        </>
                     )}
                 </div>
             </div>
@@ -437,7 +487,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                         <ChevronLeft size={20} />
                     </button>
                     <span className={styles.headerTitle}>
-                        {selectedThreadId || "Select a thread"}
+                        {selectedThreadId || "スレッドを選択"}
                     </span>
                     {selectedThreadId && firstCreatedAt && lastCreatedAt && (
                         <span className={styles.dateRange}>
@@ -447,29 +497,46 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                     <div className={styles.headerActions}>
                         {selectionMode ? (
                             <>
-                                <span className={styles.selectedCount}>{selectedIds.size} selected</span>
+                                <span className={styles.selectedCount}>{selectedIds.size}件選択中</span>
                                 <button
                                     className={styles.deleteSelectedBtn}
                                     onClick={handleDeleteSelected}
                                     disabled={selectedIds.size === 0}
-                                    title="Delete selected"
+                                    title="選択を削除"
                                 >
                                     <Trash size={16} />
                                 </button>
                                 <button
                                     className={styles.exitSelectBtn}
                                     onClick={handleExitSelectionMode}
-                                    title="Exit selection mode"
+                                    title="選択モードを終了"
                                 >
                                     <X size={16} />
                                 </button>
                             </>
                         ) : (
                             <>
+                                {canSetActive && (
+                                    <button
+                                        className={styles.setActiveHeaderBtn}
+                                        onClick={(e) => handleSetActiveThread(selectedThreadId!, e)}
+                                        title="このスレッドをアクティブに設定"
+                                    >
+                                        アクティブに設定
+                                    </button>
+                                )}
+                                <button
+                                    className={styles.exportBtn}
+                                    onClick={handleExportThread}
+                                    title="スレッドをエクスポート (Native JSON)"
+                                    disabled={!selectedThreadId}
+                                >
+                                    <Download size={16} />
+                                </button>
                                 <button
                                     className={styles.addMsgBtn}
                                     onClick={handleShowAddForm}
-                                    title="Add message"
+                                    title="メッセージを追加"
                                     disabled={!selectedThreadId}
                                 >
                                     <Plus size={16} />
@@ -477,13 +544,13 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                 <button
                                     className={styles.selectModeBtn}
                                     onClick={() => setSelectionMode(true)}
-                                    title="Select messages"
+                                    title="メッセージを選択"
                                 >
                                     <CheckSquare size={16} />
                                 </button>
                             </>
                         )}
-                        <span className={styles.msgCount}>{totalMessages} msgs</span>
+                        <span className={styles.msgCount}>{totalMessages}件</span>
                     </div>
                 </div>
 
@@ -491,13 +558,13 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                 {showAddForm && (
                     <div className={styles.addMessageForm}>
                         <div className={styles.addFormHeader}>
-                            <span>Add New Message</span>
+                            <span>新しいメッセージを追加</span>
                             <button onClick={handleCancelAdd} className={styles.cancelAddBtn}>
                                 <X size={16} />
                             </button>
                         </div>
                         <div className={styles.addFormRow}>
-                            <label>Role:</label>
+                            <label>ロール:</label>
                             <select
                                 value={newMsgRole}
                                 onChange={(e) => setNewMsgRole(e.target.value)}
@@ -509,7 +576,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                             </select>
                         </div>
                         <div className={styles.addFormRow}>
-                            <label>Timestamp:</label>
+                            <label>日時:</label>
                             <input
                                 type="datetime-local"
                                 value={newMsgTimestamp}
@@ -519,7 +586,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                         </div>
                         <textarea
                             className={styles.addTextarea}
-                            placeholder="Message content..."
+                            placeholder="メッセージ内容..."
                             value={newMsgContent}
                             onChange={(e) => setNewMsgContent(e.target.value)}
                             rows={4}
@@ -531,7 +598,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                 className={styles.submitAddBtn}
                             >
                                 {isAddingMessage ? <Loader2 className={styles.loader} size={14} /> : <Plus size={14} />}
-                                Add Message
+                                追加
                             </button>
                         </div>
                     </div>
@@ -545,7 +612,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                     ) : messages.length === 0 ? (
                         <div className={styles.emptyState}>
                             <MessageSquare size={48} />
-                            <p>No messages in this thread</p>
+                            <p>このスレッドにメッセージはありません</p>
                         </div>
                     ) : (
                         messages.map((msg) => (
@@ -574,10 +641,10 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                         <span className={styles.timestamp}>{formatTime(msg.created_at)}</span>
                                         {!editingMsgId && (
                                             <div className={styles.msgActions}>
-                                                <button onClick={() => handleEditStart(msg)} title="Edit">
+                                                <button onClick={() => handleEditStart(msg)} title="編集">
                                                     <Edit2 size={14} />
                                                 </button>
-                                                <button onClick={() => handleDeleteMessage(msg.id)} title="Delete" className={styles.deleteBtn}>
+                                                <button onClick={() => handleDeleteMessage(msg.id)} title="削除" className={styles.deleteBtn}>
                                                     <Trash2 size={14} />
                                                 </button>
                                             </div>
@@ -588,7 +655,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                     {editingMsgId === msg.id ? (
                                         <div className={styles.editInterface}>
                                             <div className={styles.editTimestampRow}>
-                                                <label>Timestamp:</label>
+                                                <label>日時:</label>
                                                 <input
                                                     type="datetime-local"
                                                     className={styles.editTimestampInput}
@@ -603,10 +670,10 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                             />
                                             <div className={styles.editButtons}>
                                                 <button onClick={() => handleEditSave(msg.id)} className={styles.saveBtn}>
-                                                    <Save size={14} /> Save
+                                                    <Save size={14} /> 保存
                                                 </button>
                                                 <button onClick={handleEditCancel} className={styles.cancelBtn}>
-                                                    <X size={14} /> Cancel
+                                                    <X size={14} /> キャンセル
                                                 </button>
                                             </div>
                                         </div>
@@ -626,7 +693,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                             className={styles.pageButton}
                             disabled={page === 1 || isLoadingMessages}
                             onClick={() => setPage(1)}
-                            title="First Page"
+                            title="最初のページ"
                         >
                             <ChevronsLeft size={16} />
                         </button>
@@ -634,20 +701,20 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                             className={styles.pageButton}
                             disabled={page === 1 || isLoadingMessages}
                             onClick={() => setPage(p => Math.max(1, p - 1))}
-                            title="Previous Page"
+                            title="前のページ"
                         >
                             <ChevronLeft size={16} />
                         </button>
 
                         <span className={styles.pageInfo}>
-                            Page {page} of {totalPages}
+                            {page} / {totalPages} ページ
                         </span>
 
                         <button
                             className={styles.pageButton}
                             disabled={page >= totalPages || isLoadingMessages}
                             onClick={() => setPage(p => p + 1)}
-                            title="Next Page"
+                            title="次のページ"
                         >
                             <ChevronRight size={16} />
                         </button>
@@ -655,7 +722,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                             className={styles.pageButton}
                             disabled={page >= totalPages || isLoadingMessages}
                             onClick={() => setPage(-1)} // Request last page
-                            title="Last Page"
+                            title="最後のページ"
                         >
                             <ChevronsRight size={16} />
                         </button>

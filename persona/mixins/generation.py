@@ -15,7 +15,6 @@ from persona.constants import (
     RECALL_SNIPPET_STREAM_MAX_CHARS,
 )
 from model_configs import model_supports_images, get_model_parameters
-from llm_clients import get_llm_client
 from llm_clients.base import IncompleteStreamError
 
 
@@ -59,25 +58,31 @@ class PersonaGenerationMixin:
         parameter_overrides: Optional[Dict[str, Any]] | None = None,
     ) -> None:
         self.model = model
+        self.provider = provider
         self.context_length = context_length
         self.model_supports_images = model_supports_images(model)
-        self.llm_client = get_llm_client(model, provider, context_length)
+        # Invalidate: the lazy property getter will recreate on next access
+        self._llm_client = None
         if parameter_overrides:
-            self.apply_parameter_overrides(parameter_overrides)
+            self._pending_parameter_overrides = parameter_overrides
 
     def apply_parameter_overrides(self, overrides: Optional[Dict[str, Any]] = None) -> None:
-        if not overrides or not getattr(self, "llm_client", None):
+        if not overrides:
             return
-        allowed = get_model_parameters(self.model)
-        filtered = {
-            key: value for key, value in overrides.items() if key in allowed
-        }
-        if not filtered:
-            return
-        try:
-            self.llm_client.configure_parameters(filtered)
-        except Exception:
-            logging.debug("Failed to apply parameter overrides for %s", self.persona_name, exc_info=True)
+        # Store for lazy application when the client is created later
+        self._pending_parameter_overrides = overrides
+        # Apply immediately if the client already exists
+        if getattr(self, "_llm_client", None) is not None:
+            allowed = get_model_parameters(self.model)
+            filtered = {
+                key: value for key, value in overrides.items() if key in allowed
+            }
+            if not filtered:
+                return
+            try:
+                self._llm_client.configure_parameters(filtered)
+            except Exception:
+                logging.debug("Failed to apply parameter overrides for %s", self.persona_name, exc_info=True)
 
     def _build_messages(
         self,

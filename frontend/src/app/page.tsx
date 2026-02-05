@@ -8,7 +8,7 @@ import Sidebar from '@/components/Sidebar';
 import ChatOptions from '@/components/ChatOptions';
 import RightSidebar from '@/components/RightSidebar';
 import PeopleModal from '@/components/PeopleModal';
-import { Send, Paperclip, MapPin, Settings, X, Info, Users, Menu } from 'lucide-react';
+import { Send, Paperclip, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
 
 interface MessageImage {
@@ -93,6 +93,19 @@ export default function Home() {
     const [isOptionsOpen, setIsOptionsOpen] = useState(false);
     const [isInfoOpen, setIsInfoOpen] = useState(false); // Default closed to prevent mobile flash
     const [moveTrigger, setMoveTrigger] = useState(0); // To trigger RightSidebar refresh
+    const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null); // Track which message was copied
+
+    // Copy message content to clipboard
+    const handleCopyMessage = useCallback(async (messageId: string, content: string) => {
+        try {
+            await navigator.clipboard.writeText(content);
+            setCopiedMessageId(messageId);
+            // Reset after 2 seconds
+            setTimeout(() => setCopiedMessageId(null), 2000);
+        } catch (err) {
+            console.error('Failed to copy:', err);
+        }
+    }, []);
 
     useEffect(() => {
         // Detect mobile device (touch-based or narrow screen)
@@ -137,11 +150,16 @@ export default function Home() {
     const [isPeopleModalOpen, setIsPeopleModalOpen] = useState(false);
     const [selectedPlaybook, setSelectedPlaybook] = useState<string | null>(null);
     const [playbookParams, setPlaybookParams] = useState<Record<string, any>>({});
+    const [selectedModel, setSelectedModel] = useState<string>(''); // Model ID selected in Chat Options
+    const [selectedModelDisplayName, setSelectedModelDisplayName] = useState<string>(''); // Model display name
+    const [isDragOver, setIsDragOver] = useState(false); // Drag & drop state
     const [attachments, setAttachments] = useState<FileAttachment[]>([]); // Multiple attachments
     const fileInputRef = useRef<HTMLInputElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const [isMobile, setIsMobile] = useState(false);
     const [currentBuildingName, setCurrentBuildingName] = useState<string>('SAIVerse');
+    const [currentBuildingId, setCurrentBuildingId] = useState<string | null>(null);
+    const currentBuildingIdRef = useRef<string | null>(null);
     const swipeStartX = useRef<number | null>(null);
     const swipeStartY = useRef<number | null>(null);
     const swipeStartTime = useRef<number | null>(null);
@@ -237,7 +255,7 @@ export default function Home() {
     }, [messages, isLoadingMore]);
 
 
-    const fetchHistory = async (beforeId?: string) => {
+    const fetchHistory = async (beforeId?: string, overrideBuildingId?: string) => {
         try {
             if (!beforeId) {
                 setIsHistoryLoaded(false);
@@ -251,8 +269,10 @@ export default function Home() {
 
             const params = new URLSearchParams({ limit: '20' });
             if (beforeId) params.append('before', beforeId);
+            const bid = overrideBuildingId || currentBuildingIdRef.current;
+            if (bid) params.append('building_id', bid);
 
-            console.log(`[DEBUG] Fetching history: before=${beforeId}`);
+            console.log(`[DEBUG] Fetching history: before=${beforeId}, building_id=${bid}`);
 
             const res = await fetch(`/api/chat/history?${params.toString()}`);
             if (res.ok) {
@@ -322,9 +342,11 @@ export default function Home() {
         }
     };
 
-    const fetchBuildingInfo = async () => {
+    const fetchBuildingInfo = async (overrideBuildingId?: string) => {
         try {
-            const res = await fetch('/api/info/details');
+            const bid = overrideBuildingId || currentBuildingIdRef.current;
+            const url = bid ? `/api/info/details?building_id=${bid}` : '/api/info/details';
+            const res = await fetch(url);
             if (res.ok) {
                 const data = await res.json();
                 setCurrentBuildingName(data.name || 'SAIVerse');
@@ -335,6 +357,16 @@ export default function Home() {
     };
 
     useEffect(() => {
+        // Fetch current building_id for multi-device safety
+        fetch('/api/user/status')
+            .then(res => res.ok ? res.json() : null)
+            .then(data => {
+                if (data?.current_building_id) {
+                    setCurrentBuildingId(data.current_building_id);
+                    currentBuildingIdRef.current = data.current_building_id;
+                }
+            })
+            .catch(err => console.error('Failed to fetch user status', err));
         fetchHistory();
         fetchBuildingInfo();
         // Fetch saved playbook setting and params from server
@@ -351,6 +383,19 @@ export default function Home() {
                 }
             })
             .catch(err => console.error('Failed to load playbook setting', err));
+
+        // Fetch current model setting
+        Promise.all([
+            fetch('/api/config/config').then(res => res.ok ? res.json() : null),
+            fetch('/api/config/models').then(res => res.ok ? res.json() : null)
+        ]).then(([config, models]) => {
+            if (config?.current_model && models) {
+                const modelId = config.current_model;
+                const modelInfo = models.find((m: { id: string; name: string }) => m.id === modelId);
+                setSelectedModel(modelId);
+                setSelectedModelDisplayName(modelInfo?.name || '');
+            }
+        }).catch(err => console.error('Failed to load model setting', err));
     }, []);
 
     // Polling for new messages (schedule-triggered persona speech, etc.)
@@ -372,7 +417,9 @@ export default function Home() {
             if (!newestId) return; // Skip if no real ID
 
             try {
-                const res = await fetch(`/api/chat/history?after=${newestId}&limit=50`);
+                const pollBid = currentBuildingIdRef.current;
+                const bidParam = pollBid ? `&building_id=${pollBid}` : '';
+                const res = await fetch(`/api/chat/history?after=${newestId}&limit=50${bidParam}`);
                 if (res.ok) {
                     const data = await res.json();
                     const newMessages: Message[] = data.history || [];
@@ -421,6 +468,7 @@ export default function Home() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     message: userMsg.content,
+                    building_id: currentBuildingIdRef.current || undefined,
                     attachments: currentAttachments.length > 0 ? currentAttachments.map(a => ({
                         data: a.base64,
                         filename: a.name,
@@ -585,6 +633,59 @@ export default function Home() {
         if (fileInputRef.current) fileInputRef.current.value = '';
     };
 
+    // Drag & Drop handlers (using counter to prevent flickering)
+    const dragCounter = useRef(0);
+
+    const handleDragEnter = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounter.current++;
+        if (dragCounter.current === 1) {
+            setIsDragOver(true);
+        }
+    };
+
+    const handleDragOver = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+    };
+
+    const handleDragLeave = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounter.current--;
+        if (dragCounter.current === 0) {
+            setIsDragOver(false);
+        }
+    };
+
+    const handleDrop = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounter.current = 0;
+        setIsDragOver(false);
+
+        const files = Array.from(e.dataTransfer.files);
+        if (files.length === 0) return;
+
+        files.forEach(file => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+                const base64 = reader.result as string;
+                const mimeType = file.type || 'application/octet-stream';
+                const fileType = getFileType(file.name, mimeType);
+
+                setAttachments(prev => [...prev, {
+                    base64,
+                    name: file.name,
+                    type: fileType,
+                    mimeType
+                }]);
+            };
+            reader.readAsDataURL(file);
+        });
+    };
+
     return (
         <div
             className={styles.container}
@@ -592,11 +693,13 @@ export default function Home() {
             onTouchMove={handleTouchMove}
         >
             <Sidebar
-                onMove={() => {
+                onMove={(buildingId: string) => {
+                    setCurrentBuildingId(buildingId);
+                    currentBuildingIdRef.current = buildingId;
                     setMessages([]);
                     setIsHistoryLoaded(false);
-                    fetchHistory();
-                    fetchBuildingInfo();
+                    fetchHistory(undefined, buildingId);
+                    fetchBuildingInfo(buildingId);
                     setMoveTrigger(prev => prev + 1);
                 }}
                 isOpen={isLeftOpen}
@@ -623,13 +726,6 @@ export default function Home() {
                             title="Manage People"
                         >
                             <Users size={20} />
-                        </button>
-                        <button
-                            className={styles.iconBtn}
-                            onClick={() => setIsOptionsOpen(true)}
-                            title="Chat Options"
-                        >
-                            <Settings size={20} />
                         </button>
                         <button
                             className={`${styles.iconBtn} ${isInfoOpen ? styles.active : ''}`}
@@ -690,6 +786,15 @@ export default function Home() {
                                         )}
                                     </div>
                                 )}
+                                <div className={styles.cardActions}>
+                                    <button
+                                        className={`${styles.actionBtn} ${copiedMessageId === (msg.id || `msg-${idx}`) ? styles.copied : ''}`}
+                                        onClick={() => handleCopyMessage(msg.id || `msg-${idx}`, msg.content)}
+                                        title="Copy message"
+                                    >
+                                        {copiedMessageId === (msg.id || `msg-${idx}`) ? <Check size={14} /> : <Copy size={14} />}
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     ))}
@@ -697,14 +802,36 @@ export default function Home() {
                     <div ref={messagesEndRef} />
                 </div>
 
-                <div className={styles.inputArea}>
+                <div
+                    className={styles.inputArea}
+                    onDragEnter={handleDragEnter}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
+                >
+                    {/* Options bar: Model display + settings button */}
+                    <div className={styles.optionsBar}>
+                        <button
+                            className={styles.optionsBtn}
+                            onClick={() => setIsOptionsOpen(true)}
+                            title="Chat Options"
+                        >
+                            <SlidersHorizontal size={16} />
+                            {selectedModelDisplayName ? (
+                                <span className={styles.modelName}>{selectedModelDisplayName}</span>
+                            ) : null}
+                            <ChevronDown size={14} className={styles.chevron} />
+                        </button>
+                    </div>
+
                     {attachments.length > 0 && (
                         <div style={{
                             fontSize: '0.8rem',
                             marginBottom: '0.5rem',
                             display: 'flex',
                             flexWrap: 'wrap',
-                            gap: '0.5rem'
+                            gap: '0.5rem',
+                            pointerEvents: 'auto'
                         }}>
                             {attachments.map((att, idx) => (
                                 <div key={idx} style={{
@@ -733,7 +860,13 @@ export default function Home() {
                             )}
                         </div>
                     )}
-                    <div className={styles.inputWrapper}>
+                    <div className={`${styles.inputWrapper} ${isDragOver ? styles.inputWrapperDragOver : ''}`}>
+                        {/* Drag & drop indicator */}
+                        {isDragOver && (
+                            <div className={styles.dropIndicator}>
+                                Drop files here to attach
+                            </div>
+                        )}
                         <button
                             className={styles.attachBtn}
                             onClick={() => fileInputRef.current?.click()}
@@ -781,6 +914,11 @@ export default function Home() {
                 onPlaybookChange={setSelectedPlaybook}
                 playbookParams={playbookParams}
                 onPlaybookParamsChange={setPlaybookParams}
+                currentModel={selectedModel}
+                onModelChange={(id, displayName) => {
+                    setSelectedModel(id);
+                    setSelectedModelDisplayName(displayName);
+                }}
             />
 
             <PeopleModal

@@ -1,16 +1,16 @@
 {
-  "model": "claude-sonnet-4-5",
-  "display_name": "Claude Sonnet 4.5",
+  "model": "claude-sonnet-5",
+  "display_name": "Claude Sonnet 5",
   "provider": "anthropic",
   "context_length": 60000,
   "thinking_type": "enabled",
   "thinking_budget": 4096,
   "supports_images": true,
   "pricing": {
-    "input_per_1m_tokens": 3,
-    "output_per_1m_tokens": 15,
-    "cached_input_per_1m_tokens": 0.3,
-    "cache_write_per_1m_tokens": 3.75,
+    "input_per_1m_tokens": 2.5,
+    "output_per_1m_tokens": 12.5,
+    "cached_input_per_1m_tokens": 0.25,
+    "cache_write_per_1m_tokens": 3.125,
     "currency": "USD"
   },
   "cache": {

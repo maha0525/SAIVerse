@@ -306,6 +306,24 @@ class SEARuntime:
 
             inherited_vars[param_name] = value
 
+        # Inherit pulse_usage_accumulator from parent_state if it exists (for sub-playbook calls)
+        # This ensures usage is accumulated across all LLM calls in the entire pulse chain
+        parent_accumulator = parent.get("pulse_usage_accumulator")
+        if parent_accumulator:
+            # Use the same accumulator (reference) to accumulate across sub-playbooks
+            usage_accumulator = parent_accumulator
+        else:
+            # Create new accumulator for this pulse
+            usage_accumulator = {
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "total_cached_tokens": 0,
+                "total_cache_write_tokens": 0,
+                "total_cost_usd": 0.0,
+                "call_count": 0,
+                "models_used": [],
+            }
+
         initial_state = {
             "messages": list(base_messages),
             "inputs": {"input": user_input or ""},
@@ -318,15 +336,7 @@ class SEARuntime:
             "pulse_id": pulse_id,
             "pulse_type": pulse_type,  # user/schedule/auto
             "_cancellation_token": cancellation_token,  # For node-level cancellation checks
-            "pulse_usage_accumulator": {  # Accumulate LLM usage across all nodes in this pulse
-                "total_input_tokens": 0,
-                "total_output_tokens": 0,
-                "total_cached_tokens": 0,
-                "total_cache_write_tokens": 0,
-                "total_cost_usd": 0.0,
-                "call_count": 0,
-                "models_used": [],
-            },
+            "pulse_usage_accumulator": usage_accumulator,  # Inherit from parent or create new
             **inherited_vars,  # Add inherited variables from input_schema
         }
 
@@ -468,6 +478,7 @@ class SEARuntime:
                             building_id=building_id,
                             node_type="llm_tool",
                             playbook_name=playbook.name,
+                            category="persona_speak",
                         )
                         # Accumulate into pulse total
                         from model_configs import calculate_cost
@@ -632,6 +643,7 @@ class SEARuntime:
                                 building_id=building_id,
                                 node_type="llm_stream",
                                 playbook_name=playbook.name,
+                                category="persona_speak",
                             )
                             LOGGER.info("[DEBUG] Usage recorded: model=%s in=%d out=%d cached=%d cache_write=%d", usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens)
                             # Build llm_usage metadata for message
@@ -690,6 +702,7 @@ class SEARuntime:
                                 building_id=building_id,
                                 node_type="llm",
                                 playbook_name=playbook.name,
+                                category="persona_speak",
                             )
                             # Build llm_usage metadata for message
                             from model_configs import calculate_cost, get_model_display_name
@@ -1178,8 +1191,11 @@ class SEARuntime:
                 new_prefix = f"{prefix}.{k}" if prefix else str(k)
                 result.update(self._flatten_dict(v, new_prefix))
         elif isinstance(value, list):
+            # Also store the array itself as JSON string for direct template access
+            if prefix:
+                result[prefix] = json.dumps(value, ensure_ascii=False)
+            # Store individual elements with .N format
             for idx, item in enumerate(value):
-                # Use .N format (not [N]) for consistency with playbook templates
                 new_prefix = f"{prefix}.{idx}" if prefix else str(idx)
                 result.update(self._flatten_dict(item, new_prefix))
         else:
@@ -1194,18 +1210,19 @@ class SEARuntime:
         - Nested dict keys: "foo.bar" -> state["foo"]["bar"]
         - Array indexing: "foo.0" or "foo.items.0" -> state["foo"][0] or state["foo"]["items"][0]
 
-        Falls back to direct state lookup if nested resolution fails.
+        Tries nested resolution first to preserve actual types (arrays, dicts),
+        then falls back to direct/flattened lookup.
         """
-        # First try direct lookup (for flattened keys like "page_selection.selected_urls")
-        if key in state:
-            return state[key]
+        # For simple keys without dots, do direct lookup
+        if "." not in key:
+            return state.get(key, "")
 
-        # Try nested resolution
+        # Try nested resolution first (preserves actual types like arrays)
         parts = key.split(".")
         value = state
         for part in parts:
             if value is None:
-                return ""
+                break
             if isinstance(value, dict):
                 value = value.get(part)
             elif isinstance(value, list):
@@ -1214,11 +1231,20 @@ class SEARuntime:
                     idx = int(part)
                     value = value[idx] if idx < len(value) else None
                 else:
-                    return ""
+                    value = None
+                    break
             else:
-                return ""
+                value = None
+                break
 
-        return value if value is not None else ""
+        if value is not None:
+            return value
+
+        # Fall back to direct lookup (for flattened keys)
+        if key in state:
+            return state[key]
+
+        return ""
 
 
     def _extract_structured_json(self, text: str) -> Optional[Dict[str, Any]]:
@@ -1490,12 +1516,26 @@ class SEARuntime:
             text = state.get("last") or ""
             pulse_id = state.get("pulse_id")
             metadata_key = getattr(node_def, "metadata_key", None)
-            metadata = state.get(metadata_key) if metadata_key else None
-            self._emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=metadata)
+            base_metadata = state.get(metadata_key) if metadata_key else None
+
+            # Build metadata with usage total from accumulator
+            msg_metadata: Dict[str, Any] = {}
+            if base_metadata:
+                if isinstance(base_metadata, dict):
+                    msg_metadata.update(base_metadata)
+                else:
+                    msg_metadata["metadata"] = base_metadata
+
+            # Include pulse usage accumulator total for UI display
+            accumulator = state.get("pulse_usage_accumulator")
+            if accumulator and accumulator.get("call_count", 0) > 0:
+                msg_metadata["llm_usage_total"] = dict(accumulator)
+
+            self._emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
             if outputs is not None:
                 outputs.append(text)
             if event_callback:
-                event_callback({"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None), "metadata": metadata})
+                event_callback({"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None), "metadata": msg_metadata if msg_metadata else None})
             
             # Debug: log speak_content at end of say node
             speak_content = state.get("speak_content", "")
@@ -1602,8 +1642,8 @@ class SEARuntime:
 
         Handles:
         - Literal values (int, float, bool, None): returned as-is
+        - Arithmetic expressions with "=" prefix: "={count} + 1" evaluated safely
         - Template strings with {var} placeholders: expanded with state values
-        - Arithmetic expressions like "{count} + 1": evaluated safely
         """
         # Literal values
         if isinstance(value_template, (int, float, bool, type(None))):
@@ -1612,13 +1652,10 @@ class SEARuntime:
         if not isinstance(value_template, str):
             return value_template
 
-        # Check if it looks like an arithmetic expression
-        # Must have a pattern like "{var} + 1" or "{a} * {b}" - operator with {var} adjacent
-        # This avoids false positives on strings like "---" (markdown separator)
-        import re
-        arithmetic_pattern = re.compile(r"\{[^}]+\}\s*[\+\-\*/%]\s*(?:\d+|\{[^}]+\})|\d+\s*[\+\-\*/%]\s*\{[^}]+\}")
-        if arithmetic_pattern.search(value_template):
-            return self._eval_arithmetic_expression(value_template, state)
+        # Explicit arithmetic expression with "=" prefix
+        # e.g., "={loop_count} + 1" or "={a} * {b}"
+        if value_template.startswith("="):
+            return self._eval_arithmetic_expression(value_template[1:], state)
 
         # Simple template expansion
         try:
@@ -2427,23 +2464,45 @@ class SEARuntime:
             history_mgr = getattr(persona, "history_manager", None)
             if history_mgr:
                 try:
-                    # Determine character count limit
-                    if history_depth == "full":
-                        char_limit = getattr(persona, "context_length", 2000)
-                    else:
-                        try:
-                            char_limit = int(history_depth)
-                        except (ValueError, TypeError):
-                            char_limit = 2000  # fallback
-
                     # Determine which tags to include
                     required_tags = ["conversation"]
                     if reqs.include_internal:
                         required_tags.append("internal")
 
-                    LOGGER.debug("[sea][prepare-context] Fetching history: char_limit=%d, pulse_id=%s, balanced=%s, tags=%s", char_limit, pulse_id, reqs.history_balanced, required_tags)
+                    # Parse history_depth format
+                    # - "full": use persona's context_length (character limit)
+                    # - "Nmessages" (e.g., "10messages"): message count limit
+                    # - integer or numeric string: character limit
+                    use_message_count = False
+                    limit_value = 2000  # fallback
 
-                    if reqs.history_balanced:
+                    if history_depth == "full":
+                        limit_value = getattr(persona, "context_length", 2000)
+                    elif isinstance(history_depth, str) and history_depth.endswith("messages"):
+                        # Message count mode: "10messages", "20messages", etc.
+                        try:
+                            limit_value = int(history_depth[:-8])  # Remove "messages" suffix
+                            use_message_count = True
+                        except ValueError:
+                            limit_value = 10  # fallback for message count
+                            use_message_count = True
+                    else:
+                        try:
+                            limit_value = int(history_depth)
+                        except (ValueError, TypeError):
+                            limit_value = 2000  # fallback
+
+                    LOGGER.debug("[sea][prepare-context] Fetching history: limit=%d, mode=%s, pulse_id=%s, balanced=%s, tags=%s",
+                                limit_value, "messages" if use_message_count else "chars", pulse_id, reqs.history_balanced, required_tags)
+
+                    if use_message_count:
+                        # Message count mode - balanced not supported yet
+                        recent = history_mgr.get_recent_history_by_count(
+                            limit_value,
+                            required_tags=required_tags,
+                            pulse_id=pulse_id,
+                        )
+                    elif reqs.history_balanced:
                         # Get conversation partners for balanced retrieval
                         participant_ids = ["user"]
                         occupants = self.manager.occupants.get(building_id, [])
@@ -2453,7 +2512,7 @@ class SEARuntime:
                                 participant_ids.append(oid)
                         LOGGER.debug("[sea][prepare-context] Balancing across: %s", participant_ids)
                         recent = history_mgr.get_recent_history_balanced(
-                            char_limit,
+                            limit_value,
                             participant_ids,
                             required_tags=required_tags,
                             pulse_id=pulse_id,
@@ -2461,7 +2520,7 @@ class SEARuntime:
                     else:
                         # Filter by required tags or current pulse_id
                         recent = history_mgr.get_recent_history(
-                            char_limit,
+                            limit_value,
                             required_tags=required_tags,
                             pulse_id=pulse_id,
                         )

@@ -153,7 +153,7 @@ export default function WorldEditor() {
     };
     const handleCreateCity = async () => { try { await fetch('/api/world/cities', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadCities(); setFormData({}); } catch (e) { } };
     const handleUpdateCity = async () => { try { await fetch(`/api/world/cities/${selectedCity!.CITYID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadCities(); } catch (e) { } };
-    const handleDeleteCity = async () => { if (confirm("Are you sure?")) { await fetch(`/api/world/cities/${selectedCity!.CITYID}`, { method: 'DELETE' }); setSelectedCity(null); setFormData({}); loadCities(); } };
+    const handleDeleteCity = async () => { if (confirm("この City を削除しますか？")) { await fetch(`/api/world/cities/${selectedCity!.CITYID}`, { method: 'DELETE' }); setSelectedCity(null); setFormData({}); loadCities(); } };
 
     // --- Building Handlers ---
     const handleBuildingSelect = (b: Building) => {
@@ -171,7 +171,7 @@ export default function WorldEditor() {
     };
     const handleCreateBuilding = async () => { try { await fetch('/api/world/buildings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, description: formData.description || "", capacity: formData.capacity || 1, system_instruction: formData.system_instruction || "", city_id: formData.city_id, building_id: formData.building_id || null }) }); loadBuildings(); setFormData({}); } catch (e) { } };
     const handleUpdateBuilding = async () => { try { await fetch(`/api/world/buildings/${selectedBuilding!.BUILDINGID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...formData, tool_ids: formData.tool_ids || [] }) }); loadBuildings(); } catch (e) { } };
-    const handleDeleteBuilding = async () => { if (confirm("Are you sure?")) { await fetch(`/api/world/buildings/${selectedBuilding!.BUILDINGID}`, { method: 'DELETE' }); setSelectedBuilding(null); setFormData({}); loadBuildings(); } };
+    const handleDeleteBuilding = async () => { if (confirm("この Building を削除しますか？")) { await fetch(`/api/world/buildings/${selectedBuilding!.BUILDINGID}`, { method: 'DELETE' }); setSelectedBuilding(null); setFormData({}); loadBuildings(); } };
 
     // --- AI Handlers ---
     const handleAISelect = (ai: AI) => {
@@ -185,11 +185,11 @@ export default function WorldEditor() {
     };
     const handleCreateAI = async () => { try { await fetch('/api/world/ais', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, system_prompt: formData.system_prompt, home_city_id: formData.home_city_id }) }); loadAIs(); setFormData({}); } catch (e) { } };
     const handleUpdateAI = async () => { try { await fetch(`/api/world/ais/${selectedAI!.AIID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadAIs(); } catch (e) { } };
-    const handleDeleteAI = async () => { if (confirm("Are you sure?")) { await fetch(`/api/world/ais/${selectedAI!.AIID}`, { method: 'DELETE' }); setSelectedAI(null); setFormData({}); loadAIs(); } };
+    const handleDeleteAI = async () => { if (confirm("このペルソナを削除しますか？")) { await fetch(`/api/world/ais/${selectedAI!.AIID}`, { method: 'DELETE' }); setSelectedAI(null); setFormData({}); loadAIs(); } };
     const handleMoveAI = async () => {
         if (!selectedAI || !formData.target_building_name) return;
         await fetch(`/api/world/ais/${selectedAI.AIID}/move`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target_building_name: formData.target_building_name }) });
-        alert("Move requested");
+        alert("移動リクエストを送信しました");
         // Ideally refresh location display
     };
 
@@ -200,21 +200,21 @@ export default function WorldEditor() {
     };
     const handleCreateBlueprint = async () => { await fetch('/api/world/blueprints', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadBlueprints(); setFormData({}); };
     const handleUpdateBlueprint = async () => { await fetch(`/api/world/blueprints/${selectedBlueprint!.BLUEPRINT_ID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadBlueprints(); };
-    const handleDeleteBlueprint = async () => { if (confirm("Are you sure?")) { await fetch(`/api/world/blueprints/${selectedBlueprint!.BLUEPRINT_ID}`, { method: 'DELETE' }); setSelectedBlueprint(null); setFormData({}); loadBlueprints(); } };
+    const handleDeleteBlueprint = async () => { if (confirm("この Blueprint を削除しますか？")) { await fetch(`/api/world/blueprints/${selectedBlueprint!.BLUEPRINT_ID}`, { method: 'DELETE' }); setSelectedBlueprint(null); setFormData({}); loadBlueprints(); } };
     const handleSpawnBlueprint = async () => {
         if (!selectedBlueprint || !formData.spawn_entity_name || !formData.spawn_building_name) return;
         const res = await fetch(`/api/world/blueprints/${selectedBlueprint.BLUEPRINT_ID}/spawn`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ entity_name: formData.spawn_entity_name, building_name: formData.spawn_building_name })
         });
-        if (res.ok) alert("Spawned!"); else alert("Failed");
+        if (res.ok) alert("生成しました！"); else alert("生成に失敗しました");
     };
 
     // --- Tool Handlers ---
     const handleToolSelect = (t: Tool) => { setSelectedTool(t); setFormData({ name: t.TOOLNAME, description: t.DESCRIPTION, module_path: t.MODULE_PATH, function_name: t.FUNCTION_NAME }); };
     const handleCreateTool = async () => { await fetch('/api/world/tools', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadTools(); setFormData({}); };
     const handleUpdateTool = async () => { await fetch(`/api/world/tools/${selectedTool!.TOOLID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadTools(); };
-    const handleDeleteTool = async () => { if (confirm("Are you sure?")) { await fetch(`/api/world/tools/${selectedTool!.TOOLID}`, { method: 'DELETE' }); setSelectedTool(null); setFormData({}); loadTools(); } };
+    const handleDeleteTool = async () => { if (confirm("このツールを削除しますか？")) { await fetch(`/api/world/tools/${selectedTool!.TOOLID}`, { method: 'DELETE' }); setSelectedTool(null); setFormData({}); loadTools(); } };
 
     // --- Item Handlers ---
     const handleItemSelect = async (i: Item) => {
@@ -244,7 +244,7 @@ export default function WorldEditor() {
     };
     const handleCreateItem = async () => { await fetch('/api/world/items', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadItems(); setFormData({}); };
     const handleUpdateItem = async () => { await fetch(`/api/world/items/${selectedItem!.ITEM_ID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadItems(); };
-    const handleDeleteItem = async () => { if (confirm("Are you sure?")) { await fetch(`/api/world/items/${selectedItem!.ITEM_ID}`, { method: 'DELETE' }); setSelectedItem(null); setFormData({}); loadItems(); } };
+    const handleDeleteItem = async () => { if (confirm("このアイテムを削除しますか？")) { await fetch(`/api/world/items/${selectedItem!.ITEM_ID}`, { method: 'DELETE' }); setSelectedItem(null); setFormData({}); loadItems(); } };
 
     // --- Playbook Handlers ---
     const handlePlaybookSelect = async (pb: Playbook) => {
@@ -280,48 +280,48 @@ export default function WorldEditor() {
             loadPlaybooks();
         } catch (e) { }
     };
-    const handleDeletePlaybook = async () => { if (confirm("Are you sure?")) { await fetch(`/api/world/playbooks/${selectedPlaybook!.id}`, { method: 'DELETE' }); setSelectedPlaybook(null); setFormData({}); loadPlaybooks(); } };
+    const handleDeletePlaybook = async () => { if (confirm("この Playbook を削除しますか？")) { await fetch(`/api/world/playbooks/${selectedPlaybook!.id}`, { method: 'DELETE' }); setSelectedPlaybook(null); setFormData({}); loadPlaybooks(); } };
 
 
 
 
     const renderFormActions = (selected: any, create: any, update: any, remove: any) => (
         <div className={styles.actions}>
-            {selected ? <><button className={styles.primaryBtn} onClick={update}>Update</button><button className={styles.dangerBtn} onClick={remove}>Delete</button></>
-                : <button className={styles.primaryBtn} onClick={create}>Create</button>}
+            {selected ? <><button className={styles.primaryBtn} onClick={update}>更新</button><button className={styles.dangerBtn} onClick={remove}>削除</button></>
+                : <button className={styles.primaryBtn} onClick={create}>作成</button>}
         </div>
     );
 
     return (
         <div className={styles.container}>
             <div className={styles.tabs}>
-                <button className={`${styles.tab} ${subTab === 'city' ? styles.active : ''}`} onClick={() => { setSubTab('city'); setSelectedCity(null); setFormData({}); }}><MapPin size={16} /> Cities</button>
-                <button className={`${styles.tab} ${subTab === 'building' ? styles.active : ''}`} onClick={() => { setSubTab('building'); setSelectedBuilding(null); setFormData({}); }}><Layers size={16} /> Buildings</button>
-                <button className={`${styles.tab} ${subTab === 'ai' ? styles.active : ''}`} onClick={() => { setSubTab('ai'); setSelectedAI(null); setFormData({}); }}><Cpu size={16} /> AIs</button>
-                <button className={`${styles.tab} ${subTab === 'blueprint' ? styles.active : ''}`} onClick={() => { setSubTab('blueprint'); setSelectedBlueprint(null); setFormData({}); }}><FileText size={16} /> Blueprints</button>
-                <button className={`${styles.tab} ${subTab === 'tool' ? styles.active : ''}`} onClick={() => { setSubTab('tool'); setSelectedTool(null); setFormData({}); }}><Wrench size={16} /> Tools</button>
-                <button className={`${styles.tab} ${subTab === 'item' ? styles.active : ''}`} onClick={() => { setSubTab('item'); setSelectedItem(null); setFormData({}); }}><Box size={16} /> Items</button>
-                <button className={`${styles.tab} ${subTab === 'playbook' ? styles.active : ''}`} onClick={() => { setSubTab('playbook'); setSelectedPlaybook(null); setFormData({}); }}><BookOpen size={16} /> Playbooks</button>
+                <button className={`${styles.tab} ${subTab === 'city' ? styles.active : ''}`} onClick={() => { setSubTab('city'); setSelectedCity(null); setFormData({}); }}><MapPin size={16} /> City</button>
+                <button className={`${styles.tab} ${subTab === 'building' ? styles.active : ''}`} onClick={() => { setSubTab('building'); setSelectedBuilding(null); setFormData({}); }}><Layers size={16} /> Building</button>
+                <button className={`${styles.tab} ${subTab === 'ai' ? styles.active : ''}`} onClick={() => { setSubTab('ai'); setSelectedAI(null); setFormData({}); }}><Cpu size={16} /> ペルソナ</button>
+                <button className={`${styles.tab} ${subTab === 'blueprint' ? styles.active : ''}`} onClick={() => { setSubTab('blueprint'); setSelectedBlueprint(null); setFormData({}); }}><FileText size={16} /> Blueprint</button>
+                <button className={`${styles.tab} ${subTab === 'tool' ? styles.active : ''}`} onClick={() => { setSubTab('tool'); setSelectedTool(null); setFormData({}); }}><Wrench size={16} /> ツール</button>
+                <button className={`${styles.tab} ${subTab === 'item' ? styles.active : ''}`} onClick={() => { setSubTab('item'); setSelectedItem(null); setFormData({}); }}><Box size={16} /> アイテム</button>
+                <button className={`${styles.tab} ${subTab === 'playbook' ? styles.active : ''}`} onClick={() => { setSubTab('playbook'); setSelectedPlaybook(null); setFormData({}); }}><BookOpen size={16} /> Playbook</button>
             </div>
 
             <div className={styles.content}>
                 {subTab === 'city' && (
                     <div className={styles.pane}>
                         <div className={styles.list}>
-                            <h3>Cities</h3>
+                            <h3>City 一覧</h3>
                             {cities.map(c => <div key={c.CITYID} className={`${styles.item} ${selectedCity?.CITYID === c.CITYID ? styles.selected : ''}`} onClick={() => handleCitySelect(c)}>{c.CITYNAME}</div>)}
-                            <button className={styles.newBtn} onClick={() => { setSelectedCity(null); setFormData({}); }}>+ New City</button>
+                            <button className={styles.newBtn} onClick={() => { setSelectedCity(null); setFormData({}); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
-                            <h3>{selectedCity ? `Edit City` : 'New City'}</h3>
-                            <Field label="Name"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
-                            <Field label="Description"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
+                            <h3>{selectedCity ? `City を編集` : '新しい City'}</h3>
+                            <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
                             <div className={styles.row}>
-                                <Field label="UI Port"><NumInput value={formData.ui_port || ''} onChange={(e: any) => setFormData({ ...formData, ui_port: parseInt(e.target.value) })} /></Field>
-                                <Field label="API Port"><NumInput value={formData.api_port || ''} onChange={(e: any) => setFormData({ ...formData, api_port: parseInt(e.target.value) })} /></Field>
+                                <Field label="UI ポート"><NumInput value={formData.ui_port || ''} onChange={(e: any) => setFormData({ ...formData, ui_port: parseInt(e.target.value) })} /></Field>
+                                <Field label="API ポート"><NumInput value={formData.api_port || ''} onChange={(e: any) => setFormData({ ...formData, api_port: parseInt(e.target.value) })} /></Field>
                             </div>
-                            <Field label="Timezone"><Input value={formData.timezone || ''} onChange={(e: any) => setFormData({ ...formData, timezone: e.target.value })} /></Field>
-                            {selectedCity && <label><input type="checkbox" checked={formData.online_mode || false} onChange={(e: any) => setFormData({ ...formData, online_mode: e.target.checked })} /> Start Online Mode</label>}
+                            <Field label="タイムゾーン"><Input value={formData.timezone || ''} onChange={(e: any) => setFormData({ ...formData, timezone: e.target.value })} /></Field>
+                            {selectedCity && <label><input type="checkbox" checked={formData.online_mode || false} onChange={(e: any) => setFormData({ ...formData, online_mode: e.target.checked })} /> オンラインモードで起動</label>}
                             {renderFormActions(selectedCity, handleCreateCity, handleUpdateCity, handleDeleteCity)}
                         </div>
                     </div>
@@ -330,35 +330,35 @@ export default function WorldEditor() {
                 {subTab === 'building' && (
                     <div className={styles.pane}>
                         <div className={styles.list}>
-                            <h3>Buildings</h3>
+                            <h3>Building 一覧</h3>
                             {buildings.map(b => <div key={b.BUILDINGID} className={`${styles.item} ${selectedBuilding?.BUILDINGID === b.BUILDINGID ? styles.selected : ''}`} onClick={() => handleBuildingSelect(b)}>{b.BUILDINGNAME}</div>)}
-                            <button className={styles.newBtn} onClick={() => { setSelectedBuilding(null); setFormData({}); }}>+ New Building</button>
+                            <button className={styles.newBtn} onClick={() => { setSelectedBuilding(null); setFormData({}); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
-                            <h3>{selectedBuilding ? `Edit Building` : 'New Building'}</h3>
-                            <Field label="Name"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            <h3>{selectedBuilding ? `Building を編集` : '新しい Building'}</h3>
+                            <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
                             {selectedBuilding
                                 ? <Field label="ID"><Input value={selectedBuilding.BUILDINGID} disabled style={{ opacity: 0.7, cursor: 'not-allowed' }} /></Field>
-                                : <Field label="ID (optional)"><Input value={formData.building_id || ''} placeholder="Leave empty to auto-generate" onChange={(e: any) => setFormData({ ...formData, building_id: e.target.value })} /></Field>
+                                : <Field label="ID（任意）"><Input value={formData.building_id || ''} placeholder="空欄で自動生成" onChange={(e: any) => setFormData({ ...formData, building_id: e.target.value })} /></Field>
                             }
-                            <Field label="City"><Select value={formData.city_id || ''} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
-                                <option value="">Select City...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME}</option>)}
+                            <Field label="都市"><Select value={formData.city_id || ''} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
+                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME}</option>)}
                             </Select></Field>
                             <div className={styles.row}>
-                                <Field label="Capacity"><NumInput value={formData.capacity || 1} onChange={(e: any) => setFormData({ ...formData, capacity: parseInt(e.target.value) })} /></Field>
-                                <Field label="Interval (s)"><NumInput value={formData.auto_interval || 10} onChange={(e: any) => setFormData({ ...formData, auto_interval: parseInt(e.target.value) })} /></Field>
+                                <Field label="定員"><NumInput value={formData.capacity || 1} onChange={(e: any) => setFormData({ ...formData, capacity: parseInt(e.target.value) })} /></Field>
+                                <Field label="インターバル（秒）"><NumInput value={formData.auto_interval || 10} onChange={(e: any) => setFormData({ ...formData, auto_interval: parseInt(e.target.value) })} /></Field>
                             </div>
-                            <Field label="Description"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
-                            <Field label="System Instruction"><TextArea style={{ minHeight: 150 }} value={formData.system_instruction || ''} onChange={(e: any) => setFormData({ ...formData, system_instruction: e.target.value })} /></Field>
-                            {selectedBuilding && <Field label="Interior Image (Visual Context)">
+                            <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
+                            <Field label="システムプロンプト"><TextArea style={{ minHeight: 150 }} value={formData.system_instruction || ''} onChange={(e: any) => setFormData({ ...formData, system_instruction: e.target.value })} /></Field>
+                            {selectedBuilding && <Field label="インテリア画像（ビジュアルコンテキスト）">
                                 <ImageUpload
                                     value={formData.image_path || ''}
                                     onChange={(url: string) => setFormData({ ...formData, image_path: url })}
                                 />
-                                <small style={{ color: '#666', fontSize: '0.8rem' }}>Building interior image for LLM visual context</small>
+                                <small style={{ color: '#666', fontSize: '0.8rem' }}>LLM のビジュアルコンテキスト用インテリア画像</small>
                             </Field>}
                             {selectedBuilding && <div className={styles.field}>
-                                <label>Extra Prompt Files</label>
+                                <label>追加プロンプトファイル</label>
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                                     {(formData.extra_prompt_files || []).map((file: string, idx: number) => (
                                         <div key={idx} style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
@@ -371,7 +371,7 @@ export default function WorldEditor() {
                                                 }}
                                                 style={{ flex: 1 }}
                                             >
-                                                <option value="">Select prompt file...</option>
+                                                <option value="">プロンプトファイルを選択...</option>
                                                 {availablePrompts.map(p => <option key={p} value={p}>{p}</option>)}
                                             </Select>
                                             <button
@@ -391,12 +391,12 @@ export default function WorldEditor() {
                                         onClick={() => setFormData({ ...formData, extra_prompt_files: [...(formData.extra_prompt_files || []), ''] })}
                                         style={{ padding: '0.5rem', background: '#e2e8f0', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
                                     >
-                                        + Add Prompt File
+                                        + プロンプトファイルを追加
                                     </button>
                                 </div>
-                                <small style={{ color: '#666', fontSize: '0.8rem' }}>Additional system prompts to include when personas are in this building</small>
+                                <small style={{ color: '#666', fontSize: '0.8rem' }}>この Building 内のペルソナ用の追加システムプロンプト</small>
                             </div>}
-                            {selectedBuilding && <div className={styles.field}><label>Tools</label><div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>{tools.map(t => (<label key={t.TOOLID} style={{ background: '#f1f5f9', padding: '0.25rem' }}><input type="checkbox" checked={(formData.tool_ids || []).includes(t.TOOLID)} onChange={e => { const c = formData.tool_ids || []; if (e.target.checked) setFormData({ ...formData, tool_ids: [...c, t.TOOLID] }); else setFormData({ ...formData, tool_ids: c.filter((id: any) => id !== t.TOOLID) }); }} /> {t.TOOLNAME}</label>))}</div></div>}
+                            {selectedBuilding && <div className={styles.field}><label>ツール</label><div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>{tools.map(t => (<label key={t.TOOLID} style={{ background: '#f1f5f9', padding: '0.25rem' }}><input type="checkbox" checked={(formData.tool_ids || []).includes(t.TOOLID)} onChange={e => { const c = formData.tool_ids || []; if (e.target.checked) setFormData({ ...formData, tool_ids: [...c, t.TOOLID] }); else setFormData({ ...formData, tool_ids: c.filter((id: any) => id !== t.TOOLID) }); }} /> {t.TOOLNAME}</label>))}</div></div>}
                             {renderFormActions(selectedBuilding, handleCreateBuilding, handleUpdateBuilding, handleDeleteBuilding)}
                         </div>
                     </div>
@@ -405,59 +405,59 @@ export default function WorldEditor() {
                 {subTab === 'ai' && (
                     <div className={styles.pane}>
                         <div className={styles.list}>
-                            <h3>AIs</h3>
+                            <h3>ペルソナ一覧</h3>
                             {ais.map(a => <div key={a.AIID} className={`${styles.item} ${selectedAI?.AIID === a.AIID ? styles.selected : ''}`} onClick={() => handleAISelect(a)}>{a.AINAME}</div>)}
-                            <button className={styles.newBtn} onClick={() => { setSelectedAI(null); setFormData({ interaction_mode: 'auto' }); }}>+ New AI</button>
+                            <button className={styles.newBtn} onClick={() => { setSelectedAI(null); setFormData({ interaction_mode: 'auto' }); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
-                            <h3>{selectedAI ? `Edit AI` : 'New AI'}</h3>
-                            <Field label="Name"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
-                            <Field label="Home City"><Select value={formData.home_city_id || ''} onChange={(e: any) => setFormData({ ...formData, home_city_id: parseInt(e.target.value) })}>
-                                <option value="">Select City...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME}</option>)}
+                            <h3>{selectedAI ? `ペルソナを編集` : '新しいペルソナ'}</h3>
+                            <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            <Field label="ホーム都市"><Select value={formData.home_city_id || ''} onChange={(e: any) => setFormData({ ...formData, home_city_id: parseInt(e.target.value) })}>
+                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME}</option>)}
                             </Select></Field>
                             {selectedAI && <>
-                                <Field label="Default Model"><Select value={formData.default_model || ''} onChange={(e: any) => setFormData({ ...formData, default_model: e.target.value })}>
-                                    <option value="">Use System Default</option>
+                                <Field label="デフォルトモデル"><Select value={formData.default_model || ''} onChange={(e: any) => setFormData({ ...formData, default_model: e.target.value })}>
+                                    <option value="">システムデフォルトを使用</option>
                                     {formData.default_model && !modelChoices.some(m => m.id === formData.default_model) && (
-                                        <option value={formData.default_model}>⚠️ Unknown: {formData.default_model}</option>
+                                        <option value={formData.default_model}>⚠️ 不明: {formData.default_model}</option>
                                     )}
                                     {modelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                                 </Select></Field>
-                                <Field label="Lightweight Model"><Select value={formData.lightweight_model || ''} onChange={(e: any) => setFormData({ ...formData, lightweight_model: e.target.value })}>
-                                    <option value="">Use System Default</option>
+                                <Field label="軽量モデル"><Select value={formData.lightweight_model || ''} onChange={(e: any) => setFormData({ ...formData, lightweight_model: e.target.value })}>
+                                    <option value="">システムデフォルトを使用</option>
                                     {formData.lightweight_model && !modelChoices.some(m => m.id === formData.lightweight_model) && (
-                                        <option value={formData.lightweight_model}>⚠️ Unknown: {formData.lightweight_model}</option>
+                                        <option value={formData.lightweight_model}>⚠️ 不明: {formData.lightweight_model}</option>
                                     )}
                                     {modelChoices.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                                 </Select></Field>
-                                <Field label="Interaction Mode"><Select value={formData.interaction_mode || 'auto'} onChange={(e: any) => setFormData({ ...formData, interaction_mode: e.target.value })}>
+                                <Field label="インタラクションモード"><Select value={formData.interaction_mode || 'auto'} onChange={(e: any) => setFormData({ ...formData, interaction_mode: e.target.value })}>
                                     <option value="auto">Auto</option><option value="manual">Manual</option><option value="sleep">Sleep</option>
                                 </Select></Field>
-                                <Field label="Avatar">
+                                <Field label="アバター">
                                     <ImageUpload
                                         value={formData.avatar_path || ''}
                                         onChange={(url: string) => setFormData({ ...formData, avatar_path: url })}
                                         circle={true}
                                     />
                                 </Field>
-                                <Field label="Appearance Image (Visual Context)">
+                                <Field label="外見画像（ビジュアルコンテキスト）">
                                     <ImageUpload
                                         value={formData.appearance_image_path || ''}
                                         onChange={(url: string) => setFormData({ ...formData, appearance_image_path: url })}
                                     />
-                                    <small style={{ color: '#666', fontSize: '0.8rem' }}>Detailed persona appearance image for LLM visual context (separate from avatar)</small>
+                                    <small style={{ color: '#666', fontSize: '0.8rem' }}>LLM のビジュアルコンテキスト用外見画像（アバターとは別）</small>
                                 </Field>
                             </>}
-                            <Field label="System Prompt"><TextArea style={{ minHeight: 200 }} value={formData.system_prompt || ''} onChange={(e: any) => setFormData({ ...formData, system_prompt: e.target.value })} /></Field>
-                            <Field label="Description"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
+                            <Field label="システムプロンプト"><TextArea style={{ minHeight: 200 }} value={formData.system_prompt || ''} onChange={(e: any) => setFormData({ ...formData, system_prompt: e.target.value })} /></Field>
+                            <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
                             {renderFormActions(selectedAI, handleCreateAI, handleUpdateAI, handleDeleteAI)}
                             {selectedAI && <div style={{ marginTop: '2rem', borderTop: '1px solid #eee', paddingTop: '1rem' }}>
-                                <h4>Move AI</h4>
+                                <h4>ペルソナを移動</h4>
                                 <div className={styles.row}>
                                     <Select value={formData.target_building_name || ''} onChange={(e: any) => setFormData({ ...formData, target_building_name: e.target.value })}>
-                                        <option value="">Select Destination...</option>{buildings.map(b => <option key={b.BUILDINGID} value={b.BUILDINGNAME}>{b.BUILDINGNAME}</option>)}
+                                        <option value="">移動先を選択...</option>{buildings.map(b => <option key={b.BUILDINGID} value={b.BUILDINGNAME}>{b.BUILDINGNAME}</option>)}
                                     </Select>
-                                    <button className={styles.primaryBtn} onClick={handleMoveAI}>Move</button>
+                                    <button className={styles.primaryBtn} onClick={handleMoveAI}>移動</button>
                                 </div>
                             </div>}
                         </div>
@@ -467,28 +467,28 @@ export default function WorldEditor() {
                 {subTab === 'blueprint' && (
                     <div className={styles.pane}>
                         <div className={styles.list}>
-                            <h3>Blueprints</h3>
+                            <h3>Blueprint 一覧</h3>
                             {blueprints.map(b => <div key={b.BLUEPRINT_ID} className={`${styles.item} ${selectedBlueprint?.BLUEPRINT_ID === b.BLUEPRINT_ID ? styles.selected : ''}`} onClick={() => handleBlueprintSelect(b)}>{b.NAME}</div>)}
-                            <button className={styles.newBtn} onClick={() => { setSelectedBlueprint(null); setFormData({ entity_type: 'ai' }); }}>+ New Blueprint</button>
+                            <button className={styles.newBtn} onClick={() => { setSelectedBlueprint(null); setFormData({ entity_type: 'ai' }); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
-                            <h3>{selectedBlueprint ? `Edit Blueprint` : 'New Blueprint'}</h3>
-                            <Field label="Name"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
-                            <Field label="Type"><Input value={formData.entity_type || 'ai'} onChange={(e: any) => setFormData({ ...formData, entity_type: e.target.value })} /></Field>
-                            <Field label="City"><Select value={formData.city_id || ''} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
-                                <option value="">Select City...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME}</option>)}
+                            <h3>{selectedBlueprint ? `Blueprint を編集` : '新しい Blueprint'}</h3>
+                            <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            <Field label="タイプ"><Input value={formData.entity_type || 'ai'} onChange={(e: any) => setFormData({ ...formData, entity_type: e.target.value })} /></Field>
+                            <Field label="都市"><Select value={formData.city_id || ''} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
+                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME}</option>)}
                             </Select></Field>
-                            <Field label="System Prompt"><TextArea style={{ minHeight: 200 }} value={formData.system_prompt || ''} onChange={(e: any) => setFormData({ ...formData, system_prompt: e.target.value })} /></Field>
-                            <Field label="Description"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
+                            <Field label="システムプロンプト"><TextArea style={{ minHeight: 200 }} value={formData.system_prompt || ''} onChange={(e: any) => setFormData({ ...formData, system_prompt: e.target.value })} /></Field>
+                            <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
                             {renderFormActions(selectedBlueprint, handleCreateBlueprint, handleUpdateBlueprint, handleDeleteBlueprint)}
                             {selectedBlueprint && <div style={{ marginTop: '2rem', borderTop: '1px solid #eee', paddingTop: '1rem' }}>
-                                <h4>Spawn Entity</h4>
-                                <Field label="New Entity Name"><Input value={formData.spawn_entity_name || ''} onChange={(e: any) => setFormData({ ...formData, spawn_entity_name: e.target.value })} /></Field>
+                                <h4>エンティティを生成</h4>
+                                <Field label="新しいエンティティ名"><Input value={formData.spawn_entity_name || ''} onChange={(e: any) => setFormData({ ...formData, spawn_entity_name: e.target.value })} /></Field>
                                 <div className={styles.row}>
                                     <Select value={formData.spawn_building_name || ''} onChange={(e: any) => setFormData({ ...formData, spawn_building_name: e.target.value })}>
-                                        <option value="">Select Building...</option>{buildings.map(b => <option key={b.BUILDINGID} value={b.BUILDINGNAME}>{b.BUILDINGNAME}</option>)}
+                                        <option value="">Building を選択...</option>{buildings.map(b => <option key={b.BUILDINGID} value={b.BUILDINGNAME}>{b.BUILDINGNAME}</option>)}
                                     </Select>
-                                    <button className={styles.primaryBtn} onClick={handleSpawnBlueprint}>Spawn</button>
+                                    <button className={styles.primaryBtn} onClick={handleSpawnBlueprint}>生成</button>
                                 </div>
                             </div>}
                         </div>
@@ -498,16 +498,16 @@ export default function WorldEditor() {
                 {subTab === 'tool' && (
                     <div className={styles.pane}>
                         <div className={styles.list}>
-                            <h3>Tools</h3>
+                            <h3>ツール一覧</h3>
                             {tools.map(t => <div key={t.TOOLID} className={`${styles.item} ${selectedTool?.TOOLID === t.TOOLID ? styles.selected : ''}`} onClick={() => handleToolSelect(t)}>{t.TOOLNAME}</div>)}
-                            <button className={styles.newBtn} onClick={() => { setSelectedTool(null); setFormData({}); }}>+ New Tool</button>
+                            <button className={styles.newBtn} onClick={() => { setSelectedTool(null); setFormData({}); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
-                            <h3>{selectedTool ? `Edit Tool` : 'New Tool'}</h3>
-                            <Field label="Name"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
-                            <Field label="Module Path"><Input value={formData.module_path || ''} onChange={(e: any) => setFormData({ ...formData, module_path: e.target.value })} /></Field>
-                            <Field label="Function Name"><Input value={formData.function_name || ''} onChange={(e: any) => setFormData({ ...formData, function_name: e.target.value })} /></Field>
-                            <Field label="Description"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
+                            <h3>{selectedTool ? `ツールを編集` : '新しいツール'}</h3>
+                            <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            <Field label="モジュールパス"><Input value={formData.module_path || ''} onChange={(e: any) => setFormData({ ...formData, module_path: e.target.value })} /></Field>
+                            <Field label="関数名"><Input value={formData.function_name || ''} onChange={(e: any) => setFormData({ ...formData, function_name: e.target.value })} /></Field>
+                            <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
                             {renderFormActions(selectedTool, handleCreateTool, handleUpdateTool, handleDeleteTool)}
                         </div>
                     </div>
@@ -516,45 +516,45 @@ export default function WorldEditor() {
                 {subTab === 'item' && (
                     <div className={styles.pane}>
                         <div className={styles.list}>
-                            <h3>Items</h3>
+                            <h3>アイテム一覧</h3>
                             {items.map(i => <div key={i.ITEM_ID} className={`${styles.item} ${selectedItem?.ITEM_ID === i.ITEM_ID ? styles.selected : ''}`} onClick={() => handleItemSelect(i)}>{i.NAME}</div>)}
-                            <button className={styles.newBtn} onClick={() => { setSelectedItem(null); setFormData({ item_type: 'picture', owner_kind: 'world' }); }}>+ New Item</button>
+                            <button className={styles.newBtn} onClick={() => { setSelectedItem(null); setFormData({ item_type: 'picture', owner_kind: 'world' }); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
-                            <h3>{selectedItem ? `Edit Item` : 'New Item'}</h3>
-                            <Field label="Name"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
-                            <Field label="Type"><Select value={formData.item_type || 'object'} onChange={(e: any) => setFormData({ ...formData, item_type: e.target.value })}>
-                                <option value="picture">Picture </option>
-                                <option value="document">Document </option>
-                                <option value="object">Object (no file)</option>
+                            <h3>{selectedItem ? `アイテムを編集` : '新しいアイテム'}</h3>
+                            <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            <Field label="種別"><Select value={formData.item_type || 'object'} onChange={(e: any) => setFormData({ ...formData, item_type: e.target.value })}>
+                                <option value="picture">画像</option>
+                                <option value="document">ドキュメント</option>
+                                <option value="object">オブジェクト（ファイルなし）</option>
                             </Select></Field>
                             <div className={styles.row}>
-                                <Field label="Owner">
+                                <Field label="所有者">
                                     <Select value={formData.owner_kind || 'world'} onChange={(e: any) => setFormData({ ...formData, owner_kind: e.target.value, owner_id: '' })}>
-                                        <option value="world">World (Global)</option>
+                                        <option value="world">ワールド（グローバル）</option>
                                         <option value="building">Building</option>
-                                        <option value="persona">Persona</option>
+                                        <option value="persona">ペルソナ</option>
                                     </Select>
                                 </Field>
                                 {formData.owner_kind === 'building' && (
                                     <Field label="Building">
                                         <Select value={formData.owner_id || ''} onChange={(e: any) => setFormData({ ...formData, owner_id: e.target.value })}>
-                                            <option value="">Select Building...</option>
+                                            <option value="">Building を選択...</option>
                                             {buildings.map(b => <option key={b.BUILDINGID} value={b.BUILDINGID}>{b.BUILDINGNAME}</option>)}
                                         </Select>
                                     </Field>
                                 )}
                                 {formData.owner_kind === 'persona' && (
-                                    <Field label="Persona">
+                                    <Field label="ペルソナ">
                                         <Select value={formData.owner_id || ''} onChange={(e: any) => setFormData({ ...formData, owner_id: e.target.value })}>
-                                            <option value="">Select Persona...</option>
+                                            <option value="">ペルソナを選択...</option>
                                             {ais.map(a => <option key={a.AIID} value={a.AIID}>{a.AINAME}</option>)}
                                         </Select>
                                     </Field>
                                 )}
                             </div>
                             {(formData.item_type === 'picture' || formData.item_type === 'document') && (
-                                <Field label="File">
+                                <Field label="ファイル">
                                     <FileUpload
                                         value={formData.file_path || null}
                                         onChange={(path, type) => {
@@ -563,7 +563,7 @@ export default function WorldEditor() {
                                         onClear={() => setFormData({ ...formData, file_path: '' })}
                                         acceptImages={formData.item_type === 'picture'}
                                         acceptDocuments={formData.item_type === 'document'}
-                                        placeholder={formData.item_type === 'picture' ? 'Select Image' : 'Select Text File'}
+                                        placeholder={formData.item_type === 'picture' ? '画像を選択' : 'テキストファイルを選択'}
                                     />
                                 </Field>
                             )}
@@ -583,9 +583,9 @@ export default function WorldEditor() {
                 {subTab === 'playbook' && (
                     <div className={styles.pane}>
                         <div className={styles.list}>
-                            <h3>Playbooks</h3>
+                            <h3>Playbook 一覧</h3>
                             {playbooks.map(pb => <div key={pb.id} className={`${styles.item} ${selectedPlaybook?.id === pb.id ? styles.selected : ''}`} onClick={() => handlePlaybookSelect(pb)}>{pb.name}</div>)}
-                            <button className={styles.newBtn} onClick={() => { setSelectedPlaybook(null); setFormData({ scope: 'public', router_callable: false, user_selectable: false, nodes_json: '[]', schema_json: '{"input_schema": [], "start_node": "start"}' }); }}>+ New Playbook</button>
+                            <button className={styles.newBtn} onClick={() => { setSelectedPlaybook(null); setFormData({ scope: 'public', router_callable: false, user_selectable: false, nodes_json: '[]', schema_json: '{"input_schema": [], "start_node": "start"}' }); }}>+ 新規作成</button>
                             <div style={{ marginTop: '1rem', borderTop: '1px solid #eee', paddingTop: '1rem' }}>
                                 <h4 style={{ marginBottom: '0.5rem', fontSize: '0.9rem' }}>JSONからインポート</h4>
                                 <input
@@ -619,20 +619,20 @@ export default function WorldEditor() {
                             </div>
                         </div>
                         <div className={styles.form}>
-                            <h3>{selectedPlaybook ? `Edit Playbook` : 'New Playbook'}</h3>
-                            <Field label="Name (lowercase, underscore)"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
-                            <Field label="Description"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
+                            <h3>{selectedPlaybook ? `Playbook を編集` : '新しい Playbook'}</h3>
+                            <Field label="名前（小文字、アンダースコア）"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
+                            <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
                             <div className={styles.row}>
-                                <Field label="Scope"><Select value={formData.scope || 'public'} onChange={(e: any) => setFormData({ ...formData, scope: e.target.value })}>
+                                <Field label="スコープ"><Select value={formData.scope || 'public'} onChange={(e: any) => setFormData({ ...formData, scope: e.target.value })}>
                                     <option value="public">Public</option><option value="personal">Personal</option><option value="building">Building</option>
                                 </Select></Field>
                             </div>
                             <div className={styles.row}>
-                                <label><input type="checkbox" checked={formData.router_callable || false} onChange={(e: any) => setFormData({ ...formData, router_callable: e.target.checked })} /> Router Callable</label>
-                                <label style={{ marginLeft: '1rem' }}><input type="checkbox" checked={formData.user_selectable || false} onChange={(e: any) => setFormData({ ...formData, user_selectable: e.target.checked })} /> User Selectable</label>
+                                <label><input type="checkbox" checked={formData.router_callable || false} onChange={(e: any) => setFormData({ ...formData, router_callable: e.target.checked })} /> ルーターから呼び出し可能</label>
+                                <label style={{ marginLeft: '1rem' }}><input type="checkbox" checked={formData.user_selectable || false} onChange={(e: any) => setFormData({ ...formData, user_selectable: e.target.checked })} /> ユーザー選択可能</label>
                             </div>
-                            <Field label="Schema JSON (input_schema, start_node, etc.)"><TextArea style={{ minHeight: 120, fontFamily: 'monospace' }} value={formData.schema_json || ''} onChange={(e: any) => setFormData({ ...formData, schema_json: e.target.value })} /></Field>
-                            <Field label="Nodes JSON"><TextArea style={{ minHeight: 200, fontFamily: 'monospace' }} value={formData.nodes_json || ''} onChange={(e: any) => setFormData({ ...formData, nodes_json: e.target.value })} /></Field>
+                            <Field label="スキーマ JSON (input_schema, start_node など)"><TextArea style={{ minHeight: 120, fontFamily: 'monospace' }} value={formData.schema_json || ''} onChange={(e: any) => setFormData({ ...formData, schema_json: e.target.value })} /></Field>
+                            <Field label="ノード JSON"><TextArea style={{ minHeight: 200, fontFamily: 'monospace' }} value={formData.nodes_json || ''} onChange={(e: any) => setFormData({ ...formData, nodes_json: e.target.value })} /></Field>
                             {renderFormActions(selectedPlaybook, handleCreatePlaybook, handleUpdatePlaybook, handleDeletePlaybook)}
                         </div>
                     </div>

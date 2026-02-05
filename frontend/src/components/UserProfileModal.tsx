@@ -33,7 +33,7 @@ export default function UserProfileModal({ isOpen, onClose, currentName, current
 
     const handleSave = async () => {
         if (!name.trim()) {
-            setError("Name cannot be empty");
+            setError("名前を入力してください");
             return;
         }
 
@@ -55,11 +55,11 @@ export default function UserProfileModal({ isOpen, onClose, currentName, current
                 onClose();
             } else {
                 const data = await res.json();
-                setError(data.detail || "Failed to update profile");
+                setError(data.detail || "プロフィールの更新に失敗しました");
             }
         } catch (e) {
             console.error(e);
-            setError("Network error");
+            setError("ネットワークエラー");
         } finally {
             setLoading(false);
         }
@@ -69,7 +69,7 @@ export default function UserProfileModal({ isOpen, onClose, currentName, current
         <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
-                    <h2 className={styles.title}>Edit Profile</h2>
+                    <h2 className={styles.title}>プロフィール編集</h2>
                     <button className={styles.closeButton} onClick={onClose}>
                         <X size={20} />
                     </button>
@@ -87,18 +87,18 @@ export default function UserProfileModal({ isOpen, onClose, currentName, current
                     </div>
 
                     <div className={styles.formGroup}>
-                        <label className={styles.label}>Display Name</label>
+                        <label className={styles.label}>表示名</label>
                         <input
                             type="text"
                             className={styles.input}
                             value={name}
                             onChange={(e) => setName(e.target.value)}
-                            placeholder="Enter display name"
+                            placeholder="表示名を入力"
                         />
                     </div>
 
                     <div className={styles.formGroup}>
-                        <label className={styles.label}>Email Address</label>
+                        <label className={styles.label}>メールアドレス</label>
                         <input
                             type="email"
                             className={styles.input}
@@ -118,12 +118,12 @@ export default function UserProfileModal({ isOpen, onClose, currentName, current
 
                 <div className={styles.footer}>
                     <button className={styles.cancelBtn} onClick={onClose} disabled={loading}>
-                        Cancel
+                        キャンセル
                     </button>
                     <button className={styles.saveBtn} onClick={handleSave} disabled={loading}>
-                        {loading ? "Saving..." : (
+                        {loading ? "保存中..." : (
                             <>
-                                <Save size={16} /> Save Changes
+                                <Save size={16} /> 保存
                             </>
                         )}
                     </button>

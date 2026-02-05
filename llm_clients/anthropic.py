@@ -99,7 +99,9 @@ def _prepare_anthropic_system(
         else:
             remaining.append(msg)
 
-    # Add cache_control to the last system block for efficient caching
+    # Add cache_control to the last system block for efficient caching.
+    # Note: Anthropic has no read-only cache mode. Placing breakpoints enables
+    # both reads and writes. Removing them disables both entirely.
     if enable_cache and system_blocks:
         system_blocks[-1]["cache_control"] = _make_cache_control(cache_ttl)
 
@@ -204,8 +206,9 @@ def _prepare_anthropic_messages(
             if is_dynamic and first_dynamic_index is None:
                 first_dynamic_index = prepared_index
 
-    # Add cache_control BEFORE dynamic content (realtime context)
-    # This ensures conversation history is cached but dynamic content is excluded
+    # Add cache_control BEFORE dynamic content (realtime context).
+    # Note: Anthropic has no read-only cache mode. Placing breakpoints enables
+    # both reads and writes. Removing them disables both entirely.
     if enable_cache and prepared:
         if first_dynamic_index is not None and first_dynamic_index > 0:
             # Place breakpoint on the message BEFORE dynamic content
@@ -255,7 +258,8 @@ def _prepare_anthropic_tools(
             # Already in Anthropic format or simple format
             anthropic_tools.append(tool)
 
-    # Add cache_control to the last tool for caching
+    # Add cache_control to the last tool for caching.
+    # Note: Anthropic has no read-only cache mode.
     if enable_cache and anthropic_tools:
         anthropic_tools[-1]["cache_control"] = _make_cache_control(cache_ttl)
 

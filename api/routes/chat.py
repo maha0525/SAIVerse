@@ -70,12 +70,13 @@ import hashlib
 
 @router.get("/history", response_model=ChatHistoryResponse)
 def get_chat_history(
-    limit: int = 20, 
+    limit: int = 20,
     before: Optional[str] = None,
     after: Optional[str] = None,
+    building_id: Optional[str] = None,
     manager = Depends(get_manager)
 ):
-    current_bid = manager.user_current_building_id
+    current_bid = building_id or manager.user_current_building_id
     logging.debug("[CHAT_HISTORY] Request: limit=%s, before=%s, current_bid=%s", limit, before, current_bid)
     
     if not current_bid:
@@ -303,6 +304,7 @@ class AttachmentData(BaseModel):
 
 class SendMessageRequest(BaseModel):
     message: str
+    building_id: Optional[str] = None  # Client-provided building context for multi-device safety
     attachment: Optional[str] = None  # Base64 encoded file (legacy, single attachment)
     attachments: Optional[List[AttachmentData]] = None  # New: multiple attachments
     meta_playbook: Optional[str] = None
@@ -408,8 +410,6 @@ def _store_document_attachment(
     dest_dir = Path.home() / ".saiverse" / "documents"
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    # Preserve original extension
-    ext = Path(att.filename).suffix or ".txt"
     dest_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex}_{att.filename}"
     dest_path = dest_dir / dest_name
     dest_path.write_bytes(data)
@@ -479,7 +479,8 @@ def _store_uploaded_attachment_v2(
 
 @router.post("/send")
 def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
-    if not manager.user_current_building_id:
+    building_id = req.building_id or manager.user_current_building_id
+    if not building_id:
         raise HTTPException(status_code=400, detail="User is not in any building")
 
     if not req.message and not req.attachment and not req.attachments:
@@ -487,7 +488,6 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
 
     # Combine metadata
     metadata = req.metadata or {}
-    building_id = manager.user_current_building_id
 
     # Handle new multi-attachment format
     if req.attachments:
@@ -541,7 +541,8 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
                 req.message,
                 metadata=metadata,
                 meta_playbook=req.meta_playbook,
-                playbook_params=req.playbook_params
+                playbook_params=req.playbook_params,
+                building_id=building_id,
             )
             
             for chunk in stream:

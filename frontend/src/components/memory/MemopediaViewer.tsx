@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Book, ChevronRight, ChevronDown, ChevronLeft, History, Clock, GitCommit, Tag, Edit2, Trash2, Save, X, Plus, FolderTree, Sparkles } from 'lucide-react';
+import { Book, ChevronRight, ChevronDown, ChevronLeft, History, Clock, GitCommit, Tag, Edit2, Trash2, Save, X, Plus, FolderTree, Sparkles, Star } from 'lucide-react';
 import styles from './MemopediaViewer.module.css';
 
 interface MemopediaPage {
@@ -10,6 +10,7 @@ interface MemopediaPage {
     keywords: string[];
     vividness: string;
     is_trunk: boolean;
+    is_important: boolean;
     children: MemopediaPage[];
 }
 
@@ -405,13 +406,34 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         }
     };
 
+    // Toggle important flag
+    const handleImportantToggle = async (pageId: string, isImportant: boolean) => {
+        try {
+            const res = await fetch(`/api/people/${personaId}/memopedia/pages/${pageId}/important`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ is_important: isImportant }),
+            });
+
+            if (res.ok) {
+                await loadTree();
+            } else {
+                const err = await res.json();
+                alert(`重要フラグの設定に失敗しました: ${err.detail || 'Unknown error'}`);
+            }
+        } catch (error) {
+            console.error('Failed to toggle important', error);
+            alert('重要フラグの設定に失敗しました');
+        }
+    };
+
     // Generation handlers
     const startGeneration = async () => {
         if (!generateKeyword.trim()) return;
 
         setIsGenerating(true);
         setGenerateError(null);
-        setGenerateStatus("Starting generation...");
+        setGenerateStatus("生成開始中...");
 
         try {
             const res = await fetch(`/api/people/${personaId}/memopedia/generate`, {
@@ -453,7 +475,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
             }
 
             const data = await res.json();
-            setGenerateStatus(data.message || 'Processing...');
+            setGenerateStatus(data.message || '処理中...');
 
             if (data.progress !== undefined && data.total) {
                 setGenerateProgress({ current: data.progress, total: data.total });
@@ -583,6 +605,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                         <span style={{ display: 'inline-block', width: 16 }} />
                     )}
                     {page.is_trunk && <FolderTree size={14} className={styles.trunkIcon} />}
+                    {page.is_important && <Star size={12} style={{ color: '#e6a817', flexShrink: 0 }} />}
                     <span className={page.is_trunk ? styles.trunkTitle : ''}>{page.title}</span>
                     {(page.is_trunk || isRoot) && (
                         <button
@@ -616,7 +639,17 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
             return null;
         };
         const page = findPage(allPages);
-        return page?.keywords || [];
+        const keywords = page?.keywords;
+        // Handle case where keywords might be a JSON string instead of array
+        if (typeof keywords === 'string') {
+            try {
+                const parsed = JSON.parse(keywords);
+                return Array.isArray(parsed) ? parsed : [];
+            } catch {
+                return [];
+            }
+        }
+        return Array.isArray(keywords) ? keywords : [];
     };
 
     // Helper to find selected page and get its vividness
@@ -651,9 +684,26 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         return page?.is_trunk || false;
     };
 
+    // Helper to find selected page and get its is_important
+    const getSelectedPageIsImportant = (): boolean => {
+        if (!tree || !selectedPageId) return false;
+        const allPages = [...tree.people, ...tree.terms, ...tree.plans];
+        const findPage = (pages: MemopediaPage[]): MemopediaPage | null => {
+            for (const p of pages) {
+                if (p.id === selectedPageId) return p;
+                const found = findPage(p.children);
+                if (found) return found;
+            }
+            return null;
+        };
+        const page = findPage(allPages);
+        return page?.is_important || false;
+    };
+
     const selectedKeywords = getSelectedPageKeywords();
     const selectedVividness = getSelectedPageVividness();
     const selectedIsTrunk = getSelectedPageIsTrunk();
+    const selectedIsImportant = getSelectedPageIsImportant();
 
     const getVividnessLabel = (vividness: string) => {
         switch (vividness) {
@@ -665,13 +715,13 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         }
     };
 
-    if (!tree) return <div className={styles.emptyState}>Loading knowledge base...</div>;
+    if (!tree) return <div className={styles.emptyState}>ナレッジベースを読み込み中...</div>;
 
     return (
         <div className={styles.container}>
             <div className={`${styles.sidebar} ${!showList ? styles.mobileHidden : ''}`}>
                 <div className={styles.sidebarHeader}>
-                    <span>Knowledge Tree</span>
+                    <span>ナレッジツリー</span>
                     <button
                         className={styles.generateButton}
                         onClick={() => {
@@ -689,13 +739,13 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                     </button>
                 </div>
                 <div className={styles.treeContainer}>
-                    <div className={styles.categoryTitle}>People</div>
+                    <div className={styles.categoryTitle}>人物 / People</div>
                     {tree.people.map(p => <TreeItem key={p.id} page={p} />)}
 
-                    <div className={styles.categoryTitle}>Terms</div>
+                    <div className={styles.categoryTitle}>用語 / Terms</div>
                     {tree.terms.map(p => <TreeItem key={p.id} page={p} />)}
 
-                    <div className={styles.categoryTitle}>Plans</div>
+                    <div className={styles.categoryTitle}>計画 / Plans</div>
                     {tree.plans.map(p => <TreeItem key={p.id} page={p} />)}
                 </div>
             </div>
@@ -706,7 +756,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                         className={styles.backButton}
                         onClick={() => setShowList(true)}
                     >
-                        <ChevronLeft size={20} /> Back
+                        <ChevronLeft size={20} /> 戻る
                     </button>
                     {selectedPageId && !selectedPageId.startsWith('root_') && (
                         <div className={styles.headerButtons}>
@@ -748,7 +798,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                             <History size={20} /> 編集履歴
                         </h3>
                         {isLoadingHistory ? (
-                            <div className={styles.emptyState}>Loading history...</div>
+                            <div className={styles.emptyState}>履歴を読み込み中...</div>
                         ) : editHistory.length === 0 ? (
                             <div className={styles.emptyState}>
                                 <p>編集履歴がありません</p>
@@ -787,7 +837,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                         {selectedHistoryEntry?.id === entry.id && (
                                             <div className={styles.diffView}>
                                                 <div className={styles.diffHeader}>Diff</div>
-                                                <pre className={styles.diffContent}>{entry.diff_text || '(no diff)'}</pre>
+                                                <pre className={styles.diffContent}>{entry.diff_text || '(差分なし)'}</pre>
                                             </div>
                                         )}
                                     </div>
@@ -874,7 +924,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                     // Content View
                     selectedPageId ? (
                         isLoadingPage ? (
-                            <div className={styles.emptyState}>Loading...</div>
+                            <div className={styles.emptyState}>読み込み中...</div>
                         ) : (
                             <div className={styles.contentBody}>
                                 {selectedKeywords.length > 0 && (
@@ -911,21 +961,38 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                     </small>
                                 </div>
                                 {selectedPageId && !selectedPageId.startsWith('root_') && (
-                                    <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                                            <input
-                                                type="checkbox"
-                                                checked={selectedIsTrunk}
-                                                onChange={e => handleTrunkToggle(selectedPageId, e.target.checked)}
-                                                style={{ cursor: 'pointer' }}
-                                            />
-                                            <FolderTree size={14} />
-                                            <span style={{ fontSize: '0.9em', fontWeight: 'bold', color: '#666' }}>Trunkとして設定</span>
-                                        </label>
-                                        <small style={{ color: '#888' }}>
-                                            子ページをまとめるカテゴリフォルダ
-                                        </small>
-                                    </div>
+                                    <>
+                                        <div style={{ marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={selectedIsImportant}
+                                                    onChange={e => handleImportantToggle(selectedPageId, e.target.checked)}
+                                                    style={{ cursor: 'pointer' }}
+                                                />
+                                                <Star size={14} />
+                                                <span style={{ fontSize: '0.9em', fontWeight: 'bold', color: '#666' }}>重要</span>
+                                            </label>
+                                            <small style={{ color: '#888' }}>
+                                                鮮明度が概要以下に下がらなくなります
+                                            </small>
+                                        </div>
+                                        <div style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={selectedIsTrunk}
+                                                    onChange={e => handleTrunkToggle(selectedPageId, e.target.checked)}
+                                                    style={{ cursor: 'pointer' }}
+                                                />
+                                                <FolderTree size={14} />
+                                                <span style={{ fontSize: '0.9em', fontWeight: 'bold', color: '#666' }}>Trunkとして設定</span>
+                                            </label>
+                                            <small style={{ color: '#888' }}>
+                                                子ページをまとめるカテゴリフォルダ
+                                            </small>
+                                        </div>
+                                    </>
                                 )}
                                 <div className={styles.markdown}>
                                     <ReactMarkdown>{pageContent}</ReactMarkdown>
@@ -936,7 +1003,7 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                         <div className={styles.emptyState}>
                             <div style={{ textAlign: 'center' }}>
                                 <Book size={48} style={{ marginBottom: '1rem', opacity: 0.5 }} />
-                                <p>Select a page to view contents</p>
+                                <p>ページを選択して内容を表示</p>
                             </div>
                         </div>
                     )
