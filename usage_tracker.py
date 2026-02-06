@@ -38,6 +38,16 @@ class UsageTracker:
         self._pending_records: list[dict[str, Any]] = []
         self._pending_lock = threading.Lock()
         self._batch_size = 1  # Flush immediately for debugging
+        self._session_factory = None
+
+    def configure(self, session_factory) -> None:
+        """Configure the tracker with a session factory from the manager.
+
+        This ensures usage records are written to the same database the
+        manager is using (respects --db-file, test env, etc.).
+        """
+        self._session_factory = session_factory
+        LOGGER.debug("UsageTracker configured with session factory")
 
     def record_usage(
         self,
@@ -105,6 +115,14 @@ class UsageTracker:
             persona_id,
         )
 
+    def _get_session_factory(self):
+        """Get the session factory, preferring the configured one."""
+        if self._session_factory is not None:
+            return self._session_factory
+        # Fallback to the module-level SessionLocal
+        from database.session import SessionLocal
+        return SessionLocal
+
     def _flush_to_db(self) -> None:
         """Flush pending records to database. Must be called with _pending_lock held."""
         if not self._pending_records:
@@ -115,14 +133,8 @@ class UsageTracker:
 
         try:
             from database.models import LLMUsageLog
-            from database.paths import default_db_path
-            from sqlalchemy import create_engine
-            from sqlalchemy.orm import sessionmaker
 
-            db_path = default_db_path()
-            engine = create_engine(f"sqlite:///{db_path}")
-            Session = sessionmaker(bind=engine)
-            session = Session()
+            session = self._get_session_factory()()
 
             try:
                 for record in records_to_write:
