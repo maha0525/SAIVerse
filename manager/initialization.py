@@ -37,6 +37,10 @@ class InitializationMixin:
         self._ensure_phenomenon_tables(engine)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+        # Configure UsageTracker to use the same database
+        from usage_tracker import get_usage_tracker
+        get_usage_tracker().configure(self.SessionLocal)
+
     def _init_city_config(self, city_name: str) -> None:
         """Step 1: Load City Configuration from DB."""
         db = self.SessionLocal()
