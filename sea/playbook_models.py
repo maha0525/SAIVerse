@@ -31,6 +31,8 @@ class NodeType(str, Enum):
     SUBPLAY = "subplay"
     SET = "set"
     EXEC = "exec"
+    STELIS_START = "stelis_start"
+    STELIS_END = "stelis_end"
 
 
 class LLMNodeDef(BaseModel):
@@ -58,17 +60,29 @@ class LLMNodeDef(BaseModel):
         default=None,
         description="Map structured output fields to state variables. "
                     "Example: {'router.playbook': 'selected_playbook', 'router.args': 'selected_args'}. "
-                    "Keys are dot-notated paths in the structured output, values are target state variable names."
+                    "Keys are dot-notated paths in structured output, values are target state variable names."
     )
     available_tools: Optional[List[str]] = Field(
         default=None,
-        description="List of tool names that the LLM can call. If specified, enables tool calling for this node."
+        description="List of tool names that LLM can call. If specified, enables tool calling for this node."
     )
     output_keys: Optional[List[Dict[str, str]]] = Field(
         default=None,
         description="Map output types to state keys. Examples: [{'text': 'speak_content'}, {'function_call': 'tool_call'}]. "
                     "Supported types: 'text', 'function_call', 'thought'. "
                     "Function calls are stored as nested keys: '<key>.name', '<key>.args.<arg_name>'."
+    )
+    memorize: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="If specified, save prompt and response to SAIMemory. "
+                    "Example: {'tags': ['conversation']}. "
+                    "Tags will be applied to both user (prompt) and assistant (response) messages."
+    )
+    speak: Optional[bool] = Field(
+        default=None,
+        description="If True, output response to Building (UI). "
+                    "When SAIVERSE_LLM_STREAMING=true (default), streams response chunks in real-time. "
+                    "When false, sends complete response after generation."
     )
 
 
@@ -219,7 +233,65 @@ class ExecNodeDef(BaseModel):
     )
 
 
-NodeDef = Union[LLMNodeDef, ToolNodeDef, SpeakNodeDef, ThinkNodeDef, MemorizeNodeDef, SayNodeDef, PassNodeDef, SubPlayNodeDef, SetNodeDef, ExecNodeDef]
+class StelisConfig(BaseModel):
+    """Configuration for Stelis thread creation."""
+    window_ratio: float = Field(
+        default=0.8,
+        description="Portion of parent's context window to allocate to this Stelis thread (0.0-1.0)."
+    )
+    max_depth: int = Field(
+        default=3,
+        description="Maximum allowed nesting depth for Stelis threads."
+    )
+    chronicle_prompt: Optional[str] = Field(
+        default=None,
+        description="Prompt to use when generating Chronicle summary on completion."
+    )
+
+
+class StelisStartNodeDef(BaseModel):
+    """Node that starts a new Stelis thread for hierarchical context management."""
+    id: str
+    type: Literal[NodeType.STELIS_START]
+    label: Optional[str] = Field(
+        default=None,
+        description="Human-readable label for this Stelis session (e.g., 'Coding Session')."
+    )
+    stelis_config: Optional[StelisConfig] = Field(
+        default=None,
+        description="Configuration for the Stelis thread. Uses defaults if not specified."
+    )
+    next: Optional[str] = None
+    conditional_next: Optional[ConditionalNext] = Field(
+        default=None,
+        description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
+
+
+class StelisEndNodeDef(BaseModel):
+    """Node that ends the current Stelis thread and returns to parent context."""
+    id: str
+    type: Literal[NodeType.STELIS_END]
+    label: Optional[str] = Field(
+        default=None,
+        description="Human-readable label for logging purposes."
+    )
+    generate_chronicle: bool = Field(
+        default=True,
+        description="Whether to generate a Chronicle summary when ending the Stelis thread."
+    )
+    next: Optional[str] = None
+    conditional_next: Optional[ConditionalNext] = Field(
+        default=None,
+        description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
+
+
+NodeDef = Union[
+    LLMNodeDef, ToolNodeDef, SpeakNodeDef, ThinkNodeDef, MemorizeNodeDef,
+    SayNodeDef, PassNodeDef, SubPlayNodeDef, SetNodeDef, ExecNodeDef,
+    StelisStartNodeDef, StelisEndNodeDef
+]
 
 class InputParam(BaseModel):
     name: str
@@ -229,12 +301,50 @@ class InputParam(BaseModel):
         description="Optional parent state key (e.g., 'parent.input', 'router.query'). If not specified, defaults to 'input'."
     )
 
+    # Type and validation
+    param_type: str = Field(
+        default="string",
+        description="Parameter type: 'string', 'number', 'boolean', 'enum'"
+    )
+    required: bool = Field(
+        default=True,
+        description="Whether this parameter is required"
+    )
+    default: Optional[Any] = Field(
+        default=None,
+        description="Default value if not provided"
+    )
+
+    # Enum options (for param_type='enum')
+    enum_values: Optional[List[str]] = Field(
+        default=None,
+        description="Static list of allowed values for enum type"
+    )
+    enum_source: Optional[str] = Field(
+        default=None,
+        description="Dynamic enum source in format 'collection:scope'. "
+                    "Examples: 'playbooks:router_callable', 'buildings:current_city', "
+                    "'items:current_building', 'personas:current_city', 'tools:available'"
+    )
+
+    # UI display control
+    user_configurable: bool = Field(
+        default=False,
+        description="If true, this parameter is shown in UI for user input"
+    )
+    ui_widget: Optional[str] = Field(
+        default=None,
+        description="UI widget type: 'text', 'textarea', 'dropdown', 'radio'. "
+                    "Defaults to 'dropdown' for enum, 'text' for string."
+    )
+
 
 class ContextRequirements(BaseModel):
     """Defines what context should be loaded when running a playbook."""
     history_depth: Union[int, str] = Field(
         default="full",
-        description="History depth: number (character count), 'full' (use persona's context_length), or 0/'none' (no history)"
+        description="History depth: 'full' (use persona's context_length), number (character count), "
+                    "'Nmessages' (e.g., '10messages' for 10 recent messages), or 0/'none' (no history)"
     )
     history_balanced: bool = Field(
         default=False,
@@ -251,6 +361,11 @@ class ContextRequirements(BaseModel):
     visual_context: bool = Field(default=False, description="Include visual context (Building/Persona images) after system prompt")
     memory_weave: bool = Field(default=False, description="Include Memory Weave context (Chronicle + Memopedia) after system prompt")
     working_memory: bool = Field(default=False, description="Include working memory contents in system prompt")
+    realtime_context: bool = Field(
+        default=True,
+        description="Include realtime context (current time, previous AI response time, spatial info) near end of context. "
+                    "Placing time-sensitive info at the end improves LLM context caching efficiency."
+    )
 
 
 class PlaybookSchema(BaseModel):

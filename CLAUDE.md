@@ -17,7 +17,7 @@ SAIVerse is a multi-agent AI system where autonomous AI personas (agents) inhabi
 - Inter-city travel: personas can dispatch to other SAIVerse instances via database-mediated transactions
 - SEA (Self-Evolving Agent) framework: LangGraph-based playbook system for routing conversations and autonomous behavior
 - Optional Discord gateway for real-time chat integration
-- Gradio-based UI with World View, DB Manager, Task Manager, Memory Settings, and World Editor
+- Next.js frontend with REST API backend
 
 ## Development Commands
 
@@ -43,7 +43,7 @@ python scripts/import_all_playbooks.py --force
 python scripts/import_all_playbooks.py --dry-run
 
 # Run migrations (for schema changes - preserves data)
-python database/migrate.py --db database/data/saiverse.db
+python database/migrate.py --db user_data/database/saiverse.db
 ```
 
 **Safety Notes:**
@@ -59,11 +59,12 @@ python sds_server.py
 
 # Launch a city instance
 python main.py city_a
-# city_a runs on http://127.0.0.1:8000 (UI) and port 8001 (API)
-# city_b runs on http://127.0.0.1:9000 (UI) and port 9001 (API)
+# city_a backend runs on http://127.0.0.1:8000 (API at /api)
+# city_b backend runs on http://127.0.0.1:9000 (API at /api)
+# Frontend (Next.js) runs on http://localhost:3000
 
 # With custom options
-python main.py city_a --db-file database/data/saiverse.db --sds-url http://127.0.0.1:8080
+python main.py city_a --db-file user_data/database/saiverse.db --sds-url http://127.0.0.1:8080
 ```
 
 ### Testing
@@ -78,13 +79,84 @@ python -m pytest tests/test_llm_clients.py
 python -m unittest discover tests
 ```
 
+### Linting
+```bash
+# Check for errors (undefined names, syntax errors, etc.)
+ruff check .
+
+# Auto-fix what can be fixed
+ruff check --fix .
+
+# Check specific file
+ruff check path/to/file.py
+```
+
+**IMPORTANT for Claude Code**: After writing or modifying Python code, always run `ruff check` on the changed files before considering the task complete. This catches undefined variables (like `LOGGER` instead of `logging`), unused imports, and other common errors that would cause runtime failures.
+
+### GPU Setup (Optional)
+
+SAIMemory's embedding computation can be accelerated with NVIDIA CUDA:
+
+```bash
+# Install GPU dependencies (requires CUDA Toolkit + cuDNN pre-installed)
+pip uninstall onnxruntime -y
+pip install -r requirements-gpu.txt
+
+# Verify CUDA is available
+python -c "import onnxruntime as ort; print(ort.get_available_providers())"
+# Should include 'CUDAExecutionProvider'
+```
+
+**Environment variable control**:
+- `SAIMEMORY_EMBED_CUDA=1` - Force GPU
+- `SAIMEMORY_EMBED_CUDA=0` - Force CPU
+- Unset - Auto-detect (use GPU if available)
+
+**Files involved**:
+- `sai_memory/memory/recall.py` - Embedder class with CUDA detection
+- `requirements-gpu.txt` - GPU-specific dependencies
+- `docs/getting-started/gpu-setup.md` - Full setup guide
+
+### Test Environment (Isolated Backend Testing)
+
+For testing the backend without affecting production data, use the isolated test environment:
+
+```bash
+# Setup test environment (creates test_data/ directory)
+python test_fixtures/setup_test_env.py
+
+# Start test server (port 18000)
+./test_fixtures/start_test_server.sh
+
+# Run API tests
+python test_fixtures/test_api.py         # Full test (includes LLM calls)
+python test_fixtures/test_api.py --quick # Quick test (no LLM calls)
+
+# Reset database only
+python test_fixtures/setup_test_env.py --reset-db
+
+# Clean rebuild
+python test_fixtures/setup_test_env.py --clean
+```
+
+**Test environment structure:**
+- `test_fixtures/definitions/test_data.json` - Test data definitions (git-tracked)
+- `test_data/` - Generated test data directory (gitignored)
+- Environment variables: `SAIVERSE_HOME=test_data/.saiverse`, `SAIVERSE_USER_DATA_DIR=test_data/user_data`
+
+**Important for AI agents:**
+- Always use `--quick` mode for fast verification without LLM costs
+- The chat API returns streaming NDJSON responses
+- User must have `CURRENT_BUILDINGID` set for chat tests to work
+- Personas need `LIGHTWEIGHT_MODEL` set for router nodes
+
 ### Backup and Recovery
 
 **Automatic Backups (Recommended)**
 
 SAIVerse automatically backs up both saiverse.db and persona memory.db files on startup:
 
-- **saiverse.db**: Backed up to `database/data/saiverse.db_backup_YYYYMMDD_HHMMSS_mmm.bak`
+- **saiverse.db**: Backed up to `user_data/database/saiverse.db_backup_YYYYMMDD_HHMMSS_mmm.bak`
   - Keeps last 10 backups by default (configurable via `SAIVERSE_DB_BACKUP_KEEP`)
   - Enable/disable: `SAIVERSE_DB_BACKUP_ON_START=true` (enabled by default)
 
@@ -179,11 +251,6 @@ python scripts/migrate_to_user_data.py             # Execute
 - SQLite-based log storage per persona in `~/.saiverse/personas/<id>/memory.db`
 - Stores messages with tags (conversation, internal, task, summary)
 - Supports thread switching, tag filtering, time-based queries
-
-**MemoryCore** (`memory_core/`)
-- SBERT embeddings + Qdrant vector DB for semantic recall
-- Two collections: `entries` (individual messages) and `topics` (clustered summaries)
-- Located at `~/.saiverse/qdrant/` (embedded mode) or remote Qdrant server
 
 **Task Storage** (`persona/tasks/storage.py`)
 - Per-persona `tasks.db` in `~/.saiverse/personas/<id>/`
@@ -298,12 +365,6 @@ SAIVerse/
 - Parses `::act ... ::end` blocks from LLM responses
 - Executes special actions: move, pickup_item, create_persona, summon, dispatch_persona, use_item
 
-### UI Structure (`ui/app.py`)
-- Gradio app with tabs: World View, Autonomous Log, DB Manager, Task Manager, Memory Settings, World Editor
-- `ui/world_view.py`: chat interface, building movement, persona summoning
-- `ui/world_editor.py`: CRUD for cities/buildings/personas/tools, avatar upload, online/offline mode
-- `ui/task_manager.py`: view tasks.db as DataFrame
-
 ## Important Conventions
 
 ### Code Changes
@@ -367,7 +428,6 @@ SAIVerse/
      - Console: Check for errors, test selectors directly (`document.querySelector('#element')`)
      - Elements: Inspect actual DOM structure and CSS
      - Network: Verify request URLs and responses
-  7. **Framework behavior**: Understand how the framework works (e.g., Gradio's autoscroll triggers on visibility changes, not just data updates)
 - **When touching external APIs**: Always check official docs first (especially Gemini structured output limitations)
 - **Playbook modifications**: Validate that `next` node pointers form valid graphs (no accidental loops). After editing JSON files in `sea/playbooks/`, always run `python scripts/import_playbook.py --file <path>` to import the changes into the database
 - **Database changes**: Write migration in `database/migrate.py`, test with `--db-file` on copy first
@@ -406,11 +466,6 @@ SAIVerse/
 - **Gemini context window is very large (1M+ tokens)** - Do not assume large context is the cause of errors. Gemini handles 100K+ tokens routinely. The system is designed to work with large conversation histories.
 - **Playbook node transitions**: always verify `next` pointers form valid DAGs
 - **When refactoring**: complete the entire change or revert; do not leave codebase in mixed state
-- **Gradio `visible=False` does NOT add components to DOM**: Components with `visible=False` are not rendered in the HTML. If you need to access them from JavaScript, use `visible=True` with CSS `display: none !important` instead.
-- **Gradio custom API endpoints are unreliable**: Adding custom FastAPI routes via `@demo.app.get()` or `demo.app.add_api_route()` may conflict with Gradio's internal routing. Prefer Gradio's native event system (Button/Textbox + `.click()`) for Python-JavaScript communication.
-- **Gradio SelectData.index type**: Always check for both `list` and `tuple` with `isinstance(idx, (list, tuple))` before accessing `idx[0]`. Gradio returns `list` type (e.g., `[row, col]`), not `tuple`. Missing this check causes silent failures in table selection handlers.
-- **Gradio Chatbot autoscroll**: The `autoscroll=True` parameter works, but only triggers when the component becomes visible after being hidden. If updating data while already visible, autoscroll may not activate. To force autoscroll, temporarily hide the component (add CSS class), update data, then show it again. This visibility transition triggers the autoscroll behavior.
-- **Gradio dynamic inline styles**: When Gradio components apply inline styles via JavaScript after page load, CSS rules (even with `!important`) cannot override them. Solution: Use JavaScript monkey patching to hijack `element.style.setProperty()` and replace values before they're applied. See `docs/session_reflection_2025-12-03_sidebar_detail_panel.md` for detailed example.
 - **Asymmetric bugs indicate implementation mismatch**: If a bug occurs in scenario A but not in scenario B (despite similar logic), the cause is usually an implementation difference, not a timing/race condition. Compare code paths side-by-side to find where they diverge.
 - **CSS text wrapping requires multiple layers**: For reliable wrapping of long URLs/strings in CSS, combine: `word-break: break-word`, `overflow-wrap: anywhere`, `max-width: 100%`, and `overflow-x: hidden` on both content and container elements. A single property is often insufficient, especially with frameworks that inject many nested elements.
 
@@ -419,11 +474,8 @@ SAIVerse/
 Key packages (see `requirements.txt`):
 - `google-genai>=1.26.0` (Gemini API)
 - `openai==1.97.0` (OpenAI + Anthropic)
-- `gradio==5.38.0` (UI)
 - `fastapi==0.116.1`, `uvicorn==0.35.0` (API server)
-- `qdrant-client>=1.9.0` (vector DB)
-- `sentence-transformers>=2.6.0`, `fastembed>=0.7.3` (embeddings)
-- `rdiff-backup>=2.2.6` (backup utility)
+- `fastembed>=0.7.3` (SAIMemory embeddings)
 - `discord.py>=2.4.0` (optional Discord gateway)
 
 Embeddings models in `sbert/` (e.g., `intfloat/multilingual-e5-base`) are used if present, otherwise downloaded on first run.
@@ -435,7 +487,6 @@ Critical settings (see `.env.example`):
 - `SDS_URL` (default: http://127.0.0.1:8080)
 - `SAIVERSE_LOG_LEVEL` (DEBUG/INFO/WARNING)
 - `SAIMEMORY_EMBED_MODEL` (e.g., intfloat/multilingual-e5-base)
-- `QDRANT_LOCATION` (embedded path) or `QDRANT_URL` (remote server)
 - `SAIMEMORY_BACKUP_ON_START=true` (auto-backup persona memory.db on startup)
 - `SAIVERSE_DB_BACKUP_ON_START=true` (auto-backup saiverse.db on startup, **recommended**)
 - `SAIVERSE_DB_BACKUP_KEEP=10` (number of saiverse.db backups to keep)
@@ -448,16 +499,16 @@ Critical settings (see `.env.example`):
 - `docs/test_manual.md`: manual test scenarios
 - `docs/sea_integration_plan.md`: SEA framework integration roadmap
 - `docs/roadmap.md`: future features
-- `docs/session_reflection_*.md`: lessons learned from development sessions (Gradio UI patterns, debugging approaches, etc.)
+- `docs/session_reflection_*.md`: lessons learned from development sessions (debugging approaches, etc.)
 - `README.md`: comprehensive setup and usage guide
 
 ## Quick Reference
 
-**Create new persona**: Use World Editor or have user ask Genesis in "創造の祭壇" building
+**Create new persona**: Use the frontend UI or have user ask Genesis in "創造の祭壇" building
 
 **Move persona between buildings**: `OccupancyManager.move_to(persona, building_id)` (do not call PersonaCore methods directly)
 
-**Add new tool**: Define in `tools/defs/` (or `user_data/tools/` for custom tools), register automatically on startup. Tools in subdirectories need a `schema.py` file. Link to buildings via `BuildingToolLink` or World Editor
+**Add new tool**: Define in `tools/defs/` (or `user_data/tools/` for custom tools), register automatically on startup. Tools in subdirectories need a `schema.py` file. Link to buildings via `BuildingToolLink` table or frontend UI
 
 **Modify playbook**: Edit JSON in `builtin_data/playbooks/` or `user_data/playbooks/`, then run `python scripts/import_playbook.py --file <path>` to import to database. Alternatively, use `save_playbook` tool (validates graph before saving)
 
@@ -473,7 +524,7 @@ Critical settings (see `.env.example`):
   1. **MUST update** `sea/playbook_models.py` node definitions (`LLMNodeDef`, `ToolNodeDef`, etc.) with the new field
   2. Without this, `save_playbook` tool and `import_playbook.py` will silently drop the field during Pydantic validation
   3. After updating the schema, **re-import all affected playbooks** using `python scripts/import_playbook.py --file <path>`
-  4. Verify the field is stored in DB: `sqlite3 database/data/saiverse.db "SELECT nodes_json FROM playbooks WHERE name='<playbook_name>'"`
+   4. Verify the field is stored in DB: `sqlite3 user_data/database/saiverse.db "SELECT nodes_json FROM playbooks WHERE name='<playbook_name>'"`
 
 **Debug LLM calls**: Check `raw_llm_responses.txt` or set `SAIVERSE_SEA_DUMP` for playbook traces
 

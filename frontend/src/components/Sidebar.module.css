@@ -60,13 +60,86 @@
     color: #f59e0b;
 }
 
+.sectionTitleRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.8rem;
+}
+
 .sectionTitle {
     font-size: 0.8rem;
     text-transform: uppercase;
     color: #64748b;
     font-weight: 700;
-    margin-bottom: 0.8rem;
     letter-spacing: 0.05em;
+}
+
+.addBuildingBtn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    border: 1px solid #e2e8f0;
+    background: transparent;
+    color: #64748b;
+    cursor: pointer;
+    transition: all 0.2s;
+    padding: 0;
+}
+
+.addBuildingBtn:hover {
+    background: rgba(0, 0, 0, 0.05);
+    color: #475569;
+    border-color: #cbd5e1;
+}
+
+.createBuildingForm {
+    display: flex;
+    gap: 0.4rem;
+    margin-bottom: 0.6rem;
+    padding: 0 0.2rem;
+}
+
+.createBuildingInput {
+    flex: 1;
+    min-width: 0;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    background: #fff;
+    color: #1e293b;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+.createBuildingInput:focus {
+    border-color: #4dabf7;
+}
+
+.createBuildingSubmit {
+    padding: 0.4rem 0.7rem;
+    border: none;
+    border-radius: 6px;
+    background: #4dabf7;
+    color: #fff;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.2s;
+}
+
+.createBuildingSubmit:hover:not(:disabled) {
+    background: #339af0;
+}
+
+.createBuildingSubmit:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 .buildingList {
@@ -107,11 +180,93 @@
 /* Footer Settings */
 .settingsFooter {
     margin-top: auto;
-    padding: 1rem 1rem 1.2rem 1rem;
+    padding: 0.75rem 1rem;
     border-top: 1px solid rgba(0, 0, 0, 0.05);
-    padding-bottom: max(1.2rem, env(safe-area-inset-bottom));
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
 }
 
+.footerRow {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.settingsBtnIcon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    background: transparent;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    cursor: pointer;
+    color: #64748b;
+    flex-shrink: 0;
+    transition: all 0.2s;
+}
+
+.settingsBtnIcon:hover {
+    background: rgba(0, 0, 0, 0.03);
+    color: #475569;
+}
+
+.profileCompact {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1;
+    min-width: 0;
+    padding: 0.4rem 0.6rem;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.profileCompact:hover {
+    background: rgba(0, 0, 0, 0.03);
+}
+
+.avatarSmall {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    background: #e2e8f0;
+    object-fit: cover;
+    flex-shrink: 0;
+}
+
+.userNameSmall {
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: #475569;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
+}
+
+.statusDot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.statusDot.online {
+    background: #10b981;
+}
+
+.statusDot.away {
+    background: #f59e0b;
+}
+
+.statusDot.offline {
+    background: #94a3b8;
+}
+
+/* Legacy settingsBtn kept for backward compatibility */
 .settingsBtn {
     width: 100%;
     display: flex;
@@ -125,6 +280,31 @@
     cursor: pointer;
     color: #64748b;
     font-weight: 600;
+}
+
+/* Create Persona Button */
+.createPersonaBtn {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    background: linear-gradient(135deg, #4dabf7 0%, #339af0 100%);
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    color: #fff;
+    font-weight: 600;
+    font-size: 0.9rem;
+    transition: all 0.2s;
+    box-shadow: 0 2px 8px rgba(77, 171, 247, 0.3);
+}
+
+.createPersonaBtn:hover {
+    background: linear-gradient(135deg, #339af0 0%, #228be6 100%);
+    box-shadow: 0 4px 12px rgba(77, 171, 247, 0.4);
+    transform: translateY(-1px);
 }
 
 /* Mobile Overlay */
@@ -184,6 +364,27 @@
         background: rgba(67, 56, 202, 0.4);
     }
 
+    .addBuildingBtn {
+        border-color: rgba(255, 255, 255, 0.15);
+        color: #94a3b8;
+    }
+
+    .addBuildingBtn:hover {
+        background: rgba(255, 255, 255, 0.05);
+        color: #f3f4f6;
+        border-color: rgba(255, 255, 255, 0.25);
+    }
+
+    .createBuildingInput {
+        background: #262626;
+        border-color: rgba(255, 255, 255, 0.15);
+        color: #f3f4f6;
+    }
+
+    .createBuildingInput:focus {
+        border-color: #4dabf7;
+    }
+
     .settingsFooter {
         border-top-color: rgba(255, 255, 255, 0.1);
     }
@@ -191,6 +392,38 @@
     .settingsBtn {
         border-color: rgba(255, 255, 255, 0.1);
         color: #94a3b8;
+    }
+
+    .settingsBtnIcon {
+        border-color: rgba(255, 255, 255, 0.1);
+        color: #94a3b8;
+    }
+
+    .settingsBtnIcon:hover {
+        background: rgba(255, 255, 255, 0.05);
+        color: #f3f4f6;
+    }
+
+    .profileCompact:hover {
+        background: rgba(255, 255, 255, 0.05);
+    }
+
+    .avatarSmall {
+        background: #333;
+    }
+
+    .userNameSmall {
+        color: #9ca3af;
+    }
+
+    .createPersonaBtn {
+        background: linear-gradient(135deg, #4dabf7 0%, #339af0 100%);
+        box-shadow: 0 2px 8px rgba(77, 171, 247, 0.2);
+    }
+
+    .createPersonaBtn:hover {
+        background: linear-gradient(135deg, #339af0 0%, #228be6 100%);
+        box-shadow: 0 4px 12px rgba(77, 171, 247, 0.3);
     }
 }
 

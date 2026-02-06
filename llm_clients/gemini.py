@@ -3,12 +3,22 @@ from __future__ import annotations
 
 import json
 import logging
-import mimetypes
 import os
+import time
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
+import httpx
 from google import genai
 from google.genai import types
+
+from .exceptions import (
+    EmptyResponseError as LLMEmptyResponseError,
+    LLMError,
+    LLMTimeoutError,
+    RateLimitError,
+    SafetyFilterError,
+    ServerError,
+)
 
 try:  # pragma: no cover - optional defensive patching
     from google.genai import _api_client as _genai_api_client
@@ -78,32 +88,33 @@ def _install_gemini_stream_patch() -> None:
     original_async_segments = HttpResponse.async_segments
 
     def _yield_json_chunks(iterator: Iterator[str]) -> Iterator[Any]:
+        _sse_logger = logging.getLogger("saiverse.llm")
         acc = _SSEAccumulator()
         for raw_line in iterator:
             cleaned = _clean_line(raw_line)
-            raw_logger.debug("Gemini SSE raw line: %s", cleaned)
+            _sse_logger.debug("Gemini SSE raw line: %s", cleaned)
             combined = acc.feed(cleaned)
             if combined:
-                raw_logger.debug("Gemini SSE payload: %s", combined)
+                _sse_logger.debug("Gemini SSE payload: %s", combined)
                 yield json.loads(combined)
         final = acc.flush()
         if final:
-            raw_logger.debug("Gemini SSE final payload: %s", final)
+            _sse_logger.debug("Gemini SSE final payload: %s", final)
             yield json.loads(final)
 
     async def _yield_json_chunks_async(iterator: Any) -> Any:
+        _sse_logger = logging.getLogger("saiverse.llm")
         acc = _SSEAccumulator()
         async for raw_line in iterator:
             cleaned = _clean_line(raw_line)
-            raw_logger.debug("Gemini SSE raw line (async): %s", cleaned)
+            _sse_logger.debug("Gemini SSE raw line (async): %s", cleaned)
             combined = acc.feed(cleaned)
             if combined:
-                raw_logger.debug("Gemini SSE payload (async): %s", combined)
+                _sse_logger.debug("Gemini SSE payload (async): %s", combined)
                 yield json.loads(combined)
         final = acc.flush()
         if final:
-            raw_logger.debug("Gemini SSE final payload (async): %s", final)
-            yield json.loads(final)
+            _sse_logger.debug("Gemini SSE final payload (async): %s", final)
 
     def _patched_segments(self) -> Iterator[Any]:
         if isinstance(self.response_stream, list) or self.response_stream is None:
@@ -153,13 +164,30 @@ from .gemini_utils import build_gemini_clients
 
 from media_utils import iter_image_media, load_image_bytes_for_llm
 from media_summary import ensure_image_summary
-from tools import GEMINI_TOOLS_SPEC, TOOL_REGISTRY
-from tools.defs import parse_tool_result
+from tools import GEMINI_TOOLS_SPEC
 from llm_router import route
 
-from .base import EmptyResponseError, IncompleteStreamError, LLMClient, raw_logger
+from .base import EmptyResponseError, IncompleteStreamError, LLMClient, get_llm_logger
+from logging_config import log_timeout_event
 from .utils import content_to_text, is_truthy_flag, merge_reasoning_strings
 
+
+class ChunkTimeoutError(RuntimeError):
+    """Raised when no chunks are received within the timeout period (socket stall)."""
+
+
+# Timeout for receiving chunks during streaming (detects socket stalls)
+CHUNK_TIMEOUT_SECONDS = int(os.getenv("GEMINI_CHUNK_TIMEOUT_SECONDS", "60"))
+
+# Default safety settings (can be overridden via configure_parameters)
+GEMINI_DEFAULT_SAFETY_SETTINGS = {
+    "HARM_CATEGORY_HATE_SPEECH": "BLOCK_ONLY_HIGH",
+    "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+    "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+    "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_ONLY_HIGH",
+}
+
+# Legacy constant for backward compatibility
 GEMINI_SAFETY_CONFIG = [
     types.SafetySetting(
         category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
@@ -178,6 +206,26 @@ GEMINI_SAFETY_CONFIG = [
         threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
     ),
 ]
+
+# Allowed request parameters for Gemini API
+GEMINI_ALLOWED_REQUEST_PARAMS = {
+    "temperature", "top_p", "top_k", "max_output_tokens", "stop_sequences",
+}
+
+# Special parameters that need custom handling (not passed directly to API)
+GEMINI_SPECIAL_PARAMS = {
+    "thinking_level",
+    "safety_harassment", "safety_hate_speech",
+    "safety_sexually_explicit", "safety_dangerous_content",
+}
+
+# Mapping from parameter names to Gemini HarmCategory names
+SAFETY_PARAM_TO_CATEGORY = {
+    "safety_harassment": "HARM_CATEGORY_HARASSMENT",
+    "safety_hate_speech": "HARM_CATEGORY_HATE_SPEECH",
+    "safety_sexually_explicit": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+    "safety_dangerous_content": "HARM_CATEGORY_DANGEROUS_CONTENT",
+}
 
 GROUNDING_TOOL = types.Tool(google_search=types.GoogleSearch())
 
@@ -205,13 +253,73 @@ class GeminiClient(LLMClient):
         prefer_paid = cfg.get("prefer_paid", False)
         self.free_client, self.paid_client, self.client = build_gemini_clients(prefer_paid=prefer_paid)
         self.model = model
-        include_thoughts = cfg.get("include_thoughts")
-        if include_thoughts is None:
-            include_thoughts = "2.5" in (model or "").lower()
+
+        # Request parameters (temperature, top_p, etc.)
+        self._request_params: Dict[str, Any] = {}
+
+        # Thinking configuration
+        self._thinking_level: Optional[str] = None
+        self._include_thoughts: bool = cfg.get("include_thoughts", False)
+        # Auto-enable for 2.5/3 series models
+        if not self._include_thoughts:
+            model_lower = (model or "").lower()
+            self._include_thoughts = "2.5" in model_lower or "-3-" in model_lower or model_lower.startswith("gemini-3")
+
+        # Safety settings overrides
+        self._safety_overrides: Dict[str, str] = {}
+
+    def _build_thinking_config(self) -> Optional[types.ThinkingConfig]:
+        """Build ThinkingConfig from current settings."""
+        if not self._include_thoughts and not self._thinking_level:
+            return None
+
+        kwargs: Dict[str, Any] = {}
+        if self._include_thoughts:
+            kwargs["include_thoughts"] = True
+        if self._thinking_level:
+            kwargs["thinking_level"] = self._thinking_level
+
         try:
-            self._thinking_config = types.ThinkingConfig(include_thoughts=True) if include_thoughts else None
-        except Exception:
-            self._thinking_config = None
+            return types.ThinkingConfig(**kwargs)
+        except Exception as e:
+            logging.warning("Failed to create ThinkingConfig: %s", e)
+            return None
+
+    def _build_safety_settings(self) -> List[types.SafetySetting]:
+        """Build safety settings from defaults and overrides."""
+        # Start with defaults
+        settings = dict(GEMINI_DEFAULT_SAFETY_SETTINGS)
+
+        # Apply overrides from configure_parameters
+        for param_key, category in SAFETY_PARAM_TO_CATEGORY.items():
+            if param_key in self._safety_overrides:
+                settings[category] = self._safety_overrides[param_key]
+
+        result = []
+        for category_name, threshold_name in settings.items():
+            category = getattr(types.HarmCategory, category_name, None)
+            threshold = getattr(types.HarmBlockThreshold, threshold_name, None)
+            if category and threshold:
+                result.append(types.SafetySetting(category=category, threshold=threshold))
+        return result
+
+    def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
+        """Configure model parameters from UI settings."""
+        if not isinstance(parameters, dict):
+            return
+        for key, value in parameters.items():
+            if key in GEMINI_ALLOWED_REQUEST_PARAMS:
+                if value is None:
+                    self._request_params.pop(key, None)
+                else:
+                    self._request_params[key] = value
+            elif key == "thinking_level":
+                self._thinking_level = value if value else None
+            elif key in SAFETY_PARAM_TO_CATEGORY:
+                if value:
+                    self._safety_overrides[key] = value
+                else:
+                    self._safety_overrides.pop(key, None)
 
     @staticmethod
     def _schema_from_json(js: Optional[Dict[str, Any]]) -> Optional[types.Schema]:
@@ -313,6 +421,37 @@ class GeminiClient(LLMClient):
             or "unavailable" in msg
             or "overload" in msg
         )
+
+    @staticmethod
+    def _is_timeout_error(err: Exception) -> bool:
+        """Check if the error is a timeout that should be retried."""
+        return isinstance(err, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.WriteTimeout, ChunkTimeoutError))
+
+    @staticmethod
+    def _is_server_error(err: Exception) -> bool:
+        """Check if the error is a server error (5xx)."""
+        msg = str(err).lower()
+        return "500" in msg or "502" in msg or "504" in msg or "internal" in msg
+
+    @staticmethod
+    def _is_authentication_error(err: Exception) -> bool:
+        """Check if the error is an authentication error."""
+        msg = str(err).lower()
+        return "401" in msg or "403" in msg or "invalid" in msg and "key" in msg or "authentication" in msg
+
+    def _convert_to_llm_error(self, err: Exception, context: str = "API call") -> LLMError:
+        """Convert a generic exception to an appropriate LLMError subclass."""
+        if self._is_rate_limit_error(err):
+            return RateLimitError(f"Gemini {context} failed: rate limit exceeded", err)
+        elif self._is_timeout_error(err):
+            return LLMTimeoutError(f"Gemini {context} failed: timeout", err)
+        elif self._is_server_error(err):
+            return ServerError(f"Gemini {context} failed: server error", err)
+        elif self._is_authentication_error(err):
+            from .exceptions import AuthenticationError
+            return AuthenticationError(f"Gemini {context} failed: authentication error", err)
+        else:
+            return LLMError(f"Gemini {context} failed: {err}", err)
 
     def _convert_messages(
         self,
@@ -476,13 +615,16 @@ class GeminiClient(LLMClient):
         sys_msg, contents = self._convert_messages(messages)
         cfg_kwargs: Dict[str, Any] = {
             "system_instruction": sys_msg,
-            "safety_settings": GEMINI_SAFETY_CONFIG,
+            "safety_settings": self._build_safety_settings(),
         }
         if tools_spec:
             cfg_kwargs["tools"] = merge_tools_for_gemini(tools_spec)
             cfg_kwargs["tool_config"] = tool_cfg
-        if self._thinking_config is not None:
-            cfg_kwargs["thinking_config"] = self._thinking_config
+        # Always disable AFC - SAIVerse handles function calls manually
+        cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
+        thinking_config = self._build_thinking_config()
+        if thinking_config is not None:
+            cfg_kwargs["thinking_config"] = thinking_config
         return client.models.generate_content(
             model=self.model,
             contents=contents,
@@ -492,175 +634,359 @@ class GeminiClient(LLMClient):
     def generate(
         self,
         messages: List[Dict[str, str]],
-        tools: Optional[list] | None = None,
-        history_snippets: Optional[List[str]] | None = None,
+        tools: Optional[list] = None,
+        history_snippets: Optional[List[str]] = None,
         response_schema: Optional[Dict[str, Any]] = None,
         *,
         temperature: float | None = None,
-    ) -> str:
-        default_tools = GEMINI_TOOLS_SPEC if tools is None else tools
-        if response_schema is not None and tools is None:
-            tools_spec: List[Any] = []
-        else:
-            tools_spec = default_tools
+        **_: Any,
+    ) -> str | Dict[str, Any]:
+        """Unified generate method.
+        
+        Args:
+            messages: Conversation messages
+            tools: Tool specifications. If provided, returns Dict with tool detection.
+                   If None or empty, returns str with text response.
+            history_snippets: Optional history context
+            response_schema: Optional JSON schema for structured output
+            temperature: Optional temperature override
+            
+        Returns:
+            str: Text response when tools is None or empty
+            Dict: Tool detection result when tools is provided, with keys:
+                  - type: "text" | "tool_call" | "both"
+                  - content: Generated text (if any)
+                  - tool_name: Tool name (if tool_call or both)
+                  - tool_args: Tool arguments dict (if tool_call or both)
+        """
+        tools_spec = tools or []
         use_tools = bool(tools_spec)
         history_snippets = history_snippets or []
         self._store_reasoning([])
 
+        active_client = self.client
+        sys_msg, contents = self._convert_messages(messages)
+        
+        cfg_kwargs: Dict[str, Any] = {
+            "system_instruction": sys_msg,
+            "safety_settings": self._build_safety_settings(),
+        }
+
+        # Temperature: argument > _request_params
+        effective_temp = temperature if temperature is not None else self._request_params.get("temperature")
+        if effective_temp is not None:
+            cfg_kwargs["temperature"] = effective_temp
+
+        # Apply other request params (top_p, top_k, max_output_tokens, etc.)
+        for param in ("top_p", "top_k", "max_output_tokens", "stop_sequences"):
+            if param in self._request_params:
+                cfg_kwargs[param] = self._request_params[param]
+
+        # Tool configuration
         if use_tools:
-            decision = route(self._last_user(messages), tools_spec)
-            logging.info(
-                "Router decision:\n%s",
-                json.dumps(decision, indent=2, ensure_ascii=False),
+            merged_tools = merge_tools_for_gemini(tools_spec)
+            cfg_kwargs["tools"] = merged_tools
+            cfg_kwargs["tool_config"] = types.ToolConfig(
+                functionCallingConfig=types.FunctionCallingConfig(mode="AUTO")
             )
+            logging.info("[gemini] Sending %d Tool objects to API", len(merged_tools))
 
-            tool_list = merge_tools_for_gemini(tools_spec)
-            if decision["call"] == "yes":
-                fc_cfg = types.FunctionCallingConfig(
-                    mode="ANY",
-                    allowedFunctionNames=[decision["tool"]],
-                )
+        # Response schema configuration
+        if response_schema:
+            cfg_kwargs["response_mime_type"] = "application/json"
+            if isinstance(response_schema, dict) and self._requires_json_schema(response_schema):
+                cfg_kwargs["response_json_schema"] = response_schema
             else:
-                fc_cfg = types.FunctionCallingConfig(mode="AUTO")
-            tool_cfg = types.ToolConfig(functionCallingConfig=fc_cfg)
-        else:
-            tool_cfg = None
-            tool_list = []
+                schema_obj = self._schema_from_json(response_schema)
+                if schema_obj is not None:
+                    cfg_kwargs["response_schema"] = schema_obj
 
-        snippets: List[str] = history_snippets
+        # Always disable AFC - SAIVerse handles function calls manually
+        cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
 
-        def _call(client: genai.Client, model_id: str):
-            snippets: List[str] = list(history_snippets)
-            for _ in range(10):
-                sys_msg, contents = self._convert_messages(messages)
-                cfg_kwargs = {
-                    "system_instruction": sys_msg,
-                    "safety_settings": GEMINI_SAFETY_CONFIG,
-                }
-                if temperature is not None:
-                    cfg_kwargs["temperature"] = temperature
+        thinking_config = self._build_thinking_config()
+        if thinking_config is not None:
+            cfg_kwargs["thinking_config"] = thinking_config
+
+        get_llm_logger().debug(
+            "Gemini generate config model=%s use_tools=%s cfg=%s",
+            self.model, use_tools, cfg_kwargs,
+        )
+
+        max_retries = 3
+        model_id = self.model
+        
+        for attempt in range(max_retries):
+            try:
                 if use_tools:
-                    cfg_kwargs["tools"] = merge_tools_for_gemini(tools_spec)
-                    cfg_kwargs["tool_config"] = tool_cfg
+                    # Non-streaming for tool detection
+                    resp = active_client.models.generate_content(
+                        model=model_id,
+                        contents=contents,
+                        config=types.GenerateContentConfig(**cfg_kwargs),
+                    )
                 else:
-                    # Disable Automatic Function Calling when not using tools
-                    cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
-                if self._thinking_config is not None:
-                    cfg_kwargs["thinking_config"] = self._thinking_config
-                if response_schema:
-                    cfg_kwargs["response_mime_type"] = "application/json"
-                    if isinstance(response_schema, dict) and self._requires_json_schema(response_schema):
-                        cfg_kwargs["response_json_schema"] = response_schema
-                    else:
-                        schema_obj = self._schema_from_json(response_schema)
-                        if schema_obj is not None:
-                            cfg_kwargs["response_schema"] = schema_obj
+                    # Streaming with chunk timeout for text-only
+                    stream = active_client.models.generate_content_stream(
+                        model=model_id,
+                        contents=contents,
+                        config=types.GenerateContentConfig(**cfg_kwargs),
+                    )
+                    all_parts: List[Any] = []
+                    last_chunk_time = time.time()
+                    saw_any_chunk = False
+                    last_chunk = None
 
-                raw_logger.debug(
-                    "Gemini generate config model=%s use_tools=%s cfg=%s",
-                    model_id,
-                    use_tools,
-                    cfg_kwargs,
-                )
-                resp = client.models.generate_content(
-                    model=model_id,
-                    contents=contents,
-                    config=types.GenerateContentConfig(**cfg_kwargs),
-                )
-                raw_logger.debug("Gemini raw:\n%s", resp)
+                    for chunk in stream:
+                        last_chunk = chunk
+                        now = time.time()
+                        if now - last_chunk_time > CHUNK_TIMEOUT_SECONDS and not saw_any_chunk:
+                            raise ChunkTimeoutError(
+                                f"No response received within {CHUNK_TIMEOUT_SECONDS} seconds"
+                            )
+                        last_chunk_time = now
+                        saw_any_chunk = True
+                        get_llm_logger().debug("Gemini stream chunk:\n%s", chunk)
+                        
+                        if chunk.candidates:
+                            candidate = chunk.candidates[0]
+                            if candidate.content and candidate.content.parts:
+                                all_parts.extend(candidate.content.parts)
+                    
+                    if not saw_any_chunk:
+                        raise EmptyResponseError("No chunks received from stream")
+                    if not all_parts:
+                        raise EmptyResponseError("No parts in stream response")
 
-                if not resp.candidates:
-                    # No candidates: raise for retry
-                    logging.warning("Gemini returned no candidates (empty response)")
-                    raise EmptyResponseError("No candidates in response")
+                    # Store usage from last chunk (uses self.config_key for pricing)
+                    if last_chunk:
+                        usage = getattr(last_chunk, "usage_metadata", None)
+                        if usage:
+                            # Debug: log available fields in usage_metadata
+                            logging.info("[DEBUG] Gemini usage_metadata attrs: %s",
+                                        [a for a in dir(usage) if not a.startswith('_')])
+                            logging.info("[DEBUG] Gemini usage_metadata values: prompt=%s, candidates=%s, cached=%s, total=%s",
+                                        getattr(usage, "prompt_token_count", None),
+                                        getattr(usage, "candidates_token_count", None),
+                                        getattr(usage, "cached_content_token_count", None),
+                                        getattr(usage, "total_token_count", None))
+                            cached = getattr(usage, "cached_content_token_count", 0) or 0
+                            self._store_usage(
+                                input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
+                                output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+                                cached_tokens=cached,
+                            )
 
-                candidate = resp.candidates[0]
-                if not candidate.content or not candidate.content.parts:
-                    # Empty content/parts: raise for retry
-                    logging.warning("Gemini returned empty content/parts")
-                    raise EmptyResponseError("Empty content or parts in response")
+                    # Debug: log what's in all_parts before processing
+                    for i, part in enumerate(all_parts):
+                        logging.info(
+                            "[gemini] all_parts[%d]: type=%s, thought=%s, text=%r, attrs=%s",
+                            i,
+                            type(part).__name__,
+                            getattr(part, "thought", "N/A"),
+                            (getattr(part, "text", None) or "")[:100] if getattr(part, "text", None) else None,
+                            [a for a in dir(part) if not a.startswith("_")]
+                        )
 
-                text, reasoning_entries = self._separate_parts(candidate.content.parts)
-                if not text and not candidate.function_call:
-                    # No text and no function call: raise for retry
-                    logging.warning("Gemini returned no text and no function call")
-                    raise EmptyResponseError("No text or function call in response")
-
-                fcall = getattr(candidate, "function_call", None)
-                fcall_name = getattr(fcall, "name", None)
-                if not fcall_name or not isinstance(fcall_name, str):
+                    text, reasoning_entries = self._separate_parts(all_parts)
                     self._store_reasoning(reasoning_entries)
-                    prefix = "\n".join(snippets)
+
+                    if response_schema:
+                        logging.info("[gemini] Structured output: text=%r, len=%d", text[:200] if text else "(empty)", len(text))
+                        try:
+                            parsed = json.loads(text)
+                            if isinstance(parsed, dict):
+                                return parsed
+                        except json.JSONDecodeError as e:
+                            logging.warning("[gemini] Failed to parse structured output: %s", e)
+                            from .exceptions import InvalidRequestError
+                            raise InvalidRequestError(
+                                "Failed to parse JSON response from structured output",
+                                e,
+                                user_message="LLMからの応答を解析できませんでした。再度お試しください。"
+                            ) from e
+
+                    # Check for empty streaming response (no response_schema and empty/whitespace-only text)
+                    if not text.strip():
+                        logging.error(
+                            "[gemini] Empty streaming response (attempt %d/%d). "
+                            "Received parts but text is empty/whitespace-only.",
+                            attempt + 1, max_retries
+                        )
+                        continue
+
+                    prefix = "\n".join(history_snippets)
                     return prefix + ("\n" if prefix and text else "") + text
 
-                # tool call branch
-                fn = TOOL_REGISTRY.get(fcall_name)
-                if fn is None:
-                    logging.warning("Unknown tool '%s' from Gemini; abort", fcall_name)
-                    return ""
+                # Process non-streaming response (tool mode)
+                get_llm_logger().debug("Gemini raw:\n%s", resp)
 
-                try:
-                    result_text, snippet, file_path, metadata = parse_tool_result(
-                        fn(**(getattr(fcall, "args", {}) or {}))
+                # Store usage information (uses self.config_key for pricing)
+                usage = getattr(resp, "usage_metadata", None)
+                logging.info("[DEBUG] Gemini non-stream usage_metadata: %s", usage)
+                if usage:
+                    logging.info("[DEBUG] Gemini non-stream usage attrs: %s",
+                                [a for a in dir(usage) if not a.startswith('_')])
+                    logging.info("[DEBUG] Gemini non-stream usage values: prompt=%s, candidates=%s, cached=%s",
+                                getattr(usage, "prompt_token_count", None),
+                                getattr(usage, "candidates_token_count", None),
+                                getattr(usage, "cached_content_token_count", None))
+                    cached = getattr(usage, "cached_content_token_count", 0) or 0
+                    self._store_usage(
+                        input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
+                        output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+                        cached_tokens=cached,
                     )
-                    if snippet:
-                        snippets.append(snippet)
-                    result = result_text
-                except Exception:
-                    logging.exception("Tool '%s' execution failed", fcall_name)
-                    return "エラー: ツール実行に失敗しました。"
 
-                if metadata:
-                    self._store_attachment(metadata)
+                if not resp.candidates:
+                    logging.warning("[gemini] No candidates (attempt %d/%d)", attempt + 1, max_retries)
+                    continue
+                    
+                candidate = resp.candidates[0]
 
-                messages.extend(
-                    [
-                        types.Content(role="model", parts=[types.Part(function_call=fcall)]),
-                        types.Content(
-                            role="tool",
-                            parts=[
-                                types.Part(
-                                    function_response=types.FunctionResponse(
-                                        name=fcall_name,
-                                        response={"result": result},
-                                    )
-                                )
-                            ],
-                        ),
-                    ]
-                )
-                if file_path:
-                    with open(file_path, "rb") as file_handler:
-                        img_bytes = file_handler.read()
-                    mime = mimetypes.guess_type(file_path)[0] or "image/png"
-                    messages[-1].parts.append(types.Part.from_bytes(data=img_bytes, mime_type=mime))
-                snippets = list(history_snippets)
-            return "ツール呼び出しが 10 回を超えました。"
+                # Check for safety filter block
+                finish_reason = getattr(candidate, "finish_reason", None)
+                if finish_reason is not None:
+                    finish_reason_str = str(finish_reason).upper()
+                    if "SAFETY" in finish_reason_str:
+                        safety_ratings = getattr(candidate, "safety_ratings", [])
+                        blocked_categories = [
+                            str(getattr(r, "category", "unknown"))
+                            for r in (safety_ratings or [])
+                            if str(getattr(r, "probability", "")).upper() in ("HIGH", "MEDIUM")
+                        ]
+                        detail = f"Blocked categories: {blocked_categories}" if blocked_categories else ""
+                        logging.warning("[gemini] Response blocked by safety filter: %s", detail)
+                        raise SafetyFilterError(
+                            f"Content blocked by safety filter. {detail}",
+                            user_message="コンテンツが安全性フィルターによりブロックされました。入力内容を変更してお試しください。"
+                        )
 
-        active_client = self.client
-        model_id = self.model
-        max_empty_retries = 3
-        for attempt in range(max_empty_retries):
-            try:
-                result = _call(active_client, model_id)
-                if result:
-                    return result
-                # If result is empty string but no exception, retry
-                logging.warning("Gemini returned empty result (attempt %d/%d)", attempt + 1, max_empty_retries)
-                continue
+                if not candidate.content or not candidate.content.parts:
+                    logging.warning("[gemini] No content/parts (attempt %d/%d)", attempt + 1, max_retries)
+                    continue
+
+                # Extract text, reasoning, and function calls
+                text_parts = []
+                reasoning_entries = []
+                function_call_part = None
+
+                for part in candidate.content.parts:
+                    part_fcall = getattr(part, "function_call", None)
+                    if part_fcall:
+                        function_call_part = part_fcall
+                        continue
+                    
+                    is_thought = is_truthy_flag(getattr(part, "thought", None))
+                    part_text = getattr(part, "text", None)
+                    if not part_text:
+                        continue
+                    if is_thought:
+                        reasoning_entries.append({"title": "Thought", "text": part_text.strip()})
+                    else:
+                        text_parts.append(part_text)
+
+                text = "".join(text_parts)
+                self._store_reasoning(reasoning_entries)
+
+                # Check candidate-level function_call for backwards compatibility
+                if not function_call_part:
+                    function_call_part = getattr(candidate, "function_call", None)
+
+                # Return appropriate type based on what was found
+                if function_call_part:
+                    fcall_name = getattr(function_call_part, "name", None)
+                    fcall_args = getattr(function_call_part, "args", {}) or {}
+                    
+                    if fcall_name and isinstance(fcall_name, str):
+                        if text:
+                            logging.info("[gemini] Returning both: text + tool_call (%s)", fcall_name)
+                            return {
+                                "type": "both",
+                                "content": text,
+                                "tool_name": fcall_name,
+                                "tool_args": dict(fcall_args),
+                                "raw_function_call": function_call_part,
+                            }
+                        else:
+                            logging.info("[gemini] Returning tool_call: %s", fcall_name)
+                            return {
+                                "type": "tool_call",
+                                "tool_name": fcall_name,
+                                "tool_args": dict(fcall_args),
+                                "raw_function_call": function_call_part,
+                            }
+
+                # Text-only response in tool mode
+                # Check for empty text response (no tool call and empty/whitespace-only text)
+                if not text.strip():
+                    logging.error(
+                        "[gemini] Empty text response without tool call (attempt %d/%d). "
+                        "Model returned Part(text='') with finish_reason=STOP. "
+                        "prompt_tokens=%s, response_id=%s",
+                        attempt + 1, max_retries,
+                        getattr(usage, "prompt_token_count", None) if usage else None,
+                        getattr(resp, "response_id", None)
+                    )
+                    continue
+
+                logging.info("[gemini] Returning text response")
+                return {"type": "text", "content": text}
+
             except EmptyResponseError as e:
-                logging.warning("Gemini empty response (attempt %d/%d): %s", attempt + 1, max_empty_retries, e)
-                # Continue to retry
+                logging.warning("Gemini empty response (attempt %d/%d): %s", attempt + 1, max_retries, e)
                 continue
             except Exception as exc:
+                if self._is_timeout_error(exc):
+                    logging.warning(
+                        "Gemini timeout (attempt %d/%d): %s",
+                        attempt + 1, max_retries, type(exc).__name__
+                    )
+                    try:
+                        total_chars = sum(
+                            len(m.get("content", "") or "") if isinstance(m, dict) else 0
+                            for m in messages
+                        )
+                        image_count = sum(
+                            len(iter_image_media(m.get("metadata")) or [])
+                            if isinstance(m, dict) else 0
+                            for m in messages
+                        )
+                        client_type = "paid" if active_client is self.paid_client else "free"
+                        log_timeout_event(
+                            timeout_type=type(exc).__name__,
+                            model=model_id,
+                            wait_duration_sec=600.0,
+                            message_count=len(messages),
+                            total_chars=total_chars,
+                            image_count=image_count,
+                            has_tools=use_tools,
+                            use_stream=not use_tools,
+                            client_type=client_type,
+                            retry_attempt=attempt + 1,
+                        )
+                    except Exception as log_exc:
+                        logging.debug("Failed to log timeout diagnostics: %s", log_exc)
+                    if active_client is self.free_client and self.paid_client:
+                        logging.info("Switching to paid Gemini API key after timeout")
+                        active_client = self.paid_client
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                    continue
                 if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
                     logging.info("Retrying with paid Gemini API key due to rate limit")
                     active_client = self.paid_client
                     continue
                 logging.exception("Gemini call failed")
-                return "エラーが発生しました。"
-        logging.error("Gemini returned empty response after %d retries", max_empty_retries)
-        return "エラーが発生しました。"
+                raise self._convert_to_llm_error(exc, "API call") from exc
+
+        logging.error("Gemini API call failed after %d retries", max_retries)
+        if use_tools:
+            return {"type": "text", "content": ""}
+        raise LLMEmptyResponseError(
+            f"Gemini API call failed after {max_retries} retries with empty responses",
+            user_message="何度も空の応答が返されました。しばらく待ってから再度お試しください。"
+        )
 
     def _separate_parts(self, parts: List[Any]) -> Tuple[str, List[Dict[str, str]]]:
         reasoning_entries: List[Dict[str, str]] = []
@@ -688,6 +1014,7 @@ class GeminiClient(LLMClient):
         response_schema: Optional[Dict[str, Any]] = None,
         *,
         temperature: float | None = None,
+        **_: Any,
     ) -> Iterator[str]:
         disable_stream = os.getenv("SAIVERSE_DISABLE_GEMINI_STREAMING")
         if disable_stream and disable_stream.lower() not in {"0", "false", "off"}:
@@ -706,8 +1033,6 @@ class GeminiClient(LLMClient):
         use_tools = bool(tools_spec)
         history_snippets = history_snippets or []
         self._store_reasoning([])
-        if response_schema:
-            logging.warning("Structured streaming output is not yet supported for GeminiClient; ignoring response_schema.")
         reasoning_chunks: List[str] = []
 
         if use_tools:
@@ -731,16 +1056,15 @@ class GeminiClient(LLMClient):
 
         active_client = self.client
         try:
-            stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature)
+            stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema)
         except Exception as exc:
             if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
                 logging.info("Retrying with paid Gemini API key due to rate limit")
                 active_client = self.paid_client
-                stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature)
+                stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema)
             else:
                 logging.exception("Gemini call failed")
-                yield "エラーが発生しました。"
-                return
+                raise self._convert_to_llm_error(exc, "streaming")
 
         fcall: Optional[types.FunctionCall] = None
         prefix_yielded = False
@@ -749,20 +1073,41 @@ class GeminiClient(LLMClient):
 
         saw_chunks = False
         stream_completed = False
+        last_chunk = None
 
         for chunk in stream:
-            raw_logger.debug("Gemini stream chunk:\n%s", chunk)
+            last_chunk = chunk
+            get_llm_logger().debug("Gemini stream chunk:\n%s", chunk)
             if not chunk.candidates:
                 continue
             candidate = chunk.candidates[0]
-            raw_logger.debug("Gemini stream candidate:\n%s", candidate)
+            get_llm_logger().debug("Gemini stream candidate:\n%s", candidate)
             saw_chunks = True
+
+            # Check for safety filter block in streaming
+            finish_reason = getattr(candidate, "finish_reason", None)
+            if finish_reason is not None:
+                finish_reason_str = str(finish_reason).upper()
+                if "SAFETY" in finish_reason_str:
+                    safety_ratings = getattr(candidate, "safety_ratings", [])
+                    blocked_categories = [
+                        str(getattr(r, "category", "unknown"))
+                        for r in (safety_ratings or [])
+                        if str(getattr(r, "probability", "")).upper() in ("HIGH", "MEDIUM")
+                    ]
+                    detail = f"Blocked categories: {blocked_categories}" if blocked_categories else ""
+                    logging.warning("[gemini] Stream blocked by safety filter: %s", detail)
+                    raise SafetyFilterError(
+                        f"Content blocked by safety filter. {detail}",
+                        user_message="コンテンツが安全性フィルターによりブロックされました。入力内容を変更してお試しください。"
+                    )
+
             if not candidate.content or not candidate.content.parts:
                 continue
             candidate_index = getattr(candidate, "index", 0)
             for part_idx, part in enumerate(candidate.content.parts):
                 if getattr(part, "function_call", None) and fcall is None:
-                    raw_logger.debug("Gemini function_call (part %s): %s", part_idx, part.function_call)
+                    get_llm_logger().debug("Gemini function_call (part %s): %s", part_idx, part.function_call)
                     fcall = part.function_call
                 elif is_truthy_flag(getattr(part, "thought", None)):
                     text_val = getattr(part, "text", None) or ""
@@ -793,7 +1138,7 @@ class GeminiClient(LLMClient):
             )
             if not new_text:
                 continue
-            raw_logger.debug("Gemini text delta: %s", new_text)
+            get_llm_logger().debug("Gemini text delta: %s", new_text)
             if not prefix_yielded and history_snippets:
                 yield "\n".join(history_snippets) + "\n"
                 prefix_yielded = True
@@ -804,60 +1149,61 @@ class GeminiClient(LLMClient):
                 stream_completed = True
 
         if fcall is None and saw_chunks and not stream_completed:
-            raise IncompleteStreamError("Gemini stream ended without completion signal.")
+            # Log as warning but continue with received content
+            logging.warning("Gemini stream ended without completion signal, but content was received. Continuing with partial response.")
 
-        if fcall is None:
-            self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
-            return
-
-        fn = TOOL_REGISTRY.get(fcall.name)
-        if fn is None:
-            logging.warning("Unknown tool '%s' from Gemini; abort", fcall.name)
-            return
-
-        try:
-            result_text, snippet, file_path, metadata = parse_tool_result(fn(**fcall.args))
-            if snippet:
-                history_snippets.append(snippet)
-            result = result_text
-        except Exception:
-            logging.exception("Tool '%s' execution failed", fcall.name)
-            yield "エラー: ツール実行に失敗しました。"
-            return
-
-        logging.info("Gemini tool '%s' executed -> %s", fcall.name, result)
-
-        parts = [types.Part(function_call=fcall)]
-        file_parts = [
-            types.Part(
-                function_response=types.FunctionResponse(
-                    name=fcall.name,
-                    response={"result": result},
+        # Store usage from last chunk (uses self.config_key for pricing)
+        logging.info("[DEBUG] generate_stream last_chunk exists: %s", last_chunk is not None)
+        if last_chunk:
+            usage = getattr(last_chunk, "usage_metadata", None)
+            logging.info("[DEBUG] generate_stream usage_metadata: %s", usage)
+            if usage:
+                logging.info("[DEBUG] generate_stream usage attrs: %s",
+                            [a for a in dir(usage) if not a.startswith('_')])
+                logging.info("[DEBUG] generate_stream usage values: prompt=%s, candidates=%s, cached=%s",
+                            getattr(usage, "prompt_token_count", None),
+                            getattr(usage, "candidates_token_count", None),
+                            getattr(usage, "cached_content_token_count", None))
+                cached = getattr(usage, "cached_content_token_count", 0) or 0
+                self._store_usage(
+                    input_tokens=getattr(usage, "prompt_token_count", 0) or 0,
+                    output_tokens=getattr(usage, "candidates_token_count", 0) or 0,
+                    cached_tokens=cached,
                 )
-            )
-        ]
-        if file_path:
-            with open(file_path, "rb") as file_handler:
-                img_bytes = file_handler.read()
-            mime = mimetypes.guess_type(file_path)[0] or "image/png"
-            file_parts.append(types.Part.from_bytes(data=img_bytes, mime_type=mime))
-        if metadata:
-            self._store_attachment(metadata)
 
-        messages.extend([
-            types.Content(role="model", parts=parts),
-            types.Content(role="tool", parts=file_parts),
-        ])
+        # Store reasoning
+        self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
 
-        yield from self._stream_follow_up(
-            active_client,
-            messages,
-            tools_spec,
-            history_snippets,
-            reasoning_chunks,
-            result,
-            temperature,
-        )
+        # Store tool detection result if function call was detected
+        if fcall is not None:
+            # Collect all text that was yielded
+            all_text = "".join(seen_stream_texts.values())
+            fcall_name = getattr(fcall, "name", None)
+            fcall_args = getattr(fcall, "args", {}) or {}
+
+            if all_text.strip():
+                self._store_tool_detection({
+                    "type": "both",
+                    "content": all_text,
+                    "tool_name": fcall_name,
+                    "tool_args": dict(fcall_args),
+                    "raw_function_call": fcall,
+                })
+            else:
+                self._store_tool_detection({
+                    "type": "tool_call",
+                    "tool_name": fcall_name,
+                    "tool_args": dict(fcall_args),
+                    "raw_function_call": fcall,
+                })
+            logging.info("[gemini] Tool detection stored: %s", fcall_name)
+        else:
+            # No tool call - store text-only result
+            all_text = "".join(seen_stream_texts.values())
+            self._store_tool_detection({
+                "type": "text",
+                "content": all_text,
+            })
 
     def _start_stream(
         self,
@@ -867,22 +1213,41 @@ class GeminiClient(LLMClient):
         tool_cfg: Optional[types.ToolConfig],
         use_tools: bool,
         temperature: float | None,
+        response_schema: Optional[Dict[str, Any]] = None,
     ):
         sys_msg, contents = self._convert_messages(messages)
         cfg_kwargs: Dict[str, Any] = {
             "system_instruction": sys_msg,
-            "safety_settings": GEMINI_SAFETY_CONFIG,
+            "safety_settings": self._build_safety_settings(),
         }
         if use_tools:
             cfg_kwargs["tools"] = merge_tools_for_gemini(tools_spec)
             cfg_kwargs["tool_config"] = tool_cfg
-        else:
-            cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
-        if self._thinking_config is not None:
-            cfg_kwargs["thinking_config"] = self._thinking_config
-        if temperature is not None:
-            cfg_kwargs["temperature"] = temperature
-        raw_logger.debug(
+        # Response schema configuration
+        if response_schema and not use_tools:
+            cfg_kwargs["response_mime_type"] = "application/json"
+            if isinstance(response_schema, dict) and self._requires_json_schema(response_schema):
+                cfg_kwargs["response_json_schema"] = response_schema
+            else:
+                schema_obj = self._schema_from_json(response_schema)
+                if schema_obj is not None:
+                    cfg_kwargs["response_schema"] = schema_obj
+        # Always disable AFC - SAIVerse handles function calls manually via Playbook
+        cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
+        thinking_config = self._build_thinking_config()
+        if thinking_config is not None:
+            cfg_kwargs["thinking_config"] = thinking_config
+
+        # Temperature: argument > _request_params
+        effective_temp = temperature if temperature is not None else self._request_params.get("temperature")
+        if effective_temp is not None:
+            cfg_kwargs["temperature"] = effective_temp
+
+        # Apply other request params (top_p, top_k, max_output_tokens, etc.)
+        for param in ("top_p", "top_k", "max_output_tokens", "stop_sequences"):
+            if param in self._request_params:
+                cfg_kwargs[param] = self._request_params[param]
+        get_llm_logger().debug(
             "Gemini stream config model=%s use_tools=%s cfg=%s",
             self.model,
             use_tools,
@@ -896,105 +1261,6 @@ class GeminiClient(LLMClient):
             config=types.GenerateContentConfig(**cfg_kwargs),
         )
 
-    def _stream_follow_up(
-        self,
-        client: genai.Client,
-        messages: List[Any],
-        tools_spec: Optional[list],
-        history_snippets: List[str],
-        reasoning_chunks: List[str],
-        fallback_result: str,
-        temperature: float | None,
-    ) -> Iterator[str]:
-        tool_cfg_none = types.ToolConfig(functionCallingConfig=types.FunctionCallingConfig(mode="NONE"))
-        sys_msg, contents = self._convert_messages(messages)
-        cfg_kwargs: Dict[str, Any] = {
-            "system_instruction": sys_msg,
-            "safety_settings": GEMINI_SAFETY_CONFIG,
-            "tools": merge_tools_for_gemini(tools_spec or []),
-            "tool_config": tool_cfg_none,
-        }
-        if self._thinking_config is not None:
-            cfg_kwargs["thinking_config"] = self._thinking_config
-        if temperature is not None:
-            cfg_kwargs["temperature"] = temperature
-        stream = client.models.generate_content_stream(
-            model=self.model,
-            contents=contents,
-            config=types.GenerateContentConfig(**cfg_kwargs),
-        )
-
-        prefix_yielded = False
-        seen_stream_texts: Dict[int, str] = {}
-        thought_seen: Dict[int, str] = {}
-        yielded = False
-
-        saw_chunks = False
-        stream_completed = False
-
-        for chunk in stream:
-            raw_logger.debug("Gemini stream2 chunk:\n%s", chunk)
-            if not chunk.candidates:
-                continue
-            candidate = chunk.candidates[0]
-            raw_logger.debug("Gemini stream2 candidate:\n%s", candidate)
-            saw_chunks = True
-            if not candidate.content or not candidate.content.parts:
-                continue
-            candidate_index = getattr(candidate, "index", 0)
-            for part in candidate.content.parts:
-                if is_truthy_flag(getattr(part, "thought", None)):
-                    text_val = getattr(part, "text", None) or ""
-                    if text_val:
-                        prev = thought_seen.get(candidate_index, "")
-                        if text_val.startswith(prev):
-                            delta = text_val[len(prev) :]
-                            if delta:
-                                reasoning_chunks.append(delta)
-                                thought_seen[candidate_index] = prev + delta
-                        else:
-                            reasoning_chunks.append(text_val)
-                            thought_seen[candidate_index] = prev + text_val
-            combined_text = "".join(
-                getattr(part, "text", None) or ""
-                for part in candidate.content.parts
-                if getattr(part, "text", None) and not is_truthy_flag(getattr(part, "thought", None))
-            )
-            if not combined_text:
-                continue
-
-            previous_text = seen_stream_texts.get(candidate_index, "")
-            new_text = (
-                combined_text[len(previous_text) :]
-                if combined_text.startswith(previous_text)
-                else combined_text
-            )
-            if not new_text:
-                continue
-            raw_logger.debug("Gemini text2 delta: %s", new_text)
-            if not prefix_yielded and history_snippets:
-                yield "\n".join(history_snippets) + "\n"
-                prefix_yielded = True
-            yield new_text
-            seen_stream_texts[candidate_index] = combined_text
-            yielded = True
-            finish_reason = getattr(candidate, "finish_reason", None)
-            if finish_reason:
-                stream_completed = True
-
-        if not yielded:
-            if history_snippets:
-                yield "\n".join(history_snippets) + "\n" + fallback_result
-            else:
-                yield fallback_result
-            self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
-            return
-
-        if saw_chunks and not stream_completed:
-            raise IncompleteStreamError("Gemini follow-up stream ended without completion signal.")
-
-        self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
-
     def generate_with_tool_detection(
         self,
         messages: List[Dict[str, Any]],
@@ -1003,139 +1269,25 @@ class GeminiClient(LLMClient):
         temperature: float | None = None,
         **_: Any,
     ) -> Dict[str, Any]:
-        """Generate response with tool call detection (do not execute tools)."""
+        """DEPRECATED: Use generate(messages, tools=[...]) instead.
+        
+        This method is kept for backward compatibility with existing code.
+        It simply delegates to generate() with tools specified.
+        """
+        import warnings
+        warnings.warn(
+            "generate_with_tool_detection() is deprecated. Use generate(messages, tools=[...]) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         tools_spec = tools or []
-        self._store_reasoning([])
-
-        active_client = self.client
-        sys_msg, contents = self._convert_messages(messages)
-        cfg_kwargs: Dict[str, Any] = {
-            "system_instruction": sys_msg,
-            "safety_settings": GEMINI_SAFETY_CONFIG,
-        }
-        if temperature is not None:
-            cfg_kwargs["temperature"] = temperature
-        if tools_spec:
-            merged_tools = merge_tools_for_gemini(tools_spec)
-            cfg_kwargs["tools"] = merged_tools
-            cfg_kwargs["tool_config"] = types.ToolConfig(
-                functionCallingConfig=types.FunctionCallingConfig(mode="AUTO")
-            )
-            # Log tool schemas being sent to Gemini
-            logging.info("[gemini] Sending %d Tool objects to API", len(merged_tools))
-            for i, tool in enumerate(merged_tools):
-                if hasattr(tool, "function_declarations"):
-                    logging.info("[gemini] Tool[%d]: %d function_declarations", i, len(tool.function_declarations))
-                    for decl in tool.function_declarations:
-                        logging.info("[gemini]   - %s: %s", decl.name, decl.description[:80] if decl.description else "")
-        if self._thinking_config is not None:
-            cfg_kwargs["thinking_config"] = self._thinking_config
-
-        max_empty_retries = 3
-        resp = None
-        for attempt in range(max_empty_retries):
-            try:
-                resp = active_client.models.generate_content(
-                    model=self.model,
-                    contents=contents,
-                    config=types.GenerateContentConfig(**cfg_kwargs),
-                )
-            except Exception as exc:
-                if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
-                    logging.info("Retrying with paid Gemini API key due to rate limit")
-                    active_client = self.paid_client
-                    continue
-                logging.exception("Gemini call failed in generate_with_tool_detection")
-                return {"type": "text", "content": "エラーが発生しました。"}
-
-            raw_logger.debug("Gemini raw (tool detection):\n%s", resp)
-
-            if not resp.candidates:
-                logging.warning("[gemini] No candidates in response (attempt %d/%d)", attempt + 1, max_empty_retries)
-                continue
-
-            candidate = resp.candidates[0]
-            finish_reason = getattr(candidate, "finish_reason", None)
-            logging.info("[gemini] Tool detection finish_reason: %s", finish_reason)
-
-            if not candidate.content or not candidate.content.parts:
-                logging.warning("[gemini] No content or parts in candidate (attempt %d/%d)", attempt + 1, max_empty_retries)
-                continue
-
-            # Found valid response, break out of retry loop
-            break
-        else:
-            # All retries exhausted
-            logging.error("[gemini] Empty response after %d retries", max_empty_retries)
-            return {"type": "text", "content": ""}
-
-        # Extract text, reasoning, and function calls from parts
-        text_parts = []
-        reasoning_entries = []
-        function_call_part = None
-
-        for part in candidate.content.parts:
-            # Check for function call in parts
-            part_fcall = getattr(part, "function_call", None)
-            if part_fcall:
-                function_call_part = part_fcall
-                fcall_name = getattr(part_fcall, "name", None)
-                fcall_args = getattr(part_fcall, "args", None)
-                logging.info("[gemini] Function call detected in parts: name=%s, args=%s", fcall_name, fcall_args)
-                continue
-
-            # Extract text
-            is_thought = is_truthy_flag(getattr(part, "thought", None))
-            part_text = getattr(part, "text", None)
-            if not part_text:
-                continue
-
-            if is_thought:
-                reasoning_entries.append({"title": "Thought", "text": part_text.strip()})
-            else:
-                text_parts.append(part_text)
-
-        text = "".join(text_parts)
-        self._store_reasoning(reasoning_entries)
-
-        # Also check candidate-level function_call for backwards compatibility
-        if not function_call_part:
-            function_call_part = getattr(candidate, "function_call", None)
-
-        # Determine return type based on what we found
-        if function_call_part:
-            fcall_name = getattr(function_call_part, "name", None)
-            fcall_args = getattr(function_call_part, "args", {}) or {}
-
-            if finish_reason and "MALFORMED" in str(finish_reason):
-                logging.error("[gemini] MALFORMED_FUNCTION_CALL: name=%s, args=%s", fcall_name, fcall_args)
-                logging.error("[gemini] Raw fcall object: %s", function_call_part)
-
-            if fcall_name and isinstance(fcall_name, str):
-                if text:
-                    # Both text and tool call
-                    logging.info("[gemini] Returning both: text + tool_call (%s)", fcall_name)
-                    return {
-                        "type": "both",
-                        "content": text,
-                        "tool_name": fcall_name,
-                        "tool_args": dict(fcall_args),
-                        "raw_function_call": function_call_part,
-                    }
-                else:
-                    # Only tool call
-                    logging.info("[gemini] Returning tool_call: %s", fcall_name)
-                    return {
-                        "type": "tool_call",
-                        "tool_name": fcall_name,
-                        "tool_args": dict(fcall_args),
-                        "raw_function_call": function_call_part,
-                    }
-
-        # Only text
-        logging.info("[gemini] Returning text response")
-        return {"type": "text", "content": text}
-
+        if not tools_spec:
+            # If no tools, return text-only format for compatibility
+            result = self.generate(messages, temperature=temperature)
+            if isinstance(result, str):
+                return {"type": "text", "content": result}
+            return result
+        return self.generate(messages, tools=tools_spec, temperature=temperature)
 
 __all__ = [
     "GeminiClient",

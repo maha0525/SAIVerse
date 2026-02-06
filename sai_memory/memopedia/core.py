@@ -32,6 +32,13 @@ from sai_memory.memopedia.storage import (
     record_page_edit,
     get_page_edit_history as storage_get_page_edit_history,
     get_edit_by_id,
+    # Trunk operations
+    set_trunk_flag,
+    get_trunks as storage_get_trunks,
+    move_pages_to_parent,
+    get_unorganized_pages as storage_get_unorganized_pages,
+    # Important flag
+    set_important_flag,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -84,6 +91,8 @@ class Memopedia:
                 "summary": page.summary,
                 "keywords": page.keywords,
                 "vividness": page.vividness,
+                "is_trunk": page.is_trunk,
+                "is_important": page.is_important,
                 "content": page.content,  # Include content for vivid pages
                 "is_open": states.get(page.id, False),
                 "children": [_annotate(c) for c in page.children],
@@ -96,11 +105,26 @@ class Memopedia:
             "plans": [_annotate(p) for p in tree.get(CATEGORY_PLANS, [])],
         }
 
-    def get_tree_markdown(self, thread_id: Optional[str] = None) -> str:
+    def get_tree_markdown(
+        self,
+        thread_id: Optional[str] = None,
+        include_keywords: bool = False,
+        max_depth: Optional[int] = None,
+        show_markers: bool = True,
+    ) -> str:
         """
         Get the page tree as a Markdown outline.
 
-        Open pages are marked with [OPEN], closed with [-].
+        This is the unified method for formatting Memopedia content for LLM contexts.
+        
+        Args:
+            thread_id: Optional thread ID to include open/close states
+            include_keywords: If True, include keywords in output (default: False for lighter context)
+            max_depth: Maximum tree depth to include (None = unlimited, 0 = root only, 1 = root + children, etc.)
+            show_markers: If True, show [OPEN]/[-] markers (default: True for chat, False for analysis scripts)
+        
+        Returns:
+            Formatted Markdown string of the page tree
         """
         tree = self.get_tree(thread_id)
         lines: List[str] = []
@@ -111,21 +135,55 @@ class Memopedia:
             "plans": "予定",
         }
 
-        def _render_page(page: Dict[str, Any], depth: int = 0) -> None:
+        def _render_page(page: Dict[str, Any], depth: int = 0, current_depth: int = 0) -> None:
+            # Check depth limit
+            if max_depth is not None and current_depth > max_depth:
+                return
+            
+            # Skip root pages
+            if page.get("id", "").startswith("root_"):
+                # Still process children of root pages
+                for child in page.get("children", []):
+                    _render_page(child, depth, current_depth)
+                return
+            
             indent = "  " * depth
-            marker = "[OPEN]" if page.get("is_open") else "[-]"
+            
+            # Build line content
+            if show_markers:
+                marker = "[OPEN]" if page.get("is_open") else "[-]"
+                title_part = f"{marker} **{page['title']}**"
+            else:
+                title_part = page['title']
+            
             summary = page.get("summary", "")
-            summary_part = f" - {summary}" if summary else ""
-            lines.append(f"{indent}- {marker} **{page['title']}**{summary_part}")
-            for child in page.get("children", []):
-                _render_page(child, depth + 1)
+            summary_part = f": {summary}" if summary else ""
+            
+            # Add keywords if enabled
+            if include_keywords:
+                keywords = page.get("keywords", [])
+                if keywords:
+                    kw_str = f" [キーワード: {', '.join(keywords)}]"
+                    summary_part += kw_str
+            
+            lines.append(f"{indent}- {title_part}{summary_part}")
+            
+            # Process children (if within depth limit)
+            children = page.get("children", [])
+            if children and (max_depth is None or current_depth + 1 <= max_depth):
+                for child in children:
+                    _render_page(child, depth + 1, current_depth + 1)
 
         for category_key in ["people", "terms", "plans"]:
             category_name = category_names.get(category_key, category_key)
             pages = tree.get(category_key, [])
-            lines.append(f"\n## {category_name}\n")
-            for page in pages:
-                _render_page(page, depth=0)
+            if pages:
+                lines.append(f"\n### {category_name}")
+                for page in pages:
+                    _render_page(page, depth=0, current_depth=0)
+
+        if not lines:
+            return "(まだページはありません)"
 
         return "\n".join(lines)
 
@@ -164,6 +222,7 @@ class Memopedia:
         content: str = "",
         keywords: Optional[List[str]] = None,
         vividness: str = "rough",
+        is_trunk: bool = False,
         ref_start_message_id: Optional[str] = None,
         ref_end_message_id: Optional[str] = None,
         edit_source: Optional[str] = None,
@@ -180,6 +239,7 @@ class Memopedia:
             content: Page content
             keywords: List of keywords
             vividness: Vividness level (vivid/rough/faint/buried), default: rough
+            is_trunk: If True, this page is a trunk (category container)
             ref_start_message_id: Start of message reference range
             ref_end_message_id: End of message reference range
             edit_source: Source of this edit (e.g., 'ai_conversation', 'manual')
@@ -197,6 +257,7 @@ class Memopedia:
                 category=parent.category,
                 keywords=keywords,
                 vividness=vividness,
+                is_trunk=is_trunk,
             )
             # Record edit history for create
             full_content = f"title: {title}\nsummary: {summary}\ncontent:\n{content}"
@@ -256,7 +317,10 @@ class Memopedia:
                         ref_end_message_id=ref_end_message_id,
                         edit_source=edit_source,
                     )
-            return result
+
+        # Update reference timestamp
+        self.touch_page(page_id)
+        return result
 
     def append_to_content(
         self,
@@ -367,12 +431,20 @@ class Memopedia:
             if page is None:
                 return {"error": f"Page not found: {page_id}"}
             children = get_children(self.conn, page_id)
-            return {
-                "title": page.title,
-                "summary": page.summary,
-                "content": page.content,
-                "children": [{"id": c.id, "title": c.title, "summary": c.summary} for c in children],
-            }
+
+        # Update reference timestamp (outside lock to avoid deadlock)
+        self.touch_page(page_id)
+
+        # Promote buried/faint pages when opened
+        if page.vividness in ("buried", "faint"):
+            self.update_page(page_id, vividness="rough")
+
+        return {
+            "title": page.title,
+            "summary": page.summary,
+            "content": page.content,
+            "children": [{"id": c.id, "title": c.title, "summary": c.summary} for c in children],
+        }
 
     def close_page(self, thread_id: str, page_id: str) -> Dict[str, Any]:
         """Close a page for a thread."""
@@ -406,6 +478,74 @@ class Memopedia:
             sections.append("\n".join(section_lines))
 
         return "\n\n---\n\n".join(sections)
+
+    # ----- Reference tracking (vividness management) -----
+
+    def touch_page(self, page_id: str) -> None:
+        """Update last_referenced_at timestamp for a page.
+
+        Called automatically when a page is opened or updated,
+        used by apply_vividness_decay() to determine decay timing.
+        """
+        import time
+        now = int(time.time())
+        with self._lock:
+            self.conn.execute(
+                "UPDATE memopedia_pages SET last_referenced_at = ? WHERE id = ?",
+                (now, page_id),
+            )
+            self.conn.commit()
+
+    def apply_vividness_decay(self) -> int:
+        """Apply time-based vividness decay to all non-root pages.
+
+        Decay rules:
+        - vivid → rough after 14 days without reference
+        - rough → faint after 30 days without reference (skipped for important pages)
+        - faint → buried after 60 days without reference (skipped for important pages)
+
+        Important pages (is_important=1) will never decay below 'rough'.
+
+        Returns:
+            Number of pages whose vividness was changed
+        """
+        import time as _time
+
+        now = int(_time.time())
+        # (from_level, to_level, threshold_secs, skip_important)
+        decay_rules = [
+            ("vivid", "rough", 14 * 86400, False),
+            ("rough", "faint", 30 * 86400, True),
+            ("faint", "buried", 60 * 86400, True),
+        ]
+
+        changed = 0
+        with self._lock:
+            for from_level, to_level, threshold_secs, skip_important in decay_rules:
+                cutoff = now - threshold_secs
+                important_clause = "AND (is_important = 0 OR is_important IS NULL)" if skip_important else ""
+                cur = self.conn.execute(
+                    f"""
+                    UPDATE memopedia_pages
+                    SET vividness = ?, updated_at = ?
+                    WHERE vividness = ?
+                      AND (last_referenced_at IS NOT NULL AND last_referenced_at < ?)
+                      AND id NOT LIKE 'root_%'
+                      AND (is_deleted = 0 OR is_deleted IS NULL)
+                      {important_clause}
+                    """,
+                    (to_level, now, from_level, cutoff),
+                )
+                count = cur.rowcount
+                if count > 0:
+                    LOGGER.info(
+                        "Vividness decay: %d pages %s → %s",
+                        count, from_level, to_level,
+                    )
+                    changed += count
+            if changed > 0:
+                self.conn.commit()
+        return changed
 
     # ----- Update tracking -----
 
@@ -636,3 +776,156 @@ class Memopedia:
                     deleted += 1
             LOGGER.info("Deleted %d pages", deleted)
             return deleted
+
+    # ----- Trunk operations -----
+
+    def set_trunk(self, page_id: str, is_trunk: bool) -> Optional[MemopediaPage]:
+        """
+        Set or unset the trunk flag for a page.
+
+        A trunk is a category container page that can hold other pages.
+        Trunks are displayed differently in the UI and used for organization.
+
+        Args:
+            page_id: ID of the page to modify
+            is_trunk: True to make this page a trunk, False to make it a regular page
+
+        Returns:
+            The updated page, or None if not found
+        """
+        # Prevent modifying root pages
+        if page_id.startswith("root_"):
+            LOGGER.warning("Cannot modify trunk status of root page: %s", page_id)
+            return None
+
+        with self._lock:
+            result = set_trunk_flag(self.conn, page_id, is_trunk)
+            if result:
+                LOGGER.info("Set trunk flag for page %s to %s", page_id, is_trunk)
+            return result
+
+    def set_important(self, page_id: str, is_important: bool) -> Optional[MemopediaPage]:
+        """
+        Set or unset the important flag for a page.
+
+        Important pages will not decay below 'rough' vividness,
+        ensuring they remain visible in the persona's context.
+
+        Args:
+            page_id: ID of the page to modify
+            is_important: True to mark as important
+
+        Returns:
+            The updated page, or None if not found
+        """
+        if page_id.startswith("root_"):
+            LOGGER.warning("Cannot modify important status of root page: %s", page_id)
+            return None
+
+        with self._lock:
+            result = set_important_flag(self.conn, page_id, is_important)
+            if result:
+                LOGGER.info("Set important flag for page %s to %s", page_id, is_important)
+            return result
+
+    def get_trunks(self, category: Optional[str] = None) -> List[MemopediaPage]:
+        """
+        Get all trunk pages, optionally filtered by category.
+
+        Args:
+            category: Optional category filter ('people', 'terms', 'plans')
+
+        Returns:
+            List of trunk pages
+        """
+        with self._lock:
+            return storage_get_trunks(self.conn, category)
+
+    def get_unorganized_pages(self, category: str) -> List[MemopediaPage]:
+        """
+        Get pages that are direct children of the root (not in any trunk).
+
+        These are pages that haven't been organized into trunks yet.
+
+        Args:
+            category: Category to search ('people', 'terms', 'plans')
+
+        Returns:
+            List of unorganized pages
+        """
+        with self._lock:
+            return storage_get_unorganized_pages(self.conn, category)
+
+    def move_pages_to_trunk(
+        self,
+        page_ids: List[str],
+        trunk_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Move multiple pages to a trunk.
+
+        Args:
+            page_ids: List of page IDs to move
+            trunk_id: ID of the destination trunk page
+
+        Returns:
+            {
+                "success": True,
+                "moved_count": int,
+                "trunk_id": str,
+                "trunk_title": str
+            }
+        """
+        with self._lock:
+            trunk = get_page(self.conn, trunk_id)
+            if trunk is None:
+                raise ValueError(f"Trunk not found: {trunk_id}")
+
+            moved_count = move_pages_to_parent(self.conn, page_ids, trunk_id)
+            LOGGER.info("Moved %d pages to trunk %s (%s)", moved_count, trunk_id, trunk.title)
+
+            return {
+                "success": True,
+                "moved_count": moved_count,
+                "trunk_id": trunk_id,
+                "trunk_title": trunk.title,
+            }
+
+    def create_trunk(
+        self,
+        *,
+        parent_id: str,
+        title: str,
+        summary: str = "",
+        content: str = "",
+        keywords: Optional[List[str]] = None,
+        vividness: str = "rough",
+        edit_source: Optional[str] = None,
+    ) -> MemopediaPage:
+        """
+        Create a new trunk page.
+
+        A convenience method that creates a page with is_trunk=True.
+
+        Args:
+            parent_id: ID of the parent page (usually a root page like 'root_people')
+            title: Trunk title
+            summary: Trunk summary/description
+            content: Trunk content
+            keywords: List of keywords
+            vividness: Vividness level, default: rough
+            edit_source: Source of this edit
+
+        Returns:
+            The created trunk page
+        """
+        return self.create_page(
+            parent_id=parent_id,
+            title=title,
+            summary=summary,
+            content=content,
+            keywords=keywords,
+            vividness=vividness,
+            is_trunk=True,
+            edit_source=edit_source,
+        )

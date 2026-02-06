@@ -6,6 +6,8 @@ except ImportError:
     fcntl = None
 
 import contextlib
+import gc
+import hashlib
 import logging
 import os
 import shutil
@@ -13,6 +15,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,11 +23,14 @@ LOGGER = logging.getLogger(__name__)
 
 BACKUP_ROOT = Path.home() / ".saiverse" / "backups" / "saimemory_rdiff"
 BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+SIMPLE_BACKUP_ROOT = Path.home() / ".saiverse" / "backups" / "saimemory_simple"
+SIMPLE_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
 GLOBAL_LOCK_PATH = Path(os.getenv("SAIMEMORY_BACKUP_LOCK_PATH", BACKUP_ROOT / "saimemory_backup.lock"))
 BACKUP_TIMEOUT_SEC = int(os.getenv("SAIMEMORY_BACKUP_TIMEOUT_SEC", "300"))
 LOCK_WAIT_SEC = int(os.getenv("SAIMEMORY_BACKUP_LOCK_WAIT_SEC", "10"))
 RETRY_ON_CORRUPT = os.getenv("SAIMEMORY_BACKUP_RETRY_ON_CORRUPT", "true").strip().lower() in {"1", "true", "yes", "on"}
 ARCHIVE_KEEP = int(os.getenv("SAIMEMORY_BACKUP_ARCHIVE_KEEP", "3"))
+SIMPLE_BACKUP_KEEP = int(os.getenv("SAIMEMORY_SIMPLE_BACKUP_KEEP", "10"))
 
 
 class BackupError(RuntimeError):
@@ -46,11 +52,16 @@ def _sqlite_snapshot(db_path: Path) -> Path:
     tmpdir = Path(tempfile.mkdtemp(prefix="saimemory_snapshot_"))
     snapshot_path = tmpdir / "memory.db"
     try:
-        with sqlite3.connect(db_path) as src:
-            with sqlite3.connect(snapshot_path) as dst:
+        # Use closing() to ensure close() is called, not just commit().
+        # sqlite3's context manager only commits/rollbacks but does NOT close,
+        # causing file lock issues on Windows.
+        with closing(sqlite3.connect(db_path)) as src:
+            with closing(sqlite3.connect(snapshot_path)) as dst:
                 src.backup(dst)
                 dst.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 dst.execute("PRAGMA journal_mode=DELETE")
+        # Force garbage collection to release file handles on Windows
+        gc.collect()
     except Exception:
         shutil.rmtree(tmpdir, ignore_errors=True)
         raise
@@ -244,3 +255,197 @@ def run_backup(
 
 def latest_backup_path(persona_id: str, output_root: Path | None = None) -> Path:
     return _persona_backup_dir(persona_id, output_root)
+
+
+# ---------------------------------------------------------------------------
+# Simple backup (SQLite direct backup, no rdiff-backup dependency)
+# ---------------------------------------------------------------------------
+
+
+def _simple_backup_dir(persona_id: str, root: Path | None = None) -> Path:
+    """Get the simple backup directory for a persona."""
+    base = Path(root) if root else SIMPLE_BACKUP_ROOT
+    persona_dir = base / persona_id
+    persona_dir.mkdir(parents=True, exist_ok=True)
+    return persona_dir
+
+
+def _prune_simple_backups(backup_dir: Path, keep_count: int = SIMPLE_BACKUP_KEEP) -> None:
+    """Remove old simple backups, keeping only the most recent N backups."""
+    pattern = "memory.db_backup_*.bak"
+    backups = sorted(
+        [p for p in backup_dir.glob(pattern) if p.is_file()],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if len(backups) <= keep_count:
+        return
+    for old_backup in backups[keep_count:]:
+        try:
+            old_backup.unlink()
+            LOGGER.info("Removed old simple backup: %s", old_backup.name)
+        except OSError as exc:
+            LOGGER.warning("Failed to remove old backup %s: %s", old_backup.name, exc)
+
+
+def _get_latest_simple_backup(backup_dir: Path) -> Path | None:
+    """Get the most recent backup file in the directory."""
+    pattern = "memory.db_backup_*.bak"
+    backups = sorted(
+        [p for p in backup_dir.glob(pattern) if p.is_file()],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return backups[0] if backups else None
+
+
+def _compute_file_hash(file_path: Path, algorithm: str = "sha256") -> str:
+    """Compute hash of a file."""
+    h = hashlib.new(algorithm)
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def run_simple_backup(
+    *,
+    persona_id: str,
+    db_path: Path,
+    output_root: Path | None = None,
+    keep_count: int | None = None,
+    skip_if_unchanged: bool = True,
+) -> Path | None:
+    """Create a simple timestamped backup of the persona memory.db.
+
+    This is a fallback when rdiff-backup is not available. Uses SQLite's
+    built-in backup API for safe copying.
+
+    Args:
+        persona_id: Persona identifier
+        db_path: Path to memory.db
+        output_root: Custom backup directory (default: ~/.saiverse/backups/saimemory_simple)
+        keep_count: Number of backups to keep (default: from env or 10)
+        skip_if_unchanged: Skip backup if DB hasn't changed since last backup (default: True)
+
+    Returns:
+        Path to created backup file, or None if skipped (no changes)
+
+    Raises:
+        BackupError: If backup fails
+    """
+    if not db_path.exists():
+        raise BackupError(f"memory.db not found: {db_path}")
+
+    if keep_count is None:
+        keep_count = SIMPLE_BACKUP_KEEP
+
+    backup_dir = _simple_backup_dir(persona_id, output_root)
+
+    # Create a temporary snapshot first to handle WAL mode correctly
+    tmpdir = None
+    try:
+        tmpdir = Path(tempfile.mkdtemp(prefix="saimemory_simple_"))
+        snapshot_path = tmpdir / "snapshot.db"
+
+        # Create snapshot using SQLite backup API
+        # Use closing() to ensure close() is called, not just commit().
+        # sqlite3's context manager only commits/rollbacks but does NOT close,
+        # causing file lock issues on Windows.
+        with closing(sqlite3.connect(db_path)) as src:
+            with closing(sqlite3.connect(snapshot_path)) as dst:
+                src.backup(dst)
+                dst.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                dst.execute("PRAGMA journal_mode=DELETE")
+        # Force garbage collection to release file handles on Windows
+        gc.collect()
+
+        # Check if unchanged from latest backup
+        if skip_if_unchanged:
+            latest_backup = _get_latest_simple_backup(backup_dir)
+            if latest_backup:
+                current_hash = _compute_file_hash(snapshot_path)
+                latest_hash = _compute_file_hash(latest_backup)
+                if current_hash == latest_hash:
+                    LOGGER.info(
+                        "Simple backup skipped for %s: no changes since %s",
+                        persona_id,
+                        latest_backup.name,
+                    )
+                    return None
+
+        # Save backup
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")[:19]
+        backup_path = backup_dir / f"memory.db_backup_{timestamp}.bak"
+
+        LOGGER.info("Creating simple backup for %s: %s", persona_id, backup_path)
+        shutil.move(str(snapshot_path), str(backup_path))
+
+        size_kb = backup_path.stat().st_size / 1024
+        LOGGER.info("Simple backup created: %s (size: %.1f KB)", backup_path.name, size_kb)
+
+        _prune_simple_backups(backup_dir, keep_count)
+
+        return backup_path
+
+    except Exception as exc:
+        LOGGER.error("Failed to create simple backup for %s: %s", persona_id, exc)
+        raise BackupError(f"Simple backup failed: {exc}") from exc
+    finally:
+        if tmpdir and tmpdir.exists():
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def is_rdiff_backup_available(rdiff_path: str | None = None) -> bool:
+    """Check if rdiff-backup is available."""
+    candidate = rdiff_path or shutil.which("rdiff-backup")
+    return candidate is not None
+
+
+def run_backup_auto(
+    *,
+    persona_id: str,
+    db_path: Path,
+    output_root: Path | None = None,
+    rdiff_path: str | None = None,
+    force_full: bool = False,
+    prefer_simple: bool = False,
+    skip_if_unchanged: bool = True,
+) -> Path | None:
+    """Run backup with automatic fallback to simple backup if rdiff-backup unavailable.
+
+    Args:
+        persona_id: Persona identifier
+        db_path: Path to memory.db
+        output_root: Custom backup directory
+        rdiff_path: Path to rdiff-backup executable
+        force_full: Force full backup (rdiff-backup only)
+        prefer_simple: Always use simple backup even if rdiff-backup is available
+        skip_if_unchanged: Skip backup if DB hasn't changed (simple backup only)
+
+    Returns:
+        Path to backup (directory for rdiff, file for simple), or None if skipped
+
+    Raises:
+        BackupError: If backup fails
+    """
+    if prefer_simple or not is_rdiff_backup_available(rdiff_path):
+        if not prefer_simple:
+            LOGGER.info(
+                "rdiff-backup not available for %s, using simple backup",
+                persona_id,
+            )
+        return run_simple_backup(
+            persona_id=persona_id,
+            db_path=db_path,
+            output_root=output_root,
+            skip_if_unchanged=skip_if_unchanged,
+        )
+
+    return run_backup(
+        persona_id=persona_id,
+        db_path=db_path,
+        output_root=output_root,
+        rdiff_path=rdiff_path,
+        force_full=force_full,
+    )

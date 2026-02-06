@@ -1,16 +1,16 @@
 #!/usr/bin/env python
-"""Import all playbooks from sea/playbooks/ directory into the database.
+"""Import all playbooks from builtin_data/playbooks/ directory into the database.
 
 This script safely imports playbooks without affecting any other data.
 It will:
-  • Import all playbooks from sea/playbooks/public/
+  • Import all playbooks from builtin_data/playbooks/public/
   • Update existing playbooks with new definitions
   • Preserve all personas, conversations, and other data
 
 Usage:
   python scripts/import_all_playbooks.py
-  python scripts/import_all_playbooks.py --directory sea/playbooks/public
-  python scripts/import_all_playbooks.py --force  # Skip existing playbooks
+  python scripts/import_all_playbooks.py --directory builtin_data/playbooks/public
+  python scripts/import_all_playbooks.py --force  # Update existing playbooks
 """
 
 from __future__ import annotations
@@ -154,7 +154,7 @@ def import_playbooks_from_directory(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Import all playbooks from sea/playbooks/ directory",
+        description="Import all playbooks from builtin_data/playbooks/ directory",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -168,7 +168,7 @@ Examples:
   python scripts/import_all_playbooks.py --dry-run
 
   # Import from specific directory
-  python scripts/import_all_playbooks.py --directory sea/playbooks/custom
+  python scripts/import_all_playbooks.py --directory builtin_data/playbooks/custom
 """
     )
     parser.add_argument(

@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from database.models import PersonaSchedule, AI as AIModel, City as CityModel
 from tools.context import get_active_manager
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 LOGGER = logging.getLogger(__name__)
 
@@ -106,11 +106,22 @@ def schedule_list() -> str:
                     last_exec_local = last_exec_utc.astimezone(persona_tz)
                     detail += f" (最終実行: {last_exec_local.strftime('%Y-%m-%d %H:%M')})"
 
+            # Parse playbook_params
+            params_str = "(なし)"
+            if s.PLAYBOOK_PARAMS:
+                try:
+                    params = json.loads(s.PLAYBOOK_PARAMS)
+                    if params:
+                        params_str = ", ".join([f"{k}={v}" for k, v in params.items()])
+                except Exception:
+                    pass
+
             result_lines.append(
                 f"{i}. [ID: {s.SCHEDULE_ID}] {status}{completed}\n"
                 f"   タイプ: {s.SCHEDULE_TYPE}\n"
                 f"   実行: {detail}\n"
                 f"   プレイブック: {s.META_PLAYBOOK}\n"
+                f"   パラメータ: {params_str}\n"
                 f"   優先度: {s.PRIORITY}\n"
                 f"   説明: {s.DESCRIPTION or '(なし)'}\n"
             )

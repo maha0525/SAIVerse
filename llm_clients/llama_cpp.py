@@ -4,12 +4,28 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, Iterator, List, Optional
 
 from .base import LLMClient
-from .gemini import GeminiClient
 
 logger = logging.getLogger(__name__)
+
+# Retry configuration (fewer retries for local models)
+MAX_RETRIES = 2
+INITIAL_BACKOFF = 0.5  # seconds
+
+
+def _should_retry(err: Exception) -> bool:
+    """Check if the error should trigger a retry (for local models, only transient errors)."""
+    msg = str(err).lower()
+    # Retry on OOM, resource exhaustion, or temporary failures
+    return (
+        "memory" in msg
+        or "resource" in msg
+        or "busy" in msg
+        or "temporarily" in msg
+    )
 
 
 class LlamaCppClient(LLMClient):
@@ -21,7 +37,6 @@ class LlamaCppClient(LLMClient):
         context_length: int = 4096,
         n_gpu_layers: int = -1,
         supports_images: bool = False,
-        fallback_on_error: bool = True,
     ) -> None:
         """Initialize llama.cpp client.
 
@@ -30,15 +45,12 @@ class LlamaCppClient(LLMClient):
             context_length: Maximum context length (default: 4096)
             n_gpu_layers: Number of layers to offload to GPU (-1 = all, 0 = CPU only)
             supports_images: Whether model supports image inputs
-            fallback_on_error: Fall back to Gemini if model loading fails
         """
         super().__init__(supports_images=supports_images)
         self.model_path = model_path
         self.context_length = context_length
         self.n_gpu_layers = n_gpu_layers
-        self.fallback_on_error = fallback_on_error
         self._llm: Optional[Any] = None
-        self.fallback_client: Optional[LLMClient] = None
 
         # Temperature and other generation params
         self._temperature: float = 0.7
@@ -87,23 +99,10 @@ class LlamaCppClient(LLMClient):
             logger.error(
                 "llama-cpp-python not installed. Install with: pip install llama-cpp-python"
             )
-            if self.fallback_on_error:
-                self._setup_fallback()
-            return False
+            raise RuntimeError("llama-cpp-python not installed")
         except Exception as exc:
             logger.error("Failed to load GGUF model: %s", exc, exc_info=True)
-            if self.fallback_on_error:
-                self._setup_fallback()
-            return False
-
-    def _setup_fallback(self) -> None:
-        """Setup Gemini fallback client."""
-        if self.fallback_client is None:
-            try:
-                logger.info("Setting up Gemini fallback for llama.cpp")
-                self.fallback_client = GeminiClient("gemini-2.0-flash")
-            except Exception as exc:
-                logger.warning("Gemini fallback setup failed: %s", exc)
+            raise RuntimeError(f"Failed to load GGUF model: {exc}")
 
     def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
         """Apply model-specific request parameters."""
@@ -124,45 +123,133 @@ class LlamaCppClient(LLMClient):
         *,
         temperature: float | None = None,
         **_: Any,
-    ) -> str:
-        """Generate response using llama.cpp."""
-        if not self._ensure_model_loaded():
-            if self.fallback_client:
-                logger.info("Using Gemini fallback for generation")
-                return self.fallback_client.generate(
-                    messages, tools, response_schema, temperature=temperature
+    ) -> str | Dict[str, Any]:
+        """Unified generate method.
+        
+        Args:
+            messages: Conversation messages
+            tools: Tool specifications. If provided, returns Dict with tool detection.
+                   If None or empty, returns str with text response.
+            response_schema: Optional JSON schema for structured output
+            temperature: Optional temperature override
+            
+        Returns:
+            str: Text response when tools is None or empty
+            Dict: Tool detection result when tools is provided
+        """
+        self._ensure_model_loaded()
+        tools_spec = tools or []
+        use_tools = bool(tools_spec)
+        temp = temperature if temperature is not None else self._temperature
+
+        last_error: Optional[Exception] = None
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                if use_tools:
+                    # Tool mode: return Dict with tool detection
+                    response = self._llm.create_chat_completion(
+                        messages=messages,
+                        temperature=temp,
+                        top_p=self._top_p,
+                        max_tokens=self._max_tokens,
+                        tools=tools_spec,
+                    )
+
+                    # Store usage if available
+                    usage = response.get("usage")
+                    if usage:
+                        self._store_usage(
+                            input_tokens=usage.get("prompt_tokens", 0) or 0,
+                            output_tokens=usage.get("completion_tokens", 0) or 0,
+                        )
+
+                    choice = response["choices"][0]
+                    message = choice["message"]
+                    content = message.get("content", "") or ""
+                    tool_calls = message.get("tool_calls", [])
+
+                    if tool_calls:
+                        tc = tool_calls[0]
+                        func = tc.get("function", {})
+                        tool_name = func.get("name", "")
+                        try:
+                            tool_args = json.loads(func.get("arguments", "{}"))
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                "Tool call arguments invalid JSON: %s", func.get("arguments")
+                            )
+                            tool_args = {}
+
+                        if content.strip():
+                            return {
+                                "type": "both",
+                                "content": content,
+                                "tool_name": tool_name,
+                                "tool_args": tool_args,
+                            }
+                        else:
+                            return {
+                                "type": "tool_call",
+                                "tool_name": tool_name,
+                                "tool_args": tool_args,
+                            }
+                    else:
+                        # Check for empty text response without tool call
+                        if not content.strip():
+                            logger.error(
+                                "[llama.cpp] Empty text response without tool call. "
+                                "Model returned empty content."
+                            )
+                            raise RuntimeError("llama.cpp returned empty response without tool call")
+                        return {"type": "text", "content": content}
+
+                # Non-tool mode: return str
+                response = self._llm.create_chat_completion(
+                    messages=messages,
+                    temperature=temp,
+                    top_p=self._top_p,
+                    max_tokens=self._max_tokens,
+                    response_format=(
+                        {"type": "json_object", "schema": response_schema}
+                        if response_schema
+                        else None
+                    ),
                 )
-            return "エラー: モデルの読み込みに失敗しました。"
 
-        try:
-            # Use override temperature if provided
-            temp = temperature if temperature is not None else self._temperature
+                # Store usage if available
+                usage = response.get("usage")
+                if usage:
+                    self._store_usage(
+                        input_tokens=usage.get("prompt_tokens", 0) or 0,
+                        output_tokens=usage.get("completion_tokens", 0) or 0,
+                    )
 
-            # llama-cpp-python expects OpenAI-style messages
-            response = self._llm.create_chat_completion(
-                messages=messages,
-                temperature=temp,
-                top_p=self._top_p,
-                max_tokens=self._max_tokens,
-                response_format=(
-                    {"type": "json_object", "schema": response_schema}
-                    if response_schema
-                    else None
-                ),
-            )
+                content = response["choices"][0]["message"]["content"] or ""
+                # Check for empty response
+                if not content.strip():
+                    logger.error(
+                        "[llama.cpp] Empty text response. "
+                        "Model returned empty content."
+                    )
+                    raise RuntimeError("llama.cpp returned empty response")
+                logger.debug("llama.cpp response: %s", content[:200])
+                return content
 
-            content = response["choices"][0]["message"]["content"]
-            logger.debug("llama.cpp response: %s", content[:200])
-            return content
+            except Exception as exc:
+                last_error = exc
+                if _should_retry(exc) and attempt < MAX_RETRIES - 1:
+                    backoff = INITIAL_BACKOFF * (2 ** attempt)
+                    logger.warning(
+                        "[llama.cpp] Retryable error (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, MAX_RETRIES, type(exc).__name__, backoff
+                    )
+                    time.sleep(backoff)
+                    continue
+                logger.error("llama.cpp generation failed: %s", exc, exc_info=True)
+                raise RuntimeError(f"llama.cpp API call failed: {exc}")
 
-        except Exception as exc:
-            logger.error("llama.cpp generation failed: %s", exc, exc_info=True)
-            if self.fallback_client:
-                logger.info("Falling back to Gemini after llama.cpp error")
-                return self.fallback_client.generate(
-                    messages, tools, response_schema, temperature=temperature
-                )
-            return "エラーが発生しました。"
+        raise RuntimeError(f"llama.cpp API call failed after {MAX_RETRIES} retries: {last_error}")
 
     def generate_stream(
         self,
@@ -174,46 +261,73 @@ class LlamaCppClient(LLMClient):
         **_: Any,
     ) -> Iterator[str]:
         """Generate streaming response using llama.cpp."""
-        if not self._ensure_model_loaded():
-            if self.fallback_client:
-                logger.info("Using Gemini fallback for streaming")
-                yield from self.fallback_client.generate_stream(
-                    messages, tools, response_schema, temperature=temperature
+        self._ensure_model_loaded()
+
+        # For structured output, use non-streaming to get complete JSON
+        if response_schema:
+            last_schema_error: Optional[Exception] = None
+            for attempt in range(MAX_RETRIES):
+                try:
+                    temp = temperature if temperature is not None else self._temperature
+                    response = self._llm.create_chat_completion(
+                        messages=messages,
+                        temperature=temp,
+                        top_p=self._top_p,
+                        max_tokens=self._max_tokens,
+                        stream=False,
+                        response_format={"type": "json_object", "schema": response_schema},
+                    )
+                    _ = response["choices"][0]["message"]["content"]  # Structured output captured but not yielded
+                    yield ""
+                    return
+                except Exception as exc:
+                    last_schema_error = exc
+                    if _should_retry(exc) and attempt < MAX_RETRIES - 1:
+                        backoff = INITIAL_BACKOFF * (2 ** attempt)
+                        logger.warning(
+                            "[llama.cpp] Retryable structured output error (attempt %d/%d): %s. Retrying in %.1fs...",
+                            attempt + 1, MAX_RETRIES, type(exc).__name__, backoff
+                        )
+                        time.sleep(backoff)
+                        continue
+                    logger.error("llama.cpp structured output failed: %s", exc, exc_info=True)
+                    raise RuntimeError(f"llama.cpp structured output failed: {exc}")
+            raise RuntimeError(f"llama.cpp structured output failed after {MAX_RETRIES} retries: {last_schema_error}")
+
+        # Normal streaming mode (no response_schema)
+        last_stream_error: Optional[Exception] = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                temp = temperature if temperature is not None else self._temperature
+
+                stream = self._llm.create_chat_completion(
+                    messages=messages,
+                    temperature=temp,
+                    top_p=self._top_p,
+                    max_tokens=self._max_tokens,
+                    stream=True,
                 )
-            else:
-                yield "エラー: モデルの読み込みに失敗しました。"
-            return
 
-        try:
-            temp = temperature if temperature is not None else self._temperature
+                for chunk in stream:
+                    delta = chunk["choices"][0]["delta"]
+                    if "content" in delta:
+                        yield delta["content"]
+                return  # Stream completed successfully
 
-            stream = self._llm.create_chat_completion(
-                messages=messages,
-                temperature=temp,
-                top_p=self._top_p,
-                max_tokens=self._max_tokens,
-                stream=True,
-                response_format=(
-                    {"type": "json_object", "schema": response_schema}
-                    if response_schema
-                    else None
-                ),
-            )
+            except Exception as exc:
+                last_stream_error = exc
+                if _should_retry(exc) and attempt < MAX_RETRIES - 1:
+                    backoff = INITIAL_BACKOFF * (2 ** attempt)
+                    logger.warning(
+                        "[llama.cpp] Retryable streaming error (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, MAX_RETRIES, type(exc).__name__, backoff
+                    )
+                    time.sleep(backoff)
+                    continue
+                logger.error("llama.cpp streaming failed: %s", exc, exc_info=True)
+                raise RuntimeError(f"llama.cpp streaming failed: {exc}")
 
-            for chunk in stream:
-                delta = chunk["choices"][0]["delta"]
-                if "content" in delta:
-                    yield delta["content"]
-
-        except Exception as exc:
-            logger.error("llama.cpp streaming failed: %s", exc, exc_info=True)
-            if self.fallback_client:
-                logger.info("Falling back to Gemini streaming after llama.cpp error")
-                yield from self.fallback_client.generate_stream(
-                    messages, tools, response_schema, temperature=temperature
-                )
-            else:
-                yield "エラーが発生しました。"
+        raise RuntimeError(f"llama.cpp streaming failed after {MAX_RETRIES} retries: {last_stream_error}")
 
     def generate_with_tool_detection(
         self,
@@ -223,75 +337,24 @@ class LlamaCppClient(LLMClient):
         temperature: float | None = None,
         **_: Any,
     ) -> Dict[str, Any]:
-        """Generate response with tool call detection.
-
-        Returns:
-            {"type": "text", "content": str} if no tool call
-            {"type": "tool_call", "tool_name": str, "tool_args": dict} if tool call detected
+        """DEPRECATED: Use generate(messages, tools=[...]) instead.
+        
+        This method is kept for backward compatibility with existing code.
+        It simply delegates to generate() with tools specified.
         """
-        if not self._ensure_model_loaded():
-            if self.fallback_client:
-                logger.info("Using Gemini fallback for tool detection")
-                return self.fallback_client.generate_with_tool_detection(
-                    messages, tools, temperature=temperature
-                )
-            return {"type": "text", "content": "エラー: モデルの読み込みに失敗しました。"}
-
-        try:
-            temp = temperature if temperature is not None else self._temperature
-
-            # Convert tools to OpenAI format if needed
-            tools_spec = tools or []
-
-            response = self._llm.create_chat_completion(
-                messages=messages,
-                temperature=temp,
-                top_p=self._top_p,
-                max_tokens=self._max_tokens,
-                tools=tools_spec if tools_spec else None,
-            )
-
-            choice = response["choices"][0]
-            message = choice["message"]
-            content = message.get("content", "") or ""
-            tool_calls = message.get("tool_calls", [])
-
-            if tool_calls:
-                tc = tool_calls[0]
-                func = tc.get("function", {})
-                tool_name = func.get("name", "")
-                try:
-                    tool_args = json.loads(func.get("arguments", "{}"))
-                except json.JSONDecodeError:
-                    logger.warning(
-                        "Tool call arguments invalid JSON: %s", func.get("arguments")
-                    )
-                    tool_args = {}
-
-                if content.strip():
-                    return {
-                        "type": "both",
-                        "content": content,
-                        "tool_name": tool_name,
-                        "tool_args": tool_args,
-                    }
-                else:
-                    return {
-                        "type": "tool_call",
-                        "tool_name": tool_name,
-                        "tool_args": tool_args,
-                    }
-            else:
-                return {"type": "text", "content": content}
-
-        except Exception as exc:
-            logger.error("llama.cpp tool detection failed: %s", exc, exc_info=True)
-            if self.fallback_client:
-                logger.info("Falling back to Gemini for tool detection after error")
-                return self.fallback_client.generate_with_tool_detection(
-                    messages, tools, temperature=temperature
-                )
-            return {"type": "text", "content": "エラーが発生しました。"}
+        import warnings
+        warnings.warn(
+            "generate_with_tool_detection() is deprecated. Use generate(messages, tools=[...]) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        tools_spec = tools or []
+        if not tools_spec:
+            result = self.generate(messages, temperature=temperature)
+            if isinstance(result, str):
+                return {"type": "text", "content": result}
+            return result
+        return self.generate(messages, tools=tools_spec, temperature=temperature)
 
 
 __all__ = ["LlamaCppClient"]

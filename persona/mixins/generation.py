@@ -15,8 +15,22 @@ from persona.constants import (
     RECALL_SNIPPET_STREAM_MAX_CHARS,
 )
 from model_configs import model_supports_images, get_model_parameters
-from llm_clients import get_llm_client
 from llm_clients.base import IncompleteStreamError
+
+
+def _truncate_messages_for_logging(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Truncate base64 image data in messages for logging."""
+    truncated = copy.deepcopy(messages)
+    for msg in truncated:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    url = part.get("image_url", {}).get("url", "")
+                    if url.startswith("data:") and "base64," in url:
+                        mime, _, b64 = url.partition(";base64,")
+                        part["image_url"]["url"] = f"{mime};base64,<{len(b64)} bytes>"
+    return truncated
 
 
 class PersonaGenerationMixin:
@@ -44,25 +58,31 @@ class PersonaGenerationMixin:
         parameter_overrides: Optional[Dict[str, Any]] | None = None,
     ) -> None:
         self.model = model
+        self.provider = provider
         self.context_length = context_length
         self.model_supports_images = model_supports_images(model)
-        self.llm_client = get_llm_client(model, provider, context_length)
+        # Invalidate: the lazy property getter will recreate on next access
+        self._llm_client = None
         if parameter_overrides:
-            self.apply_parameter_overrides(parameter_overrides)
+            self._pending_parameter_overrides = parameter_overrides
 
     def apply_parameter_overrides(self, overrides: Optional[Dict[str, Any]] = None) -> None:
-        if not overrides or not getattr(self, "llm_client", None):
+        if not overrides:
             return
-        allowed = get_model_parameters(self.model)
-        filtered = {
-            key: value for key, value in overrides.items() if key in allowed
-        }
-        if not filtered:
-            return
-        try:
-            self.llm_client.configure_parameters(filtered)
-        except Exception:
-            logging.debug("Failed to apply parameter overrides for %s", self.persona_name, exc_info=True)
+        # Store for lazy application when the client is created later
+        self._pending_parameter_overrides = overrides
+        # Apply immediately if the client already exists
+        if getattr(self, "_llm_client", None) is not None:
+            allowed = get_model_parameters(self.model)
+            filtered = {
+                key: value for key, value in overrides.items() if key in allowed
+            }
+            if not filtered:
+                return
+            try:
+                self._llm_client.configure_parameters(filtered)
+            except Exception:
+                logging.debug("Failed to apply parameter overrides for %s", self.persona_name, exc_info=True)
 
     def _build_messages(
         self,
@@ -88,6 +108,7 @@ class PersonaGenerationMixin:
             "{current_persona_system_instruction}": self.persona_system_instruction,
             "{current_time}": current_time,
             "{current_city_name}": self.city_name,
+            "{linked_user_name}": getattr(self, "linked_user_name", "the user"),
         }
         for placeholder, value in replacements.items():
             system_text = system_text.replace(placeholder, value)
@@ -112,12 +133,29 @@ class PersonaGenerationMixin:
             attitude_var=self.emotion["attitude"]["variance"],
         )
         system_text = system_text + "\n" + emotion_text
+
+        # Load extra prompt files from Building configuration
+        extra_prompt_files = getattr(building, "extra_prompt_files", []) or []
+        if extra_prompt_files:
+            from data_paths import find_file, PROMPTS_DIR
+            for filename in extra_prompt_files:
+                prompt_path = find_file(PROMPTS_DIR, filename)
+                if prompt_path:
+                    try:
+                        extra_content = prompt_path.read_text(encoding="utf-8")
+                        system_text += "\n\n" + extra_content
+                    except Exception as exc:
+                        logging.warning("Failed to load extra prompt '%s': %s", filename, exc)
+                else:
+                    logging.warning("Extra prompt file not found: %s", filename)
+
         if info_text:
             system_text += (
                 "\n\n## 追加情報\n"
                 "常時稼働モジュールから以下の情報が提供されています。今回の発話にこの情報を利用してください。\n"
                 f"{info_text}"
             )
+
 
         base_chars = len(system_text)
         if extra_system_prompt:
@@ -373,7 +411,7 @@ class PersonaGenerationMixin:
             user_metadata=user_metadata if actual_user_message == user_message else None,
         )
         self._dump_llm_context("generate", messages)
-        logging.debug("Messages sent to API: %s", messages)
+        logging.debug("Messages sent to API: %s", _truncate_messages_for_logging(messages))
 
         content = self.llm_client.generate(messages, tools=[])
         attempt = 1
@@ -463,7 +501,7 @@ class PersonaGenerationMixin:
             include_current_user=include_current_user,
         )
         self._dump_llm_context("generate_stream", messages)
-        logging.debug("Messages sent to API: %s", messages)
+        logging.debug("Messages sent to API: %s", _truncate_messages_for_logging(messages))
 
         content_accumulator = ""
         tokens: List[str] = []

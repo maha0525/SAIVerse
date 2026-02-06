@@ -1,5 +1,5 @@
 ﻿from google.genai import types
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 def to_gemini(tool: ToolSchema) -> types.Tool:
     return types.Tool(

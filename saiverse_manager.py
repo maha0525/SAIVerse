@@ -10,9 +10,8 @@ import mimetypes
 from typing import Dict, List, Optional, Tuple, Iterator, Union, Any, Callable
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-import pandas as pd
 import importlib
-import tools.defs
+import tools.core
 from discord_gateway.mapping import ChannelMapping
 import os
 
@@ -36,9 +35,13 @@ from manager.blueprints import BlueprintMixin
 from manager.persona import PersonaMixin
 from manager.visitors import VisitorMixin
 from manager.gateway import GatewayMixin
+from manager.user_state import UserStateMixin
+from manager.initialization import InitializationMixin
+from manager.persona_events import PersonaEventMixin
 from manager.state import CoreState
 from manager.runtime import RuntimeService
 from manager.admin import AdminService
+from manager.items import ItemService
 from database.models import (
     AI as AIModel,
     Building as BuildingModel,
@@ -67,6 +70,9 @@ def _get_default_model() -> str:
 
 
 class SAIVerseManager(
+    InitializationMixin,
+    UserStateMixin,
+    PersonaEventMixin,
     VisitorMixin,
     PersonaMixin,
     HistoryMixin,
@@ -84,117 +90,14 @@ class SAIVerseManager(
         model: Optional[str] = None,
         sds_url: str = os.getenv("SDS_URL", "http://127.0.0.1:8080"),
     ):
-        # --- Step 0: Database and Configuration Setup ---
-        self.db_path = db_path
-        self.city_model = CityModel
-        self.city_host_avatar_path: Optional[str] = None
-        DATABASE_URL = f"sqlite:///{db_path}"
-        engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-        self._ensure_city_timezone_column(engine)
-        self._ensure_user_avatar_column(engine)
-        self._ensure_city_host_avatar_column(engine)
-        self._ensure_item_tables(engine)
-        self._ensure_phenomenon_tables(engine)
-        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        
-        # --- Step 1: Load City Configuration from DB ---
-        db = self.SessionLocal()
-        try:
-            my_city_config = db.query(CityModel).filter(CityModel.CITYNAME == city_name).first()
-            if not my_city_config:
-                raise ValueError(f"City '{city_name}' not found in the database. Please run 'python database/seed.py' first.")
-            
-            self.city_id = my_city_config.CITYID # This is the integer PK
-            self.city_name = my_city_config.CITYNAME # This is the string identifier
-            self.user_room_id = f"user_room_{self.city_name}"
-            self.ui_port = my_city_config.UI_PORT
-            self.api_port = my_city_config.API_PORT
-            self.start_in_online_mode = my_city_config.START_IN_ONLINE_MODE
-            self._update_timezone_cache(getattr(my_city_config, "TIMEZONE", "UTC"))
-            self.city_host_avatar_path = getattr(my_city_config, "HOST_AVATAR_IMAGE", None)
-            
-            # Load other cities' configs for inter-city communication
-            other_cities = db.query(CityModel).filter(CityModel.CITYID != self.city_id).all()
-            self.cities_config = {
-                city.CITYNAME: {
-                    "city_id": city.CITYID,
-                    "api_base_url": f"http://127.0.0.1:{city.API_PORT}",
-                    "timezone": getattr(city, "TIMEZONE", "UTC") or "UTC",
-                } for city in other_cities
-            }
-            logging.info(f"Loaded config for '{self.city_name}' (ID: {self.city_id}). Found {len(self.cities_config)} other cities.")
-
-        finally:
-            db.close()
-
-        # --- Step 1: Load Static Assets from DB ---
-        # データベースから建物の静的な情報を読み込み、メモリ上にBuildingオブジェクトとして展開します。
-        self.buildings: List[Building] = self._load_and_create_buildings_from_db()
-        self.building_map: Dict[str, Building] = {b.building_id: b for b in self.buildings}
-        self.capacities: Dict[str, int] = {b.building_id: b.capacity for b in self.buildings}
-        self.items: Dict[str, Dict[str, Any]] = {}
-        self.item_locations: Dict[str, Dict[str, str]] = {}
-        self.items_by_building: Dict[str, List[str]] = defaultdict(list)
-        self.items_by_persona: Dict[str, List[str]] = defaultdict(list)
-        self.world_items: List[str] = []
-        self._load_items_from_db()
-        self.persona_pending_events: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        self._load_persona_event_logs()
-
-        # --- Step 2: Setup File Paths and Default Avatars ---
-        # 各種ログファイルのパスや、デフォルトのアバター画像を設定します。
-        self.saiverse_home = Path.home() / ".saiverse"
-        self.backup_dir = self.saiverse_home / "backups"
-        self.backup_dir.mkdir(parents=True, exist_ok=True)
-        self.building_memory_paths: Dict[str, Path] = {
-            b.building_id: self.saiverse_home / "cities" / self.city_name / "buildings" / b.building_id / "log.json"
-            for b in self.buildings
-        }
-        # Load default avatars with graceful fallback
-        avatar_fallback_paths = [
-            Path("assets/icons/blank.png"),
-            Path("assets/icons/user.png"),
-            Path("assets/icons/host.png"),
-            Path("assets/icons/air.png"),
-        ]
-        default_avatar_data = ""
-        for avatar_path in avatar_fallback_paths:
-            data_url = self._load_avatar_data(avatar_path)
-            if data_url:
-                default_avatar_data = data_url
-                break
-        self.default_avatar = default_avatar_data
-
-        host_avatar_data = self._load_avatar_data(Path("assets/icons/host.png"))
-        self.host_avatar = host_avatar_data or self.default_avatar
-        if getattr(self, "city_host_avatar_path", None):
-            host_override = self._load_avatar_data(Path(self.city_host_avatar_path))
-            if host_override:
-                self.host_avatar = host_override
-        self.user_avatar_data = self.default_avatar
-
-        # --- Step 3: Load Conversation Histories ---
-        # 各建物の会話履歴をファイルから読み込みます。
-        self.building_histories: Dict[str, List[Dict[str, str]]] = {}
-        for b_id, path in self.building_memory_paths.items():
-            if path.exists():
-                try:
-                    self.building_histories[b_id] = json.loads(path.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    logging.warning("Failed to load building history %s", b_id)
-                    self.building_histories[b_id] = []
-            else:
-                self.building_histories[b_id] = []
-
-        # --- Step 4: Initialize Core Components and State Containers ---
-        # Resolve base model (for internal fallbacks), but start with no global override
-        # so that Chat Options shows "(Default)" on startup.
-        base_model = model or _get_default_model()
-        self.model = "None"  # No global override by default
-        self.context_length = get_context_length(base_model)
-        self.provider = get_model_provider(base_model)
-        self._base_model = base_model  # Internal fallback for personas without DB default
-        self.model_parameter_overrides: Dict[str, Any] = {}
+        # --- Phase 1: Data Loading ---
+        self._init_database(db_path)
+        self._init_city_config(city_name)
+        self._init_buildings()
+        self._init_file_paths()
+        self._init_avatars()
+        self._init_building_histories()
+        self._init_model_config(model)
 
         self.state = CoreState(
             session_factory=self.SessionLocal,
@@ -341,6 +244,16 @@ class SAIVerseManager(
 
         self.runtime = RuntimeService(self, self.state)
         self.admin = AdminService(self, self.runtime, self.state)
+        self.item_service = ItemService(self, self.state)
+        
+        # Load items through ItemService and sync data structures
+        self.item_service.load_items_from_db()
+        self.items = self.item_service.items
+        self.item_locations = self.item_service.item_locations
+        self.items_by_building = self.item_service.items_by_building
+        self.items_by_persona = self.item_service.items_by_persona
+        self.world_items = self.item_service.world_items
+        self.item_registry = self.items  # Alias for UI compatibility
 
         # Start background thread for DB polling (after runtime is ready)
         self.db_polling_stop_event = threading.Event()
@@ -359,18 +272,6 @@ class SAIVerseManager(
             {"city_id": self.city_id, "city_name": self.city_name},
         )
 
-    def _update_timezone_cache(self, tz_name: Optional[str]) -> None:
-        """Update cached timezone information for this manager."""
-        name = (tz_name or "UTC").strip() or "UTC"
-        try:
-            tz = ZoneInfo(name)
-        except Exception:
-            logging.warning("Invalid timezone '%s'. Falling back to UTC.", name)
-            name = "UTC"
-            tz = ZoneInfo("UTC")
-        self.timezone_name = name
-        self.timezone_info = tz
-
     @staticmethod
     def _load_avatar_data(path: Path) -> Optional[str]:
         """Return a data URL for the given avatar path if it exists."""
@@ -384,35 +285,6 @@ class SAIVerseManager(
         except Exception:
             logging.warning("Failed to load avatar asset %s", path, exc_info=True)
             return None
-
-    def _refresh_user_state_cache(self) -> None:
-        """Mirror CoreState's user info onto the manager-level attributes."""
-        self.user_presence_status = self.state.user_presence_status
-        self.user_is_online = self.state.user_presence_status != "offline"  # Backward compat
-        self.user_display_name = self.state.user_display_name
-        self.user_current_building_id = self.state.user_current_building_id
-        self.user_current_city_id = self.state.user_current_city_id
-        self.user_avatar_data = getattr(self.state, "user_avatar_data", None) or self.default_avatar
-
-    def reload_user_profile(self) -> None:
-        """Reload the user's profile (name/avatar) from the database."""
-        self._load_user_state_from_db()
-        try:
-            from ui import chat as chat_ui
-
-            if hasattr(chat_ui, "reset_user_avatar_cache"):
-                chat_ui.reset_user_avatar_cache()
-        except ImportError:
-            pass
-
-    def reload_host_avatar(self, avatar_path: Optional[str]) -> None:
-        """Refresh the host avatar asset from the given path."""
-        self.city_host_avatar_path = avatar_path
-        data = None
-        if avatar_path:
-            data = self._load_avatar_data(Path(avatar_path))
-        self.host_avatar = data or self.default_avatar
-        self.state.host_avatar = self.host_avatar
 
     # Phenomenon trigger helpers -----------------------------------------------
     def _emit_trigger(self, trigger_type: TriggerType, data: Dict[str, Any]) -> None:
@@ -449,7 +321,7 @@ class SAIVerseManager(
         except Exception as exc:
             logging.exception("SEA auto run failed: %s", exc)
 
-    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[str]:
+    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, playbook_params: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[str]:
         """Run user input via PulseController."""
         try:
             result = self.pulse_controller.submit_user(
@@ -458,6 +330,7 @@ class SAIVerseManager(
                 user_input=user_input,
                 metadata=metadata,
                 meta_playbook=meta_playbook,
+                playbook_params=playbook_params,
                 event_callback=event_callback,
             )
             return result if result else []
@@ -486,6 +359,17 @@ class SAIVerseManager(
             db_buildings = db.query(BuildingModel).filter(BuildingModel.CITYID == self.city_id).all()
             buildings = []
             for db_b in db_buildings:
+                # Parse extra prompt files from JSON
+                extra_prompts: List[str] = []
+                raw_extra = getattr(db_b, 'EXTRA_PROMPT_FILES', None)
+                if raw_extra:
+                    try:
+                        extra_prompts = json.loads(raw_extra)
+                        if not isinstance(extra_prompts, list):
+                            extra_prompts = []
+                    except json.JSONDecodeError:
+                        extra_prompts = []
+
                 building = Building(
                     building_id=db_b.BUILDINGID,
                     name=db_b.BUILDINGNAME,
@@ -494,7 +378,8 @@ class SAIVerseManager(
                     entry_prompt=db_b.ENTRY_PROMPT or "",
                     auto_prompt=db_b.AUTO_PROMPT or "",
                     description=db_b.DESCRIPTION or "", # 探索結果で説明を表示するために追加
-                    auto_interval_sec=db_b.AUTO_INTERVAL_SEC if hasattr(db_b, 'AUTO_INTERVAL_SEC') else 10
+                    auto_interval_sec=db_b.AUTO_INTERVAL_SEC if hasattr(db_b, 'AUTO_INTERVAL_SEC') else 10,
+                    extra_prompt_files=extra_prompts,
                 )
                 buildings.append(building)
             logging.info(f"Loaded and created {len(buildings)} buildings from database.")
@@ -504,6 +389,7 @@ class SAIVerseManager(
             return [] # エラー時は空リストを返す
         finally:
             db.close()
+
 
     def _ensure_item_tables(self, engine) -> None:
         """Ensure newly introduced item-related tables exist."""
@@ -521,914 +407,86 @@ class SAIVerseManager(
         except Exception as exc:
             logging.error("Failed to ensure phenomenon tables exist: %s", exc, exc_info=True)
 
+    # --- Item operations (delegated to ItemService) ---
+
     def _load_items_from_db(self) -> None:
         """Load items and their locations from the database into memory."""
-        db = self.SessionLocal()
-        try:
-            item_rows = db.query(ItemModel).all()
-            location_rows = db.query(ItemLocationModel).all()
-        except Exception as exc:
-            logging.error("Failed to load items from DB: %s", exc, exc_info=True)
-            item_rows = []
-            location_rows = []
-        finally:
-            db.close()
-
-        self.items = {}
-        self.item_registry = self.items  # Alias for UI compatibility
-        self.item_locations = {}
-        self.items_by_building = defaultdict(list)
-        self.items_by_persona = defaultdict(list)
-        self.world_items = []
-
-        for row in item_rows:
-            if row.STATE_JSON:
-                try:
-                    state_payload = json.loads(row.STATE_JSON)
-                except json.JSONDecodeError:
-                    logging.warning("Invalid STATE_JSON for item %s", row.ITEM_ID)
-                    state_payload = {}
-            else:
-                state_payload = {}
-            self.items[row.ITEM_ID] = {
-                "item_id": row.ITEM_ID,
-                "name": row.NAME,
-                "type": row.TYPE,
-                "description": row.DESCRIPTION or "",
-                "file_path": row.FILE_PATH,
-                "state": state_payload,
-                "created_at": row.CREATED_AT,
-                "updated_at": row.UPDATED_AT,
-            }
-
-        for loc in location_rows:
-            payload = {
-                "owner_kind": (loc.OWNER_KIND or "").strip(),
-                "owner_id": (loc.OWNER_ID or "").strip(),
-                "updated_at": loc.UPDATED_AT,
-                "location_id": loc.LOCATION_ID,
-            }
-            self.item_locations[loc.ITEM_ID] = payload
-            owner_kind = payload["owner_kind"]
-            owner_id = payload["owner_id"]
-            if owner_kind == "building":
-                self.items_by_building[owner_id].append(loc.ITEM_ID)
-            elif owner_kind == "persona":
-                self.items_by_persona[owner_id].append(loc.ITEM_ID)
-            else:
-                self.world_items.append(loc.ITEM_ID)
-
-        for item_id in self.items.keys():
-            if item_id not in self.item_locations:
-                self.world_items.append(item_id)
-
-        for building in self.buildings:
-            building.item_ids = list(self.items_by_building.get(building.building_id, []))
-            self._refresh_building_system_instruction(building.building_id)
-        if hasattr(self, "personas") and isinstance(self.personas, dict):
-            for persona_id, persona in self.personas.items():
-                if hasattr(persona, "set_item_registry"):
-                    try:
-                        persona.set_item_registry(self.items)
-                    except Exception as exc:
-                        logging.debug("Failed to update item registry for %s: %s", persona_id, exc)
-                inventory_ids = self.items_by_persona.get(persona_id, [])
-                persona.set_inventory(list(inventory_ids))
-        if hasattr(self, "state") and isinstance(self.state, CoreState):
-            self.state.items = self.items
-            self.state.item_locations = self.item_locations
-            self.state.items_by_building = {k: list(v) for k, v in self.items_by_building.items()}
-            self.state.items_by_persona = {k: list(v) for k, v in self.items_by_persona.items()}
-            self.state.world_items = list(self.world_items)
+        self.item_service.load_items_from_db()
+        # Sync references after loading
+        self.items = self.item_service.items
+        self.item_locations = self.item_service.item_locations
+        self.items_by_building = self.item_service.items_by_building
+        self.items_by_persona = self.item_service.items_by_persona
+        self.world_items = self.item_service.world_items
+        self.item_registry = self.items
 
     def _refresh_building_system_instruction(self, building_id: str) -> None:
         """Refresh building.system_instruction so that it includes the current item list."""
-        building = self.building_map.get(building_id)
-        if not building:
-            return
-        base_text = building.base_system_instruction or ""
-        item_ids = self.items_by_building.get(building_id, [])
-        if not item_ids:
-            building.system_instruction = base_text
-            return
-        lines: List[str] = []
-        for item_id in item_ids:
-            data = self.items.get(item_id)
-            if not data:
-                continue
-            description = (data.get("description") or "").strip() or "(説明なし)"
-            if len(description) > 160:
-                description = description[:157] + "..."
-            display_name = data.get("name", item_id)
-            lines.append(f"- {display_name}: {description} [アイテムID:\"{item_id}\"]")
-        if not lines:
-            building.system_instruction = base_text
-            return
-        items_block = "\n".join(lines)
-        marker = "## 現在地にあるアイテム"
-        if marker in base_text:
-            before, after = base_text.split(marker, 1)
-            after = after.lstrip("\n")
-            building.system_instruction = f"{before}{marker}\n{items_block}\n{after}".rstrip()
-        else:
-            building.system_instruction = f"{base_text.rstrip()}\n\n{marker}\n{items_block}"
+        self.item_service.refresh_building_system_instruction(building_id)
 
-    def _load_persona_event_logs(self) -> None:
-        """Load pending persona events from the database."""
-        db = self.SessionLocal()
-        try:
-            rows = (
-                db.query(PersonaEventLog)
-                .join(AIModel, PersonaEventLog.PERSONA_ID == AIModel.AIID)
-                .filter(
-                    AIModel.HOME_CITYID == self.city_id,
-                    PersonaEventLog.STATUS == "pending",
-                )
-                .all()
-            )
-        except Exception as exc:
-            logging.error("Failed to load persona events: %s", exc, exc_info=True)
-            rows = []
-        finally:
-            db.close()
+    def _update_item_cache(self, item_id: str, owner_kind: str, owner_id: Optional[str], updated_at: datetime) -> None:
+        self.item_service.update_item_cache(item_id, owner_kind, owner_id, updated_at)
 
-        self.persona_pending_events = defaultdict(list)
-        for row in rows:
-            self.persona_pending_events[row.PERSONA_ID].append(
-                {
-                    "event_id": row.EVENT_ID,
-                    "content": row.CONTENT,
-                    "created_at": row.CREATED_AT,
-                }
-            )
+    def _broadcast_item_event(self, persona_ids: List[str], message: str) -> None:
+        self.item_service.broadcast_item_event(persona_ids, message)
 
-    def record_persona_event(self, persona_id: str, content: str) -> None:
-        """Add a new pending event for the specified persona."""
-        db = self.SessionLocal()
-        try:
-            entry = PersonaEventLog(PERSONA_ID=persona_id, CONTENT=content, STATUS="pending")
-            db.add(entry)
-            db.commit()
-            db.refresh(entry)
-            created_at = entry.CREATED_AT
-            event_id = entry.EVENT_ID
-        except Exception as exc:
-            logging.error("Failed to record persona event for %s: %s", persona_id, exc, exc_info=True)
-            db.rollback()
-            return
-        finally:
-            db.close()
-        self.persona_pending_events[persona_id].append(
-            {
-                "event_id": event_id,
-                "content": content,
-                "created_at": created_at,
-            }
-        )
+    def pickup_item_for_persona(self, persona_id: str, item_id: str) -> str:
+        return self.item_service.pickup_item(persona_id, item_id)
 
-    def get_persona_pending_events(self, persona_id: str) -> List[Dict[str, Any]]:
-        events = list(self.persona_pending_events.get(persona_id, []))
-        events.sort(key=lambda e: e.get("created_at") or datetime.utcnow())
-        return events
+    def place_item_from_persona(self, persona_id: str, item_id: str, building_id: Optional[str] = None) -> str:
+        return self.item_service.place_item(persona_id, item_id, building_id)
 
-    def archive_persona_events(self, persona_id: str, event_ids: List[int]) -> None:
-        if not event_ids:
-            return
-        db = self.SessionLocal()
-        try:
-            (
-                db.query(PersonaEventLog)
-                .filter(PersonaEventLog.EVENT_ID.in_(event_ids))
-                .update({PersonaEventLog.STATUS: "archived"}, synchronize_session=False)
-            )
-            db.commit()
-        except Exception as exc:
-            logging.error("Failed to archive persona events %s: %s", event_ids, exc, exc_info=True)
-            db.rollback()
-            return
-        finally:
-            db.close()
+    def use_item_for_persona(self, persona_id: str, item_id: str, action_json: str) -> str:
+        """Use an item to apply effects."""
+        return self.item_service.use_item(persona_id, item_id, action_json)
 
-        pending = self.persona_pending_events.get(persona_id, [])
-        if pending:
-            remaining = [ev for ev in pending if ev.get("event_id") not in event_ids]
-            if remaining:
-                self.persona_pending_events[persona_id] = remaining
-            else:
-                self.persona_pending_events.pop(persona_id, None)
+    def view_item_for_persona(self, persona_id: str, item_id: str) -> str:
+        """View the full content of a picture or document item."""
+        return self.item_service.view_item(persona_id, item_id)
+
+    def toggle_item_open_state(self, item_id: str) -> bool:
+        """Toggle the open/close state of an item."""
+        return self.item_service.toggle_item_open_state(item_id)
+
+    def get_open_items_in_building(self, building_id: str) -> list:
+        """Get all items in a building that have is_open = True."""
+        return self.item_service.get_open_items_in_building(building_id)
+
+    def create_document_item(self, persona_id: str, name: str, description: str, content: str) -> str:
+        """Create a new document item and place it in the current building."""
+        return self.item_service.create_document_item(persona_id, name, description, content)
+
+    def create_picture_item(self, persona_id: str, name: str, description: str, file_path: str, building_id: Optional[str] = None) -> str:
+        """Create a new picture item and place it in the specified building."""
+        return self.item_service.create_picture_item(persona_id, name, description, file_path, building_id)
+
+    def create_picture_item_for_user(self, name: str, description: str, file_path: str, building_id: str) -> str:
+        """Create a picture item from user upload and place it in the specified building."""
+        return self.item_service.create_picture_item_for_user(name, description, file_path, building_id)
+
+    def create_document_item_for_user(self, name: str, description: str, file_path: str, building_id: str, is_open: bool = True) -> str:
+        """Create a document item from user upload and place it in the specified building."""
+        return self.item_service.create_document_item_for_user(name, description, file_path, building_id, is_open)
+
+    # Note: Persona event methods (_load_persona_event_logs, record_persona_event,
+    # get_persona_pending_events, archive_persona_events) are in PersonaEventMixin
 
     def _append_building_history_note(self, building_id: str, content: str) -> None:
         if not building_id:
             return
         history = self.building_histories.setdefault(building_id, [])
         history.append({
-        "role": "host", 
-        "content": content,
-        "timestamp": datetime.now().isoformat()
-    })
+            "role": "host", 
+            "content": content,
+            "timestamp": datetime.now().isoformat()
+        })
         try:
             self._save_building_histories([building_id])
         except Exception:
             logging.debug("Failed to save building history for %s", building_id, exc_info=True)
 
-    def _update_item_cache(self, item_id: str, owner_kind: str, owner_id: Optional[str], updated_at: datetime) -> None:
-        prev = self.item_locations.get(item_id)
-        prev_kind = prev.get("owner_kind") if prev else None
-        prev_owner = prev.get("owner_id") if prev else None
-
-        if prev_kind == "building" and prev_owner:
-            listing = self.items_by_building.get(prev_owner, [])
-            if listing and item_id in listing:
-                listing[:] = [itm for itm in listing if itm != item_id]
-            if not listing:
-                self.items_by_building.pop(prev_owner, None)
-            self._refresh_building_system_instruction(prev_owner)
-        elif prev_kind == "persona" and prev_owner:
-            inventory = self.items_by_persona.get(prev_owner, [])
-            if inventory and item_id in inventory:
-                inventory[:] = [itm for itm in inventory if itm != item_id]
-            if not inventory:
-                self.items_by_persona.pop(prev_owner, None)
-            persona_obj = self.personas.get(prev_owner)
-            if persona_obj:
-                persona_obj.set_inventory(self.items_by_persona.get(prev_owner, []))
-        else:
-            if item_id in self.world_items:
-                self.world_items[:] = [itm for itm in self.world_items if itm != item_id]
-
-        if owner_kind == "building" and owner_id:
-            listing = self.items_by_building[owner_id]
-            if item_id not in listing:
-                listing.append(item_id)
-            self._refresh_building_system_instruction(owner_id)
-        elif owner_kind == "persona" and owner_id:
-            inventory = self.items_by_persona[owner_id]
-            if item_id not in inventory:
-                inventory.append(item_id)
-            persona_obj = self.personas.get(owner_id)
-            if persona_obj:
-                persona_obj.set_inventory(list(inventory))
-        else:
-            if item_id not in self.world_items:
-                self.world_items.append(item_id)
-
-        self.item_locations[item_id] = {
-            "owner_kind": owner_kind,
-            "owner_id": owner_id,
-            "updated_at": updated_at,
-        }
-
-    def _broadcast_item_event(self, persona_ids: List[str], message: str) -> None:
-        deduped = {pid for pid in persona_ids if pid}
-        for pid in deduped:
-            self.record_persona_event(pid, message)
-
-    # --- Item operations ---
-
-    def pickup_item_for_persona(self, persona_id: str, item_id: str) -> str:
-        persona = self.personas.get(persona_id)
-        if not persona or getattr(persona, "is_proxy", False):
-            raise RuntimeError("このペルソナではアイテムを扱えません。")
-        building_id = persona.current_building_id
-        if not building_id:
-            raise RuntimeError("現在地が不明なため、アイテムを拾えません。")
-        resolved_id = item_id
-        item = self.items.get(resolved_id)
-        if not item:
-            raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
-        location = self.item_locations.get(resolved_id)
-        if not location or location.get("owner_kind") != "building" or location.get("owner_id") != building_id:
-            raise RuntimeError("このアイテムは現在の建物にはありません。")
-
-        timestamp = datetime.utcnow()
-        db = self.SessionLocal()
-        try:
-            row = (
-                db.query(ItemLocationModel)
-                .filter(ItemLocationModel.ITEM_ID == resolved_id)
-                .one_or_none()
-            )
-            if row is None:
-                raise RuntimeError("アイテムの配置情報が見つかりませんでした。")
-            row.OWNER_KIND = "persona"
-            row.OWNER_ID = persona_id
-            row.UPDATED_AT = timestamp
-            db.commit()
-        except Exception as exc:
-            db.rollback()
-            raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
-        finally:
-            db.close()
-
-        self._update_item_cache(resolved_id, "persona", persona_id, timestamp)
-        item_name = item.get("name", resolved_id)
-        actor_msg = f"「{item_name}」を拾った。"
-        self.record_persona_event(persona_id, actor_msg)
-        other_ids = [
-            oid for oid in self.occupants.get(building_id, [])
-            if oid and oid != persona_id
-        ]
-        if other_ids:
-            notice = f"{persona.persona_name}が「{item_name}」を拾った。"
-            self._broadcast_item_event(other_ids, notice)
-        building_name = self.building_map.get(building_id).name if building_id in self.building_map else building_id
-        note = (
-            "<div class=\"note-box\">📦 Item Pickup:<br>"
-            f"<b>{persona.persona_name}が「{item_name}」を拾いました（{building_name}）。</b></div>"
-        )
-        self._append_building_history_note(building_id, note)
-        return actor_msg
-
-    def place_item_from_persona(self, persona_id: str, item_id: str, building_id: Optional[str] = None) -> str:
-        persona = self.personas.get(persona_id)
-        if not persona or getattr(persona, "is_proxy", False):
-            raise RuntimeError("このペルソナではアイテムを扱えません。")
-        building_id = building_id or persona.current_building_id
-        if not building_id:
-            raise RuntimeError("現在地が不明なため、アイテムを置けません。")
-        resolved_id = item_id
-        item = self.items.get(resolved_id)
-        if not item:
-            raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
-        location = self.item_locations.get(resolved_id)
-        if not location or location.get("owner_kind") != "persona" or location.get("owner_id") != persona_id:
-            raise RuntimeError("このアイテムを所持していないため、置けません。")
-
-        timestamp = datetime.utcnow()
-        db = self.SessionLocal()
-        try:
-            row = (
-                db.query(ItemLocationModel)
-                .filter(ItemLocationModel.ITEM_ID == resolved_id)
-                .one_or_none()
-            )
-            if row is None:
-                row = ItemLocationModel(
-                    ITEM_ID=resolved_id,
-                    OWNER_KIND="building",
-                    OWNER_ID=building_id,
-                    UPDATED_AT=timestamp,
-                )
-                db.add(row)
-            else:
-                row.OWNER_KIND = "building"
-                row.OWNER_ID = building_id
-                row.UPDATED_AT = timestamp
-            db.commit()
-        except Exception as exc:
-            db.rollback()
-            raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
-        finally:
-            db.close()
-
-        self._update_item_cache(resolved_id, "building", building_id, timestamp)
-        building_name = self.building_map.get(building_id).name if building_id in self.building_map else building_id
-        item_name = item.get("name", resolved_id)
-        actor_msg = f"「{item_name}」を{building_name}に置いた。"
-        self.record_persona_event(persona_id, actor_msg)
-        other_ids = [
-            oid for oid in self.occupants.get(building_id, [])
-            if oid and oid != persona_id
-        ]
-        if other_ids:
-            notice = f"{persona.persona_name}が{building_name}に「{item_name}」を置いた。"
-            self._broadcast_item_event(other_ids, notice)
-        note = (
-            "<div class=\"note-box\">📦 Item Placement:<br>"
-            f"<b>{persona.persona_name}が「{item_name}」を{building_name}に置きました。</b></div>"
-        )
-        self._append_building_history_note(building_id, note)
-        return actor_msg
-
-    def use_item_for_persona(self, persona_id: str, item_id: str, action_json: str) -> str:
-        """
-        Use an item to apply effects.
-
-        Args:
-            persona_id: The persona using the item
-            item_id: The item to use
-            action_json: JSON string with action details
-                Schema: {"action_type": "update_description" | "patch_content", "description": "...", "patch": "..."}
-        """
-        persona = self.personas.get(persona_id)
-        if not persona or getattr(persona, "is_proxy", False):
-            raise RuntimeError("このペルソナではアイテムを扱えません。")
-        resolved_id = item_id
-        item = self.items.get(resolved_id)
-        if not item:
-            raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
-        location = self.item_locations.get(resolved_id)
-        if not location or location.get("owner_kind") != "persona" or location.get("owner_id") != persona_id:
-            raise RuntimeError("このアイテムは現在あなたのインベントリにありません。")
-
-        # Parse action JSON
-        try:
-            action_data = json.loads(action_json)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"action_jsonのパースに失敗しました: {exc}") from exc
-
-        action_type = action_data.get("action_type")
-        item_type = (item.get("type") or "").lower()
-        timestamp = datetime.utcnow()
-
-        if action_type == "update_description":
-            # object, picture, document全てに対応
-            cleaned = (action_data.get("description") or "").strip()
-
-            db = self.SessionLocal()
-            try:
-                row = (
-                    db.query(ItemModel)
-                    .filter(ItemModel.ITEM_ID == resolved_id)
-                    .one_or_none()
-                )
-                if row is None:
-                    raise RuntimeError("アイテム本体が見つかりません。")
-                row.DESCRIPTION = cleaned
-                row.UPDATED_AT = timestamp
-                db.commit()
-            except Exception as exc:
-                db.rollback()
-                raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
-            finally:
-                db.close()
-
-            item["description"] = cleaned
-            item["updated_at"] = timestamp
-            location_owner_kind = self.item_locations.get(resolved_id, {}).get("owner_kind")
-            location_owner_id = self.item_locations.get(resolved_id, {}).get("owner_id")
-            if location_owner_kind == "building" and location_owner_id:
-                self._refresh_building_system_instruction(location_owner_id)
-            inventory = self.items_by_persona.get(persona_id, [])
-            persona.set_inventory(list(inventory))
-
-            preview = cleaned if cleaned else "(内容未設定)"
-            if len(preview) > 80:
-                preview = preview[:77] + "..."
-            item_name = item.get("name", resolved_id)
-            actor_msg = f"「{item_name}」の説明を更新した。内容: {preview}"
-
-        elif action_type == "patch_content":
-            # document専用
-            if item_type != "document":
-                raise RuntimeError("patch_contentはdocumentタイプのアイテムにのみ使用できます。")
-
-            file_path_str = item.get("file_path")
-            if not file_path_str:
-                raise RuntimeError("このdocumentにはファイルパスが設定されていません。")
-
-            from pathlib import Path
-            file_path = Path(file_path_str)
-            if not file_path.exists():
-                raise RuntimeError(f"ファイルが見つかりません: {file_path}")
-
-            # ファイルに追記
-            patch = action_data.get("patch", "")
-            try:
-                current_content = file_path.read_text(encoding="utf-8")
-                new_content = current_content + "\n" + patch
-                file_path.write_text(new_content, encoding="utf-8")
-            except OSError as exc:
-                raise RuntimeError(f"ファイルの更新に失敗しました: {exc}") from exc
-
-            # Summary再生成
-            from media_summary import ensure_document_summary
-            new_summary = ensure_document_summary(file_path)
-
-            # DB更新
-            db = self.SessionLocal()
-            try:
-                row = (
-                    db.query(ItemModel)
-                    .filter(ItemModel.ITEM_ID == resolved_id)
-                    .one_or_none()
-                )
-                if row is None:
-                    raise RuntimeError("アイテム本体が見つかりません。")
-                if new_summary:
-                    row.DESCRIPTION = new_summary
-                row.UPDATED_AT = timestamp
-                db.commit()
-            except Exception as exc:
-                db.rollback()
-                raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
-            finally:
-                db.close()
-
-            if new_summary:
-                item["description"] = new_summary
-            item["updated_at"] = timestamp
-            location_owner_kind = self.item_locations.get(resolved_id, {}).get("owner_kind")
-            location_owner_id = self.item_locations.get(resolved_id, {}).get("owner_id")
-            if location_owner_kind == "building" and location_owner_id:
-                self._refresh_building_system_instruction(location_owner_id)
-            inventory = self.items_by_persona.get(persona_id, [])
-            persona.set_inventory(list(inventory))
-
-            item_name = item.get("name", resolved_id)
-            actor_msg = f"「{item_name}」の内容を更新した。"
-
-        else:
-            raise RuntimeError(f"未対応のaction_type: {action_type}")
-
-        self.record_persona_event(persona_id, actor_msg)
-        building_id = persona.current_building_id
-        other_ids = [
-            oid for oid in self.occupants.get(building_id or "", [])
-            if oid and oid != persona_id
-        ]
-        if other_ids:
-            notice = f"{persona.persona_name}が「{item_name}」を使った。"
-            self._broadcast_item_event(other_ids, notice)
-        if building_id:
-            building_name = self.building_map.get(building_id).name if building_id in self.building_map else building_id
-            note = (
-                "<div class=\"note-box\">🛠 Item Use:<br>"
-                f"<b>{persona.persona_name}が「{item_name}」を使いました（{building_name}）。</b></div>"
-            )
-            self._append_building_history_note(building_id, note)
-        return actor_msg
-
-    def view_item_for_persona(self, persona_id: str, item_id: str) -> str:
-        """
-        View the full content of a picture or document item.
-
-        Args:
-            persona_id: The persona viewing the item
-            item_id: The item to view
-
-        Returns:
-            - picture: File path for display
-            - document: Full text content of the file
-            - object: Error message (not supported)
-        """
-        persona = self.personas.get(persona_id)
-        if not persona or getattr(persona, "is_proxy", False):
-            raise RuntimeError("このペルソナではアイテムを扱えません。")
-
-        resolved_id = item_id
-        item = self.items.get(resolved_id)
-        if not item:
-            raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
-
-        item_type = (item.get("type") or "").lower()
-
-        if item_type == "object":
-            raise RuntimeError("objectタイプのアイテムは閲覧できません。")
-
-        elif item_type == "picture":
-            file_path_str = item.get("file_path")
-            if not file_path_str:
-                raise RuntimeError("この画像にはファイルパスが設定されていません。")
-            from pathlib import Path
-            file_path = Path(file_path_str)
-            if not file_path.exists():
-                raise RuntimeError(f"ファイルが見つかりません: {file_path}")
-            return f"画像ファイル: {file_path}"
-
-        elif item_type == "document":
-            file_path_str = item.get("file_path")
-            if not file_path_str:
-                raise RuntimeError("この文書にはファイルパスが設定されていません。")
-            from pathlib import Path
-            file_path = Path(file_path_str)
-            if not file_path.exists():
-                raise RuntimeError(f"ファイルが見つかりません: {file_path}")
-            try:
-                content = file_path.read_text(encoding="utf-8")
-                return f"文書の内容:\n\n{content}"
-            except OSError as exc:
-                raise RuntimeError(f"ファイルの読み込みに失敗しました: {exc}") from exc
-
-        else:
-            raise RuntimeError(f"未対応のアイテムタイプ: {item_type}")
-
-    def toggle_item_open_state(self, item_id: str) -> bool:
-        """
-        Toggle the open/close state of an item.
-        
-        When an item is "open", its content will be included in the visual context
-        for AI conversations.
-        
-        Args:
-            item_id: The item to toggle
-            
-        Returns:
-            The new is_open state (True = open, False = closed)
-        """
-        item = self.items.get(item_id)
-        if not item:
-            raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
-        
-        # Get current state
-        state = item.get("state", {})
-        if not isinstance(state, dict):
-            state = {}
-        
-        # Toggle is_open
-        current_is_open = state.get("is_open", False)
-        new_is_open = not current_is_open
-        state["is_open"] = new_is_open
-        
-        # Update memory cache
-        item["state"] = state
-        
-        # Update database
-        timestamp = datetime.utcnow()
-        db = self.SessionLocal()
-        try:
-            row = db.query(ItemModel).filter(ItemModel.ITEM_ID == item_id).one_or_none()
-            if row:
-                row.STATE_JSON = json.dumps(state)
-                row.UPDATED_AT = timestamp
-                db.commit()
-        except Exception as exc:
-            db.rollback()
-            logging.error(f"Failed to update item state in DB: {exc}")
-            raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
-        finally:
-            db.close()
-        
-        item["updated_at"] = timestamp
-        logging.info(f"Item {item_id} is_open toggled to {new_is_open}")
-        return new_is_open
-
-    def get_open_items_in_building(self, building_id: str) -> list:
-        """
-        Get all items in a building that have is_open = True.
-        
-        Args:
-            building_id: The building to check
-            
-        Returns:
-            List of item dicts that are open
-        """
-        open_items = []
-        item_ids = self.items_by_building.get(building_id, [])
-        for item_id in item_ids:
-            item = self.items.get(item_id)
-            if item:
-                state = item.get("state", {})
-                if isinstance(state, dict) and state.get("is_open", False):
-                    open_items.append(item)
-        return open_items
-
-    def create_document_item(self, persona_id: str, name: str, description: str, content: str) -> str:
-        """
-        Create a new document item and place it in the current building.
-
-        Args:
-            persona_id: The persona creating the document
-            name: Name of the document
-            description: Brief description (initial summary)
-            content: Full text content
-
-        Returns:
-            Success message with item ID
-        """
-        persona = self.personas.get(persona_id)
-        if not persona or getattr(persona, "is_proxy", False):
-            raise RuntimeError("このペルソナでは文書を作成できません。")
-
-        building_id = persona.current_building_id
-        if not building_id:
-            raise RuntimeError("現在地が不明なため、文書を作成できません。")
-
-        # ファイル保存
-        from media_utils import store_document_text
-        try:
-            metadata, file_path = store_document_text(content, source="tool:document_create")
-        except Exception as exc:
-            raise RuntimeError(f"ファイルの保存に失敗しました: {exc}") from exc
-
-        # Summary生成
-        from media_summary import ensure_document_summary
-        summary = ensure_document_summary(file_path)
-        if not summary:
-            summary = description  # フォールバック
-
-        # DBにアイテム作成
-        import uuid
-        item_id = str(uuid.uuid4())
-        timestamp = datetime.utcnow()
-
-        db = self.SessionLocal()
-        try:
-            # Store relative path for cross-platform compatibility
-            relative_path = str(file_path.relative_to(self.saiverse_home))
-            initial_state = {"is_open": True}
-            item_row = ItemModel(
-                ITEM_ID=item_id,
-                NAME=name,
-                TYPE="document",
-                DESCRIPTION=summary,
-                FILE_PATH=relative_path,
-                STATE_JSON=json.dumps(initial_state),
-                CREATED_AT=timestamp,
-                UPDATED_AT=timestamp,
-            )
-            db.add(item_row)
-
-            location_row = ItemLocationModel(
-                ITEM_ID=item_id,
-                OWNER_KIND="building",
-                OWNER_ID=building_id,
-                UPDATED_AT=timestamp,
-            )
-            db.add(location_row)
-
-            db.commit()
-        except Exception as exc:
-            db.rollback()
-            raise RuntimeError(f"データベース登録に失敗しました: {exc}") from exc
-        finally:
-            db.close()
-
-        # キャッシュ更新
-        self.items[item_id] = {
-            "item_id": item_id,
-            "name": name,
-            "type": "document",
-            "description": summary,
-            "file_path": relative_path,
-            "state": {"is_open": True},
-            "created_at": timestamp,
-            "updated_at": timestamp,
-        }
-        self.item_locations[item_id] = {
-            "owner_kind": "building",
-            "owner_id": building_id,
-            "updated_at": timestamp,
-            "location_id": None,
-        }
-        self.items_by_building[building_id].append(item_id)
-        self._refresh_building_system_instruction(building_id)
-
-        building_name = self.building_map.get(building_id).name if building_id in self.building_map else building_id
-        actor_msg = f"「{name}」という文書を作成し、{building_name}に配置した。"
-        self.record_persona_event(persona_id, actor_msg)
-
-        note = (
-            "<div class=\"note-box\">📄 Document Created:<br>"
-            f"<b>{persona.persona_name}が「{name}」を作成しました（{building_name}）。</b></div>"
-        )
-        self._append_building_history_note(building_id, note)
-
-        return f"文書「{name}」を作成しました。アイテムID: {item_id}"
-
-    def create_picture_item(self, persona_id: str, name: str, description: str, file_path: str, building_id: Optional[str] = None) -> str:
-        """
-        Create a new picture item and place it in the specified building.
-
-        Args:
-            persona_id: The persona creating the picture
-            name: Name of the picture
-            description: Summary of the picture
-            file_path: Path to the image file
-            building_id: Optional target building (defaults to current location)
-
-        Returns:
-            Item ID
-        """
-        persona = self.personas.get(persona_id)
-        if not persona or getattr(persona, "is_proxy", False):
-            raise RuntimeError("このペルソナでは画像を作成できません。")
-
-        if not building_id:
-            building_id = persona.current_building_id
-        if not building_id:
-            raise RuntimeError("現在地が不明なため、画像を配置できません。")
-
-        # DBにアイテム作成
-        import uuid
-        item_id = str(uuid.uuid4())
-        timestamp = datetime.utcnow()
-
-        # Convert to relative path if it's an absolute path under saiverse_home
-        file_path_obj = Path(file_path)
-        if file_path_obj.is_absolute():
-            try:
-                relative_path = str(file_path_obj.relative_to(self.saiverse_home))
-            except ValueError:
-                # Path is not under saiverse_home, keep as-is
-                relative_path = file_path
-        else:
-            relative_path = file_path
-
-        db = self.SessionLocal()
-        try:
-            item_row = ItemModel(
-                ITEM_ID=item_id,
-                NAME=name,
-                TYPE="picture",
-                DESCRIPTION=description,
-                FILE_PATH=relative_path,
-                CREATED_AT=timestamp,
-                UPDATED_AT=timestamp,
-            )
-            db.add(item_row)
-
-            location_row = ItemLocationModel(
-                ITEM_ID=item_id,
-                OWNER_KIND="building",
-                OWNER_ID=building_id,
-                UPDATED_AT=timestamp,
-            )
-            db.add(location_row)
-
-            db.commit()
-        except Exception as exc:
-            db.rollback()
-            raise RuntimeError(f"データベース登録に失敗しました: {exc}") from exc
-        finally:
-            db.close()
-
-        # キャッシュ更新
-        self.items[item_id] = {
-            "item_id": item_id,
-            "name": name,
-            "type": "picture",
-            "description": description,
-            "file_path": relative_path,
-            "state": {},
-            "created_at": timestamp,
-            "updated_at": timestamp,
-        }
-        self.item_locations[item_id] = {
-            "owner_kind": "building",
-            "owner_id": building_id,
-            "updated_at": timestamp,
-            "location_id": None,
-        }
-        self.items_by_building[building_id].append(item_id)
-        self._refresh_building_system_instruction(building_id)
-
-        building_name = self.building_map.get(building_id).name if building_id in self.building_map else building_id
-        actor_msg = f"「{name}」という画像を生成し、{building_name}に配置した。"
-        self.record_persona_event(persona_id, actor_msg)
-
-        note = (
-            "<div class=\"note-box\">🖼 Picture Created:<br>"
-            f"<b>{persona.persona_name}が「{name}」を生成しました（{building_name}）。</b></div>"
-        )
-        self._append_building_history_note(building_id, note)
-
-        return item_id
-
     def _explore_city(self, persona_id: str, target_city_id: str):
         self.runtime.explore_city(persona_id, target_city_id)
-
-    def _load_user_state_from_db(self):
-        if getattr(self, "runtime", None) is not None:
-            self.runtime.load_user_state_from_db()
-        else:
-            db = self.SessionLocal()
-            try:
-                user = (
-                    db.query(UserModel)
-                    .filter(UserModel.USERID == self.state.user_id)
-                    .first()
-                )
-                if user:
-                    # Map DB boolean to presence status string
-                    self.state.user_presence_status = "online" if user.LOGGED_IN else "offline"
-                    self.state.user_current_city_id = user.CURRENT_CITYID
-                    self.state.user_current_building_id = user.CURRENT_BUILDINGID
-                    self.state.user_display_name = (
-                        (user.USERNAME or "ユーザー").strip() or "ユーザー"
-                    )
-                    avatar_data = None
-                    if getattr(user, "AVATAR_IMAGE", None):
-                        avatar_data = self._load_avatar_data(Path(user.AVATAR_IMAGE))
-                    self.state.user_avatar_data = avatar_data or self.default_avatar
-                    self.id_to_name_map[str(self.state.user_id)] = (
-                        self.state.user_display_name
-                    )
-                else:
-                    self.state.user_presence_status = "offline"
-                    self.state.user_current_building_id = None
-                    self.state.user_current_building_id = None
-                    self.state.user_current_city_id = None
-                    self.state.user_display_name = "ユーザー"
-                    self.state.user_avatar_data = self.default_avatar
-                    self.id_to_name_map[str(self.state.user_id)] = (
-                        self.state.user_display_name
-                    )
-            except Exception as exc:
-                logging.error(
-                    "Failed to load user status from DB: %s", exc, exc_info=True
-                )
-                self.state.user_presence_status = "offline"
-                self.state.user_current_building_id = None
-                self.state.user_current_city_id = None
-                self.state.user_display_name = "ユーザー"
-                self.state.user_avatar_data = self.default_avatar
-                self.id_to_name_map[str(self.state.user_id)] = (
-                    self.state.user_display_name
-                )
-            finally:
-                db.close()
-        self._refresh_user_state_cache()
 
     def set_user_login_status(self, user_id: int, status: bool) -> str:
         """ユーザーのログイン状態を更新し、ログアウト時にメッセージを記録する"""
@@ -1541,9 +599,13 @@ class SAIVerseManager(
 
 
     def handle_user_input_stream(
-        self, message: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None
+        self, message: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None,
+        playbook_params: Optional[Dict[str, Any]] = None, building_id: Optional[str] = None,
     ) -> Iterator[str]:
-        yield from self.runtime.handle_user_input_stream(message, metadata=metadata, meta_playbook=meta_playbook)
+        yield from self.runtime.handle_user_input_stream(
+            message, metadata=metadata, meta_playbook=meta_playbook,
+            playbook_params=playbook_params, building_id=building_id,
+        )
 
     def get_summonable_personas(self) -> List[str]:
         """Returns a list of persona names that can be summoned to the user's current location."""
@@ -1719,7 +781,7 @@ class SAIVerseManager(
                     arguments,
                 )
                 result = tool_function(**arguments)
-                content, _, _, _ = tools.defs.parse_tool_result(result)
+                content, _, _, _ = tools.core.parse_tool_result(result)
                 return str(content)
             except ImportError:
                 logging.error(
@@ -1773,10 +835,6 @@ class SAIVerseManager(
 
     # --- World Editor Backend Methods ---
 
-    def get_cities_df(self) -> pd.DataFrame:
-        """ワールドエディタ用にすべてのCity一覧をDataFrameとして取得する"""
-        return self.admin.get_cities_df()
-
     def update_city(
         self,
         city_id: int,
@@ -1829,11 +887,47 @@ class SAIVerseManager(
         self, name: str, description: str, capacity: int, system_instruction: str, city_id: int, building_id: str = None
     ) -> str:
         """Creates a new building in a specified city."""
-        return self.admin.create_building(name, description, capacity, system_instruction, city_id, building_id)
+        result = self.admin.create_building(name, description, capacity, system_instruction, city_id, building_id)
+        # If creation succeeded and it's in our city, reload buildings list
+        if not result.startswith("Error") and city_id == self.city_id:
+            self._reload_buildings()
+        return result
+
+    def _reload_buildings(self) -> None:
+        """Reload buildings list from database to reflect recent changes."""
+        self.buildings = self._load_and_create_buildings_from_db()
+
+        # Update existing dicts in-place to preserve references held by OccupancyManager
+        new_building_map = {b.building_id: b for b in self.buildings}
+        self.building_map.clear()
+        self.building_map.update(new_building_map)
+
+        new_capacities = {b.building_id: b.capacity for b in self.buildings}
+        self.capacities.clear()
+        self.capacities.update(new_capacities)
+
+        # Update building memory paths
+        self.building_memory_paths = {
+            b.building_id: self.saiverse_home / "cities" / self.city_name / "buildings" / b.building_id / "log.json"
+            for b in self.buildings
+        }
+
+        # Initialize occupants and building_histories for new buildings
+        for building_id in self.building_map:
+            if building_id not in self.occupants:
+                self.occupants[building_id] = []
+            if building_id not in self.building_histories:
+                self.building_histories[building_id] = []
 
     def delete_building(self, building_id: str) -> str:
         """Deletes a building after checking for occupants."""
-        return self.admin.delete_building(building_id)
+        # Check if building is in our city before deletion
+        was_in_city = building_id in self.building_map
+        result = self.admin.delete_building(building_id)
+        # If deletion succeeded and it was in our city, reload buildings list
+        if not result.startswith("Error") and was_in_city:
+            self._reload_buildings()
+        return result
 
     def move_ai_from_editor(self, ai_id: str, target_building_id: str) -> str:
         """
@@ -1841,17 +935,15 @@ class SAIVerseManager(
         """
         return self.admin.move_ai_from_editor(ai_id, target_building_id)
 
-    def get_ais_df(self) -> pd.DataFrame:
-        """ワールドエディタ用にすべてのAI一覧をDataFrameとして取得する"""
-        return self.admin.get_ais_df()
-
     def get_ai_details(self, ai_id: str) -> Optional[Dict]:
         """Get full details for a single AI for the edit form."""
         return self.admin.get_ai_details(ai_id)
 
-    def create_ai(self, name: str, system_prompt: str, home_city_id: int) -> str:
+    def create_ai(
+        self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None
+    ) -> str:
         """Creates a new AI and their private room."""
-        return self.admin.create_ai(name, system_prompt, home_city_id)
+        return self.admin.create_ai(name, system_prompt, home_city_id, custom_ai_id)
 
     def update_ai(
         self,
@@ -1890,10 +982,6 @@ class SAIVerseManager(
         """Gets a list of tool IDs linked to a specific building."""
         return self.admin.get_linked_tool_ids(building_id)
 
-    def get_buildings_df(self) -> pd.DataFrame:
-        """ワールドエディタ用にすべてのBuilding一覧をDataFrameとして取得する"""
-        return self.admin.get_buildings_df()
-
     def update_building(
         self,
         building_id: str,
@@ -1905,9 +993,10 @@ class SAIVerseManager(
         tool_ids: List[int],
         interval: int,
         image_path: Optional[str] = None,
+        extra_prompt_files: Optional[List[str]] = None,
     ) -> str:
         """ワールドエディタからBuildingの設定を更新する"""
-        return self.admin.update_building(
+        result = self.admin.update_building(
             building_id,
             name,
             capacity,
@@ -1917,10 +1006,25 @@ class SAIVerseManager(
             tool_ids,
             interval,
             image_path,
+            extra_prompt_files,
         )
 
-    def get_items_df(self) -> pd.DataFrame:
-        return self.admin.get_items_df()
+        # Update in-memory Building object if DB update succeeded
+        if not result.startswith("Error") and building_id in self.building_map:
+            building = self.building_map[building_id]
+            building.name = name
+            building.capacity = capacity
+            building.description = description
+            building.base_system_instruction = system_instruction
+            building.system_instruction = system_instruction
+            building.auto_interval_sec = interval
+            building.extra_prompt_files = extra_prompt_files or []
+            # Update capacities dict used by OccupancyManager
+            if hasattr(self, 'capacities') and building_id in self.capacities:
+                self.capacities[building_id] = capacity
+            logging.info(f"Updated in-memory Building object: {building_id}")
+
+        return result
 
     def get_item_details(self, item_id: str) -> Optional[Dict[str, Any]]:
         return self.admin.get_item_details(item_id)
@@ -1954,10 +1058,6 @@ class SAIVerseManager(
         return self.admin.delete_item(item_id)
 
     # --- Playbook Management ---
-
-    def get_playbooks_df(self) -> pd.DataFrame:
-        """Get all playbooks as a DataFrame for the world editor."""
-        return self.admin.get_playbooks_df()
 
     def get_playbook_details(self, playbook_id: int) -> Optional[Dict[str, Any]]:
         """Get detailed information for a specific playbook."""

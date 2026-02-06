@@ -7,12 +7,11 @@ from .models import PersonaInfo, SummonRequest
 router = APIRouter()
 
 @router.get("/summonable", response_model=List[PersonaInfo])
-def get_summonable_personas(manager = Depends(get_manager)):
+def get_summonable_personas(building_id: Optional[str] = None, manager = Depends(get_manager)):
     """List personas that can be summoned (not in current room, not dispatched)."""
-    if not manager.user_current_building_id:
+    here = building_id or manager.user_current_building_id
+    if not here:
         return []
-
-    here = manager.user_current_building_id
     results = []
     
     # Access personas directly from manager (RuntimeService)

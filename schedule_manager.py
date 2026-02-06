@@ -42,7 +42,6 @@ class ScheduleManager:
         self._thread.start()
         LOGGER.info("[ScheduleManager] Started background schedule checker thread (check_interval=%ds).", self.check_interval)
         # スレッドが実際に起動したか少し待って確認
-        import time
         time.sleep(0.1)
         if self._thread.is_alive():
             LOGGER.info("[ScheduleManager] Thread is confirmed alive.")
@@ -257,12 +256,21 @@ class ScheduleManager:
         persona_id = schedule.PERSONA_ID
         meta_playbook = schedule.META_PLAYBOOK
 
+        # Parse playbook_params from JSON
+        playbook_params = None
+        if schedule.PLAYBOOK_PARAMS:
+            try:
+                playbook_params = json.loads(schedule.PLAYBOOK_PARAMS)
+            except Exception as e:
+                LOGGER.warning("[ScheduleManager] Failed to parse PLAYBOOK_PARAMS for schedule %d: %s", schedule.SCHEDULE_ID, e)
+
         LOGGER.info(
-            "[ScheduleManager] Executing schedule %d for persona %s (type=%s, playbook=%s)",
+            "[ScheduleManager] Executing schedule %d for persona %s (type=%s, playbook=%s, params=%s)",
             schedule.SCHEDULE_ID,
             persona_id,
             schedule.SCHEDULE_TYPE,
             meta_playbook,
+            playbook_params,
         )
 
         # ペルソナを取得
@@ -283,10 +291,11 @@ class ScheduleManager:
         # メタプレイブックを実行（PulseController経由）
         try:
             LOGGER.info(
-                "[ScheduleManager] Submitting schedule via PulseController: playbook=%s, building=%s, prompt_length=%d",
+                "[ScheduleManager] Submitting schedule via PulseController: playbook=%s, building=%s, prompt_length=%d, params=%s",
                 meta_playbook,
                 building_id,
                 len(user_input),
+                playbook_params,
             )
             self.manager.pulse_controller.submit_schedule(
                 persona_id=persona_id,
@@ -294,6 +303,7 @@ class ScheduleManager:
                 user_input=user_input,
                 metadata={"schedule_id": schedule.SCHEDULE_ID, "schedule_type": schedule.SCHEDULE_TYPE},
                 meta_playbook=meta_playbook,
+                playbook_params=playbook_params,
             )
             LOGGER.info("[ScheduleManager] Schedule submitted to PulseController")
 

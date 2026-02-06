@@ -1,0 +1,241 @@
+{
+    "name": "memopedia_edit",
+    "description": "既存のMemopediaページを編集する（加筆・修正・更新）",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "編集指示（例: 「ソフィアのページに魔導機研究のエピソードを追記して」「誕生日が間違ってるから直して」）"
+        }
+    ],
+    "context_requirements": {
+        "history_depth": "10messages",
+        "inventory": false,
+        "building_items": false,
+        "system_prompt": true,
+        "memory_weave": true
+    },
+    "router_callable": true,
+    "nodes": [
+        {
+            "id": "init",
+            "type": "set",
+            "assignments": {
+                "edit_instruction": "{input}",
+                "search_done": false
+            },
+            "next": "parse_instruction"
+        },
+        {
+            "id": "parse_instruction",
+            "type": "llm",
+            "model_type": "lightweight",
+            "action": "<system>ユーザーの編集指示を解析してください。\n\n指示: {edit_instruction}\n\n以下を特定してください:\n1. 対象ページのタイトル（推測可能な場合）\n2. 編集の種類（add=加筆, fix=修正, update=全体更新）\n3. 具体的な編集内容\n4. 追加の情報収集が必要か</system>",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "target_title": {
+                        "type": "string",
+                        "description": "対象ページのタイトル（不明な場合は空文字列）"
+                    },
+                    "edit_type": {
+                        "type": "string",
+                        "enum": ["add", "fix", "update"],
+                        "description": "編集の種類: add=加筆, fix=修正, update=全体更新"
+                    },
+                    "edit_details": {
+                        "type": "string",
+                        "description": "具体的に何を編集するか"
+                    },
+                    "needs_search": {
+                        "type": "boolean",
+                        "description": "追加の情報収集（記憶検索）が必要か"
+                    },
+                    "search_query": {
+                        "type": "string",
+                        "description": "情報収集が必要な場合の検索クエリ"
+                    }
+                },
+                "required": ["target_title", "edit_type", "edit_details", "needs_search"]
+            },
+            "output_key": "parsed",
+            "next": "set_initial_target"
+        },
+        {
+            "id": "set_initial_target",
+            "type": "set",
+            "assignments": {
+                "target_title": "{parsed.target_title}"
+            },
+            "next": "check_target"
+        },
+        {
+            "id": "check_target",
+            "type": "pass",
+            "conditional_next": {
+                "field": "parsed.target_title",
+                "operator": "eq",
+                "cases": {
+                    "": "get_tree",
+                    "default": "get_page"
+                }
+            }
+        },
+        {
+            "id": "get_tree",
+            "type": "tool",
+            "action": "memopedia_get_tree",
+            "args_input": {},
+            "output_key": "page_tree",
+            "next": "select_page"
+        },
+        {
+            "id": "select_page",
+            "type": "llm",
+            "model_type": "lightweight",
+            "action": "<system>編集指示に最も関連するページを選んでください。\n\n編集指示: {edit_instruction}\n編集内容: {parsed.edit_details}\n\n利用可能なページ:\n{page_tree}\n\n最も関連するページのタイトルを選んでください。</system>",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "selected_title": {
+                        "type": "string",
+                        "description": "選択したページのタイトル"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "選択理由"
+                    }
+                },
+                "required": ["selected_title"]
+            },
+            "output_key": "selection",
+            "next": "set_target"
+        },
+        {
+            "id": "set_target",
+            "type": "set",
+            "assignments": {
+                "target_title": "{selection.selected_title}"
+            },
+            "next": "get_page"
+        },
+        {
+            "id": "get_page",
+            "type": "tool",
+            "action": "memopedia_get_page",
+            "args_input": {
+                "title": "target_title"
+            },
+            "output_key": "current_page",
+            "next": "check_page_found"
+        },
+        {
+            "id": "check_page_found",
+            "type": "pass",
+            "conditional_next": {
+                "field": "current_page",
+                "operator": "contains",
+                "cases": {
+                    "Page not found": "page_not_found",
+                    "default": "check_needs_search"
+                }
+            }
+        },
+        {
+            "id": "page_not_found",
+            "type": "memorize",
+            "action": "指定されたページが見つかりませんでした: {target_title}",
+            "role": "assistant",
+            "tags": ["tool", "memopedia_edit", "error"],
+            "next": null
+        },
+        {
+            "id": "check_needs_search",
+            "type": "pass",
+            "conditional_next": {
+                "field": "parsed.needs_search",
+                "operator": "eq",
+                "cases": {
+                    "true": "search_memory",
+                    "default": "generate_edit"
+                }
+            }
+        },
+        {
+            "id": "search_memory",
+            "type": "tool",
+            "action": "memory_search_brief",
+            "args_input": {
+                "query": "parsed.search_query",
+                "topk": 5,
+                "max_snippet_chars": 200
+            },
+            "output_key": "search_results",
+            "next": "set_search_done"
+        },
+        {
+            "id": "set_search_done",
+            "type": "set",
+            "assignments": {
+                "search_done": true
+            },
+            "next": "generate_edit"
+        },
+        {
+            "id": "generate_edit",
+            "type": "llm",
+            "model_type": "normal",
+            "action": "<system>Memopediaページを編集してください。\n\n## 編集指示\n{edit_instruction}\n\n## 編集タイプ\n{parsed.edit_type} ({parsed.edit_details})\n\n## 現在のページ内容\n{current_page}\n\n## 追加情報（検索結果）\n{search_results}\n\n## 編集ルール\n- edit_type=add（加筆）: 既存内容を保持しつつ、新しい情報を適切な場所に追加\n- edit_type=fix（修正）: 指摘された誤りを訂正、他の部分は維持\n- edit_type=update（更新）: 全体を見直して最新情報で更新\n\n必ず既存の正しい情報は保持してください。</system>",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "ページタイトル（変更する場合のみ新しいタイトル、通常は既存のまま）"
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "更新後の要約"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "更新後の本文（Markdown形式）"
+                    },
+                    "keywords": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "更新後のキーワード"
+                    },
+                    "edit_summary": {
+                        "type": "string",
+                        "description": "何を編集したかの要約"
+                    }
+                },
+                "required": ["title", "summary", "content", "keywords", "edit_summary"]
+            },
+            "output_key": "edited",
+            "next": "save_page"
+        },
+        {
+            "id": "save_page",
+            "type": "tool",
+            "action": "memopedia_save_page",
+            "args_input": {
+                "title": "edited.title",
+                "summary": "edited.summary",
+                "content": "edited.content",
+                "keywords": "edited.keywords"
+            },
+            "output_key": "save_result",
+            "next": "record"
+        },
+        {
+            "id": "record",
+            "type": "memorize",
+            "action": "<system>Memopediaページ編集完了\n\nページ: {edited.title}\n編集内容: {edited.edit_summary}\n結果: {save_result}</system>",
+            "role": "user",
+            "tags": ["tool", "memopedia_edit", "complete"],
+            "next": null
+        }
+    ],
+    "start_node": "init"
+}

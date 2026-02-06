@@ -1,0 +1,14 @@
+{
+  "model": "gemini-2.5-flash-lite-preview-09-2025",
+  "display_name": "Gemini 2.5 Flash Lite Preview 09 2025",
+  "provider": "gemini",
+  "context_length": 128000,
+  "supports_images": true,
+  "prefer_paid": true,
+  "pricing": {
+    "input_per_1m_tokens": 0.10,
+    "cached_input_per_1m_tokens": 0.01,
+    "output_per_1m_tokens": 0.40,
+    "currency": "USD"
+  }
+}

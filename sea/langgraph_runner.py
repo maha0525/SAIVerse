@@ -26,6 +26,8 @@ def compile_playbook(
     exec_node_factory: Optional[Callable[[Any], Callable[[dict], Any]]] = None,
     subplay_node_factory: Optional[Callable[[Any], Callable[[dict], Any]]] = None,
     set_node_factory: Optional[Callable[[Any], Callable[[dict], Any]]] = None,
+    stelis_start_node_factory: Optional[Callable[[Any], Callable[[dict], Any]]] = None,
+    stelis_end_node_factory: Optional[Callable[[Any], Callable[[dict], Any]]] = None,
 ) -> Optional[Callable[[dict], Any]]:
     """Compile a PlaybookSchema into a LangGraph runnable coroutine.
 
@@ -82,6 +84,16 @@ def compile_playbook(
                 return None
             elif node_def.type == NodeType.PASS:
                 graph.add_node(node_def.id, lambda state: state)
+            elif node_def.type == NodeType.STELIS_START and stelis_start_node_factory is not None:
+                graph.add_node(node_def.id, stelis_start_node_factory(node_def))
+            elif node_def.type == NodeType.STELIS_START and stelis_start_node_factory is None:
+                logger.error("[langgraph] Cannot add STELIS_START node '%s': stelis_start_node_factory is None", node_def.id)
+                return None
+            elif node_def.type == NodeType.STELIS_END and stelis_end_node_factory is not None:
+                graph.add_node(node_def.id, stelis_end_node_factory(node_def))
+            elif node_def.type == NodeType.STELIS_END and stelis_end_node_factory is None:
+                logger.error("[langgraph] Cannot add STELIS_END node '%s': stelis_end_node_factory is None", node_def.id)
+                return None
             else:
                 logger.error("[langgraph] Unhandled node type '%s' for node '%s' in playbook '%s'",
                              node_def.type, node_def.id, playbook.name)

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import styles from './PersonaMenu.module.css';
 import { Home, Brain, Calendar, CheckSquare, Settings, X, RefreshCw, Network, Package } from 'lucide-react';
+import ModalOverlay from './common/ModalOverlay';
 
 interface PersonaMenuProps {
     isOpen: boolean;
@@ -43,7 +44,7 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
     };
 
     return (
-        <div className={styles.overlay} onClick={onClose}>
+        <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.menu} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
                     <div className={styles.profile}>
@@ -146,6 +147,6 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
                     </button>
                 </div>
             </div>
-        </div>
+        </ModalOverlay>
     );
 }

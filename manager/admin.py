@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import pandas as pd
 from zoneinfo import ZoneInfo
 
 from buildings import Building
@@ -26,7 +25,7 @@ from manager.history import HistoryMixin
 from manager.persona import PersonaMixin
 from manager.state import CoreState
 from scripts.import_playbook import infer_scope_from_path
-from tools.defs.save_playbook import save_playbook
+from builtin_data.tools.save_playbook import save_playbook
 
 class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
     """Administrative operations for world editing and CRUD."""
@@ -89,25 +88,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         self._load_cities_from_db = manager._load_cities_from_db
 
     # --- City management ---
-
-    def get_cities_df(self) -> pd.DataFrame:
-        db = self.SessionLocal()
-        try:
-            query = db.query(CityModel)
-            df = pd.read_sql(query.statement, query.session.bind)
-            cols = [
-                "CITYID",
-                "CITYNAME",
-                "DESCRIPTION",
-                "TIMEZONE",
-                "START_IN_ONLINE_MODE",
-                "UI_PORT",
-                "API_PORT",
-            ]
-            existing_cols = [c for c in cols if c in df.columns]
-            return df[existing_cols]
-        finally:
-            db.close()
 
     def update_city(
         self,
@@ -324,25 +304,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
 
     # --- Building management ---
 
-    def get_buildings_df(self) -> pd.DataFrame:
-        db = self.SessionLocal()
-        try:
-            query = db.query(BuildingModel)
-            df = pd.read_sql(query.statement, query.session.bind)
-            return df[
-                [
-                    "BUILDINGID",
-                    "BUILDINGNAME",
-                    "CAPACITY",
-                    "DESCRIPTION",
-                    "SYSTEM_INSTRUCTION",
-                    "CITYID",
-                    "AUTO_INTERVAL_SEC",
-                ]
-            ]
-        finally:
-            db.close()
-
     def create_building(
         self,
         name: str,
@@ -439,6 +400,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         tool_ids: List[int],
         interval: int,
         image_path: Optional[str] = None,
+        extra_prompt_files: Optional[List[str]] = None,
     ) -> str:
         db = self.SessionLocal()
         try:
@@ -466,6 +428,10 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             # Update image path if provided (allow clearing by passing empty string)
             if image_path is not None:
                 building.IMAGE_PATH = image_path.strip() if image_path.strip() else None
+            # Update extra prompt files
+            if extra_prompt_files is not None:
+                import json
+                building.EXTRA_PROMPT_FILES = json.dumps(extra_prompt_files) if extra_prompt_files else None
 
             db.query(BuildingToolLink).filter_by(BUILDINGID=building_id).delete(
                 synchronize_session=False
@@ -477,10 +443,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             logging.info(
                 "Updated building '%s' (%s) and its tool links.", name, building_id
             )
-            return (
-                f"Building '{name}' and its tool links updated successfully. "
-                "A restart is required for the changes to take full effect."
-            )
+            return f"Building '{name}' updated successfully."
         except Exception as exc:
             db.rollback()
             logging.error(
@@ -490,42 +453,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         finally:
             db.close()
 
-    # --- Item management ---
 
-    def get_items_df(self) -> pd.DataFrame:
-        db = self.SessionLocal()
-        try:
-            query = (
-                db.query(ItemModel, ItemLocationModel)
-                .outerjoin(ItemLocationModel, ItemModel.ITEM_ID == ItemLocationModel.ITEM_ID)
-            )
-            rows: List[Dict[str, Any]] = []
-            for item, location in query:
-                rows.append(
-                    {
-                        "ITEM_ID": item.ITEM_ID,
-                        "NAME": item.NAME,
-                        "TYPE": item.TYPE,
-                        "DESCRIPTION": item.DESCRIPTION,
-                        "OWNER_KIND": getattr(location, "OWNER_KIND", "world"),
-                        "OWNER_ID": getattr(location, "OWNER_ID", ""),
-                        "UPDATED_AT": str(getattr(item, "UPDATED_AT", "")),
-                    }
-                )
-            columns = [
-                "ITEM_ID",
-                "NAME",
-                "TYPE",
-                "DESCRIPTION",
-                "OWNER_KIND",
-                "OWNER_ID",
-                "UPDATED_AT",
-            ]
-            if not rows:
-                return pd.DataFrame(columns=columns)
-            return pd.DataFrame(rows, columns=columns)
-        finally:
-            db.close()
+    # --- Item management ---
 
     def get_item_details(self, item_id: str) -> Optional[Dict[str, Any]]:
         db = self.SessionLocal()
@@ -702,26 +631,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
 
     # --- AI management ---
 
-    def get_ais_df(self) -> pd.DataFrame:
-        db = self.SessionLocal()
-        try:
-            query = db.query(AIModel)
-            df = pd.read_sql(query.statement, query.session.bind)
-            df["SYSTEMPROMPT_SNIPPET"] = df["SYSTEMPROMPT"].str.slice(0, 40) + "..."
-            return df[
-                [
-                    "AIID",
-                    "AINAME",
-                    "HOME_CITYID",
-                    "DEFAULT_MODEL",
-                    "IS_DISPATCHED",
-                    "DESCRIPTION",
-                    "SYSTEMPROMPT_SNIPPET",
-                ]
-            ]
-        finally:
-            db.close()
-
     def get_ai_details(self, ai_id: str) -> Optional[Dict]:
         db = self.SessionLocal()
         try:
@@ -744,13 +653,15 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         finally:
             db.close()
 
-    def create_ai(self, name: str, system_prompt: str, home_city_id: int) -> str:
+    def create_ai(
+        self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None
+    ) -> str:
         if home_city_id != self.state.city_id:
             return (
                 "Error: Creating personas in a different city is not supported. "
                 "Use dispatch to move personas between cities."
             )
-        success, message = self._create_persona(name, system_prompt)
+        success, message = self._create_persona(name, system_prompt, custom_ai_id)
         if success:
             return (
                 f"AI '{name}' and their room created successfully. "
@@ -877,6 +788,29 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 persona.persona_system_instruction = system_prompt
                 persona.interaction_mode = ai.INTERACTION_MODE
                 persona.lightweight_model = lightweight_model
+
+                # Update default model and recreate LLM client if model changed
+                new_model = default_model or self.model
+                if persona.model != new_model:
+                    persona.model = new_model
+                    from llm_clients import get_llm_client
+                    from model_configs import get_context_length, get_model_provider, model_supports_images
+                    try:
+                        context_len = get_context_length(new_model)
+                        provider = get_model_provider(new_model)
+                        persona.llm_client = get_llm_client(new_model, provider, context_len)
+                        persona.model_supports_images = model_supports_images(new_model)
+                        logging.info(
+                            "Recreated LLM client for persona '%s' with model '%s'.",
+                            name,
+                            new_model,
+                        )
+                    except Exception as exc:
+                        logging.error(
+                            "Failed to recreate LLM client for '%s': %s",
+                            name,
+                            exc,
+                        )
 
                 # Recreate lightweight LLM client if model changed
                 if lightweight_model:
@@ -1053,23 +987,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             db.close()
 
     # --- Playbook Management ---
-
-    def get_playbooks_df(self) -> pd.DataFrame:
-        """Get all playbooks as a DataFrame."""
-        db = self.SessionLocal()
-        try:
-            query = db.query(PlaybookModel)
-            df = pd.read_sql(query.statement, query.session.bind)
-            # Add snippet columns for long text fields
-            if not df.empty:
-                df["description_snippet"] = df["description"].str.slice(0, 50) + "..."
-                if "schema_json" in df.columns:
-                    df["schema_snippet"] = df["schema_json"].str.slice(0, 30) + "..."
-                if "nodes_json" in df.columns:
-                    df["nodes_snippet"] = df["nodes_json"].str.slice(0, 30) + "..."
-            return df
-        finally:
-            db.close()
 
     def get_playbook_details(self, playbook_id: int) -> Optional[Dict[str, Any]]:
         """Get detailed information for a specific playbook."""

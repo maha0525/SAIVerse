@@ -12,7 +12,7 @@ import logging
 import asyncio
 from typing import Optional
 
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 from tools.context import get_active_manager, get_active_persona_id
 
 logger = logging.getLogger(__name__)

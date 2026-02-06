@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import pandas as pd
 from PIL import Image
 from sqlalchemy import func
 from buildings import Building
@@ -15,6 +14,8 @@ from database.models import (
     Building as BuildingModel,
     BuildingOccupancyLog,
     BuildingToolLink,
+    User,
+    UserAiLink,
 )
 from persona_core import PersonaCore
 from model_configs import get_context_length, get_model_provider
@@ -110,6 +111,18 @@ class PersonaMixin:
 
                 from data_paths import find_file, PROMPTS_DIR
                 common_prompt_file = find_file(PROMPTS_DIR, "common.txt") or Path("system_prompts/common.txt")
+
+                # Get linked user name (first linked user, or "the user" as fallback)
+                linked_user_name = "the user"
+                linked_user = (
+                    db.query(User)
+                    .join(UserAiLink, User.USERID == UserAiLink.USERID)
+                    .filter(UserAiLink.AIID == pid)
+                    .first()
+                )
+                if linked_user:
+                    linked_user_name = linked_user.USERNAME
+
                 persona = PersonaCore(
                     city_name=self.city_name,
                     persona_id=pid,
@@ -142,6 +155,7 @@ class PersonaMixin:
                     persona_event_fetcher=self.get_persona_pending_events,
                     persona_event_ack=self.archive_persona_events,
                     manager_ref=self,
+                    linked_user_name=linked_user_name,
                 )
 
                 persona.private_room_id = private_room_id
@@ -196,10 +210,18 @@ class PersonaMixin:
         finally:
             db.close()
 
-    def _create_persona(self, name: str, system_prompt: str) -> Tuple[bool, str]:
+    def _create_persona(
+        self, name: str, system_prompt: str, custom_ai_id: Optional[str] = None
+    ) -> Tuple[bool, str]:
         """
         Dynamically creates a new persona, their private room, and places them in it.
         This is triggered by an AI action.
+
+        Args:
+            name: Display name for the persona
+            system_prompt: System prompt for the persona
+            custom_ai_id: Optional custom ID (alphanumeric + underscore). If not provided,
+                          auto-generated from name.
         """
         db = self.SessionLocal()
         try:
@@ -214,14 +236,23 @@ class PersonaMixin:
             if existing_ai:
                 return False, f"A persona named '{name}' already exists in this city."
 
-            new_ai_id = f"{name.lower().replace(' ', '_')}_{self.city_name}"
+            # Use custom ID if provided, otherwise auto-generate from name
+            if custom_ai_id:
+                new_ai_id = f"{custom_ai_id}_{self.city_name}"
+            else:
+                new_ai_id = f"{name.lower().replace(' ', '_')}_{self.city_name}"
+
             if db.query(AIModel).filter_by(AIID=new_ai_id).first():
                 return (
                     False,
-                    f"A persona with the generated ID '{new_ai_id}' already exists.",
+                    f"A persona with the ID '{new_ai_id}' already exists.",
                 )
 
-            new_building_id = f"{name.lower().replace(' ', '_')}_{self.city_name}_room"
+            # Building ID based on AI ID
+            if custom_ai_id:
+                new_building_id = f"{custom_ai_id}_{self.city_name}_room"
+            else:
+                new_building_id = f"{name.lower().replace(' ', '_')}_{self.city_name}_room"
 
             new_ai_model = AIModel(
                 AIID=new_ai_id,
@@ -230,9 +261,9 @@ class PersonaMixin:
                 SYSTEMPROMPT=system_prompt,
                 DESCRIPTION=f"A new persona named {name}.",
                 AUTO_COUNT=0,
-                INTERACTION_MODE="auto",
+                INTERACTION_MODE="manual",
                 IS_DISPATCHED=False,
-                DEFAULT_MODEL=self.model,
+                DEFAULT_MODEL=self.model or self._base_model,
                 PRIVATE_ROOM_ID=new_building_id,
             )
             db.add(new_ai_model)
@@ -337,27 +368,6 @@ class PersonaMixin:
                 "Failed to create new persona '%s': %s", name, exc, exc_info=True
             )
             return False, f"An internal error occurred: {exc}"
-        finally:
-            db.close()
-
-    def get_ais_df(self) -> pd.DataFrame:
-        """ワールドエディタ用にすべてのAI一覧をDataFrameとして取得する"""
-        db = self.SessionLocal()
-        try:
-            query = db.query(AIModel)
-            df = pd.read_sql(query.statement, query.session.bind)
-            df["SYSTEMPROMPT_SNIPPET"] = df["SYSTEMPROMPT"].str.slice(0, 40) + "..."
-            return df[
-                [
-                    "AIID",
-                    "AINAME",
-                    "HOME_CITYID",
-                    "DEFAULT_MODEL",
-                    "IS_DISPATCHED",
-                    "DESCRIPTION",
-                    "SYSTEMPROMPT_SNIPPET",
-                ]
-            ]
         finally:
             db.close()
 

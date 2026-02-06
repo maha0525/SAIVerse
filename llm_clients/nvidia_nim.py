@@ -162,8 +162,8 @@ class NvidiaNIMClient(OpenAIClient):
                 else:
                     raise
 
-        from .base import raw_logger
-        raw_logger.debug("Nvidia NIM raw:\n%s", json.dumps(resp_json, indent=2, ensure_ascii=False))
+        from .base import get_llm_logger
+        get_llm_logger().debug("Nvidia NIM raw:\n%s", json.dumps(resp_json, indent=2, ensure_ascii=False))
 
         # Extract tool call arguments
         choices = resp_json.get("choices", [])
@@ -206,7 +206,7 @@ class NvidiaNIMClient(OpenAIClient):
         For structured output, uses guided_json in extra_body instead of response_format.
         """
         from tools import OPENAI_TOOLS_SPEC, TOOL_REGISTRY
-        from tools.defs import parse_tool_result
+        from tools.core import parse_tool_result
         from .openai import _prepare_openai_messages
 
         default_tools = OPENAI_TOOLS_SPEC if tools is None else tools
@@ -239,9 +239,16 @@ class NvidiaNIMClient(OpenAIClient):
                 )
             except Exception:
                 logging.exception("Nvidia NIM structured output call failed")
-                return "エラーが発生しました。"
+                raise RuntimeError("NVIDIA NIM API call failed")
 
             self._store_reasoning([])
+            # Check for empty response (structured output should have content)
+            if not text_body.strip():
+                logging.error(
+                    "[nvidia_nim] Empty structured output response. "
+                    "Model returned empty content."
+                )
+                raise RuntimeError("Nvidia NIM returned empty structured output response")
             if snippets:
                 prefix = "\n".join(snippets)
                 return prefix + ("\n" if text_body and prefix else "") + text_body

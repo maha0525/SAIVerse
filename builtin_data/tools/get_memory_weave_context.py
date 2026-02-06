@@ -132,13 +132,22 @@ def _get_chronicle_context(conn: sqlite3.Connection, max_entries: int = 50) -> s
 
 
 def _get_memopedia_context(conn: sqlite3.Connection) -> str:
-    """Get Memopedia context (page titles, keywords, summaries)."""
+    """Get Memopedia context (page titles, summaries, optionally content for vivid pages).
+    
+    Uses the unified get_tree_markdown() method for consistent formatting.
+    Keywords are excluded to reduce token usage.
+    """
     try:
         from sai_memory.memopedia import Memopedia, init_memopedia_tables
         
         # Initialize tables if needed
         init_memopedia_tables(conn)
         memopedia = Memopedia(conn)
+        
+        # Use the unified get_tree_markdown method
+        # - include_keywords=False for lighter context
+        # - show_markers=False since we don't need [OPEN]/[-] markers
+        # Note: This doesn't handle vividness, so we need custom logic for that
         
         tree = memopedia.get_tree()
         LOGGER.info("_get_memopedia_context: tree keys=%s", list(tree.keys()))
@@ -164,26 +173,14 @@ def _get_memopedia_context(conn: sqlite3.Connection) -> str:
                     elif vividness == "faint":
                         lines.append(f"{prefix}- {page['title']}")
 
-                    # rough: Title + summary + keywords (default)
+                    # rough: Title + summary (no keywords for lighter context)
                     elif vividness == "rough":
-                        keywords = page.get("keywords", [])
-                        if keywords:
-                            kw_str = f" [キーワード: {', '.join(keywords)}]"
-                        else:
-                            kw_str = ""
-                        lines.append(f"{prefix}- {page['title']}: {page['summary']}{kw_str}")
+                        lines.append(f"{prefix}- {page['title']}: {page['summary']}")
 
-                    # vivid: Title + summary + keywords + full content
+                    # vivid: Title + summary + full content (no keywords)
                     elif vividness == "vivid":
-                        keywords = page.get("keywords", [])
-                        if keywords:
-                            kw_str = f" [キーワード: {', '.join(keywords)}]"
-                        else:
-                            kw_str = ""
                         summary = page['summary']
-                        # Need to fetch content from database
-                        # For now, we'll need to pass full page data including content
-                        lines.append(f"{prefix}- **{page['title']}**: {summary}{kw_str}")
+                        lines.append(f"{prefix}- **{page['title']}**: {summary}")
                         # Add content if available
                         content = page.get("content", "")
                         if content:

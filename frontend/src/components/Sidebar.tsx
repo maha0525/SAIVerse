@@ -2,9 +2,11 @@
 
 import { useEffect, useState, useRef } from 'react';
 import styles from './Sidebar.module.css';
-import { Settings, Zap } from 'lucide-react';
+import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle } from 'lucide-react';
 import GlobalSettingsModal from './GlobalSettingsModal';
 import UserProfileModal from './UserProfileModal';
+import PersonaWizard from './PersonaWizard';
+import TutorialSelectModal from './tutorial/TutorialSelectModal';
 
 interface UserStatus {
     is_online: boolean;  // Backward compatibility
@@ -21,7 +23,7 @@ interface Building {
 }
 
 interface SidebarProps {
-    onMove?: () => void;
+    onMove?: (buildingId: string) => void;
     isOpen: boolean;
     onOpen: () => void;
     onClose: () => void;
@@ -30,8 +32,14 @@ interface SidebarProps {
 export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProps) {
     const [status, setStatus] = useState<UserStatus | null>(null);
     const [buildings, setBuildings] = useState<Building[]>([]);
+    const [cityId, setCityId] = useState<number | null>(null);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+    const [isWizardOpen, setIsWizardOpen] = useState(false);
+    const [isCreateBuildingOpen, setIsCreateBuildingOpen] = useState(false);
+    const [newBuildingName, setNewBuildingName] = useState('');
+    const [isCreatingBuilding, setIsCreatingBuilding] = useState(false);
+    const [isTutorialSelectOpen, setIsTutorialSelectOpen] = useState(false);
 
     // Swipe Logic for Control
     const startX = useRef<number | null>(null);
@@ -48,6 +56,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
             if (buildingsRes.ok) {
                 const data = await buildingsRes.json();
                 setBuildings(data.buildings || []);
+                if (data.city_id != null) setCityId(data.city_id);
             }
         } catch (err) {
             console.error("Sidebar fetch error", err);
@@ -123,12 +132,39 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
                 const data = await res.json();
                 if (data.success) {
                     refreshData();
-                    if (onMove) onMove();
+                    if (onMove) onMove(buildingId);
                     onClose(); // Close sidebar on nav
                 }
             }
         } catch (err) {
             console.error("Move error", err);
+        }
+    };
+
+    const handleCreateBuilding = async () => {
+        if (!newBuildingName.trim() || cityId == null) return;
+        setIsCreatingBuilding(true);
+        try {
+            const res = await fetch('/api/world/buildings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: newBuildingName.trim(),
+                    description: '',
+                    capacity: 10,
+                    system_instruction: '',
+                    city_id: cityId,
+                })
+            });
+            if (res.ok) {
+                setNewBuildingName('');
+                setIsCreateBuildingOpen(false);
+                refreshData();
+            }
+        } catch (err) {
+            console.error("Create building error", err);
+        } finally {
+            setIsCreatingBuilding(false);
         }
     };
 
@@ -193,30 +229,48 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
                 onTouchStart={handleSidebarTouchStart}
                 onTouchMove={handleSidebarTouchMove}
             >
-                {/* Profile Section */}
-                <div
-                    className={styles.profileSection}
-                    onClick={() => setIsProfileModalOpen(true)}
-                    style={{ cursor: 'pointer' }}
-                >
-                    <img
-                        src={status?.avatar || "/api/static/icons/user.png"}
-                        alt="User"
-                        className={styles.avatar}
-                        onError={(e) => { e.currentTarget.src = "https://placehold.co/48x48?text=U"; }}
-                    />
-                    <div className={styles.userInfo}>
-                        <span className={styles.userName}>{status?.display_name || "Guest"}</span>
-                        <div className={`${styles.userStatus} ${styles[status?.presence_status || 'offline']}`}>
-                            <span style={{ fontSize: '1.2em' }}>•</span>
-                            {status?.presence_status === 'online' ? 'Online' :
-                                status?.presence_status === 'away' ? 'Away' : 'Offline'}
-                        </div>
-                    </div>
+                {/* Create Persona Button */}
+                <div style={{ padding: '0 1rem 1rem 1rem' }}>
+                    <button
+                        onClick={() => setIsWizardOpen(true)}
+                        className={styles.createPersonaBtn}
+                    >
+                        <UserPlus size={18} />
+                        ペルソナを作成
+                    </button>
                 </div>
 
                 {/* Navigation */}
-                <div className={styles.sectionTitle}>Locations</div>
+                <div className={styles.sectionTitleRow}>
+                    <div className={styles.sectionTitle}>場所</div>
+                    <button
+                        className={styles.addBuildingBtn}
+                        onClick={() => setIsCreateBuildingOpen(v => !v)}
+                        title="Buildingを作成"
+                    >
+                        {isCreateBuildingOpen ? <X size={14} /> : <Plus size={14} />}
+                    </button>
+                </div>
+                {isCreateBuildingOpen && (
+                    <div className={styles.createBuildingForm}>
+                        <input
+                            type="text"
+                            className={styles.createBuildingInput}
+                            placeholder="Building名..."
+                            value={newBuildingName}
+                            onChange={e => setNewBuildingName(e.target.value)}
+                            onKeyDown={e => { if (e.key === 'Enter') handleCreateBuilding(); }}
+                            autoFocus
+                        />
+                        <button
+                            className={styles.createBuildingSubmit}
+                            onClick={handleCreateBuilding}
+                            disabled={!newBuildingName.trim() || isCreatingBuilding}
+                        >
+                            {isCreatingBuilding ? '...' : '作成'}
+                        </button>
+                    </div>
+                )}
                 <div className={styles.buildingList}>
                     {buildings.map(b => (
                         <div
@@ -231,7 +285,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
                 </div>
 
                 {/* System Section */}
-                <div className={styles.sectionTitle}>System</div>
+                <div className={styles.sectionTitle}>システム</div>
                 <div className={styles.buildingList} style={{ flex: 'none', marginBottom: '1rem' }}>
                     <div
                         className={styles.buildingItem}
@@ -241,19 +295,54 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
                         }}
                     >
                         <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                            <Zap size={16} /> Phenomenon Rules
+                            <Zap size={16} /> フェノメノン
+                        </span>
+                    </div>
+                    <div
+                        className={styles.buildingItem}
+                        onClick={() => {
+                            window.location.href = '/usage';
+                            if (onClose) onClose();
+                        }}
+                    >
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <BarChart2 size={16} /> API使用状況
+                        </span>
+                    </div>
+                    <div
+                        className={styles.buildingItem}
+                        onClick={() => setIsTutorialSelectOpen(true)}
+                    >
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <HelpCircle size={16} /> チュートリアル
                         </span>
                     </div>
                 </div>
 
-                {/* Global Settings Trigger */}
+                {/* Footer: Settings + Profile */}
                 <div className={styles.settingsFooter}>
-                    <button
-                        onClick={() => setIsSettingsOpen(true)}
-                        className={styles.settingsBtn}
-                    >
-                        <Settings size={18} /> Settings
-                    </button>
+                    <div className={styles.footerRow}>
+                        <button
+                            onClick={() => setIsSettingsOpen(true)}
+                            className={styles.settingsBtnIcon}
+                            title="設定"
+                        >
+                            <Settings size={20} />
+                        </button>
+                        <div
+                            className={styles.profileCompact}
+                            onClick={() => setIsProfileModalOpen(true)}
+                        >
+                            <img
+                                src={status?.avatar || "/api/static/icons/user.png"}
+                                alt="User"
+                                className={styles.avatarSmall}
+                                onError={(e) => { e.currentTarget.src = "https://placehold.co/32x32?text=U"; }}
+                            />
+                            <span className={styles.userNameSmall}>{status?.display_name || "Guest"}</span>
+                            <span className={`${styles.statusDot} ${styles[status?.presence_status || 'offline']}`} />
+                        </div>
+                    </div>
                 </div>
 
                 <GlobalSettingsModal
@@ -268,6 +357,23 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
                     currentAvatar={status?.avatar ?? null}
                     currentEmail={status?.email}
                     onSaveSuccess={refreshData}
+                />
+
+                <PersonaWizard
+                    isOpen={isWizardOpen}
+                    onClose={() => {
+                        setIsWizardOpen(false);
+                        refreshData();
+                    }}
+                    onComplete={() => {
+                        refreshData();
+                        if (onMove) onMove();
+                    }}
+                />
+
+                <TutorialSelectModal
+                    isOpen={isTutorialSelectOpen}
+                    onClose={() => setIsTutorialSelectOpen(false)}
                 />
             </aside>
         </>

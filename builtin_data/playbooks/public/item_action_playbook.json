@@ -1,0 +1,150 @@
+{
+  "name": "item_action",
+  "description": "Perform item operations: view content, pick up from building, place in building, or use items",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "User request about item interaction"
+    }
+  ],
+  "context_requirements": {
+    "history_depth": "full",
+    "inventory": true,
+    "building_items": true,
+    "system_prompt": true
+  },
+  "router_callable": true,
+  "nodes": [
+    {
+      "id": "decide_action",
+      "type": "llm",
+      "model_type": "lightweight",
+      "action": "ユーザーの要求を分析し、アイテム操作の種類を決定してください。\n\n## 操作の種類（必ず1つ選択）\n- **view**: アイテムの内容を閲覧する（画像を見る、ドキュメントを読む、内容を確認する）\n- **pickup**: 建物にあるアイテムを自分のインベントリに拾う（「拾う」「取る」「持つ」）\n- **place**: 自分のインベントリから建物にアイテムを置く（「置く」「渡す」「出す」）\n- **use**: アイテムを使用する（説明の更新、内容の編集、その他アイテム固有の効果）\n\n## 選択の注意点\n- 「拾う」「取る」等の要求 → **pickup**を選択\n- 「見せて」「読んで」「確認して」等の要求 → **view**を選択\n- 「置いて」「渡して」等の要求 → **place**を選択\n- 「書き換えて」「修正して」「使って」等の要求 → **use**を選択\n\n## アイテム位置の制約\n- pickup: 建物内のアイテムのみ対象\n- place: インベントリのアイテムのみ対象\n- view: 建物内またはインベントリのアイテムが対象\n- use: 建物内またはインベントリのアイテムが対象",
+      "next": null,
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "reasoning": {
+            "type": "string",
+            "description": "Why this action was chosen"
+          },
+          "action": {
+            "type": "string",
+            "enum": ["view", "pickup", "place", "use"],
+            "description": "Type of item action to perform"
+          },
+          "item_id": {
+            "type": "string",
+            "description": "ID of the item to interact with"
+          },
+          "item_name": {
+            "type": "string",
+            "description": "Human-readable name of the item for logging"
+          }
+        },
+        "required": ["reasoning", "action", "item_id", "item_name"]
+      },
+      "output_key": "params",
+      "conditional_next": {
+        "field": "params.action",
+        "cases": {
+          "view": "do_view",
+          "pickup": "do_pickup",
+          "place": "do_place",
+          "use": "prepare_use"
+        }
+      }
+    },
+    {
+      "id": "do_view",
+      "type": "tool",
+      "action": "item_view",
+      "args_input": {
+        "item_id": "params.item_id"
+      },
+      "output_key": "view_result",
+      "next": "record_view"
+    },
+    {
+      "id": "record_view",
+      "type": "memorize",
+      "action": "【アイテム閲覧】{params.item_name}\n\n{view_result}",
+      "role": "assistant",
+      "tags": ["item", "view"],
+      "next": null
+    },
+    {
+      "id": "do_pickup",
+      "type": "tool",
+      "action": "item_pickup",
+      "args_input": {
+        "item_id": "params.item_id"
+      },
+      "output_key": "pickup_result",
+      "next": "record_pickup"
+    },
+    {
+      "id": "record_pickup",
+      "type": "memorize",
+      "action": "【アイテム取得】{params.item_name}を拾った。\n結果: {pickup_result}",
+      "role": "assistant",
+      "tags": ["item", "pickup"],
+      "next": null
+    },
+    {
+      "id": "do_place",
+      "type": "tool",
+      "action": "item_place",
+      "args_input": {
+        "item_id": "params.item_id"
+      },
+      "output_key": "place_result",
+      "next": "record_place"
+    },
+    {
+      "id": "record_place",
+      "type": "memorize",
+      "action": "【アイテム配置】{params.item_name}を置いた。\n結果: {place_result}",
+      "role": "assistant",
+      "tags": ["item", "place"],
+      "next": null
+    },
+    {
+      "id": "prepare_use",
+      "type": "llm",
+      "action": "アイテム「{params.item_name}」を使用します。ユーザーの要求に基づいて、使用方法をJSON形式で生成してください。\n\n## 使用タイプ\n- update_description: アイテムの説明文を更新する\n- patch_content: ドキュメントの内容を部分的に修正する\n\n## JSON形式\n```json\n{\"action_type\": \"update_description\", \"description\": \"新しい説明文\"}\n```\nまたは\n```json\n{\"action_type\": \"patch_content\", \"patch\": \"修正内容\"}\n```",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "action_json": {
+            "type": "string",
+            "description": "JSON string for item_use tool"
+          }
+        },
+        "required": ["action_json"]
+      },
+      "output_key": "use_params",
+      "next": "do_use"
+    },
+    {
+      "id": "do_use",
+      "type": "tool",
+      "action": "item_use",
+      "args_input": {
+        "item_id": "params.item_id",
+        "action_json": "use_params.action_json"
+      },
+      "output_key": "use_result",
+      "next": "record_use"
+    },
+    {
+      "id": "record_use",
+      "type": "memorize",
+      "action": "【アイテム使用】{params.item_name}を使用した。\n使用内容: {use_params.action_json}\n結果: {use_result}",
+      "role": "assistant",
+      "tags": ["item", "use"],
+      "next": null
+    }
+  ],
+  "start_node": "decide_action"
+}

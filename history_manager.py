@@ -251,6 +251,43 @@ class HistoryManager:
             selected.append(msg)
         return list(reversed(selected))
 
+    def get_recent_history_by_count(
+        self,
+        max_messages: int,
+        *,
+        required_tags: Optional[List[str]] = None,
+        pulse_id: Optional[str] = None,
+    ) -> List[Dict[str, str]]:
+        """Retrieves recent messages from persona history up to a message count limit."""
+        if self.memory_adapter is not None:
+            if not self.memory_adapter.is_ready():
+                LOGGER.debug("SAIMemory adapter not ready for %s; falling back to in-memory", self.persona_id)
+            else:
+                LOGGER.debug(
+                    "Fetching recent persona history from SAIMemory for %s (max_messages=%d)",
+                    self.persona_id,
+                    max_messages,
+                )
+                msgs = self.memory_adapter.recent_persona_messages_by_count(
+                    max_messages,
+                    required_tags=required_tags,
+                    pulse_id=pulse_id,
+                )
+                LOGGER.debug(
+                    "SAIMemory returned %d persona messages for %s",
+                    len(msgs),
+                    self.persona_id,
+                )
+                return msgs
+
+        # Fallback to in-memory
+        selected: List[Dict[str, str]] = []
+        for msg in reversed(self.messages):
+            selected.append(msg)
+            if len(selected) >= max_messages:
+                break
+        return list(reversed(selected))
+
     def get_recent_history_balanced(
         self,
         max_chars: int,

@@ -44,11 +44,13 @@ class BuildingUpdate(BaseModel):
     tool_ids: List[int]
     auto_interval: int
     image_path: Optional[str] = None  # Building interior image for LLM visual context
+    extra_prompt_files: Optional[List[str]] = None  # Additional prompt files for this building
 
 class AICreate(BaseModel):
     name: str
     system_prompt: str
     home_city_id: int
+    ai_id: Optional[str] = None  # Custom ID (optional, auto-generated if not provided)
 
 class AIUpdate(BaseModel):
     name: str
@@ -122,16 +124,25 @@ def create_building(b: BuildingCreate, manager: SAIVerseManager = Depends(get_ma
 
 @router.put("/buildings/{building_id}")
 def update_building(building_id: str, b: BuildingUpdate, manager: SAIVerseManager = Depends(get_manager)):
-    return manager.update_building(building_id, b.name, b.capacity, b.description, b.system_instruction, b.city_id, b.tool_ids, b.auto_interval, b.image_path)
+    return manager.update_building(building_id, b.name, b.capacity, b.description, b.system_instruction, b.city_id, b.tool_ids, b.auto_interval, b.image_path, b.extra_prompt_files)
 
 @router.delete("/buildings/{building_id}")
 def delete_building(building_id: str, manager: SAIVerseManager = Depends(get_manager)):
     return manager.delete_building(building_id)
 
+@router.get("/prompts/available")
+def get_available_prompts():
+    """Get list of available prompt files from prompts directories."""
+    from data_paths import iter_files, PROMPTS_DIR
+    prompts = []
+    for path in iter_files(PROMPTS_DIR, "*.txt"):
+        prompts.append(path.name)
+    return sorted(prompts)
+
 # AI
 @router.post("/ais")
 def create_ai(ai: AICreate, manager: SAIVerseManager = Depends(get_manager)):
-    return manager.create_ai(ai.name, ai.system_prompt, ai.home_city_id)
+    return manager.create_ai(ai.name, ai.system_prompt, ai.home_city_id, ai.ai_id)
 
 @router.put("/ais/{ai_id}")
 def update_ai(ai_id: str, ai: AIUpdate, manager: SAIVerseManager = Depends(get_manager)):

@@ -2,17 +2,37 @@
 
 import { useState, useRef, useEffect, KeyboardEvent, ChangeEvent, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
+import remarkBreaks from 'remark-breaks';
 import styles from './page.module.css';
 import Sidebar from '@/components/Sidebar';
 import ChatOptions from '@/components/ChatOptions';
 import RightSidebar from '@/components/RightSidebar';
 import PeopleModal from '@/components/PeopleModal';
-import { Send, Paperclip, MapPin, Settings, X, Info, Users, Menu } from 'lucide-react';
+import TutorialWizard from '@/components/tutorial/TutorialWizard';
+import { Send, Paperclip, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
 
 interface MessageImage {
     url: string;
     mime_type?: string;
+}
+
+interface MessageLLMUsage {
+    model: string;
+    model_display_name?: string;
+    input_tokens: number;
+    output_tokens: number;
+    cached_tokens?: number;  // Tokens served from cache
+    cost_usd?: number;
+}
+
+interface MessageLLMUsageTotal {
+    total_input_tokens: number;
+    total_output_tokens: number;
+    total_cached_tokens?: number;  // Total cached tokens across all calls
+    total_cost_usd: number;
+    call_count: number;
+    models_used: string[];
 }
 
 interface Message {
@@ -23,6 +43,37 @@ interface Message {
     avatar?: string;
     sender?: string;
     images?: MessageImage[];
+    llm_usage?: MessageLLMUsage;
+    llm_usage_total?: MessageLLMUsageTotal;
+    // Error information
+    isError?: boolean;
+    errorCode?: string;
+    errorDetail?: string;
+}
+
+// File attachment types for upload
+interface FileAttachment {
+    base64: string;
+    name: string;
+    type: 'image' | 'document' | 'unknown';
+    mimeType: string;
+}
+
+// File type detection
+const TEXT_EXTENSIONS = new Set(['txt', 'md', 'py', 'js', 'ts', 'tsx', 'json', 'yaml', 'yml', 'csv',
+    'html', 'css', 'xml', 'log', 'sh', 'bat', 'sql', 'java', 'c', 'cpp',
+    'h', 'hpp', 'go', 'rs', 'rb', 'swift', 'kt', 'scala', 'r', 'lua', 'pl']);
+const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']);
+
+function getFileType(filename: string, mimeType: string): 'image' | 'document' | 'unknown' {
+    const ext = filename.split('.').pop()?.toLowerCase() || '';
+    if (IMAGE_EXTENSIONS.has(ext) || mimeType.startsWith('image/')) {
+        return 'image';
+    }
+    if (TEXT_EXTENSIONS.has(ext) || mimeType.startsWith('text/')) {
+        return 'document';
+    }
+    return 'unknown';
 }
 
 export default function Home() {
@@ -47,6 +98,19 @@ export default function Home() {
     const [isOptionsOpen, setIsOptionsOpen] = useState(false);
     const [isInfoOpen, setIsInfoOpen] = useState(false); // Default closed to prevent mobile flash
     const [moveTrigger, setMoveTrigger] = useState(0); // To trigger RightSidebar refresh
+    const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null); // Track which message was copied
+
+    // Copy message content to clipboard
+    const handleCopyMessage = useCallback(async (messageId: string, content: string) => {
+        try {
+            await navigator.clipboard.writeText(content);
+            setCopiedMessageId(messageId);
+            // Reset after 2 seconds
+            setTimeout(() => setCopiedMessageId(null), 2000);
+        } catch (err) {
+            console.error('Failed to copy:', err);
+        }
+    }, []);
 
     useEffect(() => {
         // Detect mobile device (touch-based or narrow screen)
@@ -64,6 +128,28 @@ export default function Home() {
         }
 
         return () => window.removeEventListener('resize', checkMobile);
+    }, []);
+
+    // Check tutorial status on mount
+    useEffect(() => {
+        const checkTutorial = async () => {
+            try {
+                const res = await fetch('/api/tutorial/status');
+                if (res.ok) {
+                    const data = await res.json();
+                    // Show tutorial if not completed or if initial setup is needed
+                    if (!data.tutorial_completed || data.needs_initial_setup) {
+                        setShowTutorial(true);
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to check tutorial status', e);
+            } finally {
+                setTutorialChecked(true);
+            }
+        };
+
+        checkTutorial();
     }, []);
 
     // Auto-resize textarea based on content (max 10 lines)
@@ -90,11 +176,21 @@ export default function Home() {
     }, [inputValue, adjustTextareaHeight]);
     const [isPeopleModalOpen, setIsPeopleModalOpen] = useState(false);
     const [selectedPlaybook, setSelectedPlaybook] = useState<string | null>(null);
-    const [attachment, setAttachment] = useState<string | null>(null); // Base64
-    const [attachmentName, setAttachmentName] = useState<string | null>(null);
+    const [playbookParams, setPlaybookParams] = useState<Record<string, any>>({});
+    const [selectedModel, setSelectedModel] = useState<string>(''); // Model ID selected in Chat Options
+    const [selectedModelDisplayName, setSelectedModelDisplayName] = useState<string>(''); // Model display name
+    const [isDragOver, setIsDragOver] = useState(false); // Drag & drop state
+    const [attachments, setAttachments] = useState<FileAttachment[]>([]); // Multiple attachments
     const fileInputRef = useRef<HTMLInputElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const [isMobile, setIsMobile] = useState(false);
+    const [currentBuildingName, setCurrentBuildingName] = useState<string>('SAIVerse');
+    const [currentBuildingId, setCurrentBuildingId] = useState<string | null>(null);
+    const currentBuildingIdRef = useRef<string | null>(null);
+
+    // Tutorial state
+    const [showTutorial, setShowTutorial] = useState(false);
+    const [tutorialChecked, setTutorialChecked] = useState(false);
     const swipeStartX = useRef<number | null>(null);
     const swipeStartY = useRef<number | null>(null);
     const swipeStartTime = useRef<number | null>(null);
@@ -190,7 +286,7 @@ export default function Home() {
     }, [messages, isLoadingMore]);
 
 
-    const fetchHistory = async (beforeId?: string) => {
+    const fetchHistory = async (beforeId?: string, overrideBuildingId?: string) => {
         try {
             if (!beforeId) {
                 setIsHistoryLoaded(false);
@@ -204,16 +300,21 @@ export default function Home() {
 
             const params = new URLSearchParams({ limit: '20' });
             if (beforeId) params.append('before', beforeId);
+            const bid = overrideBuildingId || currentBuildingIdRef.current;
+            if (bid) params.append('building_id', bid);
 
-            console.log(`[DEBUG] Fetching history: before=${beforeId}`);
+            console.log(`[DEBUG] Fetching history: before=${beforeId}, building_id=${bid}`);
 
             const res = await fetch(`/api/chat/history?${params.toString()}`);
             if (res.ok) {
                 const data = await res.json();
                 const newMessages: Message[] = data.history || [];
-                console.log(`[DEBUG] Fetched ${newMessages.length} items`);
+                // Use server-provided has_more flag if available, fallback to count-based heuristic
+                const serverHasMore = data.has_more;
+                const effectiveHasMore = serverHasMore !== undefined ? serverHasMore : (newMessages.length >= 20);
+                console.log(`[DEBUG] Fetched ${newMessages.length} items (beforeId=${beforeId}, server has_more=${serverHasMore}, effectiveHasMore=${effectiveHasMore})`);
 
-                if (newMessages.length < 20) {
+                if (!effectiveHasMore) {
                     setHasMore(false);
                 }
 
@@ -258,9 +359,13 @@ export default function Home() {
         if (chatAreaRef.current) {
             const { scrollTop } = chatAreaRef.current;
             // Use a threshold (e.g. 10px) to catch scrolls near the top
+            if (scrollTop < 10) {
+                console.log(`[DEBUG] Scroll near top: hasMore=${hasMore}, isLoadingMore=${isLoadingMore}, messages.length=${messages.length}, isHistoryLoaded=${isHistoryLoaded}`);
+            }
             if (scrollTop < 10 && hasMore && !isLoadingMore && messages.length > 0 && isHistoryLoaded) {
                 // Determine the oldest message ID
                 const oldestId = messages[0].id;
+                console.log(`[DEBUG] Triggering fetchHistory with before=${oldestId}`);
                 if (oldestId) {
                     fetchHistory(oldestId);
                 }
@@ -268,17 +373,60 @@ export default function Home() {
         }
     };
 
+    const fetchBuildingInfo = async (overrideBuildingId?: string) => {
+        try {
+            const bid = overrideBuildingId || currentBuildingIdRef.current;
+            const url = bid ? `/api/info/details?building_id=${bid}` : '/api/info/details';
+            const res = await fetch(url);
+            if (res.ok) {
+                const data = await res.json();
+                setCurrentBuildingName(data.name || 'SAIVerse');
+            }
+        } catch (err) {
+            console.error('Failed to fetch building info', err);
+        }
+    };
+
     useEffect(() => {
+        // Fetch current building_id for multi-device safety
+        fetch('/api/user/status')
+            .then(res => res.ok ? res.json() : null)
+            .then(data => {
+                if (data?.current_building_id) {
+                    setCurrentBuildingId(data.current_building_id);
+                    currentBuildingIdRef.current = data.current_building_id;
+                }
+            })
+            .catch(err => console.error('Failed to fetch user status', err));
         fetchHistory();
-        // Fetch saved playbook setting from server
+        fetchBuildingInfo();
+        // Fetch saved playbook setting and params from server
         fetch('/api/config/playbook')
             .then(res => res.ok ? res.json() : null)
             .then(data => {
-                if (data && data.playbook) {
-                    setSelectedPlaybook(data.playbook);
+                if (data) {
+                    if (data.playbook) {
+                        setSelectedPlaybook(data.playbook);
+                    }
+                    if (data.playbook_params && Object.keys(data.playbook_params).length > 0) {
+                        setPlaybookParams(data.playbook_params);
+                    }
                 }
             })
             .catch(err => console.error('Failed to load playbook setting', err));
+
+        // Fetch current model setting
+        Promise.all([
+            fetch('/api/config/config').then(res => res.ok ? res.json() : null),
+            fetch('/api/config/models').then(res => res.ok ? res.json() : null)
+        ]).then(([config, models]) => {
+            if (config?.current_model && models) {
+                const modelId = config.current_model;
+                const modelInfo = models.find((m: { id: string; name: string }) => m.id === modelId);
+                setSelectedModel(modelId);
+                setSelectedModelDisplayName(modelInfo?.name || '');
+            }
+        }).catch(err => console.error('Failed to load model setting', err));
     }, []);
 
     // Polling for new messages (schedule-triggered persona speech, etc.)
@@ -300,7 +448,9 @@ export default function Home() {
             if (!newestId) return; // Skip if no real ID
 
             try {
-                const res = await fetch(`/api/chat/history?after=${newestId}&limit=50`);
+                const pollBid = currentBuildingIdRef.current;
+                const bidParam = pollBid ? `&building_id=${pollBid}` : '';
+                const res = await fetch(`/api/chat/history?after=${newestId}&limit=50${bidParam}`);
                 if (res.ok) {
                     const data = await res.json();
                     const newMessages: Message[] = data.history || [];
@@ -325,7 +475,7 @@ export default function Home() {
     }, [isHistoryLoaded]);
 
     const handleSendMessage = async () => {
-        if ((!inputValue.trim() && !attachment) || loadingStatus) return;
+        if ((!inputValue.trim() && attachments.length === 0) || loadingStatus) return;
 
         // Optimistic update
         // Temporary ID for key prop until refreshed
@@ -335,11 +485,13 @@ export default function Home() {
         setInputValue('');
         setLoadingStatus('Thinking...');
 
-        const currentAttachment = attachment;
+        const currentAttachments = attachments;
         const currentPlaybook = selectedPlaybook;
+        const currentPlaybookParams = playbookParams;
 
-        setAttachment(null);
-        setAttachmentName(null);
+        setAttachments([]);
+        // Reset playbook params after sending
+        setPlaybookParams({});
 
         try {
             const res = await fetch('/api/chat/send', {
@@ -347,8 +499,15 @@ export default function Home() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     message: userMsg.content,
-                    attachment: currentAttachment,
-                    meta_playbook: currentPlaybook
+                    building_id: currentBuildingIdRef.current || undefined,
+                    attachments: currentAttachments.length > 0 ? currentAttachments.map(a => ({
+                        data: a.base64,
+                        filename: a.name,
+                        type: a.type,
+                        mime_type: a.mimeType
+                    })) : undefined,
+                    meta_playbook: currentPlaybook,
+                    playbook_params: Object.keys(currentPlaybookParams).length > 0 ? currentPlaybookParams : undefined
                 })
             });
 
@@ -383,7 +542,44 @@ export default function Home() {
                             setLoadingStatus(event.content === 'processing' ? 'Processing...' : event.content);
                         } else if (event.type === 'think') {
                             setLoadingStatus(`Thinking: ${event.content.substring(0, 50)}${event.content.length > 50 ? '...' : ''}`);
+                        } else if (event.type === 'streaming_chunk') {
+                            // Streaming: append chunk to last message or create new one
+                            const avatarUrl = event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined;
+                            setMessages(prev => {
+                                const last = prev[prev.length - 1];
+                                // Check if last message is a streaming message from same persona
+                                if (last && last.role === 'assistant' && last._streaming) {
+                                    // Append to existing streaming message
+                                    return [...prev.slice(0, -1), {
+                                        ...last,
+                                        content: last.content + event.content
+                                    }];
+                                } else {
+                                    // Create new streaming message
+                                    return [...prev, {
+                                        role: 'assistant',
+                                        content: event.content,
+                                        sender: event.persona_name || 'Assistant',
+                                        avatar: avatarUrl,
+                                        timestamp: new Date().toISOString(),
+                                        _streaming: true  // Mark as streaming in progress
+                                    }];
+                                }
+                            });
+                            setLoadingStatus('Streaming...');
+                        } else if (event.type === 'streaming_complete') {
+                            // Mark streaming message as complete
+                            setMessages(prev => {
+                                const last = prev[prev.length - 1];
+                                if (last && last._streaming) {
+                                    const { _streaming, ...rest } = last;
+                                    return [...prev.slice(0, -1), rest];
+                                }
+                                return prev;
+                            });
+                            setLoadingStatus('Thinking...');
                         } else if (event.type === 'say') {
+                            console.log('[DEBUG] Received say event:', event);
                             const avatarUrl = event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined;
 
                             setMessages(prev => [...prev, {
@@ -395,7 +591,14 @@ export default function Home() {
                             }]);
                             setLoadingStatus('Thinking...');
                         } else if (event.type === 'error') {
-                            setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${event.content}` }]);
+                            setMessages(prev => [...prev, {
+                                role: 'assistant',
+                                content: event.content || 'An error occurred',
+                                isError: true,
+                                errorCode: event.error_code || 'unknown',
+                                errorDetail: event.technical_detail,
+                                timestamp: new Date().toISOString()
+                            }]);
                         } else if (event.response) {
                             setMessages(prev => [...prev, { role: 'assistant', content: event.response }]);
                         }
@@ -434,21 +637,91 @@ export default function Home() {
     };
 
     const handleFileUpload = (e: ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files && e.target.files[0]) {
-            const file = e.target.files[0];
-            const reader = new FileReader();
-            reader.onloadend = () => {
-                setAttachment(reader.result as string);
-                setAttachmentName(file.name);
-            };
-            reader.readAsDataURL(file);
+        if (e.target.files && e.target.files.length > 0) {
+            const files = Array.from(e.target.files);
+
+            files.forEach(file => {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                    const base64 = reader.result as string;
+                    const mimeType = file.type || 'application/octet-stream';
+                    const fileType = getFileType(file.name, mimeType);
+
+                    setAttachments(prev => [...prev, {
+                        base64,
+                        name: file.name,
+                        type: fileType,
+                        mimeType
+                    }]);
+                };
+                reader.readAsDataURL(file);
+            });
+
+            // Reset input to allow selecting the same files again
+            if (fileInputRef.current) fileInputRef.current.value = '';
         }
     };
 
-    const clearAttachment = () => {
-        setAttachment(null);
-        setAttachmentName(null);
+    const removeAttachment = (index: number) => {
+        setAttachments(prev => prev.filter((_, i) => i !== index));
+    };
+
+    const clearAllAttachments = () => {
+        setAttachments([]);
         if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+
+    // Drag & Drop handlers (using counter to prevent flickering)
+    const dragCounter = useRef(0);
+
+    const handleDragEnter = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounter.current++;
+        if (dragCounter.current === 1) {
+            setIsDragOver(true);
+        }
+    };
+
+    const handleDragOver = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+    };
+
+    const handleDragLeave = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounter.current--;
+        if (dragCounter.current === 0) {
+            setIsDragOver(false);
+        }
+    };
+
+    const handleDrop = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dragCounter.current = 0;
+        setIsDragOver(false);
+
+        const files = Array.from(e.dataTransfer.files);
+        if (files.length === 0) return;
+
+        files.forEach(file => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+                const base64 = reader.result as string;
+                const mimeType = file.type || 'application/octet-stream';
+                const fileType = getFileType(file.name, mimeType);
+
+                setAttachments(prev => [...prev, {
+                    base64,
+                    name: file.name,
+                    type: fileType,
+                    mimeType
+                }]);
+            };
+            reader.readAsDataURL(file);
+        });
     };
 
     return (
@@ -458,10 +731,13 @@ export default function Home() {
             onTouchMove={handleTouchMove}
         >
             <Sidebar
-                onMove={() => {
+                onMove={(buildingId: string) => {
+                    setCurrentBuildingId(buildingId);
+                    currentBuildingIdRef.current = buildingId;
                     setMessages([]);
                     setIsHistoryLoaded(false);
-                    fetchHistory();
+                    fetchHistory(undefined, buildingId);
+                    fetchBuildingInfo(buildingId);
                     setMoveTrigger(prev => prev + 1);
                 }}
                 isOpen={isLeftOpen}
@@ -473,14 +749,13 @@ export default function Home() {
                 <header className={styles.header}>
                     <div className={styles.headerLeft}>
                         <button
-                            className={styles.mobileMenuBtn} // New class needed
+                            className={styles.mobileMenuBtn}
                             onClick={() => setIsLeftOpen(true)}
                             title="Open Menu"
                         >
                             <Menu size={20} />
                         </button>
-                        <h1>SAIVerse City</h1>
-                        <span className={styles.status}>● Online</span>
+                        <h1>{currentBuildingName}</h1>
                     </div>
                     <div className={styles.headerRight}>
                         <button
@@ -489,13 +764,6 @@ export default function Home() {
                             title="Manage People"
                         >
                             <Users size={20} />
-                        </button>
-                        <button
-                            className={styles.iconBtn}
-                            onClick={() => setIsOptionsOpen(true)}
-                            title="Chat Options"
-                        >
-                            <Settings size={20} />
                         </button>
                         <button
                             className={`${styles.iconBtn} ${isInfoOpen ? styles.active : ''}`}
@@ -515,7 +783,7 @@ export default function Home() {
                     {isLoadingMore && <div style={{ textAlign: 'center', padding: '10px', color: '#666' }}>Loading history...</div>}
                     {messages.map((msg, idx) => (
                         <div key={msg.id || idx} className={`${styles.message} ${styles[msg.role]}`}>
-                            <div className={styles.card}>
+                            <div className={`${styles.card} ${msg.isError ? styles.errorCard : ''} ${msg.isError && msg.errorCode ? styles[`error_${msg.errorCode}`] : ''}`}>
                                 <div className={styles.cardHeader}>
                                     <img
                                         src={msg.avatar || (msg.role === 'user' ? '/api/static/icons/user.png' : '/api/static/icons/host.png')}
@@ -538,13 +806,56 @@ export default function Home() {
                                             ))}
                                         </div>
                                     )}
-                                    <ReactMarkdown>{msg.content}</ReactMarkdown>
+                                    {msg.isError ? (
+                                        <div className={styles.errorContent}>
+                                            <div className={styles.errorHeader}>
+                                                <span className={styles.errorIcon}>
+                                                    {msg.errorCode === 'rate_limit' && '⏱️'}
+                                                    {msg.errorCode === 'timeout' && '⏰'}
+                                                    {msg.errorCode === 'safety_filter' && '🛡️'}
+                                                    {msg.errorCode === 'server_error' && '🔧'}
+                                                    {msg.errorCode === 'empty_response' && '📭'}
+                                                    {msg.errorCode === 'authentication' && '🔑'}
+                                                    {(!msg.errorCode || msg.errorCode === 'unknown' || !['rate_limit', 'timeout', 'safety_filter', 'server_error', 'empty_response', 'authentication'].includes(msg.errorCode)) && '⚠️'}
+                                                </span>
+                                                <span className={styles.errorMessage}>{msg.content}</span>
+                                            </div>
+                                            {msg.errorDetail && (
+                                                <details className={styles.errorDetails}>
+                                                    <summary>Technical Details</summary>
+                                                    <pre>{msg.errorDetail}</pre>
+                                                </details>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        <ReactMarkdown remarkPlugins={[remarkBreaks]}>{msg.content}</ReactMarkdown>
+                                    )}
                                 </div>
-                                {msg.timestamp && (
+                                {(msg.timestamp || msg.llm_usage || msg.llm_usage_total) && (
                                     <div className={styles.cardFooter}>
-                                        {new Date(msg.timestamp).toLocaleString()}
+                                        {msg.timestamp && <span>{new Date(msg.timestamp).toLocaleString()}</span>}
+                                        {msg.llm_usage_total && msg.llm_usage_total.call_count > 1 ? (
+                                            // Show total usage when multiple LLM calls were made
+                                            <span className={styles.llmUsage} title={`Models: ${msg.llm_usage_total.models_used.join(', ')}\nLLM Calls: ${msg.llm_usage_total.call_count}\nTotal Input: ${msg.llm_usage_total.total_input_tokens.toLocaleString()} tokens${msg.llm_usage_total.total_cached_tokens ? ` (${msg.llm_usage_total.total_cached_tokens.toLocaleString()} cached)` : ''}\nTotal Output: ${msg.llm_usage_total.total_output_tokens.toLocaleString()} tokens\nTotal Cost: $${msg.llm_usage_total.total_cost_usd.toFixed(4)}`}>
+                                                {msg.llm_usage_total.call_count} calls · {(msg.llm_usage_total.total_input_tokens + msg.llm_usage_total.total_output_tokens).toLocaleString()} tokens · ${msg.llm_usage_total.total_cost_usd.toFixed(4)}
+                                            </span>
+                                        ) : msg.llm_usage && (
+                                            // Show single call usage
+                                            <span className={styles.llmUsage} title={`Model: ${msg.llm_usage.model}\nInput: ${msg.llm_usage.input_tokens.toLocaleString()} tokens${msg.llm_usage.cached_tokens ? ` (${msg.llm_usage.cached_tokens.toLocaleString()} cached)` : ''}\nOutput: ${msg.llm_usage.output_tokens.toLocaleString()} tokens\nCost: $${(msg.llm_usage.cost_usd || 0).toFixed(4)}`}>
+                                                {msg.llm_usage.model_display_name || msg.llm_usage.model} · {(msg.llm_usage.input_tokens + msg.llm_usage.output_tokens).toLocaleString()} tokens
+                                            </span>
+                                        )}
                                     </div>
                                 )}
+                                <div className={styles.cardActions}>
+                                    <button
+                                        className={`${styles.actionBtn} ${copiedMessageId === (msg.id || `msg-${idx}`) ? styles.copied : ''}`}
+                                        onClick={() => handleCopyMessage(msg.id || `msg-${idx}`, msg.content)}
+                                        title="Copy message"
+                                    >
+                                        {copiedMessageId === (msg.id || `msg-${idx}`) ? <Check size={14} /> : <Copy size={14} />}
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     ))}
@@ -552,24 +863,71 @@ export default function Home() {
                     <div ref={messagesEndRef} />
                 </div>
 
-                <div className={styles.inputArea}>
-                    {attachmentName && (
+                <div
+                    className={styles.inputArea}
+                    onDragEnter={handleDragEnter}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
+                >
+                    {/* Options bar: Model display + settings button */}
+                    <div className={styles.optionsBar}>
+                        <button
+                            className={styles.optionsBtn}
+                            onClick={() => setIsOptionsOpen(true)}
+                            title="Chat Options"
+                        >
+                            <SlidersHorizontal size={16} />
+                            {selectedModelDisplayName ? (
+                                <span className={styles.modelName}>{selectedModelDisplayName}</span>
+                            ) : null}
+                            <ChevronDown size={14} className={styles.chevron} />
+                        </button>
+                    </div>
+
+                    {attachments.length > 0 && (
                         <div style={{
                             fontSize: '0.8rem',
                             marginBottom: '0.5rem',
-                            padding: '0.25rem 0.5rem',
-                            background: '#eee',
-                            borderRadius: '4px',
-                            display: 'inline-flex',
-                            alignItems: 'center',
+                            display: 'flex',
+                            flexWrap: 'wrap',
                             gap: '0.5rem',
-                            color: '#333'
+                            pointerEvents: 'auto'
                         }}>
-                            <span>📎 {attachmentName}</span>
-                            <button onClick={clearAttachment} style={{ border: 'none', background: 'none', cursor: 'pointer', padding: '0 4px' }}><X size={14} /></button>
+                            {attachments.map((att, idx) => (
+                                <div key={idx} style={{
+                                    padding: '0.25rem 0.5rem',
+                                    background: '#eee',
+                                    borderRadius: '4px',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '0.5rem',
+                                    color: '#333'
+                                }}>
+                                    <span>{att.type === 'image' ? '🖼' : '📄'} {att.name}</span>
+                                    <button onClick={() => removeAttachment(idx)} style={{ border: 'none', background: 'none', cursor: 'pointer', padding: '0 4px' }}><X size={14} /></button>
+                                </div>
+                            ))}
+                            {attachments.length > 1 && (
+                                <button onClick={clearAllAttachments} style={{
+                                    fontSize: '0.75rem',
+                                    padding: '0.25rem 0.5rem',
+                                    background: '#ddd',
+                                    border: 'none',
+                                    borderRadius: '4px',
+                                    cursor: 'pointer',
+                                    color: '#666'
+                                }}>Clear All</button>
+                            )}
                         </div>
                     )}
-                    <div className={styles.inputWrapper}>
+                    <div className={`${styles.inputWrapper} ${isDragOver ? styles.inputWrapperDragOver : ''}`}>
+                        {/* Drag & drop indicator */}
+                        {isDragOver && (
+                            <div className={styles.dropIndicator}>
+                                Drop files here to attach
+                            </div>
+                        )}
                         <button
                             className={styles.attachBtn}
                             onClick={() => fileInputRef.current?.click()}
@@ -582,6 +940,8 @@ export default function Home() {
                             ref={fileInputRef}
                             style={{ display: 'none' }}
                             onChange={handleFileUpload}
+                            multiple
+                            accept="image/*,.txt,.md,.py,.js,.ts,.tsx,.json,.yaml,.yml,.csv,.html,.css,.xml,.log,.sh,.sql,.java,.c,.cpp,.go,.rs,.rb"
                         />
                         <textarea
                             ref={textareaRef}
@@ -594,7 +954,7 @@ export default function Home() {
                         <button
                             className={styles.sendBtn}
                             onClick={handleSendMessage}
-                            disabled={!!loadingStatus || (!inputValue.trim() && !attachment)}
+                            disabled={!!loadingStatus || (!inputValue.trim() && attachments.length === 0)}
                         >
                             <Send size={20} />
                         </button>
@@ -613,12 +973,34 @@ export default function Home() {
                 onClose={() => setIsOptionsOpen(false)}
                 currentPlaybook={selectedPlaybook}
                 onPlaybookChange={setSelectedPlaybook}
+                playbookParams={playbookParams}
+                onPlaybookParamsChange={setPlaybookParams}
+                currentModel={selectedModel}
+                onModelChange={(id, displayName) => {
+                    setSelectedModel(id);
+                    setSelectedModelDisplayName(displayName);
+                }}
             />
 
             <PeopleModal
                 isOpen={isPeopleModalOpen}
                 onClose={() => setIsPeopleModalOpen(false)}
             />
+
+            {/* Initial Tutorial Wizard */}
+            {tutorialChecked && (
+                <TutorialWizard
+                    isOpen={showTutorial}
+                    onClose={() => setShowTutorial(false)}
+                    onComplete={(roomId) => {
+                        setShowTutorial(false);
+                        // Reload page to apply new settings
+                        // User move is already handled in TutorialWizard.handleComplete,
+                        // so after reload the page will load the persona's room
+                        window.location.reload();
+                    }}
+                />
+            )}
         </div>
     );
 }

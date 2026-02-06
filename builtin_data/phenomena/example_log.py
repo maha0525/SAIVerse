@@ -5,7 +5,7 @@ phenomena.defs.example_log ― サンプルフェノメノン
 テストや動作確認に使用できる。
 """
 import logging
-from phenomena.defs import PhenomenonSchema
+from phenomena.core import PhenomenonSchema
 
 LOGGER = logging.getLogger(__name__)
 

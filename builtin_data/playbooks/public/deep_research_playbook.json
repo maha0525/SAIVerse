@@ -8,7 +8,7 @@
         }
     ],
     "context_requirements": {
-        "history_depth": "full",
+        "history_depth": "10messages",
         "inventory": false,
         "building_items": true,
         "system_prompt": true
@@ -264,7 +264,7 @@
             "id": "inc_loop",
             "type": "set",
             "assignments": {
-                "loop_count": "{loop_count} + 1"
+                "loop_count": "={loop_count} + 1"
             },
             "next": "check_loop_limit"
         },

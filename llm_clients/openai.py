@@ -6,18 +6,90 @@ import json
 import logging
 import mimetypes
 import os
+import time
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import openai
 from openai import OpenAI
 
 from media_utils import iter_image_media, load_image_bytes_for_llm
-from tools import OPENAI_TOOLS_SPEC, TOOL_REGISTRY
-from tools.defs import parse_tool_result
+from tools import OPENAI_TOOLS_SPEC
 from llm_router import route
 
-from .base import LLMClient, raw_logger
+from .base import LLMClient, get_llm_logger
+from .exceptions import (
+    AuthenticationError,
+    EmptyResponseError as LLMEmptyResponseError,
+    InvalidRequestError,
+    LLMError,
+    LLMTimeoutError,
+    RateLimitError,
+    ServerError,
+)
 from .utils import content_to_text, merge_reasoning_strings, obj_to_dict
+
+
+# Retry configuration
+MAX_RETRIES = 3
+INITIAL_BACKOFF = 1.0  # seconds
+
+
+def _is_rate_limit_error(err: Exception) -> bool:
+    """Check if the error is a rate limit that should be retried."""
+    if isinstance(err, openai.RateLimitError):
+        return True
+    msg = str(err).lower()
+    return (
+        "rate" in msg
+        or "429" in msg
+        or "quota" in msg
+        or "overload" in msg
+    )
+
+
+def _is_server_error(err: Exception) -> bool:
+    """Check if the error is a server error (5xx) that should be retried."""
+    if isinstance(err, openai.APIStatusError):
+        return err.status_code >= 500
+    msg = str(err).lower()
+    return "503" in msg or "502" in msg or "504" in msg or "unavailable" in msg
+
+
+def _is_timeout_error(err: Exception) -> bool:
+    """Check if the error is a timeout that should be retried."""
+    if isinstance(err, openai.APITimeoutError):
+        return True
+    if isinstance(err, openai.APIConnectionError):
+        return True
+    msg = str(err).lower()
+    return "timeout" in msg or "timed out" in msg
+
+
+def _should_retry(err: Exception) -> bool:
+    """Check if the error should trigger a retry."""
+    return _is_rate_limit_error(err) or _is_server_error(err) or _is_timeout_error(err)
+
+
+def _is_authentication_error(err: Exception) -> bool:
+    """Check if the error is an authentication error."""
+    if isinstance(err, openai.AuthenticationError):
+        return True
+    msg = str(err).lower()
+    return "401" in msg or "403" in msg or "authentication" in msg or "invalid api key" in msg
+
+
+def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError:
+    """Convert a generic exception to an appropriate LLMError subclass."""
+    if _is_rate_limit_error(err):
+        return RateLimitError(f"OpenAI {context} failed: rate limit exceeded", err)
+    elif _is_timeout_error(err):
+        return LLMTimeoutError(f"OpenAI {context} failed: timeout", err)
+    elif _is_server_error(err):
+        return ServerError(f"OpenAI {context} failed: server error", err)
+    elif _is_authentication_error(err):
+        return AuthenticationError(f"OpenAI {context} failed: authentication error", err)
+    else:
+        return LLMError(f"OpenAI {context} failed: {err}", err)
 
 
 def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_image_bytes: Optional[int] = None, convert_system_to_user: bool = False) -> List[Any]:
@@ -105,7 +177,7 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
             continue
 
         text = content_to_text(msg.get("content"))
-        if supports_images:
+        if supports_images and role == "user":
             parts: List[Dict[str, Any]] = []
             if text:
                 parts.append({"type": "text", "text": text})
@@ -231,7 +303,10 @@ class OpenAIClient(LLMClient):
         key_env = api_key_env or "OPENAI_API_KEY"
         api_key = api_key or os.getenv(key_env)
         if not api_key:
-            raise RuntimeError(f"{key_env} environment variable is not set.")
+            raise AuthenticationError(
+                f"{key_env} environment variable is not set.",
+                user_message="OpenAI APIキーが設定されていません。管理者にお問い合わせください。"
+            )
 
         client_kwargs: Dict[str, str] = {"api_key": api_key}
         if base_url:
@@ -287,17 +362,32 @@ class OpenAIClient(LLMClient):
     def generate(
         self,
         messages: List[Dict[str, Any]],
-        tools: Optional[list] | None = None,
-        history_snippets: Optional[List[str]] | None = None,
+        tools: Optional[list] = None,
+        history_snippets: Optional[List[str]] = None,
         response_schema: Optional[Dict[str, Any]] = None,
         *,
         temperature: float | None = None,
-    ) -> str:
-        default_tools = OPENAI_TOOLS_SPEC if tools is None else tools
-        if response_schema is not None and tools is None:
-            tools_spec: List[Dict[str, Any]] | list = []
-        else:
-            tools_spec = default_tools
+        **_: Any,
+    ) -> str | Dict[str, Any]:
+        """Unified generate method.
+        
+        Args:
+            messages: Conversation messages
+            tools: Tool specifications. If provided, returns Dict with tool detection.
+                   If None or empty, returns str with text response.
+            history_snippets: Optional history context
+            response_schema: Optional JSON schema for structured output
+            temperature: Optional temperature override
+            
+        Returns:
+            str: Text response when tools is None or empty
+            Dict: Tool detection result when tools is provided, with keys:
+                  - type: "text" | "tool_call"
+                  - content: Generated text (if type is "text")
+                  - tool_name: Tool name (if type is "tool_call")
+                  - tool_args: Tool arguments dict (if type is "tool_call")
+        """
+        tools_spec = tools or []
         use_tools = bool(tools_spec)
         snippets: List[str] = list(history_snippets or [])
         self._store_reasoning([])
@@ -312,7 +402,6 @@ class OpenAIClient(LLMClient):
                 req["temperature"] = temperature
             if response_schema:
                 schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
-                # Add additionalProperties: false recursively for OpenAI strict mode
                 openai_schema = self._add_additional_properties(response_schema)
                 json_schema_config: Dict[str, Any] = {
                     "name": schema_name or "saiverse_structured_output",
@@ -323,8 +412,6 @@ class OpenAIClient(LLMClient):
                     "type": "json_schema",
                     "json_schema": json_schema_config,
                 }
-                # Add structured output backend if specified (for Nvidia NIM, etc.)
-                # Try both locations: inside json_schema and at response_format level
                 if self.structured_output_backend:
                     json_schema_config["backend"] = self.structured_output_backend
                     response_format_config["backend"] = self.structured_output_backend
@@ -333,117 +420,166 @@ class OpenAIClient(LLMClient):
                 logging.debug("response_format: %s", req["response_format"])
             return req
 
+        # Non-tool mode: return str or dict (if response_schema)
         if not use_tools:
-            try:
-                resp = self._create_completion(
-                    model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
-                    n=1,
-                    **_build_request_kwargs(),
-                )
-            except Exception:
-                logging.exception("OpenAI call failed")
-                return "エラーが発生しました。"
+            resp = None
+            last_error: Optional[Exception] = None
 
-            raw_logger.debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
+            for attempt in range(MAX_RETRIES):
+                try:
+                    resp = self._create_completion(
+                        model=self.model,
+                        messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
+                        n=1,
+                        **_build_request_kwargs(),
+                    )
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    last_error = e
+                    if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                        backoff = INITIAL_BACKOFF * (2 ** attempt)
+                        logging.warning(
+                            "[openai] Retryable error (attempt %d/%d): %s. Retrying in %.1fs...",
+                            attempt + 1, MAX_RETRIES, type(e).__name__, backoff
+                        )
+                        time.sleep(backoff)
+                        continue
+                    logging.exception("OpenAI call failed")
+                    raise _convert_to_llm_error(e, "API call")
+
+            if resp is None:
+                if last_error:
+                    raise _convert_to_llm_error(last_error, f"API call after {MAX_RETRIES} retries")
+                raise LLMEmptyResponseError(f"OpenAI API call failed after {MAX_RETRIES} retries with no response")
+
+            get_llm_logger().debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
+
+            # Store usage information
+            if resp.usage:
+                # Check for cached tokens (OpenAI Prompt Caching)
+                cached = 0
+                if hasattr(resp.usage, "prompt_tokens_details") and resp.usage.prompt_tokens_details:
+                    cached = getattr(resp.usage.prompt_tokens_details, "cached_tokens", 0) or 0
+                self._store_usage(
+                    input_tokens=resp.usage.prompt_tokens or 0,
+                    output_tokens=resp.usage.completion_tokens or 0,
+                    cached_tokens=cached,
+                )
+
             choice = resp.choices[0]
             text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
             if not text_body:
                 text_body = choice.message.content or ""
             self._store_reasoning(reasoning_entries)
-            if snippets:
-                prefix = "\n".join(snippets)
-                return prefix + ("\n" if text_body and prefix else "") + text_body
-            return text_body
-
-        user_msg = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
-        decision = route(user_msg, tools_spec)
-
-        try:
-            logging.info("Router decision:\n%s", json.dumps(decision, indent=2, ensure_ascii=False))
-        except Exception:
-            logging.warning("Router decision could not be serialized")
-
-        if decision["call"] == "yes" and decision["tool"]:
-            forced_tool_choice: Any = {"type": "function", "function": {"name": decision["tool"]}}
-        else:
-            forced_tool_choice = "auto"
-
-        try:
-            if tools:
+            
+            if response_schema:
                 try:
-                    logging.info("tools JSON:\n%s", json.dumps(tools, indent=2, ensure_ascii=False))
-                except TypeError:
-                    logging.info("tools contain non-serializable values")
+                    parsed = json.loads(text_body)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except json.JSONDecodeError as e:
+                    logging.warning("[openai] Failed to parse structured output: %s", e)
+                    raise InvalidRequestError(
+                        "Failed to parse JSON response from structured output",
+                        e,
+                        user_message="LLMからの応答を解析できませんでした。再度お試しください。"
+                    ) from e
+            else:
+                # Check for empty response
+                if not text_body.strip():
+                    logging.error(
+                        "[openai] Empty text response. "
+                        "Model returned empty content. finish_reason=%s",
+                        choice.finish_reason
+                    )
+                    raise LLMEmptyResponseError("OpenAI returned empty response")
+                if snippets:
+                    prefix = "\n".join(snippets)
+                    return prefix + ("\n" if text_body and prefix else "") + text_body
+                return text_body
 
-            for i in range(10):
-                tool_choice = forced_tool_choice if i == 0 else "auto"
+        # Tool mode: return Dict with tool detection (no execution)
+        logging.info("[openai] Sending %d tools to API", len(tools_spec))
+        for i, tool in enumerate(tools_spec):
+            logging.info("[openai] Tool[%d]: %s", i, tool)
 
+        resp = None
+        last_error_tool: Optional[Exception] = None
+
+        for attempt in range(MAX_RETRIES):
+            try:
                 resp = self._create_completion(
                     model=self.model,
                     messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
                     tools=tools_spec,
-                    tool_choice=tool_choice,
+                    tool_choice="auto",
                     n=1,
                     **_build_request_kwargs(),
                 )
-                raw_logger.debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
-
-                target_choice = next(
-                    (c for c in resp.choices if getattr(c.message, "tool_calls", [])),
-                    resp.choices[0],
-                )
-                tool_calls = getattr(target_choice.message, "tool_calls", [])
-
-                if not isinstance(tool_calls, list) or len(tool_calls) == 0:
-                    text_body, reasoning_entries = _extract_reasoning_from_openai_message(target_choice.message)
-                    if not text_body:
-                        text_body = target_choice.message.content or ""
-                    self._store_reasoning(reasoning_entries)
-                    prefix = "".join(s + "\n" for s in snippets)
-                    return prefix + text_body
-
-                messages.append(target_choice.message)
-                for tc in tool_calls:
-                    fn = TOOL_REGISTRY.get(tc.function.name)
-                    if fn is None:
-                        raise RuntimeError(f"Unsupported tool: {tc.function.name}")
-                    args = json.loads(tc.function.arguments)
-                    result_text, snippet, file_path, metadata = parse_tool_result(fn(**args))
-                    if snippet:
-                        snippets.append(snippet)
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "name": tc.function.name,
-                            "content": result_text,
-                        }
+                break  # Success, exit retry loop
+            except Exception as e:
+                last_error_tool = e
+                if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                    backoff = INITIAL_BACKOFF * (2 ** attempt)
+                    logging.warning(
+                        "[openai] Retryable error in tool mode (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, MAX_RETRIES, type(e).__name__, backoff
                     )
-                    if file_path:
-                        try:
-                            with open(file_path, "rb") as file_handler:
-                                img_bytes = file_handler.read()
-                            b64 = base64.b64encode(img_bytes).decode("ascii")
-                            mime = mimetypes.guess_type(file_path)[0] or "image/png"
-                            data_url = f"data:{mime};base64,{b64}"
-                            messages.append(
-                                {
-                                    "role": "assistant",
-                                    "content": [
-                                        {"type": "image_url", "image_url": {"url": data_url}}
-                                    ],
-                                }
-                            )
-                        except Exception:
-                            logging.exception("Failed to load file %s", file_path)
-                    if metadata:
-                        self._store_attachment(metadata)
-                continue
-            return "ツール呼び出しが 10 回を超えました。"
-        except Exception:
-            logging.exception("OpenAI call failed")
-            return "エラーが発生しました。"
+                    time.sleep(backoff)
+                    continue
+                logging.exception("OpenAI call failed")
+                raise _convert_to_llm_error(e, "API call (tool mode)")
+
+        if resp is None:
+            if last_error_tool:
+                raise _convert_to_llm_error(last_error_tool, f"API call after {MAX_RETRIES} retries (tool mode)")
+            raise LLMEmptyResponseError(f"OpenAI API call failed after {MAX_RETRIES} retries with no response")
+
+        get_llm_logger().debug("OpenAI raw (tool detection):\n%s", resp.model_dump_json(indent=2))
+
+        # Store usage information
+        if resp.usage:
+            # Check for cached tokens (OpenAI Prompt Caching)
+            cached = 0
+            if hasattr(resp.usage, "prompt_tokens_details") and resp.usage.prompt_tokens_details:
+                cached = getattr(resp.usage.prompt_tokens_details, "cached_tokens", 0) or 0
+            self._store_usage(
+                input_tokens=resp.usage.prompt_tokens or 0,
+                output_tokens=resp.usage.completion_tokens or 0,
+                cached_tokens=cached,
+            )
+
+        choice = resp.choices[0]
+        tool_calls = getattr(choice.message, "tool_calls", [])
+
+        # Extract reasoning if present
+        text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
+        self._store_reasoning(reasoning_entries)
+
+        if tool_calls and len(tool_calls) > 0:
+            tc = tool_calls[0]
+            try:
+                args = json.loads(tc.function.arguments)
+            except json.JSONDecodeError:
+                logging.warning("Tool call arguments invalid JSON: %s", tc.function.arguments)
+                args = {}
+            return {
+                "type": "tool_call",
+                "tool_name": tc.function.name,
+                "tool_args": args,
+                "raw_message": choice.message,
+            }
+        else:
+            content = text_body or choice.message.content or ""
+            # Check for empty text response without tool call
+            if not content.strip():
+                logging.error(
+                    "[openai] Empty text response without tool call. "
+                    "Model returned empty content. finish_reason=%s",
+                    choice.finish_reason
+                )
+                raise LLMEmptyResponseError("OpenAI returned empty response without tool call")
+            return {"type": "text", "content": content}
 
     def generate_stream(
         self,
@@ -454,14 +590,13 @@ class OpenAIClient(LLMClient):
         response_schema: Optional[Dict[str, Any]] = None,
         *,
         temperature: float | None = None,
+        **_: Any,
     ) -> Iterator[str]:
         """
         ユーザ向けに逐次テキストを yield するストリーム版。
         - force_tool_choice: 初回のみ {"type":"function","function":{"name":..}} か "auto"
         - 再帰呼び出し時はデフォルト None → 自動で "auto"
         """
-        if response_schema is not None:
-            logging.warning("Structured streaming output is not supported for OpenAIClient; ignoring response_schema.")
         tools_spec = OPENAI_TOOLS_SPEC if tools is None else tools
         use_tools = bool(tools_spec)
         history_snippets = list(history_snippets or [])
@@ -469,31 +604,95 @@ class OpenAIClient(LLMClient):
         reasoning_chunks: List[str] = []
 
         if not use_tools:
-            try:
-                req_kwargs = dict(self._request_kwargs)
-                if temperature is not None:
-                    req_kwargs["temperature"] = temperature
-                resp = self._create_completion(
-                    model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
-                    n=1,
-                    **req_kwargs,
-                )
-            except Exception:
-                logging.exception("OpenAI call failed")
-                yield "エラーが発生しました。"
-                return
+            resp = None
+            last_stream_error: Optional[Exception] = None
 
-            choice = resp.choices[0]
-            text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
-            if not text_body:
-                text_body = choice.message.content or ""
-            self._store_reasoning(reasoning_entries)
-            prefix = "\n".join(history_snippets) + ("\n" if history_snippets and text_body else "")
-            if prefix:
-                yield prefix
-            if text_body:
-                yield text_body
+            for attempt in range(MAX_RETRIES):
+                try:
+                    req_kwargs = dict(self._request_kwargs)
+                    if temperature is not None:
+                        req_kwargs["temperature"] = temperature
+                    if response_schema:
+                        schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
+                        openai_schema = self._add_additional_properties(response_schema)
+                        json_schema_config: Dict[str, Any] = {
+                            "name": schema_name or "saiverse_structured_output",
+                            "schema": openai_schema,
+                            "strict": True,
+                        }
+                        response_format_config: Dict[str, Any] = {
+                            "type": "json_schema",
+                            "json_schema": json_schema_config,
+                        }
+                        if self.structured_output_backend:
+                            json_schema_config["backend"] = self.structured_output_backend
+                            response_format_config["backend"] = self.structured_output_backend
+                            logging.info("Applying structured_output_backend='%s' to request (stream)", self.structured_output_backend)
+                        req_kwargs["response_format"] = response_format_config
+                    else:
+                        req_kwargs["stream"] = True
+                        req_kwargs["stream_options"] = {"include_usage": True}
+                    resp = self._create_completion(
+                        model=self.model,
+                        messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
+                        n=1,
+                        **req_kwargs,
+                    )
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    last_stream_error = e
+                    if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                        backoff = INITIAL_BACKOFF * (2 ** attempt)
+                        logging.warning(
+                            "[openai] Retryable streaming error (attempt %d/%d): %s. Retrying in %.1fs...",
+                            attempt + 1, MAX_RETRIES, type(e).__name__, backoff
+                        )
+                        time.sleep(backoff)
+                        continue
+                    logging.exception("OpenAI call failed")
+                    raise _convert_to_llm_error(e, "streaming")
+
+            if resp is None:
+                if last_stream_error:
+                    raise _convert_to_llm_error(last_stream_error, f"streaming after {MAX_RETRIES} retries")
+                raise LLMEmptyResponseError(f"OpenAI streaming failed after {MAX_RETRIES} retries with no response")
+
+            # Handle streaming vs non-streaming response
+            if req_kwargs.get("stream"):
+                # Streaming mode: iterate over chunks
+                prefix = "\n".join(history_snippets)
+                if prefix:
+                    yield prefix + "\n"
+                last_chunk = None
+                for chunk in resp:
+                    last_chunk = chunk
+                    if chunk.choices and chunk.choices[0].delta:
+                        content = chunk.choices[0].delta.content
+                        if content:
+                            yield content
+                # Store usage from last chunk (when stream_options.include_usage=True)
+                if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
+                    # Check for cached tokens (OpenAI Prompt Caching)
+                    cached = 0
+                    if hasattr(last_chunk.usage, "prompt_tokens_details") and last_chunk.usage.prompt_tokens_details:
+                        cached = getattr(last_chunk.usage.prompt_tokens_details, "cached_tokens", 0) or 0
+                    self._store_usage(
+                        input_tokens=last_chunk.usage.prompt_tokens or 0,
+                        output_tokens=last_chunk.usage.completion_tokens or 0,
+                        cached_tokens=cached,
+                    )
+            else:
+                # Non-streaming mode (response_schema case)
+                choice = resp.choices[0]
+                text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
+                if not text_body:
+                    text_body = choice.message.content or ""
+                self._store_reasoning(reasoning_entries)
+                prefix = "\n".join(history_snippets) + ("\n" if history_snippets and text_body else "")
+                if prefix:
+                    yield prefix
+                if text_body:
+                    yield text_body
             return
 
         if force_tool_choice is None:
@@ -509,19 +708,39 @@ class OpenAIClient(LLMClient):
             else:
                 force_tool_choice = "auto"
 
-        try:
-            resp = self._create_completion(
-                model=self.model,
-                messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
-                tools=tools_spec,
-                tool_choice=force_tool_choice,
-                stream=True,
-                **self._request_kwargs,
-            )
-        except Exception:
-            logging.exception("OpenAI call failed")
-            yield "エラーが発生しました。"
-            return
+        resp = None
+        last_tool_stream_error: Optional[Exception] = None
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                stream_req_kwargs = dict(self._request_kwargs)
+                stream_req_kwargs["stream_options"] = {"include_usage": True}
+                resp = self._create_completion(
+                    model=self.model,
+                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
+                    tools=tools_spec,
+                    tool_choice=force_tool_choice,
+                    stream=True,
+                    **stream_req_kwargs,
+                )
+                break  # Success, exit retry loop
+            except Exception as e:
+                last_tool_stream_error = e
+                if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                    backoff = INITIAL_BACKOFF * (2 ** attempt)
+                    logging.warning(
+                        "[openai] Retryable tool streaming error (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, MAX_RETRIES, type(e).__name__, backoff
+                    )
+                    time.sleep(backoff)
+                    continue
+                logging.exception("OpenAI call failed")
+                raise _convert_to_llm_error(e, "JSON mode call")
+
+        if resp is None:
+            if last_tool_stream_error:
+                raise _convert_to_llm_error(last_tool_stream_error, f"JSON mode call after {MAX_RETRIES} retries")
+            raise LLMEmptyResponseError(f"OpenAI JSON mode call failed after {MAX_RETRIES} retries with no response")
 
         call_buffer: dict[str, dict] = {}
         state = "TEXT"
@@ -529,8 +748,10 @@ class OpenAIClient(LLMClient):
 
         try:
             current_call_id = None
+            last_chunk = None
 
             for chunk in resp:
+                last_chunk = chunk
                 delta = chunk.choices[0].delta
 
                 if delta.tool_calls:
@@ -576,86 +797,60 @@ class OpenAIClient(LLMClient):
                 if additional_reasoning:
                     reasoning_chunks.extend(additional_reasoning)
 
-            if not call_buffer:
-                self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
+            # Store usage from last chunk (when stream_options.include_usage=True)
+            if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
+                # Check for cached tokens (OpenAI Prompt Caching)
+                cached = 0
+                if hasattr(last_chunk.usage, "prompt_tokens_details") and last_chunk.usage.prompt_tokens_details:
+                    cached = getattr(last_chunk.usage.prompt_tokens_details, "cached_tokens", 0) or 0
+                self._store_usage(
+                    input_tokens=last_chunk.usage.prompt_tokens or 0,
+                    output_tokens=last_chunk.usage.completion_tokens or 0,
+                    cached_tokens=cached,
+                )
+
+            # Store reasoning
+            self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
+
+            # Store tool detection result if tool calls were detected
             if call_buffer:
                 logging.debug("call_buffer final: %s", json.dumps(call_buffer, indent=2, ensure_ascii=False))
-                assistant_call_msg = {"role": "assistant", "content": None, "tool_calls": []}
-                for tc in call_buffer.values():
-                    name = tc["name"].strip()
-                    arg_str = tc["arguments"].strip()
+                # Get the first tool call (for now, only support single tool call)
+                first_tc = next(iter(call_buffer.values()), None)
+                if first_tc:
+                    name = first_tc["name"].strip()
+                    arg_str = first_tc["arguments"].strip()
 
-                    if not name:
-                        logging.warning("tool_call %s has empty name; skipping", tc["id"])
-                        continue
-                    if not arg_str:
-                        logging.warning("tool_call %s has empty arguments; skipping", tc["id"])
-                        continue
-                    try:
-                        args = json.loads(arg_str)
-                    except json.JSONDecodeError:
-                        logging.warning("tool_call %s arguments invalid JSON: %s", tc["id"], arg_str)
-                        continue
-
-                    fn = TOOL_REGISTRY.get(name)
-                    if fn is None:
-                        logging.warning("tool_call %s unknown tool '%s'; skipping", tc["id"], name)
-                        continue
-
-                    try:
-                        result_text, snippet, file_path, metadata = parse_tool_result(fn(**args))
-                        logging.info("tool_call %s executed -> %s", tc["id"], result_text)
-                        if snippet:
-                            history_snippets.append(snippet)
-                    except Exception:
-                        logging.exception("tool_call %s execution failed", tc["id"])
-                        continue
-
-                    assistant_call_msg["tool_calls"].append({
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {"name": name, "arguments": json.dumps(args)}
-                    })
-
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "name": name,
-                        "content": result_text,
-                    })
-                    if file_path:
+                    if name and arg_str:
                         try:
-                            with open(file_path, "rb") as f:
-                                img_bytes = f.read()
-                            b64 = base64.b64encode(img_bytes).decode("ascii")
-                            mime = mimetypes.guess_type(file_path)[0] or "image/png"
-                            data_url = f"data:{mime};base64,{b64}"
-                            messages.append({
-                                "role": "assistant",
-                                "content": [
-                                    {"type": "image_url", "image_url": {"url": data_url}}
-                                ],
-                            })
-                        except Exception:
-                            logging.exception("Failed to load file %s", file_path)
-                    if metadata:
-                        self._store_attachment(metadata)
-                insert_pos = len(messages) - len(call_buffer)
-                messages.insert(insert_pos, assistant_call_msg)
+                            args = json.loads(arg_str)
+                        except json.JSONDecodeError:
+                            logging.warning("tool_call arguments invalid JSON: %s", arg_str)
+                            args = {}
 
-                yield from self.generate_stream(
-                    messages,
-                    tools,
-                    force_tool_choice="auto",
-                    history_snippets=history_snippets,
-                    response_schema=response_schema,
-                    temperature=temperature,
-                )
-                return
+                        # Collect all text that was yielded (approximation)
+                        # Note: We don't have a perfect way to collect yielded text here,
+                        # but in most cases tool_call doesn't come with text
+                        self._store_tool_detection({
+                            "type": "tool_call",
+                            "tool_name": name,
+                            "tool_args": args,
+                            "raw_tool_call": first_tc,
+                        })
+                        logging.info("[openai] Tool detection stored: %s", name)
+                    else:
+                        logging.warning("tool_call has empty name or arguments; not storing")
+                        self._store_tool_detection({"type": "text", "content": ""})
+            else:
+                # No tool call - store text-only result
+                self._store_tool_detection({"type": "text", "content": ""})
 
-        except Exception:
+        except LLMError:
+            # Re-raise LLMError subclasses directly
+            raise
+        except Exception as e:
             logging.exception("OpenAI stream call failed")
-            yield "エラーが発生しました。"
+            raise _convert_to_llm_error(e, "streaming call")
 
     def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
         if not isinstance(parameters, dict):
@@ -676,60 +871,25 @@ class OpenAIClient(LLMClient):
         temperature: float | None = None,
         **_: Any,
     ) -> Dict[str, Any]:
-        """Generate response with tool call detection (do not execute tools)."""
+        """DEPRECATED: Use generate(messages, tools=[...]) instead.
+        
+        This method is kept for backward compatibility with existing code.
+        It simply delegates to generate() with tools specified.
+        """
+        import warnings
+        warnings.warn(
+            "generate_with_tool_detection() is deprecated. Use generate(messages, tools=[...]) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         tools_spec = tools or []
-        self._store_reasoning([])
-
-        req_kwargs = dict(self._request_kwargs)
-        if temperature is not None:
-            req_kwargs["temperature"] = temperature
-
-        # Log tools being sent to OpenAI
-        if tools_spec:
-            logging.info("[openai] Sending %d tools to API", len(tools_spec))
-            for i, tool in enumerate(tools_spec):
-                logging.info("[openai] Tool[%d]: %s", i, tool)
-        else:
-            logging.info("[openai] No tools specified")
-
-        try:
-            resp = self._create_completion(
-                model=self.model,
-                messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
-                tools=tools_spec if tools_spec else None,
-                tool_choice="auto" if tools_spec else None,
-                n=1,
-                **req_kwargs,
-            )
-        except Exception:
-            logging.exception("OpenAI call failed in generate_with_tool_detection")
-            return {"type": "text", "content": "エラーが発生しました。"}
-
-        raw_logger.debug("OpenAI raw (tool detection):\n%s", resp.model_dump_json(indent=2))
-        choice = resp.choices[0]
-        tool_calls = getattr(choice.message, "tool_calls", [])
-
-        # Extract reasoning if present
-        text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
-        self._store_reasoning(reasoning_entries)
-
-        if tool_calls and len(tool_calls) > 0:
-            tc = tool_calls[0]
-            try:
-                args = json.loads(tc.function.arguments)
-            except json.JSONDecodeError:
-                logging.warning("Tool call arguments invalid JSON: %s", tc.function.arguments)
-                args = {}
-            return {
-                "type": "tool_call",
-                "tool_name": tc.function.name,
-                "tool_args": args,
-                "raw_message": choice.message,
-            }
-        else:
-            content = text_body or choice.message.content or ""
-            return {"type": "text", "content": content}
-
+        if not tools_spec:
+            # If no tools, return text-only format for compatibility
+            result = self.generate(messages, temperature=temperature)
+            if isinstance(result, str):
+                return {"type": "text", "content": result}
+            return result
+        return self.generate(messages, tools=tools_spec, temperature=temperature)
 
 __all__ = ["OpenAIClient", "OpenAI"]
 OPENAI_ALLOWED_REQUEST_PARAMS = {

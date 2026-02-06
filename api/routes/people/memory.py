@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List
+import time
 from api.deps import get_manager
 from .models import (
-    ThreadSummary, MessageItem, MessagesResponse, UpdateMessageRequest
+    ThreadSummary, MessageItem, MessagesResponse, UpdateMessageRequest, CreateMessageRequest
 )
+from .utils import get_adapter
 import math
 
 router = APIRouter()
@@ -15,30 +17,22 @@ def list_persona_threads(persona_id: str, manager = Depends(get_manager)):
     if not persona:
         raise HTTPException(status_code=404, detail=f"Persona {persona_id} not found")
 
-    adapter = getattr(persona, "sai_memory", None)
-    should_close = False
-    if not adapter or not adapter.is_ready():
-        from saiverse_memory import SAIMemoryAdapter
-        try:
-            adapter = SAIMemoryAdapter(persona_id)
-            should_close = True
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to access memory: {e}")
-
-    try:
+    with get_adapter(persona_id, manager) as adapter:
         summaries = adapter.list_thread_summaries()
         return [
             ThreadSummary(
                 thread_id=s["thread_id"],
                 suffix=s["suffix"],
                 preview=s["preview"] or "",
-                active=s["active"]
+                active=s["active"],
+                is_stelis=s.get("is_stelis", False),
+                stelis_parent_id=s.get("stelis_parent_id"),
+                stelis_depth=s.get("stelis_depth"),
+                stelis_status=s.get("stelis_status"),
+                stelis_label=s.get("stelis_label"),
             )
             for s in summaries
         ]
-    finally:
-        if should_close and adapter:
-            adapter.close()
 
 @router.get("/{persona_id}/threads/{thread_id}/messages", response_model=MessagesResponse)
 def list_thread_messages(
@@ -49,21 +43,7 @@ def list_thread_messages(
     manager = Depends(get_manager)
 ):
     """List messages in a thread with pagination."""
-    
-    # Logic to acquire adapter
-    persona = manager.personas.get(persona_id)
-    adapter = getattr(persona, "sai_memory", None) if persona else None
-    should_close = False
-    
-    if not adapter or not adapter.is_ready():
-        from saiverse_memory import SAIMemoryAdapter
-        try:
-            adapter = SAIMemoryAdapter(persona_id)
-            should_close = True
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to access memory: {e}")
-
-    try:
+    with get_adapter(persona_id, manager) as adapter:
         # Check total count first
         total = adapter.count_thread_messages(thread_id)
         if total == 0:
@@ -79,21 +59,103 @@ def list_thread_messages(
         offset_page = page - 1
         msgs = adapter.get_thread_messages(thread_id, page=offset_page, page_size=page_size)
         
-        items = []
-        for m in msgs:
-            items.append(MessageItem(
+        items = [
+            MessageItem(
                 id=m["id"],
                 thread_id=m["thread_id"],
                 role=m["role"],
                 content=m["content"],
                 created_at=m["created_at"],
                 metadata=m.get("metadata")
-            ))
+            )
+            for m in msgs
+        ]
+        
+        # Get first and last timestamps for the thread
+        first_created_at = None
+        last_created_at = None
+        try:
+            first_msgs = adapter.get_thread_messages(thread_id, page=0, page_size=1)
+            if first_msgs:
+                first_created_at = first_msgs[0].get("created_at")
+            last_page = max(0, math.ceil(total / 1) - 1)
+            last_msgs = adapter.get_thread_messages(thread_id, page=last_page, page_size=1)
+            if last_msgs:
+                last_created_at = last_msgs[0].get("created_at")
+        except Exception:
+            pass
             
-        return MessagesResponse(items=items, total=total, page=page, page_size=page_size)
-    finally:
-        if should_close and adapter:
-            adapter.close()
+        return MessagesResponse(
+            items=items, 
+            total=total, 
+            page=page, 
+            page_size=page_size,
+            first_created_at=first_created_at,
+            last_created_at=last_created_at,
+        )
+
+@router.post("/{persona_id}/threads/{thread_id}/messages", response_model=MessageItem)
+def create_message(
+    persona_id: str,
+    thread_id: str,
+    request: CreateMessageRequest,
+    manager = Depends(get_manager)
+):
+    """Add a new message to a thread."""
+    with get_adapter(persona_id, manager) as adapter:
+        # Prepare message dict
+        created_at = request.created_at if request.created_at is not None else time.time()
+
+        message = {
+            "role": request.role,
+            "content": request.content,
+            "timestamp": None,  # Will use created_at
+            "metadata": request.metadata,
+        }
+
+        # Extract suffix from thread_id (e.g., "persona:suffix" -> "suffix")
+        thread_suffix = thread_id.split(":", 1)[1] if ":" in thread_id else thread_id
+
+        # Use internal method to append message
+        # We need to manually create the message to get its ID back
+        from sai_memory.memory.storage import get_or_create_thread, add_message, replace_message_embeddings
+        from sai_memory.memory.chunking import chunk_text
+
+        with adapter._db_lock:
+            resource_id = adapter.settings.resource_id
+            get_or_create_thread(adapter.conn, thread_id, resource_id)
+
+            mid = add_message(
+                adapter.conn,
+                thread_id=thread_id,
+                role=request.role,
+                content=request.content,
+                resource_id=resource_id,
+                created_at=int(created_at),
+                metadata=request.metadata,
+            )
+
+            # Add embeddings if content is not empty
+            if request.content and request.content.strip() and adapter.embedder is not None:
+                chunks = chunk_text(
+                    request.content,
+                    min_chars=adapter.settings.chunk_min_chars,
+                    max_chars=adapter.settings.chunk_max_chars,
+                )
+                payload = [c.strip() for c in chunks if c and c.strip()]
+                if payload:
+                    vectors = adapter.embedder.embed(payload, is_query=False)
+                    replace_message_embeddings(adapter.conn, mid, vectors)
+
+        return MessageItem(
+            id=mid,
+            thread_id=thread_id,
+            role=request.role,
+            content=request.content,
+            created_at=int(created_at),
+            metadata=request.metadata,
+        )
+
 
 @router.patch("/{persona_id}/messages/{message_id}")
 def update_message(
@@ -102,27 +164,17 @@ def update_message(
     request: UpdateMessageRequest, 
     manager = Depends(get_manager)
 ):
-    """Update message content."""
-    persona = manager.personas.get(persona_id)
-    adapter = getattr(persona, "sai_memory", None) if persona else None
-    should_close = False
-    
-    if not adapter or not adapter.is_ready():
-        from saiverse_memory import SAIMemoryAdapter
-        try:
-            adapter = SAIMemoryAdapter(persona_id)
-            should_close = True
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to access memory: {e}")
-
-    try:
-        success = adapter.update_message_content(message_id, request.content)
+    """Update message content and/or timestamp."""
+    with get_adapter(persona_id, manager) as adapter:
+        new_created_at = int(request.created_at) if request.created_at is not None else None
+        success = adapter.update_message(
+            message_id, 
+            new_content=request.content, 
+            new_created_at=new_created_at
+        )
         if not success:
             raise HTTPException(status_code=404, detail="Message not found or update failed")
         return {"success": True}
-    finally:
-        if should_close and adapter:
-            adapter.close()
 
 @router.delete("/{persona_id}/messages/{message_id}")
 def delete_message(
@@ -131,26 +183,11 @@ def delete_message(
     manager = Depends(get_manager)
 ):
     """Delete a message."""
-    persona = manager.personas.get(persona_id)
-    adapter = getattr(persona, "sai_memory", None) if persona else None
-    should_close = False
-    
-    if not adapter or not adapter.is_ready():
-        from saiverse_memory import SAIMemoryAdapter
-        try:
-            adapter = SAIMemoryAdapter(persona_id)
-            should_close = True
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to access memory: {e}")
-
-    try:
+    with get_adapter(persona_id, manager) as adapter:
         success = adapter.delete_message(message_id)
         if not success:
             raise HTTPException(status_code=404, detail="Message not found or delete failed")
         return {"success": True}
-    finally:
-        if should_close and adapter:
-            adapter.close()
 
 @router.delete("/{persona_id}/threads/{thread_id}")
 def delete_thread(
@@ -159,27 +196,11 @@ def delete_thread(
     manager = Depends(get_manager)
 ):
     """Delete a thread."""
-    persona = manager.personas.get(persona_id)
-    adapter = getattr(persona, "sai_memory", None) if persona else None
-    should_close = False
-    
-    if not adapter or not adapter.is_ready():
-        from saiverse_memory import SAIMemoryAdapter
-        try:
-            adapter = SAIMemoryAdapter(persona_id)
-            should_close = True
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to access memory: {e}")
-
-    try:
+    with get_adapter(persona_id, manager) as adapter:
         success = adapter.delete_thread(thread_id)
         if not success:
              raise HTTPException(status_code=404, detail="Thread not found or delete failed")
-        
         return {"success": True}
-    finally:
-        if should_close and adapter:
-            adapter.close()
 
 @router.put("/{persona_id}/threads/{thread_id}/activate")
 def set_active_thread(
@@ -188,24 +209,8 @@ def set_active_thread(
     manager = Depends(get_manager)
 ):
     """Set a thread as the active thread for the persona."""
-    persona = manager.personas.get(persona_id)
-    adapter = getattr(persona, "sai_memory", None) if persona else None
-    should_close = False
-    
-    if not adapter or not adapter.is_ready():
-        from saiverse_memory import SAIMemoryAdapter
-        try:
-            adapter = SAIMemoryAdapter(persona_id)
-            should_close = True
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to access memory: {e}")
-
-    try:
+    with get_adapter(persona_id, manager) as adapter:
         success = adapter.set_active_thread(thread_id)
         if not success:
             raise HTTPException(status_code=500, detail="Failed to set active thread")
-        
         return {"success": True, "thread_id": thread_id}
-    finally:
-        if should_close and adapter:
-            adapter.close()

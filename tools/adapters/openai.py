@@ -1,5 +1,5 @@
 ﻿from typing import Dict, Any
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 def to_openai(tool: ToolSchema) -> Dict[str, Any]:
     return {

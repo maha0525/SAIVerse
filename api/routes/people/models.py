@@ -25,6 +25,12 @@ class ThreadSummary(BaseModel):
     suffix: str
     preview: str
     active: bool
+    # Stelis thread info
+    is_stelis: bool = False
+    stelis_parent_id: Optional[str] = None
+    stelis_depth: Optional[int] = None
+    stelis_status: Optional[str] = None  # "active", "completed", "aborted"
+    stelis_label: Optional[str] = None
 
 class MessageItem(BaseModel):
     id: str
@@ -39,9 +45,19 @@ class MessagesResponse(BaseModel):
     total: int
     page: int
     page_size: int
+    first_created_at: Optional[float] = None
+    last_created_at: Optional[float] = None
 
 class UpdateMessageRequest(BaseModel):
+    content: Optional[str] = None
+    created_at: Optional[float] = None
+
+
+class CreateMessageRequest(BaseModel):
+    role: str  # "user", "assistant", "system"
     content: str
+    created_at: Optional[float] = None  # Unix timestamp, defaults to current time
+    metadata: Optional[dict] = None  # Optional tags, etc.
 
 
 # -----------------------------------------------------------------------------
@@ -60,6 +76,38 @@ class MemoryRecallResponse(BaseModel):
     max_chars: int
 
 
+class MemoryRecallDebugRequest(BaseModel):
+    """Debug-friendly recall request: returns raw search results with scores."""
+    query: str = ""  # Semantic query (can be empty if using keywords only)
+    keywords: List[str] = []  # Keywords for BM25-like matching
+    topk: int = 50  # Allow higher values for debugging
+    use_rrf: bool = False  # Enable Reciprocal Rank Fusion (split query by spaces)
+    use_hybrid: bool = False  # Enable hybrid search (keywords + semantic)
+    rrf_k: int = 60  # RRF constant (higher = more weight to lower ranks)
+    start_date: Optional[str] = None  # Filter: start date (YYYY-MM-DD)
+    end_date: Optional[str] = None  # Filter: end date (YYYY-MM-DD)
+
+
+class MemoryRecallDebugHit(BaseModel):
+    """A single search hit with its metadata."""
+    rank: int
+    score: float
+    message_id: str
+    thread_id: str
+    role: str
+    content: str
+    created_at: float  # Unix timestamp
+    created_at_str: str  # Human-readable datetime
+
+
+class MemoryRecallDebugResponse(BaseModel):
+    """Debug-friendly recall response with raw search results."""
+    query: str
+    topk: int
+    total_hits: int
+    hits: List[MemoryRecallDebugHit]
+
+
 # -----------------------------------------------------------------------------
 # Configuration Models
 # -----------------------------------------------------------------------------
@@ -74,6 +122,7 @@ class AIConfigResponse(BaseModel):
     avatar_path: Optional[str] = None
     appearance_image_path: Optional[str] = None  # Visual context appearance image
     home_city_id: int
+    linked_user_id: Optional[int] = None  # First linked user ID
 
 class UpdateAIConfigRequest(BaseModel):
     description: Optional[str] = None
@@ -83,6 +132,7 @@ class UpdateAIConfigRequest(BaseModel):
     interaction_mode: Optional[str] = None
     avatar_path: Optional[str] = None
     appearance_image_path: Optional[str] = None  # Visual context appearance image
+    linked_user_id: Optional[int] = None  # Set linked user (None = no change, 0 = clear)
 
 
 # -----------------------------------------------------------------------------
@@ -137,6 +187,15 @@ class ExtensionImportStatusResponse(BaseModel):
     success: Optional[bool] = None
     title: Optional[str] = None
 
+class NativeImportStatusResponse(BaseModel):
+    running: bool
+    progress: Optional[int] = None
+    total: Optional[int] = None
+    message: Optional[str] = None
+    success: Optional[bool] = None
+    threads_imported: Optional[int] = None
+    messages_imported: Optional[int] = None
+
 
 # -----------------------------------------------------------------------------
 # Re-embed Models
@@ -162,6 +221,30 @@ class UpdateMemopediaPageRequest(BaseModel):
     content: Optional[str] = None
     keywords: Optional[List[str]] = None
     vividness: Optional[str] = None
+    is_trunk: Optional[bool] = None
+
+
+class CreateMemopediaPageRequest(BaseModel):
+    parent_id: str
+    title: str
+    summary: str = ""
+    content: str = ""
+    keywords: Optional[List[str]] = None
+    vividness: str = "rough"
+    is_trunk: bool = False
+
+
+class SetTrunkRequest(BaseModel):
+    is_trunk: bool
+
+
+class SetImportantRequest(BaseModel):
+    is_important: bool
+
+
+class MovePagesToTrunkRequest(BaseModel):
+    page_ids: List[str]
+    trunk_id: str
 
 
 # -----------------------------------------------------------------------------
@@ -181,6 +264,7 @@ class ScheduleItem(BaseModel):
     interval_seconds: Optional[int] = None
     last_executed_at: Optional[datetime] = None
     completed: bool
+    playbook_params: Optional[dict] = None  # Playbook parameters (e.g., {"selected_playbook": "xxx"})
 
 class CreateScheduleRequest(BaseModel):
     schedule_type: str # periodic, oneshot, interval
@@ -195,6 +279,8 @@ class CreateScheduleRequest(BaseModel):
     scheduled_datetime: Optional[str] = None # "YYYY-MM-DD HH:MM" (in persona TZ)
     # interval
     interval_seconds: Optional[int] = None
+    # playbook params
+    playbook_params: Optional[dict] = None  # Playbook parameters (e.g., {"selected_playbook": "xxx"})
 
 class UpdateScheduleRequest(BaseModel):
     schedule_type: Optional[str] = None
@@ -206,6 +292,7 @@ class UpdateScheduleRequest(BaseModel):
     time_of_day: Optional[str] = None
     scheduled_datetime: Optional[str] = None  # "YYYY-MM-DD HH:MM" (in persona TZ)
     interval_seconds: Optional[int] = None
+    playbook_params: Optional[dict] = None  # Playbook parameters (e.g., {"selected_playbook": "xxx"})
 
 
 # -----------------------------------------------------------------------------
@@ -291,3 +378,38 @@ class SourceMessageItem(BaseModel):
     role: str
     content: str
     created_at: int
+
+
+# -----------------------------------------------------------------------------
+# Generation Job Models (Memory Weave)
+# -----------------------------------------------------------------------------
+
+class GenerateArasujiRequest(BaseModel):
+    """Chronicle生成リクエスト"""
+    max_messages: int = 500  # 最大処理メッセージ数
+    batch_size: int = 20     # バッチサイズ（これ未満のメッセージは処理しない）
+    consolidation_size: int = 10  # 統合サイズ
+    model: Optional[str] = None  # デフォルトはMEMORY_WEAVE_MODEL
+    with_memopedia: bool = False  # Memopedia同時生成
+
+
+class GenerateMemopediaRequest(BaseModel):
+    """Memopediaページ生成リクエスト（キーワード指定）"""
+    keyword: str
+    directions: Optional[str] = None  # 調査の方向性・まとめ方の指示
+    category: Optional[str] = None  # people, terms, plans (None = auto-detect)
+    max_loops: int = 5  # 最大検索ループ数
+    context_window: int = 5  # 周辺メッセージ取得数
+    with_chronicle: bool = True  # Chronicle（あらすじ）を参照するか
+    model: Optional[str] = None  # デフォルトはMEMORY_WEAVE_MODEL
+
+
+class GenerationJobStatus(BaseModel):
+    """生成ジョブのステータス"""
+    job_id: str
+    status: str  # "pending", "running", "completed", "failed"
+    progress: Optional[int] = None  # 処理済みメッセージ数
+    total: Optional[int] = None  # 総処理対象メッセージ数
+    message: Optional[str] = None  # ステータスメッセージ
+    entries_created: Optional[int] = None  # 作成されたエントリ数
+    error: Optional[str] = None  # エラーメッセージ

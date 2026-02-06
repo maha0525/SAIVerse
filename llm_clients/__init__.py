@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from .anthropic import AnthropicClient
-from .base import LLMClient, RAW_LOG_FILE, raw_logger
+from .base import LLMClient, log_llm_request, log_llm_response, get_llm_logger
 from .factory import get_llm_client
 from .gemini import (
     GEMINI_SAFETY_CONFIG,
@@ -33,10 +33,12 @@ __all__ = [
     "OpenAI",
     "build_gemini_clients",
     "OPENAI_TOOLS_SPEC",
-    "RAW_LOG_FILE",
+    "log_llm_request",
+    "log_llm_response",
+    "get_llm_logger",
     "genai",
     "get_llm_client",
     "merge_tools_for_gemini",
-    "raw_logger",
     "requests",
 ]
+

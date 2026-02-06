@@ -430,3 +430,113 @@
     opacity: 0.5;
     cursor: not-allowed;
 }
+
+/* Thread Selection */
+.threadSelectContainer {
+    background-color: #1a1b1e;
+    border-radius: 8px;
+    padding: 2rem;
+}
+
+.threadSelectHeader {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+    color: #4dabf7;
+}
+
+.threadSelectHeader h3 {
+    margin: 0;
+    font-size: 1.2rem;
+    font-weight: 500;
+    color: #e0e0e0;
+}
+
+.threadSelectSubtext {
+    color: #888;
+    font-size: 0.9rem;
+    margin-bottom: 1.5rem;
+}
+
+.threadList {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-height: 300px;
+    overflow-y: auto;
+    margin-bottom: 1.5rem;
+}
+
+.threadItem {
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+    padding: 1rem;
+    background-color: #252628;
+    border-radius: 8px;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: all 0.2s;
+}
+
+.threadItem:hover {
+    background-color: #2a2b2e;
+    border-color: rgba(77, 171, 247, 0.3);
+}
+
+.threadItem.selected {
+    background-color: rgba(77, 171, 247, 0.1);
+    border-color: #4dabf7;
+}
+
+.threadRadio {
+    padding-top: 2px;
+}
+
+.radioCircle {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 2px solid #555;
+    transition: all 0.2s;
+}
+
+.radioCircle.checked {
+    border-color: #4dabf7;
+    background-color: #4dabf7;
+    box-shadow: inset 0 0 0 4px #1a1b1e;
+}
+
+.threadContent {
+    flex: 1;
+    min-width: 0;
+}
+
+.threadName {
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: #e0e0e0;
+    margin-bottom: 0.3rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.activeBadge {
+    font-size: 0.7rem;
+    padding: 0.15rem 0.4rem;
+    background-color: rgba(43, 138, 62, 0.2);
+    color: #2b8a3e;
+    border-radius: 4px;
+    font-weight: 500;
+}
+
+.threadPreview {
+    font-size: 0.85rem;
+    color: #888;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+}

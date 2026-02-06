@@ -27,31 +27,13 @@
             "id": "compose",
             "type": "llm",
             "action": null,
+            "speak": true,
+            "memorize": {"tags": ["conversation"]},
             "output_keys": [
                 {
                     "text": "speak_content"
                 }
             ],
-            "next": "log",
-            "conditional_next": null
-        },
-        {
-            "id": "log",
-            "type": "memorize",
-            "action": "{last}",
-            "role": "assistant",
-            "tags": [
-                "conversation"
-            ],
-            "metadata_key": "metadata",
-            "next": "say",
-            "conditional_next": null
-        },
-        {
-            "id": "say",
-            "type": "say",
-            "action": "{speak_content}",
-            "metadata_key": "metadata",
             "next": "process_body",
             "conditional_next": null
         },

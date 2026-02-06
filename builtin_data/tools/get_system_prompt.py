@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from tools.context import get_active_persona_id, get_active_manager
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 LOGGER = logging.getLogger(__name__)
 
@@ -74,6 +74,7 @@ def get_system_prompt(
                 "{current_city_name}": city_name,
                 "{current_persona_system_instruction}": getattr(persona, "persona_system_instruction", ""),
                 "{current_building_system_instruction}": getattr(building_obj, "system_instruction", "") if building_obj else "",
+                "{linked_user_name}": getattr(persona, "linked_user_name", "the user"),
             }
             for placeholder, value in replacements.items():
                 common_text = common_text.replace(placeholder, value)

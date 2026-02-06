@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Package, FileText, Image as ImageIcon, Box, RefreshCw } from 'lucide-react';
 import styles from './InventoryModal.module.css';
+import ModalOverlay from './common/ModalOverlay';
 
 interface InventoryItem {
     id: string;
@@ -52,15 +53,10 @@ export default function InventoryModal({ isOpen, onClose, personaId }: Inventory
     if (!isOpen) return null;
 
     return (
-        <div
-            className={styles.overlay}
-            onClick={onClose}
-            onTouchStart={(e) => e.stopPropagation()}
-            onTouchMove={(e) => e.stopPropagation()}
-        >
+        <ModalOverlay onClose={onClose} className={styles.overlay}>
             <div className={styles.modal} onClick={e => e.stopPropagation()}>
                 <div className={styles.header}>
-                    <h2 className={styles.title}>Inventory: {personaId}</h2>
+                    <h2 className={styles.title}>インベントリ: {personaId}</h2>
                     <button className={styles.closeButton} onClick={onClose}>
                         <X size={20} />
                     </button>
@@ -68,16 +64,16 @@ export default function InventoryModal({ isOpen, onClose, personaId }: Inventory
 
                 <div className={styles.content}>
                     <div className={styles.toolbar}>
-                        <span className={styles.count}>{items.length} Items</span>
+                        <span className={styles.count}>{items.length} 件</span>
                         <button className={styles.refreshBtn} onClick={loadItems}>
-                            <RefreshCw size={14} /> Refresh
+                            <RefreshCw size={14} /> 更新
                         </button>
                     </div>
 
                     {loading ? (
-                        <div className={styles.loading}>Loading...</div>
+                        <div className={styles.loading}>読み込み中...</div>
                     ) : items.length === 0 ? (
-                        <div className={styles.emptyState}>No items in inventory.</div>
+                        <div className={styles.emptyState}>アイテムがありません</div>
                     ) : (
                         <div className={styles.grid}>
                             {items.map(item => (
@@ -98,6 +94,6 @@ export default function InventoryModal({ isOpen, onClose, personaId }: Inventory
                     )}
                 </div>
             </div>
-        </div>
+        </ModalOverlay>
     );
 }

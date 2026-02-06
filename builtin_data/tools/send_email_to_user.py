@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker
 from database.models import Base, User, AI
 from database.paths import default_db_path
 from tools.context import get_active_persona_id
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 # Minimal logger that writes to the shared SAIVerse log.
 LOG_FILE = Path(os.getenv("SAIVERSE_LOG_PATH", str(Path.cwd() / "saiverse_log.txt")))

@@ -9,6 +9,7 @@ from model_configs import (
     get_model_choices_with_display_names,
     get_model_parameters,
     get_model_parameter_defaults,
+    get_cache_config,
 )
 
 router = APIRouter()
@@ -17,9 +18,29 @@ class ModelInfo(BaseModel):
     id: str
     name: str
 
+class PlaybookParamInfo(BaseModel):
+    """Parameter info for playbook input_schema."""
+    name: str
+    description: str
+    param_type: str = "string"
+    required: bool = True
+    default: Optional[Any] = None
+    enum_values: Optional[List[str]] = None
+    enum_source: Optional[str] = None
+    user_configurable: bool = False
+    ui_widget: Optional[str] = None
+
+
+class PlaybookParamResolved(PlaybookParamInfo):
+    """Parameter info with resolved enum options."""
+    resolved_options: Optional[List[Dict[str, Any]]] = None
+
+
 class PlaybookInfo(BaseModel):
     id: str
     name: str
+    description: Optional[str] = None
+    input_schema: Optional[List[PlaybookParamInfo]] = None
 
 class UpdateModelRequest(BaseModel):
     model: str
@@ -49,33 +70,143 @@ def get_models():
     choices = get_model_choices_with_display_names()
     return [{"id": mid, "name": name} for mid, name in choices]
 
+
+@router.post("/reload-models")
+def reload_models():
+    """Reload model configurations from disk without restarting the server."""
+    from model_configs import reload_configs
+
+    reload_configs()
+    choices = get_model_choices_with_display_names()
+    return {
+        "reloaded": len(choices),
+        "models": [{"id": mid, "name": name} for mid, name in choices],
+    }
+
 @router.get("/playbooks", response_model=List[PlaybookInfo])
 def get_playbooks():
-    """List available playbooks from sea/playbooks/public."""
-    playbooks_dir = Path("sea/playbooks/public")
-    if not playbooks_dir.exists():
-        return []
-    
-    playbooks = []
-    for f in playbooks_dir.glob("*.json"):
-        # Use filename stem as ID (e.g. 'meta_user')
-        playbook_id = f.stem
-        # Try to read name from JSON, fallback to ID
+    """List available user-selectable playbooks with input_schema."""
+    from database.session import SessionLocal
+    from database.models import Playbook
+
+    db = SessionLocal()
+    try:
+        playbooks = db.query(Playbook).filter(Playbook.user_selectable == True).all()
+        result = []
+        for pb in playbooks:
+            # Parse schema_json to get input_schema
+            input_schema = None
+            try:
+                schema = json.loads(pb.schema_json) if pb.schema_json else {}
+                raw_input_schema = schema.get("input_schema", [])
+                # Filter to user_configurable params only for UI
+                input_schema = [
+                    {
+                        "name": p.get("name"),
+                        "description": p.get("description", ""),
+                        "param_type": p.get("param_type", "string"),
+                        "required": p.get("required", True),
+                        "default": p.get("default"),
+                        "enum_values": p.get("enum_values"),
+                        "enum_source": p.get("enum_source"),
+                        "user_configurable": p.get("user_configurable", False),
+                        "ui_widget": p.get("ui_widget"),
+                    }
+                    for p in raw_input_schema
+                    if p.get("user_configurable", False)
+                ]
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+            result.append({
+                "id": pb.name,
+                "name": pb.name,
+                "description": pb.description,
+                "input_schema": input_schema if input_schema else None,
+            })
+        return result
+    finally:
+        db.close()
+
+
+class PlaybookParamsResponse(BaseModel):
+    """Response for playbook params endpoint with resolved enum options."""
+    name: str
+    params: List[PlaybookParamResolved]
+
+
+@router.get("/playbooks/{name}/params", response_model=PlaybookParamsResponse)
+def get_playbook_params(name: str, manager=Depends(get_manager)):
+    """
+    Get playbook parameters with resolved enum options.
+
+    For params with enum_source, resolves to actual options based on current context.
+    """
+    from database.session import SessionLocal
+    from database.models import Playbook
+    from api.utils.enum_resolver import resolve_enum_source, EnumResolverContext
+
+    db = SessionLocal()
+    try:
+        playbook = db.query(Playbook).filter(Playbook.name == name).first()
+        if not playbook:
+            raise HTTPException(status_code=404, detail=f"Playbook '{name}' not found")
+
+        # Parse schema_json
         try:
-            content = json.loads(f.read_text(encoding="utf-8"))
-            if not content.get("user_selectable", False):
+            schema = json.loads(playbook.schema_json) if playbook.schema_json else {}
+            raw_input_schema = schema.get("input_schema", [])
+        except (json.JSONDecodeError, TypeError):
+            raw_input_schema = []
+
+        # Build context for enum resolution
+        # Get current user's context from manager
+        context = EnumResolverContext(
+            city_id=getattr(manager, 'city_id', None),
+            building_id=getattr(manager.state, 'current_building_id', None) if hasattr(manager, 'state') else None,
+            persona_id=getattr(manager.state, 'current_persona_id', None) if hasattr(manager, 'state') else None,
+        )
+
+        # Filter to user_configurable and resolve enum_source
+        params = []
+        for p in raw_input_schema:
+            if not p.get("user_configurable", False):
                 continue
-            name = content.get("name", playbook_id)
-        except Exception:
-            # If JSON invalid or read fails, skip or fallback
-            # Here we skip to be safe if we can't verify selectable
-            continue
-        
-        playbooks.append({"id": playbook_id, "name": name})
-    
-    # Sort by name
-    playbooks.sort(key=lambda x: x["name"])
-    return playbooks
+
+            param_info = {
+                "name": p.get("name"),
+                "description": p.get("description", ""),
+                "param_type": p.get("param_type", "string"),
+                "required": p.get("required", True),
+                "default": p.get("default"),
+                "enum_values": p.get("enum_values"),
+                "enum_source": p.get("enum_source"),
+                "user_configurable": True,
+                "ui_widget": p.get("ui_widget"),
+                "resolved_options": None,
+            }
+
+            # Resolve enum_source if present
+            enum_source = p.get("enum_source")
+            if enum_source:
+                try:
+                    param_info["resolved_options"] = resolve_enum_source(enum_source, context)
+                except ValueError:
+                    # Log but don't fail - just return empty options
+                    param_info["resolved_options"] = []
+
+            # If static enum_values, convert to resolved_options format
+            elif p.get("enum_values"):
+                param_info["resolved_options"] = [
+                    {"value": v, "label": v} for v in p.get("enum_values", [])
+                ]
+
+            params.append(param_info)
+
+        return {"name": name, "params": params}
+    finally:
+        db.close()
+
 
 @router.get("/config", response_model=ModelConfigResponse)
 def get_current_config(manager = Depends(get_manager)):
@@ -218,16 +349,91 @@ def set_global_auto(req: GlobalAutoRequest, manager = Depends(get_manager)):
 
 class PlaybookOverrideRequest(BaseModel):
     playbook: Optional[str] = None
+    playbook_params: Optional[Dict[str, Any]] = None
 
 
 @router.get("/playbook")
 def get_current_playbook(manager = Depends(get_manager)):
-    """Get current playbook override."""
-    return {"playbook": manager.state.current_playbook}
+    """Get current playbook override and parameters."""
+    return {
+        "playbook": manager.state.current_playbook,
+        "playbook_params": manager.state.playbook_params,
+    }
 
 
 @router.post("/playbook")
 def set_playbook(req: PlaybookOverrideRequest, manager = Depends(get_manager)):
-    """Set playbook override."""
+    """Set playbook override and parameters."""
     manager.state.current_playbook = req.playbook if req.playbook else None
-    return {"success": True, "playbook": manager.state.current_playbook}
+    # Update playbook_params if provided, reset if playbook changed to None
+    if req.playbook_params is not None:
+        manager.state.playbook_params = req.playbook_params
+    elif req.playbook is None:
+        # Reset params when playbook is cleared
+        manager.state.playbook_params = {}
+    return {
+        "success": True,
+        "playbook": manager.state.current_playbook,
+        "playbook_params": manager.state.playbook_params,
+    }
+
+
+class CacheConfigResponse(BaseModel):
+    """Cache configuration response."""
+    enabled: bool
+    ttl: str
+    supported: bool  # Whether current model supports explicit caching
+    ttl_options: List[str]  # Available TTL options for current model
+    cache_type: Optional[str] = None  # "explicit" or "implicit"
+
+
+class CacheConfigRequest(BaseModel):
+    """Cache configuration update request."""
+    enabled: Optional[bool] = None
+    ttl: Optional[str] = None
+
+
+@router.get("/cache", response_model=CacheConfigResponse)
+def get_cache_settings(manager = Depends(get_manager)):
+    """Get current cache settings and model cache support info."""
+    current_model = manager.model if manager.model != "None" else None
+
+    # Get cache config for current model
+    cache_config = {}
+    if current_model:
+        cache_config = get_cache_config(current_model) or {}
+
+    supported = cache_config.get("supported", False)
+    cache_type = cache_config.get("type", None)
+    ttl_options = cache_config.get("ttl_options", ["5m"])
+
+    # Only show explicit cache controls for explicit caching models (Anthropic)
+    if cache_type != "explicit":
+        supported = False
+        ttl_options = []
+
+    return {
+        "enabled": manager.state.cache_enabled,
+        "ttl": manager.state.cache_ttl,
+        "supported": supported,
+        "ttl_options": ttl_options,
+        "cache_type": cache_type,
+    }
+
+
+@router.post("/cache")
+def set_cache_settings(req: CacheConfigRequest, manager = Depends(get_manager)):
+    """Update cache settings."""
+    if req.enabled is not None:
+        manager.state.cache_enabled = req.enabled
+    if req.ttl is not None:
+        # Validate TTL value
+        if req.ttl not in ["5m", "1h"]:
+            raise HTTPException(status_code=400, detail="Invalid TTL value. Must be '5m' or '1h'")
+        manager.state.cache_ttl = req.ttl
+
+    return {
+        "success": True,
+        "enabled": manager.state.cache_enabled,
+        "ttl": manager.state.cache_ttl,
+    }

@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Optional
 
-from tools.defs import ToolSchema
+from tools.core import ToolSchema
 
 
 def invoke_phenomenon(phenomenon_name: str, arguments: Optional[str] = None) -> str:

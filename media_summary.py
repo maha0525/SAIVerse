@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Optional
+
+# Model for image summary generation (vision-capable model required)
+IMAGE_SUMMARY_MODEL = os.getenv("SAIVERSE_IMAGE_SUMMARY_MODEL", "gemini-2.5-flash-lite")
 
 from media_utils import (
     get_media_summary,
@@ -82,7 +86,7 @@ def _generate_image_summary(path: Path, mime_type: str) -> Optional[str]:
             continue
         try:
             response = client.models.generate_content(
-                model="gemini-2.0-flash",
+                model=IMAGE_SUMMARY_MODEL,
                 contents=content,
                 config=config,
             )

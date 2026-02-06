@@ -1,0 +1,140 @@
+.overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 1rem;
+}
+
+.modal {
+    background-color: #1e1f22;
+    border-radius: 12px;
+    width: 100%;
+    max-width: 500px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1.5rem;
+    border-bottom: 1px solid #333;
+}
+
+.headerTitle {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    color: #4dabf7;
+}
+
+.headerTitle h2 {
+    font-size: 1.3rem;
+    font-weight: 600;
+    color: #e0e0e0;
+    margin: 0;
+}
+
+.closeButton {
+    background: none;
+    border: none;
+    color: #888;
+    cursor: pointer;
+    padding: 0.5rem;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.closeButton:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+    color: #fff;
+}
+
+.content {
+    padding: 1.5rem;
+    overflow-y: auto;
+}
+
+.description {
+    color: #888;
+    font-size: 0.95rem;
+    margin-bottom: 1.5rem;
+    text-align: center;
+}
+
+.optionList {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.optionCard {
+    background-color: #2a2b2e;
+    border: 2px solid transparent;
+    border-radius: 10px;
+    padding: 1.25rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+}
+
+.optionCard:hover {
+    border-color: #4dabf7;
+    background-color: #32333a;
+}
+
+.optionIcon {
+    color: #4dabf7;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    background-color: rgba(77, 171, 247, 0.1);
+    border-radius: 10px;
+}
+
+.optionInfo {
+    flex: 1;
+}
+
+.optionTitle {
+    font-size: 1rem;
+    font-weight: 500;
+    color: #e0e0e0;
+    margin-bottom: 0.25rem;
+}
+
+.optionDescription {
+    font-size: 0.85rem;
+    color: #888;
+}
+
+/* Mobile responsive */
+@media (max-width: 480px) {
+    .modal {
+        max-width: 95%;
+    }
+
+    .optionCard {
+        padding: 1rem;
+    }
+
+    .optionIcon {
+        width: 40px;
+        height: 40px;
+    }
+}

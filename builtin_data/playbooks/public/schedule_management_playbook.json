@@ -60,7 +60,7 @@
     {
       "id": "prepare_add",
       "type": "llm",
-      "action": "schedule_addツールの引数を決定します。ユーザーのリクエストに基づいてスケジュールを作成してください。\n\n### スケジュールタイプ：\n- periodic: 定期実行（曜日と時刻を指定）\n- oneshot: 単発実行（日時を指定）\n- interval: 一定間隔実行（秒数を指定）\n\n### メタプレイブック：\n通常は「meta_user」を指定してください。\n\n### 現在の日時：\n{current_datetime}\n\n### 注意：\n- 日時や時刻はペルソナのタイムゾーンで指定してください\n- descriptionフィールドには、実行時にAIに伝えたい内容を書いてください（例：「まはーさんに今日のタスクを報告して」）",
+      "action": "schedule_addツールの引数を決定します。ユーザーのリクエストに基づいてスケジュールを作成してください。\n\n### スケジュールタイプ：\n- periodic: 定期実行（曜日と時刻を指定）\n- oneshot: 単発実行（日時を指定）\n- interval: 一定間隔実行（秒数を指定）\n\n### メタプレイブック：\n- 通常は「meta_user」を指定してください。\n- 特定のPlaybookを直接実行したい場合は「meta_user_manual」を指定し、playbook_paramsでselected_playbookを設定してください。\n  例: meta_playbook=\"meta_user_manual\", playbook_params={\"selected_playbook\": \"send_email_to_user\"}\n\n### 現在の日時：\n{current_datetime}\n\n### 注意：\n- 日時や時刻はペルソナのタイムゾーンで指定してください\n- descriptionフィールドには、実行時にAIに伝えたい内容を書いてください（例：「まはーさんに今日のタスクを報告して」）",
       "next": "record_add_params",
       "response_schema": {
         "type": "object",
@@ -72,7 +72,11 @@
           },
           "meta_playbook": {
             "type": "string",
-            "description": "実行するメタプレイブック名（通常は meta_user）"
+            "description": "実行するメタプレイブック名（通常は meta_user、特定のPlaybook指定時は meta_user_manual）"
+          },
+          "playbook_params": {
+            "type": "object",
+            "description": "Playbookパラメータ。meta_user_manual使用時にselected_playbookで実行するサブPlaybookを指定。例: {\"selected_playbook\": \"send_email_to_user\"}"
           },
           "description": {
             "type": "string",
@@ -123,6 +127,7 @@
       "args_input": {
         "schedule_type": "add_params.schedule_type",
         "meta_playbook": "add_params.meta_playbook",
+        "playbook_params": "add_params.playbook_params",
         "description": "add_params.description",
         "priority": "add_params.priority",
         "enabled": "add_params.enabled",

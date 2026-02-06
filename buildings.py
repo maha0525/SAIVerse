@@ -14,6 +14,7 @@ class Building:
         run_entry_llm: bool = True,
         run_auto_llm: bool = True,
         auto_interval_sec: int = 10,
+        extra_prompt_files: Optional[list[str]] = None,
     ):
         self.building_id = building_id
         self.name = name
@@ -27,3 +28,5 @@ class Building:
         self.run_auto_llm = run_auto_llm
         self.auto_interval_sec = auto_interval_sec
         self.item_ids: list[str] = []
+        self.extra_prompt_files: list[str] = extra_prompt_files or []
+

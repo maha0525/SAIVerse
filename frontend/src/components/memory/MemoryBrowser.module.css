@@ -25,6 +25,34 @@
     overflow-y: auto;
 }
 
+.threadSection {
+    border-bottom: 1px solid #333;
+}
+
+.threadSection:last-child {
+    border-bottom: none;
+}
+
+.threadSectionHeader {
+    padding: 0.5rem 1rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    background-color: rgba(0, 0, 0, 0.2);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.noActiveThread {
+    padding: 0.75rem 1rem;
+    font-size: 0.85rem;
+    color: #666;
+    font-style: italic;
+}
+
 .threadItem {
     padding: 0.75rem 1rem;
     border-bottom: 1px solid #2c2d32;
@@ -54,12 +82,32 @@
     font-family: monospace;
 }
 
-.activeBadge {
-    font-size: 0.7rem;
-    background-color: #2b8a3e;
-    color: #d3f9d8;
+/* Stelis thread styles */
+.stelisThread {
+    border-left: 3px solid #9775fa;
+    background-color: rgba(151, 117, 250, 0.05);
+}
+
+.stelisBadge {
+    font-size: 0.65rem;
     padding: 2px 6px;
     border-radius: 4px;
+    white-space: nowrap;
+}
+
+.stelisActive {
+    background-color: #9775fa;
+    color: #fff;
+}
+
+.stelisCompleted {
+    background-color: #2b8a3e;
+    color: #d3f9d8;
+}
+
+.stelisAborted {
+    background-color: #c92a2a;
+    color: #ffc9c9;
 }
 
 .threadActions {
@@ -91,22 +139,6 @@
     background-color: rgba(250, 82, 82, 0.1);
 }
 
-.setActiveBtn {
-    background: none;
-    border: 1px solid #4dabf7;
-    color: #4dabf7;
-    padding: 2px 8px;
-    font-size: 0.7rem;
-    cursor: pointer;
-    border-radius: 4px;
-    transition: background-color 0.2s, color 0.2s;
-}
-
-.setActiveBtn:hover {
-    background-color: rgba(77, 171, 247, 0.15);
-    color: #74c0fc;
-}
-
 .threadPreview {
 
     font-size: 0.85rem;
@@ -136,6 +168,14 @@
     color: #e0e0e0;
     font-weight: 600;
     flex: 1;
+}
+
+.dateRange {
+    font-size: 0.75rem;
+    color: #888;
+    font-family: monospace;
+    margin-left: 8px;
+    white-space: nowrap;
 }
 
 .headerActions {
@@ -336,6 +376,27 @@
     gap: 8px;
 }
 
+.editTimestampRow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.85rem;
+    color: #aaa;
+}
+
+.editTimestampRow label {
+    flex-shrink: 0;
+}
+
+.editTimestampInput {
+    background-color: #141517;
+    border: 1px solid #444;
+    color: #e0e0e0;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-family: monospace;
+}
+
 .editTextarea {
     width: 100%;
     min-height: 80px;
@@ -384,6 +445,179 @@
     background-color: #212529;
 }
 
+/* Set Active Header Button */
+.setActiveHeaderBtn {
+    background: none;
+    border: 1px solid #2b8a3e;
+    color: #51cf66;
+    padding: 4px 10px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background-color 0.2s, color 0.2s;
+    white-space: nowrap;
+}
+
+.setActiveHeaderBtn:hover {
+    background-color: rgba(43, 138, 62, 0.15);
+    color: #69db7c;
+}
+
+/* Export Button */
+.exportBtn {
+    background: none;
+    border: none;
+    color: #888;
+    padding: 6px;
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    transition: color 0.2s, background-color 0.2s;
+}
+
+.exportBtn:hover:not(:disabled) {
+    color: #4dabf7;
+    background-color: rgba(77, 171, 247, 0.1);
+}
+
+.exportBtn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* Add Message Button */
+.addMsgBtn {
+    background: none;
+    border: none;
+    color: #51cf66;
+    padding: 6px;
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    transition: color 0.2s, background-color 0.2s;
+}
+
+.addMsgBtn:hover:not(:disabled) {
+    color: #69db7c;
+    background-color: rgba(81, 207, 102, 0.1);
+}
+
+.addMsgBtn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* Add Message Form */
+.addMessageForm {
+    background-color: #1f2023;
+    border: 1px solid #51cf66;
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 0 1rem 1rem 1rem;
+    max-width: 900px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.addFormHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.75rem;
+    font-weight: 600;
+    color: #51cf66;
+}
+
+.cancelAddBtn {
+    background: none;
+    border: none;
+    color: #888;
+    padding: 4px;
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+}
+
+.cancelAddBtn:hover {
+    color: #e0e0e0;
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+.addFormRow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 0.75rem;
+    font-size: 0.9rem;
+    color: #aaa;
+}
+
+.addFormRow label {
+    min-width: 80px;
+    flex-shrink: 0;
+}
+
+.roleSelect {
+    background-color: #141517;
+    border: 1px solid #444;
+    color: #e0e0e0;
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 0.9rem;
+}
+
+.timestampInput {
+    background-color: #141517;
+    border: 1px solid #444;
+    color: #e0e0e0;
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-family: monospace;
+}
+
+.addTextarea {
+    width: 100%;
+    min-height: 100px;
+    background-color: #141517;
+    border: 1px solid #444;
+    color: #e0e0e0;
+    padding: 8px;
+    border-radius: 4px;
+    font-family: inherit;
+    resize: vertical;
+    margin-bottom: 0.75rem;
+}
+
+.addFormActions {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.submitAddBtn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    background-color: #2b8a3e;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.submitAddBtn:hover:not(:disabled) {
+    background-color: #237032;
+}
+
+.submitAddBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
 
 .pagination {
     padding: 1rem;
@@ -476,5 +710,62 @@
     .backButton {
         display: flex;
         align-items: center;
+    }
+
+    .messagesHeader {
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        padding: 0.75rem;
+    }
+
+    .headerTitle {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .dateRange {
+        font-size: 0.65rem;
+        margin-left: 0;
+        flex-basis: 100%;
+        order: 3;
+    }
+
+    .messageHeader {
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+
+    .msgHeaderRight {
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+
+    .timestamp {
+        font-size: 0.7rem;
+    }
+
+    .tagsContainer {
+        margin-left: 0;
+        margin-top: 4px;
+        flex-basis: 100%;
+    }
+
+    .message {
+        padding: 0.75rem;
+    }
+
+    .messageList {
+        padding: 0.75rem;
+    }
+
+    .editTimestampRow {
+        flex-wrap: wrap;
+    }
+
+    .editTimestampInput {
+        flex: 1;
+        min-width: 0;
     }
 }

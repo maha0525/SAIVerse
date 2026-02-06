@@ -8,6 +8,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
     Text,
+    Float,
 )
 from sqlalchemy.orm import declarative_base
 
@@ -59,7 +60,9 @@ class Building(Base):
     DESCRIPTION = Column(String(1024), default="", nullable=False)
     AUTO_INTERVAL_SEC = Column(Integer, default=10, nullable=False)
     IMAGE_PATH = Column(String(512), nullable=True)  # Building interior image for LLM visual context
+    EXTRA_PROMPT_FILES = Column(Text, nullable=True)  # JSON: ["body_control.txt", "other.txt"]
     __table_args__ = (UniqueConstraint('CITYID', 'BUILDINGNAME', name='uq_city_building_name'),)
+
 
 class City(Base):
     __tablename__ = "city"
@@ -211,6 +214,9 @@ class PersonaSchedule(Base):
     INTERVAL_SECONDS = Column(Integer, nullable=True)
     LAST_EXECUTED_AT = Column(DateTime, nullable=True)
 
+    # Playbook parameters (JSON)
+    PLAYBOOK_PARAMS = Column(Text, nullable=True)  # JSON string: {"selected_playbook": "xxx", ...}
+
     CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
     UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -237,4 +243,36 @@ class PhenomenonRule(Base):
     DESCRIPTION = Column(String(1024), default="", nullable=False)
     CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
     UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class LLMUsageLog(Base):
+    """LLM API使用量ログテーブル。
+
+    各LLM呼び出しのトークン使用量とコストを記録する。
+    """
+    __tablename__ = "llm_usage_log"
+    ID = Column(Integer, primary_key=True, autoincrement=True)
+    TIMESTAMP = Column(DateTime, server_default=func.now(), nullable=False)
+    PERSONA_ID = Column(String(255), nullable=True)  # Null = System/User call
+    BUILDING_ID = Column(String(255), nullable=True)
+    MODEL_ID = Column(String(255), nullable=False)
+    INPUT_TOKENS = Column(Integer, nullable=False)
+    OUTPUT_TOKENS = Column(Integer, nullable=False)
+    CACHED_TOKENS = Column(Integer, nullable=True, default=0)  # Tokens served from cache
+    COST_USD = Column(Float, nullable=True)  # Calculated cost in USD
+    NODE_TYPE = Column(String(64), nullable=True)  # llm, router, tool_detection, etc.
+    PLAYBOOK_NAME = Column(String(255), nullable=True)
+    CATEGORY = Column(String(64), nullable=True)  # persona_speak, memory_weave_generate, etc.
+
+
+class UserSettings(Base):
+    """ユーザー設定テーブル。
+
+    チュートリアル完了状態などのユーザー固有の設定を管理する。
+    """
+    __tablename__ = "user_settings"
+    USERID = Column(Integer, ForeignKey("user.USERID"), primary_key=True)
+    TUTORIAL_COMPLETED = Column(Boolean, default=False, nullable=False)
+    TUTORIAL_COMPLETED_AT = Column(DateTime, nullable=True)
+    LAST_TUTORIAL_VERSION = Column(Integer, default=1, nullable=False)
 
