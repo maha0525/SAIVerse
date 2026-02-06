@@ -10,6 +10,7 @@ import threading
 import queue
 from google.genai import errors
 
+from llm_clients.exceptions import LLMError
 from discord_gateway.translator import GatewayCommand
 from manager.persona import PersonaMixin
 from manager.visitors import VisitorMixin
@@ -439,9 +440,17 @@ class RuntimeService(
                         playbook_params=playbook_params,
                         event_callback=response_queue.put
                     )
+            except LLMError as e:
+                logging.error("SEA worker LLM error: %s", e, exc_info=True)
+                response_queue.put(e.to_dict())
             except Exception as e:
                 logging.error("SEA worker error", exc_info=True)
-                response_queue.put({"type": "error", "content": str(e)})
+                response_queue.put({
+                    "type": "error",
+                    "error_code": "unknown",
+                    "content": "予期せぬエラーが発生しました。",
+                    "technical_detail": str(e),
+                })
             finally:
                 response_queue.put(None)  # 番兵
 

@@ -2,7 +2,7 @@
   "model": "claude-sonnet-4-5",
   "display_name": "Claude Sonnet 4.5",
   "provider": "anthropic",
-  "context_length": 60000,
+  "context_length": 64000,
   "thinking_type": "enabled",
   "thinking_budget": 4096,
   "supports_images": true,
@@ -17,7 +17,10 @@
     "supported": true,
     "default_enabled": true,
     "default_ttl": "5m",
-    "ttl_options": ["5m", "1h"],
+    "ttl_options": [
+      "5m",
+      "1h"
+    ],
     "type": "explicit",
     "min_tokens": 1024
   }

@@ -11,6 +11,15 @@ import httpx
 from google import genai
 from google.genai import types
 
+from .exceptions import (
+    EmptyResponseError as LLMEmptyResponseError,
+    LLMError,
+    LLMTimeoutError,
+    RateLimitError,
+    SafetyFilterError,
+    ServerError,
+)
+
 try:  # pragma: no cover - optional defensive patching
     from google.genai import _api_client as _genai_api_client
 except Exception:  # pragma: no cover - absence is fine
@@ -170,6 +179,15 @@ class ChunkTimeoutError(RuntimeError):
 # Timeout for receiving chunks during streaming (detects socket stalls)
 CHUNK_TIMEOUT_SECONDS = int(os.getenv("GEMINI_CHUNK_TIMEOUT_SECONDS", "60"))
 
+# Default safety settings (can be overridden via configure_parameters)
+GEMINI_DEFAULT_SAFETY_SETTINGS = {
+    "HARM_CATEGORY_HATE_SPEECH": "BLOCK_ONLY_HIGH",
+    "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+    "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+    "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_ONLY_HIGH",
+}
+
+# Legacy constant for backward compatibility
 GEMINI_SAFETY_CONFIG = [
     types.SafetySetting(
         category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
@@ -188,6 +206,26 @@ GEMINI_SAFETY_CONFIG = [
         threshold=types.HarmBlockThreshold.BLOCK_ONLY_HIGH,
     ),
 ]
+
+# Allowed request parameters for Gemini API
+GEMINI_ALLOWED_REQUEST_PARAMS = {
+    "temperature", "top_p", "top_k", "max_output_tokens", "stop_sequences",
+}
+
+# Special parameters that need custom handling (not passed directly to API)
+GEMINI_SPECIAL_PARAMS = {
+    "thinking_level",
+    "safety_harassment", "safety_hate_speech",
+    "safety_sexually_explicit", "safety_dangerous_content",
+}
+
+# Mapping from parameter names to Gemini HarmCategory names
+SAFETY_PARAM_TO_CATEGORY = {
+    "safety_harassment": "HARM_CATEGORY_HARASSMENT",
+    "safety_hate_speech": "HARM_CATEGORY_HATE_SPEECH",
+    "safety_sexually_explicit": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+    "safety_dangerous_content": "HARM_CATEGORY_DANGEROUS_CONTENT",
+}
 
 GROUNDING_TOOL = types.Tool(google_search=types.GoogleSearch())
 
@@ -215,13 +253,73 @@ class GeminiClient(LLMClient):
         prefer_paid = cfg.get("prefer_paid", False)
         self.free_client, self.paid_client, self.client = build_gemini_clients(prefer_paid=prefer_paid)
         self.model = model
-        include_thoughts = cfg.get("include_thoughts")
-        if include_thoughts is None:
-            include_thoughts = "2.5" in (model or "").lower()
+
+        # Request parameters (temperature, top_p, etc.)
+        self._request_params: Dict[str, Any] = {}
+
+        # Thinking configuration
+        self._thinking_level: Optional[str] = None
+        self._include_thoughts: bool = cfg.get("include_thoughts", False)
+        # Auto-enable for 2.5/3 series models
+        if not self._include_thoughts:
+            model_lower = (model or "").lower()
+            self._include_thoughts = "2.5" in model_lower or "-3-" in model_lower or model_lower.startswith("gemini-3")
+
+        # Safety settings overrides
+        self._safety_overrides: Dict[str, str] = {}
+
+    def _build_thinking_config(self) -> Optional[types.ThinkingConfig]:
+        """Build ThinkingConfig from current settings."""
+        if not self._include_thoughts and not self._thinking_level:
+            return None
+
+        kwargs: Dict[str, Any] = {}
+        if self._include_thoughts:
+            kwargs["include_thoughts"] = True
+        if self._thinking_level:
+            kwargs["thinking_level"] = self._thinking_level
+
         try:
-            self._thinking_config = types.ThinkingConfig(include_thoughts=True) if include_thoughts else None
-        except Exception:
-            self._thinking_config = None
+            return types.ThinkingConfig(**kwargs)
+        except Exception as e:
+            logging.warning("Failed to create ThinkingConfig: %s", e)
+            return None
+
+    def _build_safety_settings(self) -> List[types.SafetySetting]:
+        """Build safety settings from defaults and overrides."""
+        # Start with defaults
+        settings = dict(GEMINI_DEFAULT_SAFETY_SETTINGS)
+
+        # Apply overrides from configure_parameters
+        for param_key, category in SAFETY_PARAM_TO_CATEGORY.items():
+            if param_key in self._safety_overrides:
+                settings[category] = self._safety_overrides[param_key]
+
+        result = []
+        for category_name, threshold_name in settings.items():
+            category = getattr(types.HarmCategory, category_name, None)
+            threshold = getattr(types.HarmBlockThreshold, threshold_name, None)
+            if category and threshold:
+                result.append(types.SafetySetting(category=category, threshold=threshold))
+        return result
+
+    def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
+        """Configure model parameters from UI settings."""
+        if not isinstance(parameters, dict):
+            return
+        for key, value in parameters.items():
+            if key in GEMINI_ALLOWED_REQUEST_PARAMS:
+                if value is None:
+                    self._request_params.pop(key, None)
+                else:
+                    self._request_params[key] = value
+            elif key == "thinking_level":
+                self._thinking_level = value if value else None
+            elif key in SAFETY_PARAM_TO_CATEGORY:
+                if value:
+                    self._safety_overrides[key] = value
+                else:
+                    self._safety_overrides.pop(key, None)
 
     @staticmethod
     def _schema_from_json(js: Optional[Dict[str, Any]]) -> Optional[types.Schema]:
@@ -328,6 +426,32 @@ class GeminiClient(LLMClient):
     def _is_timeout_error(err: Exception) -> bool:
         """Check if the error is a timeout that should be retried."""
         return isinstance(err, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.WriteTimeout, ChunkTimeoutError))
+
+    @staticmethod
+    def _is_server_error(err: Exception) -> bool:
+        """Check if the error is a server error (5xx)."""
+        msg = str(err).lower()
+        return "500" in msg or "502" in msg or "504" in msg or "internal" in msg
+
+    @staticmethod
+    def _is_authentication_error(err: Exception) -> bool:
+        """Check if the error is an authentication error."""
+        msg = str(err).lower()
+        return "401" in msg or "403" in msg or "invalid" in msg and "key" in msg or "authentication" in msg
+
+    def _convert_to_llm_error(self, err: Exception, context: str = "API call") -> LLMError:
+        """Convert a generic exception to an appropriate LLMError subclass."""
+        if self._is_rate_limit_error(err):
+            return RateLimitError(f"Gemini {context} failed: rate limit exceeded", err)
+        elif self._is_timeout_error(err):
+            return LLMTimeoutError(f"Gemini {context} failed: timeout", err)
+        elif self._is_server_error(err):
+            return ServerError(f"Gemini {context} failed: server error", err)
+        elif self._is_authentication_error(err):
+            from .exceptions import AuthenticationError
+            return AuthenticationError(f"Gemini {context} failed: authentication error", err)
+        else:
+            return LLMError(f"Gemini {context} failed: {err}", err)
 
     def _convert_messages(
         self,
@@ -491,15 +615,16 @@ class GeminiClient(LLMClient):
         sys_msg, contents = self._convert_messages(messages)
         cfg_kwargs: Dict[str, Any] = {
             "system_instruction": sys_msg,
-            "safety_settings": GEMINI_SAFETY_CONFIG,
+            "safety_settings": self._build_safety_settings(),
         }
         if tools_spec:
             cfg_kwargs["tools"] = merge_tools_for_gemini(tools_spec)
             cfg_kwargs["tool_config"] = tool_cfg
         # Always disable AFC - SAIVerse handles function calls manually
         cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
-        if self._thinking_config is not None:
-            cfg_kwargs["thinking_config"] = self._thinking_config
+        thinking_config = self._build_thinking_config()
+        if thinking_config is not None:
+            cfg_kwargs["thinking_config"] = thinking_config
         return client.models.generate_content(
             model=self.model,
             contents=contents,
@@ -544,11 +669,19 @@ class GeminiClient(LLMClient):
         
         cfg_kwargs: Dict[str, Any] = {
             "system_instruction": sys_msg,
-            "safety_settings": GEMINI_SAFETY_CONFIG,
+            "safety_settings": self._build_safety_settings(),
         }
-        if temperature is not None:
-            cfg_kwargs["temperature"] = temperature
-            
+
+        # Temperature: argument > _request_params
+        effective_temp = temperature if temperature is not None else self._request_params.get("temperature")
+        if effective_temp is not None:
+            cfg_kwargs["temperature"] = effective_temp
+
+        # Apply other request params (top_p, top_k, max_output_tokens, etc.)
+        for param in ("top_p", "top_k", "max_output_tokens", "stop_sequences"):
+            if param in self._request_params:
+                cfg_kwargs[param] = self._request_params[param]
+
         # Tool configuration
         if use_tools:
             merged_tools = merge_tools_for_gemini(tools_spec)
@@ -557,7 +690,7 @@ class GeminiClient(LLMClient):
                 functionCallingConfig=types.FunctionCallingConfig(mode="AUTO")
             )
             logging.info("[gemini] Sending %d Tool objects to API", len(merged_tools))
-            
+
         # Response schema configuration
         if response_schema:
             cfg_kwargs["response_mime_type"] = "application/json"
@@ -567,12 +700,13 @@ class GeminiClient(LLMClient):
                 schema_obj = self._schema_from_json(response_schema)
                 if schema_obj is not None:
                     cfg_kwargs["response_schema"] = schema_obj
-                    
+
         # Always disable AFC - SAIVerse handles function calls manually
         cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
-        
-        if self._thinking_config is not None:
-            cfg_kwargs["thinking_config"] = self._thinking_config
+
+        thinking_config = self._build_thinking_config()
+        if thinking_config is not None:
+            cfg_kwargs["thinking_config"] = thinking_config
 
         get_llm_logger().debug(
             "Gemini generate config model=%s use_tools=%s cfg=%s",
@@ -665,7 +799,12 @@ class GeminiClient(LLMClient):
                                 return parsed
                         except json.JSONDecodeError as e:
                             logging.warning("[gemini] Failed to parse structured output: %s", e)
-                            raise RuntimeError("Failed to parse JSON response from structured output") from e
+                            from .exceptions import InvalidRequestError
+                            raise InvalidRequestError(
+                                "Failed to parse JSON response from structured output",
+                                e,
+                                user_message="LLMからの応答を解析できませんでした。再度お試しください。"
+                            ) from e
 
                     # Check for empty streaming response (no response_schema and empty/whitespace-only text)
                     if not text.strip():
@@ -704,6 +843,25 @@ class GeminiClient(LLMClient):
                     continue
                     
                 candidate = resp.candidates[0]
+
+                # Check for safety filter block
+                finish_reason = getattr(candidate, "finish_reason", None)
+                if finish_reason is not None:
+                    finish_reason_str = str(finish_reason).upper()
+                    if "SAFETY" in finish_reason_str:
+                        safety_ratings = getattr(candidate, "safety_ratings", [])
+                        blocked_categories = [
+                            str(getattr(r, "category", "unknown"))
+                            for r in (safety_ratings or [])
+                            if str(getattr(r, "probability", "")).upper() in ("HIGH", "MEDIUM")
+                        ]
+                        detail = f"Blocked categories: {blocked_categories}" if blocked_categories else ""
+                        logging.warning("[gemini] Response blocked by safety filter: %s", detail)
+                        raise SafetyFilterError(
+                            f"Content blocked by safety filter. {detail}",
+                            user_message="コンテンツが安全性フィルターによりブロックされました。入力内容を変更してお試しください。"
+                        )
+
                 if not candidate.content or not candidate.content.parts:
                     logging.warning("[gemini] No content/parts (attempt %d/%d)", attempt + 1, max_retries)
                     continue
@@ -820,12 +978,15 @@ class GeminiClient(LLMClient):
                     active_client = self.paid_client
                     continue
                 logging.exception("Gemini call failed")
-                raise RuntimeError("Gemini API call failed") from exc
+                raise self._convert_to_llm_error(exc, "API call") from exc
 
         logging.error("Gemini API call failed after %d retries", max_retries)
         if use_tools:
             return {"type": "text", "content": ""}
-        raise RuntimeError("Gemini API call failed")
+        raise LLMEmptyResponseError(
+            f"Gemini API call failed after {max_retries} retries with empty responses",
+            user_message="何度も空の応答が返されました。しばらく待ってから再度お試しください。"
+        )
 
     def _separate_parts(self, parts: List[Any]) -> Tuple[str, List[Dict[str, str]]]:
         reasoning_entries: List[Dict[str, str]] = []
@@ -903,8 +1064,7 @@ class GeminiClient(LLMClient):
                 stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema)
             else:
                 logging.exception("Gemini call failed")
-                raise RuntimeError("Gemini streaming failed")
-                return
+                raise self._convert_to_llm_error(exc, "streaming")
 
         fcall: Optional[types.FunctionCall] = None
         prefix_yielded = False
@@ -923,6 +1083,25 @@ class GeminiClient(LLMClient):
             candidate = chunk.candidates[0]
             get_llm_logger().debug("Gemini stream candidate:\n%s", candidate)
             saw_chunks = True
+
+            # Check for safety filter block in streaming
+            finish_reason = getattr(candidate, "finish_reason", None)
+            if finish_reason is not None:
+                finish_reason_str = str(finish_reason).upper()
+                if "SAFETY" in finish_reason_str:
+                    safety_ratings = getattr(candidate, "safety_ratings", [])
+                    blocked_categories = [
+                        str(getattr(r, "category", "unknown"))
+                        for r in (safety_ratings or [])
+                        if str(getattr(r, "probability", "")).upper() in ("HIGH", "MEDIUM")
+                    ]
+                    detail = f"Blocked categories: {blocked_categories}" if blocked_categories else ""
+                    logging.warning("[gemini] Stream blocked by safety filter: %s", detail)
+                    raise SafetyFilterError(
+                        f"Content blocked by safety filter. {detail}",
+                        user_message="コンテンツが安全性フィルターによりブロックされました。入力内容を変更してお試しください。"
+                    )
+
             if not candidate.content or not candidate.content.parts:
                 continue
             candidate_index = getattr(candidate, "index", 0)
@@ -1039,7 +1218,7 @@ class GeminiClient(LLMClient):
         sys_msg, contents = self._convert_messages(messages)
         cfg_kwargs: Dict[str, Any] = {
             "system_instruction": sys_msg,
-            "safety_settings": GEMINI_SAFETY_CONFIG,
+            "safety_settings": self._build_safety_settings(),
         }
         if use_tools:
             cfg_kwargs["tools"] = merge_tools_for_gemini(tools_spec)
@@ -1055,10 +1234,19 @@ class GeminiClient(LLMClient):
                     cfg_kwargs["response_schema"] = schema_obj
         # Always disable AFC - SAIVerse handles function calls manually via Playbook
         cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
-        if self._thinking_config is not None:
-            cfg_kwargs["thinking_config"] = self._thinking_config
-        if temperature is not None:
-            cfg_kwargs["temperature"] = temperature
+        thinking_config = self._build_thinking_config()
+        if thinking_config is not None:
+            cfg_kwargs["thinking_config"] = thinking_config
+
+        # Temperature: argument > _request_params
+        effective_temp = temperature if temperature is not None else self._request_params.get("temperature")
+        if effective_temp is not None:
+            cfg_kwargs["temperature"] = effective_temp
+
+        # Apply other request params (top_p, top_k, max_output_tokens, etc.)
+        for param in ("top_p", "top_k", "max_output_tokens", "stop_sequences"):
+            if param in self._request_params:
+                cfg_kwargs[param] = self._request_params[param]
         get_llm_logger().debug(
             "Gemini stream config model=%s use_tools=%s cfg=%s",
             self.model,

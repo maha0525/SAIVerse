@@ -264,3 +264,15 @@ class LLMUsageLog(Base):
     PLAYBOOK_NAME = Column(String(255), nullable=True)
     CATEGORY = Column(String(64), nullable=True)  # persona_speak, memory_weave_generate, etc.
 
+
+class UserSettings(Base):
+    """ユーザー設定テーブル。
+
+    チュートリアル完了状態などのユーザー固有の設定を管理する。
+    """
+    __tablename__ = "user_settings"
+    USERID = Column(Integer, ForeignKey("user.USERID"), primary_key=True)
+    TUTORIAL_COMPLETED = Column(Boolean, default=False, nullable=False)
+    TUTORIAL_COMPLETED_AT = Column(DateTime, nullable=True)
+    LAST_TUTORIAL_VERSION = Column(Integer, default=1, nullable=False)
+

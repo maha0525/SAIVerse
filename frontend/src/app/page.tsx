@@ -8,6 +8,7 @@ import Sidebar from '@/components/Sidebar';
 import ChatOptions from '@/components/ChatOptions';
 import RightSidebar from '@/components/RightSidebar';
 import PeopleModal from '@/components/PeopleModal';
+import TutorialWizard from '@/components/tutorial/TutorialWizard';
 import { Send, Paperclip, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
 
@@ -44,6 +45,10 @@ interface Message {
     images?: MessageImage[];
     llm_usage?: MessageLLMUsage;
     llm_usage_total?: MessageLLMUsageTotal;
+    // Error information
+    isError?: boolean;
+    errorCode?: string;
+    errorDetail?: string;
 }
 
 // File attachment types for upload
@@ -125,6 +130,28 @@ export default function Home() {
         return () => window.removeEventListener('resize', checkMobile);
     }, []);
 
+    // Check tutorial status on mount
+    useEffect(() => {
+        const checkTutorial = async () => {
+            try {
+                const res = await fetch('/api/tutorial/status');
+                if (res.ok) {
+                    const data = await res.json();
+                    // Show tutorial if not completed or if initial setup is needed
+                    if (!data.tutorial_completed || data.needs_initial_setup) {
+                        setShowTutorial(true);
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to check tutorial status', e);
+            } finally {
+                setTutorialChecked(true);
+            }
+        };
+
+        checkTutorial();
+    }, []);
+
     // Auto-resize textarea based on content (max 10 lines)
     const adjustTextareaHeight = useCallback(() => {
         const textarea = textareaRef.current;
@@ -160,6 +187,10 @@ export default function Home() {
     const [currentBuildingName, setCurrentBuildingName] = useState<string>('SAIVerse');
     const [currentBuildingId, setCurrentBuildingId] = useState<string | null>(null);
     const currentBuildingIdRef = useRef<string | null>(null);
+
+    // Tutorial state
+    const [showTutorial, setShowTutorial] = useState(false);
+    const [tutorialChecked, setTutorialChecked] = useState(false);
     const swipeStartX = useRef<number | null>(null);
     const swipeStartY = useRef<number | null>(null);
     const swipeStartTime = useRef<number | null>(null);
@@ -560,7 +591,14 @@ export default function Home() {
                             }]);
                             setLoadingStatus('Thinking...');
                         } else if (event.type === 'error') {
-                            setMessages(prev => [...prev, { role: 'assistant', content: `Error: ${event.content}` }]);
+                            setMessages(prev => [...prev, {
+                                role: 'assistant',
+                                content: event.content || 'An error occurred',
+                                isError: true,
+                                errorCode: event.error_code || 'unknown',
+                                errorDetail: event.technical_detail,
+                                timestamp: new Date().toISOString()
+                            }]);
                         } else if (event.response) {
                             setMessages(prev => [...prev, { role: 'assistant', content: event.response }]);
                         }
@@ -745,7 +783,7 @@ export default function Home() {
                     {isLoadingMore && <div style={{ textAlign: 'center', padding: '10px', color: '#666' }}>Loading history...</div>}
                     {messages.map((msg, idx) => (
                         <div key={msg.id || idx} className={`${styles.message} ${styles[msg.role]}`}>
-                            <div className={styles.card}>
+                            <div className={`${styles.card} ${msg.isError ? styles.errorCard : ''} ${msg.isError && msg.errorCode ? styles[`error_${msg.errorCode}`] : ''}`}>
                                 <div className={styles.cardHeader}>
                                     <img
                                         src={msg.avatar || (msg.role === 'user' ? '/api/static/icons/user.png' : '/api/static/icons/host.png')}
@@ -768,7 +806,30 @@ export default function Home() {
                                             ))}
                                         </div>
                                     )}
-                                    <ReactMarkdown remarkPlugins={[remarkBreaks]}>{msg.content}</ReactMarkdown>
+                                    {msg.isError ? (
+                                        <div className={styles.errorContent}>
+                                            <div className={styles.errorHeader}>
+                                                <span className={styles.errorIcon}>
+                                                    {msg.errorCode === 'rate_limit' && '⏱️'}
+                                                    {msg.errorCode === 'timeout' && '⏰'}
+                                                    {msg.errorCode === 'safety_filter' && '🛡️'}
+                                                    {msg.errorCode === 'server_error' && '🔧'}
+                                                    {msg.errorCode === 'empty_response' && '📭'}
+                                                    {msg.errorCode === 'authentication' && '🔑'}
+                                                    {(!msg.errorCode || msg.errorCode === 'unknown' || !['rate_limit', 'timeout', 'safety_filter', 'server_error', 'empty_response', 'authentication'].includes(msg.errorCode)) && '⚠️'}
+                                                </span>
+                                                <span className={styles.errorMessage}>{msg.content}</span>
+                                            </div>
+                                            {msg.errorDetail && (
+                                                <details className={styles.errorDetails}>
+                                                    <summary>Technical Details</summary>
+                                                    <pre>{msg.errorDetail}</pre>
+                                                </details>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        <ReactMarkdown remarkPlugins={[remarkBreaks]}>{msg.content}</ReactMarkdown>
+                                    )}
                                 </div>
                                 {(msg.timestamp || msg.llm_usage || msg.llm_usage_total) && (
                                     <div className={styles.cardFooter}>
@@ -925,6 +986,21 @@ export default function Home() {
                 isOpen={isPeopleModalOpen}
                 onClose={() => setIsPeopleModalOpen(false)}
             />
+
+            {/* Initial Tutorial Wizard */}
+            {tutorialChecked && (
+                <TutorialWizard
+                    isOpen={showTutorial}
+                    onClose={() => setShowTutorial(false)}
+                    onComplete={(roomId) => {
+                        setShowTutorial(false);
+                        // Reload page to apply new settings
+                        // User move is already handled in TutorialWizard.handleComplete,
+                        // so after reload the page will load the persona's room
+                        window.location.reload();
+                    }}
+                />
+            )}
         </div>
     );
 }

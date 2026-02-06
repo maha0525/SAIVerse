@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Callable
 import json
 import re
 
+from llm_clients.exceptions import LLMError
 from sea.playbook_models import NodeType, PlaybookSchema, PlaybookValidationError, validate_playbook_graph
 from sea.langgraph_runner import compile_playbook
 from sea.cancellation import CancellationToken, ExecutionCancelledException
@@ -367,6 +368,14 @@ class SEARuntime:
         except ExecutionCancelledException:
             # Re-raise cancellation exceptions
             raise
+        except LLMError:
+            # Re-raise LLM errors for proper error handling in caller
+            # Update execution state: execution failed, reset to idle
+            if hasattr(persona, "execution_state"):
+                persona.execution_state["playbook"] = None
+                persona.execution_state["node"] = None
+                persona.execution_state["status"] = "idle"
+            raise
         except Exception:
             LOGGER.exception("SEA LangGraph execution failed")
             # Update execution state: execution failed, reset to idle
@@ -610,23 +619,47 @@ class SEARuntime:
 
                     if use_streaming:
                         LOGGER.info("[DEBUG] Using streaming generation (speak=true)")
-                        # Streaming mode: yield chunks to UI
-                        text_chunks = []
-                        for chunk in llm_client.generate_stream(
-                            messages,
-                            tools=[],
-                            temperature=self._default_temperature(persona),
-                            **self._get_cache_kwargs(),
-                        ):
-                            text_chunks.append(chunk)
-                            # Send each chunk to UI
-                            event_callback({
-                                "type": "streaming_chunk",
-                                "content": chunk,
-                                "persona_id": getattr(persona, "persona_id", None),
-                                "node_id": getattr(node_def, "id", "llm"),
-                            })
-                        text = "".join(text_chunks)
+                        # Streaming mode: yield chunks to UI (with retry for empty response)
+                        max_stream_retries = 3
+                        text = ""
+                        for stream_attempt in range(max_stream_retries):
+                            text_chunks = []
+                            for chunk in llm_client.generate_stream(
+                                messages,
+                                tools=[],
+                                temperature=self._default_temperature(persona),
+                                **self._get_cache_kwargs(),
+                            ):
+                                text_chunks.append(chunk)
+                                # Send each chunk to UI
+                                event_callback({
+                                    "type": "streaming_chunk",
+                                    "content": chunk,
+                                    "persona_id": getattr(persona, "persona_id", None),
+                                    "node_id": getattr(node_def, "id", "llm"),
+                                })
+                            text = "".join(text_chunks)
+
+                            # Check for empty response
+                            if text.strip():
+                                break  # Got valid response
+
+                            # Empty response - discard usage and retry
+                            discarded_usage = llm_client.consume_usage()
+                            LOGGER.warning(
+                                "[sea][llm] Empty streaming response (attempt %d/%d). "
+                                "Discarding usage (in=%d, out=%d) and retrying...",
+                                stream_attempt + 1, max_stream_retries,
+                                discarded_usage.input_tokens if discarded_usage else 0,
+                                discarded_usage.output_tokens if discarded_usage else 0,
+                            )
+                        else:
+                            # All retries exhausted
+                            LOGGER.error(
+                                "[sea][llm] Empty streaming response after %d attempts. "
+                                "Proceeding with empty response.",
+                                max_stream_retries
+                            )
 
                         # Record usage
                         usage = llm_client.consume_usage()
@@ -769,6 +802,9 @@ class SEARuntime:
                                 LOGGER.info("[sea][llm] (normal mode) Stored state['%s'] = %s", text_key, content_preview)
                                 state["has_speak_content"] = True
                                 break
+            except LLMError:
+                # Propagate LLM errors to the caller for proper handling
+                raise
             except Exception as exc:
                 LOGGER.error("SEA LangGraph LLM failed: %s: %s", type(exc).__name__, exc)
                 text = "(error in llm node)"

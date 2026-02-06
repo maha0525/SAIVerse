@@ -17,6 +17,15 @@ from tools import OPENAI_TOOLS_SPEC
 from llm_router import route
 
 from .base import LLMClient, get_llm_logger
+from .exceptions import (
+    AuthenticationError,
+    EmptyResponseError as LLMEmptyResponseError,
+    InvalidRequestError,
+    LLMError,
+    LLMTimeoutError,
+    RateLimitError,
+    ServerError,
+)
 from .utils import content_to_text, merge_reasoning_strings, obj_to_dict
 
 
@@ -59,6 +68,28 @@ def _is_timeout_error(err: Exception) -> bool:
 def _should_retry(err: Exception) -> bool:
     """Check if the error should trigger a retry."""
     return _is_rate_limit_error(err) or _is_server_error(err) or _is_timeout_error(err)
+
+
+def _is_authentication_error(err: Exception) -> bool:
+    """Check if the error is an authentication error."""
+    if isinstance(err, openai.AuthenticationError):
+        return True
+    msg = str(err).lower()
+    return "401" in msg or "403" in msg or "authentication" in msg or "invalid api key" in msg
+
+
+def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError:
+    """Convert a generic exception to an appropriate LLMError subclass."""
+    if _is_rate_limit_error(err):
+        return RateLimitError(f"OpenAI {context} failed: rate limit exceeded", err)
+    elif _is_timeout_error(err):
+        return LLMTimeoutError(f"OpenAI {context} failed: timeout", err)
+    elif _is_server_error(err):
+        return ServerError(f"OpenAI {context} failed: server error", err)
+    elif _is_authentication_error(err):
+        return AuthenticationError(f"OpenAI {context} failed: authentication error", err)
+    else:
+        return LLMError(f"OpenAI {context} failed: {err}", err)
 
 
 def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_image_bytes: Optional[int] = None, convert_system_to_user: bool = False) -> List[Any]:
@@ -272,7 +303,10 @@ class OpenAIClient(LLMClient):
         key_env = api_key_env or "OPENAI_API_KEY"
         api_key = api_key or os.getenv(key_env)
         if not api_key:
-            raise RuntimeError(f"{key_env} environment variable is not set.")
+            raise AuthenticationError(
+                f"{key_env} environment variable is not set.",
+                user_message="OpenAI APIキーが設定されていません。管理者にお問い合わせください。"
+            )
 
         client_kwargs: Dict[str, str] = {"api_key": api_key}
         if base_url:
@@ -411,10 +445,12 @@ class OpenAIClient(LLMClient):
                         time.sleep(backoff)
                         continue
                     logging.exception("OpenAI call failed")
-                    raise RuntimeError("OpenAI API call failed")
+                    raise _convert_to_llm_error(e, "API call")
 
             if resp is None:
-                raise RuntimeError(f"OpenAI API call failed after {MAX_RETRIES} retries: {last_error}")
+                if last_error:
+                    raise _convert_to_llm_error(last_error, f"API call after {MAX_RETRIES} retries")
+                raise LLMEmptyResponseError(f"OpenAI API call failed after {MAX_RETRIES} retries with no response")
 
             get_llm_logger().debug("OpenAI raw:\n%s", resp.model_dump_json(indent=2))
 
@@ -443,7 +479,11 @@ class OpenAIClient(LLMClient):
                         return parsed
                 except json.JSONDecodeError as e:
                     logging.warning("[openai] Failed to parse structured output: %s", e)
-                    raise RuntimeError("Failed to parse JSON response from structured output") from e
+                    raise InvalidRequestError(
+                        "Failed to parse JSON response from structured output",
+                        e,
+                        user_message="LLMからの応答を解析できませんでした。再度お試しください。"
+                    ) from e
             else:
                 # Check for empty response
                 if not text_body.strip():
@@ -452,7 +492,7 @@ class OpenAIClient(LLMClient):
                         "Model returned empty content. finish_reason=%s",
                         choice.finish_reason
                     )
-                    raise RuntimeError("OpenAI returned empty response")
+                    raise LLMEmptyResponseError("OpenAI returned empty response")
                 if snippets:
                     prefix = "\n".join(snippets)
                     return prefix + ("\n" if text_body and prefix else "") + text_body
@@ -488,10 +528,12 @@ class OpenAIClient(LLMClient):
                     time.sleep(backoff)
                     continue
                 logging.exception("OpenAI call failed")
-                raise RuntimeError("OpenAI API call failed")
+                raise _convert_to_llm_error(e, "API call (tool mode)")
 
         if resp is None:
-            raise RuntimeError(f"OpenAI API call failed after {MAX_RETRIES} retries: {last_error_tool}")
+            if last_error_tool:
+                raise _convert_to_llm_error(last_error_tool, f"API call after {MAX_RETRIES} retries (tool mode)")
+            raise LLMEmptyResponseError(f"OpenAI API call failed after {MAX_RETRIES} retries with no response")
 
         get_llm_logger().debug("OpenAI raw (tool detection):\n%s", resp.model_dump_json(indent=2))
 
@@ -536,7 +578,7 @@ class OpenAIClient(LLMClient):
                     "Model returned empty content. finish_reason=%s",
                     choice.finish_reason
                 )
-                raise RuntimeError("OpenAI returned empty response without tool call")
+                raise LLMEmptyResponseError("OpenAI returned empty response without tool call")
             return {"type": "text", "content": content}
 
     def generate_stream(
@@ -608,10 +650,12 @@ class OpenAIClient(LLMClient):
                         time.sleep(backoff)
                         continue
                     logging.exception("OpenAI call failed")
-                    raise RuntimeError("OpenAI streaming failed")
+                    raise _convert_to_llm_error(e, "streaming")
 
             if resp is None:
-                raise RuntimeError(f"OpenAI streaming failed after {MAX_RETRIES} retries: {last_stream_error}")
+                if last_stream_error:
+                    raise _convert_to_llm_error(last_stream_error, f"streaming after {MAX_RETRIES} retries")
+                raise LLMEmptyResponseError(f"OpenAI streaming failed after {MAX_RETRIES} retries with no response")
 
             # Handle streaming vs non-streaming response
             if req_kwargs.get("stream"):
@@ -691,10 +735,12 @@ class OpenAIClient(LLMClient):
                     time.sleep(backoff)
                     continue
                 logging.exception("OpenAI call failed")
-                raise RuntimeError("OpenAI JSON mode call failed")
+                raise _convert_to_llm_error(e, "JSON mode call")
 
         if resp is None:
-            raise RuntimeError(f"OpenAI JSON mode call failed after {MAX_RETRIES} retries: {last_tool_stream_error}")
+            if last_tool_stream_error:
+                raise _convert_to_llm_error(last_tool_stream_error, f"JSON mode call after {MAX_RETRIES} retries")
+            raise LLMEmptyResponseError(f"OpenAI JSON mode call failed after {MAX_RETRIES} retries with no response")
 
         call_buffer: dict[str, dict] = {}
         state = "TEXT"
@@ -799,9 +845,12 @@ class OpenAIClient(LLMClient):
                 # No tool call - store text-only result
                 self._store_tool_detection({"type": "text", "content": ""})
 
-        except Exception:
+        except LLMError:
+            # Re-raise LLMError subclasses directly
+            raise
+        except Exception as e:
             logging.exception("OpenAI stream call failed")
-            raise RuntimeError("OpenAI streaming call failed")
+            raise _convert_to_llm_error(e, "streaming call")
 
     def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
         if not isinstance(parameters, dict):

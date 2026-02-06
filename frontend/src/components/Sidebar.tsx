@@ -2,10 +2,11 @@
 
 import { useEffect, useState, useRef } from 'react';
 import styles from './Sidebar.module.css';
-import { Settings, Zap, BarChart2, UserPlus, Plus, X } from 'lucide-react';
+import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle } from 'lucide-react';
 import GlobalSettingsModal from './GlobalSettingsModal';
 import UserProfileModal from './UserProfileModal';
 import PersonaWizard from './PersonaWizard';
+import TutorialSelectModal from './tutorial/TutorialSelectModal';
 
 interface UserStatus {
     is_online: boolean;  // Backward compatibility
@@ -38,6 +39,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
     const [isCreateBuildingOpen, setIsCreateBuildingOpen] = useState(false);
     const [newBuildingName, setNewBuildingName] = useState('');
     const [isCreatingBuilding, setIsCreatingBuilding] = useState(false);
+    const [isTutorialSelectOpen, setIsTutorialSelectOpen] = useState(false);
 
     // Swipe Logic for Control
     const startX = useRef<number | null>(null);
@@ -307,6 +309,14 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
                             <BarChart2 size={16} /> API使用状況
                         </span>
                     </div>
+                    <div
+                        className={styles.buildingItem}
+                        onClick={() => setIsTutorialSelectOpen(true)}
+                    >
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <HelpCircle size={16} /> チュートリアル
+                        </span>
+                    </div>
                 </div>
 
                 {/* Footer: Settings + Profile */}
@@ -359,6 +369,11 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
                         refreshData();
                         if (onMove) onMove();
                     }}
+                />
+
+                <TutorialSelectModal
+                    isOpen={isTutorialSelectOpen}
+                    onClose={() => setIsTutorialSelectOpen(false)}
                 />
             </aside>
         </>

@@ -1,6 +1,6 @@
 {
-  "model": "claude-opus-4-5",
-  "display_name": "Claude Opus 4.5",
+  "model": "claude-opus-4-6",
+  "display_name": "Claude Opus 4.6",
   "provider": "anthropic",
   "context_length": 64000,
   "thinking_type": "enabled",

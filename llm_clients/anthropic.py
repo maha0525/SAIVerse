@@ -15,6 +15,15 @@ from anthropic.types import Message, TextBlock, ToolUseBlock
 from media_utils import iter_image_media, load_image_bytes_for_llm
 
 from .base import EmptyResponseError, LLMClient, get_llm_logger
+from .exceptions import (
+    AuthenticationError,
+    EmptyResponseError as LLMEmptyResponseError,
+    InvalidRequestError,
+    LLMError,
+    LLMTimeoutError,
+    RateLimitError,
+    ServerError,
+)
 from .utils import content_to_text
 
 
@@ -57,6 +66,28 @@ def _is_timeout_error(err: Exception) -> bool:
 def _should_retry(err: Exception) -> bool:
     """Check if the error should trigger a retry."""
     return _is_rate_limit_error(err) or _is_server_error(err) or _is_timeout_error(err)
+
+
+def _is_authentication_error(err: Exception) -> bool:
+    """Check if the error is an authentication error."""
+    if isinstance(err, anthropic.AuthenticationError):
+        return True
+    msg = str(err).lower()
+    return "401" in msg or "403" in msg or "authentication" in msg or "invalid api key" in msg
+
+
+def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError:
+    """Convert a generic exception to an appropriate LLMError subclass."""
+    if _is_rate_limit_error(err):
+        return RateLimitError(f"Anthropic {context} failed: rate limit exceeded", err)
+    elif _is_timeout_error(err):
+        return LLMTimeoutError(f"Anthropic {context} failed: timeout", err)
+    elif _is_server_error(err):
+        return ServerError(f"Anthropic {context} failed: server error", err)
+    elif _is_authentication_error(err):
+        return AuthenticationError(f"Anthropic {context} failed: authentication error", err)
+    else:
+        return LLMError(f"Anthropic {context} failed: {err}", err)
 
 
 def _make_cache_control(cache_ttl: str = "5m") -> Dict[str, Any]:
@@ -308,7 +339,10 @@ class AnthropicClient(LLMClient):
 
         api_key = os.getenv("CLAUDE_API_KEY")
         if not api_key:
-            raise RuntimeError("CLAUDE_API_KEY environment variable is not set.")
+            raise AuthenticationError(
+                "CLAUDE_API_KEY environment variable is not set.",
+                user_message="Anthropic APIキーが設定されていません。管理者にお問い合わせください。"
+            )
 
         self.client = Anthropic(api_key=api_key)
         self.model = model
@@ -363,6 +397,19 @@ class AnthropicClient(LLMClient):
         self._extra_params: Dict[str, Any] = {}
         if cfg.get("temperature") is not None:
             self._extra_params["temperature"] = cfg["temperature"]
+
+    def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
+        """Configure model parameters from UI settings."""
+        if not isinstance(parameters, dict):
+            return
+        allowed_params = {"temperature", "top_p", "top_k", "max_tokens"}
+        for key, value in parameters.items():
+            if key not in allowed_params:
+                continue
+            if value is None:
+                self._extra_params.pop(key, None)
+            else:
+                self._extra_params[key] = value
 
     def _store_usage_from_response(self, usage: Any) -> None:
         """Extract and store usage information from Anthropic response."""
@@ -459,6 +506,11 @@ class AnthropicClient(LLMClient):
         elif "temperature" in self._extra_params:
             request_params["temperature"] = self._extra_params["temperature"]
 
+        # Apply other extra params (top_p, top_k)
+        for param in ("top_p", "top_k"):
+            if param in self._extra_params:
+                request_params[param] = self._extra_params[param]
+
         # Add thinking configuration if set
         if self._thinking_config:
             request_params["thinking"] = self._thinking_config
@@ -491,7 +543,7 @@ class AnthropicClient(LLMClient):
                 break  # Success, exit retry loop
             except anthropic.BadRequestError as e:
                 logging.error("[anthropic] Bad request: %s", e)
-                raise RuntimeError(f"Anthropic API error: {e}")
+                raise InvalidRequestError(f"Anthropic API error: {e}", e)
             except Exception as e:
                 last_error = e
                 if _should_retry(e) and attempt < MAX_RETRIES - 1:
@@ -503,10 +555,12 @@ class AnthropicClient(LLMClient):
                     time.sleep(backoff)
                     continue
                 logging.exception("[anthropic] API call failed")
-                raise RuntimeError(f"Anthropic API call failed: {e}")
+                raise _convert_to_llm_error(e, "API call")
 
         if response is None:
-            raise RuntimeError(f"Anthropic API call failed after {MAX_RETRIES} retries: {last_error}")
+            if last_error:
+                raise _convert_to_llm_error(last_error, f"API call after {MAX_RETRIES} retries")
+            raise LLMEmptyResponseError(f"Anthropic API call failed after {MAX_RETRIES} retries with no response")
 
         # Store usage
         self._store_usage_from_response(response.usage)
@@ -542,7 +596,7 @@ class AnthropicClient(LLMClient):
                         "Model returned empty content. stop_reason=%s",
                         getattr(response, "stop_reason", None)
                     )
-                    raise RuntimeError("Anthropic returned empty response without tool call")
+                    raise LLMEmptyResponseError("Anthropic returned empty response without tool call")
                 self._store_tool_detection({
                     "type": "text",
                     "content": text,
@@ -561,7 +615,7 @@ class AnthropicClient(LLMClient):
                 "Model returned empty content. stop_reason=%s",
                 getattr(response, "stop_reason", None)
             )
-            raise RuntimeError("Anthropic returned empty response")
+            raise LLMEmptyResponseError("Anthropic returned empty response")
         return text
 
     def generate_stream(
@@ -635,6 +689,11 @@ class AnthropicClient(LLMClient):
         elif "temperature" in self._extra_params:
             request_params["temperature"] = self._extra_params["temperature"]
 
+        # Apply other extra params (top_p, top_k)
+        for param in ("top_p", "top_k"):
+            if param in self._extra_params:
+                request_params[param] = self._extra_params[param]
+
         # Add thinking configuration if set
         if self._thinking_config:
             request_params["thinking"] = self._thinking_config
@@ -685,7 +744,7 @@ class AnthropicClient(LLMClient):
 
             except anthropic.BadRequestError as e:
                 logging.error("[anthropic] Bad request: %s", e)
-                raise RuntimeError(f"Anthropic API error: {e}")
+                raise InvalidRequestError(f"Anthropic streaming API error: {e}", e)
             except Exception as e:
                 last_error = e
                 if _should_retry(e) and attempt < MAX_RETRIES - 1:
@@ -697,10 +756,12 @@ class AnthropicClient(LLMClient):
                     time.sleep(backoff)
                     continue
                 logging.exception("[anthropic] Streaming API call failed")
-                raise RuntimeError(f"Anthropic streaming API call failed: {e}")
+                raise _convert_to_llm_error(e, "streaming API call")
 
         if not stream_success:
-            raise RuntimeError(f"Anthropic streaming API call failed after {MAX_RETRIES} retries: {last_error}")
+            if last_error:
+                raise _convert_to_llm_error(last_error, f"streaming API call after {MAX_RETRIES} retries")
+            raise LLMEmptyResponseError(f"Anthropic streaming API call failed after {MAX_RETRIES} retries with no response")
 
     def generate_with_tool_detection(
         self,

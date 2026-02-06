@@ -1,0 +1,377 @@
+/* Welcome Step */
+.welcomeContainer {
+    text-align: center;
+    padding: 1rem 0;
+}
+
+.logoArea {
+    margin-bottom: 2rem;
+}
+
+.logo {
+    max-width: 200px;
+    height: auto;
+}
+
+.welcomeTitle {
+    font-size: 1.8rem;
+    font-weight: 600;
+    color: #e0e0e0;
+    margin-bottom: 1.5rem;
+}
+
+.descriptionBox {
+    background-color: #2a2b2e;
+    border-radius: 12px;
+    padding: 2rem;
+    margin-bottom: 1.5rem;
+    font-size: 1.1rem;
+    line-height: 1.8;
+    color: #ccc;
+}
+
+.descriptionBox p {
+    margin: 0.3rem 0;
+}
+
+.descriptionBox strong {
+    color: #4dabf7;
+}
+
+.hint {
+    font-size: 0.9rem;
+    color: #888;
+}
+
+/* Form Fields */
+.formContainer {
+    max-width: 500px;
+    margin: 0 auto;
+}
+
+.title {
+    font-size: 1.3rem;
+    font-weight: 600;
+    color: #e0e0e0;
+    margin-bottom: 0.5rem;
+}
+
+.subtitle {
+    font-size: 0.95rem;
+    color: #888;
+    margin-bottom: 2rem;
+}
+
+.field {
+    margin-bottom: 1.5rem;
+}
+
+.field label {
+    display: block;
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: #ccc;
+    margin-bottom: 0.5rem;
+}
+
+.field input,
+.field select {
+    width: 100%;
+    padding: 0.85rem;
+    border: 1px solid #444;
+    border-radius: 8px;
+    background-color: #2a2b2e;
+    color: #e0e0e0;
+    font-size: 1rem;
+    transition: border-color 0.2s;
+}
+
+.field input:focus,
+.field select:focus {
+    outline: none;
+    border-color: #4dabf7;
+}
+
+.field input::placeholder {
+    color: #666;
+}
+
+.fieldHint {
+    font-size: 0.8rem;
+    color: #888;
+    margin-top: 0.4rem;
+}
+
+/* API Keys Step */
+.apiKeysContainer {
+    max-width: 600px;
+    margin: 0 auto;
+}
+
+.apiKeyList {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+}
+
+.apiKeyItem {
+    background-color: #2a2b2e;
+    border-radius: 8px;
+    padding: 1rem;
+}
+
+.apiKeyHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.3rem;
+}
+
+.apiKeyHeaderLeft {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.apiKeyHeader label {
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: #e0e0e0;
+}
+
+.freeBadge {
+    background-color: #2b8a3e;
+    color: #fff;
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    white-space: nowrap;
+}
+
+.freeNote {
+    font-size: 0.75rem;
+    color: #999;
+    margin-bottom: 0.75rem;
+    line-height: 1.5;
+    padding-left: 0.5rem;
+    border-left: 2px solid #444;
+}
+
+.docLink {
+    background: none;
+    border: none;
+    color: #4dabf7;
+    font-size: 0.8rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    transition: all 0.2s;
+}
+
+.docLink:hover {
+    background-color: rgba(77, 171, 247, 0.1);
+}
+
+.providerDescription {
+    font-size: 0.8rem;
+    color: #888;
+    margin-bottom: 0.5rem;
+}
+
+.inputRow {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.inputRow input {
+    flex: 1;
+    padding: 0.7rem;
+    border: 1px solid #444;
+    border-radius: 6px;
+    background-color: #1e1f22;
+    color: #e0e0e0;
+    font-size: 0.9rem;
+}
+
+.inputRow input:focus {
+    outline: none;
+    border-color: #4dabf7;
+}
+
+.inputRow input::placeholder {
+    color: #666;
+}
+
+.inputSet {
+    border-color: #2b8a3e !important;
+}
+
+.statusBadge {
+    background-color: #2b8a3e;
+    color: #fff;
+    font-size: 0.7rem;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    white-space: nowrap;
+}
+
+/* Model Selection Step */
+.modelSelectContainer {
+    max-width: 600px;
+    margin: 0 auto;
+}
+
+.modelGrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 1rem;
+    margin-top: 1.5rem;
+}
+
+.modelCard {
+    background-color: #2a2b2e;
+    border: 2px solid transparent;
+    border-radius: 10px;
+    padding: 1rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.modelCard:hover:not(.disabled) {
+    border-color: #4dabf7;
+    background-color: #32333a;
+}
+
+.modelCard.selected {
+    border-color: #4dabf7;
+    background-color: rgba(77, 171, 247, 0.1);
+}
+
+.modelCard.disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.modelName {
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: #e0e0e0;
+    margin-bottom: 0.3rem;
+    word-break: break-word;
+}
+
+.modelProvider {
+    font-size: 0.8rem;
+    color: #888;
+}
+
+.modelUnavailable {
+    font-size: 0.75rem;
+    color: #fa5252;
+    margin-top: 0.5rem;
+}
+
+/* Persona Choice Step */
+.personaChoiceContainer {
+    max-width: 500px;
+    margin: 0 auto;
+}
+
+.choiceCards {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    margin-top: 1.5rem;
+}
+
+.choiceCard {
+    background-color: #2a2b2e;
+    border: 2px solid transparent;
+    border-radius: 12px;
+    padding: 1.5rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+}
+
+.choiceCard:hover {
+    border-color: #4dabf7;
+    background-color: #32333a;
+}
+
+.choiceCard.selected {
+    border-color: #4dabf7;
+    background-color: rgba(77, 171, 247, 0.1);
+}
+
+.choiceIcon {
+    color: #4dabf7;
+    flex-shrink: 0;
+}
+
+.choiceInfo {
+    flex: 1;
+}
+
+.choiceTitle {
+    font-size: 1.1rem;
+    font-weight: 500;
+    color: #e0e0e0;
+    margin-bottom: 0.3rem;
+}
+
+.choiceDescription {
+    font-size: 0.85rem;
+    color: #888;
+}
+
+/* Complete Step */
+.completeContainer {
+    text-align: center;
+    padding: 2rem 0;
+}
+
+.successIcon {
+    color: #2b8a3e;
+    margin-bottom: 1.5rem;
+}
+
+.completeTitle {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: #e0e0e0;
+    margin-bottom: 0.5rem;
+}
+
+.completeSubtitle {
+    color: #888;
+    font-size: 1rem;
+    margin-bottom: 2rem;
+    line-height: 1.6;
+}
+
+.startButton {
+    background-color: #4dabf7;
+    border: none;
+    color: #fff;
+    padding: 1rem 2.5rem;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1.1rem;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: all 0.2s;
+}
+
+.startButton:hover {
+    background-color: #339af0;
+}

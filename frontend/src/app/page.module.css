@@ -633,3 +633,134 @@
         background: rgba(99, 102, 241, 0.9);
     }
 }
+
+/* Error message styles */
+.errorCard {
+    border-left: 4px solid #dc3545;
+}
+
+.error_rate_limit {
+    border-left-color: #ffc107;
+    background-color: rgba(255, 243, 205, 0.1);
+}
+
+.error_timeout {
+    border-left-color: #17a2b8;
+    background-color: rgba(209, 236, 241, 0.1);
+}
+
+.error_safety_filter {
+    border-left-color: #dc3545;
+    background-color: rgba(248, 215, 218, 0.1);
+}
+
+.error_server_error {
+    border-left-color: #dc3545;
+    background-color: rgba(245, 198, 203, 0.1);
+}
+
+.error_empty_response {
+    border-left-color: #6c757d;
+    background-color: rgba(226, 227, 229, 0.1);
+}
+
+.error_authentication {
+    border-left-color: #fd7e14;
+    background-color: rgba(255, 237, 213, 0.1);
+}
+
+.error_unknown {
+    border-left-color: #6c757d;
+    background-color: rgba(226, 227, 229, 0.1);
+}
+
+.errorContent {
+    padding: 0.5rem 0;
+}
+
+.errorHeader {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+}
+
+.errorIcon {
+    font-size: 1.5rem;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.errorMessage {
+    color: var(--foreground);
+    font-weight: 500;
+    line-height: 1.5;
+}
+
+.errorDetails {
+    margin-top: 0.75rem;
+    font-size: 0.85rem;
+    color: #666;
+}
+
+.errorDetails summary {
+    cursor: pointer;
+    color: #888;
+    font-size: 0.8rem;
+}
+
+.errorDetails summary:hover {
+    color: var(--foreground);
+}
+
+.errorDetails pre {
+    margin-top: 0.5rem;
+    padding: 0.75rem;
+    background: rgba(0, 0, 0, 0.05);
+    border-radius: 4px;
+    overflow-x: auto;
+    font-size: 0.8rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+@media (prefers-color-scheme: dark) {
+    .error_rate_limit {
+        background-color: rgba(255, 193, 7, 0.1);
+    }
+
+    .error_timeout {
+        background-color: rgba(23, 162, 184, 0.1);
+    }
+
+    .error_safety_filter {
+        background-color: rgba(220, 53, 69, 0.1);
+    }
+
+    .error_server_error {
+        background-color: rgba(220, 53, 69, 0.1);
+    }
+
+    .error_empty_response {
+        background-color: rgba(108, 117, 125, 0.1);
+    }
+
+    .error_authentication {
+        background-color: rgba(253, 126, 20, 0.1);
+    }
+
+    .error_unknown {
+        background-color: rgba(108, 117, 125, 0.1);
+    }
+
+    .errorDetails {
+        color: #aaa;
+    }
+
+    .errorDetails summary {
+        color: #888;
+    }
+
+    .errorDetails pre {
+        background: rgba(255, 255, 255, 0.05);
+    }
+}
