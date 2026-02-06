@@ -7,9 +7,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
-import pandas as pd
-
-
 class HistoryMixin:
     """Shared helpers for building histories and backup management."""
 
@@ -37,27 +34,6 @@ class HistoryMixin:
         return self.building_histories.get(building_id, [])
 
     # --- World Editor: Backup/Restore Methods ---
-
-    def get_backups(self) -> pd.DataFrame:
-        """Gets a list of available world backups (.zip)."""
-        backups: List[Dict[str, str]] = []
-        for archive in self.backup_dir.glob("*.zip"):
-            try:
-                stat = archive.stat()
-            except FileNotFoundError:
-                continue
-            backups.append(
-                {
-                    "Backup Name": archive.stem,
-                    "Created At": datetime.fromtimestamp(stat.st_mtime).strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    ),
-                    "Size (KB)": round(stat.st_size / 1024, 2),
-                }
-            )
-        if not backups:
-            return pd.DataFrame(columns=["Backup Name", "Created At", "Size (KB)"])
-        return pd.DataFrame(backups).sort_values(by="Created At", ascending=False)
 
     def backup_world(self, backup_name: str) -> str:
         """
