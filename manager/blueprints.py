@@ -3,7 +3,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import pandas as pd
 from sqlalchemy import func
 
 from database.models import (
@@ -51,16 +50,6 @@ class BlueprintMixin:
         try:
             results = db.query(Blueprint.BLUEPRINT_ID).order_by(Blueprint.NAME.asc()).all()
             return [str(row.BLUEPRINT_ID) for row in results]
-        finally:
-            db.close()
-
-    def get_blueprints_df(self) -> pd.DataFrame:
-        """ワールドエディタ用にすべてのBlueprint一覧をDataFrameとして取得する"""
-        db = self.SessionLocal()
-        try:
-            query = db.query(Blueprint)
-            df = pd.read_sql(query.statement, query.session.bind)
-            return df[["BLUEPRINT_ID", "NAME", "DESCRIPTION", "ENTITY_TYPE", "CITYID"]]
         finally:
             db.close()
 
@@ -333,16 +322,6 @@ class BlueprintMixin:
             db.close()
 
     # --- Tool Management ---
-
-    def get_tools_df(self) -> pd.DataFrame:
-        """ワールドエディタ用にすべてのTool一覧をDataFrameとして取得する"""
-        db = self.SessionLocal()
-        try:
-            query = db.query(ToolModel)
-            df = pd.read_sql(query.statement, query.session.bind)
-            return df
-        finally:
-            db.close()
 
     def get_tool_details(self, tool_id: int) -> Optional[Dict]:
         """Get full details for a single tool for the edit form."""
