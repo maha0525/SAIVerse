@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import pandas as pd
 from PIL import Image
 from sqlalchemy import func
 from buildings import Building
@@ -369,27 +368,6 @@ class PersonaMixin:
                 "Failed to create new persona '%s': %s", name, exc, exc_info=True
             )
             return False, f"An internal error occurred: {exc}"
-        finally:
-            db.close()
-
-    def get_ais_df(self) -> pd.DataFrame:
-        """ワールドエディタ用にすべてのAI一覧をDataFrameとして取得する"""
-        db = self.SessionLocal()
-        try:
-            query = db.query(AIModel)
-            df = pd.read_sql(query.statement, query.session.bind)
-            df["SYSTEMPROMPT_SNIPPET"] = df["SYSTEMPROMPT"].str.slice(0, 40) + "..."
-            return df[
-                [
-                    "AIID",
-                    "AINAME",
-                    "HOME_CITYID",
-                    "DEFAULT_MODEL",
-                    "IS_DISPATCHED",
-                    "DESCRIPTION",
-                    "SYSTEMPROMPT_SNIPPET",
-                ]
-            ]
         finally:
             db.close()
 

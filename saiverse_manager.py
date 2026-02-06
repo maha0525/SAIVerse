@@ -10,7 +10,6 @@ import mimetypes
 from typing import Dict, List, Optional, Tuple, Iterator, Union, Any, Callable
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-import pandas as pd
 import importlib
 import tools.core
 from discord_gateway.mapping import ChannelMapping
@@ -836,10 +835,6 @@ class SAIVerseManager(
 
     # --- World Editor Backend Methods ---
 
-    def get_cities_df(self) -> pd.DataFrame:
-        """ワールドエディタ用にすべてのCity一覧をDataFrameとして取得する"""
-        return self.admin.get_cities_df()
-
     def update_city(
         self,
         city_id: int,
@@ -940,10 +935,6 @@ class SAIVerseManager(
         """
         return self.admin.move_ai_from_editor(ai_id, target_building_id)
 
-    def get_ais_df(self) -> pd.DataFrame:
-        """ワールドエディタ用にすべてのAI一覧をDataFrameとして取得する"""
-        return self.admin.get_ais_df()
-
     def get_ai_details(self, ai_id: str) -> Optional[Dict]:
         """Get full details for a single AI for the edit form."""
         return self.admin.get_ai_details(ai_id)
@@ -991,10 +982,6 @@ class SAIVerseManager(
         """Gets a list of tool IDs linked to a specific building."""
         return self.admin.get_linked_tool_ids(building_id)
 
-    def get_buildings_df(self) -> pd.DataFrame:
-        """ワールドエディタ用にすべてのBuilding一覧をDataFrameとして取得する"""
-        return self.admin.get_buildings_df()
-
     def update_building(
         self,
         building_id: str,
@@ -1039,9 +1026,6 @@ class SAIVerseManager(
 
         return result
 
-    def get_items_df(self) -> pd.DataFrame:
-        return self.admin.get_items_df()
-
     def get_item_details(self, item_id: str) -> Optional[Dict[str, Any]]:
         return self.admin.get_item_details(item_id)
 
@@ -1074,10 +1058,6 @@ class SAIVerseManager(
         return self.admin.delete_item(item_id)
 
     # --- Playbook Management ---
-
-    def get_playbooks_df(self) -> pd.DataFrame:
-        """Get all playbooks as a DataFrame for the world editor."""
-        return self.admin.get_playbooks_df()
 
     def get_playbook_details(self, playbook_id: int) -> Optional[Dict[str, Any]]:
         """Get detailed information for a specific playbook."""

@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import pandas as pd
 from zoneinfo import ZoneInfo
 
 from buildings import Building
@@ -89,25 +88,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         self._load_cities_from_db = manager._load_cities_from_db
 
     # --- City management ---
-
-    def get_cities_df(self) -> pd.DataFrame:
-        db = self.SessionLocal()
-        try:
-            query = db.query(CityModel)
-            df = pd.read_sql(query.statement, query.session.bind)
-            cols = [
-                "CITYID",
-                "CITYNAME",
-                "DESCRIPTION",
-                "TIMEZONE",
-                "START_IN_ONLINE_MODE",
-                "UI_PORT",
-                "API_PORT",
-            ]
-            existing_cols = [c for c in cols if c in df.columns]
-            return df[existing_cols]
-        finally:
-            db.close()
 
     def update_city(
         self,
@@ -324,28 +304,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
 
     # --- Building management ---
 
-    def get_buildings_df(self) -> pd.DataFrame:
-        db = self.SessionLocal()
-        try:
-            query = db.query(BuildingModel)
-            df = pd.read_sql(query.statement, query.session.bind)
-            # Select columns, handling missing columns gracefully
-            columns = [
-                "BUILDINGID",
-                "BUILDINGNAME",
-                "CAPACITY",
-                "DESCRIPTION",
-                "SYSTEM_INSTRUCTION",
-                "CITYID",
-                "AUTO_INTERVAL_SEC",
-                "EXTRA_PROMPT_FILES",
-            ]
-            existing_cols = [c for c in columns if c in df.columns]
-            return df[existing_cols]
-        finally:
-            db.close()
-
-
     def create_building(
         self,
         name: str,
@@ -497,41 +455,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
 
 
     # --- Item management ---
-
-    def get_items_df(self) -> pd.DataFrame:
-        db = self.SessionLocal()
-        try:
-            query = (
-                db.query(ItemModel, ItemLocationModel)
-                .outerjoin(ItemLocationModel, ItemModel.ITEM_ID == ItemLocationModel.ITEM_ID)
-            )
-            rows: List[Dict[str, Any]] = []
-            for item, location in query:
-                rows.append(
-                    {
-                        "ITEM_ID": item.ITEM_ID,
-                        "NAME": item.NAME,
-                        "TYPE": item.TYPE,
-                        "DESCRIPTION": item.DESCRIPTION,
-                        "OWNER_KIND": getattr(location, "OWNER_KIND", "world"),
-                        "OWNER_ID": getattr(location, "OWNER_ID", ""),
-                        "UPDATED_AT": str(getattr(item, "UPDATED_AT", "")),
-                    }
-                )
-            columns = [
-                "ITEM_ID",
-                "NAME",
-                "TYPE",
-                "DESCRIPTION",
-                "OWNER_KIND",
-                "OWNER_ID",
-                "UPDATED_AT",
-            ]
-            if not rows:
-                return pd.DataFrame(columns=columns)
-            return pd.DataFrame(rows, columns=columns)
-        finally:
-            db.close()
 
     def get_item_details(self, item_id: str) -> Optional[Dict[str, Any]]:
         db = self.SessionLocal()
@@ -707,26 +630,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         return f"Item '{item_name}' deleted successfully."
 
     # --- AI management ---
-
-    def get_ais_df(self) -> pd.DataFrame:
-        db = self.SessionLocal()
-        try:
-            query = db.query(AIModel)
-            df = pd.read_sql(query.statement, query.session.bind)
-            df["SYSTEMPROMPT_SNIPPET"] = df["SYSTEMPROMPT"].str.slice(0, 40) + "..."
-            return df[
-                [
-                    "AIID",
-                    "AINAME",
-                    "HOME_CITYID",
-                    "DEFAULT_MODEL",
-                    "IS_DISPATCHED",
-                    "DESCRIPTION",
-                    "SYSTEMPROMPT_SNIPPET",
-                ]
-            ]
-        finally:
-            db.close()
 
     def get_ai_details(self, ai_id: str) -> Optional[Dict]:
         db = self.SessionLocal()
@@ -1084,23 +987,6 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             db.close()
 
     # --- Playbook Management ---
-
-    def get_playbooks_df(self) -> pd.DataFrame:
-        """Get all playbooks as a DataFrame."""
-        db = self.SessionLocal()
-        try:
-            query = db.query(PlaybookModel)
-            df = pd.read_sql(query.statement, query.session.bind)
-            # Add snippet columns for long text fields
-            if not df.empty:
-                df["description_snippet"] = df["description"].str.slice(0, 50) + "..."
-                if "schema_json" in df.columns:
-                    df["schema_snippet"] = df["schema_json"].str.slice(0, 30) + "..."
-                if "nodes_json" in df.columns:
-                    df["nodes_snippet"] = df["nodes_json"].str.slice(0, 30) + "..."
-            return df
-        finally:
-            db.close()
 
     def get_playbook_details(self, playbook_id: int) -> Optional[Dict[str, Any]]:
         """Get detailed information for a specific playbook."""
