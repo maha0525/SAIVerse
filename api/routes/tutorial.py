@@ -263,3 +263,311 @@ def get_env_key_mapping():
             for config in PROVIDER_CONFIG
         }
     }
+
+
+# --- Model Role Presets ---
+
+# The 6 model roles that can be auto-configured
+MODEL_ROLES = {
+    "default_model": "SAIVERSE_DEFAULT_MODEL",
+    "lightweight_model": "SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL",
+    "agentic_model": "SAIVERSE_AGENTIC_MODEL",
+    "memory_weave_model": "MEMORY_WEAVE_MODEL",
+    "image_summary_model": "SAIVERSE_IMAGE_SUMMARY_MODEL",
+    "task_creation_model": "SAIVERSE_TASK_CREATION_MODEL",
+}
+
+MODEL_ROLE_DESCRIPTIONS = {
+    "default_model": {
+        "label": "標準モデル",
+        "description": "会話や複雑な推論に使用するメインモデル",
+    },
+    "lightweight_model": {
+        "label": "軽量モデル",
+        "description": "ルーティングやツール判断に使用する高速・安価なモデル",
+    },
+    "agentic_model": {
+        "label": "エージェントモデル",
+        "description": "構造化出力を使うエージェントタスク用モデル",
+    },
+    "memory_weave_model": {
+        "label": "Memory Weaveモデル",
+        "description": "クロニクル・メモペディアの生成に使用するモデル",
+    },
+    "image_summary_model": {
+        "label": "画像要約モデル",
+        "description": "画像・ドキュメント要約生成用モデル（Gemini専用）",
+    },
+    "task_creation_model": {
+        "label": "タスク生成モデル",
+        "description": "タスクの自動生成に使用するモデル",
+    },
+}
+
+# Provider presets: values are config keys (filename stems).
+# image_summary_model is Gemini API model name (used directly by Gemini SDK).
+# None means "not applicable for this provider" — will fall back to Gemini default if available.
+PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
+    "gemini_paid": {
+        "default_model": "gemini-3-flash-preview-paid",
+        "lightweight_model": "gemini-2.5-flash-lite-preview-09-2025-paid",
+        "agentic_model": "gemini-3-flash-preview-paid",
+        "memory_weave_model": "gemini-3-flash-preview-paid",
+        "image_summary_model": "gemini-2.5-flash-lite-preview-09-2025",
+        "task_creation_model": "gemini-2.5-flash-preview-09-2025-paid",
+    },
+    "gemini_free": {
+        "default_model": "gemini-3-flash-preview",
+        "lightweight_model": "gemini-2.5-flash-lite-preview-09-2025",
+        "agentic_model": "gemini-3-flash-preview",
+        "memory_weave_model": "gemini-3-flash-preview",
+        "image_summary_model": "gemini-2.5-flash-lite-preview-09-2025",
+        "task_creation_model": "gemini-2.5-flash-preview-09-2025",
+    },
+    "anthropic": {
+        "default_model": "claude-sonnet-4-5",
+        "lightweight_model": "claude-haiku-4-5",
+        "agentic_model": "claude-haiku-4-5",
+        "memory_weave_model": "claude-sonnet-4-5",
+        "image_summary_model": None,
+        "task_creation_model": "claude-haiku-4-5",
+    },
+    "openai": {
+        "default_model": "gpt-5",
+        "lightweight_model": "gpt-5-nano",
+        "agentic_model": "gpt-5-mini",
+        "memory_weave_model": "gpt-5-mini",
+        "image_summary_model": None,
+        "task_creation_model": "gpt-5-mini",
+    },
+    "grok": {
+        "default_model": "grok-4-1-fast-reasoning",
+        "lightweight_model": "grok-4-1-fast-reasoning",
+        "agentic_model": "grok-4-1-fast-reasoning",
+        "memory_weave_model": "grok-4-1-fast-reasoning",
+        "image_summary_model": None,
+        "task_creation_model": "grok-4-1-fast-reasoning",
+    },
+    "openrouter": {
+        "default_model": "openrouter-kimi-k2.5",
+        "lightweight_model": "openrouter-deepseek-v3.2",
+        "agentic_model": "openrouter-kimi-k2.5",
+        "memory_weave_model": "openrouter-kimi-k2.5",
+        "image_summary_model": None,
+        "task_creation_model": "openrouter-deepseek-v3.2",
+    },
+    "nvidia": {
+        "default_model": "nim-qwen3-235b-a22b",
+        "lightweight_model": "nim-qwen3-next-80b-a3b-instruct",
+        "agentic_model": "nim-qwen3-235b-a22b",
+        "memory_weave_model": "nim-qwen3-235b-a22b",
+        "image_summary_model": None,
+        "task_creation_model": "nim-qwen3-next-80b-a3b-instruct",
+    },
+    "ollama": {
+        "default_model": "ollama-qwen3-next-80b",
+        "lightweight_model": "ollama-qwen3-next-80b",
+        "agentic_model": "ollama-qwen3-next-80b",
+        "memory_weave_model": "ollama-qwen3-next-80b",
+        "image_summary_model": None,
+        "task_creation_model": "ollama-qwen3-next-80b",
+    },
+}
+
+# Auto-detection priority order
+PROVIDER_PRIORITY = [
+    "gemini_paid", "gemini_free", "anthropic", "openai",
+    "grok", "openrouter", "nvidia", "ollama",
+]
+
+# Which env key to check for each preset provider
+PROVIDER_DETECTION: Dict[str, Optional[str]] = {
+    "gemini_paid": "GEMINI_API_KEY",
+    "gemini_free": "GEMINI_FREE_API_KEY",
+    "anthropic": "CLAUDE_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "grok": "XAI_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "nvidia": "NVIDIA_API_KEY",
+    "ollama": None,  # Always available (local)
+}
+
+# Display names for preset providers
+PROVIDER_DISPLAY_NAMES = {
+    "gemini_paid": "Gemini (有料)",
+    "gemini_free": "Gemini (無料)",
+    "anthropic": "Anthropic",
+    "openai": "OpenAI",
+    "grok": "Grok (xAI)",
+    "openrouter": "OpenRouter",
+    "nvidia": "Nvidia NIM",
+    "ollama": "Ollama (ローカル)",
+}
+
+# Default Gemini image summary model (used as fallback for non-Gemini providers)
+_GEMINI_IMAGE_SUMMARY_DEFAULT = "gemini-2.5-flash-lite-preview-09-2025"
+
+
+def _detect_best_provider() -> str:
+    """Detect the highest-priority provider with an API key set."""
+    for provider in PROVIDER_PRIORITY:
+        env_key = PROVIDER_DETECTION.get(provider)
+        if env_key is None:
+            # Local provider (ollama) — always available, but lowest priority
+            continue
+        if _is_env_key_set(env_key):
+            return provider
+    return "ollama"
+
+
+def _has_any_gemini_key() -> bool:
+    """Check if any Gemini API key (free or paid) is available."""
+    return _is_env_key_set("GEMINI_API_KEY") or _is_env_key_set("GEMINI_FREE_API_KEY")
+
+
+# --- Model Preset Pydantic Models ---
+
+class AutoConfigureRequest(BaseModel):
+    provider: Optional[str] = None  # None = auto-detect
+
+
+class ModelRoleAssignment(BaseModel):
+    role: str
+    label: str
+    description: str
+    env_key: str
+    model_id: str
+    display_name: str
+
+
+class AutoConfigureResponse(BaseModel):
+    provider: str
+    provider_display: str
+    assignments: List[ModelRoleAssignment]
+    warnings: List[str]
+
+
+# --- Model Preset Endpoints ---
+
+@router.post("/auto-configure-models", response_model=AutoConfigureResponse)
+def auto_configure_models(
+    req: AutoConfigureRequest,
+    manager=Depends(get_manager),
+):
+    """Auto-configure all 6 model role env vars based on available API keys.
+
+    If provider is not specified, auto-detects the highest-priority provider
+    with an API key set. Writes to .env, updates os.environ, and sets the
+    session model on the manager.
+    """
+    from api.routes.admin import write_env_updates
+    from model_configs import get_model_display_name
+
+    # 1. Determine provider
+    provider = req.provider or _detect_best_provider()
+    if provider not in PROVIDER_PRESETS:
+        raise HTTPException(status_code=400, detail=f"Unknown provider: {provider}")
+
+    preset = PROVIDER_PRESETS[provider]
+    provider_display = PROVIDER_DISPLAY_NAMES.get(provider, provider)
+
+    # 2. Build env var updates and assignment list
+    env_updates: Dict[str, str] = {}
+    assignments: List[ModelRoleAssignment] = []
+    warnings: List[str] = []
+
+    for role, env_key in MODEL_ROLES.items():
+        model_id = preset.get(role)
+
+        # Handle image_summary_model fallback for non-Gemini providers
+        if model_id is None and role == "image_summary_model":
+            if _has_any_gemini_key():
+                model_id = _GEMINI_IMAGE_SUMMARY_DEFAULT
+            else:
+                warnings.append(
+                    "画像要約モデルはGemini専用のため、Gemini APIキーがない場合は機能しません。"
+                )
+                continue
+
+        if model_id is None:
+            continue
+
+        env_updates[env_key] = model_id
+
+        display_name = get_model_display_name(model_id)
+        if not display_name or display_name == model_id:
+            display_name = model_id
+
+        role_desc = MODEL_ROLE_DESCRIPTIONS.get(role, {})
+        assignments.append(ModelRoleAssignment(
+            role=role,
+            label=role_desc.get("label", role),
+            description=role_desc.get("description", ""),
+            env_key=env_key,
+            model_id=model_id,
+            display_name=display_name,
+        ))
+
+    # 3. Write to .env and os.environ
+    if env_updates:
+        write_env_updates(env_updates)
+
+    # 4. Set session model on manager
+    default_model = preset.get("default_model")
+    if default_model:
+        try:
+            manager.set_model(default_model, None)
+        except Exception as exc:
+            LOGGER.warning("Failed to set session model to %s: %s", default_model, exc)
+
+    LOGGER.info(
+        "Auto-configured models for provider=%s: %s",
+        provider,
+        {k: v for k, v in env_updates.items()},
+    )
+
+    return AutoConfigureResponse(
+        provider=provider,
+        provider_display=provider_display,
+        assignments=assignments,
+        warnings=warnings,
+    )
+
+
+@router.get("/model-roles")
+def get_model_roles():
+    """Get current model role assignments and available provider presets."""
+    from model_configs import get_model_display_name
+
+    current = {}
+    for role, env_key in MODEL_ROLES.items():
+        value = os.environ.get(env_key, "")
+        role_desc = MODEL_ROLE_DESCRIPTIONS.get(role, {})
+        display_name = ""
+        if value:
+            display_name = get_model_display_name(value)
+            if not display_name or display_name == value:
+                display_name = value
+
+        current[role] = {
+            "env_key": env_key,
+            "value": value,
+            "display_name": display_name,
+            "label": role_desc.get("label", role),
+            "description": role_desc.get("description", ""),
+        }
+
+    available_presets = []
+    for provider_key in PROVIDER_PRIORITY:
+        detection_key = PROVIDER_DETECTION.get(provider_key)
+        is_available = detection_key is None or _is_env_key_set(detection_key)
+        available_presets.append({
+            "provider": provider_key,
+            "display_name": PROVIDER_DISPLAY_NAMES.get(provider_key, provider_key),
+            "is_available": is_available,
+        })
+
+    return {
+        "current": current,
+        "presets": available_presets,
+    }

@@ -1,5 +1,6 @@
 {
     "name": "meta_simple_speak",
+    "display_name": "ツール不使用（喋るだけ）",
     "description": "speak only",
     "input_schema": [
         {
@@ -26,7 +27,7 @@
         {
             "id": "speak",
             "type": "subplay",
-            "playbook": "sub_speak_simple",
+            "playbook": "sub_speak",
             "input_template": "{input}",
             "propagate_output": true,
             "next": null

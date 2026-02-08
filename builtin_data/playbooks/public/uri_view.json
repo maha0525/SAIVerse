@@ -1,5 +1,6 @@
 {
     "name": "uri_view",
+    "display_name": "URI閲覧",
     "description": "URIで指定されたリソースの内容を閲覧する。アイテム、Memopediaページ、過去のメッセージ、Chronicleなど。「見せて」「読んで」「確認して」系の要求のうち、item_actionでは対応しきれない広範なリソースに対応。",
     "input_schema": [
         {
@@ -56,14 +57,14 @@
                 "max_total_chars": 12000
             },
             "output_key": "resolved_content",
-            "next": "respond"
+            "next": "save_results"
         },
         {
-            "id": "respond",
-            "type": "subplay",
-            "playbook": "sub_speak_meta",
-            "input_template": "以下のリソースの内容をユーザーに伝えてください。\n\n## 閲覧対象\n{view_target.description}\n\n## 取得した内容\n{resolved_content}\n\n## 注意\n- 内容をそのまま丸写しするのではなく、ユーザーの要求に合わせて適切にまとめて伝えてください\n- 元の要求が「見せて」なら内容を提示、「要約して」なら要約、「確認して」なら確認結果を報告",
-            "propagate_output": true,
+            "id": "save_results",
+            "type": "memorize",
+            "action": "<system>\nサブプレイブック実行結果 (uri_view)\n\n## 閲覧対象\n{view_target.description}\n\n## 取得した内容\n{resolved_content}\n\n## 注意\n- 内容をそのまま丸写しするのではなく、ユーザーの要求に合わせて適切にまとめて伝えてください\n- 元の要求が「見せて」なら内容を提示、「要約して」なら要約、「確認して」なら確認結果を報告\n\n※この結果はユーザーには見えていません。\n</system>",
+            "role": "user",
+            "tags": ["uri_view", "save_results"],
             "next": null
         }
     ],

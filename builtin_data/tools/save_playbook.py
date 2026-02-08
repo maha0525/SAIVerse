@@ -25,6 +25,7 @@ def save_playbook(
     playbook_json: str = "",
     router_callable: Optional[bool] = None,
     user_selectable: Optional[bool] = None,
+    display_name: Optional[str] = None,
 ) -> Tuple[str, None, None]:
     """Persist a playbook definition to the database.
 
@@ -80,6 +81,10 @@ def save_playbook(
     if user_selectable is None:
         user_selectable = normalized_nodes.get("user_selectable", False)
 
+    # Determine display_name: explicit param > JSON value > None
+    if display_name is None:
+        display_name = normalized_nodes.get("display_name")
+
     db_path = default_db_path()
     engine = create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
@@ -89,6 +94,7 @@ def save_playbook(
         existing = session.query(Playbook).filter(Playbook.name == name).first()
         if existing:
             existing.description = description
+            existing.display_name = display_name
             existing.scope = scope
             existing.created_by_persona_id = owner
             existing.building_id = building_id
@@ -100,6 +106,7 @@ def save_playbook(
             record = Playbook(
                 name=name,
                 description=description,
+                display_name=display_name,
                 scope=scope,
                 created_by_persona_id=owner,
                 building_id=building_id,
@@ -129,6 +136,7 @@ def schema() -> ToolSchema:
                 "playbook_json": {"type": "string", "description": "Full PlaybookSchema JSON."},
                 "router_callable": {"type": "boolean", "description": "If true, playbook can be called from router. Defaults to value in JSON or False."},
                 "user_selectable": {"type": "boolean", "description": "If true, meta playbook can be selected by user in UI. Defaults to value in JSON or False."},
+                "display_name": {"type": "string", "description": "Human-readable display name for UI. Defaults to value in JSON or None."},
             },
             "required": ["name", "description", "playbook_json"],
         },

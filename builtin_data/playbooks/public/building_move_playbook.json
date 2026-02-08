@@ -1,5 +1,6 @@
 {
     "name": "building_move",
+    "display_name": "部屋の移動",
     "description": "List buildings in the city, choose a destination, and move there.",
     "input_schema": [
         {

@@ -471,11 +471,19 @@ Intent documents record the "why" that code alone cannot express. They prevent w
 - Check `docs/test_manual.md` for manual integration test scenarios (World Dive, Persona Genesis, etc.)
 
 ### Logging
-- Main log: `saiverse_log.txt`
-- Raw LLM I/O: `raw_llm_responses.txt`
+
+All session logs are written under `user_data/logs/{YYYYMMDD_HHMMSS}/`:
+
+| File | Logger | Purpose |
+|------|--------|---------|
+| `backend.log` | root | Application-wide log + console mirror |
+| `llm_io.log` | `saiverse.llm` | LLM API request/response I/O (JSON) |
+| `sea_trace.log` | `saiverse.sea_trace` | SEA playbook node execution trace |
+| `timeout_diagnostics.log` | `saiverse.timeout` | Timeout event diagnostics |
+
 - Per-persona logs: `~/.saiverse/personas/<id>/log.json`, `conscious_log.json`
 - Set `SAIVERSE_LOG_LEVEL=DEBUG` in `.env` for verbose output
-- SEA trace: set `SAIVERSE_SEA_TRACE=1` and `SAIVERSE_SEA_DUMP=<filepath>` to capture playbook execution
+- SEA trace: set `SAIVERSE_SEA_TRACE=1` to enable detailed playbook debug logging
 - **Debugging tip**: When `LOGGER.debug()` with `extra={}` doesn't show details, use `print()` to output directly to stdout. The logger formatter may not be configured to display `extra` fields.
 - **Browser console logging**: JavaScript `console.debug()` is filtered by default in most browsers. Use `console.log()` for debug messages that should always be visible. In Chrome/Edge, open DevTools Console and set log level filter to "Verbose" or "All levels" to see `console.debug()` output.
 
@@ -546,6 +554,6 @@ Critical settings (see `.env.example`):
   3. After updating the schema, **re-import all affected playbooks** using `python scripts/import_playbook.py --file <path>`
    4. Verify the field is stored in DB: `sqlite3 user_data/database/saiverse.db "SELECT nodes_json FROM playbooks WHERE name='<playbook_name>'"`
 
-**Debug LLM calls**: Check `raw_llm_responses.txt` or set `SAIVERSE_SEA_DUMP` for playbook traces
+**Debug LLM calls**: Check `user_data/logs/{session}/llm_io.log` for LLM I/O, `sea_trace.log` for playbook execution traces
 
 **Access persona memory**: Use `scripts/recall_persona_memory.py` or Memory Settings UI tab

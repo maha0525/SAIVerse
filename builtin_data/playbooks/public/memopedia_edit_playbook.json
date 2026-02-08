@@ -1,5 +1,6 @@
 {
     "name": "memopedia_edit",
+    "display_name": "メモペディア編集",
     "description": "既存のMemopediaページを編集する（加筆・修正・更新）",
     "input_schema": [
         {

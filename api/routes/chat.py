@@ -40,6 +40,8 @@ class ChatMessage(BaseModel):
     sender: Optional[str] = None
     avatar: Optional[str] = None
     images: Optional[List[ChatMessageImage]] = None
+    reasoning: Optional[str] = None
+    activity_trace: Optional[List[dict]] = None
     llm_usage: Optional[ChatMessageLLMUsage] = None
     llm_usage_total: Optional[ChatMessageLLMUsageTotal] = None
 
@@ -257,6 +259,16 @@ def get_chat_history(
                     models_used=total_raw.get("models_used", []),
                 )
 
+        # Extract reasoning (thinking) from metadata
+        reasoning_data = None
+        if metadata and "reasoning" in metadata:
+            reasoning_data = metadata["reasoning"]
+
+        # Extract activity trace from metadata
+        activity_trace_data = None
+        if metadata and "activity_trace" in metadata:
+            activity_trace_data = metadata["activity_trace"]
+
         final_response.append(ChatMessage(
             id=message_id,
             role=role,
@@ -265,6 +277,8 @@ def get_chat_history(
             sender=sender,
             avatar=avatar,
             images=images_list,
+            reasoning=reasoning_data,
+            activity_trace=activity_trace_data,
             llm_usage=llm_usage_data,
             llm_usage_total=llm_usage_total_data
         ))
@@ -548,4 +562,42 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
     except Exception as e:
         import logging
         logging.error(f"Error sending message: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---- Context Preview ----
+
+class PreviewRequest(BaseModel):
+    message: str
+    building_id: Optional[str] = None
+    meta_playbook: Optional[str] = None
+    attachment_count: int = 0
+    attachment_types: List[str] = []  # ["image", "document"]
+
+
+@router.post("/preview")
+def preview_context(req: PreviewRequest, manager=Depends(get_manager)):
+    """Preview the context that would be sent to the LLM, without executing."""
+    import logging
+
+    if not req.message:
+        raise HTTPException(status_code=400, detail="Message is required")
+
+    image_count = sum(1 for t in req.attachment_types if t == "image")
+    document_count = sum(1 for t in req.attachment_types if t == "document")
+    # Also count untyped attachments as documents
+    if req.attachment_count > len(req.attachment_types):
+        document_count += req.attachment_count - len(req.attachment_types)
+
+    try:
+        results = manager.preview_context(
+            req.message,
+            building_id=req.building_id,
+            meta_playbook=req.meta_playbook,
+            image_count=image_count,
+            document_count=document_count,
+        )
+        return {"personas": results}
+    except Exception as e:
+        logging.error("Error previewing context: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

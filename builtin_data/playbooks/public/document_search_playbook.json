@@ -1,5 +1,6 @@
 {
     "name": "document_search",
+    "display_name": "ドキュメント検索",
     "description": "Search within a document item for specific content using pattern matching or line navigation",
     "input_schema": [
         {

@@ -4,6 +4,8 @@
   "provider": "nvidia_nim",
   "supports_structured_output": true,
   "context_length": 250000,
+  "default_max_history_messages": 80,
+  "metabolism_keep_messages": 60,
   "base_url": "https://integrate.api.nvidia.com/v1",
   "api_key_env": "NVIDIA_API_KEY",
   "convert_system_to_user": true,
@@ -35,7 +37,5 @@
       "label": "Max tokens",
       "description": "Upper bound on generated tokens."
     }
-  },
-  "default_max_history_messages": 80,
-  "metabolism_keep_messages": 60
+  }
 }

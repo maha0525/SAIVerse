@@ -45,6 +45,24 @@ class TestCalculateCost(unittest.TestCase):
         # non-cached: 500K * $3/1M = $1.5, cache_write: 500K * $3.75/1M = $1.875
         self.assertAlmostEqual(cost, 3.375)
 
+    def test_cache_write_1h_tokens_premium(self):
+        # 1M input with 500K cache_write at 1h TTL (write rate: $6/1M), no output
+        cost = model_configs.calculate_cost(
+            "claude-sonnet-4-5", 1_000_000, 0,
+            cache_write_tokens=500_000, cache_ttl="1h",
+        )
+        # non-cached: 500K * $3/1M = $1.5, cache_write: 500K * $6/1M = $3.0
+        self.assertAlmostEqual(cost, 4.5)
+
+    def test_cache_write_1h_fallback_to_5m_rate(self):
+        # Model without 1h-specific pricing should use default cache_write rate
+        cost_5m = model_configs.calculate_cost(
+            "claude-sonnet-4-5", 1_000_000, 0,
+            cache_write_tokens=500_000, cache_ttl="5m",
+        )
+        # non-cached: 500K * $3/1M = $1.5, cache_write: 500K * $3.75/1M = $1.875
+        self.assertAlmostEqual(cost_5m, 3.375)
+
     def test_no_pricing_returns_zero(self):
         cost = model_configs.calculate_cost("nonexistent-model-xyz", 1_000_000, 1_000_000)
         self.assertEqual(cost, 0.0)

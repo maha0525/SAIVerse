@@ -16,6 +16,7 @@ from discord_gateway.mapping import ChannelMapping
 import os
 
 from google.genai import errors
+from llm_clients.exceptions import LLMError
 from buildings import Building
 from sea import SEARuntime
 from sea.pulse_controller import PulseController
@@ -334,6 +335,9 @@ class SAIVerseManager(
                 event_callback=event_callback,
             )
             return result if result else []
+        except LLMError:
+            # Propagate LLM errors to the caller for frontend display
+            raise
         except Exception as exc:
             logging.exception("SEA user run failed: %s", exc)
             return []
@@ -605,6 +609,17 @@ class SAIVerseManager(
         yield from self.runtime.handle_user_input_stream(
             message, metadata=metadata, meta_playbook=meta_playbook,
             playbook_params=playbook_params, building_id=building_id,
+        )
+
+    def preview_context(
+        self, message: str, building_id: Optional[str] = None,
+        meta_playbook: Optional[str] = None,
+        image_count: int = 0, document_count: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Preview context for responding personas without executing LLM calls."""
+        return self.runtime.preview_context(
+            message, building_id=building_id, meta_playbook=meta_playbook,
+            image_count=image_count, document_count=document_count,
         )
 
     def get_summonable_personas(self) -> List[str]:

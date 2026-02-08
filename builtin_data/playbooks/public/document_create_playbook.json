@@ -1,5 +1,6 @@
 {
     "name": "document_create",
+    "display_name": "ドキュメント作成",
     "description": "Create a new document item with text content",
     "input_schema": [
         {

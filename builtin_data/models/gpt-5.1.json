@@ -2,7 +2,9 @@
   "model": "gpt-5.1",
   "display_name": "GPT-5.1",
   "provider": "openai",
-  "context_length": 32000,
+  "context_length": 400000,
+  "default_max_history_messages": 60,
+  "metabolism_keep_messages": 20,
   "supports_images": true,
   "parameters": {
     "reasoning_effort": {
@@ -46,7 +48,5 @@
     "cached_input_per_1m_tokens": 0.125,
     "output_per_1m_tokens": 10.0,
     "currency": "USD"
-  },
-  "default_max_history_messages": 20,
-  "metabolism_keep_messages": 10
+  }
 }

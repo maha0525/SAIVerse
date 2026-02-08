@@ -105,7 +105,7 @@
             "id": "select_entry",
             "type": "llm",
             "model_type": "lightweight",
-            "action": "検索結果から、調査目的「{objective}」に最も関連するChronicleエントリを1件選んでください。\n\n検索結果:\n{search_results}\n\nエントリIDはカッコ内の文字列です（例: (abc12345...)）。\n関連するエントリがない場合はentry_idを空文字にしてください。",
+            "action": "検索結果から、調査目的「{objective}」に最も関連するChronicleエントリを1件選んでください。\n\n検索結果:\n{search_results}\n\nエントリIDはカッコ内のUUID文字列全体です（例: (abcd1234-5678-90ab-cdef-1234567890ab)）。必ずUUID全体をコピーしてください。\n関連するエントリがない場合はentry_idを空文字にしてください。",
             "response_schema": {
                 "type": "object",
                 "properties": {

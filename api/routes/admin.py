@@ -74,46 +74,51 @@ def get_env_vars():
     vars_list.sort(key=lambda x: x.key)
     return vars_list
 
+def write_env_updates(updates: Dict[str, str]) -> None:
+    """Write environment variable updates to .env file and os.environ.
+
+    This function can be called from other modules (e.g., tutorial.py) to
+    persist env var changes without going through the HTTP endpoint.
+    """
+    current_data = read_env_file()
+    new_lines = []
+    updated_keys: set[str] = set()
+
+    for key, value, original in current_data:
+        if not key:
+            new_lines.append(original)
+        elif key in updates:
+            new_val = updates[key]
+            if " " in new_val or "=" in new_val:
+                new_lines.append(f'{key}="{new_val}"')
+            else:
+                new_lines.append(f"{key}={new_val}")
+            updated_keys.add(key)
+        else:
+            new_lines.append(original)
+
+    for key, val in updates.items():
+        if key not in updated_keys:
+            if " " in val or "=" in val:
+                new_lines.append(f'{key}="{val}"')
+            else:
+                new_lines.append(f"{key}={val}")
+
+    with open(ENV_FILE_PATH, "w", encoding="utf-8") as f:
+        f.write("\n".join(new_lines))
+        if new_lines:
+            f.write("\n")
+
+    # Also update os.environ so changes take effect immediately
+    for key, val in updates.items():
+        os.environ[key] = val
+
+
 @router.post("/env")
 def update_env_vars(req: EnvUpdateRequest):
-    """Update environment variables in .env file."""
+    """Update environment variables in .env file and runtime os.environ."""
     try:
-        current_data = read_env_file()
-        new_lines = []
-        updated_keys = set()
-        
-        # Update existing lines
-        for key, value, original in current_data:
-            if not key:
-                new_lines.append(original)
-            elif key in req.updates:
-                new_val = req.updates[key]
-                # If sensitive and empty strings passed, user might mean "no change"
-                # But frontend should send current value if not changed, or we handle partial updates?
-                # Let's assume frontend sends explicit values.
-                
-                # Check formatting
-                if " " in new_val or "=" in new_val:
-                    new_lines.append(f'{key}="{new_val}"')
-                else:
-                    new_lines.append(f"{key}={new_val}")
-                updated_keys.add(key)
-            else:
-                new_lines.append(original)
-        
-        # Append new keys
-        for key, val in req.updates.items():
-            if key not in updated_keys:
-                 if " " in val or "=" in val:
-                    new_lines.append(f'{key}="{val}"')
-                 else:
-                    new_lines.append(f"{key}={val}")
-        
-        with open(ENV_FILE_PATH, "w", encoding="utf-8") as f:
-            f.write("\n".join(new_lines))
-            if new_lines:
-                f.write("\n")
-                
+        write_env_updates(req.updates)
         return {"success": True, "message": "Environment variables updated."}
     except Exception as e:
         LOGGER.error(f"Failed to update .env: {e}")

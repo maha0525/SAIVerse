@@ -313,15 +313,25 @@ def create_page(
 
 
 def get_page(conn: sqlite3.Connection, page_id: str) -> Optional[MemopediaPage]:
-    """Get a page by ID."""
+    """Get a page by ID (exact match, with prefix fallback)."""
     cur = conn.execute(
         "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness, is_trunk, is_important, last_referenced_at FROM memopedia_pages WHERE id = ?",
         (page_id,),
     )
     row = cur.fetchone()
-    if row is None:
-        return None
-    return _row_to_page(row)
+    if row is not None:
+        return _row_to_page(row)
+
+    # Fallback: prefix match for truncated IDs (e.g. first 8 chars)
+    if len(page_id) < 36:
+        cur = conn.execute(
+            "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness, is_trunk, is_important, last_referenced_at FROM memopedia_pages WHERE id LIKE ? LIMIT 1",
+            (f"{page_id}%",),
+        )
+        row = cur.fetchone()
+        return _row_to_page(row) if row else None
+
+    return None
 
 
 def update_page(

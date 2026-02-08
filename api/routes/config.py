@@ -125,7 +125,7 @@ def get_playbooks():
 
             result.append({
                 "id": pb.name,
-                "name": pb.name,
+                "name": pb.display_name or pb.name,
                 "description": pb.description,
                 "input_schema": input_schema if input_schema else None,
             })

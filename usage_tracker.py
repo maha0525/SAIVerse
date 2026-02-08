@@ -57,6 +57,7 @@ class UsageTracker:
         *,
         cached_tokens: int = 0,
         cache_write_tokens: int = 0,
+        cache_ttl: str = "",
         persona_id: Optional[str] = None,
         building_id: Optional[str] = None,
         node_type: Optional[str] = None,
@@ -71,7 +72,8 @@ class UsageTracker:
             input_tokens: Number of input tokens
             output_tokens: Number of output tokens
             cached_tokens: Number of tokens served FROM cache (cache read)
-            cache_write_tokens: Number of tokens written TO cache (Anthropic: 1.25x cost)
+            cache_write_tokens: Number of tokens written TO cache
+            cache_ttl: Cache TTL used ("5m" or "1h") - affects write cost calculation
             persona_id: Optional persona ID
             building_id: Optional building ID
             node_type: Type of node (llm, router, etc.)
@@ -81,7 +83,8 @@ class UsageTracker:
         """
         # Calculate cost (with cache discount and write premium if applicable)
         cost_usd = calculate_cost(
-            model_id, input_tokens, output_tokens, cached_tokens, cache_write_tokens
+            model_id, input_tokens, output_tokens, cached_tokens, cache_write_tokens,
+            cache_ttl=cache_ttl,
         )
 
         record = {

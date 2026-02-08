@@ -1,5 +1,6 @@
 {
     "name": "wait",
+    "display_name": "待機",
     "description": "Do nothing - choose to wait and observe. Consecutive waits are consolidated.",
     "input_schema": [
         {

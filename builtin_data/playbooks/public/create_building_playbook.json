@@ -1,5 +1,6 @@
 {
     "name": "create_building",
+    "display_name": "部屋の作成",
     "description": "Create a new building with customized settings, optionally generating interior image",
     "input_schema": [
         {

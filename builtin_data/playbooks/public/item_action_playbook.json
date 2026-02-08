@@ -1,5 +1,6 @@
 {
     "name": "item_action",
+    "display_name": "アイテム操作",
     "description": "Perform item operations: view content, pick up from building, place in building, or use items",
     "input_schema": [
         {

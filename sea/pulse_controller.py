@@ -13,6 +13,7 @@ from enum import IntEnum
 from queue import Queue
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional
 
+from llm_clients.exceptions import LLMError
 from sea.cancellation import CancellationToken, ExecutionCancelledException
 
 if TYPE_CHECKING:
@@ -258,6 +259,9 @@ class PulseController:
             # Record interruption to memory
             self._record_interruption(request, e.interrupted_by)
             return []
+        except LLMError:
+            # Propagate LLM errors to the caller for frontend display
+            raise
         except Exception as e:
             LOGGER.exception(
                 "[PulseController] Error executing %s for persona %s: %s",

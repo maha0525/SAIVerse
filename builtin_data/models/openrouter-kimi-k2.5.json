@@ -1,11 +1,12 @@
 {
-  "model": "openai/gpt-oss-120b",
-  "display_name": "Openai Gpt Oss 120b",
-  "provider": "nvidia_nim",
-  "supports_structured_output": false,
-  "context_length": 120000,
-  "base_url": "https://integrate.api.nvidia.com/v1",
-  "api_key_env": "NVIDIA_API_KEY",
+  "model": "moonshotai/kimi-k2.5",
+  "display_name": "Kimi K2.5(OpenRouter)",
+  "provider": "openai",
+  "context_length": 256000,
+  "default_max_history_messages": 80,
+  "metabolism_keep_messages": 60,
+  "base_url": "https://openrouter.ai/api/v1",
+  "api_key_env": "OPENROUTER_API_KEY",
   "convert_system_to_user": true,
   "parameters": {
     "temperature": {
@@ -29,13 +30,11 @@
     "max_tokens": {
       "type": "int",
       "min": 32,
-      "max": 8000,
+      "max": 4096,
       "step": 1,
-      "default": 8000,
+      "default": 4096,
       "label": "Max tokens",
       "description": "Upper bound on generated tokens."
     }
-  },
-  "default_max_history_messages": 50,
-  "metabolism_keep_messages": 30
+  }
 }

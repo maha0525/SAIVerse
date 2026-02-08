@@ -355,6 +355,13 @@ class SEARuntime:
                 "models_used": [],
             }
 
+        # Inherit activity trace list (shared reference, same pattern as accumulator)
+        parent_activity_trace = parent.get("_activity_trace")
+        if parent_activity_trace is not None:
+            activity_trace = parent_activity_trace
+        else:
+            activity_trace = []
+
         initial_state = {
             "messages": list(base_messages),
             "inputs": {"input": user_input or ""},
@@ -362,12 +369,11 @@ class SEARuntime:
             "last": user_input or "",
             "outputs": _lg_outputs,
             "persona_obj": persona,
-            "context_bundle": [],
-            "context_bundle_text": "",
             "pulse_id": pulse_id,
             "pulse_type": pulse_type,  # user/schedule/auto
             "_cancellation_token": cancellation_token,  # For node-level cancellation checks
             "pulse_usage_accumulator": usage_accumulator,  # Inherit from parent or create new
+            "_activity_trace": activity_trace,  # Shared trace of exec/tool activities
             **inherited_vars,  # Add inherited variables from input_schema
         }
 
@@ -462,7 +468,6 @@ class SEARuntime:
                 "last": state.get("last", ""),
                 "persona_id": getattr(persona, "persona_id", None),
                 "persona_name": getattr(persona, "persona_name", None),
-                "context_bundle_text": state.get("context_bundle_text", ""),
                 **{k: v for k, v in state.items() if k not in ["messages", "inputs", "outputs", "persona_obj", "_cancellation_token"]},  # Include all other state variables
             }
 
@@ -495,6 +500,23 @@ class SEARuntime:
                 needs_structured_output = response_schema is not None
                 llm_client = self._select_llm_client(node_def, persona, needs_structured_output=needs_structured_output)
 
+                # Inject model-specific system prompt if configured
+                _model_config_key = getattr(llm_client, "config_key", None)
+                if _model_config_key:
+                    from model_configs import get_model_system_prompt
+                    _model_sys_prompt = get_model_system_prompt(_model_config_key)
+                    if _model_sys_prompt:
+                        _injected = False
+                        for _mi, _msg in enumerate(messages):
+                            if _msg.get("role") == "system":
+                                # Create new dict to avoid mutating shared base_msgs
+                                messages[_mi] = {**_msg, "content": _msg["content"] + "\n\n---\n\n" + _model_sys_prompt}
+                                _injected = True
+                                break
+                        if not _injected:
+                            messages.insert(0, {"role": "system", "content": _model_sys_prompt})
+                        LOGGER.debug("[sea] Injected model-specific system prompt for %s", _model_config_key)
+
                 # Check if tools are available for this node
                 available_tools = getattr(node_def, "available_tools", None)
                 LOGGER.info("[DEBUG] available_tools = %s", available_tools)
@@ -510,6 +532,14 @@ class SEARuntime:
                         **self._get_cache_kwargs(),
                     )
 
+                    # Consume reasoning (thinking) from tool-mode LLM call
+                    _tool_reasoning = llm_client.consume_reasoning()
+                    _tool_reasoning_text = "\n\n".join(
+                        e.get("text", "") for e in _tool_reasoning if e.get("text")
+                    ) if _tool_reasoning else ""
+                    if _tool_reasoning_text:
+                        state["_reasoning_text"] = _tool_reasoning_text
+
                     # Record usage
                     usage = llm_client.consume_usage()
                     if usage:
@@ -519,6 +549,7 @@ class SEARuntime:
                             output_tokens=usage.output_tokens,
                             cached_tokens=usage.cached_tokens,
                             cache_write_tokens=usage.cache_write_tokens,
+                            cache_ttl=usage.cache_ttl,
                             persona_id=getattr(persona, "persona_id", None),
                             building_id=building_id,
                             node_type="llm_tool",
@@ -527,7 +558,7 @@ class SEARuntime:
                         )
                         # Accumulate into pulse total
                         from model_configs import calculate_cost
-                        cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens)
+                        cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
                         self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
 
                     # Parse output_keys to determine where to store results
@@ -666,8 +697,17 @@ class SEARuntime:
                                 temperature=self._default_temperature(persona),
                                 **self._get_cache_kwargs(),
                             ):
+                                # Thinking chunks are dicts, text chunks are strings
+                                if isinstance(chunk, dict) and chunk.get("type") == "thinking":
+                                    event_callback({
+                                        "type": "streaming_thinking",
+                                        "content": chunk["content"],
+                                        "persona_id": getattr(persona, "persona_id", None),
+                                        "node_id": getattr(node_def, "id", "llm"),
+                                    })
+                                    continue
                                 text_chunks.append(chunk)
-                                # Send each chunk to UI
+                                # Send each text chunk to UI
                                 event_callback({
                                     "type": "streaming_chunk",
                                     "content": chunk,
@@ -708,6 +748,7 @@ class SEARuntime:
                                 output_tokens=usage.output_tokens,
                                 cached_tokens=usage.cached_tokens,
                                 cache_write_tokens=usage.cache_write_tokens,
+                                cache_ttl=usage.cache_ttl,
                                 persona_id=getattr(persona, "persona_id", None),
                                 building_id=building_id,
                                 node_type="llm_stream",
@@ -717,7 +758,7 @@ class SEARuntime:
                             LOGGER.info("[DEBUG] Usage recorded: model=%s in=%d out=%d cached=%d cache_write=%d", usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens)
                             # Build llm_usage metadata for message
                             from model_configs import calculate_cost, get_model_display_name
-                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens)
+                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
                             llm_usage_metadata = {
                                 "model": usage.model,
                                 "model_display_name": get_model_display_name(usage.model),
@@ -732,17 +773,32 @@ class SEARuntime:
                         else:
                             LOGGER.warning("[DEBUG] No usage data from LLM client")
 
-                        # Send completion event
-                        event_callback({
+                        # Consume reasoning (thinking) from LLM — store as metadata, not in content
+                        reasoning_entries = llm_client.consume_reasoning()
+                        reasoning_text = "\n\n".join(
+                            e.get("text", "") for e in reasoning_entries if e.get("text")
+                        ) if reasoning_entries else ""
+
+                        # Send completion event with reasoning
+                        completion_event: Dict[str, Any] = {
                             "type": "streaming_complete",
                             "persona_id": getattr(persona, "persona_id", None),
                             "node_id": getattr(node_def, "id", "llm"),
-                        })
+                        }
+                        if reasoning_text:
+                            completion_event["reasoning"] = reasoning_text
+                        event_callback(completion_event)
+
                         # Record to Building history with usage metadata (include pulse total)
                         pulse_id = state.get("pulse_id")
                         msg_metadata: Dict[str, Any] = {}
                         if llm_usage_metadata:
                             msg_metadata["llm_usage"] = llm_usage_metadata
+                        if reasoning_text:
+                            msg_metadata["reasoning"] = reasoning_text
+                        _at_stream = state.get("_activity_trace")
+                        if _at_stream:
+                            msg_metadata["activity_trace"] = list(_at_stream)
                         accumulator = state.get("pulse_usage_accumulator")
                         if accumulator:
                             msg_metadata["llm_usage_total"] = dict(accumulator)
@@ -768,6 +824,7 @@ class SEARuntime:
                                 output_tokens=usage.output_tokens,
                                 cached_tokens=usage.cached_tokens,
                                 cache_write_tokens=usage.cache_write_tokens,
+                                cache_ttl=usage.cache_ttl,
                                 persona_id=getattr(persona, "persona_id", None),
                                 building_id=building_id,
                                 node_type="llm",
@@ -776,7 +833,7 @@ class SEARuntime:
                             )
                             # Build llm_usage metadata for message
                             from model_configs import calculate_cost, get_model_display_name
-                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens)
+                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
                             llm_usage_metadata = {
                                 "model": usage.model,
                                 "model_display_name": get_model_display_name(usage.model),
@@ -789,6 +846,12 @@ class SEARuntime:
                             # Accumulate into pulse total
                             self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
 
+                        # Consume reasoning (thinking) from LLM — store as metadata
+                        reasoning_entries = llm_client.consume_reasoning()
+                        reasoning_text = "\n\n".join(
+                            e.get("text", "") for e in reasoning_entries if e.get("text")
+                        ) if reasoning_entries else ""
+
                         # If speak=true but streaming disabled, send complete text and record to Building history
                         LOGGER.info("[DEBUG] speak_flag=%s, event_callback=%s, text_len=%d",
                                    speak_flag, event_callback is not None, len(text) if text else 0)
@@ -797,6 +860,11 @@ class SEARuntime:
                             msg_metadata: Dict[str, Any] = {}
                             if llm_usage_metadata:
                                 msg_metadata["llm_usage"] = llm_usage_metadata
+                            if reasoning_text:
+                                msg_metadata["reasoning"] = reasoning_text
+                            _at_speak = state.get("_activity_trace")
+                            if _at_speak:
+                                msg_metadata["activity_trace"] = list(_at_speak)
                             accumulator = state.get("pulse_usage_accumulator")
                             if accumulator:
                                 msg_metadata["llm_usage_total"] = dict(accumulator)
@@ -804,11 +872,20 @@ class SEARuntime:
                             self._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
                             if event_callback is not None:
                                 LOGGER.info("[DEBUG] Sending 'say' event with content: %s", text[:100] if text else "(empty)")
-                                event_callback({
+                                say_event: Dict[str, Any] = {
                                     "type": "say",
                                     "content": text,
                                     "persona_id": getattr(persona, "persona_id", None),
-                                })
+                                }
+                                if reasoning_text:
+                                    say_event["reasoning"] = reasoning_text
+                                if _at_speak:
+                                    say_event["activity_trace"] = list(_at_speak)
+                                event_callback(say_event)
+
+                        # Store remaining reasoning for say/speak node (non-speak path)
+                        if reasoning_text:
+                            state["_reasoning_text"] = reasoning_text
 
                     self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                     schema_consumed = self._process_structured_output(node_def, text, state)
@@ -845,8 +922,11 @@ class SEARuntime:
                 raise
             except Exception as exc:
                 LOGGER.error("SEA LangGraph LLM failed: %s: %s", type(exc).__name__, exc)
-                text = "(error in llm node)"
-                state["tool_called"] = False
+                # Convert to LLMError so it propagates to the frontend
+                raise LLMError(
+                    f"LLM node failed: {type(exc).__name__}: {exc}",
+                    original_error=exc,
+                ) from exc
             state["last"] = text
             state["messages"] = messages + [{"role": "assistant", "content": text}]
 
@@ -904,6 +984,16 @@ class SEARuntime:
                         pulse_id=pulse_id,
                     )
                     LOGGER.debug("[sea][llm] Memorized response (assistant): %s...", str(content_to_save)[:100])
+
+                # Activity trace: record LLM memorize
+                if not playbook.name.startswith(("meta_", "sub_")):
+                    pb_display = playbook.display_name or playbook.name
+                    node_label = getattr(node_def, "label", None) or node_id
+                    _at = state.get("_activity_trace")
+                    if isinstance(_at, list):
+                        _at.append({"action": "memorize", "name": node_label, "playbook": pb_display})
+                    if event_callback:
+                        event_callback({"type": "activity", "action": "memorize", "name": node_label, "playbook": pb_display, "status": "completed"})
 
             # Debug: log speak_content at end of LLM node
             speak_content = state.get("speak_content", "")
@@ -1453,6 +1543,15 @@ class SEARuntime:
                 LOGGER.info("[sea][tool] RESULT %s -> %s", tool_name, result_preview)
                 log_sea_trace(playbook.name, node_id, "TOOL", f"action={tool_name} → {result_preview}")
 
+                # Activity trace: record tool execution (skip infrastructure playbooks)
+                if not playbook.name.startswith(("meta_", "sub_")):
+                    pb_display = playbook.display_name or playbook.name
+                    _at = state.get("_activity_trace")
+                    if isinstance(_at, list):
+                        _at.append({"action": "tool", "name": tool_name, "playbook": pb_display})
+                    if event_callback:
+                        event_callback({"type": "activity", "action": "tool", "name": tool_name, "playbook": pb_display, "status": "completed"})
+
                 # Handle tuple results with output_keys (for multi-value returns)
                 if output_keys and isinstance(result, tuple):
                     # Expand tuple to multiple state variables
@@ -1513,15 +1612,25 @@ class SEARuntime:
 
             eff_bid = self._effective_building_id(persona, building_id)
             log_sea_trace(playbook.name, node_id, "EXEC", f"→ {sub_name} (input=\"{str(sub_input)[:150]}\")")
+
             try:
                 sub_outputs = await asyncio.to_thread(
                     self._run_playbook, sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback
                 )
             except Exception as exc:
                 LOGGER.exception("SEA LangGraph exec sub-playbook failed")
-                state["last"] = f"Sub-playbook error: {exc}"
+                error_msg = f"Sub-playbook error: {exc}"
+                state["last"] = error_msg
+                log_sea_trace(playbook.name, node_id, "EXEC", f"→ Sub-playbook error: {type(exc).__name__}: {exc}")
+                if event_callback:
+                    event_callback({
+                        "type": "error",
+                        "content": f"[{sub_name}] {type(exc).__name__}: {exc}",
+                        "playbook": playbook.name,
+                        "node": node_id,
+                    })
                 if outputs is not None:
-                    outputs.append(state["last"])
+                    outputs.append(error_msg)
                 return state
 
             # Track executed playbook in executed_playbooks list
@@ -1530,10 +1639,12 @@ class SEARuntime:
                 executed_list.append(str(sub_name).strip())
                 LOGGER.debug("[sea][exec] Added '%s' to executed_playbooks: %s", sub_name, executed_list)
 
-            ingested = self._ingest_context_from_subplaybook(state, sub_name, sub_outputs)
-            if ingested:
-                state["last"] = state.get("context_bundle_text") or state.get("last")
-            elif sub_outputs:
+            # Append tool result message to close the router function call pair
+            joined = ""
+            if sub_outputs:
+                joined = "\n".join(str(item).strip() for item in sub_outputs if str(item).strip())
+            self._append_tool_result_message(state, str(sub_name).strip(), joined or "(completed)")
+            if sub_outputs:
                 state["last"] = sub_outputs[-1]
             return state
 
@@ -1573,9 +1684,19 @@ class SEARuntime:
             metadata = state.get(metadata_key) if metadata_key else None
             self._store_memory(persona, memo_text, role=role, tags=tags, pulse_id=pulse_id, metadata=metadata)
             state["last"] = memo_text
-            if outputs is not None and self._should_collect_memory_output(playbook):
+            if outputs is not None:
                 outputs.append(memo_text)
-            
+
+            # Activity trace: record memorize execution
+            if not playbook.name.startswith(("meta_", "sub_")):
+                pb_display = playbook.display_name or playbook.name
+                node_label = getattr(node_def, "label", None) or node_id
+                _at = state.get("_activity_trace")
+                if isinstance(_at, list):
+                    _at.append({"action": "memorize", "name": node_label, "playbook": pb_display})
+                if event_callback:
+                    event_callback({"type": "activity", "action": "memorize", "name": node_label, "playbook": pb_display, "status": "completed"})
+
             # Debug: log speak_content at end of memorize node
             speak_content = state.get("speak_content", "")
             preview = speak_content[:100] + "..." if len(speak_content) > 100 else speak_content
@@ -1590,13 +1711,20 @@ class SEARuntime:
         if event_callback:
             event_callback({"type": "status", "content": f"{playbook.name} / speak", "playbook": playbook.name, "node": "speak"})
         text = state.get("last") or ""
+        reasoning_text = state.pop("_reasoning_text", "")
+        activity_trace = state.get("_activity_trace")
         pulse_id = state.get("pulse_id")
         eff_bid = self._effective_building_id(persona, building_id)
         self._emit_speak(persona, eff_bid, text, pulse_id=pulse_id)
         if outputs is not None:
             outputs.append(text)
         if event_callback:
-            event_callback({"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None)})
+            say_event: Dict[str, Any] = {"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None)}
+            if reasoning_text:
+                say_event["reasoning"] = reasoning_text
+            if activity_trace:
+                say_event["activity_trace"] = list(activity_trace)
+            event_callback(say_event)
         return state
 
     def _lg_say_node(self, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
@@ -1606,6 +1734,7 @@ class SEARuntime:
             if event_callback:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             text = state.get("last") or ""
+            reasoning_text = state.pop("_reasoning_text", "")
             pulse_id = state.get("pulse_id")
             metadata_key = getattr(node_def, "metadata_key", None)
             base_metadata = state.get(metadata_key) if metadata_key else None
@@ -1617,18 +1746,30 @@ class SEARuntime:
                     msg_metadata.update(base_metadata)
                 else:
                     msg_metadata["metadata"] = base_metadata
+            if reasoning_text:
+                msg_metadata["reasoning"] = reasoning_text
 
             # Include pulse usage accumulator total for UI display
             accumulator = state.get("pulse_usage_accumulator")
             if accumulator and accumulator.get("call_count", 0) > 0:
                 msg_metadata["llm_usage_total"] = dict(accumulator)
 
+            # Include activity trace for UI display
+            activity_trace = state.get("_activity_trace")
+            if activity_trace:
+                msg_metadata["activity_trace"] = list(activity_trace)
+
             eff_bid = self._effective_building_id(persona, building_id)
             self._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
             if outputs is not None:
                 outputs.append(text)
             if event_callback:
-                event_callback({"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None), "metadata": msg_metadata if msg_metadata else None})
+                say_event: Dict[str, Any] = {"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None), "metadata": msg_metadata if msg_metadata else None}
+                if reasoning_text:
+                    say_event["reasoning"] = reasoning_text
+                if activity_trace:
+                    say_event["activity_trace"] = list(activity_trace)
+                event_callback(say_event)
 
             # Debug: log speak_content at end of say node
             speak_content = state.get("speak_content", "")
@@ -2103,21 +2244,17 @@ class SEARuntime:
 
         # Get LLM client for summarization
         try:
-            from llm_clients import get_llm_client
-            from model_configs import get_model_config
+            # Prefer persona's existing lightweight client (already configured)
+            client = getattr(persona, "lightweight_llm_client", None)
+            if client is None:
+                # Fallback: create a temporary client
+                from llm_clients import get_llm_client
+                from model_configs import get_context_length, get_model_provider
 
-            # Use lightweight model for summarization
-            lightweight_model = getattr(persona, "lightweight_model", None)
-            if not lightweight_model:
-                import os
-                lightweight_model = os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gemini-2.0-flash-lite")
-
-            model_config = get_model_config(lightweight_model)
-            if not model_config:
-                LOGGER.warning("[stelis] Could not get model config for Chronicle generation")
-                return None
-
-            client = get_llm_client(lightweight_model, model_config)
+                lightweight_model = getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
+                lw_context = get_context_length(lightweight_model)
+                provider = get_model_provider(lightweight_model)
+                client = get_llm_client(lightweight_model, provider, lw_context)
 
             summary_messages = [
                 {"role": "system", "content": chronicle_prompt},
@@ -2172,46 +2309,6 @@ class SEARuntime:
         state["messages"] = conv
         state["_last_tool_call_id"] = call_id
         state["_last_tool_name"] = payload.get("playbook") or "sub_playbook"
-
-    def _ingest_context_from_subplaybook(
-        self,
-        state: Dict[str, Any],
-        source: str,
-        sub_outputs: Optional[List[str]],
-    ) -> bool:
-        bundle = state.setdefault("context_bundle", [])
-        state.setdefault("context_bundle_text", "")
-        if not sub_outputs:
-            return False
-        joined = "\n".join(str(item).strip() for item in sub_outputs if str(item).strip())
-        if not joined:
-            return False
-        entry: Dict[str, Any] = {"source": source, "raw": joined}
-        parsed = self._extract_structured_json(joined)
-        if parsed is not None:
-            entry["data"] = parsed
-        bundle.append(entry)
-        state["context_bundle_text"] = self._render_context_bundle(bundle)
-        self._append_tool_result_message(state, source, joined)
-        return True
-
-    def _render_context_bundle(self, bundle: List[Dict[str, Any]]) -> str:
-        blocks: List[str] = []
-        for idx, entry in enumerate(bundle, 1):
-            label = entry.get("source") or f"context_{idx}"
-            payload = entry.get("raw") or ""
-            data = entry.get("data")
-            if isinstance(data, (dict, list)):
-                try:
-                    payload = json.dumps(data, ensure_ascii=False)
-                except Exception:
-                    payload = str(data)
-            payload = str(payload).strip()
-            blocks.append(f"[{label}]\n{payload}" if payload else f"[{label}]")
-        return "\n\n".join(blocks)
-
-    def _should_collect_memory_output(self, playbook: PlaybookSchema) -> bool:
-        return not playbook.name.startswith("meta_")
 
     def _store_memory(
         self,
@@ -2908,7 +3005,7 @@ class SEARuntime:
                             msg.get("role") != "system"
                             and not meta.get("__visual_context__")
                             and not meta.get("__realtime_context__")
-                            and not meta.get("__memory_weave__")
+                            and not meta.get("__memory_weave_context__")
                         ):
                             history_indices.append(i)
 
@@ -2962,6 +3059,162 @@ class SEARuntime:
             LOGGER.debug("[sea][prepare-context] Token budget check failed: %s", exc)
 
         return messages
+
+    # ---- Context Preview (read-only, no side effects) ----
+
+    def preview_context(
+        self,
+        persona: Any,
+        building_id: str,
+        user_input: str,
+        meta_playbook: Optional[str] = None,
+        image_count: int = 0,
+        document_count: int = 0,
+    ) -> Dict[str, Any]:
+        """Build the context that would be sent to the LLM, without executing anything.
+
+        Returns a dict with messages, token estimates, cost estimates, and model info.
+        Does NOT record the user message to history or call any LLM.
+        """
+        from token_estimator import estimate_messages_tokens, estimate_image_tokens
+        from model_configs import (
+            get_model_provider, get_context_length,
+            get_model_display_name, get_model_pricing, calculate_cost,
+        )
+
+        # Select playbook (same logic as run_meta_user)
+        if meta_playbook:
+            playbook = self._load_playbook_for(meta_playbook, persona, building_id)
+            if playbook is None:
+                playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
+        else:
+            playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
+
+        # Build context messages (without recording user message to history)
+        context_warnings: List[Dict[str, Any]] = []
+        messages = self._prepare_context(
+            persona, building_id, user_input=None,
+            requirements=playbook.context_requirements,
+            warnings=context_warnings,
+        )
+
+        # Append the user message manually (in real flow it comes from history)
+        if user_input:
+            messages.append({"role": "user", "content": user_input})
+
+        # Classify each message into a section
+        persona_model = getattr(persona, "model", None) or "gemini-2.0-flash"
+        provider = get_model_provider(persona_model)
+
+        section_order = [
+            "system_prompt", "memory_weave", "visual_context",
+            "history", "realtime_context", "user_message",
+        ]
+        section_labels = {
+            "system_prompt": "System Prompt",
+            "memory_weave": "Memory Weave",
+            "visual_context": "Visual Context",
+            "history": "Conversation History",
+            "realtime_context": "Realtime Context",
+            "user_message": "Your Message",
+            "attachments": "Attachments",
+        }
+        section_tokens: Dict[str, int] = {s: 0 for s in section_order}
+        section_tokens["attachments"] = 0
+        section_msg_counts: Dict[str, int] = {s: 0 for s in section_order}
+        section_msg_counts["attachments"] = 0
+
+        annotated_messages: List[Dict[str, Any]] = []
+        for i, msg in enumerate(messages):
+            meta = msg.get("metadata") or {}
+            # Determine section
+            if msg.get("role") == "system":
+                section = "system_prompt"
+            elif meta.get("__memory_weave_context__"):
+                section = "memory_weave"
+            elif meta.get("__visual_context__"):
+                section = "visual_context"
+            elif meta.get("__realtime_context__"):
+                section = "realtime_context"
+            elif i == len(messages) - 1 and msg.get("role") == "user" and user_input and msg.get("content") == user_input:
+                section = "user_message"
+            else:
+                section = "history"
+
+            msg_tokens = estimate_messages_tokens([msg], provider)
+            section_tokens[section] += msg_tokens
+            section_msg_counts[section] += 1
+
+            annotated_messages.append({
+                "role": msg.get("role", "unknown"),
+                "content": msg.get("content", ""),
+                "section": section,
+                "tokens": msg_tokens,
+            })
+
+        # Add estimated attachment tokens
+        attachment_tokens = 0
+        if image_count > 0:
+            attachment_tokens += image_count * estimate_image_tokens(provider)
+        if document_count > 0:
+            # Rough estimate: ~500 tokens per document (varies widely)
+            attachment_tokens += document_count * 500
+        section_tokens["attachments"] = attachment_tokens
+
+        total_input_tokens = sum(section_tokens.values())
+        context_length = get_context_length(persona_model)
+        pricing = get_model_pricing(persona_model)
+
+        # Cost range: best case (all cached) to worst case (all cache-write)
+        cache_kwargs = self._get_cache_kwargs()
+        cache_enabled = cache_kwargs.get("enable_cache", False)
+        cache_ttl = cache_kwargs.get("cache_ttl", "5m")
+
+        if cache_enabled and pricing and pricing.get("cached_input_per_1m_tokens") is not None:
+            # Best case: everything is a cache hit
+            cost_best = calculate_cost(
+                persona_model, total_input_tokens, 0,
+                cached_tokens=total_input_tokens, cache_write_tokens=0,
+            )
+            # Worst case: everything is a cache write
+            cost_worst = calculate_cost(
+                persona_model, total_input_tokens, 0,
+                cached_tokens=0, cache_write_tokens=total_input_tokens,
+                cache_ttl=cache_ttl,
+            )
+        else:
+            # No cache: single estimate
+            cost_best = calculate_cost(persona_model, total_input_tokens, 0)
+            cost_worst = cost_best
+
+        # Build sections summary
+        all_sections = section_order + ["attachments"]
+        sections_summary = []
+        for s in all_sections:
+            if section_tokens.get(s, 0) > 0 or section_msg_counts.get(s, 0) > 0:
+                sections_summary.append({
+                    "name": s,
+                    "label": section_labels.get(s, s),
+                    "tokens": section_tokens.get(s, 0),
+                    "message_count": section_msg_counts.get(s, 0),
+                })
+
+        return {
+            "persona_id": getattr(persona, "persona_id", "unknown"),
+            "persona_name": getattr(persona, "persona_name", "Unknown"),
+            "model": persona_model,
+            "model_display_name": get_model_display_name(persona_model),
+            "provider": provider,
+            "context_length": context_length,
+            "sections": sections_summary,
+            "total_input_tokens": total_input_tokens,
+            "estimated_cost_best_usd": round(cost_best, 6),
+            "estimated_cost_worst_usd": round(cost_worst, 6),
+            "cache_enabled": cache_enabled,
+            "cache_ttl": cache_ttl if cache_enabled else None,
+            "pricing": pricing or {},
+            "messages": annotated_messages,
+        }
 
     def _enrich_history_with_attachments(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Enrich history messages with attachment context.

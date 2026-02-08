@@ -94,7 +94,7 @@ def chronicle_read_detail(
                     if child:
                         c_start = datetime.fromtimestamp(child.start_time).strftime("%Y-%m-%d %H:%M") if child.start_time else "?"
                         c_end = datetime.fromtimestamp(child.end_time).strftime("%Y-%m-%d %H:%M") if child.end_time else "?"
-                        parts.append(f"[{child.id[:8]}...] Lv.{child.level} | {c_start} ~ {c_end} | {child.message_count}msg")
+                        parts.append(f"[{child.id}] Lv.{child.level} | {c_start} ~ {c_end} | {child.message_count}msg")
                         # Show first 200 chars of child content
                         snippet = child.content[:200] + "..." if len(child.content) > 200 else child.content
                         parts.append(f"  {snippet}")

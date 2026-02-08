@@ -136,6 +136,7 @@ class Playbook(Base):
     __tablename__ = "playbooks"
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(255), unique=True, nullable=False)
+    display_name = Column(String(255), nullable=True)  # Human-readable display name for UI
     description = Column(String(1024), default="", nullable=False)
     scope = Column(String(32), nullable=False, default="public")  # public/personal/building
     created_by_persona_id = Column(String(255), ForeignKey("ai.AIID"), nullable=True)

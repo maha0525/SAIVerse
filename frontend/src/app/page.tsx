@@ -3,6 +3,8 @@
 import { useState, useRef, useEffect, KeyboardEvent, ChangeEvent, useCallback } from 'react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
+import rehypeRaw from 'rehype-raw';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import styles from './page.module.css';
 import Sidebar from '@/components/Sidebar';
 import ChatOptions from '@/components/ChatOptions';
@@ -11,8 +13,24 @@ import PeopleModal from '@/components/PeopleModal';
 import TutorialWizard from '@/components/tutorial/TutorialWizard';
 import SaiverseLink from '@/components/SaiverseLink';
 import ItemModal from '@/components/ItemModal';
-import { Send, Paperclip, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown } from 'lucide-react';
+import ContextPreviewModal, { ContextPreviewData } from '@/components/ContextPreviewModal';
+import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
+
+// Allow className on HTML elements used by thinking blocks (<details>, <div>, <summary>)
+const sanitizeSchema = {
+    ...defaultSchema,
+    attributes: {
+        ...defaultSchema.attributes,
+        details: [...(defaultSchema.attributes?.details || []), 'className'],
+        div: [...(defaultSchema.attributes?.div || []), 'className'],
+        summary: [...(defaultSchema.attributes?.summary || []), 'className'],
+    },
+    protocols: {
+        ...defaultSchema.protocols,
+        href: [...(defaultSchema.protocols?.href || []), 'saiverse'],
+    },
+};
 
 interface MessageImage {
     url: string;
@@ -54,8 +72,21 @@ interface Message {
     // Warning information
     isWarning?: boolean;
     warningCode?: string;
+    // Reasoning (thinking) from LLM
+    reasoning?: string;
+    // Activity trace (exec/tool steps before final response)
+    activity_trace?: ActivityEntry[];
     // Streaming state
     _streaming?: boolean;
+    _streamingThinking?: string;
+    _activities?: ActivityEntry[];
+}
+
+interface ActivityEntry {
+    action: 'exec' | 'tool' | 'memorize';
+    name: string;
+    playbook?: string;
+    status?: string;
 }
 
 // File attachment types for upload
@@ -210,6 +241,11 @@ export default function Home() {
     const [attachments, setAttachments] = useState<FileAttachment[]>([]); // Multiple attachments
     const fileInputRef = useRef<HTMLInputElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const [showPlusMenu, setShowPlusMenu] = useState(false);
+    const [showContextPreview, setShowContextPreview] = useState(false);
+    const [contextPreviewData, setContextPreviewData] = useState<ContextPreviewData | null>(null);
+    const [contextPreviewLoading, setContextPreviewLoading] = useState(false);
+    const plusMenuRef = useRef<HTMLDivElement>(null);
     const [isMobile, setIsMobile] = useState(false);
     const [currentBuildingName, setCurrentBuildingName] = useState<string>('SAIVerse');
     const [currentBuildingId, setCurrentBuildingId] = useState<string | null>(null);
@@ -627,38 +663,91 @@ export default function Home() {
                             setLoadingStatus(event.content === 'processing' ? 'Processing...' : event.content);
                         } else if (event.type === 'think') {
                             setLoadingStatus(`Thinking: ${event.content.substring(0, 50)}${event.content.length > 50 ? '...' : ''}`);
+                        } else if (event.type === 'activity') {
+                            // Activity trace: accumulate tool/memorize steps
+                            const entry: ActivityEntry = { action: event.action, name: event.name, ...(event.playbook && { playbook: event.playbook }), status: event.status };
+                            setMessages(prev => {
+                                const last = prev[prev.length - 1];
+                                if (last && last.role === 'assistant' && last._streaming) {
+                                    const activities = [...(last._activities || [])];
+                                    if (event.status === 'completed' || event.status === 'error') {
+                                        const idx = activities.findIndex(
+                                            a => a.action === entry.action && a.name === entry.name && a.status === 'started'
+                                        );
+                                        if (idx >= 0) {
+                                            activities[idx] = { ...activities[idx], status: event.status };
+                                        } else {
+                                            activities.push(entry);
+                                        }
+                                    } else {
+                                        activities.push(entry);
+                                    }
+                                    return [...prev.slice(0, -1), { ...last, _activities: activities }];
+                                } else {
+                                    return [...prev, {
+                                        role: 'assistant' as const, content: '', _streaming: true,
+                                        _activities: [entry], timestamp: new Date().toISOString()
+                                    }];
+                                }
+                            });
+                            setLoadingStatus(event.status === 'started' ? `Running ${event.name}...` : event.name);
+                        } else if (event.type === 'streaming_thinking') {
+                            // Streaming thinking: accumulate into _streamingThinking
+                            const avatarUrl = event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined;
+                            setMessages(prev => {
+                                const last = prev[prev.length - 1];
+                                if (last && last.role === 'assistant' && last._streaming) {
+                                    return [...prev.slice(0, -1), {
+                                        ...last,
+                                        _streamingThinking: (last._streamingThinking || '') + event.content
+                                    }];
+                                } else {
+                                    return [...prev, {
+                                        role: 'assistant',
+                                        content: '',
+                                        sender: event.persona_name || 'Assistant',
+                                        avatar: avatarUrl,
+                                        timestamp: new Date().toISOString(),
+                                        _streaming: true,
+                                        _streamingThinking: event.content
+                                    }];
+                                }
+                            });
+                            setLoadingStatus('Thinking...');
                         } else if (event.type === 'streaming_chunk') {
                             // Streaming: append chunk to last message or create new one
                             const avatarUrl = event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined;
                             setMessages(prev => {
                                 const last = prev[prev.length - 1];
-                                // Check if last message is a streaming message from same persona
                                 if (last && last.role === 'assistant' && last._streaming) {
-                                    // Append to existing streaming message
                                     return [...prev.slice(0, -1), {
                                         ...last,
                                         content: last.content + event.content
                                     }];
                                 } else {
-                                    // Create new streaming message
                                     return [...prev, {
                                         role: 'assistant',
                                         content: event.content,
                                         sender: event.persona_name || 'Assistant',
                                         avatar: avatarUrl,
                                         timestamp: new Date().toISOString(),
-                                        _streaming: true  // Mark as streaming in progress
+                                        _streaming: true
                                     }];
                                 }
                             });
                             setLoadingStatus('Streaming...');
                         } else if (event.type === 'streaming_complete') {
-                            // Mark streaming message as complete
+                            // Mark streaming message as complete, finalize reasoning and activities
                             setMessages(prev => {
                                 const last = prev[prev.length - 1];
                                 if (last && last._streaming) {
-                                    const { _streaming, ...rest } = last;
-                                    return [...prev.slice(0, -1), rest];
+                                    const { _streaming, _streamingThinking, _activities, ...rest } = last;
+                                    const reasoning = event.reasoning || _streamingThinking || undefined;
+                                    return [...prev.slice(0, -1), {
+                                        ...rest,
+                                        reasoning,
+                                        ...((_activities && _activities.length > 0) && { activity_trace: _activities }),
+                                    }];
                                 }
                                 return prev;
                             });
@@ -667,6 +756,47 @@ export default function Home() {
                             console.log('[DEBUG] Received say event:', event);
                             const avatarUrl = event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined;
 
+                            // Extract images from metadata (mirrors chat.py logic)
+                            let sayImages: MessageImage[] | undefined;
+                            const sayMeta = event.metadata;
+                            if (sayMeta && (sayMeta.images || sayMeta.media)) {
+                                const mediaItems = sayMeta.images || sayMeta.media || [];
+                                sayImages = [];
+                                for (const img of mediaItems) {
+                                    let imgPath: string = img.path || "";
+                                    if (!imgPath && img.uri) {
+                                        const prefix = "saiverse://image/";
+                                        if (img.uri.startsWith(prefix)) {
+                                            imgPath = img.uri.replace(prefix, "");
+                                        }
+                                    }
+                                    if (imgPath) {
+                                        const filename = imgPath.split('/').pop() || imgPath.split('\\').pop() || imgPath;
+                                        sayImages.push({
+                                            url: `/api/static/uploads/${filename}`,
+                                            mime_type: img.mime_type
+                                        });
+                                    }
+                                }
+                                if (sayImages.length === 0) sayImages = undefined;
+                            }
+
+                            // Extract LLM usage total from metadata
+                            let sayUsageTotal: MessageLLMUsageTotal | undefined;
+                            if (sayMeta?.llm_usage_total) {
+                                const ut = sayMeta.llm_usage_total;
+                                sayUsageTotal = {
+                                    total_input_tokens: ut.total_input_tokens || 0,
+                                    total_output_tokens: ut.total_output_tokens || 0,
+                                    total_cached_tokens: ut.total_cached_tokens,
+                                    total_cost_usd: ut.total_cost_usd || 0,
+                                    call_count: ut.call_count || 0,
+                                    models_used: ut.models_used || [],
+                                };
+                            }
+
+                            const sayReasoning = event.reasoning || undefined;
+                            const sayActivityTrace = event.activity_trace || undefined;
                             setMessages(prev => {
                                 // Check if last message already has this content (from streaming completion)
                                 const last = prev[prev.length - 1];
@@ -677,6 +807,10 @@ export default function Home() {
                                         ...last,
                                         avatar: avatarUrl || last.avatar,
                                         sender: event.persona_name || last.sender,
+                                        ...(sayImages && { images: sayImages }),
+                                        ...(sayUsageTotal && { llm_usage_total: sayUsageTotal }),
+                                        ...(sayReasoning && { reasoning: sayReasoning }),
+                                        ...(sayActivityTrace && { activity_trace: sayActivityTrace }),
                                     }];
                                 }
                                 return [...prev, {
@@ -684,7 +818,11 @@ export default function Home() {
                                     content: event.content,
                                     sender: event.persona_name || 'Assistant',
                                     avatar: avatarUrl,
-                                    timestamp: new Date().toISOString()
+                                    timestamp: new Date().toISOString(),
+                                    ...(sayImages && { images: sayImages }),
+                                    ...(sayUsageTotal && { llm_usage_total: sayUsageTotal }),
+                                    ...(sayReasoning && { reasoning: sayReasoning }),
+                                    ...(sayActivityTrace && { activity_trace: sayActivityTrace }),
                                 }];
                             });
                             setLoadingStatus('Thinking...');
@@ -782,6 +920,50 @@ export default function Home() {
     const clearAllAttachments = () => {
         setAttachments([]);
         if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+
+    // Close plus menu on outside click
+    useEffect(() => {
+        if (!showPlusMenu) return;
+        const handleClickOutside = (e: MouseEvent) => {
+            if (plusMenuRef.current && !plusMenuRef.current.contains(e.target as Node)) {
+                setShowPlusMenu(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, [showPlusMenu]);
+
+    const handleContextPreview = async () => {
+        setShowPlusMenu(false);
+        setShowContextPreview(true);
+        setContextPreviewLoading(true);
+        setContextPreviewData(null);
+
+        try {
+            const attachmentTypes = attachments.map(a => a.type === 'image' ? 'image' : 'document');
+            const res = await fetch('/api/chat/preview', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    message: inputValue || '(empty)',
+                    building_id: currentBuildingIdRef.current,
+                    meta_playbook: selectedPlaybook || undefined,
+                    attachment_count: attachments.length,
+                    attachment_types: attachmentTypes,
+                }),
+            });
+            if (!res.ok) {
+                throw new Error(`HTTP ${res.status}`);
+            }
+            const data = await res.json();
+            setContextPreviewData(data);
+        } catch (err) {
+            console.error('Context preview failed:', err);
+            setContextPreviewData({ personas: [] });
+        } finally {
+            setContextPreviewLoading(false);
+        }
     };
 
     // Drag & Drop handlers (using counter to prevent flickering)
@@ -946,13 +1128,69 @@ export default function Home() {
                                             <span className={styles.warningMessage}>{msg.content}</span>
                                         </div>
                                     ) : (
-                                        <ReactMarkdown
-                                            remarkPlugins={[remarkBreaks]}
-                                            urlTransform={(url) => url.startsWith('saiverse://') ? url : defaultUrlTransform(url)}
-                                            components={{
-                                                a: ({ href, children }) => <SaiverseLink href={href} children={children} onOpenItem={handleOpenItemFromLink} />,
-                                            }}
-                                        >{msg.content}</ReactMarkdown>
+                                        <>
+                                            {(msg.activity_trace || msg._activities) && (() => {
+                                                const activities = msg.activity_trace || msg._activities || [];
+                                                if (activities.length === 0) return null;
+                                                const isStreaming = !!msg._streaming;
+                                                return (
+                                                    <details className={styles.activityBlock} open={isStreaming}>
+                                                        <summary className={styles.activitySummary}>
+                                                            <span className={styles.activityIcon}>
+                                                                {isStreaming ? (
+                                                                    <span className={styles.activitySpinner} />
+                                                                ) : (
+                                                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                                                                )}
+                                                            </span>
+                                                            <span>{isStreaming ? 'Working...' : `${activities.length} step${activities.length > 1 ? 's' : ''}`}</span>
+                                                        </summary>
+                                                        <div className={styles.activityContent}>
+                                                            {activities.map((a, i) => (
+                                                                <div key={i} className={styles.activityItem}>
+                                                                    <span className={styles.activityItemStatus}>
+                                                                        {a.status === 'started' ? (
+                                                                            <span className={styles.activitySpinner} />
+                                                                        ) : (
+                                                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                                                                        )}
+                                                                    </span>
+                                                                    <span className={styles.activityItemLabel}>
+                                                                        {a.name}
+                                                                        {a.playbook && <span className={styles.activityItemPlaybook}> ({a.playbook})</span>}
+                                                                    </span>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </details>
+                                                );
+                                            })()}
+                                            {(msg.reasoning || msg._streamingThinking) && (
+                                                <details className={styles.thinkingBlock} open={!!msg._streaming}>
+                                                    <summary className={styles.thinkingSummary}>
+                                                        <span className={styles.thinkingIcon}>
+                                                            {msg._streaming ? (
+                                                                <span className={styles.thinkingSpinner} />
+                                                            ) : (
+                                                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                                                            )}
+                                                        </span>
+                                                        <span>{msg._streaming ? 'Thinking...' : 'Thought process'}</span>
+                                                    </summary>
+                                                    <div className={styles.thinkingContent}>
+                                                        {msg.reasoning || msg._streamingThinking}
+                                                    </div>
+                                                </details>
+                                            )}
+                                            <ReactMarkdown
+                                                remarkPlugins={[remarkBreaks]}
+                                                rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
+                                                urlTransform={(url) => url.startsWith('saiverse://') ? url : defaultUrlTransform(url)}
+                                                components={{
+                                                    a: ({ href, children }) => <SaiverseLink href={href} children={children} onOpenItem={handleOpenItemFromLink} />,
+                                                }}
+                                            >{msg.content}</ReactMarkdown>
+                                        </>
                                     )}
                                 </div>
                                 {(msg.timestamp || msg.llm_usage || msg.llm_usage_total) && (
@@ -1052,13 +1290,36 @@ export default function Home() {
                                 Drop files here to attach
                             </div>
                         )}
-                        <button
-                            className={styles.attachBtn}
-                            onClick={() => fileInputRef.current?.click()}
-                            title="Attach File"
-                        >
-                            <Paperclip size={20} />
-                        </button>
+                        <div className={styles.plusMenuContainer} ref={plusMenuRef}>
+                            <button
+                                className={`${styles.attachBtn} ${showPlusMenu ? styles.plusBtnActive : ''}`}
+                                onClick={() => setShowPlusMenu(prev => !prev)}
+                                title="More actions"
+                            >
+                                <Plus size={20} />
+                            </button>
+                            {showPlusMenu && (
+                                <div className={styles.plusMenu}>
+                                    <button
+                                        className={styles.plusMenuItem}
+                                        onClick={() => {
+                                            setShowPlusMenu(false);
+                                            fileInputRef.current?.click();
+                                        }}
+                                    >
+                                        <Paperclip size={16} />
+                                        <span>Attach File</span>
+                                    </button>
+                                    <button
+                                        className={styles.plusMenuItem}
+                                        onClick={handleContextPreview}
+                                    >
+                                        <Eye size={16} />
+                                        <span>Context Preview</span>
+                                    </button>
+                                </div>
+                            )}
+                        </div>
                         <input
                             type="file"
                             ref={fileInputRef}
@@ -1115,6 +1376,13 @@ export default function Home() {
                 isOpen={!!linkItemModalItem}
                 onClose={() => setLinkItemModalItem(null)}
                 item={linkItemModalItem}
+            />
+
+            <ContextPreviewModal
+                isOpen={showContextPreview}
+                onClose={() => setShowContextPreview(false)}
+                data={contextPreviewData}
+                isLoading={contextPreviewLoading}
             />
 
             {/* Initial Tutorial Wizard */}

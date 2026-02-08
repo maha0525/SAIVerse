@@ -169,7 +169,7 @@ def create_entry(
 
 
 def get_entry(conn: sqlite3.Connection, entry_id: str) -> Optional[ArasujiEntry]:
-    """Get an arasuji entry by ID."""
+    """Get an arasuji entry by ID (exact match, with prefix fallback)."""
     cur = conn.execute(
         """
         SELECT id, level, content, source_ids_json, start_time, end_time,
@@ -180,7 +180,25 @@ def get_entry(conn: sqlite3.Connection, entry_id: str) -> Optional[ArasujiEntry]
         (entry_id,),
     )
     row = cur.fetchone()
-    return _row_to_entry(row) if row else None
+    if row:
+        return _row_to_entry(row)
+
+    # Fallback: prefix match for truncated IDs (e.g. first 8 chars)
+    if len(entry_id) < 36:
+        cur = conn.execute(
+            """
+            SELECT id, level, content, source_ids_json, start_time, end_time,
+                   source_count, message_count, parent_id, is_consolidated, created_at
+            FROM arasuji_entries
+            WHERE id LIKE ?
+            LIMIT 1
+            """,
+            (f"{entry_id}%",),
+        )
+        row = cur.fetchone()
+        return _row_to_entry(row) if row else None
+
+    return None
 
 
 def get_entries_by_level(

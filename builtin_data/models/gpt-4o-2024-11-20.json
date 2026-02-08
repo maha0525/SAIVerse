@@ -3,6 +3,8 @@
   "display_name": "GPT-4o (2024-11-20)",
   "provider": "openai",
   "context_length": 128000,
+  "default_max_history_messages": 40,
+  "metabolism_keep_messages": 20,
   "supports_images": true,
   "supports_structured_output": true,
   "parameters": {
@@ -39,7 +41,5 @@
     "cached_input_per_1m_tokens": 1.25,
     "output_per_1m_tokens": 10.0,
     "currency": "USD"
-  },
-  "default_max_history_messages": 50,
-  "metabolism_keep_messages": 30
+  }
 }

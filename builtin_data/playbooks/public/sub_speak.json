@@ -1,6 +1,6 @@
 {
-    "name": "sub_speak_simple",
-    "description": "Compose final response and speak (no tools)",
+    "name": "sub_speak",
+    "description": "Compose final response and speak (unified speak playbook)",
     "input_schema": [
         {
             "name": "input",

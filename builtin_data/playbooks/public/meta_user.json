@@ -1,5 +1,6 @@
 {
     "name": "meta_user",
+    "display_name": "ツール自動使用（1回まで）",
     "description": "Router -> sub-playbook -> speak (exec handled by runtime). Automatically retrieves context from previous autonomous activity.",
     "input_schema": [
         {
@@ -62,8 +63,8 @@
         {
             "id": "finalize",
             "type": "subplay",
-            "playbook": "sub_speak_meta",
-            "input_template": "{input}\n\n参考情報:\n{context_bundle_text}",
+            "playbook": "sub_speak",
+            "input_template": "{input}",
             "propagate_output": true,
             "next": null
         }

@@ -11,8 +11,7 @@ import StepUserName from './steps/StepUserName';
 import StepCityName from './steps/StepCityName';
 import StepPersonaChoice from './steps/StepPersonaChoice';
 import StepApiKeys from './steps/StepApiKeys';
-import StepDefaultModel from './steps/StepDefaultModel';
-import StepLightweightModel from './steps/StepLightweightModel';
+import StepModelSummary from './steps/StepModelSummary';
 import StepComplete from './steps/StepComplete';
 
 interface TutorialWizardProps {
@@ -22,7 +21,7 @@ interface TutorialWizardProps {
     startAtStep?: number;
 }
 
-type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
+type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
 interface ApiKeyStatus {
     provider: string;
@@ -41,15 +40,25 @@ interface ModelInfo {
     is_available: boolean;
 }
 
+interface ModelRoleAssignment {
+    role: string;
+    label: string;
+    description: string;
+    env_key: string;
+    model_id: string;
+    display_name: string;
+}
+
 interface TutorialState {
     userName: string;
     cityName: string;
     personaChoice: 'new' | 'import' | null;
     apiKeys: Record<string, string>;
-    defaultModel: string;
-    lightweightModel: string;
     createdPersonaId: string | null;
     createdRoomId: string | null;
+    autoConfiguredProvider: string;
+    autoConfiguredAssignments: ModelRoleAssignment[];
+    autoConfigureWarnings: string[];
 }
 
 const STEP_TITLES = [
@@ -58,8 +67,7 @@ const STEP_TITLES = [
     'City名',
     'ペルソナ',
     'APIキー',
-    '標準モデル',
-    '軽量モデル',
+    'モデル設定',
     '完了'
 ];
 
@@ -89,10 +97,11 @@ export default function TutorialWizard({
         cityName: '',
         personaChoice: null,
         apiKeys: {},
-        defaultModel: '',
-        lightweightModel: '',
         createdPersonaId: null,
-        createdRoomId: null
+        createdRoomId: null,
+        autoConfiguredProvider: '',
+        autoConfiguredAssignments: [],
+        autoConfigureWarnings: [],
     });
 
     const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
@@ -108,10 +117,11 @@ export default function TutorialWizard({
                 cityName: '',
                 personaChoice: null,
                 apiKeys: {},
-                defaultModel: '',
-                lightweightModel: '',
                 createdPersonaId: null,
-                createdRoomId: null
+                createdRoomId: null,
+                autoConfiguredProvider: '',
+                autoConfiguredAssignments: [],
+                autoConfigureWarnings: [],
             });
             loadInitialData();
         }
@@ -158,16 +168,11 @@ export default function TutorialWizard({
                 case 5:
                     await saveApiKeys();
                     await loadInitialData(); // Reload models with updated availability
-                    break;
-                case 6:
-                    await saveDefaultModel();
-                    break;
-                case 7:
-                    await saveLightweightModel();
+                    await autoConfigureModels();
                     break;
             }
 
-            if (step < 8) {
+            if (step < 7) {
                 setStep((step + 1) as Step);
             }
         } catch (e) {
@@ -268,27 +273,42 @@ export default function TutorialWizard({
         }
     };
 
-    const saveDefaultModel = async () => {
-        if (state.defaultModel) {
-            await fetch('/api/config/model', {
+    const autoConfigureModels = async () => {
+        try {
+            const res = await fetch('/api/tutorial/auto-configure-models', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: state.defaultModel })
+                body: JSON.stringify({})  // Auto-detect provider
             });
+            if (res.ok) {
+                const data = await res.json();
+                updateState({
+                    autoConfiguredProvider: data.provider_display,
+                    autoConfiguredAssignments: data.assignments,
+                    autoConfigureWarnings: data.warnings,
+                });
+            }
+        } catch (e) {
+            console.error('Failed to auto-configure models', e);
         }
     };
 
-    const saveLightweightModel = async () => {
-        if (state.lightweightModel) {
+    const handleModelOverride = async (role: string, envKey: string, modelId: string) => {
+        try {
             await fetch('/api/admin/env', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    updates: {
-                        'SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL': state.lightweightModel
-                    }
-                })
+                body: JSON.stringify({ updates: { [envKey]: modelId } })
             });
+            // Update local state
+            const updated = state.autoConfiguredAssignments.map(a =>
+                a.role === role ? { ...a, model_id: modelId, display_name: modelId } : a
+            );
+            updateState({ autoConfiguredAssignments: updated });
+            // Reload models to get correct display names
+            await loadInitialData();
+        } catch (e) {
+            console.error('Failed to override model', e);
         }
     };
 
@@ -328,27 +348,22 @@ export default function TutorialWizard({
                 );
             case 6:
                 return (
-                    <StepDefaultModel
-                        models={availableModels}
-                        selected={state.defaultModel}
-                        onChange={(v) => updateState({ defaultModel: v })}
+                    <StepModelSummary
+                        provider={state.autoConfiguredProvider}
+                        assignments={state.autoConfiguredAssignments}
+                        warnings={state.autoConfigureWarnings}
+                        availableModels={availableModels}
+                        onOverride={handleModelOverride}
+                        editMode={startAtStep === 6 && state.autoConfiguredAssignments.length === 0}
                     />
                 );
             case 7:
-                return (
-                    <StepLightweightModel
-                        models={availableModels}
-                        selected={state.lightweightModel}
-                        onChange={(v) => updateState({ lightweightModel: v })}
-                    />
-                );
-            case 8:
                 return <StepComplete onStart={handleComplete} />;
         }
     };
 
     // Steps that can be skipped
-    const canSkip = [2, 3, 5, 6, 7].includes(step);
+    const canSkip = [2, 3, 5, 6].includes(step);
 
     if (!isOpen) return null;
 
@@ -385,7 +400,7 @@ export default function TutorialWizard({
                 </div>
 
                 {/* Actions */}
-                {step !== 8 && (
+                {step !== 7 && (
                     <div className={styles.actions}>
                         <div className={styles.actionsLeft}>
                             {step > 1 && (

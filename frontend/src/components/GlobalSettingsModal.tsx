@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Settings, Database, Globe, Layers, Save, RefreshCw, Power, Play, Pause, Monitor, Sun, Moon } from 'lucide-react';
+import { X, Settings, Database, Globe, Layers, Save, RefreshCw, Power, Play, Pause, Monitor, Sun, Moon, Cpu, ChevronDown } from 'lucide-react';
 import styles from './GlobalSettingsModal.module.css';
 import WorldEditor from './settings/WorldEditor';
 import ModalOverlay from './common/ModalOverlay';
@@ -21,7 +21,28 @@ interface TableInfo {
     pk_columns: string[];
 }
 
-type TabId = 'env' | 'world' | 'db';
+interface ModelRoleInfo {
+    env_key: string;
+    value: string;
+    display_name: string;
+    label: string;
+    description: string;
+}
+
+interface PresetInfo {
+    provider: string;
+    display_name: string;
+    is_available: boolean;
+}
+
+interface ModelInfo {
+    id: string;
+    display_name: string;
+    provider: string;
+    is_available: boolean;
+}
+
+type TabId = 'env' | 'world' | 'db' | 'models';
 
 export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsModalProps) {
     const [activeTab, setActiveTab] = useState<TabId>('env');
@@ -42,6 +63,13 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     // Theme
     const [theme, setTheme] = useState<'system' | 'light' | 'dark'>('system');
 
+    // Model Roles
+    const [modelRoles, setModelRoles] = useState<Record<string, ModelRoleInfo>>({});
+    const [modelPresets, setModelPresets] = useState<PresetInfo[]>([]);
+    const [modelsAvailable, setModelsAvailable] = useState<ModelInfo[]>([]);
+    const [expandedModelRole, setExpandedModelRole] = useState<string | null>(null);
+    const [modelRolesLoading, setModelRolesLoading] = useState(false);
+
     useEffect(() => {
         if (isOpen && activeTab === 'env') {
             loadEnvVars();
@@ -52,6 +80,9 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         }
         if (isOpen && activeTab === 'db') {
             loadTables();
+        }
+        if (isOpen && activeTab === 'models') {
+            loadModelRoles();
         }
     }, [isOpen, activeTab]);
 
@@ -172,6 +203,59 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         }
     };
 
+    // --- Model Roles ---
+    const loadModelRoles = async () => {
+        setModelRolesLoading(true);
+        try {
+            const [rolesRes, modelsRes] = await Promise.all([
+                fetch('/api/tutorial/model-roles'),
+                fetch('/api/tutorial/available-models'),
+            ]);
+            if (rolesRes.ok) {
+                const data = await rolesRes.json();
+                setModelRoles(data.current);
+                setModelPresets(data.presets);
+            }
+            if (modelsRes.ok) {
+                const data = await modelsRes.json();
+                setModelsAvailable(data.models);
+            }
+        } catch (e) {
+            console.error('Failed to load model roles', e);
+        } finally {
+            setModelRolesLoading(false);
+        }
+    };
+
+    const handlePresetApply = async (provider: string) => {
+        try {
+            const res = await fetch('/api/tutorial/auto-configure-models', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ provider }),
+            });
+            if (res.ok) {
+                await loadModelRoles();
+            }
+        } catch (e) {
+            console.error('Failed to apply preset', e);
+        }
+    };
+
+    const handleModelRoleChange = async (envKey: string, modelId: string) => {
+        try {
+            await fetch('/api/admin/env', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ updates: { [envKey]: modelId } }),
+            });
+            setExpandedModelRole(null);
+            await loadModelRoles();
+        } catch (e) {
+            console.error('Failed to update model role', e);
+        }
+    };
+
     if (!isOpen) return null;
 
     return (
@@ -209,6 +293,12 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                             onClick={() => setActiveTab('db')}
                         >
                             <Database size={18} /> データベース管理
+                        </div>
+                        <div
+                            className={`${styles.navItem} ${activeTab === 'models' ? styles.active : ''}`}
+                            onClick={() => setActiveTab('models')}
+                        >
+                            <Cpu size={18} /> モデルロール
                         </div>
                     </div>
 
@@ -358,6 +448,84 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                             </tbody>
                                         </table>
                                     </div>
+                                )}
+                            </div>
+                        )}
+
+                        {activeTab === 'models' && (
+                            <div className={styles.modelsContainer}>
+                                <div className={styles.sectionHeader}>
+                                    <h3>モデルロール設定</h3>
+                                </div>
+
+                                {modelRolesLoading ? (
+                                    <div>読み込み中...</div>
+                                ) : (
+                                    <>
+                                        {modelPresets.length > 0 && (
+                                            <div className={styles.presetContainer}>
+                                                <div className={styles.presetHeader}>プリセット切替</div>
+                                                <div className={styles.presetDescription}>
+                                                    プロバイダを選択すると、全ロールのモデルを一括変更します
+                                                </div>
+                                                <div className={styles.presetList}>
+                                                    {modelPresets.filter(p => p.is_available).map((preset) => (
+                                                        <button
+                                                            key={preset.provider}
+                                                            className={styles.presetBtn}
+                                                            onClick={() => handlePresetApply(preset.provider)}
+                                                        >
+                                                            {preset.display_name}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        <div className={styles.rolesList}>
+                                            {Object.entries(modelRoles).map(([role, info]) => (
+                                                <div key={role} className={styles.roleItem}>
+                                                    <div className={styles.roleHeader}>
+                                                        <div className={styles.roleInfo}>
+                                                            <span className={styles.roleLabel}>{info.label}</span>
+                                                            <span className={styles.roleDescription}>{info.description}</span>
+                                                        </div>
+                                                        <div className={styles.roleValue}>
+                                                            <span className={styles.roleModelName}>
+                                                                {info.display_name || info.value || '(未設定)'}
+                                                            </span>
+                                                            <button
+                                                                className={styles.roleChangeBtn}
+                                                                onClick={() => setExpandedModelRole(
+                                                                    expandedModelRole === role ? null : role
+                                                                )}
+                                                            >
+                                                                <ChevronDown size={14} />
+                                                                <span>変更</span>
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                    {expandedModelRole === role && (
+                                                        <div className={styles.roleDropdown}>
+                                                            {modelsAvailable
+                                                                .filter(m => m.is_available)
+                                                                .map(model => (
+                                                                    <div
+                                                                        key={model.id}
+                                                                        className={`${styles.roleDropdownItem} ${model.id === info.value ? styles.selected : ''}`}
+                                                                        onClick={() => handleModelRoleChange(info.env_key, model.id)}
+                                                                    >
+                                                                        <span className={styles.roleDropdownName}>{model.display_name}</span>
+                                                                        <span className={styles.roleDropdownProvider}>{model.provider}</span>
+                                                                    </div>
+                                                                ))
+                                                            }
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </>
                                 )}
                             </div>
                         )}

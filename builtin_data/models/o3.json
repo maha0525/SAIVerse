@@ -1,10 +1,11 @@
 {
-  "model": "gpt-4o",
-  "display_name": "GPT-4o (2024-08-06)",
+  "model": "o3",
+  "display_name": "o3",
   "provider": "openai",
-  "context_length": 32000,
+  "context_length": 200000,
+  "default_max_history_messages": 40,
+  "metabolism_keep_messages": 20,
   "supports_images": true,
-  "supports_structured_output": true,
   "parameters": {
     "temperature": {
       "type": "float",
@@ -13,7 +14,7 @@
       "step": 0.1,
       "default": 1,
       "label": "Temperature",
-      "description": "Controls randomness."
+      "description": "0 is deterministic, higher values add randomness."
     },
     "top_p": {
       "type": "float",
@@ -22,7 +23,7 @@
       "step": 0.05,
       "default": 1.0,
       "label": "Top P",
-      "description": "Nucleus sampling cutoff."
+      "description": "Nucleus sampling threshold."
     },
     "max_completion_tokens": {
       "type": "int",
@@ -35,11 +36,9 @@
     }
   },
   "pricing": {
-    "input_per_1m_tokens": 2.5,
-    "cached_input_per_1m_tokens": 1.25,
-    "output_per_1m_tokens": 10.0,
+    "input_per_1m_tokens": 2,
+    "cached_input_per_1m_tokens": 0.5,
+    "output_per_1m_tokens": 8.0,
     "currency": "USD"
-  },
-  "default_max_history_messages": 20,
-  "metabolism_keep_messages": 10
+  }
 }

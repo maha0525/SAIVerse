@@ -1,5 +1,6 @@
 {
     "name": "detail_recall_playbook",
+    "display_name": "詳細な記憶呼び出し",
     "description": "Recall detailed memories from a specific time range or summary. Can expand the range if needed.",
     "input_schema": [
         {

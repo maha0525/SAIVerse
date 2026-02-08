@@ -70,7 +70,7 @@ def memopedia_search(
 
         kw_str = f" [{', '.join(keywords)}]" if keywords else ""
 
-        lines.append(f"[{i}] ({page.id[:8]}...) [{page.category}] {page.title}{kw_str}")
+        lines.append(f"[{i}] ({page.id}) [{page.category}] {page.title}{kw_str}")
         if page.summary:
             lines.append(f"    {page.summary}")
 

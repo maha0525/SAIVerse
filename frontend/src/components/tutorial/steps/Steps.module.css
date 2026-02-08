@@ -376,6 +376,200 @@
     background-color: #339af0;
 }
 
+/* Model Summary Step */
+.modelSummaryContainer {
+    max-width: 600px;
+    margin: 0 auto;
+}
+
+.summaryHeader {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+}
+
+.summaryIcon {
+    color: #2b8a3e;
+    flex-shrink: 0;
+}
+
+.summaryProvider {
+    font-size: 0.95rem;
+    color: #888;
+    margin-bottom: 1.5rem;
+}
+
+.summaryProvider strong {
+    color: #4dabf7;
+}
+
+.presetSelector {
+    margin-bottom: 1.5rem;
+}
+
+.presetLabel {
+    font-size: 0.85rem;
+    color: #888;
+    display: block;
+    margin-bottom: 0.5rem;
+}
+
+.presetButtons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.presetButton {
+    background-color: #2a2b2e;
+    border: 1px solid #444;
+    color: #ccc;
+    padding: 0.4rem 0.8rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    transition: all 0.2s;
+}
+
+.presetButton:hover {
+    border-color: #4dabf7;
+    color: #4dabf7;
+}
+
+.roleList {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.roleItem {
+    background-color: #2a2b2e;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.roleHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.85rem 1rem;
+    gap: 1rem;
+}
+
+.roleInfo {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+}
+
+.roleLabel {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: #e0e0e0;
+}
+
+.roleDescription {
+    font-size: 0.75rem;
+    color: #888;
+}
+
+.roleModel {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+}
+
+.roleModelName {
+    font-size: 0.85rem;
+    color: #4dabf7;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.roleChangeButton {
+    background: none;
+    border: 1px solid #555;
+    color: #aaa;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.roleChangeButton:hover {
+    border-color: #4dabf7;
+    color: #4dabf7;
+}
+
+.roleDropdown {
+    max-height: 200px;
+    overflow-y: auto;
+    border-top: 1px solid #3a3b3e;
+    padding: 0.25rem;
+}
+
+.roleDropdownItem {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background-color 0.15s;
+}
+
+.roleDropdownItem:hover {
+    background-color: #32333a;
+}
+
+.roleDropdownSelected {
+    background-color: rgba(77, 171, 247, 0.1);
+}
+
+.roleDropdownName {
+    font-size: 0.8rem;
+    color: #ccc;
+}
+
+.roleDropdownProvider {
+    font-size: 0.7rem;
+    color: #666;
+}
+
+.warningBox {
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-start;
+    background-color: rgba(250, 176, 5, 0.1);
+    border: 1px solid rgba(250, 176, 5, 0.3);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    margin-top: 1rem;
+    color: #fab005;
+    font-size: 0.85rem;
+}
+
+.warningBox p {
+    margin: 0;
+}
+
+.summaryFooter {
+    font-size: 0.85rem;
+    color: #666;
+    margin-top: 1.25rem;
+    text-align: center;
+}
+
 /* ===== Light Mode Overrides ===== */
 :global([data-theme="light"]) .welcomeTitle {
     color: #1f2937;
@@ -506,5 +700,84 @@
 }
 
 :global([data-theme="light"]) .completeSubtitle {
+    color: #64748b;
+}
+
+/* Model Summary Light */
+:global([data-theme="light"]) .summaryProvider {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .summaryProvider strong {
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .presetButton {
+    background-color: #f8fafc;
+    border-color: #cbd5e1;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .presetButton:hover {
+    border-color: #3b82f6;
+    color: #3b82f6;
+}
+
+:global([data-theme="light"]) .roleItem {
+    background-color: #f8fafc;
+}
+
+:global([data-theme="light"]) .roleLabel {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .roleDescription {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .roleModelName {
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .roleChangeButton {
+    border-color: #cbd5e1;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .roleChangeButton:hover {
+    border-color: #3b82f6;
+    color: #3b82f6;
+}
+
+:global([data-theme="light"]) .roleDropdown {
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .roleDropdownItem:hover {
+    background-color: #f1f5f9;
+}
+
+:global([data-theme="light"]) .roleDropdownSelected {
+    background-color: #dbeafe;
+}
+
+:global([data-theme="light"]) .roleDropdownName {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .roleDropdownProvider {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .warningBox {
+    background-color: rgba(250, 176, 5, 0.08);
+    border-color: rgba(250, 176, 5, 0.25);
+}
+
+:global([data-theme="light"]) .summaryFooter {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .presetLabel {
     color: #64748b;
 }

@@ -84,7 +84,7 @@ def _resolve_playbooks(scope: str, context: EnumResolverContext) -> List[Dict[st
 
         playbooks = query.all()
         return [
-            {"value": pb.name, "label": pb.name}
+            {"value": pb.name, "label": pb.display_name or pb.name}
             for pb in playbooks
         ]
     finally:

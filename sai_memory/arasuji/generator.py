@@ -40,6 +40,7 @@ def _record_llm_usage(client, persona_id: Optional[str], node_type: str) -> None
                 output_tokens=usage.output_tokens,
                 cached_tokens=usage.cached_tokens,
                 cache_write_tokens=usage.cache_write_tokens,
+                cache_ttl=usage.cache_ttl,
                 persona_id=persona_id,
                 node_type=node_type,
                 category="memory_weave_generate",

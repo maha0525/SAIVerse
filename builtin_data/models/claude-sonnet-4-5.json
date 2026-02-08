@@ -2,7 +2,9 @@
   "model": "claude-sonnet-4-5",
   "display_name": "Claude Sonnet 4.5",
   "provider": "anthropic",
-  "context_length": 64000,
+  "context_length": 200000,
+  "default_max_history_messages": 60,
+  "metabolism_keep_messages": 20,
   "thinking_type": "enabled",
   "thinking_budget": 4096,
   "supports_images": true,
@@ -11,6 +13,7 @@
     "output_per_1m_tokens": 15,
     "cached_input_per_1m_tokens": 0.3,
     "cache_write_per_1m_tokens": 3.75,
+    "cache_write_1h_per_1m_tokens": 6,
     "currency": "USD"
   },
   "cache": {
@@ -23,7 +26,5 @@
     ],
     "type": "explicit",
     "min_tokens": 1024
-  },
-  "default_max_history_messages": 40,
-  "metabolism_keep_messages": 20
+  }
 }

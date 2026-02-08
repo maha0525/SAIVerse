@@ -1,8 +1,10 @@
 {
   "model": "gemini-3-flash-preview",
-  "display_name": "Gemini 3 Flash (Paid)",
+  "display_name": "Gemini 3 Flash (有料Tier)",
   "provider": "gemini",
-  "context_length": 128000,
+  "context_length": 1000000,
+  "default_max_history_messages": 80,
+  "metabolism_keep_messages": 60,
   "supports_images": true,
   "prefer_paid": true,
   "pricing": {
@@ -77,7 +79,5 @@
       "default": "BLOCK_ONLY_HIGH",
       "label": "Safety: Dangerous Content"
     }
-  },
-  "default_max_history_messages": 50,
-  "metabolism_keep_messages": 30
+  }
 }

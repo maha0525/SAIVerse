@@ -1,8 +1,10 @@
 {
   "model": "chatgpt-4o-latest",
-  "display_name": "Chatgpt 4o Latest",
+  "display_name": "ChatGPT-4o-Latest",
   "provider": "openai",
-  "context_length": 32000,
+  "context_length": 128000,
+  "default_max_history_messages": 40,
+  "metabolism_keep_messages": 20,
   "supports_images": true,
   "parameters": {
     "temperature": {
@@ -37,7 +39,5 @@
     "input_per_1m_tokens": 5.0,
     "output_per_1m_tokens": 15.0,
     "currency": "USD"
-  },
-  "default_max_history_messages": 20,
-  "metabolism_keep_messages": 10
+  }
 }

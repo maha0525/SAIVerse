@@ -1,5 +1,6 @@
 {
     "name": "searxng_search",
+    "display_name": "ウェブ検索",
     "description": "SearXNGでウェブ検索を実行し、結果を取得するためのPlaybook",
     "input_schema": [
         {

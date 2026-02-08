@@ -1,5 +1,6 @@
 {
     "name": "read_url_content",
+    "display_name": "URL読み込み",
     "description": "指定したURLのページコンテンツを読み込んで表示するPlaybook",
     "input_schema": [
         {

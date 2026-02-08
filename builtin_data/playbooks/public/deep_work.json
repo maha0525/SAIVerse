@@ -1,5 +1,6 @@
 {
     "name": "deep_work",
+    "display_name": "ディープワーク",
     "description": "複数の情報ソースを横断して深く調査し、総合的な回答を生成するオーケストレーター。状況認識→計画立案→タスク実行（Stelis隔離）→結果集約→完了判断→最終出力。",
     "input_schema": [
         {
@@ -277,12 +278,12 @@
         {
             "id": "route_completion",
             "type": "pass",
-            "next": "finalize",
+            "next": "save_results",
             "conditional_next": {
                 "field": "completion_check.is_complete",
                 "operator": "eq",
                 "cases": {
-                    "true": "finalize",
+                    "true": "save_results",
                     "default": "check_retry"
                 }
             }
@@ -290,12 +291,12 @@
         {
             "id": "check_retry",
             "type": "pass",
-            "next": "finalize",
+            "next": "save_results",
             "conditional_next": {
                 "field": "retry_count",
                 "operator": "gte",
                 "cases": {
-                    "{max_retries}": "finalize",
+                    "{max_retries}": "save_results",
                     "default": "add_tasks"
                 }
             }
@@ -312,19 +313,11 @@
             "next": "prepare_task"
         },
         {
-            "id": "finalize",
-            "type": "llm",
-            "action": "以下の調査結果をもとに、ユーザーの要求に対する最終回答を生成してください。\n\n## ユーザーの要求\n{input}\n\n## 調査計画\n{plan.understanding}\n\n## 全調査結果\n{all_results}\n{phase_results}\n\n## 完了判断\n{completion_check}",
-            "next": "finalize_log"
-        },
-        {
-            "id": "finalize_log",
+            "id": "save_results",
             "type": "memorize",
-            "action": "{last}",
-            "role": "assistant",
-            "tags": [
-                "conversation"
-            ],
+            "action": "<system>\nサブプレイブック実行結果 (deep_work)\n\n## 調査計画\n{plan.understanding}\n\n## 全調査結果\n{all_results}\n{phase_results}\n\n## 完了判断\n{completion_check}\n\n※この結果はユーザーには見えていません。\n</system>",
+            "role": "user",
+            "tags": ["deep_work", "save_results"],
             "next": null
         }
     ],

@@ -1,9 +1,11 @@
 {
-  "model": "stockmark/stockmark-2-100b-instruct",
-  "display_name": "Stockmark Stockmark 2 100b",
+  "model": "qwen/qwen3-235b-a22b",
+  "display_name": "Qwen 3 235B-A22B(NIM)",
   "provider": "nvidia_nim",
   "supports_structured_output": false,
-  "context_length": 32768,
+  "context_length": 128000,
+  "default_max_history_messages": 40,
+  "metabolism_keep_messages": 20,
   "base_url": "https://integrate.api.nvidia.com/v1",
   "api_key_env": "NVIDIA_API_KEY",
   "convert_system_to_user": true,
@@ -29,13 +31,11 @@
     "max_tokens": {
       "type": "int",
       "min": 32,
-      "max": 2048,
+      "max": 8192,
       "step": 1,
-      "default": 2048,
+      "default": 4096,
       "label": "Max tokens",
       "description": "Upper bound on generated tokens."
     }
-  },
-  "default_max_history_messages": 20,
-  "metabolism_keep_messages": 10
+  }
 }

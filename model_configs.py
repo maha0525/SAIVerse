@@ -149,6 +149,15 @@ def get_model_parameter_defaults(model: str) -> Dict[str, Any]:
     return defaults
 
 
+def get_model_system_prompt(model: str) -> str:
+    """Get the additional system prompt defined in model config.
+
+    Returns an empty string if not configured.
+    """
+    config = get_model_config(model)
+    return config.get("system_prompt", "") or ""
+
+
 def get_structured_output_backend(model: str) -> str | None:
     """Get structured output backend for a model (e.g., 'xgrammar', 'outlines')."""
     config = get_model_config(model)
@@ -260,6 +269,7 @@ def calculate_cost(
     output_tokens: int,
     cached_tokens: int = 0,
     cache_write_tokens: int = 0,
+    cache_ttl: str = "",
 ) -> float:
     """Calculate cost in USD for a given token usage.
 
@@ -268,7 +278,8 @@ def calculate_cost(
         input_tokens: Number of input tokens (total including cached and cache_write)
         output_tokens: Number of output tokens
         cached_tokens: Number of tokens served FROM cache (cache read, discounted rate)
-        cache_write_tokens: Number of tokens written TO cache (Anthropic: 1.25x rate)
+        cache_write_tokens: Number of tokens written TO cache
+        cache_ttl: Cache TTL used ("5m" or "1h"). Affects write cost for Anthropic.
 
     Returns:
         Cost in USD. Returns 0.0 if pricing not configured (e.g., local models).
@@ -276,7 +287,7 @@ def calculate_cost(
     Note:
         Token breakdown for Anthropic:
         - cached_tokens: Read from cache (0.1x rate)
-        - cache_write_tokens: Written to cache (1.25x rate for 5m TTL)
+        - cache_write_tokens: Written to cache (1.25x rate for 5m, 2x rate for 1h)
         - remaining: Regular input tokens (1x rate)
 
         For Gemini/OpenAI (implicit caching):
@@ -293,8 +304,11 @@ def calculate_cost(
     output_rate = pricing.get("output_per_1m_tokens", 0.0)
     # Cached tokens (read): use explicit cached rate if configured, otherwise same as input rate
     cached_rate = pricing.get("cached_input_per_1m_tokens", input_rate)
-    # Cache write tokens: use explicit write rate if configured, otherwise same as input rate
-    cache_write_rate = pricing.get("cache_write_per_1m_tokens", input_rate)
+    # Cache write tokens: use TTL-specific rate if available
+    if cache_ttl == "1h" and "cache_write_1h_per_1m_tokens" in pricing:
+        cache_write_rate = pricing["cache_write_1h_per_1m_tokens"]
+    else:
+        cache_write_rate = pricing.get("cache_write_per_1m_tokens", input_rate)
 
     # Non-cached input tokens (input_tokens includes cached + cache_write, so subtract both)
     non_cached_input = max(0, input_tokens - cached_tokens - cache_write_tokens)

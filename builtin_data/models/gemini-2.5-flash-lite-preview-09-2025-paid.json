@@ -1,8 +1,10 @@
 {
   "model": "gemini-2.5-flash-lite-preview-09-2025",
-  "display_name": "Gemini 2.5 Flash Lite Preview 09 2025",
+  "display_name": "Gemini 2.5 Flash Lite Preview 09 2025(有料Tier)",
   "provider": "gemini",
-  "context_length": 128000,
+  "context_length": 1000000,
+  "default_max_history_messages": 80,
+  "metabolism_keep_messages": 60,
   "supports_images": true,
   "prefer_paid": true,
   "pricing": {
@@ -11,6 +13,74 @@
     "output_per_1m_tokens": 0.4,
     "currency": "USD"
   },
-  "default_max_history_messages": 50,
-  "metabolism_keep_messages": 30
+  "parameters": {
+    "temperature": {
+      "type": "slider",
+      "min": 0,
+      "max": 2,
+      "step": 0.1,
+      "default": 1.0,
+      "label": "Temperature",
+      "description": "出力のランダム性。0で決定的、高いほど多様。"
+    },
+    "thinking_budget": {
+      "type": "dropdown",
+      "options": [
+        "default",
+        "512",
+        "1024",
+        "4096",
+        "8192",
+        "16384",
+        "24576"
+      ],
+      "default": "default",
+      "label": "Thinking Budget",
+      "description": "思考トークン予算。defaultで思考なし(Liteのデフォルト)。数値で思考を有効化し予算を指定(512〜24576)。"
+    },
+    "safety_harassment": {
+      "type": "dropdown",
+      "options": [
+        "BLOCK_NONE",
+        "BLOCK_ONLY_HIGH",
+        "BLOCK_MEDIUM_AND_ABOVE",
+        "BLOCK_LOW_AND_ABOVE"
+      ],
+      "default": "BLOCK_NONE",
+      "label": "Safety: Harassment"
+    },
+    "safety_hate_speech": {
+      "type": "dropdown",
+      "options": [
+        "BLOCK_NONE",
+        "BLOCK_ONLY_HIGH",
+        "BLOCK_MEDIUM_AND_ABOVE",
+        "BLOCK_LOW_AND_ABOVE"
+      ],
+      "default": "BLOCK_ONLY_HIGH",
+      "label": "Safety: Hate Speech"
+    },
+    "safety_sexually_explicit": {
+      "type": "dropdown",
+      "options": [
+        "BLOCK_NONE",
+        "BLOCK_ONLY_HIGH",
+        "BLOCK_MEDIUM_AND_ABOVE",
+        "BLOCK_LOW_AND_ABOVE"
+      ],
+      "default": "BLOCK_NONE",
+      "label": "Safety: Sexually Explicit"
+    },
+    "safety_dangerous_content": {
+      "type": "dropdown",
+      "options": [
+        "BLOCK_NONE",
+        "BLOCK_ONLY_HIGH",
+        "BLOCK_MEDIUM_AND_ABOVE",
+        "BLOCK_LOW_AND_ABOVE"
+      ],
+      "default": "BLOCK_ONLY_HIGH",
+      "label": "Safety: Dangerous Content"
+    }
+  }
 }

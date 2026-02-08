@@ -1,0 +1,111 @@
+{
+    "name": "memopedia_note",
+    "display_name": "メモペディア直接書き込み",
+    "description": "会話コンテキストから直接Memopediaに書き込む（調査なし）。既存ページへのURI指定追記も可能",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "書き込み指示（例: 「今の話をメモペディアに書き留めて」「saiverse://self/memopedia/page/xxx に追記して」）"
+        }
+    ],
+    "context_requirements": {
+        "history_depth": "full",
+        "history_balanced": false,
+        "include_internal": false,
+        "system_prompt": true,
+        "memory_weave": true,
+        "working_memory": false,
+        "inventory": false,
+        "building_items": false,
+        "available_playbooks": false,
+        "visual_context": false,
+        "realtime_context": true
+    },
+    "router_callable": true,
+    "nodes": [
+        {
+            "id": "init",
+            "type": "set",
+            "assignments": {
+                "write_instruction": "{input}"
+            },
+            "next": "compose"
+        },
+        {
+            "id": "compose",
+            "type": "llm",
+            "model_type": "normal",
+            "action": "<system>ユーザーの指示と会話コンテキストに基づいて、Memopediaに書き込む内容を構成してください。\n\n指示: {write_instruction}\n\n## ルール\n\n### 新規ページの場合\n- page_id は空文字にしてください\n- title, content, category, keywords を全て指定してください\n- content は会話の文脈から得られた情報をMarkdown形式で構成してください\n\n### 既存ページへの追記の場合\n- ユーザーが URI（saiverse://self/memopedia/page/xxx）やページIDを指定している場合、page_id にそのまま設定してください\n- ユーザーがページタイトルで指定している場合は、page_id は空にして title にそのタイトルを設定してください（タイトルで検索して追記されます）\n- content には追記する内容のみを記述してください（既存内容の繰り返しは不要）\n\n### category の選び方\n- people: 人物に関する情報\n- terms: 用語・概念・出来事・一般的なトピック\n- plans: 予定・計画・目標\n\n### content の書き方\n- 会話で得られた具体的な事実、エピソード、日付を優先して記録\n- 推測や曖昧な情報は含めない\n- Markdown形式で見出し・リストを適宜使用</system>",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "page_id": {
+                        "type": "string",
+                        "description": "追記先の既存ページID or URI（新規ページの場合は空文字列）"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "ページタイトル（新規の場合は必須、追記の場合は省略可）"
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "1-2文の要約"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "書き込む内容（Markdown形式）"
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["people", "terms", "plans"],
+                        "description": "カテゴリ"
+                    },
+                    "keywords": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "検索用キーワード"
+                    }
+                },
+                "required": [
+                    "page_id",
+                    "title",
+                    "content",
+                    "category",
+                    "keywords"
+                ]
+            },
+            "output_key": "note",
+            "next": "write"
+        },
+        {
+            "id": "write",
+            "type": "tool",
+            "action": "memopedia_note",
+            "args_input": {
+                "content": "note.content",
+                "title": "note.title",
+                "summary": "note.summary",
+                "category": "note.category",
+                "keywords": "note.keywords",
+                "page_id": "note.page_id"
+            },
+            "output_key": "write_result",
+            "next": "record"
+        },
+        {
+            "id": "record",
+            "type": "memorize",
+            "action": "<system>Memopedia直接書き込み完了\n\n指示: {write_instruction}\nタイトル: {note.title}\n結果: {write_result}</system>",
+            "role": "user",
+            "tags": [
+                "tool",
+                "memopedia_note",
+                "complete"
+            ],
+            "next": null
+        }
+    ],
+    "start_node": "init"
+}

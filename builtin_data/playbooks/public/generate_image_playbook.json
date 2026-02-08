@@ -1,5 +1,6 @@
 {
     "name": "generate_image",
+    "display_name": "画像生成",
     "description": "Generate an image using AI image generation models (Gemini or GPT Image)",
     "input_schema": [
         {

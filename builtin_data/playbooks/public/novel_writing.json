@@ -1,5 +1,6 @@
 {
     "name": "novel_writing",
+    "display_name": "小説執筆",
     "description": "全4章構成の短編小説を執筆するPlaybook。Stelisスレッド内で複数回のLLM呼び出しを行い、アイデア出し→草案→構成→各章執筆→感想→保存の流れで小説を完成させる。",
     "input_schema": [
         {

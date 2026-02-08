@@ -24,30 +24,33 @@ LOGS_BASE_DIR = PROJECT_ROOT / "user_data" / "logs"
 _session_log_dir: Optional[Path] = None
 _initialized: bool = False
 
-# Pattern to match base64 data URLs
-_BASE64_PATTERN = re.compile(r'(?P<prefix>"url":\s*"data:[^;]+;base64,)(?P<b64>[A-Za-z0-9+/=]+)(?P<suffix>")')
+# Patterns to match base64 data in logs
+# 1. data URL format: "url": "data:image/png;base64,iVBOR..."
+_BASE64_DATA_URL = re.compile(r'(?P<prefix>"url":\s*"data:[^;]+;base64,)(?P<b64>[A-Za-z0-9+/=]{200,})(?P<suffix>")')
+# 2. Anthropic format: "data": "iVBOR..." (long base64 string in "data" field)
+_BASE64_DATA_FIELD = re.compile(r'(?P<prefix>"data":\s*")(?P<b64>[A-Za-z0-9+/=]{200,})(?P<suffix>")')
+
+
+def _truncate_base64_in_string(msg_str: str) -> str:
+    """Truncate base64 data in a string, replacing long base64 content with byte count."""
+    for pattern in (_BASE64_DATA_URL, _BASE64_DATA_FIELD):
+        msg_str = pattern.sub(
+            lambda m: f'{m.group("prefix")}[base64: {len(m.group("b64"))} chars]{m.group("suffix")}',
+            msg_str
+        )
+    return msg_str
 
 
 def _truncate_base64_filter(record: logging.LogRecord) -> bool:
-    """Filter that truncates base64 data in log messages.
-    
-    Replaces base64 encoded data in data URLs with a short placeholder
-    to avoid cluttering logs with long strings.
-    """
+    """Filter that truncates base64 data in log messages."""
     if not record.msg:
         return True
-    
+
     msg_str = str(record.msg)
-    
-    # Check if message contains base64 data URLs
-    if _BASE64_PATTERN.search(msg_str):
-        # Replace base64 data with byte count placeholder
-        truncated = _BASE64_PATTERN.sub(
-            lambda m: f'{m.group("prefix")}[{len(m.group("b64"))} bytes]{m.group("suffix")}',
-            msg_str
-        )
+    truncated = _truncate_base64_in_string(msg_str)
+    if truncated is not msg_str:
         record.msg = truncated
-    
+
     return True
 
 
@@ -150,7 +153,14 @@ def configure_logging(level_name: Optional[str] = None) -> Path:
     
     # Configure LLM I/O logger
     _configure_llm_logger()
-    
+
+    # Configure error-only log (WARNING and above)
+    _configure_error_logger()
+
+    # Suppress overly verbose HTTP library debug logging (base64 request bodies)
+    for noisy_logger in ("httpcore", "httpx", "anthropic._base_client"):
+        logging.getLogger(noisy_logger).setLevel(max(level, logging.INFO))
+
     _initialized = True
     logging.info("Logging configured. Session logs: %s", log_dir)
     
@@ -174,15 +184,65 @@ def _configure_llm_logger() -> None:
         "%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     ))
+    # Add base64 truncation filter to LLM logger
+    file_handler.addFilter(_truncate_base64_filter)
     llm_logger.addHandler(file_handler)
-    
+
     # Don't propagate to root logger (LLM logs are verbose)
     llm_logger.propagate = False
+
+
+def _configure_error_logger() -> None:
+    """Configure error-only log file (WARNING and above from all loggers)."""
+    error_log_path = get_session_log_dir() / "error.log"
+    error_handler = logging.FileHandler(error_log_path, encoding="utf-8")
+    error_handler.setLevel(logging.WARNING)
+    error_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+    error_handler.addFilter(_truncate_base64_filter)
+    # Add to root logger so it catches WARNING/ERROR/CRITICAL from all modules
+    logging.getLogger().addHandler(error_handler)
 
 
 def get_llm_logger() -> logging.Logger:
     """Get the unified LLM I/O logger."""
     return logging.getLogger("saiverse.llm")
+
+
+def _sanitize_messages_for_log(messages: list) -> list:
+    """Deep-sanitize messages to truncate base64 image data for logging.
+
+    Handles Anthropic format: {"type": "image", "source": {"type": "base64", "data": "..."}}
+    and OpenAI format: {"type": "image_url", "image_url": {"url": "data:...;base64,..."}}
+    """
+
+    def _sanitize_content(content):
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return [_sanitize_content(item) for item in content]
+        if isinstance(content, dict):
+            result = {}
+            for k, v in content.items():
+                if k == "data" and isinstance(v, str) and len(v) > 200:
+                    result[k] = f"[base64: {len(v)} chars]"
+                elif k == "url" and isinstance(v, str) and ";base64," in v and len(v) > 200:
+                    prefix = v[:v.index(";base64,") + 8]
+                    result[k] = f"{prefix}[{len(v) - len(prefix)} chars]"
+                else:
+                    result[k] = _sanitize_content(v)
+            return result
+        return content
+
+    sanitized = []
+    for msg in messages:
+        new_msg = dict(msg)
+        if "content" in new_msg:
+            new_msg["content"] = _sanitize_content(new_msg["content"])
+        sanitized.append(new_msg)
+    return sanitized
 
 
 def log_llm_request(
@@ -204,8 +264,8 @@ def log_llm_request(
     import json
     logger = get_llm_logger()
     
-    # Use messages as-is (no truncation for debugging purposes)
-    formatted_messages = messages
+    # Sanitize messages: truncate base64 image data before logging
+    formatted_messages = _sanitize_messages_for_log(messages)
     
     entry = {
         "type": "request",

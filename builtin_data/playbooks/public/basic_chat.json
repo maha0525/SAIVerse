@@ -1,5 +1,6 @@
 {
     "name": "basic_chat",
+    "display_name": "通常の会話",
     "description": "No-op for simple conversations handled by meta layer",
     "input_schema": [
         {

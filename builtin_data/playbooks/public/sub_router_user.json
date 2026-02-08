@@ -40,8 +40,8 @@
         "working_memory": false,
         "inventory": true,
         "building_items": true,
-        "available_playbooks": false,
-        "visual_context": false,
+        "available_playbooks": true,
+        "visual_context": true,
         "realtime_context": true
     },
     "router_callable": false,

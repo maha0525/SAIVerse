@@ -1,5 +1,6 @@
 {
     "name": "deep_research",
+    "display_name": "深い調査",
     "description": "トピックについて深く調査し、複数の情報源から情報を収集してレポートドキュメントを作成する",
     "input_schema": [
         {

@@ -1,5 +1,6 @@
 {
     "name": "meta_agentic",
+    "display_name": "ツール自動使用（連続）",
     "description": "Multi-step agent loop: router -> exec -> loop back (max iterations enforced)",
     "input_schema": [
         {
@@ -93,8 +94,8 @@
         {
             "id": "finalize",
             "type": "subplay",
-            "playbook": "sub_speak_meta",
-            "input_template": "{input}\n\n参考情報:\n{context_bundle_text}",
+            "playbook": "sub_speak",
+            "input_template": "{input}",
             "propagate_output": true,
             "next": null
         }

@@ -3,6 +3,8 @@
   "display_name": "Qwen3 Next 80B A3B(Ollama)",
   "provider": "ollama",
   "context_length": 262144,
+  "default_max_history_messages": 60,
+  "metabolism_keep_messages": 40,
   "supports_structured_output": true,
   "supports_images": false,
   "parameter_defaults": {
@@ -37,7 +39,5 @@
       "label": "Max tokens",
       "description": "Upper bound on generated tokens."
     }
-  },
-  "default_max_history_messages": 80,
-  "metabolism_keep_messages": 60
+  }
 }

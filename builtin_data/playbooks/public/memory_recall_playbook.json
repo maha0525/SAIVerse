@@ -1,5 +1,6 @@
 {
     "name": "memory_recall",
+    "display_name": "記憶検索",
     "description": "Recall relevant SAIMemory entries and package structured data for meta compose",
     "input_schema": [
         {

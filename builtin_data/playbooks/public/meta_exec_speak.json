@@ -34,36 +34,16 @@
             "id": "exec",
             "type": "exec",
             "action": null,
-            "next": "speak",
+            "next": "finalize",
             "conditional_next": null
         },
         {
-            "id": "speak",
-            "type": "llm",
-            "action": "上記の実行結果を踏まえて、ユーザーに報告する内容を生成してください。\n\n実行結果:\n{context_bundle_text}",
-            "model_type": "normal",
-            "available_tools": [],
-            "next": "log",
-            "conditional_next": null
-        },
-        {
-            "id": "log",
-            "type": "memorize",
-            "action": "{last}",
-            "role": "assistant",
-            "tags": [
-                "conversation"
-            ],
-            "metadata_key": "metadata",
-            "next": "say",
-            "conditional_next": null
-        },
-        {
-            "id": "say",
-            "type": "say",
-            "metadata_key": "metadata",
-            "next": null,
-            "conditional_next": null
+            "id": "finalize",
+            "type": "subplay",
+            "playbook": "sub_speak",
+            "input_template": "{input}",
+            "propagate_output": true,
+            "next": null
         }
     ],
     "start_node": "exec"

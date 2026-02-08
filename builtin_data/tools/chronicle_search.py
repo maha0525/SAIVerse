@@ -109,7 +109,7 @@ def chronicle_search(
         start = datetime.fromtimestamp(entry.start_time).strftime("%Y-%m-%d %H:%M") if entry.start_time else "?"
         end = datetime.fromtimestamp(entry.end_time).strftime("%Y-%m-%d %H:%M") if entry.end_time else "?"
 
-        lines.append(f"[{i}] ({entry.id[:8]}...) Lv.{entry.level} | {start} ~ {end} | {entry.message_count}msg")
+        lines.append(f"[{i}] ({entry.id}) Lv.{entry.level} | {start} ~ {end} | {entry.message_count}msg")
 
         # Show content snippet (first 200 chars)
         snippet = entry.content.strip()

@@ -1,8 +1,10 @@
 {
   "model": "z-ai/glm-4.7",
-  "display_name": "Z Ai Glm V4.7",
+  "display_name": "Z.ai GLM-4.7",
   "provider": "openai",
   "context_length": 131072,
+  "default_max_history_messages": 50,
+  "metabolism_keep_messages": 30,
   "base_url": "https://openrouter.ai/api/v1",
   "api_key_env": "OPENROUTER_API_KEY",
   "parameters": {
@@ -33,7 +35,5 @@
       "label": "Max tokens",
       "description": "Upper bound on generated tokens."
     }
-  },
-  "default_max_history_messages": 50,
-  "metabolism_keep_messages": 30
+  }
 }

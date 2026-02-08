@@ -3,6 +3,8 @@
   "display_name": "Grok 4.1 Fast Reasoning",
   "provider": "openai",
   "context_length": 128000,
+  "default_max_history_messages": 60,
+  "metabolism_keep_messages": 40,
   "base_url": "https://api.x.ai/v1",
   "api_key_env": "XAI_API_KEY",
   "parameters": {
@@ -39,7 +41,5 @@
     "cached_input_per_1m_tokens": 0.05,
     "output_per_1m_tokens": 0.5,
     "currency": "USD"
-  },
-  "default_max_history_messages": 50,
-  "metabolism_keep_messages": 30
+  }
 }

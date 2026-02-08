@@ -1,5 +1,6 @@
 {
     "name": "memopedia_write",
+    "display_name": "メモペディア作成",
     "description": "記憶を調査してMemopediaページを生成・更新する（Deep Research方式）",
     "input_schema": [
         {
