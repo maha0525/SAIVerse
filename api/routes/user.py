@@ -104,12 +104,34 @@ def update_user_profile(req: UpdateProfileRequest, manager = Depends(get_manager
         user.USERNAME = req.display_name
         user.AVATAR_IMAGE = req.avatar
         user.MAILADDRESS = req.email
+
+        # Update user_room building names to match the new username
+        from database.models import Building as BuildingModel, City as CityModel
+        new_room_name = f"{req.display_name}の部屋"
+        all_cities = session.query(CityModel).all()
+        for city in all_cities:
+            user_room_id = f"user_room_{city.CITYNAME}"
+            user_room = session.query(BuildingModel).filter_by(
+                BUILDINGID=user_room_id
+            ).first()
+            if user_room:
+                _log.info(
+                    "Updating building name: %s -> '%s'",
+                    user_room_id, new_room_name,
+                )
+                user_room.BUILDINGNAME = new_room_name
+
         session.commit()
-        
+
         # Update Runtime Manager State so UI reflects it immediately via status polling
         manager.state.user_display_name = req.display_name
         manager.state.user_avatar_data = req.avatar
-        
+
+        # Update in-memory Building objects for user_rooms
+        for building in manager.buildings:
+            if building.building_id.startswith("user_room_"):
+                building.name = new_room_name
+
         return {"success": True}
     except Exception as e:
         session.rollback()

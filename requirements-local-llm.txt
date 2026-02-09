@@ -1,0 +1,10 @@
+# Local LLM support via llama.cpp
+#
+# Requires C++ build tools:
+#   Windows: Visual Studio Build Tools (C++ workload)
+#   macOS:   Xcode Command Line Tools (xcode-select --install)
+#   Linux:   gcc, g++, cmake
+#
+# See docs/llama_cpp_integration.md for detailed setup instructions.
+
+llama-cpp-python>=0.3.0

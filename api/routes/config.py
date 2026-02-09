@@ -578,3 +578,10 @@ def set_metabolism_settings(req: MetabolismConfigRequest, manager=Depends(get_ma
         "enabled": getattr(manager, "metabolism_enabled", True),
         "keep_messages": getattr(manager, "metabolism_keep_messages_override", None),
     }
+
+
+@router.get("/startup-warnings")
+def get_startup_warnings(manager=Depends(get_manager)):
+    """Return warnings collected during startup (e.g. failed persona loads)."""
+    warnings = getattr(manager, "startup_warnings", [])
+    return {"warnings": warnings}

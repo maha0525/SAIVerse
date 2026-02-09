@@ -374,6 +374,7 @@ class SEARuntime:
             "_cancellation_token": cancellation_token,  # For node-level cancellation checks
             "pulse_usage_accumulator": usage_accumulator,  # Inherit from parent or create new
             "_activity_trace": activity_trace,  # Shared trace of exec/tool activities
+            "_intermediate_msgs": [],  # Track intermediate node outputs for profile-based context
             **inherited_vars,  # Add inherited variables from input_schema
         }
 
@@ -483,7 +484,30 @@ class SEARuntime:
             schema_consumed = False
             prompt = None  # Will store the expanded prompt for memorize
             try:
-                base_msgs = state.get("messages", [])
+                # Determine base messages: use context_profile if set, otherwise legacy state["messages"]
+                _profile_name = getattr(node_def, "context_profile", None)
+                if _profile_name:
+                    from sea.playbook_models import CONTEXT_PROFILES
+                    _profile = CONTEXT_PROFILES.get(_profile_name)
+                    if _profile:
+                        _cache_key = f"_ctx_profile_{_profile_name}"
+                        if _cache_key not in state:
+                            state[_cache_key] = self._prepare_context(
+                                persona, building_id,
+                                state.get("inputs", {}).get("input") or None,
+                                _profile["requirements"],
+                                pulse_id=state.get("pulse_id"),
+                            )
+                            LOGGER.info("[sea] Prepared context for profile '%s' (node=%s, %d messages)",
+                                        _profile_name, node_id, len(state[_cache_key]))
+                        _profile_base = state[_cache_key]
+                        _intermediate = state.get("_intermediate_msgs", [])
+                        base_msgs = list(_profile_base) + list(_intermediate)
+                    else:
+                        LOGGER.warning("[sea] Unknown context_profile '%s' on node '%s', falling back to state messages", _profile_name, node_id)
+                        base_msgs = state.get("messages", [])
+                else:
+                    base_msgs = state.get("messages", [])
                 action_template = getattr(node_def, "action", None)
                 if action_template:
                     prompt = _format(action_template, variables)
@@ -930,6 +954,14 @@ class SEARuntime:
             state["last"] = text
             state["messages"] = messages + [{"role": "assistant", "content": text}]
 
+            # Track intermediate messages for profile-based nodes in the same playbook
+            if "_intermediate_msgs" in state:
+                _im = list(state.get("_intermediate_msgs", []))
+                if prompt:
+                    _im.append({"role": "user", "content": prompt})
+                _im.append({"role": "assistant", "content": text})
+                state["_intermediate_msgs"] = _im
+
             # Trace: log concise prompt→response summary
             _prompt_preview = (prompt[:120] + "...") if prompt and len(prompt) > 120 else (prompt or "(no prompt)")
             if schema_consumed:
@@ -1077,8 +1109,15 @@ class SEARuntime:
             persona: Persona object
             needs_structured_output: Whether this node requires structured output
         """
-        model_type = getattr(node_def, "model_type", "normal") or "normal"
-        LOGGER.info("[sea] Node model_type: %s (node_id=%s)", model_type, getattr(node_def, "id", "unknown"))
+        # Determine model_type: context_profile takes precedence over explicit model_type
+        _profile_name = getattr(node_def, "context_profile", None)
+        if _profile_name:
+            from sea.playbook_models import CONTEXT_PROFILES
+            _profile = CONTEXT_PROFILES.get(_profile_name)
+            model_type = _profile["model_type"] if _profile else (getattr(node_def, "model_type", "normal") or "normal")
+        else:
+            model_type = getattr(node_def, "model_type", "normal") or "normal"
+        LOGGER.info("[sea] Node model_type: %s (node_id=%s, profile=%s)", model_type, getattr(node_def, "id", "unknown"), _profile_name or "none")
 
         # First, select base client based on model_type
         if model_type == "lightweight":

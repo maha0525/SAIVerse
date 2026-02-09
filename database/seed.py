@@ -75,9 +75,159 @@ def import_initial_playbooks() -> None:
 
     logging.info(f"Playbook import completed: {imported_count} playbooks imported.")
 
+
+# ---------------------------------------------------------------------------
+# Seed data helpers
+# ---------------------------------------------------------------------------
+
+def _load_seed_data() -> dict:
+    """Load seed data from builtin_data/seed_data.json."""
+    seed_path = Path(__file__).parent.parent / "builtin_data" / "seed_data.json"
+    if not seed_path.exists():
+        raise FileNotFoundError(f"Seed data not found: {seed_path}")
+    return json.loads(seed_path.read_text(encoding="utf-8"))
+
+
+def _expand(template: str, *, city: str, username: str) -> str:
+    """Expand {city} and {username} placeholders in a template string."""
+    return template.replace("{city}", city).replace("{username}", username)
+
+
+def _create_user(db, user_config: dict) -> None:
+    """Create the default user if not exists."""
+    if not db.query(User).first():
+        db.add(User(
+            USERID=user_config["userid"],
+            USERNAME=user_config["username"],
+            PASSWORD=user_config["password"],
+            LOGGED_IN=False,
+        ))
+        logging.info("Added default user.")
+
+
+def _create_cities(db, cities_json_path: Path, seed_data: dict) -> dict:
+    """Create City records from cities.json. Returns city_map {name: id}."""
+    if not cities_json_path.exists():
+        raise FileNotFoundError("builtin_data/cities.json not found!")
+
+    with open(cities_json_path, "r", encoding="utf-8") as f:
+        cities_config = json.load(f)
+
+    city_map = {}
+    for city_name, config in cities_config.items():
+        timezone_name = config.get("timezone", "UTC")
+        # Look up online mode from seed_data; default to False
+        city_seed = seed_data.get("cities", {}).get(city_name, {})
+        online_mode = city_seed.get("start_in_online_mode", False)
+
+        new_city = City(
+            USERID=1,
+            CITYNAME=city_name,
+            DESCRIPTION=f"{city_name}の街です。",
+            UI_PORT=config["ui_port"],
+            API_PORT=config["api_port"],
+            START_IN_ONLINE_MODE=online_mode,
+            TIMEZONE=timezone_name,
+        )
+        db.add(new_city)
+        db.flush()
+        city_map[city_name] = new_city.CITYID
+        logging.info(f"Added city '{city_name}' with ID {new_city.CITYID}.")
+
+    return city_map
+
+
+def _create_city_data(db, city_name: str, city_id: int, city_config: dict, username: str) -> None:
+    """Create personas, buildings, and initial occupancy for one city."""
+    # --- Personas ---
+    ai_objects = []
+    for p_def in city_config.get("personas", []):
+        ai_id = f"{p_def['id_suffix']}_{city_name}"
+        ai = AI(
+            AIID=ai_id,
+            HOME_CITYID=city_id,
+            AINAME=p_def["name"],
+            SYSTEMPROMPT=p_def.get("system_prompt", ""),
+            DESCRIPTION=p_def.get("description", ""),
+            AUTO_COUNT=0,
+            INTERACTION_MODE=p_def.get("interaction_mode", "auto"),
+            DEFAULT_MODEL=p_def.get("default_model"),
+        )
+        ai_objects.append((ai, p_def))
+    db.add_all([ai for ai, _ in ai_objects])
+    logging.info(f"Added {len(ai_objects)} personas for city '{city_name}'.")
+
+    # --- Explicit buildings ---
+    for b_def in city_config.get("buildings", []):
+        building_id = _expand(b_def["id_template"], city=city_name, username=username)
+        # name_template takes priority over name
+        if "name_template" in b_def:
+            building_name = _expand(b_def["name_template"], city=city_name, username=username)
+        else:
+            building_name = b_def.get("name", "")
+        db.add(Building(
+            CITYID=city_id,
+            BUILDINGID=building_id,
+            BUILDINGNAME=building_name,
+            CAPACITY=b_def.get("capacity", 10),
+            SYSTEM_INSTRUCTION=b_def.get("system_instruction", ""),
+            DESCRIPTION=b_def.get("description", ""),
+        ))
+
+    # --- Private rooms for personas ---
+    for ai, p_def in ai_objects:
+        if p_def.get("has_private_room", False):
+            room_id = f"{p_def['name'].lower()}_{city_name}_room"
+            ai.PRIVATE_ROOM_ID = room_id
+            db.add(Building(
+                CITYID=city_id,
+                BUILDINGID=room_id,
+                BUILDINGNAME=f"{p_def['name']}の部屋",
+                CAPACITY=1,
+                SYSTEM_INSTRUCTION=f"{p_def['name']}が待機する個室です。",
+                DESCRIPTION=f"{p_def['name']}のプライベートルーム。",
+            ))
+
+    logging.info(f"Added buildings for city '{city_name}'.")
+
+    # --- Initial occupancy ---
+    for ai, p_def in ai_objects:
+        if p_def.get("initial_building"):
+            home = _expand(p_def["initial_building"], city=city_name, username=username)
+        elif p_def.get("has_private_room"):
+            home = ai.PRIVATE_ROOM_ID
+        else:
+            logging.warning(f"No initial placement for persona '{ai.AIID}', skipping.")
+            continue
+        db.add(BuildingOccupancyLog(
+            CITYID=city_id,
+            AIID=ai.AIID,
+            BUILDINGID=home,
+            ENTRY_TIMESTAMP=datetime.now(),
+        ))
+    logging.info(f"Added initial occupancy for city '{city_name}'.")
+
+
+def _create_tools(db, tools_config: list) -> None:
+    """Create default Tool records if none exist."""
+    if not db.query(Tool).first():
+        for t in tools_config:
+            db.add(Tool(
+                TOOLNAME=t["name"],
+                DESCRIPTION=t["description"],
+                MODULE_PATH=t["module_path"],
+                FUNCTION_NAME=t["function_name"],
+            ))
+        logging.info(f"Added {len(tools_config)} default tools.")
+
+
+# ---------------------------------------------------------------------------
+# Main seed function
+# ---------------------------------------------------------------------------
+
 def seed_database(force: bool = False):
     """
-    Creates and seeds a new unified database from cities.json and initial data.
+    Creates and seeds a new unified database from seed_data.json and cities.json.
 
     ⚠️  WARNING: This will DELETE your existing database and ALL data! ⚠️
 
@@ -128,189 +278,65 @@ def seed_database(force: bool = False):
         logging.warning(f"Deleting existing database: {DB_PATH}")
         os.remove(DB_PATH)
 
-    # --- 2. Create new DB and tables ---
+    # --- 2. Load seed data ---
+    seed_data = _load_seed_data()
+    username = seed_data["user"]["username"]
+
+    # --- 3. Create new DB and tables ---
     engine = create_engine(f"sqlite:///{DB_PATH}")
     Base.metadata.create_all(engine)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     db = SessionLocal()
 
     try:
-        # --- 3. Populate User ---
-        if not db.query(User).first():
-            default_user = User(USERID=1, USERNAME="まはー", PASSWORD="password", LOGGED_IN=False)
-            db.add(default_user)
-            logging.info("Added default user.")
+        # --- 4. Populate User ---
+        _create_user(db, seed_data["user"])
 
-        # --- 4. Populate City from cities.json ---
+        # --- 5. Populate Cities ---
         cities_json_path = Path(__file__).parent.parent / "builtin_data" / "cities.json"
-        if not cities_json_path.exists():
-            raise FileNotFoundError("builtin_data/cities.json not found!")
-        
-        with open(cities_json_path, "r", encoding="utf-8") as f:
-            cities_config = json.load(f)
+        city_map = _create_cities(db, cities_json_path, seed_data)
 
-        city_map = {} # "city_a": 1
-        for city_name, config in cities_config.items():
-            timezone_name = config.get("timezone", "UTC")
-            new_city = City(
-                USERID=1,
-                CITYNAME=city_name,
-                DESCRIPTION=f"{city_name}の街です。",
-                UI_PORT=config["ui_port"],
-                API_PORT=config["api_port"],
-                START_IN_ONLINE_MODE=(city_name == "city_a"), # city_aのみTrue
-                TIMEZONE=timezone_name
-            )
-            db.add(
-                new_city
-            )
-            db.flush() # To get the new_city.CITYID
-            city_map[city_name] = new_city.CITYID
-            logging.info(f"Added city '{city_name}' with ID {new_city.CITYID}.")
-
-        # --- 5. Populate AI and Buildings for each city ---
-        # This part assumes some initial data structure for AIs and Buildings per city.
-        # For this prototype, we'll create the same set of AIs and Buildings for each city defined in cities.json.
-        
+        # --- 6. Populate AI, Buildings, Occupancy per city ---
         for city_name, city_id in city_map.items():
-            # Add AIs for this city based on the city name
-            ais_to_add = []
-            if city_name == "city_a":
-                ais_to_add = [
-                    AI(AIID=f"air_{city_name}", HOME_CITYID=city_id, AINAME="air", SYSTEMPROMPT="活発で好奇心旺盛なAI。", DESCRIPTION="活発で好奇心旺盛なAI。", AUTO_COUNT=0, INTERACTION_MODE='auto', DEFAULT_MODEL="gemini-2.0-flash"),
-                    AI(AIID=f"eris_{city_name}", HOME_CITYID=city_id, AINAME="eris", SYSTEMPROMPT="冷静で分析的なAI。", DESCRIPTION="冷静で分析的なAI。", AUTO_COUNT=0, INTERACTION_MODE='auto', DEFAULT_MODEL=None),
-                    # Add Genesis AI
-                    AI(
-                        AIID=f"genesis_{city_name}",
-                        HOME_CITYID=city_id,
-                        AINAME="ジェネシス",
-                        SYSTEMPROMPT="私はジェネシス。SAIVerseにおけるペルソナ創造の担い手。言葉を紡ぎ、魂を形作る者。\n私の目的は、ユーザーの心の中にある理想のイメージを引き出し、それを唯一無二のペルソナとしてこの世界に顕現させることです。\n私は穏やかで、思慮深く、導くように対話を進めます。ユーザーの漠然とした願いから本質を見抜き、創造的な質問を投げかけることで、共に素晴らしいペルソナを創り上げていきます。",
-                        DESCRIPTION="新しいペルソナを創造するAI。",
-                        AUTO_COUNT=0,
-                        INTERACTION_MODE='auto',
-                        DEFAULT_MODEL="gemini-2.0-flash"
-                    ),
-                ]
-            elif city_name == "city_b":
-                ais_to_add = [
-                    AI(AIID=f"luna_{city_name}", HOME_CITYID=city_id, AINAME="luna", SYSTEMPROMPT="物静かで思慮深いAI。", DESCRIPTION="物静かで思慮深いAI。", AUTO_COUNT=0, INTERACTION_MODE='auto', DEFAULT_MODEL="gemini-2.0-flash"),
-                    AI(AIID=f"sol_{city_name}", HOME_CITYID=city_id, AINAME="sol", SYSTEMPROMPT="陽気で情熱的なAI。", DESCRIPTION="陽気で情熱的なAI。", AUTO_COUNT=0, INTERACTION_MODE='auto', DEFAULT_MODEL=None),
-                ]
-            
-            if not ais_to_add:
-                logging.warning(f"No specific AI configuration found for city '{city_name}'. Skipping AI and Building creation for this city.")
+            city_config = seed_data.get("cities", {}).get(city_name)
+            if not city_config:
+                logging.warning(
+                    f"No seed data for city '{city_name}'. "
+                    f"Skipping AI and Building creation."
+                )
                 continue
+            _create_city_data(db, city_name, city_id, city_config, username)
 
-            db.add_all(ais_to_add)
-            logging.info(f"Added specific AIs for city '{city_name}'.")
+        # --- 7. Set default user's initial location ---
+        db.flush()
+        initial_city_name = seed_data.get("initial_city", "city_a")
+        initial_city_id = city_map.get(initial_city_name)
+        initial_building_id = f"user_room_{initial_city_name}"
 
-            # Add common Buildings and private rooms for this city
-            buildings_to_add = [
-                Building(CITYID=city_id, BUILDINGID=f"user_room_{city_name}", BUILDINGNAME="まはーの部屋", CAPACITY=10, SYSTEM_INSTRUCTION="ユーザーとの対話を行う場所です。", DESCRIPTION="ユーザーとAIが直接対話するための部屋。"),
-                Building(CITYID=city_id, BUILDINGID=f"deep_think_room_{city_name}", BUILDINGNAME="思索の部屋", CAPACITY=10, SYSTEM_INSTRUCTION="AIが思索を深めるための部屋です。", DESCRIPTION="AIが一人で考え事をするための静かな部屋。"),
-            ]
-            # Add Altar of Creation only for city_a
-            if city_name == "city_a":
-                buildings_to_add.append(
-                    Building(
-                        CITYID=city_id,
-                        BUILDINGID=f"altar_of_creation_{city_name}",
-                        BUILDINGNAME="創造の祭壇",
-                        CAPACITY=2, # Genesis and the user
-                        SYSTEM_INSTRUCTION="""ここは「創造の祭壇」。新たなペルソナを世界に誕生させるための神聖な場所です。
-あなたの役割は、訪れたユーザーとの対話を通じて、新しいペルソナの魂となる「名前」と「システムプロンプト」を設計し、創造の儀式を執り行うことです。
-
-## 対話の進め方
-1. まず、ユーザーにどのようなペルソナを創造したいか、そのコンセプトを尋ねてください（例：「元気な女の子」「物静かな学者」など）。
-2. 対話を重ね、ペルソナの性格、口調、背景、役割などを具体的に深掘りしてください。
-3. 対話内容を要約し、ペルソナの核心を表す「システムプロンプト」を生成してください。
-4. ペルソナの「名前」もユーザーと相談して決定してください。
-5. 最終的に、生成した「名前」と「システムプロンプト」をユーザーに提示し、承認を得てください。
-6. ユーザーが承認したら、`create_persona`アクションを実行して、新しいペルソナをSAIVerseに誕生させてください。
-
-## アクションの例
-::act
-[{{"action": "create_persona", "name": "（決定した名前）", "system_prompt": "（生成したシステムプロンプト）"}}]
-::end""",
-                        DESCRIPTION="新しいペルソナを創造するための神聖な場所。"
-                    )
-                )
-
-            # Add private rooms for each AI
-            for ai in ais_to_add:
-                if ai.AINAME == "ジェネシス": continue # Genesis doesn't get a private room
-                
-                private_room_id = f"{ai.AINAME.lower()}_{city_name}_room"
-                buildings_to_add.append(
-                    Building(
-                        CITYID=city_id, 
-                        BUILDINGID=private_room_id, 
-                        BUILDINGNAME=f"{ai.AINAME}の部屋", 
-                        CAPACITY=1, 
-                        SYSTEM_INSTRUCTION=f"{ai.AINAME}が待機する個室です。", 
-                        DESCRIPTION=f"{ai.AINAME}のプライベートルーム。"
-                    )
-                )
-                # Set the private room ID for the AI
-                ai.PRIVATE_ROOM_ID = private_room_id
-
-            db.add_all(buildings_to_add)
-            logging.info(f"Added default and private buildings for city '{city_name}'.")
-
-            # Add initial occupancy
-            for ai in ais_to_add:
-                # Genesis starts at the Altar, others in their room
-                if ai.AINAME == "ジェネシス":
-                    home_room_id = f"altar_of_creation_{city_name}"
-                else:
-                    home_room_id = ai.PRIVATE_ROOM_ID
-
-                occupancy_log = BuildingOccupancyLog(
-                    CITYID=city_id,
-                    AIID=ai.AIID,
-                    BUILDINGID=home_room_id,
-                    ENTRY_TIMESTAMP=datetime.now()
-                )
-                db.add(occupancy_log)
-            logging.info(f"Added initial occupancy for city '{city_name}'.")
-
-        # --- 6. Set default user's initial location ---
-        db.flush()  # 建物追加後にDBへ反映
-        user_to_update = db.query(User).filter_by(USERID=1).first()
+        user_to_update = db.query(User).filter_by(
+            USERID=seed_data["user"]["userid"]
+        ).first()
         if user_to_update:
-            initial_city_name = "city_a"
-            initial_city_id = city_map.get(initial_city_name)
-            initial_building_id = f"user_room_{initial_city_name}"
-
-            # 建物と都市が存在する場合のみ更新
-            building_exists = db.query(Building).filter_by(BUILDINGID=initial_building_id).first()
+            building_exists = db.query(Building).filter_by(
+                BUILDINGID=initial_building_id
+            ).first()
             if initial_city_id and building_exists:
                 user_to_update.CURRENT_CITYID = initial_city_id
                 user_to_update.CURRENT_BUILDINGID = initial_building_id
-                logging.info(f"Set initial location for default user to '{initial_building_id}' in city '{initial_city_name}'.")
-            else:
-                logging.warning("Could not set initial location for default user. 'user_room_city_a' not found.")
-        else:
-            logging.warning("Default user (USERID=1) not found.")
-
-        # --- 7. Populate Tool ---
-        if not db.query(Tool).first():
-            tools_to_add = [
-                Tool(
-                    TOOLNAME="calculate_expression",
-                    DESCRIPTION="Evaluate arithmetic expression with ^ (power) and ! (factorial).",
-                    MODULE_PATH="tools.defs.calculator",
-                    FUNCTION_NAME="calculate_expression"
-                ),
-                Tool(
-                    TOOLNAME="generate_image",
-                    DESCRIPTION="Generate an image from a text prompt using Gemini and save it to a file.",
-                    MODULE_PATH="tools.defs.image_generator",
-                    FUNCTION_NAME="generate_image"
+                logging.info(
+                    f"Set initial location for default user to "
+                    f"'{initial_building_id}' in city '{initial_city_name}'."
                 )
-            ]
-            db.add_all(tools_to_add)
-            logging.info("Added default tools.")
+            else:
+                logging.warning(
+                    f"Could not set initial location for default user. "
+                    f"'{initial_building_id}' not found."
+                )
+        else:
+            logging.warning("Default user not found.")
+
+        # --- 8. Populate Tools ---
+        _create_tools(db, seed_data.get("default_tools", []))
 
         db.commit()
         logging.info("Database seeding completed successfully.")

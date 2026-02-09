@@ -14,7 +14,7 @@ import TutorialWizard from '@/components/tutorial/TutorialWizard';
 import SaiverseLink from '@/components/SaiverseLink';
 import ItemModal from '@/components/ItemModal';
 import ContextPreviewModal, { ContextPreviewData } from '@/components/ContextPreviewModal';
-import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown } from 'lucide-react';
+import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
 
 // Allow className on HTML elements used by thinking blocks (<details>, <div>, <summary>)
@@ -254,6 +254,10 @@ export default function Home() {
     // Tutorial state
     const [showTutorial, setShowTutorial] = useState(false);
     const [tutorialChecked, setTutorialChecked] = useState(false);
+
+    // Startup warnings
+    const [startupWarnings, setStartupWarnings] = useState<string[]>([]);
+    const [showStartupWarnings, setShowStartupWarnings] = useState(false);
     const swipeStartX = useRef<number | null>(null);
     const swipeStartY = useRef<number | null>(null);
     const swipeStartTime = useRef<number | null>(null);
@@ -546,6 +550,17 @@ export default function Home() {
                 setSelectedModelDisplayName(modelInfo?.name || '');
             }
         }).catch(err => console.error('Failed to load model setting', err));
+
+        // Fetch startup warnings
+        fetch('/api/config/startup-warnings')
+            .then(res => res.ok ? res.json() : null)
+            .then(data => {
+                if (data?.warnings?.length > 0) {
+                    setStartupWarnings(data.warnings.map((w: { message: string }) => w.message));
+                    setShowStartupWarnings(true);
+                }
+            })
+            .catch(err => console.error('Failed to fetch startup warnings', err));
     }, []);
 
     // Polling for new messages (schedule-triggered persona speech, etc.)
@@ -1070,6 +1085,24 @@ export default function Home() {
                         </button>
                     </div>
                 </header>
+
+                {showStartupWarnings && startupWarnings.length > 0 && (
+                    <div className={styles.startupWarningBanner}>
+                        <AlertTriangle size={16} />
+                        <div className={styles.startupWarningContent}>
+                            {startupWarnings.map((msg, i) => (
+                                <div key={i}>{msg}</div>
+                            ))}
+                        </div>
+                        <button
+                            className={styles.startupWarningClose}
+                            onClick={() => setShowStartupWarnings(false)}
+                            title="Dismiss"
+                        >
+                            <X size={14} />
+                        </button>
+                    </div>
+                )}
 
                 <div
                     className={styles.chatArea}

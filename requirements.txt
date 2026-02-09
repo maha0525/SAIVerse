@@ -24,8 +24,8 @@ markdownify>=0.12.0
 # PDF processing
 pymupdf>=1.25.0
 
-# llama.cpp integration for local GGUF models
-llama-cpp-python>=0.3.0
+# ローカルLLM (llama.cpp) を使う場合:
+#   pip install -r requirements-local-llm.txt
 
 # Linting
 ruff>=0.9.0

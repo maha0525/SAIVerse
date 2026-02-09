@@ -67,11 +67,12 @@ def memopedia_save_page(
             edit_source="ai_conversation",
         )
         if page:
-            # Promote buried/faint pages on update
-            if existing.vividness in ("buried", "faint"):
-                memopedia.update_page(existing.id, vividness="rough")
-            return f"Updated page '{title}' (id: {existing.id})"
-        return f"Failed to update page '{title}'"
+            # Just saved — set vividness to vivid (freshly written/updated)
+            if existing.vividness != "vivid":
+                memopedia.update_page(existing.id, vividness="vivid")
+            action = f"Updated page '{title}' (id: {existing.id})"
+        else:
+            return f"Failed to update page '{title}'"
     else:
         # Create new page under the appropriate root
         parent_id = _CATEGORY_ROOT_MAP[cat]
@@ -81,10 +82,21 @@ def memopedia_save_page(
             summary=summary,
             content=content,
             keywords=keywords,
-            vividness="rough",
+            vividness="vivid",
             edit_source="ai_conversation",
         )
-        return f"Created page '{title}' (id: {page.id}, category: {cat})"
+        action = f"Created page '{title}' (id: {page.id}, category: {cat})"
+
+    # Return the full page content so the persona can see what was saved
+    kw_str = ", ".join(keywords) if keywords else "(none)"
+    return (
+        f"{action}\n\n"
+        f"## {title}\n\n"
+        f"**Category**: {cat}\n"
+        f"**Keywords**: {kw_str}\n"
+        f"**Summary**: {summary}\n\n"
+        f"{content}"
+    )
 
 
 def schema() -> ToolSchema:

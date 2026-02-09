@@ -31,7 +31,7 @@
         "visual_context": false,
         "realtime_context": true
     },
-    "router_callable": true,
+    "router_callable": false,
     "user_selectable": false,
     "nodes": [
         {

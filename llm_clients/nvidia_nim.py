@@ -151,6 +151,10 @@ class NvidiaNIMClient(OpenAIClient):
                     raise
             except httpx.HTTPStatusError as e:
                 last_exception = e
+                logging.error(
+                    "NIM structured output HTTP %d response body: %s",
+                    e.response.status_code, e.response.text
+                )
                 # Retry on 5xx server errors
                 if e.response.status_code >= 500 and attempt < max_retries:
                     wait_time = 2 ** attempt
@@ -199,6 +203,7 @@ class NvidiaNIMClient(OpenAIClient):
         response_schema: Optional[Dict[str, Any]] = None,
         *,
         temperature: float | None = None,
+        **_: Any,
     ) -> str:
         """
         Generate response using Nvidia NIM.

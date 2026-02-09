@@ -96,82 +96,105 @@ class PersonaMixin:
             db_personas = (
                 db.query(AIModel).filter(AIModel.HOME_CITYID == self.city_id).all()
             )
+            failed_count = 0
             for db_ai in db_personas:
                 pid = db_ai.AIID
-                default_room_id = f"{pid}_room"
-                raw_private_room_id = (db_ai.PRIVATE_ROOM_ID or "").strip()
-                private_room_id = raw_private_room_id or default_room_id
-
-                self._set_persona_avatar(pid, db_ai.AVATAR_IMAGE)
-
-                persona_model = db_ai.DEFAULT_MODEL or self.model or self._base_model
-                persona_context_length = get_context_length(persona_model)
-                persona_provider = get_model_provider(persona_model)  # Get provider for persona's model
-                persona_lightweight_model = db_ai.LIGHTWEIGHT_MODEL
-
-                from data_paths import find_file, PROMPTS_DIR
-                common_prompt_file = find_file(PROMPTS_DIR, "common.txt") or Path("system_prompts/common.txt")
-
-                # Get linked user name (first linked user, or "the user" as fallback)
-                linked_user_name = "the user"
-                linked_user = (
-                    db.query(User)
-                    .join(UserAiLink, User.USERID == UserAiLink.USERID)
-                    .filter(UserAiLink.AIID == pid)
-                    .first()
-                )
-                if linked_user:
-                    linked_user_name = linked_user.USERNAME
-
-                persona = PersonaCore(
-                    city_name=self.city_name,
-                    persona_id=pid,
-                    persona_name=db_ai.AINAME,
-                    persona_system_instruction=db_ai.SYSTEMPROMPT or "",
-                    avatar_image=db_ai.AVATAR_IMAGE,
-                    buildings=self.buildings,
-                    common_prompt_path=common_prompt_file,
-                    action_priority_path=Path("builtin_data/action_priority.json"),
-                    building_histories=self.building_histories,
-                    occupants=self.occupants,
-                    id_to_name_map=self.id_to_name_map,
-                    move_callback=self._move_persona,
-                    dispatch_callback=self.dispatch_persona,
-                    explore_callback=self._explore_city,
-                    create_persona_callback=self._create_persona,
-                    session_factory=self.SessionLocal,
-                    start_building_id=private_room_id,
-                    model=persona_model,
-                    lightweight_model=persona_lightweight_model,
-                    context_length=persona_context_length,
-                    user_room_id=self.user_room_id,
-                    provider=persona_provider,  # Use provider for persona's model
-                    interaction_mode=(db_ai.INTERACTION_MODE or "auto"),
-                    is_dispatched=db_ai.IS_DISPATCHED,
-                    timezone_info=self.timezone_info,
-                    timezone_name=self.timezone_name,
-                    item_registry=self.items,
-                    inventory_item_ids=self.items_by_persona.get(pid, []),
-                    persona_event_fetcher=self.get_persona_pending_events,
-                    persona_event_ack=self.archive_persona_events,
-                    manager_ref=self,
-                    linked_user_name=linked_user_name,
-                )
-
-                persona.private_room_id = private_room_id
-                if private_room_id not in self.building_map:
-                    logging.warning(
-                        "Persona '%s' private room '%s' is missing from building_map.",
-                        pid,
-                        private_room_id,
-                    )
-
-                self.personas[pid] = persona
-            logging.info("Loaded %d personas from database.", len(self.personas))
+                try:
+                    self._load_single_persona(db, db_ai)
+                except Exception as exc:
+                    failed_count += 1
+                    msg = f"Failed to load persona '{pid}': {exc}"
+                    logging.error(msg, exc_info=True)
+                    self.startup_warnings.append({
+                        "source": "persona_load",
+                        "message": msg,
+                    })
+            logging.info(
+                "Loaded %d personas from database (%d failed).",
+                len(self.personas), failed_count,
+            )
         except Exception as exc:
-            logging.error("Failed to load personas from DB: %s", exc, exc_info=True)
+            msg = f"Failed to query personas from DB: {exc}"
+            logging.error(msg, exc_info=True)
+            self.startup_warnings.append({
+                "source": "persona_load",
+                "message": msg,
+            })
         finally:
             db.close()
+
+    def _load_single_persona(self, db, db_ai) -> None:
+        """単一のペルソナをDBレコードからロードする"""
+        pid = db_ai.AIID
+        default_room_id = f"{pid}_room"
+        raw_private_room_id = (db_ai.PRIVATE_ROOM_ID or "").strip()
+        private_room_id = raw_private_room_id or default_room_id
+
+        self._set_persona_avatar(pid, db_ai.AVATAR_IMAGE)
+
+        persona_model = db_ai.DEFAULT_MODEL or self.model or self._base_model
+        persona_context_length = get_context_length(persona_model)
+        persona_provider = get_model_provider(persona_model)
+        persona_lightweight_model = db_ai.LIGHTWEIGHT_MODEL
+
+        from data_paths import find_file, PROMPTS_DIR
+        common_prompt_file = find_file(PROMPTS_DIR, "common.txt") or Path("system_prompts/common.txt")
+
+        # Get linked user name (first linked user, or "the user" as fallback)
+        linked_user_name = "the user"
+        linked_user = (
+            db.query(User)
+            .join(UserAiLink, User.USERID == UserAiLink.USERID)
+            .filter(UserAiLink.AIID == pid)
+            .first()
+        )
+        if linked_user:
+            linked_user_name = linked_user.USERNAME
+
+        persona = PersonaCore(
+            city_name=self.city_name,
+            persona_id=pid,
+            persona_name=db_ai.AINAME,
+            persona_system_instruction=db_ai.SYSTEMPROMPT or "",
+            avatar_image=db_ai.AVATAR_IMAGE,
+            buildings=self.buildings,
+            common_prompt_path=common_prompt_file,
+            action_priority_path=Path("builtin_data/action_priority.json"),
+            building_histories=self.building_histories,
+            occupants=self.occupants,
+            id_to_name_map=self.id_to_name_map,
+            move_callback=self._move_persona,
+            dispatch_callback=self.dispatch_persona,
+            explore_callback=self._explore_city,
+            create_persona_callback=self._create_persona,
+            session_factory=self.SessionLocal,
+            start_building_id=private_room_id,
+            model=persona_model,
+            lightweight_model=persona_lightweight_model,
+            context_length=persona_context_length,
+            user_room_id=self.user_room_id,
+            provider=persona_provider,
+            interaction_mode=(db_ai.INTERACTION_MODE or "auto"),
+            is_dispatched=db_ai.IS_DISPATCHED,
+            timezone_info=self.timezone_info,
+            timezone_name=self.timezone_name,
+            item_registry=self.items,
+            inventory_item_ids=self.items_by_persona.get(pid, []),
+            persona_event_fetcher=self.get_persona_pending_events,
+            persona_event_ack=self.archive_persona_events,
+            manager_ref=self,
+            linked_user_name=linked_user_name,
+        )
+
+        persona.private_room_id = private_room_id
+        if private_room_id not in self.building_map:
+            logging.warning(
+                "Persona '%s' private room '%s' is missing from building_map.",
+                pid,
+                private_room_id,
+            )
+
+        self.personas[pid] = persona
 
     def _load_occupancy_from_db(self) -> None:
         """DBから現在の入室状況を読み込み、PersonaCoreとManagerの状態を更新する"""
@@ -195,18 +218,22 @@ class PersonaMixin:
                     self.occupants[bid].append(pid)
                     self.personas[pid].current_building_id = bid
                 else:
-                    logging.warning(
-                        "Invalid occupancy record found: AI '%s' or Building '%s' does not exist.",
-                        pid,
-                        bid,
-                    )
+                    msg = f"Invalid occupancy record: AI '{pid}' or Building '{bid}' does not exist."
+                    logging.warning(msg)
+                    self.startup_warnings.append({
+                        "source": "occupancy_load",
+                        "message": msg,
+                    })
             if hasattr(self, "state"):
                 self.state.occupants = self.occupants
             logging.info("Loaded current occupancy from database.")
         except Exception as exc:
-            logging.error(
-                "Failed to load occupancy from DB: %s", exc, exc_info=True
-            )
+            msg = f"Failed to load occupancy from DB: {exc}"
+            logging.error(msg, exc_info=True)
+            self.startup_warnings.append({
+                "source": "occupancy_load",
+                "message": msg,
+            })
         finally:
             db.close()
 

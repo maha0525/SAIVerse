@@ -40,6 +40,39 @@
     flex-shrink: 0;
 }
 
+.startupWarningBanner {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.6rem 1rem;
+    background: #fef3c7;
+    border-bottom: 1px solid #f59e0b;
+    color: #92400e;
+    font-size: 0.82rem;
+    line-height: 1.4;
+    flex-shrink: 0;
+}
+
+.startupWarningContent {
+    flex: 1;
+    min-width: 0;
+    word-break: break-word;
+}
+
+.startupWarningClose {
+    background: none;
+    border: none;
+    color: #92400e;
+    cursor: pointer;
+    padding: 2px;
+    flex-shrink: 0;
+    opacity: 0.7;
+}
+
+.startupWarningClose:hover {
+    opacity: 1;
+}
+
 .headerLeft {
     display: flex;
     align-items: center;
@@ -567,6 +600,16 @@
 :global([data-theme="dark"]) .header {
     background: rgba(10, 10, 10, 0.8);
     border-color: rgba(255, 255, 255, 0.1);
+}
+
+:global([data-theme="dark"]) .startupWarningBanner {
+    background: #422006;
+    border-color: #b45309;
+    color: #fbbf24;
+}
+
+:global([data-theme="dark"]) .startupWarningClose {
+    color: #fbbf24;
 }
 
 :global([data-theme="dark"]) .assistant .bubble {

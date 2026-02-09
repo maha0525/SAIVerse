@@ -10,6 +10,7 @@
   "base_url": "https://integrate.api.nvidia.com/v1",
   "api_key_env": "NVIDIA_API_KEY",
   "convert_system_to_user": true,
+  "supports_images": false,
   "parameters": {
     "temperature": {
       "type": "float",

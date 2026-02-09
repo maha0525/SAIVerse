@@ -49,6 +49,7 @@
         {
             "id": "decide",
             "type": "llm",
+            "context_profile": "router",
             "model_type": "lightweight",
             "action": "You are the SEA router. Choose the best playbook for the user's request.\n\n## Current Execution Context\nMeta playbook: {meta_playbook_name}\nDescription: {meta_playbook_description}\nPlaybooks already executed in this run: {executed_playbooks}\n\n## Available Playbooks (MUST select from this list)\n{available_playbooks}\n\n## Instructions\n- If the user's request has been fulfilled by previously executed playbooks, select 'basic_chat' to respond.\n- Do NOT re-select a playbook that has already been executed unless explicitly necessary.\n- The 'playbook' field MUST be exactly one of the names from the available playbooks list above.\n\nRespond ONLY with JSON per the schema.",
             "response_schema": {

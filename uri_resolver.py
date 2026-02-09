@@ -206,17 +206,29 @@ class UriResolver:
         parsed = parse_sai_uri(uri, context_persona_id=persona_id)
 
         # ペルソナスコープURIのアクセス制御: 自分の記憶のみ参照可能
-        if parsed.is_persona_scoped and persona_id and parsed.persona_id != persona_id:
-            LOGGER.warning(
-                "Access denied: persona %s tried to access %s's %s",
-                persona_id, parsed.persona_id, parsed.scheme,
-            )
-            return ResolvedContent(
-                uri=uri,
-                content="(アクセス拒否: 他ペルソナの記憶は参照できません)",
-                content_type="error",
-                metadata={"error": "access_denied", "target_persona": parsed.persona_id},
-            )
+        if parsed.is_persona_scoped:
+            if not persona_id:
+                LOGGER.warning(
+                    "Access denied: persona_id not provided for persona-scoped URI %s",
+                    uri,
+                )
+                return ResolvedContent(
+                    uri=uri,
+                    content="(アクセス拒否: ペルソナスコープURIにはpersona_idが必要です)",
+                    content_type="error",
+                    metadata={"error": "access_denied", "reason": "persona_id_required"},
+                )
+            if parsed.persona_id != persona_id:
+                LOGGER.warning(
+                    "Access denied: persona %s tried to access %s's %s",
+                    persona_id, parsed.persona_id, parsed.scheme,
+                )
+                return ResolvedContent(
+                    uri=uri,
+                    content="(アクセス拒否: 他ペルソナの記憶は参照できません)",
+                    content_type="error",
+                    metadata={"error": "access_denied", "target_persona": parsed.persona_id},
+                )
 
         handler = self._handlers.get(parsed.scheme)
         if not handler:

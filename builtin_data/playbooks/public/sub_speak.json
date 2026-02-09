@@ -30,6 +30,7 @@
         {
             "id": "compose",
             "type": "llm",
+            "context_profile": "conversation",
             "action": null,
             "speak": true,
             "memorize": {

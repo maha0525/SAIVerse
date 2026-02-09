@@ -44,9 +44,16 @@ class LLMNodeDef(BaseModel):
         default=None,
         description="Conditional routing based on state field. If specified, overrides 'next'."
     )
+    context_profile: Optional[str] = Field(
+        default=None,
+        description="Context profile name. Overrides playbook-level context_requirements and model_type. "
+                    "Values: 'conversation' (normal model, full context), 'router' (lightweight, full context), "
+                    "'worker' (normal, isolated), 'worker_light' (lightweight, isolated)."
+    )
     model_type: Optional[str] = Field(
         default="normal",
-        description="Which model to use: 'normal' (default) or 'lightweight' for faster/cheaper models."
+        description="Which model to use: 'normal' (default) or 'lightweight' for faster/cheaper models. "
+                    "Ignored when context_profile is set (profile determines model)."
     )
     response_schema: Optional[Dict[str, Any]] = Field(
         default=None,
@@ -371,6 +378,60 @@ class ContextRequirements(BaseModel):
         description="Include realtime context (current time, previous AI response time, spatial info) near end of context. "
                     "Placing time-sensitive info at the end improves LLM context caching efficiency."
     )
+
+
+# ---------------------------------------------------------------------------
+# Context Profiles — predefined combinations of model_type + context settings
+# ---------------------------------------------------------------------------
+# conversation / router share the same context (only model_type differs).
+# worker / worker_light are fully isolated (no history, no system prompt).
+
+_FULL_CONTEXT_REQUIREMENTS = ContextRequirements(
+    history_depth="full",
+    history_balanced=False,
+    include_internal=False,
+    system_prompt=True,
+    memory_weave=True,
+    working_memory=False,
+    inventory=True,
+    building_items=True,
+    available_playbooks=True,
+    visual_context=True,
+    realtime_context=True,
+)
+
+_ISOLATED_CONTEXT_REQUIREMENTS = ContextRequirements(
+    history_depth=0,
+    history_balanced=False,
+    include_internal=False,
+    system_prompt=False,
+    memory_weave=False,
+    working_memory=False,
+    inventory=False,
+    building_items=False,
+    available_playbooks=False,
+    visual_context=False,
+    realtime_context=False,
+)
+
+CONTEXT_PROFILES: Dict[str, Dict[str, Any]] = {
+    "conversation": {
+        "model_type": "normal",
+        "requirements": _FULL_CONTEXT_REQUIREMENTS,
+    },
+    "router": {
+        "model_type": "lightweight",
+        "requirements": _FULL_CONTEXT_REQUIREMENTS,
+    },
+    "worker": {
+        "model_type": "normal",
+        "requirements": _ISOLATED_CONTEXT_REQUIREMENTS,
+    },
+    "worker_light": {
+        "model_type": "lightweight",
+        "requirements": _ISOLATED_CONTEXT_REQUIREMENTS,
+    },
+}
 
 
 class PlaybookSchema(BaseModel):
