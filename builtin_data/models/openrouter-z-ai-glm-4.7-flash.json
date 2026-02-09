@@ -1,0 +1,49 @@
+{
+  "model": "z-ai/glm-4.7-flash",
+  "system_prompt": "",
+  "display_name": "Z.ai GLM-4.7-Flash (Open Router)",
+  "provider": "openai",
+  "supports_structured_output": true,
+  "context_length": 202752,
+  "default_max_history_messages": 50,
+  "metabolism_keep_messages": 30,
+  "base_url": "https://openrouter.ai/api/v1",
+  "api_key_env": "OPENROUTER_API_KEY",
+  "supports_images": false,
+  "convert_system_to_user": true,
+  "parameters": {
+    "temperature": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.1,
+      "default": 1,
+      "label": "Temperature",
+      "description": "Controls randomness."
+    },
+    "top_p": {
+      "type": "float",
+      "min": 0,
+      "max": 1,
+      "step": 0.05,
+      "default": 0.95,
+      "label": "Top P",
+      "description": "Nucleus sampling cutoff."
+    },
+    "max_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 120000,
+      "step": 1,
+      "default": 8000,
+      "label": "Max tokens",
+      "description": "Upper bound on generated tokens."
+    }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 0.06,
+    "cached_input_per_1m_tokens": 0.01,
+    "output_per_1m_tokens": 0.4,
+    "currency": "USD"
+  }
+}

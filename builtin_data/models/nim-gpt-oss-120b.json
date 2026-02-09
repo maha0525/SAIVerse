@@ -1,5 +1,6 @@
 {
   "model": "openai/gpt-oss-120b",
+  "system_prompt": "",
   "display_name": "GPT-OSS 120B (NIM)",
   "provider": "nvidia_nim",
   "supports_structured_output": false,

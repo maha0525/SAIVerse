@@ -637,7 +637,7 @@ export default function Home() {
                 try {
                     const errorText = await res.text();
                     errorDetails += ` - Body: ${errorText}`;
-                } catch (e) { }
+                } catch (e) { console.error('Failed to read error response body:', e); }
                 throw new Error(`Failed to send message. ${errorDetails}`);
             }
 

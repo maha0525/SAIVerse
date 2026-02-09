@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Optional
+
+_log = logging.getLogger(__name__)
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -27,16 +30,16 @@ def list_available_playbooks(persona_id: Optional[str] = None, building_id: Opti
             # Try to get current building from manager/persona
             # This is a best-effort; if unavailable, we only return public playbooks
             try:
-                from database.operations import get_db_session
-                session = get_db_session()
-                # Get persona's current location
-                from database.models import AI
-                ai_record = session.query(AI).filter(AI.AIID == persona_id).first()
-                if ai_record:
-                    building_id = ai_record.CURRENT_LOCATION
-                session.close()
+                session = manager.SessionLocal()
+                try:
+                    from database.models import AI
+                    ai_record = session.query(AI).filter(AI.AIID == persona_id).first()
+                    if ai_record:
+                        building_id = ai_record.CURRENT_LOCATION
+                finally:
+                    session.close()
             except Exception:
-                pass
+                _log.warning("Failed to get building_id for persona %s", persona_id, exc_info=True)
 
     db_path = default_db_path()
     engine = create_engine(f"sqlite:///{db_path}")

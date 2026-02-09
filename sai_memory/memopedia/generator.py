@@ -93,7 +93,7 @@ def get_messages_around(
             try:
                 metadata = json.loads(metadata_raw)
             except Exception:
-                pass
+                LOGGER.warning("Failed to parse metadata JSON for message %s", msg_id, exc_info=True)
         msg = Message(
             id=msg_id,
             thread_id=tid,

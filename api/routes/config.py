@@ -1,6 +1,9 @@
+import logging
 import os
 import json
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -121,7 +124,7 @@ def get_playbooks():
                     if p.get("user_configurable", False)
                 ]
             except (json.JSONDecodeError, TypeError):
-                pass
+                _log.warning("Failed to parse schema_json for playbook %s", pb.name, exc_info=True)
 
             result.append({
                 "id": pb.name,
@@ -162,6 +165,7 @@ def get_playbook_params(name: str, manager=Depends(get_manager)):
             schema = json.loads(playbook.schema_json) if playbook.schema_json else {}
             raw_input_schema = schema.get("input_schema", [])
         except (json.JSONDecodeError, TypeError):
+            _log.warning("Failed to parse schema_json for playbook %s", name, exc_info=True)
             raw_input_schema = []
 
         # Build context for enum resolution

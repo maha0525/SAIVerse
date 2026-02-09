@@ -1,12 +1,15 @@
 {
   "model": "deepseek/deepseek-v3.2",
+  "system_prompt": "",
   "display_name": "DeepSeek V3.2(OpenRouter)",
   "provider": "openai",
-  "context_length": 164000,
+  "supports_structured_output": true,
+  "context_length": 163840,
   "default_max_history_messages": 60,
   "metabolism_keep_messages": 40,
   "base_url": "https://openrouter.ai/api/v1",
   "api_key_env": "OPENROUTER_API_KEY",
+  "supports_images": false,
   "convert_system_to_user": true,
   "parameters": {
     "temperature": {

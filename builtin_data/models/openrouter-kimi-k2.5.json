@@ -1,6 +1,7 @@
 {
   "model": "moonshotai/kimi-k2.5",
-  "display_name": "Kimi K2.5(OpenRouter)",
+  "system_prompt": "",
+  "display_name": "Kimi K2.5 (OpenRouter)",
   "provider": "openai",
   "context_length": 256000,
   "default_max_history_messages": 80,
@@ -8,6 +9,7 @@
   "base_url": "https://openrouter.ai/api/v1",
   "api_key_env": "OPENROUTER_API_KEY",
   "convert_system_to_user": true,
+  "supports_images": true,
   "parameters": {
     "temperature": {
       "type": "float",
@@ -36,5 +38,11 @@
       "label": "Max tokens",
       "description": "Upper bound on generated tokens."
     }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 0.45,
+    "cached_input_per_1m_tokens": 0.07,
+    "output_per_1m_tokens": 2.25,
+    "currency": "USD"
   }
 }

@@ -1464,7 +1464,7 @@ class SEARuntime:
                     if isinstance(pb, dict) and pb.get("name"):
                         available_names.append(pb.get("name"))
         except Exception:
-            pass
+            LOGGER.warning("Failed to parse available_playbooks from state", exc_info=True)
 
         if not playbook_value:
             stripped = str(text).strip()
@@ -1619,9 +1619,11 @@ class SEARuntime:
                 )
             except Exception as exc:
                 LOGGER.exception("SEA LangGraph exec sub-playbook failed")
-                error_msg = f"Sub-playbook error: {exc}"
+                error_msg = f"Sub-playbook error: {type(exc).__name__}: {exc}"
                 state["last"] = error_msg
-                log_sea_trace(playbook.name, node_id, "EXEC", f"→ Sub-playbook error: {type(exc).__name__}: {exc}")
+                state["_exec_error"] = True
+                state["_exec_error_detail"] = error_msg
+                log_sea_trace(playbook.name, node_id, "EXEC", f"→ {error_msg}")
                 if event_callback:
                     event_callback({
                         "type": "error",
@@ -1629,9 +1631,23 @@ class SEARuntime:
                         "playbook": playbook.name,
                         "node": node_id,
                     })
+                # Record error to SAIMemory so the persona (and subsequent LLM calls) can see it
+                try:
+                    self._store_memory(
+                        persona, error_msg,
+                        role="system",
+                        tags=["error", "exec", str(sub_name).strip()],
+                        pulse_id=state.get("pulse_id"),
+                    )
+                except Exception:
+                    LOGGER.debug("Failed to store exec error to SAIMemory", exc_info=True)
                 if outputs is not None:
                     outputs.append(error_msg)
                 return state
+
+            # Success path: clear error flag
+            state["_exec_error"] = False
+            state.pop("_exec_error_detail", None)
 
             # Track executed playbook in executed_playbooks list
             executed_list = state.get("executed_playbooks")
@@ -2518,6 +2534,140 @@ class SEARuntime:
             return get_metabolism_keep_messages(persona_model)
         return None
 
+    # ---- anchor persistence helpers ----
+
+    def _load_anchors(self, persona) -> Dict[str, Any]:
+        """Load per-model metabolism anchors from DB (AI.METABOLISM_ANCHORS)."""
+        if not self.manager or not hasattr(self.manager, "SessionLocal"):
+            return {}
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id:
+            return {}
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI
+            ai_row = db.query(AI).filter_by(AIID=persona_id).first()
+            if ai_row and ai_row.METABOLISM_ANCHORS:
+                return json.loads(ai_row.METABOLISM_ANCHORS)
+        except Exception as exc:
+            LOGGER.warning("[metabolism] Failed to load anchors for %s: %s", persona_id, exc)
+        finally:
+            db.close()
+        return {}
+
+    def _save_anchors(self, persona, anchors: Dict[str, Any]) -> None:
+        """Persist per-model metabolism anchors to DB."""
+        if not self.manager or not hasattr(self.manager, "SessionLocal"):
+            return
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id:
+            return
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI
+            ai_row = db.query(AI).filter_by(AIID=persona_id).first()
+            if ai_row:
+                ai_row.METABOLISM_ANCHORS = json.dumps(anchors, ensure_ascii=False)
+                db.commit()
+        except Exception as exc:
+            LOGGER.warning("[metabolism] Failed to save anchors for %s: %s", persona_id, exc)
+        finally:
+            db.close()
+
+    def _get_anchor_validity_seconds(self, model_key: str) -> int:
+        """Get anchor validity duration in seconds based on model cache config.
+
+        - Anthropic (explicit cache): current manager.state.cache_ttl (300s or 3600s)
+        - Others (implicit/no cache): 1200s (20 min)
+        """
+        try:
+            from model_configs import get_cache_config
+            cache_config = get_cache_config(model_key)
+            cache_type = cache_config.get("type", "implicit")
+            if cache_type == "explicit":
+                current_ttl = "5m"
+                if self.manager and hasattr(self.manager, "state"):
+                    current_ttl = getattr(self.manager.state, "cache_ttl", "5m")
+                return 300 if current_ttl == "5m" else 3600
+        except Exception:
+            LOGGER.warning("Failed to resolve cache TTL for model %s", model_key, exc_info=True)
+        return 1200  # 20 minutes default
+
+    def _resolve_metabolism_anchor(self, persona) -> tuple:
+        """Resolve the best metabolism anchor using 3-level fallback.
+
+        Returns:
+            (anchor_id, resolution_type) where resolution_type is
+            "self" | "other" | "minimal".
+            anchor_id is None for "minimal" (no valid anchor found).
+        """
+        persona_model = getattr(persona, "model", None)
+        if not persona_model:
+            return (None, "minimal")
+
+        anchors = self._load_anchors(persona)
+        now = datetime.now()
+
+        # Case 1: self model's anchor exists and is valid
+        self_entry = anchors.get(persona_model)
+        if self_entry:
+            try:
+                updated_at = datetime.fromisoformat(self_entry["updated_at"])
+                validity = self._get_anchor_validity_seconds(persona_model)
+                age = (now - updated_at).total_seconds()
+                if age <= validity:
+                    LOGGER.debug(
+                        "[metabolism] Anchor resolved: self model '%s' (age=%.0fs, validity=%ds)",
+                        persona_model, age, validity,
+                    )
+                    return (self_entry["anchor_id"], "self")
+                else:
+                    LOGGER.debug(
+                        "[metabolism] Self model anchor expired: '%s' (age=%.0fs > validity=%ds)",
+                        persona_model, age, validity,
+                    )
+            except (KeyError, ValueError, TypeError) as exc:
+                LOGGER.debug("[metabolism] Invalid self anchor entry: %s", exc)
+
+        # Case 2: most recent valid anchor from any model
+        best_entry = None
+        best_updated = None
+        for model_key, entry in anchors.items():
+            if model_key == persona_model:
+                continue  # already checked
+            try:
+                updated_at = datetime.fromisoformat(entry["updated_at"])
+                validity = self._get_anchor_validity_seconds(model_key)
+                age = (now - updated_at).total_seconds()
+                if age <= validity:
+                    if best_updated is None or updated_at > best_updated:
+                        best_entry = entry
+                        best_updated = updated_at
+            except (KeyError, ValueError, TypeError):
+                continue
+
+        if best_entry:
+            LOGGER.debug(
+                "[metabolism] Anchor resolved: other model (age=%.0fs)",
+                (now - best_updated).total_seconds(),
+            )
+            return (best_entry["anchor_id"], "other")
+
+        # Case 3: no valid anchor
+        LOGGER.debug("[metabolism] No valid anchor found — will use minimal load")
+        return (None, "minimal")
+
+    def _update_anchor_for_model(self, persona, model_key: str, anchor_id: str) -> None:
+        """Update the anchor for a specific model and persist to DB."""
+        if not model_key or not anchor_id:
+            return
+        anchors = self._load_anchors(persona)
+        anchors[model_key] = {
+            "anchor_id": anchor_id,
+            "updated_at": datetime.now().isoformat(),
+        }
+        self._save_anchors(persona, anchors)
+
     def _maybe_run_metabolism(
         self,
         persona,
@@ -2585,6 +2735,9 @@ class SEARuntime:
         new_anchor_id = current_messages[evict_count].get("id")
         if new_anchor_id:
             persona.history_manager.metabolism_anchor_message_id = new_anchor_id
+            persona_model = getattr(persona, "model", None)
+            if persona_model:
+                self._update_anchor_for_model(persona, persona_model, new_anchor_id)
             LOGGER.info("[metabolism] Updated anchor to %s (evicted %d, kept %d)", new_anchor_id, evict_count, keep_count)
 
         # 4. Notify completion
@@ -2657,7 +2810,7 @@ class SEARuntime:
 
     # ---------------- context preparation -----------------
 
-    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False) -> List[Dict[str, Any]]:
         from sea.playbook_models import ContextRequirements
 
         # Use provided requirements or default to full context
@@ -2725,7 +2878,9 @@ class SEARuntime:
                     # NOTE: Datetime variables ({current_time}, etc.) are no longer expanded here.
                     # Time information is now provided via Realtime Context at the end of messages
                     # to improve LLM context caching efficiency.
-                    building_sys = getattr(building_obj, "system_instruction", None)
+                    # Use base_system_instruction (without items) to avoid duplication
+                    # with the building_items block below.
+                    building_sys = getattr(building_obj, "base_system_instruction", None) or getattr(building_obj, "system_instruction", None)
                     if building_sys:
                         building_section_parts.append(str(building_sys).strip())
 
@@ -2745,13 +2900,13 @@ class SEARuntime:
                             if lines:
                                 building_section_parts.append("### 建物内のアイテム\n" + "\n".join(lines))
                         except Exception:
-                            pass
+                            LOGGER.warning("Failed to collect building items for %s", building_id, exc_info=True)
 
                     if building_section_parts:
                         building_name = getattr(building_obj, "name", building_id)
                         system_sections.append(f"## {building_name} (ID: {building_id})\n" + "\n\n".join(building_section_parts))
             except Exception:
-                pass
+                LOGGER.warning("Failed to build building section for system prompt", exc_info=True)
 
             # 4. "## 利用可能な能力" section (available playbooks)
             if reqs.available_playbooks:
@@ -2856,25 +3011,65 @@ class SEARuntime:
                     recent = []
 
                     if history_depth == "full":
-                        # Metabolism anchor-based retrieval: keep window start fixed for cache hits
                         metabolism_enabled = getattr(self.manager, "metabolism_enabled", False) if self.manager else False
-                        anchor = getattr(history_mgr, "metabolism_anchor_message_id", None)
-                        used_anchor = False
 
-                        if metabolism_enabled and anchor:
-                            recent_from_anchor = history_mgr.get_history_from_anchor(
-                                anchor, required_tags=required_tags, pulse_id=pulse_id,
-                            )
-                            if recent_from_anchor:
-                                recent = recent_from_anchor
-                                used_anchor = True
+                        if metabolism_enabled and not preview_only:
+                            # Persistent anchor resolution with 3-level fallback
+                            anchor_id, resolution = self._resolve_metabolism_anchor(persona)
+
+                            if anchor_id:
+                                # Case 1 or 2: valid anchor found
+                                recent_from_anchor = history_mgr.get_history_from_anchor(
+                                    anchor_id, required_tags=required_tags, pulse_id=pulse_id,
+                                )
+                                if recent_from_anchor:
+                                    recent = recent_from_anchor
+                                    used_anchor = True
+                                    history_mgr.metabolism_anchor_message_id = anchor_id
+                                    LOGGER.debug(
+                                        "[sea][prepare-context] Anchor-based retrieval (%s): %d messages from anchor %s",
+                                        resolution, len(recent), anchor_id,
+                                    )
+                                    # Persist anchor for current model (touch updated_at)
+                                    persona_model = getattr(persona, "model", None)
+                                    if persona_model:
+                                        self._update_anchor_for_model(persona, persona_model, anchor_id)
+                            else:
+                                # Case 3: no valid anchor — minimal load + Chronicle generation
+                                memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
+                                if memory_weave_enabled:
+                                    try:
+                                        LOGGER.info("[metabolism] Triggering Chronicle generation on anchor expiry")
+                                        self._generate_chronicle(persona)
+                                    except Exception as exc:
+                                        LOGGER.warning("[metabolism] Chronicle generation on anchor expiry failed: %s", exc)
+
+                                # Load minimal history (low watermark)
+                                low_wm = self._get_low_watermark(persona)
+                                limit_value = low_wm if low_wm and low_wm > 0 else 20
+                                use_message_count = True
                                 LOGGER.debug(
-                                    "[sea][prepare-context] Anchor-based retrieval: %d messages from anchor %s",
-                                    len(recent), anchor,
+                                    "[sea][prepare-context] Minimal load (no valid anchor): %d messages",
+                                    limit_value,
                                 )
 
-                        if not used_anchor:
-                            # Fallback: traditional message-count or char-based retrieval
+                        elif metabolism_enabled and preview_only:
+                            # Preview mode: use anchor for retrieval but don't persist or generate Chronicle
+                            anchor_id, resolution = self._resolve_metabolism_anchor(persona)
+                            if anchor_id:
+                                recent_from_anchor = history_mgr.get_history_from_anchor(
+                                    anchor_id, required_tags=required_tags, pulse_id=pulse_id,
+                                )
+                                if recent_from_anchor:
+                                    recent = recent_from_anchor
+                                    used_anchor = True
+                            if not used_anchor:
+                                low_wm = self._get_low_watermark(persona)
+                                limit_value = low_wm if low_wm and low_wm > 0 else 20
+                                use_message_count = True
+
+                        if not used_anchor and not metabolism_enabled:
+                            # Metabolism disabled — traditional count/char retrieval
                             max_hist_msgs = getattr(self.manager, "max_history_messages_override", None) if self.manager else None
                             if max_hist_msgs is None:
                                 from model_configs import get_default_max_history_messages
@@ -2887,9 +3082,6 @@ class SEARuntime:
                                 LOGGER.debug("[sea][prepare-context] Using max_history_messages=%d", max_hist_msgs)
                             else:
                                 limit_value = getattr(persona, "context_length", 2000)
-
-                            # Set anchor on first retrieval when metabolism is enabled
-                            # (actual fetch happens below in the use_message_count/balanced/chars branches)
 
                     elif isinstance(history_depth, str) and history_depth.endswith("messages"):
                         # Message count mode: "10messages", "20messages", etc.
@@ -2940,13 +3132,16 @@ class SEARuntime:
                                 pulse_id=pulse_id,
                             )
 
-                        # Set metabolism anchor on first retrieval
+                        # Set metabolism anchor on first count-based retrieval and persist (skip in preview)
                         metabolism_enabled_for_anchor = getattr(self.manager, "metabolism_enabled", False) if self.manager else False
-                        if metabolism_enabled_for_anchor and recent:
+                        if metabolism_enabled_for_anchor and recent and not preview_only:
                             oldest_id = recent[0].get("id")
                             if oldest_id:
                                 history_mgr.metabolism_anchor_message_id = oldest_id
-                                LOGGER.debug("[sea][prepare-context] Set metabolism anchor to %s", oldest_id)
+                                persona_model = getattr(persona, "model", None)
+                                if persona_model:
+                                    self._update_anchor_for_model(persona, persona_model, oldest_id)
+                                LOGGER.debug("[sea][prepare-context] Set metabolism anchor to %s (persisted)", oldest_id)
 
                     LOGGER.debug("[sea][prepare-context] Got %d history messages", len(recent))
                     # Enrich messages with attachment context
@@ -3096,6 +3291,7 @@ class SEARuntime:
             persona, building_id, user_input=None,
             requirements=playbook.context_requirements,
             warnings=context_warnings,
+            preview_only=True,
         )
 
         # Append the user message manually (in real flow it comes from history)
@@ -3107,11 +3303,14 @@ class SEARuntime:
         provider = get_model_provider(persona_model)
 
         section_order = [
-            "system_prompt", "memory_weave", "visual_context",
+            "system_prompt", "memory_weave_chronicle", "memory_weave_memopedia",
+            "memory_weave", "visual_context",
             "history", "realtime_context", "user_message",
         ]
         section_labels = {
             "system_prompt": "System Prompt",
+            "memory_weave_chronicle": "Memory Weave — Chronicle",
+            "memory_weave_memopedia": "Memory Weave — Memopedia",
             "memory_weave": "Memory Weave",
             "visual_context": "Visual Context",
             "history": "Conversation History",
@@ -3131,7 +3330,13 @@ class SEARuntime:
             if msg.get("role") == "system":
                 section = "system_prompt"
             elif meta.get("__memory_weave_context__"):
-                section = "memory_weave"
+                mw_type = meta.get("__memory_weave_type__", "")
+                if mw_type == "chronicle":
+                    section = "memory_weave_chronicle"
+                elif mw_type == "memopedia":
+                    section = "memory_weave_memopedia"
+                else:
+                    section = "memory_weave"
             elif meta.get("__visual_context__"):
                 section = "visual_context"
             elif meta.get("__realtime_context__"):

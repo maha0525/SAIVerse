@@ -214,7 +214,7 @@ class ScheduleManager:
                     day_names = ["月曜日", "火曜日", "水曜日", "木曜日", "金曜日", "土曜日", "日曜日"]
                     days_str = ", ".join([day_names[d] for d in day_list if 0 <= d < 7])
                 except Exception:
-                    pass
+                    LOGGER.warning("Failed to parse DAYS_OF_WEEK for schedule prompt (schedule %d)", schedule.SCHEDULE_ID, exc_info=True)
             scheduled_time_str = f"{days_str} {schedule.TIME_OF_DAY or '??:??'}"
 
         elif schedule.SCHEDULE_TYPE == "oneshot":

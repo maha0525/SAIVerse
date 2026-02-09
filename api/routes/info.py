@@ -1,9 +1,12 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 from pathlib import Path
 from pydantic import BaseModel
 from typing import List, Optional, Any
 from api.deps import get_manager, avatar_path_to_url
+
+LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -100,7 +103,7 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
         finally:
             session.close()
     except Exception as e:
-        print(f"Failed to get building image: {e}")
+        LOGGER.warning("Failed to get building image for %s: %s", building_id, e, exc_info=True)
 
     return {
         "id": building_id,
@@ -120,17 +123,15 @@ def get_item_content(item_id: str, manager = Depends(get_manager)):
     elif hasattr(manager, 'items'):
         items_map = manager.items
     
-    # Debug logging
-    print(f"DEBUG: Requesting item_id: {item_id}")
-    print(f"DEBUG: Available item keys: {list(items_map.keys())}")
+    LOGGER.debug("Requesting item_id: %s, available keys: %s", item_id, list(items_map.keys()))
     
     if item_id not in items_map:
         # Fallback to registry if needed (for admin/seed items not yet in memory?)
         if hasattr(manager, 'item_registry') and item_id in manager.item_registry:
             items_map = manager.item_registry
-            print("DEBUG: Found in registry")
+            LOGGER.debug("Item %s found in registry", item_id)
         else:
-            print("DEBUG: Not found in any map")
+            LOGGER.debug("Item %s not found in any map", item_id)
             raise HTTPException(status_code=404, detail=f"Item not found: {item_id}")
 
     item_data = items_map[item_id]
@@ -138,15 +139,13 @@ def get_item_content(item_id: str, manager = Depends(get_manager)):
     item_type = item_data.get("type", "object")
     file_path = item_data.get("file_path")
     
-    print(f"DEBUG: Item type: {item_type}")
-    print(f"DEBUG: Raw file_path: {file_path}")
+    LOGGER.debug("Item type: %s, raw file_path: %s", item_type, file_path)
 
     if not file_path:
         raise HTTPException(status_code=400, detail="No file path for this item")
         
     path = Path(file_path)
-    # Debug info
-    print(f"DEBUG: Checking path: {path}")
+    LOGGER.debug("Checking path: %s", path)
     
     if not path.exists():
         # Attempt recovery for legacy/WSL paths or relative paths
@@ -163,7 +162,7 @@ def get_item_content(item_id: str, manager = Depends(get_manager)):
             if not path.is_absolute():
                 candidate = home / file_path
                 if candidate.exists():
-                    print(f"DEBUG: Recovered path (strategy 0 - relative path): {candidate}")
+                    LOGGER.debug("Recovered path (strategy 0 - relative path): %s", candidate)
                     path = candidate
             
             # Strategy 1a: strict 'documents' match (legacy WSL paths)
@@ -172,7 +171,7 @@ def get_item_content(item_id: str, manager = Depends(get_manager)):
                 rel = Path(*parts[idx:])
                 candidate = home / rel
                 if candidate.exists():
-                    print(f"DEBUG: Recovered path (strategy 1a - documents): {candidate}")
+                    LOGGER.debug("Recovered path (strategy 1a - documents): %s", candidate)
                     path = candidate
             
             # Strategy 1b: strict 'image' match (legacy WSL paths for picture items)
@@ -181,21 +180,21 @@ def get_item_content(item_id: str, manager = Depends(get_manager)):
                 rel = Path(*parts[idx:])
                 candidate = home / rel
                 if candidate.exists():
-                    print(f"DEBUG: Recovered path (strategy 1b - image): {candidate}")
+                    LOGGER.debug("Recovered path (strategy 1b - image): %s", candidate)
                     path = candidate
             
             # Strategy 2a: just filename in documents (fallback)
             if not path.exists():
                 candidate = home / "documents" / path.name
                 if candidate.exists():
-                    print(f"DEBUG: Recovered path (strategy 2a - documents filename): {candidate}")
+                    LOGGER.debug("Recovered path (strategy 2a - documents filename): %s", candidate)
                     path = candidate
             
             # Strategy 2b: just filename in image (fallback for picture items)
             if not path.exists():
                 candidate = home / "image" / path.name
                 if candidate.exists():
-                    print(f"DEBUG: Recovered path (strategy 2b - image filename): {candidate}")
+                    LOGGER.debug("Recovered path (strategy 2b - image filename): %s", candidate)
                     path = candidate
     
     if not path.exists():

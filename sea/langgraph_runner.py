@@ -109,6 +109,35 @@ def compile_playbook(
 
         for node_def in playbook.nodes:
             logger.debug("[langgraph] Processing edges for node '%s'", node_def.id)
+
+            # Handle error_next for exec nodes: route based on _exec_error state flag
+            error_next = getattr(node_def, "error_next", None)
+            if error_next and getattr(node_def, "type", None) == NodeType.EXEC:
+                normal_target = node_def.next
+                err_target = error_next
+
+                def make_error_router(_node_id=node_def.id, _pb_name=playbook.name):
+                    def router_fn(state: dict) -> str:
+                        if state.get("_exec_error"):
+                            from logging_config import log_sea_trace
+                            log_sea_trace(_pb_name, _node_id, "EXEC", "→ error_next (sub-playbook failed)")
+                            return "_exec_error"
+                        return "_exec_ok"
+                    return router_fn
+
+                path_map = {
+                    "_exec_error": err_target if err_target else END,
+                    "_exec_ok": normal_target if normal_target else END,
+                }
+                try:
+                    graph.add_conditional_edges(node_def.id, make_error_router(), path_map)
+                    logger.debug("[langgraph] Added error_next edges for '%s': error->%s, ok->%s",
+                                node_def.id, err_target, normal_target)
+                except Exception as e:
+                    logger.error("[langgraph] Failed to add error_next edges for '%s': %s", node_def.id, e, exc_info=True)
+                    return None
+                continue
+
             # Check for conditional_next first (takes precedence over next)
             conditional_next = getattr(node_def, "conditional_next", None)
             if conditional_next:

@@ -104,7 +104,7 @@ class PersonaMixin:
 
                 self._set_persona_avatar(pid, db_ai.AVATAR_IMAGE)
 
-                persona_model = db_ai.DEFAULT_MODEL or self.model
+                persona_model = db_ai.DEFAULT_MODEL or self.model or self._base_model
                 persona_context_length = get_context_length(persona_model)
                 persona_provider = get_model_provider(persona_model)  # Get provider for persona's model
                 persona_lightweight_model = db_ai.LIGHTWEIGHT_MODEL
@@ -316,7 +316,7 @@ class PersonaMixin:
             )
             self.building_histories[new_building_id] = []
 
-            new_persona_model = self.model
+            new_persona_model = self.model or self._base_model
             new_persona_provider = get_model_provider(new_persona_model)  # Get provider for model
             new_persona_context_length = get_context_length(new_persona_model)
 

@@ -298,6 +298,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(outputs, ["Stream test", "!"])
 
     def test_anthropic_thinking_override(self):
+        """Test manual thinking mode (legacy, for Sonnet 4.5 / Opus 4.5)."""
         client = AnthropicClient(
             "claude-sonnet-4-5",
             config={"thinking_budget": 2048, "thinking_type": "enabled"}
@@ -305,6 +306,61 @@ class TestLLMClients(unittest.TestCase):
         self.assertIsNotNone(client._thinking_config)
         self.assertEqual(client._thinking_config.get("budget_tokens"), 2048)
         self.assertEqual(client._thinking_config.get("type"), "enabled")
+        self.assertIsNone(client._thinking_effort)
+
+    def test_anthropic_adaptive_thinking(self):
+        """Test adaptive thinking mode (Opus 4.6+)."""
+        client = AnthropicClient(
+            "claude-opus-4-6",
+            config={"thinking_type": "adaptive", "thinking_effort": "high"}
+        )
+        self.assertIsNotNone(client._thinking_config)
+        self.assertEqual(client._thinking_config.get("type"), "adaptive")
+        # Adaptive mode should NOT have budget_tokens
+        self.assertNotIn("budget_tokens", client._thinking_config)
+        self.assertEqual(client._thinking_effort, "high")
+        # Adaptive thinking should set higher default max_tokens
+        self.assertEqual(client._max_tokens, 16000)
+
+    def test_anthropic_adaptive_thinking_with_effort(self):
+        """Test adaptive thinking with different effort levels."""
+        for effort in ("low", "medium", "high", "max"):
+            client = AnthropicClient(
+                "claude-opus-4-6",
+                config={"thinking_type": "adaptive", "thinking_effort": effort}
+            )
+            self.assertEqual(client._thinking_effort, effort)
+
+        # Invalid effort should be ignored
+        client = AnthropicClient(
+            "claude-opus-4-6",
+            config={"thinking_type": "adaptive", "thinking_effort": "invalid"}
+        )
+        self.assertIsNone(client._thinking_effort)
+
+    def test_anthropic_configure_thinking_effort(self):
+        """Test that thinking_effort can be changed via configure_parameters."""
+        client = AnthropicClient(
+            "claude-opus-4-6",
+            config={"thinking_type": "adaptive"}
+        )
+        self.assertIsNone(client._thinking_effort)
+
+        # Set effort via configure_parameters
+        client.configure_parameters({"thinking_effort": "medium"})
+        self.assertEqual(client._thinking_effort, "medium")
+
+        # Change effort
+        client.configure_parameters({"thinking_effort": "max"})
+        self.assertEqual(client._thinking_effort, "max")
+
+        # Clear effort
+        client.configure_parameters({"thinking_effort": None})
+        self.assertIsNone(client._thinking_effort)
+
+        # Invalid effort should be ignored
+        client.configure_parameters({"thinking_effort": "invalid"})
+        self.assertIsNone(client._thinking_effort)
 
     @patch('llm_clients.gemini.genai')
     def test_gemini_client_free_key_fallback(self, mock_genai):

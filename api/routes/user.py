@@ -1,8 +1,11 @@
+import logging
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 from api.deps import get_manager
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -40,8 +43,8 @@ def get_user_status(manager = Depends(get_manager)):
         if user_db:
             email = user_db.MAILADDRESS
         session.close()
-    except:
-        pass
+    except Exception:
+        _log.warning("Failed to get user email from database", exc_info=True)
 
     presence_status = manager.state.user_presence_status
     is_online = presence_status != "offline"

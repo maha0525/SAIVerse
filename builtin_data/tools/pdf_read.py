@@ -52,7 +52,7 @@ def pdf_read(
             if item:
                 item_name = item.NAME
     except Exception:
-        pass
+        LOGGER.warning("Failed to get item name for %s", item_id, exc_info=True)
 
     try:
         doc = fitz.open(str(file_path))

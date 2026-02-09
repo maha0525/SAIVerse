@@ -886,7 +886,7 @@ class UriResolver:
             try:
                 return getter()
             except Exception:
-                pass
+                LOGGER.warning("Failed to get active thread_id from adapter for %s", adapter.persona_id, exc_info=True)
         return f"{adapter.persona_id}:__persona__"
 
     def _get_adapter(self, persona_id: Optional[str]):
@@ -910,7 +910,7 @@ class UriResolver:
             if persona_dir.exists():
                 return SAIMemoryAdapter(persona_id, persona_dir=persona_dir, resource_id=persona_id)
         except Exception:
-            pass
+            LOGGER.warning("Failed to create SAIMemoryAdapter for %s", persona_id, exc_info=True)
         return None
 
     def _get_persona(self, persona_id: Optional[str]):
@@ -990,6 +990,7 @@ class UriResolver:
             end = int(parts[1]) if len(parts) > 1 else start + 1
             return "\n".join(lines[start:end])
         except (ValueError, IndexError):
+            LOGGER.debug("Failed to parse line range '%s', returning full content", line_spec, exc_info=True)
             return content
 
     def _error(self, uri: str, message: str) -> ResolvedContent:

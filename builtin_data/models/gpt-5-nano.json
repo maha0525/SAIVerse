@@ -1,5 +1,6 @@
 {
   "model": "gpt-5-nano",
+  "system_prompt": "現在の使用モデルはGPT-5 nanoです。\n\n[Model info]\n- Sep 30, 2024 knowledge cutoff",
   "display_name": "GPT-5 nano",
   "provider": "openai",
   "context_length": 400000,

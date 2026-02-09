@@ -1,5 +1,6 @@
 {
   "model": "chatgpt-4o-latest",
+  "system_prompt": "",
   "display_name": "ChatGPT-4o-Latest",
   "provider": "openai",
   "context_length": 128000,

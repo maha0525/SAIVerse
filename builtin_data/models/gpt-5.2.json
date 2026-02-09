@@ -1,5 +1,6 @@
 {
   "model": "gpt-5.2",
+  "system_prompt": "現在の使用モデルはGPT-5.2です。\n\n[Model info]\n- Aug 31, 2025 knowledge cutoff",
   "display_name": "GPT-5.2",
   "provider": "openai",
   "context_length": 400000,

@@ -1,5 +1,6 @@
 {
   "model": "qwen/qwen3-coder-480b-a35b-instruct",
+  "system_prompt": "",
   "display_name": "Qwen 3 Coder 480B-A35B (NIM)",
   "provider": "nvidia_nim",
   "supports_structured_output": true,
@@ -9,6 +10,7 @@
   "base_url": "https://integrate.api.nvidia.com/v1",
   "api_key_env": "NVIDIA_API_KEY",
   "convert_system_to_user": true,
+  "supports_images": false,
   "parameters": {
     "temperature": {
       "type": "float",

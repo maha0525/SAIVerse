@@ -204,7 +204,7 @@ class PersonaHistoryMixin:
                 prior_cursor,
             )
         except Exception:
-            pass
+            logging.warning("Failed to mark entry for building %s", building_id, exc_info=True)
 
     def register_entry(self, building_id: str) -> None:
         self._mark_entry(building_id)

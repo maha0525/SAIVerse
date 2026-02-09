@@ -77,11 +77,23 @@ def reload_configs() -> Dict[str, Dict]:
 
 
 def get_model_provider(model: str) -> str:
-    return MODEL_CONFIGS.get(model, {}).get("provider", "ollama")
+    config = MODEL_CONFIGS.get(model)
+    if config is None:
+        raise ValueError(
+            f"Model config not found: '{model}'. "
+            f"Check that a matching JSON file exists in builtin_data/models/ or user_data/models/."
+        )
+    return config.get("provider", "ollama")
 
 
 def get_context_length(model: str) -> int:
-    return int(MODEL_CONFIGS.get(model, {}).get("context_length", 120000))
+    config = MODEL_CONFIGS.get(model)
+    if config is None:
+        raise ValueError(
+            f"Model config not found: '{model}'. "
+            f"Check that a matching JSON file exists in builtin_data/models/ or user_data/models/."
+        )
+    return int(config.get("context_length", 120000))
 
 
 def get_default_max_history_messages(model: str) -> int | None:
@@ -211,7 +223,7 @@ def find_model_config(query: str) -> tuple[str, Dict]:
                 # But include the actual model ID in the config for API calls
                 return query, config_data
             except Exception:
-                pass
+                LOGGER.warning("Failed to load model config from %s", config_file, exc_info=True)
 
     # 4. Partial match on model ID (query is suffix or contains)
     for model_id, config in MODEL_CONFIGS.items():
@@ -330,9 +342,12 @@ def is_local_model(model: str) -> bool:
     """Check if a model is a local model (Ollama or llama.cpp).
 
     Local models have zero API cost.
+    Returns False if the model config is not found.
     """
-    provider = get_model_provider(model)
-    return provider in ("ollama", "llama_cpp")
+    config = MODEL_CONFIGS.get(model)
+    if config is None:
+        return False
+    return config.get("provider") in ("ollama", "llama_cpp")
 
 
 def get_cache_config(model: str) -> Dict[str, Any]:
@@ -351,7 +366,8 @@ def get_cache_config(model: str) -> Dict[str, Any]:
     cache = config.get("cache", {})
 
     # Determine if caching is supported based on provider
-    provider = get_model_provider(model)
+    # Use direct config lookup to avoid ValueError when model config is missing
+    provider = config.get("provider")
     default_supported = provider in ("anthropic", "gemini", "openai")
 
     return {

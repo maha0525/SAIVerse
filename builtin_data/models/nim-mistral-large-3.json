@@ -1,5 +1,6 @@
 {
   "model": "mistralai/mistral-large-3-675b-instruct-2512",
+  "system_prompt": "",
   "display_name": "Mistral Large 3 (NIM)",
   "provider": "nvidia_nim",
   "supports_structured_output": false,

@@ -1,5 +1,6 @@
 {
   "model": "gpt-4o-2024-11-20",
+  "system_prompt": "",
   "display_name": "GPT-4o (2024-11-20)",
   "provider": "openai",
   "context_length": 128000,

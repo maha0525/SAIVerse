@@ -306,7 +306,7 @@ def _get_last_ai_message_elapsed(persona, building_id: str, now_utc: datetime) -
                         last_ai_time = datetime.fromtimestamp(created_at, tz=dt_timezone.utc)
                         break
                     except (TypeError, ValueError):
-                        pass
+                        LOGGER.debug("Failed to parse created_at timestamp: %s", created_at, exc_info=True)
                 
                 # Fallback to timestamp field (ISO format string, top-level)
                 timestamp = msg.get("timestamp")
@@ -317,7 +317,7 @@ def _get_last_ai_message_elapsed(persona, building_id: str, now_utc: datetime) -
                             last_ai_time = last_ai_time.replace(tzinfo=dt_timezone.utc)
                         break
                     except (TypeError, ValueError):
-                        pass
+                        LOGGER.debug("Failed to parse timestamp: %s", timestamp, exc_info=True)
         
         if last_ai_time is None:
             return "履歴なし"

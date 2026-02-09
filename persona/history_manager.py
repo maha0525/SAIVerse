@@ -94,6 +94,7 @@ class HistoryManager:
                     try:
                         seq = int(seq_value)
                     except (TypeError, ValueError):
+                        LOGGER.debug("Failed to parse seq value %r, defaulting to %d", seq_value, idx + 1)
                         seq = idx + 1
                 msg["seq"] = seq
                 if not msg.get("message_id"):
@@ -136,6 +137,7 @@ class HistoryManager:
             try:
                 seq = int(seq_value)
             except (TypeError, ValueError):
+                LOGGER.debug("Failed to parse seq value %r, defaulting to %d", seq_value, next_candidate)
                 seq = next_candidate
         if seq_value is None:
             seq = next_candidate

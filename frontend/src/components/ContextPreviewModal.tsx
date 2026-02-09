@@ -92,7 +92,10 @@ function SectionRow({ section, totalTokens, messages, isExpanded, onToggle }: {
                 <span className={styles.sectionToggle}>
                     {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                 </span>
-                <span className={styles.sectionLabel}>{section.label}</span>
+                <span className={styles.sectionLabel}>
+                    {section.label}
+                    {section.name === 'history' && section.message_count > 0 && ` (${section.message_count}件)`}
+                </span>
                 <span className={styles.sectionTokens}>{formatTokens(section.tokens)}</span>
                 <div className={styles.sectionBar}>
                     <div className={styles.sectionBarFill} style={{ width: `${Math.min(pct, 100)}%` }} />
@@ -108,9 +111,7 @@ function SectionRow({ section, totalTokens, messages, isExpanded, onToggle }: {
                                 <span className={styles.messageTokenCount}>{msg.tokens} トークン</span>
                             </div>
                             <pre className={styles.messageContent}>
-                                {msg.content.length > 2000
-                                    ? msg.content.substring(0, 2000) + '\n... (省略)'
-                                    : msg.content}
+                                {msg.content}
                             </pre>
                         </div>
                     ))}

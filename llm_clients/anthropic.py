@@ -402,8 +402,15 @@ class AnthropicClient(LLMClient):
 
         # Extended thinking configuration
         self._thinking_config: Optional[Dict[str, Any]] = None
+        self._thinking_effort: Optional[str] = None  # "low", "medium", "high", "max"
         thinking_type = cfg.get("thinking_type") or os.getenv("ANTHROPIC_THINKING_TYPE")
         thinking_budget = cfg.get("thinking_budget") or os.getenv("ANTHROPIC_THINKING_BUDGET")
+        thinking_effort = cfg.get("thinking_effort") or os.getenv("ANTHROPIC_THINKING_EFFORT")
+
+        # Validate and store thinking_effort
+        valid_efforts = ("low", "medium", "high", "max")
+        if thinking_effort and thinking_effort in valid_efforts:
+            self._thinking_effort = thinking_effort
 
         if thinking_budget:
             try:
@@ -414,7 +421,13 @@ class AnthropicClient(LLMClient):
             except (TypeError, ValueError):
                 thinking_budget = None
 
-        if thinking_type or thinking_budget:
+        if thinking_type == "adaptive":
+            # Adaptive thinking (Opus 4.6+): Claude decides when and how much to think
+            # budget_tokens is not used with adaptive mode
+            self._thinking_config = {"type": "adaptive"}
+            logging.debug("[anthropic] Using adaptive thinking mode (effort=%s)", self._thinking_effort or "default")
+        elif thinking_type or thinking_budget:
+            # Manual thinking (legacy): explicit budget_tokens
             self._thinking_config = {}
             if thinking_type:
                 self._thinking_config["type"] = thinking_type
@@ -423,8 +436,11 @@ class AnthropicClient(LLMClient):
             self._thinking_config.setdefault("type", "enabled")
 
         # Max output tokens
-        # Note: max_tokens must be greater than thinking.budget_tokens
+        # Note: For manual thinking, max_tokens must be greater than thinking.budget_tokens
+        # For adaptive thinking, a higher default is recommended since thinking tokens are dynamic
         self._max_tokens = 4096  # Default
+        if thinking_type == "adaptive":
+            self._max_tokens = 16000  # Higher default for adaptive thinking
         max_output = cfg.get("max_output_tokens") or os.getenv("ANTHROPIC_MAX_OUTPUT_TOKENS")
         if max_output:
             try:
@@ -432,7 +448,7 @@ class AnthropicClient(LLMClient):
             except (TypeError, ValueError):
                 pass
 
-        # Ensure max_tokens > thinking_budget when thinking is enabled
+        # Ensure max_tokens > thinking_budget when manual thinking is enabled
         if thinking_budget and self._max_tokens <= thinking_budget:
             # max_tokens must include both thinking budget and actual output
             self._max_tokens = thinking_budget + 4096
@@ -451,7 +467,15 @@ class AnthropicClient(LLMClient):
         if not isinstance(parameters, dict):
             return
         allowed_params = {"temperature", "top_p", "top_k", "max_tokens"}
+        valid_efforts = ("low", "medium", "high", "max")
         for key, value in parameters.items():
+            # Handle thinking_effort specially (stored on instance, not in _extra_params)
+            if key == "thinking_effort":
+                if value in valid_efforts:
+                    self._thinking_effort = value
+                elif value is None:
+                    self._thinking_effort = None
+                continue
             if key not in allowed_params:
                 continue
             if value is None:
@@ -571,6 +595,11 @@ class AnthropicClient(LLMClient):
                 tools, enable_cache=enable_cache, cache_ttl=cache_ttl
             )
 
+        # Build output_config (may contain effort and/or structured output format)
+        output_config: Dict[str, Any] = {}
+        if self._thinking_effort:
+            output_config["effort"] = self._thinking_effort
+
         # Handle structured output
         use_native_structured_output = False
         if response_schema and not use_tools:
@@ -578,11 +607,9 @@ class AnthropicClient(LLMClient):
                 # Thinking enabled: use native output_config (compatible with thinking)
                 # Native structured output requires additionalProperties: false on all objects
                 prepared_schema = _prepare_schema_for_native_output(response_schema)
-                request_params["output_config"] = {
-                    "format": {
-                        "type": "json_schema",
-                        "schema": prepared_schema,
-                    }
+                output_config["format"] = {
+                    "type": "json_schema",
+                    "schema": prepared_schema,
                 }
                 use_native_structured_output = True
             else:
@@ -594,6 +621,10 @@ class AnthropicClient(LLMClient):
                     "input_schema": response_schema,
                 }]
                 request_params["tool_choice"] = {"type": "tool", "name": schema_name}
+
+        # Apply output_config if any fields were set (effort and/or format)
+        if output_config:
+            request_params["output_config"] = output_config
 
         response = None
         last_error: Optional[Exception] = None
@@ -773,6 +804,10 @@ class AnthropicClient(LLMClient):
         # Add thinking configuration if set
         if self._thinking_config:
             request_params["thinking"] = self._thinking_config
+
+        # Add effort parameter via output_config if configured
+        if self._thinking_effort:
+            request_params["output_config"] = {"effort": self._thinking_effort}
 
         # Handle tools
         use_tools = bool(tools)

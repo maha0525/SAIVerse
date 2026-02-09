@@ -1,5 +1,6 @@
 {
   "model": "qwen/qwen3-235b-a22b",
+  "system_prompt": "",
   "display_name": "Qwen 3 235B-A22B(NIM)",
   "provider": "nvidia_nim",
   "supports_structured_output": false,

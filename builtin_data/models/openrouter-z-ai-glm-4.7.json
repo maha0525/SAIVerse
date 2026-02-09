@@ -1,12 +1,16 @@
 {
   "model": "z-ai/glm-4.7",
-  "display_name": "Z.ai GLM-4.7",
+  "system_prompt": "",
+  "display_name": "Z.ai GLM-4.7 (Open Router)",
   "provider": "openai",
-  "context_length": 131072,
+  "supports_structured_output": true,
+  "context_length": 202752,
   "default_max_history_messages": 50,
   "metabolism_keep_messages": 30,
   "base_url": "https://openrouter.ai/api/v1",
   "api_key_env": "OPENROUTER_API_KEY",
+  "supports_images": false,
+  "convert_system_to_user": true,
   "parameters": {
     "temperature": {
       "type": "float",
@@ -35,5 +39,11 @@
       "label": "Max tokens",
       "description": "Upper bound on generated tokens."
     }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 0.40,
+    "cached_input_per_1m_tokens": 0.08,
+    "output_per_1m_tokens": 1.75,
+    "currency": "USD"
   }
 }

@@ -1,5 +1,6 @@
 {
   "model": "qwen3-next:80b",
+  "system_prompt": "",
   "display_name": "Qwen3 Next 80B A3B(Ollama)",
   "provider": "ollama",
   "context_length": 262144,

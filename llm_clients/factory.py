@@ -134,9 +134,10 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
         logging.debug("Creating Ollama client for model '%s' with kwargs: %s", api_model, extra_kwargs)
         client = OllamaClient(api_model, context_length, supports_images=supports_images, **extra_kwargs)
     else:
-        # Unknown provider - fallback to Ollama
-        logging.warning("Unknown provider '%s', falling back to Ollama", provider)
-        client = OllamaClient(api_model, context_length, supports_images=supports_images)
+        raise ValueError(
+            f"Unknown provider '{provider}' for model '{model}'. "
+            f"Valid providers: openai, nvidia_nim, anthropic, gemini, llama_cpp, ollama"
+        )
 
     # Set config_key for pricing lookup (model param is the config key/filename)
     client.config_key = model

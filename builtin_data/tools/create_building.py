@@ -81,7 +81,7 @@ def create_building(
         try:
             building_id = result.split("ID:")[1].split(")")[0].strip()
         except (IndexError, AttributeError):
-            pass
+            logger.warning("Failed to extract building_id from result: %s", result, exc_info=True)
 
     # Set interior image if provided and building was created
     if resolved_image_path and building_id:

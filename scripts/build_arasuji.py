@@ -138,8 +138,8 @@ def fetch_messages(
             try:
                 import json
                 metadata = json.loads(metadata_raw)
-            except:
-                pass
+            except Exception:
+                LOGGER.warning("Failed to parse metadata JSON for message %s", msg_id, exc_info=True)
         messages.append(Message(
             id=msg_id,
             thread_id=tid,

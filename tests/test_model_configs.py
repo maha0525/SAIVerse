@@ -10,9 +10,10 @@ class TestGetModelProvider(unittest.TestCase):
         provider = model_configs.get_model_provider("claude-sonnet-4-5")
         self.assertEqual(provider, "anthropic")
 
-    def test_unknown_model_returns_ollama(self):
-        provider = model_configs.get_model_provider("nonexistent-model-xyz")
-        self.assertEqual(provider, "ollama")
+    def test_unknown_model_raises_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            model_configs.get_model_provider("nonexistent-model-xyz")
+        self.assertIn("nonexistent-model-xyz", str(ctx.exception))
 
 
 class TestGetContextLength(unittest.TestCase):
@@ -20,9 +21,10 @@ class TestGetContextLength(unittest.TestCase):
         length = model_configs.get_context_length("claude-sonnet-4-5")
         self.assertEqual(length, 64000)
 
-    def test_unknown_model_returns_default(self):
-        length = model_configs.get_context_length("nonexistent-model-xyz")
-        self.assertEqual(length, 120000)
+    def test_unknown_model_raises_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            model_configs.get_context_length("nonexistent-model-xyz")
+        self.assertIn("nonexistent-model-xyz", str(ctx.exception))
 
 
 class TestCalculateCost(unittest.TestCase):
@@ -94,9 +96,9 @@ class TestFindModelConfig(unittest.TestCase):
 
 
 class TestIsLocalModel(unittest.TestCase):
-    def test_ollama_is_local(self):
-        # Unknown providers default to ollama
-        self.assertTrue(model_configs.is_local_model("nonexistent-model-xyz"))
+    def test_unknown_model_is_not_local(self):
+        # Unknown models return False (no config = no fallback to ollama)
+        self.assertFalse(model_configs.is_local_model("nonexistent-model-xyz"))
 
     def test_anthropic_is_not_local(self):
         self.assertFalse(model_configs.is_local_model("claude-sonnet-4-5"))

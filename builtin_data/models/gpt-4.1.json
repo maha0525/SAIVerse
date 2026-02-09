@@ -1,5 +1,6 @@
 {
   "model": "gpt-4.1",
+  "system_prompt": "",
   "display_name": "GPT-4.1",
   "provider": "openai",
   "context_length": 128000,

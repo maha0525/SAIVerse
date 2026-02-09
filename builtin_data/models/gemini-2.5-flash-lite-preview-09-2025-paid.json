@@ -1,5 +1,6 @@
 {
   "model": "gemini-2.5-flash-lite-preview-09-2025",
+  "system_prompt": "",
   "display_name": "Gemini 2.5 Flash Lite Preview 09 2025(有料Tier)",
   "provider": "gemini",
   "context_length": 1000000,

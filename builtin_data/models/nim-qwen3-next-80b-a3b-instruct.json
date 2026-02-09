@@ -1,9 +1,10 @@
 {
   "model": "qwen/qwen3-next-80b-a3b-instruct",
-  "display_name": "Qwen 3 Next 80B A3B(NIM)",
+  "system_prompt": "",
+  "display_name": "Qwen 3 Next 80B A3B instruct(NIM)",
   "provider": "nvidia_nim",
   "supports_structured_output": true,
-  "context_length": 128000,
+  "context_length": 262144,
   "default_max_history_messages": 60,
   "metabolism_keep_messages": 40,
   "base_url": "https://integrate.api.nvidia.com/v1",

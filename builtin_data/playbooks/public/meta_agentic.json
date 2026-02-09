@@ -69,7 +69,8 @@
             "type": "exec",
             "playbook_source": "selected_playbook",
             "args_source": "selected_args",
-            "next": "inc_loop"
+            "next": "inc_loop",
+            "error_next": "finalize"
         },
         {
             "id": "inc_loop",

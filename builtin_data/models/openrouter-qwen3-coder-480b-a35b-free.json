@@ -1,0 +1,43 @@
+{
+  "model": "qwen/qwen3-coder:free",
+  "system_prompt": "",
+  "display_name": "Qwen 3 Coder (Open Router, Free)",
+  "provider": "openai",
+  "supports_structured_output": true,
+  "context_length": 250000,
+  "default_max_history_messages": 80,
+  "metabolism_keep_messages": 60,
+  "base_url": "https://openrouter.ai/api/v1",
+  "api_key_env": "OPENROUTER_API_KEY",
+  "convert_system_to_user": true,
+  "supports_images": false,
+  "parameters": {
+    "temperature": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.01,
+      "default": 0.7,
+      "label": "Temperature",
+      "description": "Controls randomness."
+    },
+    "top_p": {
+      "type": "float",
+      "min": 0,
+      "max": 1,
+      "step": 0.05,
+      "default": 0.8,
+      "label": "Top P",
+      "description": "Nucleus sampling cutoff."
+    },
+    "max_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 260000,
+      "step": 1,
+      "default": 8000,
+      "label": "Max tokens",
+      "description": "Upper bound on generated tokens."
+    }
+  }
+}

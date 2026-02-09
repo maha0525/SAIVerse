@@ -1,8 +1,11 @@
+import logging
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from pathlib import Path
 import shutil
 import mimetypes
+
+LOGGER = logging.getLogger(__name__)
 from media_utils import resize_image_if_needed, resize_image_for_llm_context, _ensure_image_dir, _ensure_document_dir, IMAGE_URI_PREFIX, DOCUMENT_URI_PREFIX
 
 router = APIRouter()
@@ -49,8 +52,7 @@ async def upload_image(file: UploadFile = File(...)):
         }
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        LOGGER.error("Upload failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @router.post("/upload-document")
@@ -92,8 +94,7 @@ async def upload_document(file: UploadFile = File(...)):
         }
 
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        LOGGER.error("Upload failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @router.post("/upload-file")

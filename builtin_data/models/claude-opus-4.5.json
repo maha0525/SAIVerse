@@ -1,10 +1,11 @@
 {
   "model": "claude-opus-4-5",
+  "system_prompt": "現在の使用モデルはClaude Opus 4.5です。",
   "display_name": "Claude Opus 4.5",
   "provider": "anthropic",
   "context_length": 200000,
-  "default_max_history_messages": 60,
-  "metabolism_keep_messages": 20,
+  "default_max_history_messages": 100,
+  "metabolism_keep_messages": 40,
   "thinking_type": "enabled",
   "thinking_budget": 8192,
   "supports_images": true,
