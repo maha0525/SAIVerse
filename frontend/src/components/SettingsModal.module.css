@@ -147,31 +147,29 @@
     cursor: not-allowed;
 }
 
-@media (prefers-color-scheme: dark) {
-    .modal {
-        background: #1e1e1e;
-        color: #fff;
-    }
+:global([data-theme="dark"]) .modal {
+    background: #1e1e1e;
+    color: #fff;
+}
 
-    .label {
-        color: #aaa;
-    }
+:global([data-theme="dark"]) .label {
+    color: #aaa;
+}
 
-    .input,
-    .textarea,
-    .select {
-        background: #2d2d2d;
-        border-color: #444;
-        color: white;
-    }
+:global([data-theme="dark"]) .input,
+:global([data-theme="dark"]) .textarea,
+:global([data-theme="dark"]) .select {
+    background: #2d2d2d;
+    border-color: #444;
+    color: white;
+}
 
-    .cancelBtn {
-        border-color: #444;
-    }
+:global([data-theme="dark"]) .cancelBtn {
+    border-color: #444;
+}
 
-    .header,
-    .footer {
-        background: rgba(255, 255, 255, 0.05);
-        border-color: rgba(255, 255, 255, 0.1);
-    }
+:global([data-theme="dark"]) .header,
+:global([data-theme="dark"]) .footer {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.1);
 }

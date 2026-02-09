@@ -169,3 +169,31 @@
     opacity: 0.5;
     cursor: not-allowed;
 }
+
+/* ── Light Mode Overrides ── */
+:global([data-theme="light"]) .modal {
+    background: #ffffff;
+    border-color: #e2e8f0;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .header {
+    background: #f1f5f9;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .input {
+    background: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .footer {
+    background: #f1f5f9;
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .avatarImg {
+    background: #f1f5f9;
+    border-color: #e2e8f0;
+}

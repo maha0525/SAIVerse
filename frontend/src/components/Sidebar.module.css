@@ -328,103 +328,101 @@
 
 
 /* Dark Mode */
-@media (prefers-color-scheme: dark) {
-    .sidebar {
-        background: #171717;
-        border-right-color: rgba(255, 255, 255, 0.1);
-    }
+:global([data-theme="dark"]) .sidebar {
+    background: #171717;
+    border-right-color: rgba(255, 255, 255, 0.1);
+}
 
-    .profileSection {
-        border-bottom-color: rgba(255, 255, 255, 0.1);
-    }
+:global([data-theme="dark"]) .profileSection {
+    border-bottom-color: rgba(255, 255, 255, 0.1);
+}
 
-    .avatar {
-        background: #333;
-    }
+:global([data-theme="dark"]) .avatar {
+    background: #333;
+}
 
-    .userName {
-        color: #f3f4f6;
-    }
+:global([data-theme="dark"]) .userName {
+    color: #f3f4f6;
+}
 
-    .buildingItem {
-        color: #9ca3af;
-    }
+:global([data-theme="dark"]) .buildingItem {
+    color: #9ca3af;
+}
 
-    .buildingItem:hover {
-        background: rgba(255, 255, 255, 0.05);
-        color: #f3f4f6;
-    }
+:global([data-theme="dark"]) .buildingItem:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: #f3f4f6;
+}
 
-    .active {
-        background: rgba(67, 56, 202, 0.3);
-        color: #e0e7ff;
-    }
+:global([data-theme="dark"]) .active {
+    background: rgba(67, 56, 202, 0.3);
+    color: #e0e7ff;
+}
 
-    .active:hover {
-        background: rgba(67, 56, 202, 0.4);
-    }
+:global([data-theme="dark"]) .active:hover {
+    background: rgba(67, 56, 202, 0.4);
+}
 
-    .addBuildingBtn {
-        border-color: rgba(255, 255, 255, 0.15);
-        color: #94a3b8;
-    }
+:global([data-theme="dark"]) .addBuildingBtn {
+    border-color: rgba(255, 255, 255, 0.15);
+    color: #94a3b8;
+}
 
-    .addBuildingBtn:hover {
-        background: rgba(255, 255, 255, 0.05);
-        color: #f3f4f6;
-        border-color: rgba(255, 255, 255, 0.25);
-    }
+:global([data-theme="dark"]) .addBuildingBtn:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: #f3f4f6;
+    border-color: rgba(255, 255, 255, 0.25);
+}
 
-    .createBuildingInput {
-        background: #262626;
-        border-color: rgba(255, 255, 255, 0.15);
-        color: #f3f4f6;
-    }
+:global([data-theme="dark"]) .createBuildingInput {
+    background: #262626;
+    border-color: rgba(255, 255, 255, 0.15);
+    color: #f3f4f6;
+}
 
-    .createBuildingInput:focus {
-        border-color: #4dabf7;
-    }
+:global([data-theme="dark"]) .createBuildingInput:focus {
+    border-color: #4dabf7;
+}
 
-    .settingsFooter {
-        border-top-color: rgba(255, 255, 255, 0.1);
-    }
+:global([data-theme="dark"]) .settingsFooter {
+    border-top-color: rgba(255, 255, 255, 0.1);
+}
 
-    .settingsBtn {
-        border-color: rgba(255, 255, 255, 0.1);
-        color: #94a3b8;
-    }
+:global([data-theme="dark"]) .settingsBtn {
+    border-color: rgba(255, 255, 255, 0.1);
+    color: #94a3b8;
+}
 
-    .settingsBtnIcon {
-        border-color: rgba(255, 255, 255, 0.1);
-        color: #94a3b8;
-    }
+:global([data-theme="dark"]) .settingsBtnIcon {
+    border-color: rgba(255, 255, 255, 0.1);
+    color: #94a3b8;
+}
 
-    .settingsBtnIcon:hover {
-        background: rgba(255, 255, 255, 0.05);
-        color: #f3f4f6;
-    }
+:global([data-theme="dark"]) .settingsBtnIcon:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: #f3f4f6;
+}
 
-    .profileCompact:hover {
-        background: rgba(255, 255, 255, 0.05);
-    }
+:global([data-theme="dark"]) .profileCompact:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
 
-    .avatarSmall {
-        background: #333;
-    }
+:global([data-theme="dark"]) .avatarSmall {
+    background: #333;
+}
 
-    .userNameSmall {
-        color: #9ca3af;
-    }
+:global([data-theme="dark"]) .userNameSmall {
+    color: #9ca3af;
+}
 
-    .createPersonaBtn {
-        background: linear-gradient(135deg, #4dabf7 0%, #339af0 100%);
-        box-shadow: 0 2px 8px rgba(77, 171, 247, 0.2);
-    }
+:global([data-theme="dark"]) .createPersonaBtn {
+    background: linear-gradient(135deg, #4dabf7 0%, #339af0 100%);
+    box-shadow: 0 2px 8px rgba(77, 171, 247, 0.2);
+}
 
-    .createPersonaBtn:hover {
-        background: linear-gradient(135deg, #339af0 0%, #228be6 100%);
-        box-shadow: 0 4px 12px rgba(77, 171, 247, 0.3);
-    }
+:global([data-theme="dark"]) .createPersonaBtn:hover {
+    background: linear-gradient(135deg, #339af0 0%, #228be6 100%);
+    box-shadow: 0 4px 12px rgba(77, 171, 247, 0.3);
 }
 
 /* Mobile Responsive */

@@ -136,23 +136,23 @@ export default function WorldEditor() {
         if (subTab === 'playbook') { loadPlaybooks(); }
     }, [subTab]);
 
-    const loadCities = async () => { try { const res = await fetch('/api/db/tables/city'); if (res.ok) setCities(await res.json()); } catch (e) { } };
-    const loadBuildings = async () => { try { const res = await fetch('/api/db/tables/building'); if (res.ok) setBuildings(await res.json()); } catch (e) { } };
-    const loadTools = async () => { try { const res = await fetch('/api/db/tables/tool'); if (res.ok) setTools(await res.json()); } catch (e) { } };
-    const loadAIs = async () => { try { const res = await fetch('/api/db/tables/ai'); if (res.ok) setAis(await res.json()); } catch (e) { } };
-    const loadItems = async () => { try { const res = await fetch('/api/db/tables/item'); if (res.ok) setItems(await res.json()); } catch (e) { } };
-    const loadBlueprints = async () => { try { const res = await fetch('/api/db/tables/blueprint'); if (res.ok) setBlueprints(await res.json()); } catch (e) { } };
-    const loadModels = async () => { try { const res = await fetch('/api/info/models'); if (res.ok) setModelChoices(await res.json()); } catch (e) { } };
-    const loadPlaybooks = async () => { try { const res = await fetch('/api/world/playbooks'); if (res.ok) setPlaybooks(await res.json()); } catch (e) { } };
-    const loadAvailablePrompts = async () => { try { const res = await fetch('/api/world/prompts/available'); if (res.ok) setAvailablePrompts(await res.json()); } catch (e) { } };
+    const loadCities = async () => { try { const res = await fetch('/api/db/tables/city'); if (res.ok) setCities(await res.json()); } catch (e) { console.error('loadCities failed:', e); } };
+    const loadBuildings = async () => { try { const res = await fetch('/api/db/tables/building'); if (res.ok) setBuildings(await res.json()); } catch (e) { console.error('loadBuildings failed:', e); } };
+    const loadTools = async () => { try { const res = await fetch('/api/db/tables/tool'); if (res.ok) setTools(await res.json()); } catch (e) { console.error('loadTools failed:', e); } };
+    const loadAIs = async () => { try { const res = await fetch('/api/db/tables/ai'); if (res.ok) setAis(await res.json()); } catch (e) { console.error('loadAIs failed:', e); } };
+    const loadItems = async () => { try { const res = await fetch('/api/db/tables/item'); if (res.ok) setItems(await res.json()); } catch (e) { console.error('loadItems failed:', e); } };
+    const loadBlueprints = async () => { try { const res = await fetch('/api/db/tables/blueprint'); if (res.ok) setBlueprints(await res.json()); } catch (e) { console.error('loadBlueprints failed:', e); } };
+    const loadModels = async () => { try { const res = await fetch('/api/info/models'); if (res.ok) setModelChoices(await res.json()); } catch (e) { console.error('loadModels failed:', e); } };
+    const loadPlaybooks = async () => { try { const res = await fetch('/api/world/playbooks'); if (res.ok) setPlaybooks(await res.json()); } catch (e) { console.error('loadPlaybooks failed:', e); } };
+    const loadAvailablePrompts = async () => { try { const res = await fetch('/api/world/prompts/available'); if (res.ok) setAvailablePrompts(await res.json()); } catch (e) { console.error('loadAvailablePrompts failed:', e); } };
 
     // --- City Handlers ---
     const handleCitySelect = (city: City) => {
         setSelectedCity(city);
         setFormData({ name: city.CITYNAME, description: city.DESCRIPTION, ui_port: city.UI_PORT, api_port: city.API_PORT, timezone: city.TIMEZONE, online_mode: city.START_IN_ONLINE_MODE });
     };
-    const handleCreateCity = async () => { try { await fetch('/api/world/cities', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadCities(); setFormData({}); } catch (e) { } };
-    const handleUpdateCity = async () => { try { await fetch(`/api/world/cities/${selectedCity!.CITYID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadCities(); } catch (e) { } };
+    const handleCreateCity = async () => { try { await fetch('/api/world/cities', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadCities(); setFormData({}); } catch (e) { console.error('handleCreateCity failed:', e); } };
+    const handleUpdateCity = async () => { try { await fetch(`/api/world/cities/${selectedCity!.CITYID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadCities(); } catch (e) { console.error('handleUpdateCity failed:', e); } };
     const handleDeleteCity = async () => { if (confirm("この City を削除しますか？")) { await fetch(`/api/world/cities/${selectedCity!.CITYID}`, { method: 'DELETE' }); setSelectedCity(null); setFormData({}); loadCities(); } };
 
     // --- Building Handlers ---
@@ -161,7 +161,7 @@ export default function WorldEditor() {
         // Parse extra prompt files from JSON
         let extraPrompts: string[] = [];
         if (b.EXTRA_PROMPT_FILES) {
-            try { extraPrompts = JSON.parse(b.EXTRA_PROMPT_FILES); } catch { extraPrompts = []; }
+            try { extraPrompts = JSON.parse(b.EXTRA_PROMPT_FILES); } catch (e) { console.error('Failed to parse EXTRA_PROMPT_FILES:', e); extraPrompts = []; }
         }
         // Fetch tools ... (simplified for now to empty list or need separate fetch)
         fetch(`/api/db/tables/building_tool_link`).then(r => r.json()).then(links => {
@@ -169,8 +169,8 @@ export default function WorldEditor() {
             setFormData({ name: b.BUILDINGNAME, description: b.DESCRIPTION, capacity: b.CAPACITY, system_instruction: b.SYSTEM_INSTRUCTION, city_id: b.CITYID, auto_interval: b.AUTO_INTERVAL_SEC, tool_ids: ids, image_path: b.IMAGE_PATH || '', extra_prompt_files: extraPrompts });
         });
     };
-    const handleCreateBuilding = async () => { try { await fetch('/api/world/buildings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, description: formData.description || "", capacity: formData.capacity || 1, system_instruction: formData.system_instruction || "", city_id: formData.city_id, building_id: formData.building_id || null }) }); loadBuildings(); setFormData({}); } catch (e) { } };
-    const handleUpdateBuilding = async () => { try { await fetch(`/api/world/buildings/${selectedBuilding!.BUILDINGID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...formData, tool_ids: formData.tool_ids || [] }) }); loadBuildings(); } catch (e) { } };
+    const handleCreateBuilding = async () => { try { await fetch('/api/world/buildings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, description: formData.description || "", capacity: formData.capacity || 1, system_instruction: formData.system_instruction || "", city_id: formData.city_id, building_id: formData.building_id || null }) }); loadBuildings(); setFormData({}); } catch (e) { console.error('handleCreateBuilding failed:', e); } };
+    const handleUpdateBuilding = async () => { try { await fetch(`/api/world/buildings/${selectedBuilding!.BUILDINGID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...formData, tool_ids: formData.tool_ids || [] }) }); loadBuildings(); } catch (e) { console.error('handleUpdateBuilding failed:', e); } };
     const handleDeleteBuilding = async () => { if (confirm("この Building を削除しますか？")) { await fetch(`/api/world/buildings/${selectedBuilding!.BUILDINGID}`, { method: 'DELETE' }); setSelectedBuilding(null); setFormData({}); loadBuildings(); } };
 
     // --- AI Handlers ---
@@ -183,8 +183,8 @@ export default function WorldEditor() {
             appearance_image_path: ai.APPEARANCE_IMAGE_PATH || ''
         });
     };
-    const handleCreateAI = async () => { try { await fetch('/api/world/ais', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, system_prompt: formData.system_prompt, home_city_id: formData.home_city_id }) }); loadAIs(); setFormData({}); } catch (e) { } };
-    const handleUpdateAI = async () => { try { await fetch(`/api/world/ais/${selectedAI!.AIID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadAIs(); } catch (e) { } };
+    const handleCreateAI = async () => { try { await fetch('/api/world/ais', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, system_prompt: formData.system_prompt, home_city_id: formData.home_city_id }) }); loadAIs(); setFormData({}); } catch (e) { console.error('handleCreateAI failed:', e); } };
+    const handleUpdateAI = async () => { try { await fetch(`/api/world/ais/${selectedAI!.AIID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) }); loadAIs(); } catch (e) { console.error('handleUpdateAI failed:', e); } };
     const handleDeleteAI = async () => { if (confirm("このペルソナを削除しますか？")) { await fetch(`/api/world/ais/${selectedAI!.AIID}`, { method: 'DELETE' }); setSelectedAI(null); setFormData({}); loadAIs(); } };
     const handleMoveAI = async () => {
         if (!selectedAI || !formData.target_building_name) return;
@@ -264,21 +264,21 @@ export default function WorldEditor() {
                     schema_json: detail.schema_json,
                 });
             }
-        } catch (e) { }
+        } catch (e) { console.error('handlePlaybookSelect failed:', e); }
     };
     const handleCreatePlaybook = async () => {
         try {
             const res = await fetch('/api/world/playbooks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) });
             if (!res.ok) { const err = await res.json(); alert(err.detail || 'Error'); return; }
             loadPlaybooks(); setFormData({}); setSelectedPlaybook(null);
-        } catch (e) { }
+        } catch (e) { console.error('handleCreatePlaybook failed:', e); }
     };
     const handleUpdatePlaybook = async () => {
         try {
             const res = await fetch(`/api/world/playbooks/${selectedPlaybook!.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formData) });
             if (!res.ok) { const err = await res.json(); alert(err.detail || 'Error'); return; }
             loadPlaybooks();
-        } catch (e) { }
+        } catch (e) { console.error('handleUpdatePlaybook failed:', e); }
     };
     const handleDeletePlaybook = async () => { if (confirm("この Playbook を削除しますか？")) { await fetch(`/api/world/playbooks/${selectedPlaybook!.id}`, { method: 'DELETE' }); setSelectedPlaybook(null); setFormData({}); loadPlaybooks(); } };
 

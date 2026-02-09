@@ -1,0 +1,21 @@
+.saiverseLink {
+    color: #60a5fa;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    cursor: pointer;
+    transition: color 0.2s;
+}
+
+.saiverseLink:hover {
+    color: #93bbfd;
+    text-decoration-style: solid;
+}
+
+/* ── Light Mode Overrides ── */
+:global([data-theme="light"]) .saiverseLink {
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .saiverseLink:hover {
+    color: #1d4ed8;
+}

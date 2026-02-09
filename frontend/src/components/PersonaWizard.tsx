@@ -200,15 +200,6 @@ export default function PersonaWizard({ isOpen, onClose, onComplete }: PersonaWi
                     <select
                         value={selectedCityId || ''}
                         onChange={(e) => handleCityChange(parseInt(e.target.value))}
-                        style={{
-                            width: '100%',
-                            padding: '0.75rem',
-                            border: '1px solid #444',
-                            borderRadius: '6px',
-                            backgroundColor: '#2a2b2e',
-                            color: '#e0e0e0',
-                            fontSize: '0.95rem',
-                        }}
                     >
                         {cities.map(c => (
                             <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME}</option>

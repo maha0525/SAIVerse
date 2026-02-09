@@ -783,3 +783,182 @@
 .resultState p {
     margin-bottom: 0.75rem;
 }
+
+/* Light Mode Overrides */
+:global([data-theme="light"]) .sidebar {
+    background-color: #ffffff;
+    border-right-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .sidebarHeader {
+    border-bottom-color: #e2e8f0;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .categoryTitle {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .pageItem {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .pageItem:hover {
+    background-color: #f1f5f9;
+    color: #0f172a;
+}
+
+:global([data-theme="light"]) .pageItem.active {
+    background-color: #dbeafe;
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .pageChildren {
+    border-left-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .contentArea {
+    background-color: #f8fafc;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .markdown h1,
+:global([data-theme="light"]) .markdown h2,
+:global([data-theme="light"]) .markdown h3 {
+    color: #0f172a;
+}
+
+:global([data-theme="light"]) .markdown h1 {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .markdown code {
+    background-color: rgba(0, 0, 0, 0.06);
+}
+
+:global([data-theme="light"]) .markdown pre {
+    background-color: #f1f5f9;
+}
+
+:global([data-theme="light"]) .diffContent {
+    background-color: #f8fafc;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .formInput {
+    background-color: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .formTextarea {
+    background-color: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .formGroup label {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .formActions {
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .confirmDialog {
+    background-color: #ffffff;
+    border-color: #e2e8f0;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .confirmDialog p {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .createModal {
+    background-color: #ffffff;
+    border-color: #e2e8f0;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .createModal h3 {
+    color: #1f2937;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .emptyState {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .backButton {
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .chevron:hover {
+    background-color: rgba(0, 0, 0, 0.06);
+}
+
+:global([data-theme="light"]) .historyTitle {
+    color: #1f2937;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .historyEntry {
+    background-color: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .historyEntry:hover {
+    background-color: #f1f5f9;
+    border-color: #cbd5e1;
+}
+
+:global([data-theme="light"]) .historyEntry.selected {
+    background-color: rgba(37, 99, 235, 0.05);
+    border-color: rgba(37, 99, 235, 0.3);
+}
+
+:global([data-theme="light"]) .editType {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .editDate {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .editSource {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .diffHeader {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .diffView {
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .contentKeywords {
+    background-color: rgba(37, 99, 235, 0.05);
+}
+
+:global([data-theme="light"]) .keyword {
+    background-color: rgba(37, 99, 235, 0.1);
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .keywordIcon {
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .pageVividVivid {
+    color: #0f172a;
+}
+
+:global([data-theme="light"]) .pageVividFaint {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .pageVividBuried {
+    color: #cbd5e1;
+}

@@ -321,11 +321,83 @@
 
     .sidebar:not(.open) {
         display: none;
-        /* Or we can use negative margin? 
-           Let's stick to display: none for desktop toggle for now if that's what page logic implies. 
+        /* Or we can use negative margin?
+           Let's stick to display: none for desktop toggle for now if that's what page logic implies.
            But wait, isOpen is passed prop.
            If simple display:none breaks transition, that's fine for desktop toggle.
         */
         display: none;
     }
+}
+
+/* ── Light Mode Overrides ── */
+:global([data-theme="light"]) .sidebar {
+    background: #ffffff;
+    border-left-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .heading {
+    color: #64748b;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .buildingName {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .settingsBtn {
+    background: #f1f5f9;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .settingsBtn:hover {
+    background: #e2e8f0;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .description {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .buildingImage {
+    background: #f1f5f9;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .occupant {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .clickable:hover {
+    background: #f1f5f9;
+}
+
+:global([data-theme="light"]) .occupantAvatar {
+    background: #e2e8f0;
+}
+
+:global([data-theme="light"]) .occupantName {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .empty {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .card {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .card:hover {
+    background: #f1f5f9;
+}
+
+:global([data-theme="light"]) .cardName {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .cardDesc {
+    color: #64748b;
 }

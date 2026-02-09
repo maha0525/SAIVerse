@@ -231,6 +231,11 @@ class ExecNodeDef(BaseModel):
         default=None,
         description="Conditional routing based on state field. If specified, overrides 'next'."
     )
+    error_next: Optional[str] = Field(
+        default=None,
+        description="Node to transition to when sub-playbook execution fails. "
+                    "If not set, normal next/conditional_next is used even on error."
+    )
 
 
 class StelisConfig(BaseModel):
@@ -370,6 +375,7 @@ class ContextRequirements(BaseModel):
 
 class PlaybookSchema(BaseModel):
     name: str = Field(..., pattern=r"^[a-z0-9_]+$")
+    display_name: Optional[str] = Field(default=None, description="Human-readable display name for UI. Falls back to name if not set.")
     description: str
     input_schema: List[InputParam]
     output_schema: Optional[List[str]] = Field(

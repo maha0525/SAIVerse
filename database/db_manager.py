@@ -1,6 +1,9 @@
+import logging
 import gradio as gr
 import pandas as pd
 from sqlalchemy import inspect, DateTime, Integer, Boolean
+
+_log = logging.getLogger(__name__)
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime
@@ -230,8 +233,7 @@ def create_management_tab(model_class, session_factory: sessionmaker):
                     try:
                         value = int(value)
                     except (ValueError, TypeError):
-                        # 変換できない場合はそのまま（エラーはGradio側で発生するかもしれないが、ここでクラッシュするよりは良い）
-                        pass
+                        _log.warning("Failed to convert value %r to int for column %s", value, c.name, exc_info=True)
                 updates.append(gr.update(value=value))
             return updates
 

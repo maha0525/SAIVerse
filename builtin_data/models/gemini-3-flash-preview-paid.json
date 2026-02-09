@@ -1,14 +1,17 @@
 {
   "model": "gemini-3-flash-preview",
-  "display_name": "Gemini 3 Flash (Paid)",
+  "system_prompt": "",
+  "display_name": "Gemini 3 Flash (有料Tier)",
   "provider": "gemini",
-  "context_length": 128000,
+  "context_length": 1000000,
+  "default_max_history_messages": 80,
+  "metabolism_keep_messages": 60,
   "supports_images": true,
   "prefer_paid": true,
   "pricing": {
     "input_per_1m_tokens": 0.5,
     "cached_input_per_1m_tokens": 0.05,
-    "output_per_1m_tokens": 3.00,
+    "output_per_1m_tokens": 3.0,
     "currency": "USD"
   },
   "parameters": {
@@ -23,32 +26,57 @@
     },
     "thinking_level": {
       "type": "dropdown",
-      "options": ["minimal", "low", "medium", "high"],
+      "options": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
       "default": "minimal",
       "label": "Thinking Level",
       "description": "思考の深さ。minimalで高速・安定、highで深い推論。空応答対策にはminimalを推奨。"
     },
     "safety_harassment": {
       "type": "dropdown",
-      "options": ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"],
+      "options": [
+        "BLOCK_NONE",
+        "BLOCK_ONLY_HIGH",
+        "BLOCK_MEDIUM_AND_ABOVE",
+        "BLOCK_LOW_AND_ABOVE"
+      ],
       "default": "BLOCK_NONE",
       "label": "Safety: Harassment"
     },
     "safety_hate_speech": {
       "type": "dropdown",
-      "options": ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"],
+      "options": [
+        "BLOCK_NONE",
+        "BLOCK_ONLY_HIGH",
+        "BLOCK_MEDIUM_AND_ABOVE",
+        "BLOCK_LOW_AND_ABOVE"
+      ],
       "default": "BLOCK_ONLY_HIGH",
       "label": "Safety: Hate Speech"
     },
     "safety_sexually_explicit": {
       "type": "dropdown",
-      "options": ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"],
+      "options": [
+        "BLOCK_NONE",
+        "BLOCK_ONLY_HIGH",
+        "BLOCK_MEDIUM_AND_ABOVE",
+        "BLOCK_LOW_AND_ABOVE"
+      ],
       "default": "BLOCK_NONE",
       "label": "Safety: Sexually Explicit"
     },
     "safety_dangerous_content": {
       "type": "dropdown",
-      "options": ["BLOCK_NONE", "BLOCK_ONLY_HIGH", "BLOCK_MEDIUM_AND_ABOVE", "BLOCK_LOW_AND_ABOVE"],
+      "options": [
+        "BLOCK_NONE",
+        "BLOCK_ONLY_HIGH",
+        "BLOCK_MEDIUM_AND_ABOVE",
+        "BLOCK_LOW_AND_ABOVE"
+      ],
       "default": "BLOCK_ONLY_HIGH",
       "label": "Safety: Dangerous Content"
     }

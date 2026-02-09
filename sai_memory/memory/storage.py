@@ -268,6 +268,25 @@ def get_messages_paginated(conn: sqlite3.Connection, thread_id: str, page: int, 
     return [_row_to_message(row) for row in cur.fetchall()]
 
 
+def get_messages_from_id(
+    conn: sqlite3.Connection, thread_id: str, from_message_id: str
+) -> List[Message]:
+    """Fetch messages from (including) the given message_id onwards.
+
+    Uses a subquery to find the anchor message's created_at timestamp,
+    then returns all messages in the thread at or after that time.
+    """
+    cur = conn.execute(
+        "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+        "FROM messages "
+        "WHERE thread_id = ? AND created_at >= ("
+        "  SELECT created_at FROM messages WHERE id = ?"
+        ") ORDER BY created_at ASC",
+        (thread_id, from_message_id),
+    )
+    return [_row_to_message(row) for row in cur.fetchall()]
+
+
 def get_messages_by_resource(conn: sqlite3.Connection, resource_id: str) -> List[Message]:
     cur = conn.execute(
         "SELECT id, thread_id, role, content, resource_id, created_at, metadata FROM messages WHERE resource_id=? ORDER BY created_at ASC",
@@ -521,7 +540,7 @@ def _render_stelis_anchor_full(
             lines.append("## Chronicle")
             lines.append(stelis.chronicle_summary)
 
-        # Recent messages (last 3)
+        # Recent messages (last 3, full content)
         recent_msgs = get_messages_last(conn, stelis_thread_id, 3)
         if recent_msgs:
             lines.append("")
@@ -529,8 +548,6 @@ def _render_stelis_anchor_full(
             for msg in recent_msgs:
                 role = "assistant" if msg.role == "model" else msg.role
                 content = (msg.content or "").strip()
-                if len(content) > 200:
-                    content = content[:197] + "..."
                 if content:
                     lines.append(f"[{role}]: {content}")
     else:

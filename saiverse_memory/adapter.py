@@ -327,6 +327,57 @@ class SAIMemoryAdapter:
                 break
         return selected
 
+    def persona_messages_from_anchor(
+        self,
+        anchor_message_id: str,
+        *,
+        required_tags: Optional[List[str]] = None,
+        pulse_id: Optional[str] = None,
+    ) -> List[dict]:
+        """Get persona messages from anchor message onwards.
+
+        Uses an efficient SQL query to fetch only messages at or after
+        the anchor's timestamp, keeping the context window prefix stable
+        for LLM cache optimization.
+        """
+        if not self._ready:
+            return []
+        thread_id = self._thread_id(None)
+        try:
+            with self._db_lock:
+                from sai_memory.memory.storage import get_messages_from_id
+                rows = get_messages_from_id(self.conn, thread_id, anchor_message_id)
+                payloads = [self._payload_from_message_locked(msg, viewing_thread_id=thread_id) for msg in rows]
+        except Exception as exc:
+            LOGGER.warning("Failed to fetch persona messages from anchor %s: %s", anchor_message_id, exc)
+            return []
+
+        # Tag filtering (same logic as recent_persona_messages_by_count)
+        selected: List[dict] = []
+        required_tags = required_tags or []
+        pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
+
+        for payload in payloads:  # already in chronological order
+            tags = []
+            metadata = payload.get("metadata")
+            if isinstance(metadata, dict):
+                raw_tags = metadata.get("tags")
+                if isinstance(raw_tags, list):
+                    tags = [str(tag) for tag in raw_tags if tag]
+
+            include = True
+            if required_tags:
+                include = any(tag in tags for tag in required_tags)
+            if pulse_tag and pulse_tag in tags:
+                include = True
+            if not tags and required_tags:
+                include = not required_tags or "conversation" not in required_tags
+            if not include:
+                continue
+            selected.append(payload)
+
+        return selected
+
     def recent_persona_messages_balanced(
         self,
         max_chars: int,

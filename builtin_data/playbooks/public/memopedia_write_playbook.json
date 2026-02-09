@@ -1,5 +1,6 @@
 {
     "name": "memopedia_write",
+    "display_name": "メモペディア作成",
     "description": "記憶を調査してMemopediaページを生成・更新する（Deep Research方式）",
     "input_schema": [
         {
@@ -9,12 +10,16 @@
     ],
     "context_requirements": {
         "history_depth": "10messages",
+        "history_balanced": false,
+        "include_internal": false,
+        "system_prompt": true,
+        "memory_weave": true,
+        "working_memory": false,
         "inventory": true,
         "building_items": true,
-        "system_prompt": true,
         "available_playbooks": false,
         "visual_context": false,
-        "memory_weave": true
+        "realtime_context": true
     },
     "router_callable": true,
     "nodes": [

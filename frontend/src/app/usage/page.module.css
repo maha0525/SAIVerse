@@ -252,3 +252,92 @@
         padding: 1rem;
     }
 }
+
+/* ===== Light Mode Overrides ===== */
+:global([data-theme="light"]) .container {
+    background-color: #f8fafc;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .header {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .title {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .backButton {
+    border-color: #e2e8f0;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .backButton:hover {
+    background: #f1f5f9;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .refreshButton {
+    border-color: #e2e8f0;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .refreshButton:hover {
+    background: #f1f5f9;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .filterGroup label {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .select {
+    background: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .select:focus {
+    border-color: #3b82f6;
+}
+
+:global([data-theme="light"]) .card {
+    background: #ffffff;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .cardLabel {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .chartContainer {
+    background: #ffffff;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .chartTitle {
+    color: #475569;
+}
+
+:global([data-theme="light"]) .noData {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .categorySection {
+    background: #ffffff;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .categoryCard {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .categoryName {
+    color: #1f2937;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .statLabel {
+    color: #64748b;
+}

@@ -139,3 +139,9 @@
         transform: rotate(360deg);
     }
 }
+
+/* ── Light Mode Overrides ── */
+:global([data-theme="light"]) .menu {
+    background-color: #ffffff;
+    border-color: #e2e8f0;
+}

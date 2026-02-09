@@ -77,7 +77,8 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                     if (building.EXTRA_PROMPT_FILES) {
                         try {
                             setExtraPromptFiles(JSON.parse(building.EXTRA_PROMPT_FILES));
-                        } catch {
+                        } catch (e) {
+                            console.error('Failed to parse EXTRA_PROMPT_FILES:', e);
                             setExtraPromptFiles([]);
                         }
                     } else {

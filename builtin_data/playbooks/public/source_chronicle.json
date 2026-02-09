@@ -1,0 +1,272 @@
+{
+    "name": "source_chronicle",
+    "description": "Chronicle（あらすじ）を検索し、目的に関連する出来事の記録を構造化された調査結果として返す",
+    "input_schema": [
+        {
+            "name": "objective",
+            "param_type": "string",
+            "source": "parent.objective",
+            "description": "What to find"
+        },
+        {
+            "name": "context_text",
+            "param_type": "string",
+            "source": "parent.context_text",
+            "description": "Pre-resolved context from URIs"
+        },
+        {
+            "name": "depth",
+            "param_type": "string",
+            "source": "parent.depth",
+            "description": "shallow/normal/deep"
+        },
+        {
+            "name": "max_iterations",
+            "param_type": "number",
+            "source": "parent.max_iterations",
+            "description": "Max search iterations"
+        }
+    ],
+    "output_schema": [
+        "research_result"
+    ],
+    "context_requirements": {
+        "history_depth": "5messages",
+        "history_balanced": false,
+        "include_internal": false,
+        "system_prompt": true,
+        "memory_weave": true,
+        "working_memory": false,
+        "inventory": false,
+        "building_items": false,
+        "available_playbooks": false,
+        "visual_context": false,
+        "realtime_context": true
+    },
+    "router_callable": false,
+    "user_selectable": false,
+    "nodes": [
+        {
+            "id": "init",
+            "type": "set",
+            "assignments": {
+                "iterations": 0,
+                "accumulated_info": ""
+            },
+            "next": "generate_params"
+        },
+        {
+            "id": "generate_params",
+            "type": "llm",
+            "model_type": "lightweight",
+            "action": "Chronicle（あらすじ）検索のパラメータを生成してください。\n\n## 調査目的\n{objective}\n\n## 補足コンテキスト\n{context_text}\n\n## これまでに収集した情報\n{accumulated_info}\n\n## 現在のイテレーション\n{iterations} / {max_iterations}\n\nChronicleは会話の要約記録です。以下のパラメータを生成してください:\n- query: 検索キーワード\n- start_date / end_date: 時期が分かっている場合のみ YYYY-MM-DD 形式（不要なら空文字）\n- level: Chronicleのレベル（1=詳細なあらすじ、2=統合要約、不要なら0）\n\nイテレーションが2回目以降の場合、前回と異なる切り口を試してください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search keyword"
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start date (YYYY-MM-DD) or empty"
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "End date (YYYY-MM-DD) or empty"
+                    },
+                    "level": {
+                        "type": "integer",
+                        "description": "Chronicle level (1=detail, 2=consolidated, 0=any)"
+                    }
+                },
+                "required": [
+                    "query"
+                ]
+            },
+            "output_key": "search_params",
+            "next": "search"
+        },
+        {
+            "id": "search",
+            "type": "tool",
+            "action": "chronicle_search",
+            "args_input": {
+                "query": "search_params.query",
+                "start_date": "search_params.start_date",
+                "end_date": "search_params.end_date",
+                "level": "search_params.level",
+                "max_results": 10
+            },
+            "output_key": "search_results",
+            "next": "select_entry"
+        },
+        {
+            "id": "select_entry",
+            "type": "llm",
+            "model_type": "lightweight",
+            "action": "検索結果から、調査目的「{objective}」に最も関連するChronicleエントリを1件選んでください。\n\n検索結果:\n{search_results}\n\nエントリIDはカッコ内のUUID文字列全体です（例: (abcd1234-5678-90ab-cdef-1234567890ab)）。必ずUUID全体をコピーしてください。\n関連するエントリがない場合はentry_idを空文字にしてください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "entry_id": {
+                        "type": "string",
+                        "description": "Selected entry ID (or empty if none relevant)"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Reason for selection"
+                    }
+                },
+                "required": [
+                    "entry_id"
+                ]
+            },
+            "output_key": "entry_selection",
+            "next": "check_entry"
+        },
+        {
+            "id": "check_entry",
+            "type": "pass",
+            "conditional_next": {
+                "field": "entry_selection.entry_id",
+                "operator": "eq",
+                "cases": {
+                    "": "evaluate",
+                    "default": "read_detail"
+                }
+            }
+        },
+        {
+            "id": "read_detail",
+            "type": "tool",
+            "action": "chronicle_read_detail",
+            "args_input": {
+                "entry_id": "entry_selection.entry_id",
+                "include_sources": true,
+                "max_source_messages": 15
+            },
+            "output_key": "entry_detail",
+            "next": "accumulate"
+        },
+        {
+            "id": "accumulate",
+            "type": "set",
+            "assignments": {
+                "accumulated_info": "{accumulated_info}\n\n---\nEntry: {entry_selection.entry_id}\n{entry_detail}"
+            },
+            "next": "evaluate"
+        },
+        {
+            "id": "evaluate",
+            "type": "llm",
+            "action": "調査目的に対して、Chronicleから収集した情報を評価し、構造化された調査結果を生成してください。\n\n## 調査目的\n{objective}\n\n## 検索結果（一覧）\n{search_results}\n\n## 読み込んだエントリの詳細\n{accumulated_info}\n\n## 評価基準\n- status: 目的に合致する情報が見つかったか（found/partial/not_found）\n- summary: 発見内容の簡潔なまとめ\n- findings: 各発見の詳細（source_refはsaiverse://self/chronicle/entry/<entry_id>形式）\n- confidence: 結果の確信度\n\nChronicleの記録から目的に関連する出来事や情報を抽出してください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "found",
+                            "partial",
+                            "not_found"
+                        ]
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Concise summary of findings"
+                    },
+                    "findings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source_ref": {
+                                    "type": "string",
+                                    "description": "SAIVerse URI of the source"
+                                },
+                                "excerpt": {
+                                    "type": "string",
+                                    "description": "Relevant excerpt"
+                                },
+                                "relevance": {
+                                    "type": "string",
+                                    "enum": [
+                                        "high",
+                                        "medium",
+                                        "low"
+                                    ]
+                                }
+                            },
+                            "required": [
+                                "source_ref",
+                                "excerpt",
+                                "relevance"
+                            ]
+                        }
+                    },
+                    "confidence": {
+                        "type": "string",
+                        "enum": [
+                            "high",
+                            "medium",
+                            "low"
+                        ]
+                    }
+                },
+                "required": [
+                    "status",
+                    "summary",
+                    "findings",
+                    "confidence"
+                ]
+            },
+            "memorize": {
+                "tags": [
+                    "internal",
+                    "research"
+                ]
+            },
+            "output_key": "research_result",
+            "next": "check_done"
+        },
+        {
+            "id": "check_done",
+            "type": "pass",
+            "conditional_next": {
+                "field": "research_result.status",
+                "operator": "eq",
+                "cases": {
+                    "found": "done",
+                    "default": "check_iterations"
+                }
+            }
+        },
+        {
+            "id": "check_iterations",
+            "type": "pass",
+            "conditional_next": {
+                "field": "iterations",
+                "operator": "gte",
+                "cases": {
+                    "{max_iterations}": "done",
+                    "default": "inc"
+                }
+            }
+        },
+        {
+            "id": "inc",
+            "type": "set",
+            "assignments": {
+                "iterations": "={iterations} + 1"
+            },
+            "next": "generate_params"
+        },
+        {
+            "id": "done",
+            "type": "pass",
+            "next": null
+        }
+    ],
+    "start_node": "init"
+}

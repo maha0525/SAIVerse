@@ -1,48 +1,54 @@
 {
-  "name": "meta_auto",
-  "description": "テスト用: 状況取得 → 終了判断",
-  "input_schema": [
-    {
-      "name": "input",
-      "description": "Trigger input (usually empty)",
-      "source": null
-    }
-  ],
-  "output_schema": null,
-  "context_requirements": {
-    "history_depth": 0,
-    "inventory": false,
-    "building_items": false,
-    "system_prompt": false,
-    "working_memory": true
-  },
-  "router_callable": false,
-  "user_selectable": false,
-  "nodes": [
-    {
-      "id": "ingest_messages",
-      "type": "tool",
-      "action": "get_building_messages",
-      "args": {},
-      "output_key": "perception_summary",
-      "next": "detect_situation"
+    "name": "meta_auto",
+    "description": "テスト用: 状況取得 → 終了判断",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "Trigger input (usually empty)",
+            "source": null
+        }
+    ],
+    "output_schema": null,
+    "context_requirements": {
+        "history_depth": 0,
+        "history_balanced": false,
+        "include_internal": false,
+        "system_prompt": false,
+        "memory_weave": true,
+        "working_memory": true,
+        "inventory": false,
+        "building_items": false,
+        "available_playbooks": false,
+        "visual_context": false,
+        "realtime_context": true
     },
-    {
-      "id": "detect_situation",
-      "type": "subplay",
-      "playbook": "sub_detect_situation_change",
-      "input_template": "",
-      "propagate_output": false,
-      "next": "finalize"
-    },
-    {
-      "id": "finalize",
-      "type": "subplay",
-      "playbook": "sub_finalize_auto",
-      "input_template": "",
-      "propagate_output": false,
-      "next": null
-    }
-  ],
-  "start_node": "ingest_messages"
+    "router_callable": false,
+    "user_selectable": false,
+    "nodes": [
+        {
+            "id": "ingest_messages",
+            "type": "tool",
+            "action": "get_building_messages",
+            "args": {},
+            "output_key": "perception_summary",
+            "next": "detect_situation"
+        },
+        {
+            "id": "detect_situation",
+            "type": "subplay",
+            "playbook": "sub_detect_situation_change",
+            "input_template": "",
+            "propagate_output": false,
+            "next": "finalize"
+        },
+        {
+            "id": "finalize",
+            "type": "subplay",
+            "playbook": "sub_finalize_auto",
+            "input_template": "",
+            "propagate_output": false,
+            "next": null
+        }
+    ],
+    "start_node": "ingest_messages"
 }

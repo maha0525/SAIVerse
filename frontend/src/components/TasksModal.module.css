@@ -289,3 +289,109 @@
     height: 100%;
     color: #666;
 }
+
+/* ===== Light Mode Overrides ===== */
+:global([data-theme="light"]) .modal {
+    background-color: #ffffff;
+    border-color: #e2e8f0;
+    color: #1f2937;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+}
+
+:global([data-theme="light"]) .header {
+    background-color: #f1f5f9;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .title {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .closeButton {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .sidebar {
+    background-color: #f8fafc;
+    border-right-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .sidebarHeader {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .taskItem {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .taskItem:hover {
+    background-color: #f1f5f9;
+}
+
+:global([data-theme="light"]) .taskItem.selected {
+    background-color: #dbeafe;
+    color: #1e40af;
+}
+
+:global([data-theme="light"]) .taskItem.selected .taskItemMeta {
+    color: #3b82f6;
+}
+
+:global([data-theme="light"]) .taskItemMeta {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .mainArea {
+    background-color: #ffffff;
+}
+
+:global([data-theme="light"]) .detailsTitle {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .detailsMeta {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .sectionTitle {
+    color: #2563eb;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .stepItem {
+    background-color: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .stepDesc {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .historyList {
+    background-color: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .historyItem {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .historyMeta {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .label {
+    color: #475569;
+}
+
+:global([data-theme="light"]) .input,
+:global([data-theme="light"]) .textarea,
+:global([data-theme="light"]) .select {
+    background-color: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .emptyState {
+    color: #94a3b8;
+}

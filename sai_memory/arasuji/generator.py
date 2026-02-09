@@ -27,6 +27,27 @@ from sai_memory.arasuji.context import (
 
 LOGGER = logging.getLogger(__name__)
 
+
+def _record_llm_usage(client, persona_id: Optional[str], node_type: str) -> None:
+    """Record LLM usage from the client to usage tracker."""
+    try:
+        usage = client.consume_usage()
+        if usage:
+            from usage_tracker import get_usage_tracker
+            get_usage_tracker().record_usage(
+                model_id=usage.model,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_tokens=usage.cached_tokens,
+                cache_write_tokens=usage.cache_write_tokens,
+                cache_ttl=usage.cache_ttl,
+                persona_id=persona_id,
+                node_type=node_type,
+                category="memory_weave_generate",
+            )
+    except Exception as e:
+        LOGGER.warning(f"Failed to record chronicle usage: {e}")
+
 # Default settings
 DEFAULT_BATCH_SIZE = 20  # messages per level-1 arasuji
 DEFAULT_CONSOLIDATION_SIZE = 10  # entries per higher-level arasuji
@@ -113,6 +134,7 @@ def generate_level1_arasuji(
     include_timestamp: bool = True,
     memopedia_context: Optional[str] = None,
     debug_log_path: Optional[Path] = None,
+    persona_id: Optional[str] = None,
 ) -> Optional[ArasujiEntry]:
     """Generate a level-1 arasuji from messages.
 
@@ -205,6 +227,7 @@ def generate_level1_arasuji(
             messages=[{"role": "user", "content": prompt}],
             tools=[],
         )
+        _record_llm_usage(client, persona_id, "chronicle_level1")
 
         # Debug log: write response
         if debug_log_path:
@@ -264,6 +287,7 @@ def generate_consolidated_arasuji(
     *,
     dry_run: bool = False,
     include_timestamp: bool = True,
+    persona_id: Optional[str] = None,
 ) -> Optional[ArasujiEntry]:
     """Generate a consolidated arasuji from lower-level entries.
 
@@ -341,6 +365,7 @@ def generate_consolidated_arasuji(
             messages=[{"role": "user", "content": prompt}],
             tools=[],
         )
+        _record_llm_usage(client, persona_id, f"chronicle_level{target_level}")
 
         if not response or not response.strip():
             LOGGER.warning(f"Empty response from LLM for level-{target_level} arasuji")
@@ -402,6 +427,7 @@ def maybe_consolidate(
     *,
     dry_run: bool = False,
     include_timestamp: bool = True,
+    persona_id: Optional[str] = None,
 ) -> List[ArasujiEntry]:
     """Check if consolidation is needed at a level and perform it recursively.
 
@@ -433,6 +459,7 @@ def maybe_consolidate(
             target_level=level + 1,
             dry_run=dry_run,
             include_timestamp=include_timestamp,
+            persona_id=persona_id,
         )
 
         if entry:
@@ -446,6 +473,7 @@ def maybe_consolidate(
                 consolidation_size=consolidation_size,
                 dry_run=dry_run,
                 include_timestamp=include_timestamp,
+                persona_id=persona_id,
             )
             created.extend(higher)
 
@@ -464,6 +492,7 @@ class ArasujiGenerator:
         consolidation_size: int = DEFAULT_CONSOLIDATION_SIZE,
         include_timestamp: bool = True,
         memopedia_context: Optional[str] = None,
+        persona_id: Optional[str] = None,
     ):
         """Initialize the generator.
 
@@ -474,6 +503,7 @@ class ArasujiGenerator:
             consolidation_size: Number of entries per higher-level arasuji
             include_timestamp: If False, omit timestamps from prompts (useful when dates are unreliable)
             memopedia_context: Optional semantic memory context (page titles, summaries, keywords)
+            persona_id: Optional persona ID for usage tracking
         """
         self.client = client
         self.conn = conn
@@ -481,6 +511,7 @@ class ArasujiGenerator:
         self.consolidation_size = consolidation_size
         self.include_timestamp = include_timestamp
         self.memopedia_context = memopedia_context
+        self.persona_id = persona_id
         self.debug_log_path = None  # Can be set externally
 
     def generate_from_messages(
@@ -543,6 +574,7 @@ class ArasujiGenerator:
                 include_timestamp=self.include_timestamp,
                 memopedia_context=self.memopedia_context,
                 debug_log_path=self.debug_log_path,
+                persona_id=self.persona_id,
             )
 
             if entry:
@@ -555,6 +587,7 @@ class ArasujiGenerator:
                     consolidation_size=self.consolidation_size,
                     dry_run=dry_run,
                     include_timestamp=self.include_timestamp,
+                    persona_id=self.persona_id,
                 )
                 consolidated_entries.extend(consolidated)
 

@@ -57,6 +57,11 @@ export default function ImageUpload({
         }
     };
 
+    const isDark = typeof document !== 'undefined' && document.documentElement.dataset.theme === 'dark';
+    const bgColor = isDark ? '#1f2937' : '#f1f5f9';
+    const borderColor = isDark ? '#4b5563' : '#cbd5e1';
+    const placeholderColor = isDark ? '#9ca3af' : '#64748b';
+
     return (
         <div
             className={className}
@@ -67,8 +72,8 @@ export default function ImageUpload({
                 cursor: 'pointer',
                 borderRadius: circle ? '50%' : '8px',
                 overflow: 'hidden',
-                border: '2px dashed #4b5563',
-                backgroundColor: '#1f2937',
+                border: `2px dashed ${borderColor}`,
+                backgroundColor: bgColor,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
@@ -76,7 +81,7 @@ export default function ImageUpload({
             }}
             onClick={handleClick}
             onMouseEnter={e => { e.currentTarget.style.borderColor = '#6366f1'; }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor = '#4b5563'; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = borderColor; }}
         >
             <input
                 type="file"
@@ -99,7 +104,7 @@ export default function ImageUpload({
                     onError={(e) => { e.currentTarget.style.display = 'none'; }}
                 />
             ) : (
-                <div style={{ color: '#9ca3af', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+                <div style={{ color: placeholderColor, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
                     <ImageIcon size={20} />
                     <span style={{ fontSize: '10px' }}>{placeholder}</span>
                 </div>

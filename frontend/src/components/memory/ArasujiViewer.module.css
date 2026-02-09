@@ -751,3 +751,230 @@
     background-color: rgba(77, 171, 247, 0.25);
     border-color: rgba(77, 171, 247, 0.5);
 }
+
+/* Light Mode Overrides */
+:global([data-theme="light"]) .sidebar {
+    background-color: #ffffff;
+    border-right-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .sidebarHeader {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .headerContent {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .statsInfo {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .filterRow {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .levelSelect {
+    background-color: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .entryItem {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .entryItem:hover {
+    background-color: #f1f5f9;
+}
+
+:global([data-theme="light"]) .entryItem.active {
+    background-color: #dbeafe;
+    border-left-color: #2563eb;
+}
+
+:global([data-theme="light"]) .entryPreview {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .entryStats {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .timeRange {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .levelBadge {
+    background-color: #e2e8f0;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .deleteBtn {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .deleteBtn:hover {
+    color: #ef4444;
+    background-color: rgba(239, 68, 68, 0.1);
+}
+
+:global([data-theme="light"]) .mainArea {
+    background-color: #f8fafc;
+}
+
+:global([data-theme="light"]) .detailHeader {
+    background-color: #ffffff;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .headerTitle {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .detailMeta {
+    background-color: #f8fafc;
+}
+
+:global([data-theme="light"]) .metaLabel {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .contentSection {
+    background-color: #ffffff;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .contentText {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .sourceSection {
+    background-color: #ffffff;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .sourceSectionTitle {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .sourceArasujiItem {
+    background-color: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .sourceArasujiItem:hover {
+    background-color: #f1f5f9;
+    border-color: #2563eb;
+}
+
+:global([data-theme="light"]) .sourceArasujiTime {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .sourceArasujiPreview {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .sourceArasujiId {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .sourceArasujiMissing {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .sourceMessageItem {
+    background-color: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .sourceMessageRole {
+    background-color: #e2e8f0;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .sourceMessageRole.user {
+    background-color: rgba(37, 99, 235, 0.1);
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .sourceMessageRole.assistant,
+:global([data-theme="light"]) .sourceMessageRole.model {
+    background-color: rgba(22, 163, 74, 0.1);
+    color: #16a34a;
+}
+
+:global([data-theme="light"]) .sourceMessageRole.system {
+    background-color: rgba(234, 179, 8, 0.15);
+    color: #b45309;
+}
+
+:global([data-theme="light"]) .sourceMessageTime {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .sourceMessageContent {
+    color: #374151;
+}
+
+:global([data-theme="light"]) .emptyState {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .hint {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .backButton {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .modal {
+    background-color: #ffffff;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .modal h3 {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .formGroup label {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .formGroup input[type="number"] {
+    background-color: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .formGroup .hint {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .checkboxLabel {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .modalActions {
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .cancelBtn {
+    background-color: #f1f5f9;
+    border-color: #e2e8f0;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .cancelBtn:hover {
+    background-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .loadingMessages {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .offsetHint {
+    color: #64748b;
+}

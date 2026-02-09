@@ -140,7 +140,7 @@ class OllamaClient(LLMClient):
                     logging.info("Using Ollama base: %s (v1)", base)
                     return base
             except Exception:
-                pass
+                logging.debug("Ollama probe failed for %s/v1/models", base, exc_info=True)
             try:
                 url_legacy = f"{base}/api/version"
                 response_legacy = requests.get(url_legacy, timeout=(2, 2))
@@ -148,6 +148,7 @@ class OllamaClient(LLMClient):
                     logging.info("Using Ollama base: %s (legacy)", base)
                     return base
             except Exception:
+                logging.debug("Ollama probe failed for %s/api/version", base, exc_info=True)
                 continue
         logging.warning("No responsive Ollama endpoint detected during probe")
         return None

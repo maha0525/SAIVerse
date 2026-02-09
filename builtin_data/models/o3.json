@@ -1,0 +1,45 @@
+{
+  "model": "o3",
+  "system_prompt": "",
+  "display_name": "o3",
+  "provider": "openai",
+  "context_length": 200000,
+  "default_max_history_messages": 40,
+  "metabolism_keep_messages": 20,
+  "supports_images": true,
+  "parameters": {
+    "temperature": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.1,
+      "default": 1,
+      "label": "Temperature",
+      "description": "0 is deterministic, higher values add randomness."
+    },
+    "top_p": {
+      "type": "float",
+      "min": 0,
+      "max": 1,
+      "step": 0.05,
+      "default": 1.0,
+      "label": "Top P",
+      "description": "Nucleus sampling threshold."
+    },
+    "max_completion_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 4096,
+      "step": 1,
+      "default": 4096,
+      "label": "Max completion tokens",
+      "description": "Upper bound on reply length."
+    }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 2,
+    "cached_input_per_1m_tokens": 0.5,
+    "output_per_1m_tokens": 8.0,
+    "currency": "USD"
+  }
+}

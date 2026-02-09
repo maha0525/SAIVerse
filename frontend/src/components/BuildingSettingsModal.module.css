@@ -272,6 +272,91 @@
     cursor: not-allowed;
 }
 
+/* ── Light Mode Overrides ── */
+:global([data-theme="light"]) .modal {
+    background: #ffffff;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .header {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .header h2 {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .closeBtn {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .closeBtn:hover {
+    color: #1f2937;
+    background: #e2e8f0;
+}
+
+:global([data-theme="light"]) .loading {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .error {
+    background: #fef2f2;
+    color: #dc2626;
+}
+
+:global([data-theme="light"]) .field label {
+    color: #475569;
+}
+
+:global([data-theme="light"]) .hint {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .toolItem {
+    color: #475569;
+}
+
+:global([data-theme="light"]) .promptItem select {
+    background: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .field input[type="text"],
+:global([data-theme="light"]) .field input[type="number"],
+:global([data-theme="light"]) .field select,
+:global([data-theme="light"]) .field textarea {
+    background: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .toolGrid {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .toolItem {
+    background: #ffffff;
+}
+
+:global([data-theme="light"]) .toolItem:hover {
+    background: #f1f5f9;
+}
+
+:global([data-theme="light"]) .actions {
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .addBtn {
+    background: #f1f5f9;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .addBtn:hover {
+    background: #e2e8f0;
+}
+
 /* Mobile */
 @media (max-width: 640px) {
     .modal {

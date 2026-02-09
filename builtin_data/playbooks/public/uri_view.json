@@ -1,0 +1,72 @@
+{
+    "name": "uri_view",
+    "display_name": "URI閲覧",
+    "description": "URIで指定されたリソースの内容を閲覧する。アイテム、Memopediaページ、過去のメッセージ、Chronicleなど。「見せて」「読んで」「確認して」系の要求のうち、item_actionでは対応しきれない広範なリソースに対応。",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "ユーザーの要求"
+        }
+    ],
+    "context_requirements": {
+        "history_depth": "full",
+        "history_balanced": false,
+        "include_internal": false,
+        "system_prompt": true,
+        "memory_weave": true,
+        "working_memory": false,
+        "inventory": true,
+        "building_items": true,
+        "available_playbooks": false,
+        "visual_context": false,
+        "realtime_context": true
+    },
+    "router_callable": true,
+    "user_selectable": false,
+    "nodes": [
+        {
+            "id": "analyze",
+            "type": "llm",
+            "action": "ユーザーの要求から、閲覧すべきリソースのSAIVerse URIを特定してください。\n\n## ユーザーの要求\n{input}\n\n## URI構築の手がかり\n- 自分のペルソナID: コンテキストのシステムプロンプトに記載\n- インベントリ・建物アイテム: コンテキストに記載のアイテムID\n- Memopedia: タイトルで指定 → saiverse://self/memopedia/page?title=タイトル\n- 過去ログ: saiverse://self/messagelog/msg/recent?depth=N または saiverse://self/messagelog/msg?contain=テキスト\n- Chronicle: saiverse://self/chronicle/recent?depth=N または saiverse://self/chronicle/entry?contain=テキスト\n- アイテム: saiverse://item/{item_id}/content\n- PDF: saiverse://item/{item_id}/content?pages=1-3\n\n## 注意\n- 「self」は自分のリソースに自動解決されます\n- アイテムはitem_idを使ってURI構築してください（インベントリや建物アイテム一覧から確認可能）\n- 複数のURIが必要な場合はカンマ区切りで指定",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "uri": {
+                        "type": "string",
+                        "description": "閲覧するSAIVerse URI（複数の場合はカンマ区切り）"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "何を閲覧するかの説明"
+                    }
+                },
+                "required": [
+                    "uri",
+                    "description"
+                ]
+            },
+            "output_key": "view_target",
+            "next": "resolve"
+        },
+        {
+            "id": "resolve",
+            "type": "tool",
+            "action": "resolve_uri",
+            "args_input": {
+                "uris": "view_target.uri",
+                "max_total_chars": 12000
+            },
+            "output_key": "resolved_content",
+            "next": "save_results"
+        },
+        {
+            "id": "save_results",
+            "type": "memorize",
+            "action": "<system>\nサブプレイブック実行結果 (uri_view)\n\n## 閲覧対象\n{view_target.description}\n\n## 取得した内容\n{resolved_content}\n\n## 注意\n- 内容をそのまま丸写しするのではなく、ユーザーの要求に合わせて適切にまとめて伝えてください\n- 元の要求が「見せて」なら内容を提示、「要約して」なら要約、「確認して」なら確認結果を報告\n\n※この結果はユーザーには見えていません。\n</system>",
+            "role": "user",
+            "tags": ["uri_view", "save_results"],
+            "next": null
+        }
+    ],
+    "start_node": "analyze"
+}

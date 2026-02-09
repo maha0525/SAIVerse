@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from api.deps import get_manager
+from api.deps import get_manager, avatar_path_to_url
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 
@@ -40,6 +40,8 @@ class ChatMessage(BaseModel):
     sender: Optional[str] = None
     avatar: Optional[str] = None
     images: Optional[List[ChatMessageImage]] = None
+    reasoning: Optional[str] = None
+    activity_trace: Optional[List[dict]] = None
     llm_usage: Optional[ChatMessageLLMUsage] = None
     llm_usage_total: Optional[ChatMessageLLMUsageTotal] = None
 
@@ -196,24 +198,7 @@ def get_chat_history(
                 persona = manager.personas.get(pid)
                 if persona:
                     sender = persona.persona_name
-                    # Use same avatar handling logic as info.py to support both file paths and API URLs
-                    avatar_path = persona.avatar_image
-                    if avatar_path:
-                        if avatar_path.startswith("user_data/icons/"):
-                            # Convert user_data/icons path to API URL
-                            avatar = "/api/static/user_icons/" + avatar_path[len("user_data/icons/"):]
-                        elif avatar_path.startswith("builtin_data/icons/"):
-                            # Convert builtin_data/icons path to API URL
-                            avatar = "/api/static/builtin_icons/" + avatar_path[len("builtin_data/icons/"):]
-                        elif avatar_path.startswith("assets/"):
-                            # Convert legacy assets path to API URL
-                            avatar = "/api/static/" + avatar_path[7:]
-                        else:
-                            # If avatar already starts with /api/ or other format, use it as-is
-                            avatar = avatar_path
-                    else:
-                        # Fallback if no avatar set
-                        avatar = "/api/static/builtin_icons/host.png"
+                    avatar = avatar_path_to_url(persona.avatar_image) or "/api/static/builtin_icons/host.png"
             else:
                 sender = "Assistant"
         elif role == "host":
@@ -274,6 +259,16 @@ def get_chat_history(
                     models_used=total_raw.get("models_used", []),
                 )
 
+        # Extract reasoning (thinking) from metadata
+        reasoning_data = None
+        if metadata and "reasoning" in metadata:
+            reasoning_data = metadata["reasoning"]
+
+        # Extract activity trace from metadata
+        activity_trace_data = None
+        if metadata and "activity_trace" in metadata:
+            activity_trace_data = metadata["activity_trace"]
+
         final_response.append(ChatMessage(
             id=message_id,
             role=role,
@@ -282,6 +277,8 @@ def get_chat_history(
             sender=sender,
             avatar=avatar,
             images=images_list,
+            reasoning=reasoning_data,
+            activity_trace=activity_trace_data,
             llm_usage=llm_usage_data,
             llm_usage_total=llm_usage_total_data
         ))
@@ -354,7 +351,8 @@ def _store_uploaded_attachment(base64_data: str) -> Optional[Dict[str, str]]:
 # File type detection constants
 TEXT_EXTENSIONS = {'txt', 'md', 'py', 'js', 'ts', 'tsx', 'json', 'yaml', 'yml', 'csv',
                    'html', 'css', 'xml', 'log', 'sh', 'bat', 'sql', 'java', 'c', 'cpp',
-                   'h', 'hpp', 'go', 'rs', 'rb', 'swift', 'kt', 'scala', 'r', 'lua', 'pl'}
+                   'h', 'hpp', 'go', 'rs', 'rb', 'swift', 'kt', 'scala', 'r', 'lua', 'pl',
+                   'pdf'}
 IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'}
 
 def _store_image_attachment(
@@ -415,10 +413,21 @@ def _store_document_attachment(
     dest_path.write_bytes(data)
 
     # Read content for summary
-    try:
-        content = data.decode('utf-8')
-    except UnicodeDecodeError:
-        content = data.decode('utf-8', errors='replace')
+    is_pdf = att.filename.lower().endswith('.pdf') or att.mime_type == 'application/pdf'
+    if is_pdf:
+        try:
+            import fitz  # PyMuPDF
+            doc = fitz.open(stream=data, filetype="pdf")
+            text_parts = [page.get_text() for page in doc[:5]]  # first 5 pages for summary
+            content = "\n".join(text_parts)
+            doc.close()
+        except Exception:
+            content = "(PDF text extraction failed)"
+    else:
+        try:
+            content = data.decode('utf-8')
+        except UnicodeDecodeError:
+            content = data.decode('utf-8', errors='replace')
 
     # Generate summary (first 200 chars)
     summary = content[:200].strip()
@@ -553,4 +562,42 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
     except Exception as e:
         import logging
         logging.error(f"Error sending message: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---- Context Preview ----
+
+class PreviewRequest(BaseModel):
+    message: str
+    building_id: Optional[str] = None
+    meta_playbook: Optional[str] = None
+    attachment_count: int = 0
+    attachment_types: List[str] = []  # ["image", "document"]
+
+
+@router.post("/preview")
+def preview_context(req: PreviewRequest, manager=Depends(get_manager)):
+    """Preview the context that would be sent to the LLM, without executing."""
+    import logging
+
+    if not req.message:
+        raise HTTPException(status_code=400, detail="Message is required")
+
+    image_count = sum(1 for t in req.attachment_types if t == "image")
+    document_count = sum(1 for t in req.attachment_types if t == "document")
+    # Also count untyped attachments as documents
+    if req.attachment_count > len(req.attachment_types):
+        document_count += req.attachment_count - len(req.attachment_types)
+
+    try:
+        results = manager.preview_context(
+            req.message,
+            building_id=req.building_id,
+            meta_playbook=req.meta_playbook,
+            image_count=image_count,
+            document_count=document_count,
+        )
+        return {"personas": results}
+    except Exception as e:
+        logging.error("Error previewing context: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

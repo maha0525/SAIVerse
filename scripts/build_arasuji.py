@@ -138,8 +138,8 @@ def fetch_messages(
             try:
                 import json
                 metadata = json.loads(metadata_raw)
-            except:
-                pass
+            except Exception:
+                LOGGER.warning("Failed to parse metadata JSON for message %s", msg_id, exc_info=True)
         messages.append(Message(
             id=msg_id,
             thread_id=tid,
@@ -347,18 +347,20 @@ def regenerate_entry_from_messages(
     conn: sqlite3.Connection,
     messages: List[Message],
     model_name: str = None,
+    persona_id: str = None,
 ) -> Optional[Any]:
     """Regenerate a Chronicle entry from messages.
-    
+
     This function contains the business logic for regeneration:
     - Get LLM client based on model config
     - Call generate_level1_arasuji
-    
+
     Args:
         conn: Database connection
         messages: Messages to regenerate from
         model_name: Model to use (defaults to MEMORY_WEAVE_MODEL env var)
-        
+        persona_id: Optional persona ID for usage tracking
+
     Returns:
         New ArasujiEntry or None on failure
     """
@@ -393,7 +395,8 @@ def regenerate_entry_from_messages(
         client,
         conn,
         messages,
-        dry_run=False
+        dry_run=False,
+        persona_id=persona_id,
     )
     
     return new_entry
@@ -685,6 +688,7 @@ def main():
         consolidation_size=args.consolidation_size,
         include_timestamp=not args.no_timestamp,
         memopedia_context=memopedia_context,
+        persona_id=args.persona_id,
     )
 
     # Set debug log path if specified

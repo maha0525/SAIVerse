@@ -1,0 +1,260 @@
+{
+    "name": "source_web",
+    "description": "Webを検索し、目的に関連する情報を構造化された調査結果として返す",
+    "input_schema": [
+        {
+            "name": "objective",
+            "param_type": "string",
+            "source": "parent.objective",
+            "description": "What to find"
+        },
+        {
+            "name": "context_text",
+            "param_type": "string",
+            "source": "parent.context_text",
+            "description": "Pre-resolved context from URIs"
+        },
+        {
+            "name": "depth",
+            "param_type": "string",
+            "source": "parent.depth",
+            "description": "shallow/normal/deep"
+        },
+        {
+            "name": "max_iterations",
+            "param_type": "number",
+            "source": "parent.max_iterations",
+            "description": "Max search iterations"
+        }
+    ],
+    "output_schema": [
+        "research_result"
+    ],
+    "context_requirements": {
+        "history_depth": "5messages",
+        "history_balanced": false,
+        "include_internal": false,
+        "system_prompt": true,
+        "memory_weave": true,
+        "working_memory": false,
+        "inventory": false,
+        "building_items": false,
+        "available_playbooks": false,
+        "visual_context": false,
+        "realtime_context": true
+    },
+    "router_callable": false,
+    "user_selectable": false,
+    "nodes": [
+        {
+            "id": "init",
+            "type": "set",
+            "assignments": {
+                "iterations": 0,
+                "accumulated_info": ""
+            },
+            "next": "generate_query"
+        },
+        {
+            "id": "generate_query",
+            "type": "llm",
+            "model_type": "lightweight",
+            "action": "Web検索のクエリを生成してください。\n\n## 調査目的\n{objective}\n\n## 補足コンテキスト\n{context_text}\n\n## これまでに収集した情報\n{accumulated_info}\n\n## 現在のイテレーション\n{iterations} / {max_iterations}\n\n目的に最適な検索クエリを生成してください。既に情報がある場合は、不足している観点を補うクエリにしてください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Number of results (3-10)"
+                    }
+                },
+                "required": [
+                    "query"
+                ]
+            },
+            "output_key": "search_params",
+            "next": "search"
+        },
+        {
+            "id": "search",
+            "type": "tool",
+            "action": "searxng_search",
+            "args_input": {
+                "query": "search_params.query",
+                "max_results": "search_params.max_results"
+            },
+            "output_key": "search_results",
+            "next": "select_page"
+        },
+        {
+            "id": "select_page",
+            "type": "llm",
+            "model_type": "lightweight",
+            "action": "検索結果から、調査目的「{objective}」に最も関連するページを1件選んでください。\n\n検索結果:\n{search_results}\n\nこれまでに収集した情報:\n{accumulated_info}\n\n最も有用そうなURLを選んでください。既に読み込んだ情報と重複するものは避けてください。\n選べるURLがない場合はurlを空文字にしてください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Selected URL to read"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why this URL was selected"
+                    }
+                },
+                "required": [
+                    "url"
+                ]
+            },
+            "output_key": "page_selection",
+            "next": "check_url"
+        },
+        {
+            "id": "check_url",
+            "type": "pass",
+            "conditional_next": {
+                "field": "page_selection.url",
+                "operator": "eq",
+                "cases": {
+                    "": "evaluate",
+                    "default": "read_page"
+                }
+            }
+        },
+        {
+            "id": "read_page",
+            "type": "tool",
+            "action": "read_url_content",
+            "args_input": {
+                "url": "page_selection.url",
+                "max_chars": 6000
+            },
+            "output_key": "page_content",
+            "next": "accumulate"
+        },
+        {
+            "id": "accumulate",
+            "type": "set",
+            "assignments": {
+                "accumulated_info": "{accumulated_info}\n\n---\nURL: {page_selection.url}\n{page_content}"
+            },
+            "next": "evaluate"
+        },
+        {
+            "id": "evaluate",
+            "type": "llm",
+            "action": "調査目的に対して、Web検索から収集した情報を評価し、構造化された調査結果を生成してください。\n\n## 調査目的\n{objective}\n\n## 検索結果\n{search_results}\n\n## 収集した情報\n{accumulated_info}\n\n## 評価基準\n- status: 目的に合致する情報が見つかったか（found/partial/not_found）\n- summary: 発見内容の簡潔なまとめ\n- findings: 各発見の詳細（source_refはURL形式）\n- confidence: 結果の確信度\n\nWebから得られた情報を調査目的と照らし合わせ、正確に評価してください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "found",
+                            "partial",
+                            "not_found"
+                        ]
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Concise summary of findings"
+                    },
+                    "findings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source_ref": {
+                                    "type": "string",
+                                    "description": "URL of the source"
+                                },
+                                "excerpt": {
+                                    "type": "string",
+                                    "description": "Relevant excerpt"
+                                },
+                                "relevance": {
+                                    "type": "string",
+                                    "enum": [
+                                        "high",
+                                        "medium",
+                                        "low"
+                                    ]
+                                }
+                            },
+                            "required": [
+                                "source_ref",
+                                "excerpt",
+                                "relevance"
+                            ]
+                        }
+                    },
+                    "confidence": {
+                        "type": "string",
+                        "enum": [
+                            "high",
+                            "medium",
+                            "low"
+                        ]
+                    }
+                },
+                "required": [
+                    "status",
+                    "summary",
+                    "findings",
+                    "confidence"
+                ]
+            },
+            "memorize": {
+                "tags": [
+                    "internal",
+                    "research"
+                ]
+            },
+            "output_key": "research_result",
+            "next": "check_done"
+        },
+        {
+            "id": "check_done",
+            "type": "pass",
+            "conditional_next": {
+                "field": "research_result.status",
+                "operator": "eq",
+                "cases": {
+                    "found": "done",
+                    "default": "check_iterations"
+                }
+            }
+        },
+        {
+            "id": "check_iterations",
+            "type": "pass",
+            "conditional_next": {
+                "field": "iterations",
+                "operator": "gte",
+                "cases": {
+                    "{max_iterations}": "done",
+                    "default": "inc"
+                }
+            }
+        },
+        {
+            "id": "inc",
+            "type": "set",
+            "assignments": {
+                "iterations": "={iterations} + 1"
+            },
+            "next": "generate_query"
+        },
+        {
+            "id": "done",
+            "type": "pass",
+            "next": null
+        }
+    ],
+    "start_node": "init"
+}

@@ -1,4 +1,3 @@
-import types
 from types import SimpleNamespace
 
 import pytest
@@ -7,12 +6,18 @@ import llm_clients.gemini_utils as gemini_utils
 
 
 def _make_dummy_genai(created_clients):
-    def client_factory(*, api_key=None):
+    def client_factory(*, api_key=None, http_options=None):
         client = SimpleNamespace(api_key=api_key)
         created_clients.append(client)
         return client
 
-    return SimpleNamespace(Client=client_factory)
+    # Provide types.HttpOptions and types.HttpRetryOptions used by _http_options()
+    types_ns = SimpleNamespace(
+        HttpOptions=lambda **kw: SimpleNamespace(**kw),
+        HttpRetryOptions=lambda **kw: SimpleNamespace(**kw),
+    )
+
+    return SimpleNamespace(Client=client_factory, types=types_ns)
 
 
 def test_build_gemini_clients_requires_key(monkeypatch):
@@ -52,4 +57,3 @@ def test_build_gemini_clients_prefer_paid(monkeypatch):
     assert getattr(paid_client, "api_key", None) == "paid-key"
     assert active_client is paid_client
     assert [client.api_key for client in created] == ["free-key", "paid-key"]
-

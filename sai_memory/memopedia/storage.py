@@ -313,15 +313,25 @@ def create_page(
 
 
 def get_page(conn: sqlite3.Connection, page_id: str) -> Optional[MemopediaPage]:
-    """Get a page by ID."""
+    """Get a page by ID (exact match, with prefix fallback)."""
     cur = conn.execute(
         "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness, is_trunk, is_important, last_referenced_at FROM memopedia_pages WHERE id = ?",
         (page_id,),
     )
     row = cur.fetchone()
-    if row is None:
-        return None
-    return _row_to_page(row)
+    if row is not None:
+        return _row_to_page(row)
+
+    # Fallback: prefix match for truncated IDs (e.g. first 8 chars)
+    if len(page_id) < 36:
+        cur = conn.execute(
+            "SELECT id, parent_id, title, summary, content, category, created_at, updated_at, keywords, vividness, is_trunk, is_important, last_referenced_at FROM memopedia_pages WHERE id LIKE ? LIMIT 1",
+            (f"{page_id}%",),
+        )
+        row = cur.fetchone()
+        return _row_to_page(row) if row else None
+
+    return None
 
 
 def update_page(
@@ -594,6 +604,66 @@ def search_pages(conn: sqlite3.Connection, query: str, limit: int = 10) -> List[
         LIMIT ?
         """,
         (pattern, pattern, pattern, limit),
+    )
+    return [_row_to_page(row) for row in cur.fetchall()]
+
+
+def search_pages_filtered(
+    conn: sqlite3.Connection,
+    query: str,
+    *,
+    category: Optional[str] = None,
+    limit: int = 10,
+) -> List[MemopediaPage]:
+    """Search non-deleted pages by title/content with optional category filter.
+
+    Args:
+        conn: Database connection
+        query: Search keyword (LIKE match on title, summary, content)
+        category: Optional category filter ("people", "terms", "plans")
+        limit: Maximum results
+
+    Returns:
+        List of matching MemopediaPage, newest first.
+    """
+    # Split by whitespace and match ANY keyword (OR) across title/summary/content
+    keywords = query.split()
+    if len(keywords) > 1:
+        keyword_conditions = []
+        params: list = []
+        for kw in keywords:
+            pat = f"%{kw}%"
+            keyword_conditions.append("(title LIKE ? OR summary LIKE ? OR content LIKE ?)")
+            params.extend([pat, pat, pat])
+        conditions = [
+            f"({' OR '.join(keyword_conditions)})",
+            "(is_deleted = 0 OR is_deleted IS NULL)",
+        ]
+    else:
+        pattern = f"%{query}%"
+        conditions = [
+            "(title LIKE ? OR summary LIKE ? OR content LIKE ?)",
+            "(is_deleted = 0 OR is_deleted IS NULL)",
+        ]
+        params: list = [pattern, pattern, pattern]
+
+    if category:
+        conditions.append("category = ?")
+        params.append(category)
+
+    where_clause = " AND ".join(conditions)
+    params.append(limit)
+
+    cur = conn.execute(
+        f"""
+        SELECT id, parent_id, title, summary, content, category, created_at, updated_at,
+               keywords, vividness, is_trunk, is_important, last_referenced_at
+        FROM memopedia_pages
+        WHERE {where_clause}
+        ORDER BY updated_at DESC
+        LIMIT ?
+        """,
+        params,
     )
     return [_row_to_page(row) for row in cur.fetchall()]
 

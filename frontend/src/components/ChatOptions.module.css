@@ -161,24 +161,22 @@
     cursor: pointer;
 }
 
-@media (prefers-color-scheme: dark) {
-    .modal {
-        background: #1f1f1f;
-        border: 1px solid #333;
-    }
+:global([data-theme="dark"]) .modal {
+    background: #1f1f1f;
+    border: 1px solid #333;
+}
 
-    .select,
-    .input {
-        background: #2a2a2a;
-        border-color: #444;
-    }
+:global([data-theme="dark"]) .select,
+:global([data-theme="dark"]) .input {
+    background: #2a2a2a;
+    border-color: #444;
+}
 
-    .footer {
-        background: #262626;
-    }
+:global([data-theme="dark"]) .footer {
+    background: #262626;
+}
 
-    .cancelBtn {
-        border-color: #444;
-        color: #ccc;
-    }
+:global([data-theme="dark"]) .cancelBtn {
+    border-color: #444;
+    color: #ccc;
 }

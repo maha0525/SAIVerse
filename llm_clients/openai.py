@@ -250,6 +250,8 @@ def _extract_reasoning_from_delta(delta: Any) -> List[str]:
     delta_dict = obj_to_dict(delta)
     if not isinstance(delta_dict, dict):
         return reasoning_chunks
+
+    # Check "reasoning" field (list of items or string)
     raw_reasoning = delta_dict.get("reasoning")
     if isinstance(raw_reasoning, list):
         for item in raw_reasoning:
@@ -259,6 +261,12 @@ def _extract_reasoning_from_delta(delta: Any) -> List[str]:
                 reasoning_chunks.append(text)
     elif isinstance(raw_reasoning, str):
         reasoning_chunks.append(raw_reasoning)
+
+    # Check "reasoning_content" field (used by o-series models)
+    reasoning_content = delta_dict.get("reasoning_content")
+    if isinstance(reasoning_content, str) and reasoning_content:
+        reasoning_chunks.append(reasoning_content)
+
     return reasoning_chunks
 
 
@@ -667,9 +675,23 @@ class OpenAIClient(LLMClient):
                 for chunk in resp:
                     last_chunk = chunk
                     if chunk.choices and chunk.choices[0].delta:
-                        content = chunk.choices[0].delta.content
+                        delta = chunk.choices[0].delta
+
+                        # Extract reasoning from delta attributes
+                        extra_reasoning = _extract_reasoning_from_delta(delta)
+                        for r in extra_reasoning:
+                            reasoning_chunks.append(r)
+                            yield {"type": "thinking", "content": r}
+
+                        content = delta.content
                         if content:
-                            yield content
+                            # Check for reasoning in structured content (list with type="reasoning")
+                            text_fragment, reasoning_piece = _process_openai_stream_content(content)
+                            for r in reasoning_piece:
+                                reasoning_chunks.append(r)
+                                yield {"type": "thinking", "content": r}
+                            if text_fragment:
+                                yield text_fragment
                 # Store usage from last chunk (when stream_options.include_usage=True)
                 if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
                     # Check for cached tokens (OpenAI Prompt Caching)
@@ -681,6 +703,8 @@ class OpenAIClient(LLMClient):
                         output_tokens=last_chunk.usage.completion_tokens or 0,
                         cached_tokens=cached,
                     )
+                # Store reasoning collected during streaming
+                self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
             else:
                 # Non-streaming mode (response_schema case)
                 choice = resp.choices[0]
@@ -780,11 +804,13 @@ class OpenAIClient(LLMClient):
 
                 if state == "TEXT" and delta.content:
                     text_fragment, reasoning_piece = _process_openai_stream_content(delta.content)
-                    if reasoning_piece:
-                        reasoning_chunks.extend(reasoning_piece)
+                    for r in reasoning_piece:
+                        reasoning_chunks.append(r)
+                        yield {"type": "thinking", "content": r}
                     extra_reasoning = _extract_reasoning_from_delta(delta)
-                    if extra_reasoning:
-                        reasoning_chunks.extend(extra_reasoning)
+                    for r in extra_reasoning:
+                        reasoning_chunks.append(r)
+                        yield {"type": "thinking", "content": r}
                     if not text_fragment:
                         continue
                     if not prefix_yielded and history_snippets:
@@ -794,8 +820,9 @@ class OpenAIClient(LLMClient):
                     continue
 
                 additional_reasoning = _extract_reasoning_from_delta(delta)
-                if additional_reasoning:
-                    reasoning_chunks.extend(additional_reasoning)
+                for r in additional_reasoning:
+                    reasoning_chunks.append(r)
+                    yield {"type": "thinking", "content": r}
 
             # Store usage from last chunk (when stream_options.include_usage=True)
             if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:

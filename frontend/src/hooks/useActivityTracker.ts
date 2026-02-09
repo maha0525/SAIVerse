@@ -59,7 +59,7 @@ export function useActivityTracker() {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ visible: false }),
                     keepalive: true
-                }).catch(() => { });
+                }).catch((e) => { console.warn('Visibility update fetch failed:', e); });
             }
         } else {
             // Page is visible again - send heartbeat to restore online status

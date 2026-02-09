@@ -139,7 +139,7 @@ def list_arasuji_entries(
             try:
                 msg_num_map = _get_message_number_map(conn)
             except Exception:
-                pass  # Table might not exist or be empty
+                LOGGER.warning("Failed to get message number map for %s", persona_id, exc_info=True)
 
         items = []
         for e in entries:
@@ -206,7 +206,7 @@ def get_arasuji_entry(
                     source_start_num = min(nums)
                     source_end_num = max(nums)
             except Exception:
-                pass
+                LOGGER.warning("Failed to get message number range for entry %s", entry_id, exc_info=True)
 
         return ArasujiEntryItem(
             id=entry.id,
@@ -337,7 +337,7 @@ async def regenerate_arasuji_entry(
     conn = _get_arasuji_db(persona_id)
     
     try:
-        new_entry = regenerate_entry(conn, entry_id)
+        new_entry = regenerate_entry(conn, entry_id, persona_id=persona_id)
         
         if not new_entry:
             raise HTTPException(
@@ -431,8 +431,8 @@ def _run_chronicle_generation(
             if metadata_raw:
                 try:
                     metadata = json.loads(metadata_raw)
-                except:
-                    pass
+                except Exception:
+                    LOGGER.warning("Failed to parse metadata JSON for message %s", msg_id, exc_info=True)
             messages.append(Message(
                 id=msg_id,
                 thread_id=tid,
@@ -503,6 +503,7 @@ def _run_chronicle_generation(
             consolidation_size=consolidation_size,
             include_timestamp=True,
             memopedia_context=memopedia_context,
+            persona_id=persona_id,
         )
 
         # Progress callback

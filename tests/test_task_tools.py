@@ -3,12 +3,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from conftest import load_builtin_tool
 from persona.tasks import TaskStorage
 from tools.context import persona_context
-from tools.defs.task_change_active import task_change_active
-from tools.defs.task_close import task_close
-from tools.defs.task_request_creation import task_request_creation
-from tools.defs.task_update_step import task_update_step
+
+task_change_active = load_builtin_tool("task_change_active").task_change_active
+task_close = load_builtin_tool("task_close").task_close
+task_request_creation = load_builtin_tool("task_request_creation").task_request_creation
+task_update_step = load_builtin_tool("task_update_step").task_update_step
 
 
 class TaskToolsTestCase(unittest.TestCase):

@@ -288,6 +288,65 @@
     color: #f1f5f9;
 }
 
+/* Theme Selector Styles */
+.themeContainer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem;
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    margin-bottom: 1.5rem;
+}
+
+.themeLabel {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-weight: 600;
+    color: #f1f5f9;
+}
+
+.themeDescription {
+    font-size: 0.85rem;
+    color: #94a3b8;
+    margin-top: 0.25rem;
+}
+
+.themeSelector {
+    display: flex;
+    background: #334155;
+    border-radius: 8px;
+    padding: 3px;
+    gap: 2px;
+}
+
+.themeOption {
+    padding: 0.4rem 0.8rem;
+    border: none;
+    background: transparent;
+    color: #94a3b8;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 500;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.themeOption:hover {
+    color: #f1f5f9;
+}
+
+.themeOption.active {
+    background: #1e293b;
+    color: #60a5fa;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
 /* Toggle Switch Styles */
 .toggleContainer {
     display: flex;
@@ -411,5 +470,444 @@
     .envKey {
         font-size: 0.85rem;
         color: #94a3b8;
+    }
+}
+
+/* ── Light Mode Overrides ── */
+:global([data-theme="light"]) .modal {
+    background: #ffffff;
+    border-color: #e2e8f0;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .header {
+    background: #f1f5f9;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .header h2 {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .closeBtn {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .closeBtn:hover {
+    background: #e2e8f0;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .sidebar {
+    background: #f1f5f9;
+    border-right-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .navItem {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .navItem:hover {
+    background: #e2e8f0;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .navItem.active {
+    background: #dbeafe;
+    color: #2563eb;
+    border-right-color: #3b82f6;
+}
+
+:global([data-theme="light"]) .mainPanel {
+    background: #ffffff;
+}
+
+:global([data-theme="light"]) .envList {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .envItem {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .envKey {
+    color: #475569;
+}
+
+:global([data-theme="light"]) .envInput {
+    background: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .envInput:focus {
+    border-color: #3b82f6;
+}
+
+:global([data-theme="light"]) .actionFooter {
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .saveBtn:disabled {
+    background: #e2e8f0;
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .restartBtn {
+    background: #fef2f2;
+    color: #dc2626;
+    border-color: #fecaca;
+}
+
+:global([data-theme="light"]) .restartBtn:hover {
+    background: #fee2e2;
+    color: #b91c1c;
+}
+
+:global([data-theme="light"]) .dbSelect {
+    background: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .tableWrapper {
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .dataTable th {
+    background: #f1f5f9;
+    color: #475569;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .dataTable td {
+    background: #ffffff;
+    color: #475569;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .dataTable tr:hover td {
+    background: #f1f5f9;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .themeContainer {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .themeLabel {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .themeDescription {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .themeSelector {
+    background: #e2e8f0;
+}
+
+:global([data-theme="light"]) .themeOption {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .themeOption:hover {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .themeOption.active {
+    background: #ffffff;
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .toggleContainer {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .toggleLabel {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .toggleDescription {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .toggle {
+    background: #cbd5e1;
+}
+
+:global([data-theme="light"]) .toggle.active {
+    background: #22c55e;
+}
+
+:global([data-theme="light"]) .toggle::after {
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+/* ── Model Roles Tab ── */
+.modelsContainer {
+    max-width: 800px;
+    margin: 0 auto;
+    width: 100%;
+}
+
+.presetContainer {
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.presetHeader {
+    font-weight: 600;
+    color: #f1f5f9;
+    margin-bottom: 0.25rem;
+}
+
+.presetDescription {
+    font-size: 0.85rem;
+    color: #94a3b8;
+    margin-bottom: 0.75rem;
+}
+
+.presetList {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.presetBtn {
+    padding: 0.4rem 1rem;
+    background: #1e293b;
+    border: 1px solid #475569;
+    border-radius: 6px;
+    color: #cbd5e1;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 500;
+    transition: all 0.2s;
+}
+
+.presetBtn:hover {
+    background: #334155;
+    color: #f1f5f9;
+    border-color: #60a5fa;
+}
+
+.rolesList {
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.roleItem {
+    border-bottom: 1px solid #334155;
+}
+
+.roleItem:last-child {
+    border-bottom: none;
+}
+
+.roleHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    gap: 1rem;
+}
+
+.roleInfo {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+}
+
+.roleLabel {
+    font-weight: 600;
+    color: #f1f5f9;
+    font-size: 0.9rem;
+}
+
+.roleDescription {
+    font-size: 0.8rem;
+    color: #94a3b8;
+}
+
+.roleValue {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-shrink: 0;
+}
+
+.roleModelName {
+    font-family: monospace;
+    font-size: 0.85rem;
+    color: #60a5fa;
+    background: #1e293b;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.roleChangeBtn {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.3rem 0.6rem;
+    background: transparent;
+    border: 1px solid #475569;
+    border-radius: 4px;
+    color: #94a3b8;
+    cursor: pointer;
+    font-size: 0.8rem;
+    transition: all 0.2s;
+}
+
+.roleChangeBtn:hover {
+    background: #334155;
+    color: #f1f5f9;
+}
+
+.roleDropdown {
+    background: #1e293b;
+    border-top: 1px solid #334155;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.roleDropdownItem {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 1rem 0.5rem 1.5rem;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.roleDropdownItem:hover {
+    background: #334155;
+}
+
+.roleDropdownItem.selected {
+    background: #1e3a8a;
+}
+
+.roleDropdownName {
+    font-size: 0.85rem;
+    color: #f1f5f9;
+}
+
+.roleDropdownProvider {
+    font-size: 0.75rem;
+    color: #94a3b8;
+    margin-left: 0.75rem;
+}
+
+/* ── Light Mode: Model Roles ── */
+:global([data-theme="light"]) .presetContainer {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .presetHeader {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .presetDescription {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .presetBtn {
+    background: #ffffff;
+    border-color: #cbd5e1;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .presetBtn:hover {
+    background: #f1f5f9;
+    color: #1f2937;
+    border-color: #3b82f6;
+}
+
+:global([data-theme="light"]) .rolesList {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .roleItem {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .roleLabel {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .roleDescription {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .roleModelName {
+    color: #2563eb;
+    background: #eff6ff;
+}
+
+:global([data-theme="light"]) .roleChangeBtn {
+    border-color: #cbd5e1;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .roleChangeBtn:hover {
+    background: #e2e8f0;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .roleDropdown {
+    background: #ffffff;
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .roleDropdownItem:hover {
+    background: #f1f5f9;
+}
+
+:global([data-theme="light"]) .roleDropdownItem.selected {
+    background: #dbeafe;
+}
+
+:global([data-theme="light"]) .roleDropdownName {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .roleDropdownProvider {
+    color: #64748b;
+}
+
+/* ── Mobile: Model Roles ── */
+@media (max-width: 768px) {
+    .roleHeader {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.5rem;
+    }
+
+    .roleValue {
+        width: 100%;
+        justify-content: space-between;
+    }
+
+    .roleModelName {
+        max-width: none;
+        flex: 1;
+        min-width: 0;
     }
 }

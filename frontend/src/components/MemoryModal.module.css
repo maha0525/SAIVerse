@@ -149,3 +149,51 @@
         margin-right: 0 !important;
     }
 }
+
+/* Light Mode Overrides */
+:global([data-theme="light"]) .modal {
+    background-color: #ffffff;
+    border-color: #e2e8f0;
+    color: #1f2937;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+}
+
+:global([data-theme="light"]) .header {
+    background-color: #f1f5f9;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .title {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .closeButton {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .closeButton:hover {
+    color: #1f2937;
+    background-color: rgba(0, 0, 0, 0.06);
+}
+
+:global([data-theme="light"]) .tabs {
+    border-bottom-color: #e2e8f0;
+    background-color: #ffffff;
+}
+
+:global([data-theme="light"]) .tab {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .tab:hover {
+    color: #1f2937;
+    background-color: rgba(0, 0, 0, 0.03);
+}
+
+:global([data-theme="light"]) .activeTab {
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .activeTab::after {
+    background-color: #2563eb;
+}

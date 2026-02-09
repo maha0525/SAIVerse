@@ -11,9 +11,9 @@ def get_autonomous_status(persona_id: str, manager = Depends(get_manager)):
     if not persona:
         raise HTTPException(status_code=404, detail="Persona not found")
     
-    # autonomous_conversation_running is the system-wide flag
-    system_running = manager.state.autonomous_conversation_running
-    
+    # global_auto_enabled is the user-facing toggle (GlobalSettings)
+    system_running = manager.state.global_auto_enabled
+
     # interaction_mode determines if this persona will actually speak
     interaction_mode = getattr(persona, "interaction_mode", "auto")
     is_active = system_running and interaction_mode == "auto"

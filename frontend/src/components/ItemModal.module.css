@@ -487,9 +487,147 @@
     }
 }
 
-/* Light mode overrides if user switches */
-@media (prefers-color-scheme: light) {
-    /* Keep dark style? The user requested "cool", dark is usually safer.
-       But let's support generic card style just in case. 
-       Actually user asked for "Gradio" style which is dark by default but we can force dark for modal. */
+/* Light mode overrides */
+:global([data-theme="light"]) .modal {
+    background: #ffffff;
+    color: #1f2937;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .header {
+    background: #f1f5f9;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .closeBtn {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .closeBtn:hover {
+    background: #e2e8f0;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .metaEditBtn {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .metaEditBtn:hover {
+    background: #e2e8f0;
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .meta {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .badge {
+    background: #e2e8f0;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .description {
+    color: #475569;
+    background: rgba(0, 0, 0, 0.04);
+}
+
+:global([data-theme="light"]) .metaEditSection {
+    background: #f8fafc;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .formGroup label {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .input,
+:global([data-theme="light"]) .select,
+:global([data-theme="light"]) .descriptionTextarea {
+    background: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .imageContainer {
+    background: #f1f5f9;
+}
+
+:global([data-theme="light"]) .documentContainer {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .documentContent {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .documentHeader {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .toggleBtn {
+    background: #f1f5f9;
+    border-color: #cbd5e1;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .toggleBtn:hover {
+    background: #e2e8f0;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .editTextarea {
+    background: #f8fafc;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .markdownContent {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .markdownContent h1,
+:global([data-theme="light"]) .markdownContent h2,
+:global([data-theme="light"]) .markdownContent h3,
+:global([data-theme="light"]) .markdownContent h4,
+:global([data-theme="light"]) .markdownContent h5,
+:global([data-theme="light"]) .markdownContent h6 {
+    color: #111827;
+}
+
+:global([data-theme="light"]) .markdownContent code {
+    background: rgba(0, 0, 0, 0.06);
+}
+
+:global([data-theme="light"]) .markdownContent pre {
+    background: #f1f5f9;
+}
+
+:global([data-theme="light"]) .markdownContent blockquote {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .markdownContent a {
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .markdownContent a:hover {
+    color: #1d4ed8;
+}
+
+:global([data-theme="light"]) .markdownContent th,
+:global([data-theme="light"]) .markdownContent td {
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .markdownContent th {
+    background: #f1f5f9;
+}
+
+:global([data-theme="light"]) .markdownContent hr {
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .loading {
+    color: #64748b;
 }

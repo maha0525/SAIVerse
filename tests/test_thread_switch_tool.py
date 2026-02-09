@@ -11,10 +11,10 @@ from sai_memory.memory.storage import get_messages_last
 
 
 class DummyEmbedder:
-    def __init__(self, model: str | None = None) -> None:
+    def __init__(self, model: str | None = None, **kwargs) -> None:
         self.model_name = model
 
-    def embed(self, texts):
+    def embed(self, texts, **kwargs):
         return [[0.0] * 3 for _ in texts]
 
 
@@ -24,6 +24,9 @@ class ThreadSwitchToolTest(unittest.TestCase):
         self.persona_path = Path(self._tmp.name) / "personas" / "tester"
         self.persona_path.mkdir(parents=True, exist_ok=True)
         os.environ["SAIMEMORY_MEMORY"] = "1"
+
+        # Register temp dir cleanup first (LIFO → runs last, after all adapter closes)
+        self.addCleanup(self._cleanup_temp)
 
         patcher = patch("saiverse_memory.adapter.Embedder", DummyEmbedder)
         self.addCleanup(patcher.stop)
@@ -35,9 +38,16 @@ class ThreadSwitchToolTest(unittest.TestCase):
         self.adapter = self.adapter_cls("tester", persona_dir=self.persona_path, resource_id="tester")
         self.addCleanup(self.adapter.close)
 
+    def _cleanup_temp(self) -> None:
+        import gc
+        gc.collect()
+        try:
+            self._tmp.cleanup()
+        except PermissionError:
+            pass
+
     def tearDown(self) -> None:
         os.environ.pop("SAIMEMORY_MEMORY", None)
-        self._tmp.cleanup()
 
     def test_switch_active_thread_creates_metadata_link(self) -> None:
         sns_suffix = "sns"
@@ -67,7 +77,8 @@ class ThreadSwitchToolTest(unittest.TestCase):
         state_file = self.persona_path / "active_state.json"
         state_file.write_text(json.dumps({"active_thread_id": sns_suffix}), encoding="utf-8")
 
-        from tools.defs.thread_switch import switch_active_thread
+        from conftest import load_builtin_tool
+        switch_active_thread = load_builtin_tool("thread_switch").switch_active_thread
 
         from tools.context import persona_context
         result, snippet, _ = None, None, None
@@ -126,7 +137,8 @@ class ThreadSwitchToolTest(unittest.TestCase):
         state_file = self.persona_path / "active_state.json"
         state_file.write_text(json.dumps({"active_thread_id": sns_suffix}), encoding="utf-8")
 
-        from tools.defs.thread_switch import switch_active_thread
+        from conftest import load_builtin_tool
+        switch_active_thread = load_builtin_tool("thread_switch").switch_active_thread
         from tools.context import persona_context
 
         with persona_context("tester", self.persona_path):
@@ -144,7 +156,8 @@ class ThreadSwitchToolTest(unittest.TestCase):
     def test_switch_without_origin_messages_raises(self) -> None:
         follow_suffix = "follow-no-origin"
 
-        from tools.defs.thread_switch import switch_active_thread
+        from conftest import load_builtin_tool
+        switch_active_thread = load_builtin_tool("thread_switch").switch_active_thread
         from tools.context import persona_context
 
         with persona_context("tester", self.persona_path):

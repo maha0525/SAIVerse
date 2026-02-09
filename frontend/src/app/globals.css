@@ -3,13 +3,26 @@
   --foreground: #171717;
   --primary: #6366f1;
   --primary-foreground: #ffffff;
+  /* Semantic tokens for components using CSS variables */
+  --bg-secondary: #f8fafc;
+  --bg-tertiary: #f1f5f9;
+  --bg-hover: #e2e8f0;
+  --border-color: #e2e8f0;
+  --text-primary: #1f2937;
+  --text-secondary: #64748b;
+  --accent-primary: #6366f1;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+[data-theme="dark"] {
+  --background: #0a0a0a;
+  --foreground: #ededed;
+  --bg-secondary: #1f2937;
+  --bg-tertiary: #111827;
+  --bg-hover: #374151;
+  --border-color: #374151;
+  --text-primary: #f3f4f6;
+  --text-secondary: #9ca3af;
+  --accent-primary: #6366f1;
 }
 
 body {

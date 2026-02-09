@@ -66,8 +66,7 @@
     "meta_user",
     "meta_auto",
     "sub_router_user",
-    "sub_speak_meta",
-    "sub_speak_simple",
+    "sub_speak",
     "meta_simple_speak",
     "meta_exec_speak"
   ]

@@ -75,7 +75,7 @@ def schedule_list() -> str:
                         day_names = ["月", "火", "水", "木", "金", "土", "日"]
                         days = ", ".join([day_names[d] for d in day_list if 0 <= d < 7])
                     except Exception:
-                        pass
+                        LOGGER.warning("Failed to parse DAYS_OF_WEEK for schedule %d", s.SCHEDULE_ID, exc_info=True)
                 detail = f"{days} {s.TIME_OF_DAY or '??:??'}"
 
             elif s.SCHEDULE_TYPE == "oneshot":
@@ -114,7 +114,7 @@ def schedule_list() -> str:
                     if params:
                         params_str = ", ".join([f"{k}={v}" for k, v in params.items()])
                 except Exception:
-                    pass
+                    LOGGER.warning("Failed to parse PLAYBOOK_PARAMS for schedule %d", s.SCHEDULE_ID, exc_info=True)
 
             result_lines.append(
                 f"{i}. [ID: {s.SCHEDULE_ID}] {status}{completed}\n"

@@ -11,6 +11,7 @@ import json
 import re
 
 from llm_clients.exceptions import LLMError
+from logging_config import log_sea_trace
 from sea.playbook_models import NodeType, PlaybookSchema, PlaybookValidationError, validate_playbook_graph
 from sea.langgraph_runner import compile_playbook
 from sea.cancellation import CancellationToken, ExecutionCancelledException
@@ -119,6 +120,20 @@ class SEARuntime:
             cancellation_token=cancellation_token, pulse_type=pulse_type,
             initial_params=playbook_params,
         )
+
+        # Post-response metabolism check
+        bh_before = len(self.manager.building_histories.get(building_id, []))
+        try:
+            self._maybe_run_metabolism(persona, building_id, event_callback)
+        except Exception:
+            LOGGER.exception("[metabolism] Post-response metabolism failed")
+        bh_after = len(self.manager.building_histories.get(building_id, []))
+        if bh_before != bh_after:
+            LOGGER.warning(
+                "[metabolism] building_histories[%s] changed during metabolism: %d -> %d",
+                building_id, bh_before, bh_after,
+            )
+
         return result
 
     def run_meta_auto(
@@ -133,10 +148,10 @@ class SEARuntime:
         # Check for cancellation before starting
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
-        
+
         # Store pulse_type in persona for tools to access
         persona._current_pulse_type = pulse_type
-        
+
         # Update last pulse time for get_situation_snapshot
         persona._last_conscious_prompt_time_utc = datetime.now(dt_timezone.utc)
         playbook = self._choose_playbook(kind="auto", persona=persona, building_id=building_id)
@@ -145,6 +160,12 @@ class SEARuntime:
             auto_mode=True, record_history=True,
             cancellation_token=cancellation_token, pulse_type=pulse_type,
         )
+
+        # Post-auto metabolism check (no event_callback for auto pulses)
+        try:
+            self._maybe_run_metabolism(persona, building_id)
+        except Exception:
+            LOGGER.exception("[metabolism] Post-auto metabolism failed")
 
     # ---------------- core runner -----------------
     def _run_playbook(
@@ -213,9 +234,15 @@ class SEARuntime:
                     playbook.name,
                     playbook.context_requirements.history_depth if playbook.context_requirements else "None",
                     pulse_id)
-        base_messages = self._prepare_context(persona, building_id, user_input, playbook.context_requirements, pulse_id=pulse_id)
+        context_warnings: List[Dict[str, Any]] = []
+        base_messages = self._prepare_context(persona, building_id, user_input, playbook.context_requirements, pulse_id=pulse_id, warnings=context_warnings)
         LOGGER.info("[sea][run-playbook] %s: _prepare_context returned %d messages", playbook.name, len(base_messages))
         conversation_msgs = list(base_messages)
+
+        # Emit context budget warnings via event callback
+        for warn in context_warnings:
+            if event_callback:
+                wrapped_event_callback(warn)
 
         # Execute playbook with LangGraph (use wrapped callback)
         compiled_ok = self._compile_with_langgraph(
@@ -298,7 +325,10 @@ class SEARuntime:
             # Resolve value from parent_state or fallback
             elif source_key.startswith("parent."):
                 actual_key = source_key[7:]  # strip "parent."
-                value = parent.get(actual_key, "")
+                # Use _resolve_state_value for dot-notation support (e.g., "current_task.objective")
+                value = self._resolve_state_value(parent, actual_key)
+                if value is None:
+                    value = ""
                 LOGGER.debug("[sea][LangGraph] Resolved %s from parent.%s: %s", param_name, actual_key, str(value)[:200] if value else "(empty)")
             elif source_key == "input":
                 value = user_input or ""
@@ -325,6 +355,13 @@ class SEARuntime:
                 "models_used": [],
             }
 
+        # Inherit activity trace list (shared reference, same pattern as accumulator)
+        parent_activity_trace = parent.get("_activity_trace")
+        if parent_activity_trace is not None:
+            activity_trace = parent_activity_trace
+        else:
+            activity_trace = []
+
         initial_state = {
             "messages": list(base_messages),
             "inputs": {"input": user_input or ""},
@@ -332,12 +369,11 @@ class SEARuntime:
             "last": user_input or "",
             "outputs": _lg_outputs,
             "persona_obj": persona,
-            "context_bundle": [],
-            "context_bundle_text": "",
             "pulse_id": pulse_id,
             "pulse_type": pulse_type,  # user/schedule/auto
             "_cancellation_token": cancellation_token,  # For node-level cancellation checks
             "pulse_usage_accumulator": usage_accumulator,  # Inherit from parent or create new
+            "_activity_trace": activity_trace,  # Shared trace of exec/tool activities
             **inherited_vars,  # Add inherited variables from input_schema
         }
 
@@ -389,8 +425,14 @@ class SEARuntime:
         if parent_state is not None and isinstance(final_state, dict) and playbook.output_schema:
             for key in playbook.output_schema:
                 if key in final_state:
-                    parent_state[key] = final_state[key]
-                    LOGGER.debug("[sea][LangGraph] Propagated %s to parent_state: %s", key, str(final_state[key])[:200])
+                    value = final_state[key]
+                    # Use _store_structured_result to also create flattened dot-notation keys
+                    # (e.g., research_result.summary, research_result.status)
+                    if isinstance(value, dict):
+                        self._store_structured_result(parent_state, key, value)
+                    else:
+                        parent_state[key] = value
+                    LOGGER.debug("[sea][LangGraph] Propagated %s to parent_state: %s", key, str(value)[:200])
 
         # Update execution state: playbook completed (LangGraph path)
         if hasattr(persona, "execution_state"):
@@ -426,7 +468,6 @@ class SEARuntime:
                 "last": state.get("last", ""),
                 "persona_id": getattr(persona, "persona_id", None),
                 "persona_name": getattr(persona, "persona_name", None),
-                "context_bundle_text": state.get("context_bundle_text", ""),
                 **{k: v for k, v in state.items() if k not in ["messages", "inputs", "outputs", "persona_obj", "_cancellation_token"]},  # Include all other state variables
             }
 
@@ -459,6 +500,23 @@ class SEARuntime:
                 needs_structured_output = response_schema is not None
                 llm_client = self._select_llm_client(node_def, persona, needs_structured_output=needs_structured_output)
 
+                # Inject model-specific system prompt if configured
+                _model_config_key = getattr(llm_client, "config_key", None)
+                if _model_config_key:
+                    from model_configs import get_model_system_prompt
+                    _model_sys_prompt = get_model_system_prompt(_model_config_key)
+                    if _model_sys_prompt:
+                        _injected = False
+                        for _mi, _msg in enumerate(messages):
+                            if _msg.get("role") == "system":
+                                # Create new dict to avoid mutating shared base_msgs
+                                messages[_mi] = {**_msg, "content": _msg["content"] + "\n\n---\n\n" + _model_sys_prompt}
+                                _injected = True
+                                break
+                        if not _injected:
+                            messages.insert(0, {"role": "system", "content": _model_sys_prompt})
+                        LOGGER.debug("[sea] Injected model-specific system prompt for %s", _model_config_key)
+
                 # Check if tools are available for this node
                 available_tools = getattr(node_def, "available_tools", None)
                 LOGGER.info("[DEBUG] available_tools = %s", available_tools)
@@ -474,6 +532,14 @@ class SEARuntime:
                         **self._get_cache_kwargs(),
                     )
 
+                    # Consume reasoning (thinking) from tool-mode LLM call
+                    _tool_reasoning = llm_client.consume_reasoning()
+                    _tool_reasoning_text = "\n\n".join(
+                        e.get("text", "") for e in _tool_reasoning if e.get("text")
+                    ) if _tool_reasoning else ""
+                    if _tool_reasoning_text:
+                        state["_reasoning_text"] = _tool_reasoning_text
+
                     # Record usage
                     usage = llm_client.consume_usage()
                     if usage:
@@ -483,6 +549,7 @@ class SEARuntime:
                             output_tokens=usage.output_tokens,
                             cached_tokens=usage.cached_tokens,
                             cache_write_tokens=usage.cache_write_tokens,
+                            cache_ttl=usage.cache_ttl,
                             persona_id=getattr(persona, "persona_id", None),
                             building_id=building_id,
                             node_type="llm_tool",
@@ -491,7 +558,7 @@ class SEARuntime:
                         )
                         # Accumulate into pulse total
                         from model_configs import calculate_cost
-                        cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens)
+                        cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
                         self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
 
                     # Parse output_keys to determine where to store results
@@ -630,8 +697,17 @@ class SEARuntime:
                                 temperature=self._default_temperature(persona),
                                 **self._get_cache_kwargs(),
                             ):
+                                # Thinking chunks are dicts, text chunks are strings
+                                if isinstance(chunk, dict) and chunk.get("type") == "thinking":
+                                    event_callback({
+                                        "type": "streaming_thinking",
+                                        "content": chunk["content"],
+                                        "persona_id": getattr(persona, "persona_id", None),
+                                        "node_id": getattr(node_def, "id", "llm"),
+                                    })
+                                    continue
                                 text_chunks.append(chunk)
-                                # Send each chunk to UI
+                                # Send each text chunk to UI
                                 event_callback({
                                     "type": "streaming_chunk",
                                     "content": chunk,
@@ -672,6 +748,7 @@ class SEARuntime:
                                 output_tokens=usage.output_tokens,
                                 cached_tokens=usage.cached_tokens,
                                 cache_write_tokens=usage.cache_write_tokens,
+                                cache_ttl=usage.cache_ttl,
                                 persona_id=getattr(persona, "persona_id", None),
                                 building_id=building_id,
                                 node_type="llm_stream",
@@ -681,7 +758,7 @@ class SEARuntime:
                             LOGGER.info("[DEBUG] Usage recorded: model=%s in=%d out=%d cached=%d cache_write=%d", usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens)
                             # Build llm_usage metadata for message
                             from model_configs import calculate_cost, get_model_display_name
-                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens)
+                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
                             llm_usage_metadata = {
                                 "model": usage.model,
                                 "model_display_name": get_model_display_name(usage.model),
@@ -696,21 +773,37 @@ class SEARuntime:
                         else:
                             LOGGER.warning("[DEBUG] No usage data from LLM client")
 
-                        # Send completion event
-                        event_callback({
+                        # Consume reasoning (thinking) from LLM — store as metadata, not in content
+                        reasoning_entries = llm_client.consume_reasoning()
+                        reasoning_text = "\n\n".join(
+                            e.get("text", "") for e in reasoning_entries if e.get("text")
+                        ) if reasoning_entries else ""
+
+                        # Send completion event with reasoning
+                        completion_event: Dict[str, Any] = {
                             "type": "streaming_complete",
                             "persona_id": getattr(persona, "persona_id", None),
                             "node_id": getattr(node_def, "id", "llm"),
-                        })
+                        }
+                        if reasoning_text:
+                            completion_event["reasoning"] = reasoning_text
+                        event_callback(completion_event)
+
                         # Record to Building history with usage metadata (include pulse total)
                         pulse_id = state.get("pulse_id")
                         msg_metadata: Dict[str, Any] = {}
                         if llm_usage_metadata:
                             msg_metadata["llm_usage"] = llm_usage_metadata
+                        if reasoning_text:
+                            msg_metadata["reasoning"] = reasoning_text
+                        _at_stream = state.get("_activity_trace")
+                        if _at_stream:
+                            msg_metadata["activity_trace"] = list(_at_stream)
                         accumulator = state.get("pulse_usage_accumulator")
                         if accumulator:
                             msg_metadata["llm_usage_total"] = dict(accumulator)
-                        self._emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+                        eff_bid = self._effective_building_id(persona, building_id)
+                        self._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
                     else:
                         # Non-streaming mode
                         text = llm_client.generate(
@@ -731,6 +824,7 @@ class SEARuntime:
                                 output_tokens=usage.output_tokens,
                                 cached_tokens=usage.cached_tokens,
                                 cache_write_tokens=usage.cache_write_tokens,
+                                cache_ttl=usage.cache_ttl,
                                 persona_id=getattr(persona, "persona_id", None),
                                 building_id=building_id,
                                 node_type="llm",
@@ -739,7 +833,7 @@ class SEARuntime:
                             )
                             # Build llm_usage metadata for message
                             from model_configs import calculate_cost, get_model_display_name
-                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens)
+                            cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
                             llm_usage_metadata = {
                                 "model": usage.model,
                                 "model_display_name": get_model_display_name(usage.model),
@@ -752,6 +846,12 @@ class SEARuntime:
                             # Accumulate into pulse total
                             self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
 
+                        # Consume reasoning (thinking) from LLM — store as metadata
+                        reasoning_entries = llm_client.consume_reasoning()
+                        reasoning_text = "\n\n".join(
+                            e.get("text", "") for e in reasoning_entries if e.get("text")
+                        ) if reasoning_entries else ""
+
                         # If speak=true but streaming disabled, send complete text and record to Building history
                         LOGGER.info("[DEBUG] speak_flag=%s, event_callback=%s, text_len=%d",
                                    speak_flag, event_callback is not None, len(text) if text else 0)
@@ -760,17 +860,32 @@ class SEARuntime:
                             msg_metadata: Dict[str, Any] = {}
                             if llm_usage_metadata:
                                 msg_metadata["llm_usage"] = llm_usage_metadata
+                            if reasoning_text:
+                                msg_metadata["reasoning"] = reasoning_text
+                            _at_speak = state.get("_activity_trace")
+                            if _at_speak:
+                                msg_metadata["activity_trace"] = list(_at_speak)
                             accumulator = state.get("pulse_usage_accumulator")
                             if accumulator:
                                 msg_metadata["llm_usage_total"] = dict(accumulator)
-                            self._emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+                            eff_bid = self._effective_building_id(persona, building_id)
+                            self._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
                             if event_callback is not None:
                                 LOGGER.info("[DEBUG] Sending 'say' event with content: %s", text[:100] if text else "(empty)")
-                                event_callback({
+                                say_event: Dict[str, Any] = {
                                     "type": "say",
                                     "content": text,
                                     "persona_id": getattr(persona, "persona_id", None),
-                                })
+                                }
+                                if reasoning_text:
+                                    say_event["reasoning"] = reasoning_text
+                                if _at_speak:
+                                    say_event["activity_trace"] = list(_at_speak)
+                                event_callback(say_event)
+
+                        # Store remaining reasoning for say/speak node (non-speak path)
+                        if reasoning_text:
+                            state["_reasoning_text"] = reasoning_text
 
                     self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                     schema_consumed = self._process_structured_output(node_def, text, state)
@@ -807,10 +922,27 @@ class SEARuntime:
                 raise
             except Exception as exc:
                 LOGGER.error("SEA LangGraph LLM failed: %s: %s", type(exc).__name__, exc)
-                text = "(error in llm node)"
-                state["tool_called"] = False
+                # Convert to LLMError so it propagates to the frontend
+                raise LLMError(
+                    f"LLM node failed: {type(exc).__name__}: {exc}",
+                    original_error=exc,
+                ) from exc
             state["last"] = text
             state["messages"] = messages + [{"role": "assistant", "content": text}]
+
+            # Trace: log concise prompt→response summary
+            _prompt_preview = (prompt[:120] + "...") if prompt and len(prompt) > 120 else (prompt or "(no prompt)")
+            if schema_consumed:
+                _output_key = getattr(node_def, "output_key", None) or node_id
+                _out_val = state.get(_output_key, text)
+                if isinstance(_out_val, dict):
+                    _resp_preview = ", ".join(f"{k}={str(v)[:60]}" for k, v in list(_out_val.items())[:6])
+                else:
+                    _resp_preview = str(_out_val)[:200]
+                log_sea_trace(playbook.name, node_id, "LLM", f"prompt=\"{_prompt_preview}\" → {{{_resp_preview}}}")
+            else:
+                _resp_preview = str(text)[:200] if text else "(empty)"
+                log_sea_trace(playbook.name, node_id, "LLM", f"prompt=\"{_prompt_preview}\" → \"{_resp_preview}\"")
 
             # Handle memorize option - save prompt and response to SAIMemory
             memorize_config = getattr(node_def, "memorize", None)
@@ -852,6 +984,16 @@ class SEARuntime:
                         pulse_id=pulse_id,
                     )
                     LOGGER.debug("[sea][llm] Memorized response (assistant): %s...", str(content_to_save)[:100])
+
+                # Activity trace: record LLM memorize
+                if not playbook.name.startswith(("meta_", "sub_")):
+                    pb_display = playbook.display_name or playbook.name
+                    node_label = getattr(node_def, "label", None) or node_id
+                    _at = state.get("_activity_trace")
+                    if isinstance(_at, list):
+                        _at.append({"action": "memorize", "name": node_label, "playbook": pb_display})
+                    if event_callback:
+                        event_callback({"type": "activity", "action": "memorize", "name": node_label, "playbook": pb_display, "status": "completed"})
 
             # Debug: log speak_content at end of LLM node
             speak_content = state.get("speak_content", "")
@@ -1322,7 +1464,7 @@ class SEARuntime:
                     if isinstance(pb, dict) and pb.get("name"):
                         available_names.append(pb.get("name"))
         except Exception:
-            pass
+            LOGGER.warning("Failed to parse available_playbooks from state", exc_info=True)
 
         if not playbook_value:
             stripped = str(text).strip()
@@ -1399,6 +1541,16 @@ class SEARuntime:
                 # Log tool result
                 result_preview = str(result)[:200] + "..." if len(str(result)) > 200 else str(result)
                 LOGGER.info("[sea][tool] RESULT %s -> %s", tool_name, result_preview)
+                log_sea_trace(playbook.name, node_id, "TOOL", f"action={tool_name} → {result_preview}")
+
+                # Activity trace: record tool execution (skip infrastructure playbooks)
+                if not playbook.name.startswith(("meta_", "sub_")):
+                    pb_display = playbook.display_name or playbook.name
+                    _at = state.get("_activity_trace")
+                    if isinstance(_at, list):
+                        _at.append({"action": "tool", "name": tool_name, "playbook": pb_display})
+                    if event_callback:
+                        event_callback({"type": "activity", "action": "tool", "name": tool_name, "playbook": pb_display, "status": "completed"})
 
                 # Handle tuple results with output_keys (for multi-value returns)
                 if output_keys and isinstance(result, tuple):
@@ -1458,16 +1610,44 @@ class SEARuntime:
             if not sub_input:
                 sub_input = state.get("inputs", {}).get("input")
 
+            eff_bid = self._effective_building_id(persona, building_id)
+            log_sea_trace(playbook.name, node_id, "EXEC", f"→ {sub_name} (input=\"{str(sub_input)[:150]}\")")
+
             try:
                 sub_outputs = await asyncio.to_thread(
-                    self._run_playbook, sub_pb, persona, building_id, sub_input, auto_mode, True, state, event_callback
+                    self._run_playbook, sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback
                 )
             except Exception as exc:
                 LOGGER.exception("SEA LangGraph exec sub-playbook failed")
-                state["last"] = f"Sub-playbook error: {exc}"
+                error_msg = f"Sub-playbook error: {type(exc).__name__}: {exc}"
+                state["last"] = error_msg
+                state["_exec_error"] = True
+                state["_exec_error_detail"] = error_msg
+                log_sea_trace(playbook.name, node_id, "EXEC", f"→ {error_msg}")
+                if event_callback:
+                    event_callback({
+                        "type": "error",
+                        "content": f"[{sub_name}] {type(exc).__name__}: {exc}",
+                        "playbook": playbook.name,
+                        "node": node_id,
+                    })
+                # Record error to SAIMemory so the persona (and subsequent LLM calls) can see it
+                try:
+                    self._store_memory(
+                        persona, error_msg,
+                        role="system",
+                        tags=["error", "exec", str(sub_name).strip()],
+                        pulse_id=state.get("pulse_id"),
+                    )
+                except Exception:
+                    LOGGER.debug("Failed to store exec error to SAIMemory", exc_info=True)
                 if outputs is not None:
-                    outputs.append(state["last"])
+                    outputs.append(error_msg)
                 return state
+
+            # Success path: clear error flag
+            state["_exec_error"] = False
+            state.pop("_exec_error_detail", None)
 
             # Track executed playbook in executed_playbooks list
             executed_list = state.get("executed_playbooks")
@@ -1475,10 +1655,12 @@ class SEARuntime:
                 executed_list.append(str(sub_name).strip())
                 LOGGER.debug("[sea][exec] Added '%s' to executed_playbooks: %s", sub_name, executed_list)
 
-            ingested = self._ingest_context_from_subplaybook(state, sub_name, sub_outputs)
-            if ingested:
-                state["last"] = state.get("context_bundle_text") or state.get("last")
-            elif sub_outputs:
+            # Append tool result message to close the router function call pair
+            joined = ""
+            if sub_outputs:
+                joined = "\n".join(str(item).strip() for item in sub_outputs if str(item).strip())
+            self._append_tool_result_message(state, str(sub_name).strip(), joined or "(completed)")
+            if sub_outputs:
                 state["last"] = sub_outputs[-1]
             return state
 
@@ -1518,9 +1700,19 @@ class SEARuntime:
             metadata = state.get(metadata_key) if metadata_key else None
             self._store_memory(persona, memo_text, role=role, tags=tags, pulse_id=pulse_id, metadata=metadata)
             state["last"] = memo_text
-            if outputs is not None and self._should_collect_memory_output(playbook):
+            if outputs is not None:
                 outputs.append(memo_text)
-            
+
+            # Activity trace: record memorize execution
+            if not playbook.name.startswith(("meta_", "sub_")):
+                pb_display = playbook.display_name or playbook.name
+                node_label = getattr(node_def, "label", None) or node_id
+                _at = state.get("_activity_trace")
+                if isinstance(_at, list):
+                    _at.append({"action": "memorize", "name": node_label, "playbook": pb_display})
+                if event_callback:
+                    event_callback({"type": "activity", "action": "memorize", "name": node_label, "playbook": pb_display, "status": "completed"})
+
             # Debug: log speak_content at end of memorize node
             speak_content = state.get("speak_content", "")
             preview = speak_content[:100] + "..." if len(speak_content) > 100 else speak_content
@@ -1535,12 +1727,20 @@ class SEARuntime:
         if event_callback:
             event_callback({"type": "status", "content": f"{playbook.name} / speak", "playbook": playbook.name, "node": "speak"})
         text = state.get("last") or ""
+        reasoning_text = state.pop("_reasoning_text", "")
+        activity_trace = state.get("_activity_trace")
         pulse_id = state.get("pulse_id")
-        self._emit_speak(persona, building_id, text, pulse_id=pulse_id)
+        eff_bid = self._effective_building_id(persona, building_id)
+        self._emit_speak(persona, eff_bid, text, pulse_id=pulse_id)
         if outputs is not None:
             outputs.append(text)
         if event_callback:
-            event_callback({"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None)})
+            say_event: Dict[str, Any] = {"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None)}
+            if reasoning_text:
+                say_event["reasoning"] = reasoning_text
+            if activity_trace:
+                say_event["activity_trace"] = list(activity_trace)
+            event_callback(say_event)
         return state
 
     def _lg_say_node(self, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
@@ -1550,6 +1750,7 @@ class SEARuntime:
             if event_callback:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             text = state.get("last") or ""
+            reasoning_text = state.pop("_reasoning_text", "")
             pulse_id = state.get("pulse_id")
             metadata_key = getattr(node_def, "metadata_key", None)
             base_metadata = state.get(metadata_key) if metadata_key else None
@@ -1561,18 +1762,31 @@ class SEARuntime:
                     msg_metadata.update(base_metadata)
                 else:
                     msg_metadata["metadata"] = base_metadata
+            if reasoning_text:
+                msg_metadata["reasoning"] = reasoning_text
 
             # Include pulse usage accumulator total for UI display
             accumulator = state.get("pulse_usage_accumulator")
             if accumulator and accumulator.get("call_count", 0) > 0:
                 msg_metadata["llm_usage_total"] = dict(accumulator)
 
-            self._emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+            # Include activity trace for UI display
+            activity_trace = state.get("_activity_trace")
+            if activity_trace:
+                msg_metadata["activity_trace"] = list(activity_trace)
+
+            eff_bid = self._effective_building_id(persona, building_id)
+            self._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
             if outputs is not None:
                 outputs.append(text)
             if event_callback:
-                event_callback({"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None), "metadata": msg_metadata if msg_metadata else None})
-            
+                say_event: Dict[str, Any] = {"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None), "metadata": msg_metadata if msg_metadata else None}
+                if reasoning_text:
+                    say_event["reasoning"] = reasoning_text
+                if activity_trace:
+                    say_event["activity_trace"] = list(activity_trace)
+                event_callback(say_event)
+
             # Debug: log speak_content at end of say node
             speak_content = state.get("speak_content", "")
             preview = speak_content[:100] + "..." if len(speak_content) > 100 else speak_content
@@ -1627,13 +1841,15 @@ class SEARuntime:
                 "last": state.get("last", ""),
             })
             sub_input = _format(template, variables)
+            eff_bid = self._effective_building_id(persona, building_id)
+            log_sea_trace(playbook.name, node_id, "SUBPLAY", f"→ {sub_name} (input=\"{str(sub_input)[:150]}\")")
 
             # Execute subplaybook
             # Note: We call _run_playbook directly (not via asyncio.to_thread) to keep
             # SQLite connections on the same thread. _run_playbook handles its own
             # async/sync boundary internally via ThreadPoolExecutor.
             try:
-                sub_outputs = self._run_playbook(sub_pb, persona, building_id, sub_input, auto_mode, True, state, event_callback)
+                sub_outputs = self._run_playbook(sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback)
             except Exception as exc:
                 LOGGER.exception("[sea][subplay] Failed to execute subplaybook '%s'", sub_name)
                 state["last"] = f"Sub-playbook error: {exc}"
@@ -1660,10 +1876,13 @@ class SEARuntime:
             node_id = getattr(node_def, "id", "set")
             if event_callback:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
+            trace_parts = []
             for key, value_template in assignments.items():
                 resolved_value = self._resolve_set_value(value_template, state)
                 state[key] = resolved_value
                 LOGGER.debug("[sea][set] %s = %s", key, resolved_value)
+                trace_parts.append(f"{key}={str(resolved_value)[:80]}")
+            log_sea_trace(playbook.name, node_id, "SET", ", ".join(trace_parts))
 
             # Special handling: if executed_playbooks_init is set, initialize executed_playbooks as empty list
             if state.get("executed_playbooks_init") and "executed_playbooks" not in state:
@@ -1770,7 +1989,8 @@ class SEARuntime:
                 cancellation_token.raise_if_cancelled()
 
             node_id = getattr(node_def, "id", "stelis_start")
-            label = getattr(node_def, "label", None) or "Stelis Session"
+            label_raw = getattr(node_def, "label", None) or "Stelis Session"
+            label = _format(label_raw, state)
 
             # Send status event
             if event_callback:
@@ -1859,6 +2079,7 @@ class SEARuntime:
 
             # Switch to new Stelis thread
             memory_adapter.set_active_thread(stelis.thread_id)
+            log_sea_trace(playbook.name, node_id, "STELIS_START", f"thread={stelis.thread_id} label=\"{label}\"")
 
             # Update state with Stelis info
             state["stelis_thread_id"] = stelis.thread_id
@@ -1976,6 +2197,9 @@ class SEARuntime:
                 current_thread_id, parent_thread_id
             )
 
+            _chron_preview = (chronicle_summary[:120] + "...") if chronicle_summary and len(chronicle_summary) > 120 else (chronicle_summary or "(none)")
+            log_sea_trace(playbook.name, node_id, "STELIS_END", f"thread={current_thread_id} chronicle=\"{_chron_preview}\"")
+
             # Emit event for UI
             if event_callback:
                 event_callback({
@@ -2014,44 +2238,39 @@ class SEARuntime:
         if not messages:
             return None
 
-        # Build content for summarization
+        # Build full conversation content for summarization (no per-message truncation)
         content_parts = []
         for msg in messages:
             role = msg.get("role", "unknown")
             content = msg.get("content", "")
             if content:
-                content_parts.append(f"[{role}]: {content[:500]}")
+                content_parts.append(f"[{role}]: {content}")
 
         if not content_parts:
             return None
 
-        conversation_text = "\n".join(content_parts[-50:])  # Last 50 messages
+        conversation_text = "\n".join(content_parts)
 
         # Use default prompt if not specified
         if not chronicle_prompt:
             chronicle_prompt = (
                 "Please summarize the following conversation/work session concisely. "
-                "Focus on: what was done, key decisions made, and any important outcomes. "
-                "Keep the summary under 500 characters."
+                "Focus on: what was done, key decisions made, and any important outcomes."
             )
 
         # Get LLM client for summarization
         try:
-            from llm_clients import get_llm_client
-            from model_configs import get_model_config
+            # Prefer persona's existing lightweight client (already configured)
+            client = getattr(persona, "lightweight_llm_client", None)
+            if client is None:
+                # Fallback: create a temporary client
+                from llm_clients import get_llm_client
+                from model_configs import get_context_length, get_model_provider
 
-            # Use lightweight model for summarization
-            lightweight_model = getattr(persona, "lightweight_model", None)
-            if not lightweight_model:
-                import os
-                lightweight_model = os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gemini-2.0-flash-lite")
-
-            model_config = get_model_config(lightweight_model)
-            if not model_config:
-                LOGGER.warning("[stelis] Could not get model config for Chronicle generation")
-                return None
-
-            client = get_llm_client(lightweight_model, model_config)
+                lightweight_model = getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
+                lw_context = get_context_length(lightweight_model)
+                provider = get_model_provider(lightweight_model)
+                client = get_llm_client(lightweight_model, provider, lw_context)
 
             summary_messages = [
                 {"role": "system", "content": chronicle_prompt},
@@ -2060,7 +2279,7 @@ class SEARuntime:
 
             response, _ = client.generate(summary_messages, temperature=0.3)
             if response and isinstance(response, str):
-                return response.strip()[:1000]  # Cap at 1000 chars
+                return response.strip()
 
         except Exception as exc:
             LOGGER.warning("[stelis] Chronicle generation failed: %s", exc)
@@ -2106,46 +2325,6 @@ class SEARuntime:
         state["messages"] = conv
         state["_last_tool_call_id"] = call_id
         state["_last_tool_name"] = payload.get("playbook") or "sub_playbook"
-
-    def _ingest_context_from_subplaybook(
-        self,
-        state: Dict[str, Any],
-        source: str,
-        sub_outputs: Optional[List[str]],
-    ) -> bool:
-        bundle = state.setdefault("context_bundle", [])
-        state.setdefault("context_bundle_text", "")
-        if not sub_outputs:
-            return False
-        joined = "\n".join(str(item).strip() for item in sub_outputs if str(item).strip())
-        if not joined:
-            return False
-        entry: Dict[str, Any] = {"source": source, "raw": joined}
-        parsed = self._extract_structured_json(joined)
-        if parsed is not None:
-            entry["data"] = parsed
-        bundle.append(entry)
-        state["context_bundle_text"] = self._render_context_bundle(bundle)
-        self._append_tool_result_message(state, source, joined)
-        return True
-
-    def _render_context_bundle(self, bundle: List[Dict[str, Any]]) -> str:
-        blocks: List[str] = []
-        for idx, entry in enumerate(bundle, 1):
-            label = entry.get("source") or f"context_{idx}"
-            payload = entry.get("raw") or ""
-            data = entry.get("data")
-            if isinstance(data, (dict, list)):
-                try:
-                    payload = json.dumps(data, ensure_ascii=False)
-                except Exception:
-                    payload = str(data)
-            payload = str(payload).strip()
-            blocks.append(f"[{label}]\n{payload}" if payload else f"[{label}]")
-        return "\n\n".join(blocks)
-
-    def _should_collect_memory_output(self, playbook: PlaybookSchema) -> bool:
-        return not playbook.name.startswith("meta_")
 
     def _store_memory(
         self,
@@ -2213,6 +2392,21 @@ class SEARuntime:
         state["_last_tool_call_id"] = None
 
     # ---------------- helpers -----------------
+    def _effective_building_id(self, persona: Any, fallback: str) -> str:
+        """Return persona's actual building from occupancy map.
+
+        After a move_persona tool changes the occupants dict, this returns
+        the new building so that post-move utterances land in the correct
+        building history.  For normal (non-move) conversations it returns
+        the same value as *fallback*.
+        """
+        pid = getattr(persona, "persona_id", None)
+        if pid:
+            for bid, occ_list in self.manager.occupants.items():
+                if pid in occ_list:
+                    return bid
+        return fallback
+
     def _emit_speak(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, record_history: bool = True) -> None:
         msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
         # Build metadata with tags and conversation partners
@@ -2316,7 +2510,307 @@ class SEARuntime:
         except Exception as exc:
             LOGGER.debug("Failed to notify Unity Gateway: %s", exc)
 
-    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    # ---------------- history metabolism -----------------
+
+    def _get_high_watermark(self, persona) -> Optional[int]:
+        """Get the high watermark (max history messages) for metabolism."""
+        override = getattr(self.manager, "max_history_messages_override", None) if self.manager else None
+        if override is not None:
+            return override
+        from model_configs import get_default_max_history_messages
+        persona_model = getattr(persona, "model", None)
+        if persona_model:
+            return get_default_max_history_messages(persona_model)
+        return None
+
+    def _get_low_watermark(self, persona) -> Optional[int]:
+        """Get the low watermark (keep messages after metabolism) for metabolism."""
+        override = getattr(self.manager, "metabolism_keep_messages_override", None) if self.manager else None
+        if override is not None:
+            return override
+        from model_configs import get_metabolism_keep_messages
+        persona_model = getattr(persona, "model", None)
+        if persona_model:
+            return get_metabolism_keep_messages(persona_model)
+        return None
+
+    # ---- anchor persistence helpers ----
+
+    def _load_anchors(self, persona) -> Dict[str, Any]:
+        """Load per-model metabolism anchors from DB (AI.METABOLISM_ANCHORS)."""
+        if not self.manager or not hasattr(self.manager, "SessionLocal"):
+            return {}
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id:
+            return {}
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI
+            ai_row = db.query(AI).filter_by(AIID=persona_id).first()
+            if ai_row and ai_row.METABOLISM_ANCHORS:
+                return json.loads(ai_row.METABOLISM_ANCHORS)
+        except Exception as exc:
+            LOGGER.warning("[metabolism] Failed to load anchors for %s: %s", persona_id, exc)
+        finally:
+            db.close()
+        return {}
+
+    def _save_anchors(self, persona, anchors: Dict[str, Any]) -> None:
+        """Persist per-model metabolism anchors to DB."""
+        if not self.manager or not hasattr(self.manager, "SessionLocal"):
+            return
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id:
+            return
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI
+            ai_row = db.query(AI).filter_by(AIID=persona_id).first()
+            if ai_row:
+                ai_row.METABOLISM_ANCHORS = json.dumps(anchors, ensure_ascii=False)
+                db.commit()
+        except Exception as exc:
+            LOGGER.warning("[metabolism] Failed to save anchors for %s: %s", persona_id, exc)
+        finally:
+            db.close()
+
+    def _get_anchor_validity_seconds(self, model_key: str) -> int:
+        """Get anchor validity duration in seconds based on model cache config.
+
+        - Anthropic (explicit cache): current manager.state.cache_ttl (300s or 3600s)
+        - Others (implicit/no cache): 1200s (20 min)
+        """
+        try:
+            from model_configs import get_cache_config
+            cache_config = get_cache_config(model_key)
+            cache_type = cache_config.get("type", "implicit")
+            if cache_type == "explicit":
+                current_ttl = "5m"
+                if self.manager and hasattr(self.manager, "state"):
+                    current_ttl = getattr(self.manager.state, "cache_ttl", "5m")
+                return 300 if current_ttl == "5m" else 3600
+        except Exception:
+            LOGGER.warning("Failed to resolve cache TTL for model %s", model_key, exc_info=True)
+        return 1200  # 20 minutes default
+
+    def _resolve_metabolism_anchor(self, persona) -> tuple:
+        """Resolve the best metabolism anchor using 3-level fallback.
+
+        Returns:
+            (anchor_id, resolution_type) where resolution_type is
+            "self" | "other" | "minimal".
+            anchor_id is None for "minimal" (no valid anchor found).
+        """
+        persona_model = getattr(persona, "model", None)
+        if not persona_model:
+            return (None, "minimal")
+
+        anchors = self._load_anchors(persona)
+        now = datetime.now()
+
+        # Case 1: self model's anchor exists and is valid
+        self_entry = anchors.get(persona_model)
+        if self_entry:
+            try:
+                updated_at = datetime.fromisoformat(self_entry["updated_at"])
+                validity = self._get_anchor_validity_seconds(persona_model)
+                age = (now - updated_at).total_seconds()
+                if age <= validity:
+                    LOGGER.debug(
+                        "[metabolism] Anchor resolved: self model '%s' (age=%.0fs, validity=%ds)",
+                        persona_model, age, validity,
+                    )
+                    return (self_entry["anchor_id"], "self")
+                else:
+                    LOGGER.debug(
+                        "[metabolism] Self model anchor expired: '%s' (age=%.0fs > validity=%ds)",
+                        persona_model, age, validity,
+                    )
+            except (KeyError, ValueError, TypeError) as exc:
+                LOGGER.debug("[metabolism] Invalid self anchor entry: %s", exc)
+
+        # Case 2: most recent valid anchor from any model
+        best_entry = None
+        best_updated = None
+        for model_key, entry in anchors.items():
+            if model_key == persona_model:
+                continue  # already checked
+            try:
+                updated_at = datetime.fromisoformat(entry["updated_at"])
+                validity = self._get_anchor_validity_seconds(model_key)
+                age = (now - updated_at).total_seconds()
+                if age <= validity:
+                    if best_updated is None or updated_at > best_updated:
+                        best_entry = entry
+                        best_updated = updated_at
+            except (KeyError, ValueError, TypeError):
+                continue
+
+        if best_entry:
+            LOGGER.debug(
+                "[metabolism] Anchor resolved: other model (age=%.0fs)",
+                (now - best_updated).total_seconds(),
+            )
+            return (best_entry["anchor_id"], "other")
+
+        # Case 3: no valid anchor
+        LOGGER.debug("[metabolism] No valid anchor found — will use minimal load")
+        return (None, "minimal")
+
+    def _update_anchor_for_model(self, persona, model_key: str, anchor_id: str) -> None:
+        """Update the anchor for a specific model and persist to DB."""
+        if not model_key or not anchor_id:
+            return
+        anchors = self._load_anchors(persona)
+        anchors[model_key] = {
+            "anchor_id": anchor_id,
+            "updated_at": datetime.now().isoformat(),
+        }
+        self._save_anchors(persona, anchors)
+
+    def _maybe_run_metabolism(
+        self,
+        persona,
+        building_id: str,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> None:
+        """Check if metabolism is needed after response and run if so."""
+        if not getattr(self.manager, "metabolism_enabled", False):
+            return
+
+        history_mgr = getattr(persona, "history_manager", None)
+        anchor = getattr(history_mgr, "metabolism_anchor_message_id", None)
+        if not history_mgr or not anchor:
+            return
+
+        high_wm = self._get_high_watermark(persona)
+        if high_wm is None:
+            return
+
+        # Get current message count from anchor
+        current_messages = history_mgr.get_history_from_anchor(
+            anchor, required_tags=["conversation"],
+        )
+        if len(current_messages) <= high_wm:
+            return  # Haven't reached high watermark yet
+
+        low_wm = self._get_low_watermark(persona)
+        if low_wm is None or high_wm - low_wm < 20:
+            return  # Gap too small for a Chronicle batch
+
+        LOGGER.info(
+            "[metabolism] Triggering metabolism for %s: %d messages > high_wm=%d, will keep %d",
+            getattr(persona, "persona_id", "?"), len(current_messages), high_wm, low_wm,
+        )
+        self._run_metabolism(persona, building_id, current_messages, low_wm, event_callback)
+
+    def _run_metabolism(
+        self,
+        persona,
+        building_id: str,
+        current_messages: List[Dict[str, Any]],
+        keep_count: int,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> None:
+        """Execute history metabolism: Chronicle generation + anchor update."""
+        evict_count = len(current_messages) - keep_count
+
+        # 1. Notify start
+        if event_callback:
+            event_callback({
+                "type": "metabolism",
+                "status": "started",
+                "content": f"記憶を整理しています（{len(current_messages)}件 → {keep_count}件）...",
+            })
+
+        # 2. Chronicle generation (only if Memory Weave is enabled)
+        memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
+        if memory_weave_enabled:
+            try:
+                self._generate_chronicle(persona, event_callback)
+            except Exception as exc:
+                LOGGER.warning("[metabolism] Chronicle generation failed: %s", exc)
+
+        # 3. Update anchor to new window start
+        new_anchor_id = current_messages[evict_count].get("id")
+        if new_anchor_id:
+            persona.history_manager.metabolism_anchor_message_id = new_anchor_id
+            persona_model = getattr(persona, "model", None)
+            if persona_model:
+                self._update_anchor_for_model(persona, persona_model, new_anchor_id)
+            LOGGER.info("[metabolism] Updated anchor to %s (evicted %d, kept %d)", new_anchor_id, evict_count, keep_count)
+
+        # 4. Notify completion
+        if event_callback:
+            event_callback({
+                "type": "metabolism",
+                "status": "completed",
+                "content": f"記憶の整理が完了しました（{evict_count}件の会話をChronicleに圧縮）",
+                "evicted": evict_count,
+                "kept": keep_count,
+            })
+
+    def _generate_chronicle(
+        self,
+        persona,
+        event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> None:
+        """Generate Chronicle entries from all unprocessed messages."""
+        from llm_clients.factory import get_llm_client
+        from model_configs import find_model_config
+        from sai_memory.arasuji import init_arasuji_tables
+        from sai_memory.arasuji.generator import ArasujiGenerator, DEFAULT_BATCH_SIZE
+        from sai_memory.memory.storage import get_messages_paginated
+
+        # Get LLM client using MEMORY_WEAVE_MODEL
+        model_name = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.0-flash")
+        model_id, model_config = find_model_config(model_name)
+        if not model_config:
+            LOGGER.warning("[metabolism] Model '%s' not found for Chronicle generation", model_name)
+            return
+
+        actual_model_id = model_config.get("model", model_name)
+        provider = model_config.get("provider")
+        context_length = model_config.get("context_length", 128000)
+        client = get_llm_client(actual_model_id, provider, context_length, config=model_config)
+
+        # Initialize arasuji tables and fetch all messages
+        adapter = getattr(persona, "sai_memory", None)
+        if not adapter or not adapter.is_ready():
+            LOGGER.warning("[metabolism] SAIMemory not available for Chronicle generation")
+            return
+
+        init_arasuji_tables(adapter.conn)
+
+        thread_id = adapter._thread_id(None)
+        all_messages = []
+        page = 0
+        while True:
+            batch = get_messages_paginated(adapter.conn, thread_id, page=page, page_size=200)
+            if not batch:
+                break
+            all_messages.extend(batch)
+            page += 1
+
+        if not all_messages:
+            return
+
+        batch_size = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)))
+        generator = ArasujiGenerator(
+            client, adapter.conn,
+            batch_size=batch_size,
+            consolidation_size=10,
+            persona_id=getattr(persona, "persona_id", None),
+        )
+        level1, consolidated = generator.generate_from_messages(all_messages)
+        LOGGER.info(
+            "[metabolism] Chronicle generation complete: %d level1, %d consolidated entries",
+            len(level1), len(consolidated),
+        )
+
+    # ---------------- context preparation -----------------
+
+    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False) -> List[Dict[str, Any]]:
         from sea.playbook_models import ContextRequirements
 
         # Use provided requirements or default to full context
@@ -2384,7 +2878,9 @@ class SEARuntime:
                     # NOTE: Datetime variables ({current_time}, etc.) are no longer expanded here.
                     # Time information is now provided via Realtime Context at the end of messages
                     # to improve LLM context caching efficiency.
-                    building_sys = getattr(building_obj, "system_instruction", None)
+                    # Use base_system_instruction (without items) to avoid duplication
+                    # with the building_items block below.
+                    building_sys = getattr(building_obj, "base_system_instruction", None) or getattr(building_obj, "system_instruction", None)
                     if building_sys:
                         building_section_parts.append(str(building_sys).strip())
 
@@ -2404,13 +2900,13 @@ class SEARuntime:
                             if lines:
                                 building_section_parts.append("### 建物内のアイテム\n" + "\n".join(lines))
                         except Exception:
-                            pass
+                            LOGGER.warning("Failed to collect building items for %s", building_id, exc_info=True)
 
                     if building_section_parts:
                         building_name = getattr(building_obj, "name", building_id)
-                        system_sections.append(f"## {building_name}\n" + "\n\n".join(building_section_parts))
+                        system_sections.append(f"## {building_name} (ID: {building_id})\n" + "\n\n".join(building_section_parts))
             except Exception:
-                pass
+                LOGGER.warning("Failed to build building section for system prompt", exc_info=True)
 
             # 4. "## 利用可能な能力" section (available playbooks)
             if reqs.available_playbooks:
@@ -2506,14 +3002,87 @@ class SEARuntime:
                         required_tags.append("internal")
 
                     # Parse history_depth format
-                    # - "full": use persona's context_length (character limit)
+                    # - "full": use max_history_messages (message count) or context_length (character limit)
                     # - "Nmessages" (e.g., "10messages"): message count limit
                     # - integer or numeric string: character limit
                     use_message_count = False
                     limit_value = 2000  # fallback
+                    used_anchor = False
+                    recent = []
 
                     if history_depth == "full":
-                        limit_value = getattr(persona, "context_length", 2000)
+                        metabolism_enabled = getattr(self.manager, "metabolism_enabled", False) if self.manager else False
+
+                        if metabolism_enabled and not preview_only:
+                            # Persistent anchor resolution with 3-level fallback
+                            anchor_id, resolution = self._resolve_metabolism_anchor(persona)
+
+                            if anchor_id:
+                                # Case 1 or 2: valid anchor found
+                                recent_from_anchor = history_mgr.get_history_from_anchor(
+                                    anchor_id, required_tags=required_tags, pulse_id=pulse_id,
+                                )
+                                if recent_from_anchor:
+                                    recent = recent_from_anchor
+                                    used_anchor = True
+                                    history_mgr.metabolism_anchor_message_id = anchor_id
+                                    LOGGER.debug(
+                                        "[sea][prepare-context] Anchor-based retrieval (%s): %d messages from anchor %s",
+                                        resolution, len(recent), anchor_id,
+                                    )
+                                    # Persist anchor for current model (touch updated_at)
+                                    persona_model = getattr(persona, "model", None)
+                                    if persona_model:
+                                        self._update_anchor_for_model(persona, persona_model, anchor_id)
+                            else:
+                                # Case 3: no valid anchor — minimal load + Chronicle generation
+                                memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
+                                if memory_weave_enabled:
+                                    try:
+                                        LOGGER.info("[metabolism] Triggering Chronicle generation on anchor expiry")
+                                        self._generate_chronicle(persona)
+                                    except Exception as exc:
+                                        LOGGER.warning("[metabolism] Chronicle generation on anchor expiry failed: %s", exc)
+
+                                # Load minimal history (low watermark)
+                                low_wm = self._get_low_watermark(persona)
+                                limit_value = low_wm if low_wm and low_wm > 0 else 20
+                                use_message_count = True
+                                LOGGER.debug(
+                                    "[sea][prepare-context] Minimal load (no valid anchor): %d messages",
+                                    limit_value,
+                                )
+
+                        elif metabolism_enabled and preview_only:
+                            # Preview mode: use anchor for retrieval but don't persist or generate Chronicle
+                            anchor_id, resolution = self._resolve_metabolism_anchor(persona)
+                            if anchor_id:
+                                recent_from_anchor = history_mgr.get_history_from_anchor(
+                                    anchor_id, required_tags=required_tags, pulse_id=pulse_id,
+                                )
+                                if recent_from_anchor:
+                                    recent = recent_from_anchor
+                                    used_anchor = True
+                            if not used_anchor:
+                                low_wm = self._get_low_watermark(persona)
+                                limit_value = low_wm if low_wm and low_wm > 0 else 20
+                                use_message_count = True
+
+                        if not used_anchor and not metabolism_enabled:
+                            # Metabolism disabled — traditional count/char retrieval
+                            max_hist_msgs = getattr(self.manager, "max_history_messages_override", None) if self.manager else None
+                            if max_hist_msgs is None:
+                                from model_configs import get_default_max_history_messages
+                                persona_model = getattr(persona, "model", None)
+                                if persona_model:
+                                    max_hist_msgs = get_default_max_history_messages(persona_model)
+                            if max_hist_msgs is not None:
+                                limit_value = max_hist_msgs
+                                use_message_count = True
+                                LOGGER.debug("[sea][prepare-context] Using max_history_messages=%d", max_hist_msgs)
+                            else:
+                                limit_value = getattr(persona, "context_length", 2000)
+
                     elif isinstance(history_depth, str) and history_depth.endswith("messages"):
                         # Message count mode: "10messages", "20messages", etc.
                         try:
@@ -2528,38 +3097,52 @@ class SEARuntime:
                         except (ValueError, TypeError):
                             limit_value = 2000  # fallback
 
-                    LOGGER.debug("[sea][prepare-context] Fetching history: limit=%d, mode=%s, pulse_id=%s, balanced=%s, tags=%s",
-                                limit_value, "messages" if use_message_count else "chars", pulse_id, reqs.history_balanced, required_tags)
+                    # Fetch history if not already retrieved via anchor
+                    if not used_anchor:
+                        LOGGER.debug("[sea][prepare-context] Fetching history: limit=%d, mode=%s, pulse_id=%s, balanced=%s, tags=%s",
+                                    limit_value, "messages" if use_message_count else "chars", pulse_id, reqs.history_balanced, required_tags)
 
-                    if use_message_count:
-                        # Message count mode - balanced not supported yet
-                        recent = history_mgr.get_recent_history_by_count(
-                            limit_value,
-                            required_tags=required_tags,
-                            pulse_id=pulse_id,
-                        )
-                    elif reqs.history_balanced:
-                        # Get conversation partners for balanced retrieval
-                        participant_ids = ["user"]
-                        occupants = self.manager.occupants.get(building_id, [])
-                        persona_id = getattr(persona, "persona_id", None)
-                        for oid in occupants:
-                            if oid != persona_id:
-                                participant_ids.append(oid)
-                        LOGGER.debug("[sea][prepare-context] Balancing across: %s", participant_ids)
-                        recent = history_mgr.get_recent_history_balanced(
-                            limit_value,
-                            participant_ids,
-                            required_tags=required_tags,
-                            pulse_id=pulse_id,
-                        )
-                    else:
-                        # Filter by required tags or current pulse_id
-                        recent = history_mgr.get_recent_history(
-                            limit_value,
-                            required_tags=required_tags,
-                            pulse_id=pulse_id,
-                        )
+                        if use_message_count:
+                            # Message count mode - balanced not supported yet
+                            recent = history_mgr.get_recent_history_by_count(
+                                limit_value,
+                                required_tags=required_tags,
+                                pulse_id=pulse_id,
+                            )
+                        elif reqs.history_balanced:
+                            # Get conversation partners for balanced retrieval
+                            participant_ids = ["user"]
+                            occupants = self.manager.occupants.get(building_id, [])
+                            persona_id = getattr(persona, "persona_id", None)
+                            for oid in occupants:
+                                if oid != persona_id:
+                                    participant_ids.append(oid)
+                            LOGGER.debug("[sea][prepare-context] Balancing across: %s", participant_ids)
+                            recent = history_mgr.get_recent_history_balanced(
+                                limit_value,
+                                participant_ids,
+                                required_tags=required_tags,
+                                pulse_id=pulse_id,
+                            )
+                        else:
+                            # Filter by required tags or current pulse_id
+                            recent = history_mgr.get_recent_history(
+                                limit_value,
+                                required_tags=required_tags,
+                                pulse_id=pulse_id,
+                            )
+
+                        # Set metabolism anchor on first count-based retrieval and persist (skip in preview)
+                        metabolism_enabled_for_anchor = getattr(self.manager, "metabolism_enabled", False) if self.manager else False
+                        if metabolism_enabled_for_anchor and recent and not preview_only:
+                            oldest_id = recent[0].get("id")
+                            if oldest_id:
+                                history_mgr.metabolism_anchor_message_id = oldest_id
+                                persona_model = getattr(persona, "model", None)
+                                if persona_model:
+                                    self._update_anchor_for_model(persona, persona_model, oldest_id)
+                                LOGGER.debug("[sea][prepare-context] Set metabolism anchor to %s (persisted)", oldest_id)
+
                     LOGGER.debug("[sea][prepare-context] Got %d history messages", len(recent))
                     # Enrich messages with attachment context
                     enriched_recent = self._enrich_history_with_attachments(recent)
@@ -2592,7 +3175,251 @@ class SEARuntime:
             except Exception as exc:
                 LOGGER.debug("[sea][prepare-context] Failed to build realtime context: %s", exc)
 
+        # ---- Token budget check ----
+        try:
+            from token_estimator import estimate_messages_tokens
+            from model_configs import get_context_length, get_model_provider
+
+            persona_model = getattr(persona, "model", None)
+            if persona_model:
+                provider = get_model_provider(persona_model)
+                context_length = get_context_length(persona_model)
+                estimated_tokens = estimate_messages_tokens(messages, provider)
+                LOGGER.debug(
+                    "[sea][prepare-context] Token budget: estimated=%d, limit=%d (model=%s)",
+                    estimated_tokens, context_length, persona_model,
+                )
+
+                if estimated_tokens > context_length:
+                    # Over budget: trim history messages from oldest until within budget
+                    # Find indices of history messages (not system, not visual context, not realtime)
+                    history_indices = []
+                    for i, msg in enumerate(messages):
+                        meta = msg.get("metadata") or {}
+                        if (
+                            msg.get("role") != "system"
+                            and not meta.get("__visual_context__")
+                            and not meta.get("__realtime_context__")
+                            and not meta.get("__memory_weave_context__")
+                        ):
+                            history_indices.append(i)
+
+                    original_count = len(history_indices)
+                    # Remove oldest history messages until under budget
+                    while history_indices and estimated_tokens > context_length:
+                        remove_idx = history_indices.pop(0)
+                        removed_msg = messages[remove_idx]
+                        removed_tokens = estimate_messages_tokens([removed_msg], provider)
+                        estimated_tokens -= removed_tokens
+                        messages[remove_idx] = None  # mark for removal
+
+                    # Clean up None entries
+                    messages = [m for m in messages if m is not None]
+                    remaining_count = len(history_indices)
+
+                    warning_msg = {
+                        "type": "warning",
+                        "warning_code": "context_auto_trimmed",
+                        "content": (
+                            f"コンテキスト超過のため、履歴を直近{original_count}件→{remaining_count}件に"
+                            f"自動削減しました（推定: {estimated_tokens:,} / {context_length:,}トークン）。"
+                            f"ChatOptionsでメッセージ数上限を下げてください。"
+                        ),
+                    }
+                    LOGGER.warning(
+                        "[sea][prepare-context] Context auto-trimmed: %d -> %d messages (est=%d, limit=%d)",
+                        original_count, remaining_count, estimated_tokens, context_length,
+                    )
+                    if warnings is not None:
+                        warnings.append(warning_msg)
+
+                elif estimated_tokens > context_length * 0.85:
+                    # Approaching limit: warn but continue
+                    warning_msg = {
+                        "type": "warning",
+                        "warning_code": "context_approaching_limit",
+                        "content": (
+                            f"コンテキスト使用量がモデルの上限に近づいています"
+                            f"（推定: {estimated_tokens:,} / {context_length:,}トークン）。"
+                            f"ChatOptionsでメッセージ数上限を下げることを検討してください。"
+                        ),
+                    }
+                    LOGGER.warning(
+                        "[sea][prepare-context] Context approaching limit: est=%d, limit=%d (%.0f%%)",
+                        estimated_tokens, context_length, estimated_tokens / context_length * 100,
+                    )
+                    if warnings is not None:
+                        warnings.append(warning_msg)
+        except Exception as exc:
+            LOGGER.debug("[sea][prepare-context] Token budget check failed: %s", exc)
+
         return messages
+
+    # ---- Context Preview (read-only, no side effects) ----
+
+    def preview_context(
+        self,
+        persona: Any,
+        building_id: str,
+        user_input: str,
+        meta_playbook: Optional[str] = None,
+        image_count: int = 0,
+        document_count: int = 0,
+    ) -> Dict[str, Any]:
+        """Build the context that would be sent to the LLM, without executing anything.
+
+        Returns a dict with messages, token estimates, cost estimates, and model info.
+        Does NOT record the user message to history or call any LLM.
+        """
+        from token_estimator import estimate_messages_tokens, estimate_image_tokens
+        from model_configs import (
+            get_model_provider, get_context_length,
+            get_model_display_name, get_model_pricing, calculate_cost,
+        )
+
+        # Select playbook (same logic as run_meta_user)
+        if meta_playbook:
+            playbook = self._load_playbook_for(meta_playbook, persona, building_id)
+            if playbook is None:
+                playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
+        else:
+            playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
+
+        # Build context messages (without recording user message to history)
+        context_warnings: List[Dict[str, Any]] = []
+        messages = self._prepare_context(
+            persona, building_id, user_input=None,
+            requirements=playbook.context_requirements,
+            warnings=context_warnings,
+            preview_only=True,
+        )
+
+        # Append the user message manually (in real flow it comes from history)
+        if user_input:
+            messages.append({"role": "user", "content": user_input})
+
+        # Classify each message into a section
+        persona_model = getattr(persona, "model", None) or "gemini-2.0-flash"
+        provider = get_model_provider(persona_model)
+
+        section_order = [
+            "system_prompt", "memory_weave_chronicle", "memory_weave_memopedia",
+            "memory_weave", "visual_context",
+            "history", "realtime_context", "user_message",
+        ]
+        section_labels = {
+            "system_prompt": "System Prompt",
+            "memory_weave_chronicle": "Memory Weave — Chronicle",
+            "memory_weave_memopedia": "Memory Weave — Memopedia",
+            "memory_weave": "Memory Weave",
+            "visual_context": "Visual Context",
+            "history": "Conversation History",
+            "realtime_context": "Realtime Context",
+            "user_message": "Your Message",
+            "attachments": "Attachments",
+        }
+        section_tokens: Dict[str, int] = {s: 0 for s in section_order}
+        section_tokens["attachments"] = 0
+        section_msg_counts: Dict[str, int] = {s: 0 for s in section_order}
+        section_msg_counts["attachments"] = 0
+
+        annotated_messages: List[Dict[str, Any]] = []
+        for i, msg in enumerate(messages):
+            meta = msg.get("metadata") or {}
+            # Determine section
+            if msg.get("role") == "system":
+                section = "system_prompt"
+            elif meta.get("__memory_weave_context__"):
+                mw_type = meta.get("__memory_weave_type__", "")
+                if mw_type == "chronicle":
+                    section = "memory_weave_chronicle"
+                elif mw_type == "memopedia":
+                    section = "memory_weave_memopedia"
+                else:
+                    section = "memory_weave"
+            elif meta.get("__visual_context__"):
+                section = "visual_context"
+            elif meta.get("__realtime_context__"):
+                section = "realtime_context"
+            elif i == len(messages) - 1 and msg.get("role") == "user" and user_input and msg.get("content") == user_input:
+                section = "user_message"
+            else:
+                section = "history"
+
+            msg_tokens = estimate_messages_tokens([msg], provider)
+            section_tokens[section] += msg_tokens
+            section_msg_counts[section] += 1
+
+            annotated_messages.append({
+                "role": msg.get("role", "unknown"),
+                "content": msg.get("content", ""),
+                "section": section,
+                "tokens": msg_tokens,
+            })
+
+        # Add estimated attachment tokens
+        attachment_tokens = 0
+        if image_count > 0:
+            attachment_tokens += image_count * estimate_image_tokens(provider)
+        if document_count > 0:
+            # Rough estimate: ~500 tokens per document (varies widely)
+            attachment_tokens += document_count * 500
+        section_tokens["attachments"] = attachment_tokens
+
+        total_input_tokens = sum(section_tokens.values())
+        context_length = get_context_length(persona_model)
+        pricing = get_model_pricing(persona_model)
+
+        # Cost range: best case (all cached) to worst case (all cache-write)
+        cache_kwargs = self._get_cache_kwargs()
+        cache_enabled = cache_kwargs.get("enable_cache", False)
+        cache_ttl = cache_kwargs.get("cache_ttl", "5m")
+
+        if cache_enabled and pricing and pricing.get("cached_input_per_1m_tokens") is not None:
+            # Best case: everything is a cache hit
+            cost_best = calculate_cost(
+                persona_model, total_input_tokens, 0,
+                cached_tokens=total_input_tokens, cache_write_tokens=0,
+            )
+            # Worst case: everything is a cache write
+            cost_worst = calculate_cost(
+                persona_model, total_input_tokens, 0,
+                cached_tokens=0, cache_write_tokens=total_input_tokens,
+                cache_ttl=cache_ttl,
+            )
+        else:
+            # No cache: single estimate
+            cost_best = calculate_cost(persona_model, total_input_tokens, 0)
+            cost_worst = cost_best
+
+        # Build sections summary
+        all_sections = section_order + ["attachments"]
+        sections_summary = []
+        for s in all_sections:
+            if section_tokens.get(s, 0) > 0 or section_msg_counts.get(s, 0) > 0:
+                sections_summary.append({
+                    "name": s,
+                    "label": section_labels.get(s, s),
+                    "tokens": section_tokens.get(s, 0),
+                    "message_count": section_msg_counts.get(s, 0),
+                })
+
+        return {
+            "persona_id": getattr(persona, "persona_id", "unknown"),
+            "persona_name": getattr(persona, "persona_name", "Unknown"),
+            "model": persona_model,
+            "model_display_name": get_model_display_name(persona_model),
+            "provider": provider,
+            "context_length": context_length,
+            "sections": sections_summary,
+            "total_input_tokens": total_input_tokens,
+            "estimated_cost_best_usd": round(cost_best, 6),
+            "estimated_cost_worst_usd": round(cost_worst, 6),
+            "cache_enabled": cache_enabled,
+            "cache_ttl": cache_ttl if cache_enabled else None,
+            "pricing": pricing or {},
+            "messages": annotated_messages,
+        }
 
     def _enrich_history_with_attachments(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Enrich history messages with attachment context.

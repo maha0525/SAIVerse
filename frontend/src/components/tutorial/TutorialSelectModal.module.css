@@ -138,3 +138,53 @@
         height: 40px;
     }
 }
+
+/* ===== Light Mode Overrides ===== */
+:global([data-theme="light"]) .modal {
+    background-color: #ffffff;
+    color: #1f2937;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+}
+
+:global([data-theme="light"]) .header {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .headerTitle h2 {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .closeButton {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .closeButton:hover {
+    background-color: rgba(0, 0, 0, 0.05);
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .description {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .optionCard {
+    background-color: #f8fafc;
+    border-color: transparent;
+}
+
+:global([data-theme="light"]) .optionCard:hover {
+    background-color: #f1f5f9;
+    border-color: #3b82f6;
+}
+
+:global([data-theme="light"]) .optionIcon {
+    background-color: #dbeafe;
+}
+
+:global([data-theme="light"]) .optionTitle {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .optionDescription {
+    color: #64748b;
+}

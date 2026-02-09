@@ -1,32 +1,39 @@
 {
-  "name": "wait",
-  "description": "Do nothing - choose to wait and observe. Consecutive waits are consolidated.",
-  "input_schema": [
-    {
-      "name": "input",
-      "description": "Reason for waiting (optional)",
-      "source": null
-    }
-  ],
-  "output_schema": [],
-  "context_requirements": {
-    "history_depth": 0,
-    "inventory": false,
-    "building_items": false,
-    "system_prompt": false,
-    "available_playbooks": false
-  },
-  "router_callable": true,
-  "user_selectable": false,
-  "nodes": [
-    {
-      "id": "record",
-      "type": "tool",
-      "action": "record_wait",
-      "args": {},
-      "output_key": "_wait_result",
-      "next": null
-    }
-  ],
-  "start_node": "record"
+    "name": "wait",
+    "display_name": "待機",
+    "description": "Do nothing - choose to wait and observe. Consecutive waits are consolidated.",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "Reason for waiting (optional)",
+            "source": null
+        }
+    ],
+    "output_schema": [],
+    "context_requirements": {
+        "history_depth": 0,
+        "history_balanced": false,
+        "include_internal": false,
+        "system_prompt": false,
+        "memory_weave": true,
+        "working_memory": false,
+        "inventory": false,
+        "building_items": false,
+        "available_playbooks": false,
+        "visual_context": false,
+        "realtime_context": true
+    },
+    "router_callable": true,
+    "user_selectable": false,
+    "nodes": [
+        {
+            "id": "record",
+            "type": "tool",
+            "action": "record_wait",
+            "args": {},
+            "output_key": "_wait_result",
+            "next": null
+        }
+    ],
+    "start_node": "record"
 }

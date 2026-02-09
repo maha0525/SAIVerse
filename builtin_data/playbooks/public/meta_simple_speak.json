@@ -1,29 +1,37 @@
 {
-  "name": "meta_simple_speak",
-  "description": "speak only",
-  "input_schema": [
-    {
-      "name": "input",
-      "description": "User input"
-    }
-  ],
-  "context_requirements": {
-    "history_depth": "full",
-    "inventory": true,
-    "building_items": true,
-    "system_prompt": true
-  },
-  "router_callable": false,
-  "user_selectable": true,
-  "nodes": [
-    {
-      "id": "speak",
-      "type": "subplay",
-      "playbook": "sub_speak_simple",
-      "input_template": "{input}",
-      "propagate_output": true,
-      "next": null
-    }
-  ],
-  "start_node": "speak"
+    "name": "meta_simple_speak",
+    "display_name": "ツール不使用（喋るだけ）",
+    "description": "speak only",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "User input"
+        }
+    ],
+    "context_requirements": {
+        "history_depth": "full",
+        "history_balanced": false,
+        "include_internal": false,
+        "system_prompt": true,
+        "memory_weave": true,
+        "working_memory": false,
+        "inventory": true,
+        "building_items": true,
+        "available_playbooks": false,
+        "visual_context": true,
+        "realtime_context": true
+    },
+    "router_callable": false,
+    "user_selectable": true,
+    "nodes": [
+        {
+            "id": "speak",
+            "type": "subplay",
+            "playbook": "sub_speak",
+            "input_template": "{input}",
+            "propagate_output": true,
+            "next": null
+        }
+    ],
+    "start_node": "speak"
 }

@@ -1,7 +1,10 @@
 """Utility helpers shared by LLM client implementations."""
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List
+
+_log = logging.getLogger(__name__)
 
 
 def content_to_text(content: Any) -> str:
@@ -30,12 +33,12 @@ def obj_to_dict(obj: Any) -> Any:
         try:
             return obj.model_dump()
         except Exception:
-            pass
+            _log.warning("obj_to_dict: model_dump() failed for %s", type(obj).__name__, exc_info=True)
     if hasattr(obj, "to_dict") and callable(getattr(obj, "to_dict")):
         try:
             return obj.to_dict()
         except Exception:
-            pass
+            _log.warning("obj_to_dict: to_dict() failed for %s", type(obj).__name__, exc_info=True)
     return obj
 
 

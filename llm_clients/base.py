@@ -16,7 +16,8 @@ class UsageInfo:
     output_tokens: int
     timestamp: float  # time.time() when recorded
     cached_tokens: int = 0  # Tokens served FROM cache (cache read)
-    cache_write_tokens: int = 0  # Tokens written TO cache (Anthropic: 1.25x cost)
+    cache_write_tokens: int = 0  # Tokens written TO cache (Anthropic: 1.25x cost for 5m, 2x for 1h)
+    cache_ttl: str = ""  # Cache TTL used for this request ("5m", "1h", or "" if no cache)
 
 # LLM logging is now handled by logging_config module
 # Import convenience functions for backward compatibility
@@ -126,6 +127,7 @@ class LLMClient:
         model: str | None = None,
         cached_tokens: int = 0,
         cache_write_tokens: int = 0,
+        cache_ttl: str = "",
     ) -> None:
         """Store token usage information for later retrieval.
 
@@ -134,7 +136,8 @@ class LLMClient:
             output_tokens: Number of output/completion tokens
             model: Model ID (uses self.config_key or self.model if not provided)
             cached_tokens: Number of tokens served FROM cache (cache read)
-            cache_write_tokens: Number of tokens written TO cache (Anthropic: 1.25x cost)
+            cache_write_tokens: Number of tokens written TO cache
+            cache_ttl: Cache TTL used ("5m", "1h") - affects write cost calculation
         """
         # Prefer config_key for pricing lookup, fall back to model
         import logging
@@ -150,6 +153,7 @@ class LLMClient:
             timestamp=time.time(),
             cached_tokens=cached_tokens,
             cache_write_tokens=cache_write_tokens,
+            cache_ttl=cache_ttl,
         )
 
     def consume_usage(self) -> Optional[UsageInfo]:

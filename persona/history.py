@@ -2,7 +2,10 @@
 History and pulse tracking helpers for PersonaCore.
 """
 
+import logging
 from typing import Dict
+
+_log = logging.getLogger(__name__)
 
 
 def initialise_pulse_state(persona) -> None:
@@ -15,6 +18,7 @@ def initialise_pulse_state(persona) -> None:
             try:
                 seq_val = int(msg.get("seq", 0))
             except (TypeError, ValueError):
+                _log.debug("Failed to parse seq value %r, defaulting to 0", msg.get("seq"))
                 seq_val = 0
             max_seq = max(max_seq, seq_val)
         max_seq_map[b_id] = max_seq
@@ -25,12 +29,14 @@ def initialise_pulse_state(persona) -> None:
                 try:
                     cursor = int(raw_value)
                 except (TypeError, ValueError):
+                    _log.debug("Failed to parse cursor raw_value %r, defaulting to max_seq %d", raw_value, max_seq)
                     cursor = max_seq
                 cursor = max(0, min(cursor, max_seq))
             else:
                 try:
                     count = int(raw_value)
                 except (TypeError, ValueError):
+                    _log.debug("Failed to parse count raw_value %r, defaulting to hist length %d", raw_value, len(hist))
                     count = len(hist)
                 if count <= 0:
                     cursor = 0

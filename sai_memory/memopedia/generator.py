@@ -93,7 +93,7 @@ def get_messages_around(
             try:
                 metadata = json.loads(metadata_raw)
             except Exception:
-                pass
+                LOGGER.warning("Failed to parse metadata JSON for message %s", msg_id, exc_info=True)
         msg = Message(
             id=msg_id,
             thread_id=tid,
@@ -332,6 +332,7 @@ def _record_llm_usage(client, persona_id: str, node_type: str) -> None:
                 output_tokens=usage.output_tokens,
                 cached_tokens=usage.cached_tokens,
                 cache_write_tokens=usage.cache_write_tokens,
+                cache_ttl=usage.cache_ttl,
                 persona_id=persona_id,
                 node_type=node_type,
                 category="memory_weave_generate",

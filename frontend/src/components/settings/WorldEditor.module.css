@@ -264,3 +264,94 @@
         padding-bottom: 0.5rem;
     }
 }
+
+/* ===== Light Mode Overrides ===== */
+:global([data-theme="light"]) .container {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .tabs {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .tab {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .tab:hover {
+    background: #f1f5f9;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .tab.active {
+    background: #dbeafe;
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .list {
+    border-right-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .item {
+    background: #ffffff;
+    border-color: #e2e8f0;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .item:hover {
+    background: #f1f5f9;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .item.selected {
+    background: #eff6ff;
+    border-color: #3b82f6;
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .newBtn {
+    border-color: #cbd5e1;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .newBtn:hover {
+    border-color: #94a3b8;
+    color: #1f2937;
+    background: #f1f5f9;
+}
+
+:global([data-theme="light"]) .field label {
+    color: #475569;
+}
+
+:global([data-theme="light"]) .field input[type="text"],
+:global([data-theme="light"]) .field input[type="number"],
+:global([data-theme="light"]) .field textarea,
+:global([data-theme="light"]) .field select {
+    background: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .field input:focus,
+:global([data-theme="light"]) .field textarea:focus,
+:global([data-theme="light"]) .field select:focus {
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+:global([data-theme="light"]) .actions {
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .dangerBtn {
+    background: #fef2f2;
+    border-color: #fecaca;
+    color: #dc2626;
+}
+
+:global([data-theme="light"]) .dangerBtn:hover {
+    background: #fee2e2;
+    color: #b91c1c;
+}

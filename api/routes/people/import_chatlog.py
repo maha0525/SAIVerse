@@ -96,8 +96,8 @@ def _run_extension_import_task(
         if tmp_path.exists():
             try:
                 tmp_path.unlink()
-            except:
-                pass
+            except Exception:
+                LOGGER.warning("Failed to delete temp file", exc_info=True)
 
 def _run_official_import_task(
     persona_id: str,
@@ -268,8 +268,8 @@ def preview_official_chatgpt(
         if tmp_path.exists():
             try:
                 tmp_path.unlink()
-            except:
-                pass
+            except Exception:
+                LOGGER.warning("Failed to delete temp file", exc_info=True)
         raise HTTPException(status_code=400, detail=f"Preview failed: {str(e)}")
 
 @router.post("/{persona_id}/import/official")

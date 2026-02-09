@@ -14,7 +14,7 @@ from database.models import (
     City as CityModel,
     Tool as ToolModel,
 )
-from persona_core import PersonaCore
+from persona.core import PersonaCore
 from buildings import Building
 from model_configs import get_context_length, get_model_provider
 
@@ -268,7 +268,7 @@ class BlueprintMixin:
                     avatar_image=blueprint.BASE_AVATAR,
                     buildings=self.buildings,
                     common_prompt_path=common_prompt_file,
-                    action_priority_path=Path("action_priority.json"),
+                    action_priority_path=Path("builtin_data/action_priority.json"),
                     building_histories=self.building_histories,
                     occupants=self.occupants,
                     id_to_name_map=self.id_to_name_map,

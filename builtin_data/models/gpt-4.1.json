@@ -1,8 +1,11 @@
 {
   "model": "gpt-4.1",
+  "system_prompt": "",
   "display_name": "GPT-4.1",
   "provider": "openai",
-  "context_length": 32000,
+  "context_length": 128000,
+  "default_max_history_messages": 40,
+  "metabolism_keep_messages": 20,
   "supports_images": true,
   "parameters": {
     "temperature": {
@@ -35,7 +38,7 @@
   },
   "pricing": {
     "input_per_1m_tokens": 2,
-    "output_per_1m_tokens": 8.00,
+    "output_per_1m_tokens": 8.0,
     "currency": "USD"
   }
 }

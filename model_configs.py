@@ -5,8 +5,6 @@ from typing import Any, Dict
 
 LOGGER = logging.getLogger(__name__)
 
-# Legacy single-file config
-LEGACY_CONFIG_PATH = Path("models.json")
 # Legacy directory-based configs
 LEGACY_MODELS_DIR = Path("models")
 
@@ -18,7 +16,6 @@ def load_configs() -> Dict[str, Dict]:
     1. user_data/models/ (highest priority)
     2. builtin_data/models/
     3. models/ (legacy, for backwards compatibility)
-    4. models.json (legacy fallback)
     """
     from data_paths import iter_files, MODELS_DIR
     
@@ -60,18 +57,6 @@ def load_configs() -> Dict[str, Dict]:
             except Exception as exc:
                 LOGGER.warning("Failed to load model config from %s: %s", config_file.name, exc)
 
-    # Fallback to legacy models.json if still empty
-    if not configs and LEGACY_CONFIG_PATH.exists():
-        try:
-            legacy_configs = json.loads(LEGACY_CONFIG_PATH.read_text(encoding="utf-8"))
-            for model_id, config_data in legacy_configs.items():
-                if "model" not in config_data:
-                    config_data["model"] = model_id
-                configs[model_id] = config_data
-            LOGGER.info("Loaded %d models from legacy models.json", len(configs))
-        except Exception as exc:
-            LOGGER.warning("Failed to load legacy models.json: %s", exc)
-
     LOGGER.info("Loaded %d model configurations", len(configs))
     return configs
 
@@ -92,11 +77,47 @@ def reload_configs() -> Dict[str, Dict]:
 
 
 def get_model_provider(model: str) -> str:
-    return MODEL_CONFIGS.get(model, {}).get("provider", "ollama")
+    config = MODEL_CONFIGS.get(model)
+    if config is None:
+        raise ValueError(
+            f"Model config not found: '{model}'. "
+            f"Check that a matching JSON file exists in builtin_data/models/ or user_data/models/."
+        )
+    return config.get("provider", "ollama")
 
 
 def get_context_length(model: str) -> int:
-    return int(MODEL_CONFIGS.get(model, {}).get("context_length", 120000))
+    config = MODEL_CONFIGS.get(model)
+    if config is None:
+        raise ValueError(
+            f"Model config not found: '{model}'. "
+            f"Check that a matching JSON file exists in builtin_data/models/ or user_data/models/."
+        )
+    return int(config.get("context_length", 120000))
+
+
+def get_default_max_history_messages(model: str) -> int | None:
+    """Get the default maximum number of history messages for a model.
+
+    Returns None if not configured (falls back to character-based limit).
+    """
+    config = MODEL_CONFIGS.get(model, {})
+    val = config.get("default_max_history_messages")
+    if val is not None:
+        return int(val)
+    return None
+
+
+def get_metabolism_keep_messages(model: str) -> int | None:
+    """Get the number of messages to keep after metabolism (low watermark).
+
+    Returns None if not configured (metabolism disabled for this model).
+    """
+    config = MODEL_CONFIGS.get(model, {})
+    val = config.get("metabolism_keep_messages")
+    if val is not None:
+        return int(val)
+    return None
 
 
 def get_model_display_name(model: str) -> str:
@@ -138,6 +159,15 @@ def get_model_parameter_defaults(model: str) -> Dict[str, Any]:
         if isinstance(spec, dict) and "default" in spec:
             defaults[name] = spec.get("default")
     return defaults
+
+
+def get_model_system_prompt(model: str) -> str:
+    """Get the additional system prompt defined in model config.
+
+    Returns an empty string if not configured.
+    """
+    config = get_model_config(model)
+    return config.get("system_prompt", "") or ""
 
 
 def get_structured_output_backend(model: str) -> str | None:
@@ -193,7 +223,7 @@ def find_model_config(query: str) -> tuple[str, Dict]:
                 # But include the actual model ID in the config for API calls
                 return query, config_data
             except Exception:
-                pass
+                LOGGER.warning("Failed to load model config from %s", config_file, exc_info=True)
 
     # 4. Partial match on model ID (query is suffix or contains)
     for model_id, config in MODEL_CONFIGS.items():
@@ -251,6 +281,7 @@ def calculate_cost(
     output_tokens: int,
     cached_tokens: int = 0,
     cache_write_tokens: int = 0,
+    cache_ttl: str = "",
 ) -> float:
     """Calculate cost in USD for a given token usage.
 
@@ -259,7 +290,8 @@ def calculate_cost(
         input_tokens: Number of input tokens (total including cached and cache_write)
         output_tokens: Number of output tokens
         cached_tokens: Number of tokens served FROM cache (cache read, discounted rate)
-        cache_write_tokens: Number of tokens written TO cache (Anthropic: 1.25x rate)
+        cache_write_tokens: Number of tokens written TO cache
+        cache_ttl: Cache TTL used ("5m" or "1h"). Affects write cost for Anthropic.
 
     Returns:
         Cost in USD. Returns 0.0 if pricing not configured (e.g., local models).
@@ -267,7 +299,7 @@ def calculate_cost(
     Note:
         Token breakdown for Anthropic:
         - cached_tokens: Read from cache (0.1x rate)
-        - cache_write_tokens: Written to cache (1.25x rate for 5m TTL)
+        - cache_write_tokens: Written to cache (1.25x rate for 5m, 2x rate for 1h)
         - remaining: Regular input tokens (1x rate)
 
         For Gemini/OpenAI (implicit caching):
@@ -284,8 +316,11 @@ def calculate_cost(
     output_rate = pricing.get("output_per_1m_tokens", 0.0)
     # Cached tokens (read): use explicit cached rate if configured, otherwise same as input rate
     cached_rate = pricing.get("cached_input_per_1m_tokens", input_rate)
-    # Cache write tokens: use explicit write rate if configured, otherwise same as input rate
-    cache_write_rate = pricing.get("cache_write_per_1m_tokens", input_rate)
+    # Cache write tokens: use TTL-specific rate if available
+    if cache_ttl == "1h" and "cache_write_1h_per_1m_tokens" in pricing:
+        cache_write_rate = pricing["cache_write_1h_per_1m_tokens"]
+    else:
+        cache_write_rate = pricing.get("cache_write_per_1m_tokens", input_rate)
 
     # Non-cached input tokens (input_tokens includes cached + cache_write, so subtract both)
     non_cached_input = max(0, input_tokens - cached_tokens - cache_write_tokens)
@@ -307,9 +342,12 @@ def is_local_model(model: str) -> bool:
     """Check if a model is a local model (Ollama or llama.cpp).
 
     Local models have zero API cost.
+    Returns False if the model config is not found.
     """
-    provider = get_model_provider(model)
-    return provider in ("ollama", "llama_cpp")
+    config = MODEL_CONFIGS.get(model)
+    if config is None:
+        return False
+    return config.get("provider") in ("ollama", "llama_cpp")
 
 
 def get_cache_config(model: str) -> Dict[str, Any]:
@@ -328,7 +366,8 @@ def get_cache_config(model: str) -> Dict[str, Any]:
     cache = config.get("cache", {})
 
     # Determine if caching is supported based on provider
-    provider = get_model_provider(model)
+    # Use direct config lookup to avoid ValueError when model config is missing
+    provider = config.get("provider")
     default_supported = provider in ("anthropic", "gemini", "openai")
 
     return {

@@ -12,6 +12,7 @@ generate_image/
 sai_memory/__pycache__/
 .gradio/*.pem
 .claude/
+.agent/
 
 # User data directory (user customizations, not tracked in git)
 user_data/
@@ -26,6 +27,8 @@ database/data/*
 # Temporary files and work-in-progress
 temp/
 !temp/.gitkeep
+%temp%/
+nul
 
 # Local Claude Code preferences
 CLAUDE.local.md

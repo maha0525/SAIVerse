@@ -384,6 +384,36 @@ def store_document_text(content: str, *, source: str = "generated") -> Tuple[Dic
     return metadata, dest_path
 
 
+def store_document_bytes(
+    data: bytes, mime_type: str, *, ext: str = "", source: str = "uploaded"
+) -> Tuple[Dict[str, str], Path]:
+    """Store binary document data (e.g., PDF) and return metadata and path.
+
+    Args:
+        data: Raw binary content
+        mime_type: MIME type (e.g., "application/pdf")
+        ext: File extension override (e.g., ".pdf"). Auto-detected from mime_type if empty.
+        source: Source identifier for metadata
+    """
+    dest_dir = _ensure_document_dir()
+    if not ext:
+        ext = mimetypes.guess_extension(mime_type) or ".bin"
+    filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex}{ext}"
+    dest_path = dest_dir / filename
+    try:
+        dest_path.write_bytes(data)
+    except OSError:
+        LOGGER.exception("Failed to write binary document file: %s", dest_path)
+        raise
+    metadata = {
+        "type": "document",
+        "uri": f"{DOCUMENT_URI_PREFIX}{filename}",
+        "mime_type": mime_type,
+        "source": source,
+    }
+    return metadata, dest_path
+
+
 @lru_cache(maxsize=256)
 def _cached_path_to_data_url(path: str, mime_type: str, mtime: float) -> Optional[str]:
     """Internal helper to memoize base64 conversions keyed by path + mtime."""

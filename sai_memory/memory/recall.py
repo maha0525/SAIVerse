@@ -199,7 +199,7 @@ def _infer_embedding_dimension(model_dir: Path) -> int:
             if isinstance(dim, int) and dim > 0:
                 return dim
         except Exception:
-            pass
+            logging.warning("Failed to read pooling config for embedding dimension at %s", pooling_cfg, exc_info=True)
 
     config_candidates = [
         model_dir / "config.json",
@@ -210,6 +210,7 @@ def _infer_embedding_dimension(model_dir: Path) -> int:
             try:
                 data = json.loads(cfg.read_text(encoding="utf-8"))
             except Exception:
+                logging.warning("Failed to parse config file %s", cfg, exc_info=True)
                 continue
             for key in ("word_embedding_dimension", "hidden_size", "embedding_size", "d_model"):
                 value = data.get(key)
@@ -228,7 +229,7 @@ def _infer_pooling(model_dir: Path) -> PoolingType:
             if data.get("pooling_mode_cls_token"):
                 return PoolingType.CLS
         except Exception:
-            pass
+            logging.warning("Failed to read pooling config at %s", pooling_cfg, exc_info=True)
     return PoolingType.MEAN
 
 
@@ -244,7 +245,7 @@ def _infer_normalization(model_dir: Path) -> bool:
                         if "normalize" in module_type:
                             return True
         except Exception:
-            pass
+            logging.warning("Failed to read modules.json at %s", modules_path, exc_info=True)
     # Default to True for sentence-transformer style checkpoints.
     return True
 

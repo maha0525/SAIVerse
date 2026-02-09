@@ -323,3 +323,123 @@
     border-color: #666;
     color: #ccc;
 }
+
+/* Light Mode Overrides */
+:global([data-theme="light"]) .container {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .header {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .description {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .label {
+    color: #374151;
+}
+
+:global([data-theme="light"]) .queryInput {
+    background-color: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .queryInput::placeholder {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .paramLabel {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .slider {
+    accent-color: #2563eb;
+}
+
+:global([data-theme="light"]) .paramValue {
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .toggleLabel {
+    color: #374151;
+}
+
+:global([data-theme="light"]) .toggleHint {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .modeToggle {
+    background-color: rgba(37, 99, 235, 0.03);
+    border-color: rgba(37, 99, 235, 0.15);
+}
+
+:global([data-theme="light"]) .resultBox {
+    background-color: #f8fafc;
+    border-color: #e2e8f0;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .debugTable {
+    background-color: #ffffff;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .debugTable thead {
+    background-color: #f1f5f9;
+}
+
+:global([data-theme="light"]) .debugTable th {
+    color: #475569;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .debugTable td {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .debugTable tbody tr:hover {
+    background-color: #f1f5f9;
+}
+
+:global([data-theme="light"]) .rankCol {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .roleCol {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .dateCol {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .contentPreview {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .keywordHint {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .dateInput {
+    background-color: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .dateSeparator {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .clearDateBtn {
+    border-color: #e2e8f0;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .clearDateBtn:hover {
+    border-color: #cbd5e1;
+    color: #1f2937;
+}

@@ -87,7 +87,9 @@ def import_playbooks_from_directory(
                     continue
 
                 description = data.get("description", "")
+                display_name = data.get("display_name")
                 router_callable = data.get("router_callable", False)
+                user_selectable = data.get("user_selectable", False)
 
                 # Check if already exists
                 existing = session.query(Playbook).filter(Playbook.name == name).first()
@@ -105,9 +107,11 @@ def import_playbooks_from_directory(
                                 "start_node": data.get("start_node"),
                             }
                             existing.description = description
+                            existing.display_name = display_name
                             existing.schema_json = json.dumps(schema_payload, ensure_ascii=False)
                             existing.nodes_json = json.dumps(data, ensure_ascii=False)
                             existing.router_callable = router_callable
+                            existing.user_selectable = user_selectable
                             updated_count += 1
                             logging.info(f"Updated playbook '{name}' (router_callable={router_callable})")
                     else:
@@ -131,12 +135,14 @@ def import_playbooks_from_directory(
                     record = Playbook(
                         name=name,
                         description=description,
+                        display_name=display_name,
                         scope="public",
                         created_by_persona_id=None,
                         building_id=None,
                         schema_json=schema_json,
                         nodes_json=nodes_json,
                         router_callable=router_callable,
+                        user_selectable=user_selectable,
                     )
                     session.add(record)
                     imported_count += 1

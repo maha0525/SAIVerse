@@ -23,7 +23,7 @@ interface Building {
 }
 
 interface SidebarProps {
-    onMove?: (buildingId: string) => void;
+    onMove?: (buildingId?: string) => void;
     isOpen: boolean;
     onOpen: () => void;
     onClose: () => void;

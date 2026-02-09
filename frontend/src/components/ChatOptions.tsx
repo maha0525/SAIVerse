@@ -77,6 +77,11 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
         ttl_options: [],
         cache_type: null
     });
+    const [maxHistoryMessages, setMaxHistoryMessages] = useState<number | null>(null);
+    const [maxHistoryMessagesDefault, setMaxHistoryMessagesDefault] = useState<number | null>(null);
+    const [metabolismEnabled, setMetabolismEnabled] = useState<boolean>(true);
+    const [metabolismKeepMessages, setMetabolismKeepMessages] = useState<number | null>(null);
+    const [metabolismKeepMessagesDefault, setMetabolismKeepMessagesDefault] = useState<number | null>(null);
 
     useEffect(() => {
         if (isOpen) {
@@ -110,6 +115,11 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
                 onModelChange(modelId, modelInfo?.name || ''); // Sync with parent
                 setParamSpecs(config.parameters || {});
                 setParams(config.current_values || {});
+                setMaxHistoryMessages(config.max_history_messages ?? null);
+                setMaxHistoryMessagesDefault(config.max_history_messages_model_default ?? null);
+                setMetabolismEnabled(config.metabolism_enabled ?? true);
+                setMetabolismKeepMessages(config.metabolism_keep_messages ?? null);
+                setMetabolismKeepMessagesDefault(config.metabolism_keep_messages_model_default ?? null);
             }
 
             if (cacheRes.ok) {
@@ -149,6 +159,11 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
                 const data = await res.json();
                 setParamSpecs(data.parameters || {});
                 setParams(data.current_values || {});
+                setMaxHistoryMessages(data.max_history_messages ?? null);
+                setMaxHistoryMessagesDefault(data.max_history_messages_model_default ?? null);
+                setMetabolismEnabled(data.metabolism_enabled ?? true);
+                setMetabolismKeepMessages(data.metabolism_keep_messages ?? null);
+                setMetabolismKeepMessagesDefault(data.metabolism_keep_messages_model_default ?? null);
             }
 
             // Refetch cache config since it depends on selected model
@@ -213,6 +228,71 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
             });
         } catch (e) {
             console.error("Failed to save playbook params", e);
+        }
+    };
+
+    const handleMaxHistoryMessagesInput = (value: string) => {
+        const numValue = value === '' ? null : parseInt(value, 10);
+        if (numValue !== null && (isNaN(numValue) || numValue < 1)) return;
+        setMaxHistoryMessages(numValue);
+    };
+
+    const handleMaxHistoryMessagesCommit = async () => {
+        try {
+            await fetch('/api/config/max-history-messages', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ value: maxHistoryMessages })
+            });
+        } catch (e) {
+            console.error("Failed to update max history messages", e);
+        }
+    };
+
+    const handleMetabolismEnabledChange = async (enabled: boolean) => {
+        setMetabolismEnabled(enabled);
+        try {
+            await fetch('/api/config/metabolism', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled })
+            });
+        } catch (e) {
+            console.error("Failed to update metabolism settings", e);
+        }
+    };
+
+    const handleMetabolismKeepMessagesInput = (value: string) => {
+        // Local state only — API call deferred to onBlur to avoid
+        // intermediate values (e.g. "4" while typing "40") being rejected.
+        const numValue = value === '' ? null : parseInt(value, 10);
+        if (numValue !== null && (isNaN(numValue) || numValue < 1)) return;
+        setMetabolismKeepMessages(numValue);
+    };
+
+    const getMaxKeepMessages = (): number | null => {
+        const highWm = maxHistoryMessages ?? maxHistoryMessagesDefault;
+        return highWm != null ? Math.max(1, highWm - 20) : null;
+    };
+
+    const handleMetabolismKeepMessagesCommit = async () => {
+        let numValue = metabolismKeepMessages;
+
+        // Auto-clamp to max allowed value
+        const maxAllowed = getMaxKeepMessages();
+        if (numValue != null && maxAllowed != null && numValue > maxAllowed) {
+            numValue = maxAllowed;
+            setMetabolismKeepMessages(numValue);
+        }
+
+        try {
+            await fetch('/api/config/metabolism', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ keep_messages: numValue })
+            });
+        } catch (e) {
+            console.error("Failed to update metabolism keep_messages", e);
         }
     };
 
@@ -300,6 +380,67 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
                                         ))}
                                     </select>
                                 </div>
+                                <div className={styles.formGroup}>
+                                    <label>
+                                        メッセージ数上限
+                                        {maxHistoryMessagesDefault != null && (
+                                            <span className={styles.hint}> （モデルデフォルト: {maxHistoryMessagesDefault}）</span>
+                                        )}
+                                    </label>
+                                    <input
+                                        type="number"
+                                        className={styles.input}
+                                        min={1}
+                                        max={500}
+                                        value={maxHistoryMessages ?? ''}
+                                        placeholder={maxHistoryMessagesDefault ? `（自動: ${maxHistoryMessagesDefault}）` : '（自動）'}
+                                        onChange={(e) => handleMaxHistoryMessagesInput(e.target.value)}
+                                        onBlur={() => handleMaxHistoryMessagesCommit()}
+                                    />
+                                    <span className={styles.hint}>
+                                        LLMに送信する会話履歴の最大件数。コンテキスト超過エラーが発生する場合は値を下げてください。
+                                    </span>
+                                </div>
+                                <div className={styles.formGroup}>
+                                    <label className={styles.checkboxLabel}>
+                                        <input
+                                            type="checkbox"
+                                            checked={metabolismEnabled}
+                                            onChange={(e) => handleMetabolismEnabledChange(e.target.checked)}
+                                        />
+                                        履歴の新陳代謝
+                                    </label>
+                                    <span className={styles.hint}>
+                                        ON: 会話履歴のウィンドウ始点を固定しキャッシュヒット率を向上。上限到達時にバルクトリミング+Chronicle生成。OFF: 従来のスライディングウィンドウ。
+                                    </span>
+                                </div>
+                                {metabolismEnabled && (
+                                    <div className={styles.formGroup}>
+                                        <label>
+                                            代謝後の保持件数
+                                            {metabolismKeepMessagesDefault != null && (
+                                                <span className={styles.hint}> （モデルデフォルト: {metabolismKeepMessagesDefault}）</span>
+                                            )}
+                                        </label>
+                                        <input
+                                            type="number"
+                                            className={styles.input}
+                                            min={1}
+                                            max={getMaxKeepMessages() ?? 500}
+                                            value={metabolismKeepMessages ?? ''}
+                                            placeholder={metabolismKeepMessagesDefault ? `（自動: ${metabolismKeepMessagesDefault}）` : '（自動）'}
+                                            onChange={(e) => handleMetabolismKeepMessagesInput(e.target.value)}
+                                            onBlur={() => handleMetabolismKeepMessagesCommit()}
+                                        />
+                                        <span className={styles.hint}>
+                                            上限到達時にこの件数まで古い履歴を整理します。
+                                            {getMaxKeepMessages() != null
+                                                ? `設定可能範囲: 1〜${getMaxKeepMessages()}（上限${maxHistoryMessages ?? maxHistoryMessagesDefault} - 20）。超過時は自動調整されます。`
+                                                : '上限との差は20以上必要です。'
+                                            }
+                                        </span>
+                                    </div>
+                                )}
                             </div>
 
                             {cacheConfig.supported && (

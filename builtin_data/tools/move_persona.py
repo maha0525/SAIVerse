@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from typing import Optional
+
+_log = logging.getLogger(__name__)
 
 from tools.context import get_active_manager, get_active_persona_id
 from tools.core import ToolSchema
@@ -44,7 +47,7 @@ def move_persona(building_id: str, persona_id: Optional[str] = None) -> str:
     try:
         persona_obj._mark_entry(building_id)
     except Exception:
-        pass
+        _log.warning("Failed to mark entry for %s in building %s", target_persona_id, building_id, exc_info=True)
 
     src_name = getattr(manager.building_map.get(from_building), "name", from_building)
     dest_name = getattr(manager.building_map.get(building_id), "name", building_id)

@@ -176,7 +176,7 @@ def _mark_ingested(msg: Dict[str, Any], persona_id: str) -> None:
         if isinstance(bucket, list) and persona_id not in bucket:
             bucket.append(persona_id)
     except Exception:
-        pass
+        LOGGER.warning("Failed to mark message as ingested by %s", persona_id, exc_info=True)
 
 
 def schema() -> ToolSchema:

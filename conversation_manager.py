@@ -88,7 +88,7 @@ class ConversationManager:
                 ]
                 logging.debug(f"[ConvManager] Occupants in {self.building_id}: {meta}")
             except Exception:
-                pass
+                logging.warning("[ConvManager] Failed to collect occupant meta for %s", self.building_id, exc_info=True)
 
             # 誰もいなければ何もしない
             if not ai_occupants:

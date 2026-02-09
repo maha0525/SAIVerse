@@ -13,7 +13,7 @@ class DummyEmbedder:
     def __init__(self, vector):
         self._vector = vector
 
-    def embed(self, texts):
+    def embed(self, texts, **kwargs):
         return [self._vector for _ in texts]
 
 

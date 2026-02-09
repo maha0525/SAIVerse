@@ -7,10 +7,12 @@
 
 .sidebar {
     width: 300px;
+    min-width: 0;
     background-color: #1a1b1e;
     border-right: 1px solid #333;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
 }
 
 .sidebarHeader {
@@ -23,6 +25,7 @@
 .threadList {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
 }
 
 .threadSection {
@@ -58,6 +61,7 @@
     border-bottom: 1px solid #2c2d32;
     cursor: pointer;
     transition: background-color 0.2s;
+    overflow: hidden;
 }
 
 .threadItem:hover {
@@ -74,12 +78,18 @@
     justify-content: space-between;
     align-items: center;
     margin-bottom: 4px;
+    min-width: 0;
 }
 
 .threadId {
     font-size: 0.85rem;
     color: #4dabf7;
     font-family: monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+    flex: 1;
 }
 
 /* Stelis thread styles */
@@ -92,6 +102,9 @@
     font-size: 0.65rem;
     padding: 2px 6px;
     border-radius: 4px;
+    margin-bottom: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
 }
 
@@ -114,6 +127,8 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-shrink: 0;
+    margin-left: 8px;
 }
 
 .deleteThreadBtn {
@@ -368,6 +383,41 @@
     overflow-wrap: break-word;
     /* Ensure long words don't overflow */
     word-break: break-word;
+    position: relative;
+}
+
+.contentCollapsed {
+    max-height: 200px;
+    overflow: hidden;
+}
+
+.contentFade {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 48px;
+    background: linear-gradient(transparent, #1f2023);
+    pointer-events: none;
+}
+
+.expandBtn {
+    display: block;
+    width: 100%;
+    background: none;
+    border: 1px solid #444;
+    color: #4dabf7;
+    padding: 4px 0;
+    margin-top: 4px;
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    transition: background-color 0.2s, color 0.2s;
+}
+
+.expandBtn:hover {
+    background-color: rgba(77, 171, 247, 0.1);
+    color: #74c0fc;
 }
 
 .editInterface {
@@ -768,4 +818,280 @@
         flex: 1;
         min-width: 0;
     }
+}
+
+/* Light Mode Overrides */
+:global([data-theme="light"]) .sidebar {
+    background-color: #ffffff;
+    border-right-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .sidebarHeader {
+    border-bottom-color: #e2e8f0;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .threadSection {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .threadSectionHeader {
+    background-color: #f8fafc;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .noActiveThread {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .threadItem {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .threadItem:hover {
+    background-color: #f1f5f9;
+}
+
+:global([data-theme="light"]) .threadItem.active {
+    background-color: #dbeafe;
+    border-left-color: #2563eb;
+}
+
+:global([data-theme="light"]) .threadId {
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .threadPreview {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .deleteThreadBtn {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .deleteThreadBtn:hover {
+    color: #ef4444;
+    background-color: rgba(239, 68, 68, 0.1);
+}
+
+:global([data-theme="light"]) .mainArea {
+    background-color: #f8fafc;
+}
+
+:global([data-theme="light"]) .messagesHeader {
+    background-color: #ffffff;
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .headerTitle {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .dateRange {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .selectModeBtn,
+:global([data-theme="light"]) .exitSelectBtn {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .selectModeBtn:hover {
+    color: #2563eb;
+    background-color: rgba(37, 99, 235, 0.1);
+}
+
+:global([data-theme="light"]) .exitSelectBtn:hover {
+    color: #1f2937;
+    background-color: rgba(0, 0, 0, 0.06);
+}
+
+:global([data-theme="light"]) .selectedCount {
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .msgCount {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .checkbox {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .checkbox:hover {
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .message {
+    background-color: #ffffff;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .message.selected {
+    border-color: #2563eb;
+    background-color: rgba(37, 99, 235, 0.05);
+}
+
+:global([data-theme="light"]) .messageHeader {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .msgActions button {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .msgActions button:hover {
+    color: #1f2937;
+    background-color: rgba(0, 0, 0, 0.06);
+}
+
+:global([data-theme="light"]) .content {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .contentFade {
+    background: linear-gradient(transparent, #ffffff);
+}
+
+:global([data-theme="light"]) .expandBtn {
+    border-color: #cbd5e1;
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .expandBtn:hover {
+    background-color: rgba(37, 99, 235, 0.1);
+    color: #1d4ed8;
+}
+
+:global([data-theme="light"]) .tag {
+    background-color: rgba(0, 0, 0, 0.06);
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .tagIcon {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .editTimestampInput {
+    background-color: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .editTextarea {
+    background-color: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .editTimestampRow {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .saveBtn {
+    background-color: #2563eb;
+    color: white;
+}
+
+:global([data-theme="light"]) .saveBtn:hover {
+    background-color: #1d4ed8;
+}
+
+:global([data-theme="light"]) .cancelBtn {
+    background-color: #f1f5f9;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .cancelBtn:hover {
+    background-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .roleSelect {
+    background-color: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .timestampInput {
+    background-color: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .addTextarea {
+    background-color: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .addMessageForm {
+    background-color: #f0fdf4;
+    border-color: #86efac;
+}
+
+:global([data-theme="light"]) .addFormRow {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .cancelAddBtn {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .cancelAddBtn:hover {
+    color: #1f2937;
+    background-color: rgba(0, 0, 0, 0.06);
+}
+
+:global([data-theme="light"]) .submitAddBtn {
+    background-color: #16a34a;
+}
+
+:global([data-theme="light"]) .submitAddBtn:hover:not(:disabled) {
+    background-color: #15803d;
+}
+
+:global([data-theme="light"]) .pagination {
+    background-color: #ffffff;
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .pageButton {
+    background-color: #f1f5f9;
+    border-color: #e2e8f0;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .pageButton:hover:not(:disabled) {
+    background-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .pageInfo {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .emptyState {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .exportBtn {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .exportBtn:hover:not(:disabled) {
+    color: #2563eb;
+    background-color: rgba(37, 99, 235, 0.1);
+}
+
+:global([data-theme="light"]) .backButton {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .setActiveHeaderBtn {
+    border-color: #16a34a;
+    color: #16a34a;
+}
+
+:global([data-theme="light"]) .setActiveHeaderBtn:hover {
+    background-color: rgba(22, 163, 74, 0.1);
+    color: #15803d;
 }

@@ -43,8 +43,8 @@ const TUTORIAL_OPTIONS: TutorialOption[] = [
     },
     {
         id: 'models',
-        title: 'モデル選択',
-        description: '使用するLLMモデルを変更します',
+        title: 'モデル設定',
+        description: 'モデルロールの確認・変更を行います',
         icon: <Cpu size={24} />,
         startStep: 6
     }

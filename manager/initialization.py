@@ -156,6 +156,9 @@ class InitializationMixin:
         self.provider = get_model_provider(base_model)
         self._base_model = base_model
         self.model_parameter_overrides: Dict[str, Any] = {}
+        self.max_history_messages_override: Optional[int] = None
+        self.metabolism_enabled: bool = True
+        self.metabolism_keep_messages_override: Optional[int] = None
 
     def _update_timezone_cache(self, tz_name: Optional[str]) -> None:
         """Update cached timezone information for this manager."""

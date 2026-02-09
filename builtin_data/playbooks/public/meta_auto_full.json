@@ -1,172 +1,177 @@
 {
-  "name": "meta_auto_full",
-  "description": "Autonomous pulse: task-driven with speak/think/wait finalization",
-  "input_schema": [
-    {
-      "name": "input",
-      "description": "Trigger input (usually empty)",
-      "source": null
-    }
-  ],
-  "output_schema": null,
-  "context_requirements": {
-    "history_depth": 0,
-    "inventory": false,
-    "building_items": false,
-    "system_prompt": false,
-    "available_playbooks": false,
-    "working_memory": true
-  },
-  "router_callable": false,
-  "user_selectable": false,
-  "nodes": [
-    {
-      "id": "check_task",
-      "type": "tool",
-      "action": "get_task_summary",
-      "args": {
-        "limit": 1
-      },
-      "output_key": "task_summary",
-      "next": "branch_task"
+    "name": "meta_auto_full",
+    "description": "Autonomous pulse: task-driven with speak/think/wait finalization",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "Trigger input (usually empty)",
+            "source": null
+        }
+    ],
+    "output_schema": null,
+    "context_requirements": {
+        "history_depth": 0,
+        "history_balanced": false,
+        "include_internal": false,
+        "system_prompt": false,
+        "memory_weave": true,
+        "working_memory": true,
+        "inventory": false,
+        "building_items": false,
+        "available_playbooks": false,
+        "visual_context": false,
+        "realtime_context": true
     },
-    {
-      "id": "branch_task",
-      "type": "llm",
-      "model_type": "lightweight",
-      "action": "タスク情報:\n{task_summary}\n\nアクティブなタスクがあるかどうかを判定してください。\n- has_active_task: true/false",
-      "response_schema": {
-        "type": "object",
-        "properties": {
-          "has_active_task": {
-            "type": "boolean"
-          }
+    "router_callable": false,
+    "user_selectable": false,
+    "nodes": [
+        {
+            "id": "check_task",
+            "type": "tool",
+            "action": "get_task_summary",
+            "args": {
+                "limit": 1
+            },
+            "output_key": "task_summary",
+            "next": "branch_task"
         },
-        "required": [
-          "has_active_task"
-        ]
-      },
-      "output_key": "task_check",
-      "next": "route_task"
-    },
-    {
-      "id": "route_task",
-      "type": "pass",
-      "conditional_next": {
-        "field": "task_check.has_active_task",
-        "cases": {
-          "true": "execute_phase",
-          "false": "ingest_messages",
-          "default": "ingest_messages"
-        }
-      }
-    },
-    {
-      "id": "execute_phase",
-      "type": "subplay",
-      "playbook": "sub_execute_phase",
-      "input_template": "",
-      "propagate_output": false,
-      "next": "finalize"
-    },
-    {
-      "id": "ingest_messages",
-      "type": "tool",
-      "action": "get_building_messages",
-      "args": {},
-      "output_key": "perception_summary",
-      "next": "detect_situation"
-    },
-    {
-      "id": "detect_situation",
-      "type": "subplay",
-      "playbook": "sub_detect_situation_change",
-      "input_template": "",
-      "propagate_output": false,
-      "next": "react_check"
-    },
-    {
-      "id": "react_check",
-      "type": "llm",
-      "model_type": "lightweight",
-      "action": "現在の状況:\n{current_snapshot}\n\n新規メッセージ:\n{perception_summary}\n\n状況変化:\n{change_info.change_summary}\n\n上記を踏まえて、今すぐリアクション（発言や行動）すべき外部刺激があるか判定してください。\n\n例:\n- 他のペルソナから話しかけられた → should_react: true\n- 重要なイベント通知を受けた → should_react: true\n- 新しいペルソナが部屋に来た → should_react: true (挨拶するため)\n- 特に何もない → should_react: false",
-      "response_schema": {
-        "type": "object",
-        "properties": {
-          "should_react": {
-            "type": "boolean"
-          },
-          "reaction_trigger": {
-            "type": "string"
-          }
+        {
+            "id": "branch_task",
+            "type": "llm",
+            "model_type": "lightweight",
+            "action": "タスク情報:\n{task_summary}\n\nアクティブなタスクがあるかどうかを判定してください。\n- has_active_task: true/false",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "has_active_task": {
+                        "type": "boolean"
+                    }
+                },
+                "required": [
+                    "has_active_task"
+                ]
+            },
+            "output_key": "task_check",
+            "next": "route_task"
         },
-        "required": [
-          "should_react"
-        ]
-      },
-      "output_key": "react_decision",
-      "next": "route_react"
-    },
-    {
-      "id": "route_react",
-      "type": "pass",
-      "conditional_next": {
-        "field": "react_decision.should_react",
-        "cases": {
-          "true": "reaction",
-          "false": "generate_want",
-          "default": "generate_want"
+        {
+            "id": "route_task",
+            "type": "pass",
+            "conditional_next": {
+                "field": "task_check.has_active_task",
+                "cases": {
+                    "true": "execute_phase",
+                    "false": "ingest_messages",
+                    "default": "ingest_messages"
+                }
+            }
+        },
+        {
+            "id": "execute_phase",
+            "type": "subplay",
+            "playbook": "sub_execute_phase",
+            "input_template": "",
+            "propagate_output": false,
+            "next": "finalize"
+        },
+        {
+            "id": "ingest_messages",
+            "type": "tool",
+            "action": "get_building_messages",
+            "args": {},
+            "output_key": "perception_summary",
+            "next": "detect_situation"
+        },
+        {
+            "id": "detect_situation",
+            "type": "subplay",
+            "playbook": "sub_detect_situation_change",
+            "input_template": "",
+            "propagate_output": false,
+            "next": "react_check"
+        },
+        {
+            "id": "react_check",
+            "type": "llm",
+            "model_type": "lightweight",
+            "action": "現在の状況:\n{current_snapshot}\n\n新規メッセージ:\n{perception_summary}\n\n状況変化:\n{change_info.change_summary}\n\n上記を踏まえて、今すぐリアクション（発言や行動）すべき外部刺激があるか判定してください。\n\n例:\n- 他のペルソナから話しかけられた → should_react: true\n- 重要なイベント通知を受けた → should_react: true\n- 新しいペルソナが部屋に来た → should_react: true (挨拶するため)\n- 特に何もない → should_react: false",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "should_react": {
+                        "type": "boolean"
+                    },
+                    "reaction_trigger": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "should_react"
+                ]
+            },
+            "output_key": "react_decision",
+            "next": "route_react"
+        },
+        {
+            "id": "route_react",
+            "type": "pass",
+            "conditional_next": {
+                "field": "react_decision.should_react",
+                "cases": {
+                    "true": "reaction",
+                    "false": "generate_want",
+                    "default": "generate_want"
+                }
+            }
+        },
+        {
+            "id": "reaction",
+            "type": "subplay",
+            "playbook": "sub_reaction",
+            "input_template": "",
+            "propagate_output": false,
+            "next": "finalize"
+        },
+        {
+            "id": "generate_want",
+            "type": "subplay",
+            "playbook": "sub_generate_want",
+            "input_template": "",
+            "propagate_output": false,
+            "next": "route_want"
+        },
+        {
+            "id": "route_want",
+            "type": "pass",
+            "conditional_next": {
+                "field": "has_want",
+                "cases": {
+                    "true": "start_task",
+                    "false": "finalize",
+                    "default": "finalize"
+                }
+            }
+        },
+        {
+            "id": "start_task",
+            "type": "tool",
+            "action": "task_request_creation",
+            "args": {
+                "title": "{want_name}",
+                "goal": "{want_description}",
+                "steps": "{phases}"
+            },
+            "output_key": "new_task",
+            "next": "finalize"
+        },
+        {
+            "id": "finalize",
+            "type": "subplay",
+            "playbook": "sub_finalize_auto",
+            "input_template": "",
+            "propagate_output": false,
+            "next": null
         }
-      }
-    },
-    {
-      "id": "reaction",
-      "type": "subplay",
-      "playbook": "sub_reaction",
-      "input_template": "",
-      "propagate_output": false,
-      "next": "finalize"
-    },
-    {
-      "id": "generate_want",
-      "type": "subplay",
-      "playbook": "sub_generate_want",
-      "input_template": "",
-      "propagate_output": false,
-      "next": "route_want"
-    },
-    {
-      "id": "route_want",
-      "type": "pass",
-      "conditional_next": {
-        "field": "has_want",
-        "cases": {
-          "true": "start_task",
-          "false": "finalize",
-          "default": "finalize"
-        }
-      }
-    },
-    {
-      "id": "start_task",
-      "type": "tool",
-      "action": "task_request_creation",
-      "args": {
-        "title": "{want_name}",
-        "goal": "{want_description}",
-        "steps": "{phases}"
-      },
-      "output_key": "new_task",
-      "next": "finalize"
-    },
-    {
-      "id": "finalize",
-      "type": "subplay",
-      "playbook": "sub_finalize_auto",
-      "input_template": "",
-      "propagate_output": false,
-      "next": null
-    }
-  ],
-  "start_node": "check_task"
+    ],
+    "start_node": "check_task"
 }

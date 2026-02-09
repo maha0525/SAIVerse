@@ -60,7 +60,7 @@ def get_memory_weave_context(
             path_obj = get_active_persona_path()
             persona_dir = str(path_obj) if path_obj else None
         except Exception:
-            pass
+            LOGGER.warning("Failed to get active persona path", exc_info=True)
     
     if not persona_dir:
         LOGGER.debug("get_memory_weave_context: No persona dir")
@@ -94,19 +94,34 @@ def get_memory_weave_context(
         if not context_parts:
             return []
 
-        # Build message with marker for special handling
-        content = "\n\n---\n\n".join(context_parts)
-        message = {
-            "role": "user",
-            "content": f"以下は、あなたの長期記憶です。この情報を参考に会話してください。\n\n{content}",
-            "metadata": {MEMORY_WEAVE_CONTEXT_MARKER: True},
-        }
+        # Build separate messages for Chronicle and Memopedia
+        # so the context preview can show token breakdown per source
+        messages: List[Dict[str, Any]] = []
+        if chronicle_text:
+            messages.append({
+                "role": "user",
+                "content": f"以下は、あなたの長期記憶（Chronicle: これまでの出来事）です。\n\n{chronicle_text}",
+                "metadata": {
+                    MEMORY_WEAVE_CONTEXT_MARKER: True,
+                    "__memory_weave_type__": "chronicle",
+                },
+            })
+        if memopedia_text:
+            messages.append({
+                "role": "user",
+                "content": f"以下は、あなたの長期記憶（Memopedia: 記憶ベース）です。\n\n{memopedia_text}",
+                "metadata": {
+                    MEMORY_WEAVE_CONTEXT_MARKER: True,
+                    "__memory_weave_type__": "memopedia",
+                },
+            })
 
+        total_chars = sum(len(m["content"]) for m in messages)
         LOGGER.info(
-            "get_memory_weave_context: Generated context (%d chars)",
-            len(content)
+            "get_memory_weave_context: Generated %d messages (%d chars total)",
+            len(messages), total_chars,
         )
-        return [message]
+        return messages
 
     except Exception as exc:
         LOGGER.warning("get_memory_weave_context: Failed to build context: %s", exc)

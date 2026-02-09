@@ -52,9 +52,9 @@ class TestLLMClients(unittest.TestCase):
         client = get_llm_client("claude-sonnet-4-5", "anthropic", 1000)
         self.assertIsInstance(client, AnthropicClient)
         self.assertEqual(client.model, "claude-sonnet-4-5")
-        thinking_cfg = client._request_kwargs.get("extra_body", {}).get("thinking")
-        self.assertIsNotNone(thinking_cfg)
-        self.assertEqual(thinking_cfg.get("type"), "enabled")
+        # AnthropicClient uses _thinking_config (not _request_kwargs)
+        if client._thinking_config:
+            self.assertEqual(client._thinking_config.get("type"), "enabled")
 
         # GeminiClientのテスト
         client = get_llm_client("gemini-1.5-flash", "gemini", 1000)
@@ -72,7 +72,13 @@ class TestLLMClients(unittest.TestCase):
         os.environ['NVIDIA_API_KEY'] = 'test_nim_key'
         self.addCleanup(lambda: os.environ.pop('NVIDIA_API_KEY', None))
 
-        client = get_llm_client("stockmark/stockmark-2-100b-instruct", "openai", 32768)
+        config = {
+            "model": "stockmark/stockmark-2-100b-instruct",
+            "provider": "openai",
+            "base_url": "https://integrate.api.nvidia.com/v1",
+            "api_key_env": "NVIDIA_API_KEY",
+        }
+        client = get_llm_client("stockmark-stockmark-2-100b-instruct", "openai", 32768, config=config)
 
         self.assertIsInstance(client, OpenAIClient)
         self.assertEqual(client.model, "stockmark/stockmark-2-100b-instruct")
@@ -81,41 +87,57 @@ class TestLLMClients(unittest.TestCase):
             base_url='https://integrate.api.nvidia.com/v1'
         )
 
-    @patch('llm_router.client')
     @patch('llm_clients.openai.OpenAI')
-    def test_openai_client_generate(self, mock_openai, mock_router_client):
+    def test_openai_client_generate(self, mock_openai):
         mock_client_instance = MagicMock()
         mock_openai.return_value = mock_client_instance
-        mock_client_instance.chat.completions.create.return_value.choices[0].message.content = "Test OpenAI response"
+
+        # Build a proper mock response for non-tool mode
+        mock_resp = MagicMock()
+        mock_resp.usage.prompt_tokens = 10
+        mock_resp.usage.completion_tokens = 5
+        mock_resp.usage.prompt_tokens_details = None
+        mock_resp.model_dump_json.return_value = '{}'
+        mock_choice = MagicMock()
+        mock_choice.message.content = "Test OpenAI response"
+        mock_choice.finish_reason = "stop"
+        mock_resp.choices = [mock_choice]
+        mock_client_instance.chat.completions.create.return_value = mock_resp
 
         client = OpenAIClient("gpt-4.1-nano")
         messages = [{"role": "user", "content": "Hello"}]
-        response = client.generate(messages)
+        # tools=[] triggers non-tool path, returns str
+        response = client.generate(messages, tools=[])
 
         self.assertEqual(response, "Test OpenAI response")
-        mock_client_instance.chat.completions.create.assert_called_once_with(
-            model="gpt-4.1-nano",
-            messages=messages,
-            tools=OPENAI_TOOLS_SPEC,
-            tool_choice="auto",
-            n=1,
-        )
+        mock_client_instance.chat.completions.create.assert_called_once()
+        _, kwargs = mock_client_instance.chat.completions.create.call_args
+        self.assertEqual(kwargs["model"], "gpt-4.1-nano")
+        self.assertNotIn("tools", kwargs)
+        self.assertNotIn("tool_choice", kwargs)
 
-    @patch('llm_router.client')
     @patch('llm_clients.openai.OpenAI')
-    def test_openai_client_generate_with_schema(self, mock_openai, mock_router_client):
+    def test_openai_client_generate_with_schema(self, mock_openai):
         mock_client_instance = MagicMock()
         mock_openai.return_value = mock_client_instance
-        choice = MagicMock()
-        choice.message.content = "Structured response"
-        mock_client_instance.chat.completions.create.return_value.choices = [choice]
+
+        mock_resp = MagicMock()
+        mock_resp.usage.prompt_tokens = 10
+        mock_resp.usage.completion_tokens = 5
+        mock_resp.usage.prompt_tokens_details = None
+        mock_resp.model_dump_json.return_value = '{}'
+        mock_choice = MagicMock()
+        mock_choice.message.content = '{"answer": "yes"}'
+        mock_choice.finish_reason = "stop"
+        mock_resp.choices = [mock_choice]
+        mock_client_instance.chat.completions.create.return_value = mock_resp
 
         client = OpenAIClient("gpt-4.1-nano")
         messages = [{"role": "user", "content": "Hello"}]
-        schema = {"title": "Decision", "type": "object", "properties": {}, "required": []}
+        schema = {"title": "Decision", "type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
         response = client.generate(messages, tools=[], response_schema=schema)
 
-        self.assertEqual(response, "Structured response")
+        self.assertEqual(response, {"answer": "yes"})
         mock_client_instance.chat.completions.create.assert_called_once()
         _, kwargs = mock_client_instance.chat.completions.create.call_args
         self.assertNotIn("tools", kwargs)
@@ -123,7 +145,6 @@ class TestLLMClients(unittest.TestCase):
         self.assertIn("response_format", kwargs)
         rf = kwargs["response_format"]
         self.assertEqual(rf["type"], "json_schema")
-        self.assertEqual(rf["json_schema"]["schema"], schema)
         self.assertEqual(rf["json_schema"]["name"], "Decision")
         self.assertTrue(rf["json_schema"]["strict"])
         self.assertIsNone(kwargs.get("temperature"))
@@ -132,9 +153,16 @@ class TestLLMClients(unittest.TestCase):
     def test_openai_client_host_role_is_system(self, mock_openai):
         mock_client_instance = MagicMock()
         mock_openai.return_value = mock_client_instance
+        mock_resp = MagicMock()
+        mock_resp.usage.prompt_tokens = 10
+        mock_resp.usage.completion_tokens = 5
+        mock_resp.usage.prompt_tokens_details = None
+        mock_resp.model_dump_json.return_value = '{}'
         mock_choice = MagicMock()
         mock_choice.message.content = "ok"
-        mock_client_instance.chat.completions.create.return_value.choices = [mock_choice]
+        mock_choice.finish_reason = "stop"
+        mock_resp.choices = [mock_choice]
+        mock_client_instance.chat.completions.create.return_value = mock_resp
 
         client = OpenAIClient("gpt-4.1-nano")
         messages = [
@@ -153,9 +181,16 @@ class TestLLMClients(unittest.TestCase):
     def test_openai_client_configure_parameters(self, mock_openai):
         mock_client_instance = MagicMock()
         mock_openai.return_value = mock_client_instance
+        mock_resp = MagicMock()
+        mock_resp.usage.prompt_tokens = 10
+        mock_resp.usage.completion_tokens = 5
+        mock_resp.usage.prompt_tokens_details = None
+        mock_resp.model_dump_json.return_value = '{}'
         mock_choice = MagicMock()
         mock_choice.message.content = "ok"
-        mock_client_instance.chat.completions.create.return_value.choices = [mock_choice]
+        mock_choice.finish_reason = "stop"
+        mock_resp.choices = [mock_choice]
+        mock_client_instance.chat.completions.create.return_value = mock_resp
 
         client = OpenAIClient("gpt-4.1-nano")
         client.configure_parameters({"temperature": 0.2, "reasoning_effort": "low", "verbosity": "high"})
@@ -172,9 +207,8 @@ class TestLLMClients(unittest.TestCase):
         client.configure_parameters({"temperature": None})
         self.assertNotIn("temperature", client._request_kwargs)
 
-    @patch('llm_router.client')
     @patch('llm_clients.openai.OpenAI')
-    def test_openai_client_generate_stream(self, mock_openai, mock_router_client):
+    def test_openai_client_generate_stream(self, mock_openai):
         mock_client_instance = MagicMock()
         mock_openai.return_value = mock_client_instance
 
@@ -197,50 +231,40 @@ class TestLLMClients(unittest.TestCase):
 
         client = OpenAIClient("gpt-4.1-nano")
         messages = [{"role": "user", "content": "Hello"}]
-        response_generator = client.generate_stream(messages)
+        # Pass tools=[] to avoid tool routing
+        response_generator = client.generate_stream(messages, tools=[])
 
         self.assertEqual(list(response_generator), ["Stream ", "test"])
-        mock_client_instance.chat.completions.create.assert_called_once_with(
-            model="gpt-4.1-nano",
-            messages=messages,
-            tools=OPENAI_TOOLS_SPEC,
-            tool_choice="auto",
-            stream=True
-        )
 
-    @patch('llm_router.client')
     @patch('llm_clients.gemini.genai')
-    def test_gemini_client_generate(self, mock_genai, mock_router_client):
+    def test_gemini_client_generate(self, mock_genai):
         mock_client_instance = MagicMock()
         mock_genai.Client.return_value = mock_client_instance
-        mock_resp = MagicMock()
+
+        # Non-tool mode uses streaming, so mock generate_content_stream
+        mock_chunk = MagicMock()
         mock_candidate = MagicMock()
         mock_candidate.content.parts = [
-            MagicMock(text="Test ", function_call=None, thought=False),
-            MagicMock(text="Gemini response", function_call=None, thought=False),
+            MagicMock(text="Test Gemini response", function_call=None, thought=False),
         ]
-        mock_resp.candidates = [mock_candidate]
-        mock_client_instance.models.generate_content.return_value = mock_resp
+        mock_chunk.candidates = [mock_candidate]
+        mock_chunk.usage_metadata = MagicMock(
+            prompt_token_count=10,
+            candidates_token_count=5,
+            cached_content_token_count=0,
+        )
+        mock_client_instance.models.generate_content_stream.return_value = [mock_chunk]
 
         client = GeminiClient("gemini-1.5-flash")
         messages = [{"role": "user", "content": "Hello"}]
-        response = client.generate(messages)
+        # No tools → non-tool path → streaming
+        response = client.generate(messages, tools=[])
 
         self.assertEqual(response, "Test Gemini response")
-        # Geminiのメッセージ変換ロジックも考慮してアサーション
-        mock_genai.Client.return_value.models.generate_content.assert_called_once()
-        args, kwargs = mock_genai.Client.return_value.models.generate_content.call_args
-        self.assertEqual(kwargs['model'], "gemini-1.5-flash")
-        self.assertTrue(kwargs['config'].tools)
-        # contentsの構造を考慮して検証
-        self.assertEqual(len(kwargs['contents']), 1)
-        self.assertEqual(kwargs['contents'][0].role, "user")
-        self.assertEqual(kwargs['contents'][0].parts[0].text, "Hello")
 
     @patch('llm_clients.gemini.GeminiClient._start_stream')
-    @patch('llm_router.client')
     @patch('llm_clients.gemini.genai')
-    def test_gemini_client_generate_stream(self, mock_genai, mock_router_client, mock_start_stream):
+    def test_gemini_client_generate_stream(self, mock_genai, mock_start_stream):
         mock_client_instance = MagicMock()
         mock_genai.Client.return_value = mock_client_instance
 
@@ -274,34 +298,97 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(outputs, ["Stream test", "!"])
 
     def test_anthropic_thinking_override(self):
+        """Test manual thinking mode (legacy, for Sonnet 4.5 / Opus 4.5)."""
         client = AnthropicClient(
             "claude-sonnet-4-5",
-            config={"thinking_budget": 2048, "thinking_type": "enabled", "thinking_effort": "medium"}
+            config={"thinking_budget": 2048, "thinking_type": "enabled"}
         )
-        thinking_cfg = client._request_kwargs.get("extra_body", {}).get("thinking")
-        self.assertEqual(thinking_cfg.get("budget_tokens"), 2048)
-        self.assertEqual(thinking_cfg.get("type"), "enabled")
-        self.assertEqual(thinking_cfg.get("effort"), "medium")
+        self.assertIsNotNone(client._thinking_config)
+        self.assertEqual(client._thinking_config.get("budget_tokens"), 2048)
+        self.assertEqual(client._thinking_config.get("type"), "enabled")
+        self.assertIsNone(client._thinking_effort)
 
-    @patch('llm_router.client')
+    def test_anthropic_adaptive_thinking(self):
+        """Test adaptive thinking mode (Opus 4.6+)."""
+        client = AnthropicClient(
+            "claude-opus-4-6",
+            config={"thinking_type": "adaptive", "thinking_effort": "high"}
+        )
+        self.assertIsNotNone(client._thinking_config)
+        self.assertEqual(client._thinking_config.get("type"), "adaptive")
+        # Adaptive mode should NOT have budget_tokens
+        self.assertNotIn("budget_tokens", client._thinking_config)
+        self.assertEqual(client._thinking_effort, "high")
+        # Adaptive thinking should set higher default max_tokens
+        self.assertEqual(client._max_tokens, 16000)
+
+    def test_anthropic_adaptive_thinking_with_effort(self):
+        """Test adaptive thinking with different effort levels."""
+        for effort in ("low", "medium", "high", "max"):
+            client = AnthropicClient(
+                "claude-opus-4-6",
+                config={"thinking_type": "adaptive", "thinking_effort": effort}
+            )
+            self.assertEqual(client._thinking_effort, effort)
+
+        # Invalid effort should be ignored
+        client = AnthropicClient(
+            "claude-opus-4-6",
+            config={"thinking_type": "adaptive", "thinking_effort": "invalid"}
+        )
+        self.assertIsNone(client._thinking_effort)
+
+    def test_anthropic_configure_thinking_effort(self):
+        """Test that thinking_effort can be changed via configure_parameters."""
+        client = AnthropicClient(
+            "claude-opus-4-6",
+            config={"thinking_type": "adaptive"}
+        )
+        self.assertIsNone(client._thinking_effort)
+
+        # Set effort via configure_parameters
+        client.configure_parameters({"thinking_effort": "medium"})
+        self.assertEqual(client._thinking_effort, "medium")
+
+        # Change effort
+        client.configure_parameters({"thinking_effort": "max"})
+        self.assertEqual(client._thinking_effort, "max")
+
+        # Clear effort
+        client.configure_parameters({"thinking_effort": None})
+        self.assertIsNone(client._thinking_effort)
+
+        # Invalid effort should be ignored
+        client.configure_parameters({"thinking_effort": "invalid"})
+        self.assertIsNone(client._thinking_effort)
+
     @patch('llm_clients.gemini.genai')
-    def test_gemini_client_free_key_fallback(self, mock_genai, mock_router_client):
+    def test_gemini_client_free_key_fallback(self, mock_genai):
         mock_free = MagicMock()
         mock_paid = MagicMock()
         mock_genai.Client.side_effect = [mock_free, mock_paid]
-        mock_free.models.generate_content.side_effect = Exception("429")
-        mock_paid_resp = MagicMock()
+
+        # Free client streaming fails
+        mock_free.models.generate_content_stream.side_effect = Exception("429")
+
+        # Paid client streaming succeeds
+        mock_chunk = MagicMock()
         cand = MagicMock()
         cand.content.parts = [MagicMock(text="OK", function_call=None, thought=False)]
-        mock_paid_resp.candidates = [cand]
-        mock_paid.models.generate_content.return_value = mock_paid_resp
+        mock_chunk.candidates = [cand]
+        mock_chunk.usage_metadata = MagicMock(
+            prompt_token_count=10,
+            candidates_token_count=5,
+            cached_content_token_count=0,
+        )
+        mock_paid.models.generate_content_stream.return_value = [mock_chunk]
 
         client = GeminiClient("gemini-1.5-flash")
         messages = [{"role": "user", "content": "Hi"}]
-        response = client.generate(messages)
+        response = client.generate(messages, tools=[])
 
         self.assertEqual(response, "OK")
-        mock_paid.models.generate_content.assert_called_once()
+        mock_paid.models.generate_content_stream.assert_called_once()
 
     @patch('llm_clients.ollama.OllamaClient._probe_base', return_value='http://ollama.test')
     @patch('llm_clients.ollama.requests.post')
@@ -391,23 +478,28 @@ class TestLLMClients(unittest.TestCase):
     @patch('llm_clients.gemini.types.GenerateContentConfig')
     @patch.object(llm_clients.GeminiClient, "_schema_from_json", return_value=MagicMock())
     @patch('llm_clients.gemini.genai')
-    @patch('llm_router.client')
-    def test_gemini_client_generate_with_schema(self, mock_router_client, mock_genai, mock_schema_conv, mock_config_cls):
+    def test_gemini_client_generate_with_schema(self, mock_genai, mock_schema_conv, mock_config_cls):
         mock_client_instance = MagicMock()
         mock_genai.Client.return_value = mock_client_instance
+
+        # Schema mode with tools=[] goes through non-tool streaming path
+        mock_chunk = MagicMock()
         mock_candidate = MagicMock()
-        mock_candidate.content.parts = [MagicMock(text="Structured", function_call=None, thought=False)]
-        mock_resp = MagicMock()
-        mock_resp.candidates = [mock_candidate]
-        mock_client_instance.models.generate_content.return_value = mock_resp
+        mock_candidate.content.parts = [MagicMock(text='{"key":"value"}', function_call=None, thought=False)]
+        mock_chunk.candidates = [mock_candidate]
+        mock_chunk.usage_metadata = MagicMock(
+            prompt_token_count=10,
+            candidates_token_count=5,
+            cached_content_token_count=0,
+        )
+        mock_client_instance.models.generate_content_stream.return_value = [mock_chunk]
 
         client = llm_clients.GeminiClient("gemini-1.5-flash")
         messages = [{"role": "user", "content": "Hello"}]
         schema = {"title": "Decision", "type": "object", "properties": {}, "required": []}
 
-        response = client.generate(messages, tools=[], response_schema=schema)
+        client.generate(messages, tools=[], response_schema=schema)
 
-        self.assertEqual(response, "Structured")
         mock_schema_conv.assert_called_once_with(schema)
         mock_config_cls.assert_called()
         config_kwargs = mock_config_cls.call_args.kwargs

@@ -169,7 +169,7 @@ def create_entry(
 
 
 def get_entry(conn: sqlite3.Connection, entry_id: str) -> Optional[ArasujiEntry]:
-    """Get an arasuji entry by ID."""
+    """Get an arasuji entry by ID (exact match, with prefix fallback)."""
     cur = conn.execute(
         """
         SELECT id, level, content, source_ids_json, start_time, end_time,
@@ -180,7 +180,25 @@ def get_entry(conn: sqlite3.Connection, entry_id: str) -> Optional[ArasujiEntry]
         (entry_id,),
     )
     row = cur.fetchone()
-    return _row_to_entry(row) if row else None
+    if row:
+        return _row_to_entry(row)
+
+    # Fallback: prefix match for truncated IDs (e.g. first 8 chars)
+    if len(entry_id) < 36:
+        cur = conn.execute(
+            """
+            SELECT id, level, content, source_ids_json, start_time, end_time,
+                   source_count, message_count, parent_id, is_consolidated, created_at
+            FROM arasuji_entries
+            WHERE id LIKE ?
+            LIMIT 1
+            """,
+            (f"{entry_id}%",),
+        )
+        row = cur.fetchone()
+        return _row_to_entry(row) if row else None
+
+    return None
 
 
 def get_entries_by_level(
@@ -396,7 +414,8 @@ def clear_all_entries(conn: sqlite3.Connection) -> int:
 def regenerate_entry(
     conn: sqlite3.Connection,
     entry_id: str,
-    model_name: Optional[str] = None
+    model_name: Optional[str] = None,
+    persona_id: Optional[str] = None,
 ) -> Optional[ArasujiEntry]:
     """Regenerate a Chronicle entry while preserving parent relationship.
     
@@ -449,7 +468,7 @@ def regenerate_entry(
     
     # 5. Call scripts layer for business logic
     from scripts.build_arasuji import regenerate_entry_from_messages
-    new_entry = regenerate_entry_from_messages(conn, messages, model_name)
+    new_entry = regenerate_entry_from_messages(conn, messages, model_name, persona_id=persona_id)
     
     if not new_entry:
         return None
@@ -602,3 +621,68 @@ def has_overlapping_entries(
     )
     row = cur.fetchone()
     return row[0] > 0 if row else False
+
+
+def search_entries(
+    conn: sqlite3.Connection,
+    query: Optional[str] = None,
+    *,
+    start_time: Optional[int] = None,
+    end_time: Optional[int] = None,
+    level: Optional[int] = None,
+    limit: int = 10,
+) -> List[ArasujiEntry]:
+    """Search arasuji entries by keyword (LIKE) and/or time range and level.
+
+    Args:
+        conn: Database connection
+        query: Keyword to search in content (LIKE match). None to skip.
+        start_time: Filter entries overlapping with this start time.
+        end_time: Filter entries overlapping with this end time.
+        level: Filter by specific level. None for all levels.
+        limit: Maximum results to return.
+
+    Returns:
+        List of matching ArasujiEntry, newest first.
+    """
+    conditions = []
+    params: List[Any] = []
+
+    if query:
+        # Split by whitespace and match ANY keyword (OR)
+        keywords = query.split()
+        if len(keywords) > 1:
+            keyword_conditions = []
+            for kw in keywords:
+                keyword_conditions.append("content LIKE ?")
+                params.append(f"%{kw}%")
+            conditions.append(f"({' OR '.join(keyword_conditions)})")
+        else:
+            conditions.append("content LIKE ?")
+            params.append(f"%{query}%")
+
+    if start_time is not None:
+        conditions.append("end_time >= ?")
+        params.append(start_time)
+
+    if end_time is not None:
+        conditions.append("start_time <= ?")
+        params.append(end_time)
+
+    if level is not None:
+        conditions.append("level = ?")
+        params.append(level)
+
+    where_clause = " AND ".join(conditions) if conditions else "1=1"
+    sql = f"""
+        SELECT id, level, content, source_ids_json, start_time, end_time,
+               source_count, message_count, parent_id, is_consolidated, created_at
+        FROM arasuji_entries
+        WHERE {where_clause}
+        ORDER BY end_time DESC
+        LIMIT ?
+    """
+    params.append(limit)
+
+    cur = conn.execute(sql, params)
+    return [_row_to_entry(row) for row in cur.fetchall()]

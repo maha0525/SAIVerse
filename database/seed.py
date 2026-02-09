@@ -142,9 +142,9 @@ def seed_database(force: bool = False):
             logging.info("Added default user.")
 
         # --- 4. Populate City from cities.json ---
-        cities_json_path = Path(__file__).parent.parent / "cities.json"
+        cities_json_path = Path(__file__).parent.parent / "builtin_data" / "cities.json"
         if not cities_json_path.exists():
-            raise FileNotFoundError("cities.json not found!")
+            raise FileNotFoundError("builtin_data/cities.json not found!")
         
         with open(cities_json_path, "r", encoding="utf-8") as f:
             cities_config = json.load(f)

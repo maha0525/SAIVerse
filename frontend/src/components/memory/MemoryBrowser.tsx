@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag, Plus, Download } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag, Plus, Download, ChevronDown, ChevronUp } from 'lucide-react';
 import styles from './MemoryBrowser.module.css';
 
 interface ThreadSummary {
@@ -47,6 +47,43 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
     // Selection state for bulk delete
     const [selectionMode, setSelectionMode] = useState(false);
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+    // Message collapse state
+    const [expandedMsgs, setExpandedMsgs] = useState<Set<string>>(new Set());
+    const [overflowingMsgs, setOverflowingMsgs] = useState<Set<string>>(new Set());
+    const contentRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+    const COLLAPSE_HEIGHT = 200;
+
+    const contentRefCallback = useCallback((msgId: string) => (el: HTMLDivElement | null) => {
+        if (el) {
+            contentRefs.current.set(msgId, el);
+        } else {
+            contentRefs.current.delete(msgId);
+        }
+    }, []);
+
+    // Check which messages overflow after messages load
+    useEffect(() => {
+        const newOverflowing = new Set<string>();
+        contentRefs.current.forEach((el, msgId) => {
+            if (el.scrollHeight > COLLAPSE_HEIGHT) {
+                newOverflowing.add(msgId);
+            }
+        });
+        setOverflowingMsgs(newOverflowing);
+    }, [messages]);
+
+    const toggleExpand = (msgId: string) => {
+        setExpandedMsgs(prev => {
+            const next = new Set(prev);
+            if (next.has(msgId)) {
+                next.delete(msgId);
+            } else {
+                next.add(msgId);
+            }
+            return next;
+        });
+    };
 
     // Add message state
     const [showAddForm, setShowAddForm] = useState(false);
@@ -421,11 +458,6 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                     {thread.suffix}
                 </span>
                 <div className={styles.threadActions}>
-                    {thread.is_stelis && (
-                        <span className={`${styles.stelisBadge} ${thread.stelis_status === 'completed' ? styles.stelisCompleted : thread.stelis_status === 'aborted' ? styles.stelisAborted : styles.stelisActive}`}>
-                            {thread.stelis_label || 'Stelis'}
-                        </span>
-                    )}
                     <button
                         className={styles.deleteThreadBtn}
                         onClick={(e) => handleDeleteThread(thread.thread_id, e)}
@@ -435,6 +467,11 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                     </button>
                 </div>
             </div>
+            {thread.is_stelis && (
+                <div className={`${styles.stelisBadge} ${thread.stelis_status === 'completed' ? styles.stelisCompleted : thread.stelis_status === 'aborted' ? styles.stelisAborted : styles.stelisActive}`}>
+                    {thread.stelis_label || 'Stelis'}
+                </div>
+            )}
             <div className={styles.threadPreview}>
                 {thread.preview || "プレビューなし"}
             </div>
@@ -651,7 +688,10 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                         )}
                                     </div>
                                 </div>
-                                <div className={styles.content}>
+                                <div
+                                    className={`${styles.content} ${overflowingMsgs.has(msg.id) && !expandedMsgs.has(msg.id) && editingMsgId !== msg.id ? styles.contentCollapsed : ''}`}
+                                    ref={contentRefCallback(msg.id)}
+                                >
                                     {editingMsgId === msg.id ? (
                                         <div className={styles.editInterface}>
                                             <div className={styles.editTimestampRow}>
@@ -678,9 +718,26 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                             </div>
                                         </div>
                                     ) : (
-                                        msg.content
+                                        <>
+                                            {msg.content}
+                                            {overflowingMsgs.has(msg.id) && !expandedMsgs.has(msg.id) && (
+                                                <div className={styles.contentFade} />
+                                            )}
+                                        </>
                                     )}
                                 </div>
+                                {overflowingMsgs.has(msg.id) && editingMsgId !== msg.id && (
+                                    <button
+                                        className={styles.expandBtn}
+                                        onClick={() => toggleExpand(msg.id)}
+                                    >
+                                        {expandedMsgs.has(msg.id) ? (
+                                            <><ChevronUp size={14} /> 折りたたむ</>
+                                        ) : (
+                                            <><ChevronDown size={14} /> もっと見る</>
+                                        )}
+                                    </button>
+                                )}
                             </div>
                         ))
                     )}

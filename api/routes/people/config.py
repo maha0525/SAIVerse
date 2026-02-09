@@ -1,8 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List, Optional
-from api.deps import get_manager
-from database.models import UserAiLink
+import logging
+from api.deps import get_manager, avatar_path_to_url
+from database.models import AI, UserAiLink
 from .models import AIConfigResponse, UpdateAIConfigRequest
+
+LOGGER = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -28,8 +31,8 @@ def get_persona_config(persona_id: str, manager = Depends(get_manager)):
         default_model=details["DEFAULT_MODEL"],
         lightweight_model=details.get("LIGHTWEIGHT_MODEL"),
         interaction_mode=details["INTERACTION_MODE"],
-        avatar_path=details.get("AVATAR_IMAGE"),
-        appearance_image_path=details.get("APPEARANCE_IMAGE_PATH"),
+        avatar_path=avatar_path_to_url(details.get("AVATAR_IMAGE")),
+        appearance_image_path=avatar_path_to_url(details.get("APPEARANCE_IMAGE_PATH")),
         home_city_id=details["HOME_CITYID"],
         linked_user_id=linked_user_id,
     )
@@ -108,3 +111,52 @@ def update_persona_config(
             session.close()
 
     return {"success": True, "message": result}
+
+
+@router.post("/{persona_id}/organize-memory")
+def organize_persona_memory(persona_id: str, manager=Depends(get_manager)):
+    """Clear all metabolism anchors and trigger metabolism (Chronicle generation + anchor reset).
+
+    This forces the persona to re-evaluate its conversation history,
+    generating Chronicle entries for any unprocessed messages and
+    resetting the metabolism anchor to a minimal window.
+    """
+    import os
+
+    persona = manager.personas.get(persona_id)
+    if not persona:
+        raise HTTPException(status_code=404, detail="Persona not loaded")
+
+    # 1. Clear all anchors from DB
+    db = manager.SessionLocal()
+    try:
+        ai_row = db.query(AI).filter_by(AIID=persona_id).first()
+        if ai_row:
+            ai_row.METABOLISM_ANCHORS = None
+            db.commit()
+    except Exception as exc:
+        LOGGER.warning("[organize-memory] Failed to clear anchors: %s", exc)
+        db.rollback()
+    finally:
+        db.close()
+
+    # 2. Clear in-memory anchor
+    history_mgr = getattr(persona, "history_manager", None)
+    if history_mgr:
+        history_mgr.metabolism_anchor_message_id = None
+
+    # 3. Generate Chronicle for unprocessed messages
+    chronicle_generated = False
+    memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
+    if memory_weave_enabled and hasattr(manager, "runtime") and manager.runtime:
+        try:
+            manager.runtime._generate_chronicle(persona)
+            chronicle_generated = True
+        except Exception as exc:
+            LOGGER.warning("[organize-memory] Chronicle generation failed: %s", exc)
+
+    return {
+        "success": True,
+        "anchors_cleared": True,
+        "chronicle_generated": chronicle_generated,
+    }

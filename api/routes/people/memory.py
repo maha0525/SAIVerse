@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List
+import logging
 import time
 from api.deps import get_manager
 from .models import (
@@ -83,8 +84,8 @@ def list_thread_messages(
             if last_msgs:
                 last_created_at = last_msgs[0].get("created_at")
         except Exception:
-            pass
-            
+            logging.getLogger(__name__).warning("Failed to get first/last created_at for thread %s", thread_id, exc_info=True)
+
         return MessagesResponse(
             items=items, 
             total=total, 

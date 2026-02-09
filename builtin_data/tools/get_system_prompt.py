@@ -140,13 +140,13 @@ def get_system_prompt(
                     if lines:
                         building_section_parts.append("### 建物内のアイテム\n" + "\n".join(lines))
                 except Exception:
-                    pass
+                    LOGGER.warning("Failed to collect building items for %s", building_id, exc_info=True)
 
             if building_section_parts:
                 building_name = getattr(building_obj, "name", building_id)
                 system_sections.append(f"## {building_name}\n" + "\n\n".join(building_section_parts))
     except Exception:
-        pass
+        LOGGER.warning("Failed to build building section for system prompt", exc_info=True)
 
     # 4. "## 利用可能な能力" section (available playbooks)
     if include_available_playbooks:

@@ -21,6 +21,9 @@ numpy>=1.26.0
 Pillow>=11.0.0
 markdownify>=0.12.0
 
+# PDF processing
+pymupdf>=1.25.0
+
 # llama.cpp integration for local GGUF models
 llama-cpp-python>=0.3.0
 

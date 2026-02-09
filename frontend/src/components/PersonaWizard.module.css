@@ -121,7 +121,8 @@
 }
 
 .field input,
-.field textarea {
+.field textarea,
+.field select {
     width: 100%;
     padding: 0.75rem;
     border: 1px solid #444;
@@ -133,7 +134,8 @@
 }
 
 .field input:focus,
-.field textarea:focus {
+.field textarea:focus,
+.field select:focus {
     outline: none;
     border-color: #4dabf7;
 }
@@ -371,4 +373,134 @@
     background-color: rgba(250, 82, 82, 0.1);
     border: 1px solid #fa5252;
     color: #ffc9c9;
+}
+
+/* ===== Light Mode Overrides ===== */
+:global([data-theme="light"]) .modal {
+    background-color: #ffffff;
+    color: #1f2937;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+}
+
+:global([data-theme="light"]) .header {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .title {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .closeButton {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .closeButton:hover {
+    background-color: rgba(0, 0, 0, 0.05);
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .stepper {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .step {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .stepNumber {
+    background-color: #e2e8f0;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .step.active {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .step.completed {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .field label {
+    color: #475569;
+}
+
+:global([data-theme="light"]) .field input,
+:global([data-theme="light"]) .field textarea,
+:global([data-theme="light"]) .field select {
+    background-color: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .field input::placeholder,
+:global([data-theme="light"]) .field textarea::placeholder {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .hint {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .idSuffix {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .actions {
+    border-top-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .backButton {
+    border-color: #e2e8f0;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .backButton:hover {
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .skipButton {
+    border-color: #e2e8f0;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .skipButton:hover {
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .secondaryButton {
+    border-color: #e2e8f0;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .secondaryButton:hover {
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .completeTitle {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .completeSubtitle {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .importStep {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .importStep p {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .result.success {
+    background-color: rgba(43, 138, 62, 0.08);
+    color: #166534;
+}
+
+:global([data-theme="light"]) .result.error {
+    background-color: rgba(250, 82, 82, 0.08);
+    color: #dc2626;
 }

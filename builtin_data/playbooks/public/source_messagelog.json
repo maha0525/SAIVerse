@@ -1,0 +1,266 @@
+{
+    "name": "source_messagelog",
+    "description": "過去の会話ログを検索し、目的に関連するメッセージを構造化された調査結果として返す",
+    "input_schema": [
+        {
+            "name": "objective",
+            "param_type": "string",
+            "source": "parent.objective",
+            "description": "What to find"
+        },
+        {
+            "name": "context_text",
+            "param_type": "string",
+            "source": "parent.context_text",
+            "description": "Pre-resolved context from URIs"
+        },
+        {
+            "name": "depth",
+            "param_type": "string",
+            "source": "parent.depth",
+            "description": "shallow/normal/deep"
+        },
+        {
+            "name": "max_iterations",
+            "param_type": "number",
+            "source": "parent.max_iterations",
+            "description": "Max search iterations"
+        }
+    ],
+    "output_schema": [
+        "research_result"
+    ],
+    "context_requirements": {
+        "history_depth": "5messages",
+        "history_balanced": false,
+        "include_internal": false,
+        "system_prompt": true,
+        "memory_weave": true,
+        "working_memory": false,
+        "inventory": false,
+        "building_items": false,
+        "available_playbooks": false,
+        "visual_context": false,
+        "realtime_context": true
+    },
+    "router_callable": false,
+    "user_selectable": false,
+    "nodes": [
+        {
+            "id": "init",
+            "type": "set",
+            "assignments": {
+                "iterations": 0
+            },
+            "next": "generate_query"
+        },
+        {
+            "id": "generate_query",
+            "type": "llm",
+            "model_type": "lightweight",
+            "action": "会話ログの検索パラメータを生成してください。\n\n## 調査目的\n{objective}\n\n## 補足コンテキスト\n{context_text}\n\n## 現在のイテレーション\n{iterations} / {max_iterations}\n\n以下のルールに従って検索パラメータを生成してください:\n- query: 思い出したい内容を自然文で記述（意味検索に使われます）\n- keywords: メッセージに含まれているはずの具体的な単語・固有名詞を配列で指定（部分一致検索）\n- start_date / end_date: 時期が分かっている場合のみ YYYY-MM-DD 形式で指定（不要なら空文字）\n\nイテレーションが2回目以降の場合、前回と異なる切り口のクエリを試してください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Semantic search query"
+                    },
+                    "keywords": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Keywords for exact matching"
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start date (YYYY-MM-DD) or empty"
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "End date (YYYY-MM-DD) or empty"
+                    }
+                },
+                "required": [
+                    "query",
+                    "keywords"
+                ]
+            },
+            "output_key": "search_params",
+            "next": "search"
+        },
+        {
+            "id": "search",
+            "type": "tool",
+            "action": "memory_search_brief",
+            "args_input": {
+                "query": "search_params.query",
+                "keywords": "search_params.keywords",
+                "topk": 10,
+                "max_snippet_chars": 150,
+                "start_date": "search_params.start_date",
+                "end_date": "search_params.end_date"
+            },
+            "output_key": "search_results",
+            "next": "select_hits"
+        },
+        {
+            "id": "select_hits",
+            "type": "llm",
+            "model_type": "lightweight",
+            "action": "以下の検索結果から、調査目的「{objective}」に最も関連する上位のメッセージIDを選んでください。\n\n検索結果:\n{search_results}\n\n最も関連性が高いメッセージを最大3件選び、そのメッセージIDを返してください。カッコ内の文字列がメッセージIDです。\n結果がなさそうな場合は空の配列を返してください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "selected_ids": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Selected message IDs"
+                    }
+                },
+                "required": [
+                    "selected_ids"
+                ]
+            },
+            "output_key": "selection",
+            "next": "check_selection"
+        },
+        {
+            "id": "check_selection",
+            "type": "pass",
+            "conditional_next": {
+                "field": "selection.selected_ids.length",
+                "operator": "gte",
+                "cases": {
+                    "1": "read_context",
+                    "default": "evaluate"
+                }
+            }
+        },
+        {
+            "id": "read_context",
+            "type": "tool",
+            "action": "memory_read_around",
+            "args_input": {
+                "message_id": "selection.selected_ids.0",
+                "window": 8
+            },
+            "output_key": "context_around",
+            "next": "evaluate"
+        },
+        {
+            "id": "evaluate",
+            "type": "llm",
+            "action": "調査目的に対して、収集した会話ログの情報を評価し、構造化された調査結果を生成してください。\n\n## 調査目的\n{objective}\n\n## 検索結果（概要）\n{search_results}\n\n## 選択したメッセージの前後文脈\n{context_around}\n\n## 評価基準\n- status: 目的に合致する情報が見つかったか（found/partial/not_found）\n- summary: 発見内容の簡潔なまとめ\n- findings: 各発見の詳細（source_refはsaiverse://self/messagelog/message/<message_id>形式）\n- confidence: 結果の確信度\n\n会話ログの中から目的に関連する情報を抽出し、各findingのexcerptには該当部分の引用を含めてください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "found",
+                            "partial",
+                            "not_found"
+                        ]
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "Concise summary of findings"
+                    },
+                    "findings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source_ref": {
+                                    "type": "string",
+                                    "description": "SAIVerse URI of the source"
+                                },
+                                "excerpt": {
+                                    "type": "string",
+                                    "description": "Relevant excerpt"
+                                },
+                                "relevance": {
+                                    "type": "string",
+                                    "enum": [
+                                        "high",
+                                        "medium",
+                                        "low"
+                                    ]
+                                }
+                            },
+                            "required": [
+                                "source_ref",
+                                "excerpt",
+                                "relevance"
+                            ]
+                        }
+                    },
+                    "confidence": {
+                        "type": "string",
+                        "enum": [
+                            "high",
+                            "medium",
+                            "low"
+                        ]
+                    }
+                },
+                "required": [
+                    "status",
+                    "summary",
+                    "findings",
+                    "confidence"
+                ]
+            },
+            "memorize": {
+                "tags": [
+                    "internal",
+                    "research"
+                ]
+            },
+            "output_key": "research_result",
+            "next": "check_done"
+        },
+        {
+            "id": "check_done",
+            "type": "pass",
+            "conditional_next": {
+                "field": "research_result.status",
+                "operator": "eq",
+                "cases": {
+                    "found": "done",
+                    "default": "check_iterations"
+                }
+            }
+        },
+        {
+            "id": "check_iterations",
+            "type": "pass",
+            "conditional_next": {
+                "field": "iterations",
+                "operator": "gte",
+                "cases": {
+                    "{max_iterations}": "done",
+                    "default": "inc"
+                }
+            }
+        },
+        {
+            "id": "inc",
+            "type": "set",
+            "assignments": {
+                "iterations": "={iterations} + 1"
+            },
+            "next": "generate_query"
+        },
+        {
+            "id": "done",
+            "type": "pass",
+            "next": null
+        }
+    ],
+    "start_node": "init"
+}

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import styles from './PersonaMenu.module.css';
-import { Home, Brain, Calendar, CheckSquare, Settings, X, RefreshCw, Network, Package } from 'lucide-react';
+import { Home, Brain, Calendar, CheckSquare, Settings, X, RefreshCw, Network, Package, Sparkles } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
 
 interface PersonaMenuProps {
@@ -18,6 +18,7 @@ interface PersonaMenuProps {
 
 export default function PersonaMenu({ isOpen, onClose, personaId, personaName, avatarUrl, onOpenMemory, onOpenSchedule, onOpenTasks, onOpenSettings, onOpenInventory }: PersonaMenuProps) {
     const [loading, setLoading] = useState(false);
+    const [organizing, setOrganizing] = useState(false);
 
     if (!isOpen) return null;
 
@@ -40,6 +41,30 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
             alert("Error communicating with server.");
         } finally {
             setLoading(false);
+        }
+    };
+
+    const handleOrganizeMemory = async () => {
+        if (!confirm(`${personaName}の記憶を整理しますか？\n会話履歴のキャッシュがリセットされ、Chronicleが生成されます。`)) return;
+
+        setOrganizing(true);
+        try {
+            const res = await fetch(`/api/people/${personaId}/organize-memory`, { method: 'POST' });
+            if (res.ok) {
+                const data = await res.json();
+                const msg = data.chronicle_generated
+                    ? '記憶の整理が完了しました（Chronicle生成済み）'
+                    : '記憶の整理が完了しました';
+                alert(msg);
+            } else {
+                const err = await res.json();
+                alert(`失敗: ${err.detail}`);
+            }
+        } catch (e) {
+            console.error(e);
+            alert("サーバーとの通信に失敗しました。");
+        } finally {
+            setOrganizing(false);
         }
     };
 
@@ -127,6 +152,14 @@ export default function PersonaMenu({ isOpen, onClose, personaId, personaName, a
                         <div className={styles.label}>
                             <span>Tasks</span>
                             <span className={styles.subtext}>タスク管理</span>
+                        </div>
+                    </button>
+
+                    <button className={styles.actionBtn} onClick={handleOrganizeMemory} disabled={organizing}>
+                        {organizing ? <RefreshCw className={styles.spin} size={20} /> : <Sparkles size={20} />}
+                        <div className={styles.label}>
+                            <span>Organize Memory</span>
+                            <span className={styles.subtext}>記憶を整理</span>
                         </div>
                     </button>
 

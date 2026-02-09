@@ -12,8 +12,8 @@ from saiverse_memory import SAIMemoryAdapter
 from llm_clients import get_llm_client
 from model_configs import model_supports_images
 from action_handler import ActionHandler
-from history_manager import HistoryManager
-from emotion_module import EmotionControlModule
+from persona.history_manager import HistoryManager
+from persona.emotion_module import EmotionControlModule
 from database.models import AI as AIModel
 from persona.bootstrap import (
     initialise_memory_adapter,
@@ -56,7 +56,7 @@ class PersonaCore(
         interaction_mode: str = "auto", # ★ 現在の対話モード
         is_dispatched: bool = False, # ★ このペルソナが他のCityに派遣中かどうかのフラグ
         emotion_prompt_path: Optional[Path] = None,
-        action_priority_path: Path = Path("action_priority.json"),
+        action_priority_path: Path = Path("builtin_data/action_priority.json"),
         building_histories: Optional[Dict[str, List[Dict[str, str]]]] = None,
         occupants: Optional[Dict[str, List[str]]] = None,
         id_to_name_map: Optional[Dict[str, str]] = None,

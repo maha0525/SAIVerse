@@ -15,6 +15,7 @@ from .exceptions import (
     EmptyResponseError as LLMEmptyResponseError,
     LLMError,
     LLMTimeoutError,
+    ModelNotFoundError,
     RateLimitError,
     SafetyFilterError,
     ServerError,
@@ -214,7 +215,7 @@ GEMINI_ALLOWED_REQUEST_PARAMS = {
 
 # Special parameters that need custom handling (not passed directly to API)
 GEMINI_SPECIAL_PARAMS = {
-    "thinking_level",
+    "thinking_level", "thinking_budget",
     "safety_harassment", "safety_hate_speech",
     "safety_sexually_explicit", "safety_dangerous_content",
 }
@@ -259,6 +260,7 @@ class GeminiClient(LLMClient):
 
         # Thinking configuration
         self._thinking_level: Optional[str] = None
+        self._thinking_budget: Optional[int] = None
         self._include_thoughts: bool = cfg.get("include_thoughts", False)
         # Auto-enable for 2.5/3 series models
         if not self._include_thoughts:
@@ -270,7 +272,7 @@ class GeminiClient(LLMClient):
 
     def _build_thinking_config(self) -> Optional[types.ThinkingConfig]:
         """Build ThinkingConfig from current settings."""
-        if not self._include_thoughts and not self._thinking_level:
+        if not self._include_thoughts and not self._thinking_level and self._thinking_budget is None:
             return None
 
         kwargs: Dict[str, Any] = {}
@@ -278,6 +280,8 @@ class GeminiClient(LLMClient):
             kwargs["include_thoughts"] = True
         if self._thinking_level:
             kwargs["thinking_level"] = self._thinking_level
+        if self._thinking_budget is not None:
+            kwargs["thinking_budget"] = self._thinking_budget
 
         try:
             return types.ThinkingConfig(**kwargs)
@@ -315,6 +319,17 @@ class GeminiClient(LLMClient):
                     self._request_params[key] = value
             elif key == "thinking_level":
                 self._thinking_level = value if value else None
+            elif key == "thinking_budget":
+                if not value or value == "default":
+                    self._thinking_budget = None
+                elif value == "off":
+                    self._thinking_budget = 0
+                else:
+                    try:
+                        self._thinking_budget = int(value)
+                    except (ValueError, TypeError):
+                        logging.warning("Invalid thinking_budget value: %s", value)
+                        self._thinking_budget = None
             elif key in SAFETY_PARAM_TO_CATEGORY:
                 if value:
                     self._safety_overrides[key] = value
@@ -439,6 +454,12 @@ class GeminiClient(LLMClient):
         msg = str(err).lower()
         return "401" in msg or "403" in msg or "invalid" in msg and "key" in msg or "authentication" in msg
 
+    @staticmethod
+    def _is_model_not_found_error(err: Exception) -> bool:
+        """Check if the error is a model-not-found error (404)."""
+        msg = str(err).lower()
+        return "404" in msg and ("not found" in msg or "not_found" in msg)
+
     def _convert_to_llm_error(self, err: Exception, context: str = "API call") -> LLMError:
         """Convert a generic exception to an appropriate LLMError subclass."""
         if self._is_rate_limit_error(err):
@@ -447,6 +468,12 @@ class GeminiClient(LLMClient):
             return LLMTimeoutError(f"Gemini {context} failed: timeout", err)
         elif self._is_server_error(err):
             return ServerError(f"Gemini {context} failed: server error", err)
+        elif self._is_model_not_found_error(err):
+            return ModelNotFoundError(
+                f"Gemini {context} failed: model not found",
+                err,
+                user_message=f"指定されたモデルが見つかりません: {self.model}",
+            )
         elif self._is_authentication_error(err):
             from .exceptions import AuthenticationError
             return AuthenticationError(f"Gemini {context} failed: authentication error", err)
@@ -1118,9 +1145,11 @@ class GeminiClient(LLMClient):
                             if delta:
                                 reasoning_chunks.append(delta)
                                 thought_seen[candidate_index] = previous + delta
+                                yield {"type": "thinking", "content": delta}
                         else:
                             reasoning_chunks.append(text_val)
                             thought_seen[candidate_index] = previous + text_val
+                            yield {"type": "thinking", "content": text_val}
 
             combined_text = "".join(
                 getattr(part, "text", None) or ""

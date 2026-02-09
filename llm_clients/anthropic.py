@@ -95,6 +95,34 @@ def _make_cache_control(cache_ttl: str = "5m") -> Dict[str, Any]:
     return {"type": "ephemeral", "ttl": cache_ttl}
 
 
+def _prepare_schema_for_native_output(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Prepare a JSON schema for Anthropic native structured output.
+
+    Native structured output requires additionalProperties: false on all object types.
+    This function deep-copies the schema and adds the constraint where missing.
+    """
+    import copy
+    schema = copy.deepcopy(schema)
+
+    def _fix_object(obj: Dict[str, Any]) -> None:
+        if not isinstance(obj, dict):
+            return
+        if obj.get("type") == "object":
+            obj.setdefault("additionalProperties", False)
+            for prop in (obj.get("properties") or {}).values():
+                _fix_object(prop)
+        elif obj.get("type") == "array" and isinstance(obj.get("items"), dict):
+            _fix_object(obj["items"])
+        # Handle anyOf / allOf
+        for key in ("anyOf", "allOf"):
+            if key in obj:
+                for item in obj[key]:
+                    _fix_object(item)
+
+    _fix_object(schema)
+    return schema
+
+
 def _prepare_anthropic_system(
     messages: List[Dict[str, Any]],
     enable_cache: bool = True,
@@ -308,6 +336,26 @@ def _extract_text_from_response(message: Message) -> str:
     return "".join(texts)
 
 
+def _extract_thinking_from_response(message: Message) -> List[Dict[str, str]]:
+    """Extract thinking content from Anthropic response.
+
+    Anthropic's extended thinking returns content blocks with type='thinking'
+    and a 'thinking' attribute containing the thought text.
+    """
+    reasoning_entries: List[Dict[str, str]] = []
+    thinking_idx = 0
+    for block in message.content:
+        if getattr(block, "type", None) == "thinking":
+            thinking_text = getattr(block, "thinking", "")
+            if thinking_text and thinking_text.strip():
+                thinking_idx += 1
+                reasoning_entries.append({
+                    "title": f"Thought {thinking_idx}",
+                    "text": thinking_text.strip(),
+                })
+    return reasoning_entries
+
+
 def _extract_tool_use_from_response(message: Message) -> Optional[Dict[str, Any]]:
     """Extract tool use from Anthropic response."""
     for block in message.content:
@@ -354,8 +402,15 @@ class AnthropicClient(LLMClient):
 
         # Extended thinking configuration
         self._thinking_config: Optional[Dict[str, Any]] = None
+        self._thinking_effort: Optional[str] = None  # "low", "medium", "high", "max"
         thinking_type = cfg.get("thinking_type") or os.getenv("ANTHROPIC_THINKING_TYPE")
         thinking_budget = cfg.get("thinking_budget") or os.getenv("ANTHROPIC_THINKING_BUDGET")
+        thinking_effort = cfg.get("thinking_effort") or os.getenv("ANTHROPIC_THINKING_EFFORT")
+
+        # Validate and store thinking_effort
+        valid_efforts = ("low", "medium", "high", "max")
+        if thinking_effort and thinking_effort in valid_efforts:
+            self._thinking_effort = thinking_effort
 
         if thinking_budget:
             try:
@@ -366,7 +421,13 @@ class AnthropicClient(LLMClient):
             except (TypeError, ValueError):
                 thinking_budget = None
 
-        if thinking_type or thinking_budget:
+        if thinking_type == "adaptive":
+            # Adaptive thinking (Opus 4.6+): Claude decides when and how much to think
+            # budget_tokens is not used with adaptive mode
+            self._thinking_config = {"type": "adaptive"}
+            logging.debug("[anthropic] Using adaptive thinking mode (effort=%s)", self._thinking_effort or "default")
+        elif thinking_type or thinking_budget:
+            # Manual thinking (legacy): explicit budget_tokens
             self._thinking_config = {}
             if thinking_type:
                 self._thinking_config["type"] = thinking_type
@@ -375,8 +436,11 @@ class AnthropicClient(LLMClient):
             self._thinking_config.setdefault("type", "enabled")
 
         # Max output tokens
-        # Note: max_tokens must be greater than thinking.budget_tokens
+        # Note: For manual thinking, max_tokens must be greater than thinking.budget_tokens
+        # For adaptive thinking, a higher default is recommended since thinking tokens are dynamic
         self._max_tokens = 4096  # Default
+        if thinking_type == "adaptive":
+            self._max_tokens = 16000  # Higher default for adaptive thinking
         max_output = cfg.get("max_output_tokens") or os.getenv("ANTHROPIC_MAX_OUTPUT_TOKENS")
         if max_output:
             try:
@@ -384,7 +448,7 @@ class AnthropicClient(LLMClient):
             except (TypeError, ValueError):
                 pass
 
-        # Ensure max_tokens > thinking_budget when thinking is enabled
+        # Ensure max_tokens > thinking_budget when manual thinking is enabled
         if thinking_budget and self._max_tokens <= thinking_budget:
             # max_tokens must include both thinking budget and actual output
             self._max_tokens = thinking_budget + 4096
@@ -403,7 +467,15 @@ class AnthropicClient(LLMClient):
         if not isinstance(parameters, dict):
             return
         allowed_params = {"temperature", "top_p", "top_k", "max_tokens"}
+        valid_efforts = ("low", "medium", "high", "max")
         for key, value in parameters.items():
+            # Handle thinking_effort specially (stored on instance, not in _extra_params)
+            if key == "thinking_effort":
+                if value in valid_efforts:
+                    self._thinking_effort = value
+                elif value is None:
+                    self._thinking_effort = None
+                continue
             if key not in allowed_params:
                 continue
             if value is None:
@@ -411,7 +483,7 @@ class AnthropicClient(LLMClient):
             else:
                 self._extra_params[key] = value
 
-    def _store_usage_from_response(self, usage: Any) -> None:
+    def _store_usage_from_response(self, usage: Any, cache_ttl: str = "") -> None:
         """Extract and store usage information from Anthropic response."""
         if not usage:
             return
@@ -444,6 +516,7 @@ class AnthropicClient(LLMClient):
             output_tokens=output_tokens,
             cache_write_tokens=cache_write_tokens,
             cached_tokens=cached_tokens,
+            cache_ttl=cache_ttl,
         )
 
     def generate(
@@ -522,15 +595,36 @@ class AnthropicClient(LLMClient):
                 tools, enable_cache=enable_cache, cache_ttl=cache_ttl
             )
 
-        # Handle structured output (via tool use pattern for Anthropic)
+        # Build output_config (may contain effort and/or structured output format)
+        output_config: Dict[str, Any] = {}
+        if self._thinking_effort:
+            output_config["effort"] = self._thinking_effort
+
+        # Handle structured output
+        use_native_structured_output = False
         if response_schema and not use_tools:
-            schema_name = response_schema.get("title", "structured_output")
-            request_params["tools"] = [{
-                "name": schema_name,
-                "description": "Generate structured output according to the schema",
-                "input_schema": response_schema,
-            }]
-            request_params["tool_choice"] = {"type": "tool", "name": schema_name}
+            if self._thinking_config:
+                # Thinking enabled: use native output_config (compatible with thinking)
+                # Native structured output requires additionalProperties: false on all objects
+                prepared_schema = _prepare_schema_for_native_output(response_schema)
+                output_config["format"] = {
+                    "type": "json_schema",
+                    "schema": prepared_schema,
+                }
+                use_native_structured_output = True
+            else:
+                # No thinking: use tool_choice pattern (legacy, works on all models)
+                schema_name = response_schema.get("title", "structured_output")
+                request_params["tools"] = [{
+                    "name": schema_name,
+                    "description": "Generate structured output according to the schema",
+                    "input_schema": response_schema,
+                }]
+                request_params["tool_choice"] = {"type": "tool", "name": schema_name}
+
+        # Apply output_config if any fields were set (effort and/or format)
+        if output_config:
+            request_params["output_config"] = output_config
 
         response = None
         last_error: Optional[Exception] = None
@@ -563,15 +657,28 @@ class AnthropicClient(LLMClient):
             raise LLMEmptyResponseError(f"Anthropic API call failed after {MAX_RETRIES} retries with no response")
 
         # Store usage
-        self._store_usage_from_response(response.usage)
+        self._store_usage_from_response(response.usage, cache_ttl=cache_ttl)
+
+        # Extract and store thinking content
+        self._store_reasoning(_extract_thinking_from_response(response))
 
         # Handle structured output response
         if response_schema and not use_tools:
-            tool_use = _extract_tool_use_from_response(response)
-            if tool_use:
-                return tool_use["arguments"]
-            # Fallback to text if no tool use
-            return _extract_text_from_response(response)
+            if use_native_structured_output:
+                # Native structured output: response is JSON text in content[0].text
+                text = _extract_text_from_response(response)
+                try:
+                    return json.loads(text)
+                except (json.JSONDecodeError, TypeError):
+                    logging.warning("[anthropic] Failed to parse native structured output as JSON, returning raw text")
+                    return text
+            else:
+                # Tool-choice pattern: extract from tool_use block
+                tool_use = _extract_tool_use_from_response(response)
+                if tool_use:
+                    return tool_use["arguments"]
+                # Fallback to text if no tool use
+                return _extract_text_from_response(response)
 
         # Handle tool mode
         if use_tools:
@@ -698,6 +805,10 @@ class AnthropicClient(LLMClient):
         if self._thinking_config:
             request_params["thinking"] = self._thinking_config
 
+        # Add effort parameter via output_config if configured
+        if self._thinking_effort:
+            request_params["output_config"] = {"effort": self._thinking_effort}
+
         # Handle tools
         use_tools = bool(tools)
         if use_tools:
@@ -716,18 +827,25 @@ class AnthropicClient(LLMClient):
                     final_message = None
 
                     for event in stream:
-                        # Handle text deltas
+                        # Handle text and thinking deltas
                         if hasattr(event, "type"):
                             if event.type == "content_block_delta":
                                 delta = getattr(event, "delta", None)
-                                if delta and hasattr(delta, "text"):
-                                    yield delta.text
+                                if delta:
+                                    if hasattr(delta, "thinking"):
+                                        yield {"type": "thinking", "content": delta.thinking}
+                                    elif hasattr(delta, "text"):
+                                        yield delta.text
                             elif event.type == "message_stop":
                                 final_message = stream.get_final_message()
 
-                    # Store usage from final message
-                    if final_message and final_message.usage:
-                        self._store_usage_from_response(final_message.usage)
+                    # Store usage and thinking from final message
+                    if final_message:
+                        if final_message.usage:
+                            self._store_usage_from_response(final_message.usage, cache_ttl=cache_ttl)
+                        self._store_reasoning(
+                            _extract_thinking_from_response(final_message)
+                        )
 
                     # Handle tool calls in streaming mode
                     if use_tools and final_message:

@@ -122,16 +122,16 @@ export default function UsagePage() {
 
     // Transform daily data for stacked bar chart
     const chartData = (() => {
-        const dateMap = new Map<string, Record<string, number>>();
+        const dateMap = new Map<string, Record<string, string | number>>();
         const allModels = new Set<string>();
 
         for (const item of dailyData) {
             allModels.add(item.model_id);
             if (!dateMap.has(item.date)) {
-                dateMap.set(item.date, { date: item.date } as Record<string, number>);
+                dateMap.set(item.date, { date: item.date });
             }
             const entry = dateMap.get(item.date)!;
-            entry[item.model_id] = (entry[item.model_id] || 0) + item.cost_usd;
+            entry[item.model_id] = ((entry[item.model_id] as number) || 0) + item.cost_usd;
         }
 
         return {

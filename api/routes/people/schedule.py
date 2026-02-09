@@ -1,3 +1,5 @@
+import json
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 from api.deps import get_manager
@@ -5,7 +7,8 @@ from .models import ScheduleItem, CreateScheduleRequest, UpdateScheduleRequest
 from database.models import PersonaSchedule, AI as AIModel, City as CityModel
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-import json
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -19,7 +22,8 @@ def _get_persona_timezone(manager, persona_id: str) -> ZoneInfo:
         if not city_model or not city_model.TIMEZONE:
             return ZoneInfo("UTC")
         return ZoneInfo(city_model.TIMEZONE)
-    except:
+    except Exception:
+        _log.warning("Failed to get timezone for persona %s, defaulting to UTC", persona_id, exc_info=True)
         return ZoneInfo("UTC")
     finally:
         session.close()
@@ -41,14 +45,16 @@ def list_schedules(persona_id: str, manager = Depends(get_manager)):
             if s.DAYS_OF_WEEK:
                 try:
                     days = json.loads(s.DAYS_OF_WEEK)
-                except: pass
+                except Exception:
+                    _log.warning("Failed to parse DAYS_OF_WEEK for schedule %d", s.SCHEDULE_ID, exc_info=True)
             
             # Parse playbook_params JSON
             playbook_params = None
             if s.PLAYBOOK_PARAMS:
                 try:
                     playbook_params = json.loads(s.PLAYBOOK_PARAMS)
-                except: pass
+                except Exception:
+                    _log.warning("Failed to parse PLAYBOOK_PARAMS for schedule %d", s.SCHEDULE_ID, exc_info=True)
 
             results.append(ScheduleItem(
                 schedule_id=s.SCHEDULE_ID,

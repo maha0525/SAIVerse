@@ -15,13 +15,23 @@ class ActiveThreadAdapterTest(unittest.TestCase):
         self.persona_dir = Path(self._tmp.name)
         os.environ["SAIMEMORY_MEMORY"] = "0"
 
+        # Register temp dir cleanup first (LIFO → runs last, after adapter closes)
+        self.addCleanup(self._cleanup_temp)
+
         # Lazy import to apply environment overrides before settings load.
         from saiverse_memory.adapter import SAIMemoryAdapter
 
         self.adapter_cls = SAIMemoryAdapter
 
+    def _cleanup_temp(self) -> None:
+        import gc
+        gc.collect()
+        try:
+            self._tmp.cleanup()
+        except PermissionError:
+            pass
+
     def tearDown(self) -> None:
-        self._tmp.cleanup()
         os.environ.pop("SAIMEMORY_MEMORY", None)
 
     def _create_adapter(self):
@@ -57,10 +67,10 @@ class ActiveThreadAdapterTest(unittest.TestCase):
         os.environ["SAIMEMORY_MEMORY"] = "1"
 
         class DummyEmbedder:
-            def __init__(self, model: str | None = None) -> None:
+            def __init__(self, model: str | None = None, **kwargs) -> None:
                 self.model_name = model
 
-            def embed(self, texts):
+            def embed(self, texts, **kwargs):
                 return [[0.0] * 3 for _ in texts]
 
         with patch("saiverse_memory.adapter.Embedder", DummyEmbedder):

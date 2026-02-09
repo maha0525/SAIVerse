@@ -468,9 +468,45 @@ class RuntimeService(
                 # プロキシ等のタイムアウトを防ぐためのPing
                 yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
 
+        bh_sizes = {bid: len(h) for bid, h in self.building_histories.items() if h}
+        logging.debug("[runtime] pre-save building_histories sizes: %s", bh_sizes)
         self._save_building_histories()
         for persona in self.personas.values():
             persona._save_session_metadata()
+
+    def preview_context(
+        self, message: str, building_id: Optional[str] = None,
+        meta_playbook: Optional[str] = None,
+        image_count: int = 0, document_count: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Preview context for all responding personas without sending to LLM.
+
+        Returns a list of preview dicts (one per persona).
+        """
+        building_id = building_id or self.state.user_current_building_id
+        if not building_id:
+            return []
+
+        responding_personas = [
+            self.personas[pid]
+            for pid in self.occupants.get(building_id, [])
+            if pid in self.personas and not self.personas[pid].is_dispatched
+        ]
+
+        sea_runtime = self.manager.sea_runtime
+        results = []
+        for persona in responding_personas:
+            try:
+                preview = sea_runtime.preview_context(
+                    persona, building_id, message,
+                    meta_playbook=meta_playbook,
+                    image_count=image_count,
+                    document_count=document_count,
+                )
+                results.append(preview)
+            except Exception:
+                logging.exception("preview_context failed for persona %s", persona.persona_id)
+        return results
 
     def run_scheduled_prompts(self) -> List[str]:
         replies: List[str] = []

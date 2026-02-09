@@ -1,0 +1,53 @@
+{
+  "model": "gpt-5-nano",
+  "system_prompt": "現在の使用モデルはGPT-5 nanoです。\n\n[Model info]\n- Sep 30, 2024 knowledge cutoff",
+  "display_name": "GPT-5 nano",
+  "provider": "openai",
+  "context_length": 400000,
+  "default_max_history_messages": 60,
+  "metabolism_keep_messages": 20,
+  "supports_images": true,
+  "parameters": {
+    "reasoning_effort": {
+      "type": "enum",
+      "options": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": "medium",
+      "label": "Reasoning Effort",
+      "description": "Controls how much thinking time the model spends."
+    },
+    "verbosity": {
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": "high",
+      "label": "Verbosity",
+      "description": "Controls how long or detailed responses should be.",
+      "client_support": [
+        "responses"
+      ]
+    },
+    "max_completion_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 8192,
+      "step": 1,
+      "default": 4096,
+      "label": "Max completion tokens",
+      "description": "Upper bound on how many tokens the reply can use."
+    }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 0.05,
+    "cached_input_per_1m_tokens": 0.005,
+    "output_per_1m_tokens": 0.4,
+    "currency": "USD"
+  }
+}

@@ -10,10 +10,16 @@
     ],
     "context_requirements": {
         "history_depth": "full",
+        "history_balanced": false,
+        "include_internal": false,
+        "system_prompt": true,
+        "memory_weave": true,
+        "working_memory": true,
         "inventory": true,
         "building_items": true,
-        "system_prompt": true,
-        "working_memory": true
+        "available_playbooks": false,
+        "visual_context": false,
+        "realtime_context": true
     },
     "router_callable": false,
     "user_selectable": false,

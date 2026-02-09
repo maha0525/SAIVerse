@@ -5,7 +5,7 @@ from pathlib import Path
 from datetime import datetime
 
 # テスト対象のモジュールをインポート
-from history_manager import HistoryManager
+from persona.history_manager import HistoryManager
 
 class TestHistoryManager(unittest.TestCase):
     def assertMessagesMatch(self, actual, expected):

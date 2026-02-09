@@ -47,6 +47,7 @@ class AI(Base):
     VISION_MODEL = Column(String(255), nullable=True)
     PRIVATE_ROOM_ID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
     PREVIOUS_INTERACTION_MODE = Column(String(32), default='auto', nullable=False)
+    METABOLISM_ANCHORS = Column(Text, nullable=True)  # JSON: per-model anchor state {"model": {"anchor_id": "...", "updated_at": "..."}}
 
 class Building(Base):
     __tablename__ = "building"
@@ -136,6 +137,7 @@ class Playbook(Base):
     __tablename__ = "playbooks"
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(255), unique=True, nullable=False)
+    display_name = Column(String(255), nullable=True)  # Human-readable display name for UI
     description = Column(String(1024), default="", nullable=False)
     scope = Column(String(32), nullable=False, default="public")  # public/personal/building
     created_by_persona_id = Column(String(255), ForeignKey("ai.AIID"), nullable=True)
