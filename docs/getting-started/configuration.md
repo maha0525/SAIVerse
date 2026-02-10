@@ -63,23 +63,29 @@ python main.py <city_id> [オプション]
 
 ## モデル設定
 
-`models.json` でLLMモデルを定義します。
+`builtin_data/models/` ディレクトリ内の個別JSONファイルでLLMモデルを定義します。ユーザーカスタムモデルは `~/.saiverse/user_data/models/` に配置すると、組み込み設定より優先されます。
 
 ```json
 {
-  "gemini-2.5-flash": {
-    "provider": "gemini",
-    "context_length": 1000000,
-    "supports_images": true
+  "model": "gemini-2.5-flash-preview-05-20",
+  "display_name": "Gemini 2.5 Flash",
+  "provider": "gemini",
+  "context_length": 1000000,
+  "supports_images": true,
+  "parameters": {
+    "temperature": { "default": 1.0, "min": 0, "max": 2.0 }
   }
 }
 ```
 
 各エントリで指定可能なフィールド：
+- `model`: API呼び出し時のモデルID（必須）
+- `display_name`: UIドロップダウンに表示する名前
 - `provider`: `openai` / `anthropic` / `gemini` / `ollama`
 - `context_length`: コンテキスト長
 - `supports_images`: 画像入力対応
 - `base_url`: カスタムエンドポイント（互換API用）
+- `api_key_env`: APIキーの環境変数名
 - `parameters`: 温度・top_pなどのパラメータ制約
 
 ## 次のステップ
