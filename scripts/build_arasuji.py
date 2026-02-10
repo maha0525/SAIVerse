@@ -77,7 +77,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 LOGGER = logging.getLogger(__name__)
 
 # Environment variable configuration for Memory Weave
-ENV_MODEL = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.0-flash")
+ENV_MODEL = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
 ENV_BATCH_SIZE = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)))
 ENV_CONSOLIDATION_SIZE = int(os.getenv("MEMORY_WEAVE_CONSOLIDATION_SIZE", str(DEFAULT_CONSOLIDATION_SIZE)))
 ENV_MAINTAIN_INTERVAL = int(os.getenv("MEMORY_WEAVE_MAINTAIN_INTERVAL", "0"))
@@ -371,7 +371,7 @@ def regenerate_entry_from_messages(
     
     # Get model from env if not specified
     if model_name is None:
-        model_name = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.0-flash")
+        model_name = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
     
     # Find model config
     model_id, model_config = find_model_config(model_name)
@@ -408,7 +408,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用例:
-  # デフォルトモデル (gemini-2.0-flash) で100件処理
+  # デフォルトモデル (gemini-2.5-flash-lite-preview-09-2025) で100件処理
   python scripts/build_arasuji.py air_city_a --limit 100
 
   # 101件目から100件処理

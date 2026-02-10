@@ -35,7 +35,7 @@
         "16384",
         "24576"
       ],
-      "default": "default",
+      "default": "24576",
       "label": "Thinking Budget",
       "description": "思考トークン予算。defaultでモデルが自動調整(dynamic)、offで思考を無効化。数値で明示的に予算を指定(0〜24576)。"
     },

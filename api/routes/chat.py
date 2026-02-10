@@ -416,11 +416,11 @@ def _store_document_attachment(
     is_pdf = att.filename.lower().endswith('.pdf') or att.mime_type == 'application/pdf'
     if is_pdf:
         try:
-            import fitz  # PyMuPDF
-            doc = fitz.open(stream=data, filetype="pdf")
-            text_parts = [page.get_text() for page in doc[:5]]  # first 5 pages for summary
+            import io
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(data))
+            text_parts = [page.extract_text() or "" for page in reader.pages[:5]]  # first 5 pages for summary
             content = "\n".join(text_parts)
-            doc.close()
         except Exception:
             content = "(PDF text extraction failed)"
     else:

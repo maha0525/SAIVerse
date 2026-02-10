@@ -129,7 +129,7 @@ def _generate_summary(persona: Any, messages: List[Dict], summary_uuid: str) -> 
         model_name = getattr(persona, "lightweight_model", None)
         if not model_name:
             import os
-            model_name = os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gemini-2.0-flash")
+            model_name = os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
 
         config = get_model_config(model_name)
         client = get_llm_client(model_name, config)

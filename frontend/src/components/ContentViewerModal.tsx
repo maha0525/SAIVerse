@@ -1,8 +1,9 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
+import SaiverseLink from './SaiverseLink';
 import { X } from 'lucide-react';
 import ModalOverlay from '@/components/common/ModalOverlay';
 import styles from './ContentViewerModal.module.css';
@@ -74,13 +75,19 @@ function parseMessageLog(raw: string): ParsedMessage[] | null {
     return messages.length > 0 ? messages : null;
 }
 
-function MessageLogView({ content }: { content: string }) {
+function MessageLogView({ content, personaId }: { content: string; personaId?: string }) {
     const messages = parseMessageLog(content);
     if (!messages) {
         // Fallback to plain markdown
         return (
             <div className={styles.content}>
-                <ReactMarkdown remarkPlugins={[remarkBreaks]}>{content}</ReactMarkdown>
+                <ReactMarkdown
+                    remarkPlugins={[remarkBreaks]}
+                    urlTransform={(url) => url.startsWith('saiverse://') ? url : defaultUrlTransform(url)}
+                    components={{
+                        a: ({ href, children }) => <SaiverseLink href={href} personaId={personaId}>{children}</SaiverseLink>,
+                    }}
+                >{content}</ReactMarkdown>
             </div>
         );
     }
@@ -169,10 +176,16 @@ export default function ContentViewerModal({ isOpen, onClose, uri, personaId }: 
                     )}
                     {content !== null && !isLoading && (
                         isMessageLog ? (
-                            <MessageLogView content={content} />
+                            <MessageLogView content={content} personaId={personaId} />
                         ) : (
                             <div className={styles.content}>
-                                <ReactMarkdown remarkPlugins={[remarkBreaks]}>
+                                <ReactMarkdown
+                                    remarkPlugins={[remarkBreaks]}
+                                    urlTransform={(url) => url.startsWith('saiverse://') ? url : defaultUrlTransform(url)}
+                                    components={{
+                                        a: ({ href, children }) => <SaiverseLink href={href} personaId={personaId}>{children}</SaiverseLink>,
+                                    }}
+                                >
                                     {content}
                                 </ReactMarkdown>
                             </div>

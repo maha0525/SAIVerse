@@ -1,7 +1,7 @@
 {
     "name": "deep_work",
     "display_name": "ディープワーク",
-    "description": "複数の情報ソースを横断して深く調査し、総合的な回答を生成するオーケストレーター。状況認識→計画立案→タスク実行（Stelis隔離）→結果集約→完了判断→最終出力。",
+    "description": "複数の情報ソースを横断して深く調査し、総合的な回答を生成するオーケストレーター。状況認識→計画立案→タスク実行（サブエージェント隔離）→結果集約→完了判断→最終出力。",
     "input_schema": [
         {
             "name": "input",
@@ -151,6 +151,11 @@
                 ]
             },
             "output_key": "current_task",
+            "output_mapping": {
+                "objective": "objective",
+                "context_refs": "context_refs",
+                "depth": "depth"
+            },
             "next": "check_has_task"
         },
         {
@@ -161,31 +166,10 @@
                 "field": "current_task.has_task",
                 "operator": "eq",
                 "cases": {
-                    "true": "prepare_research_vars",
+                    "true": "exec_research",
                     "default": "next_phase"
                 }
             }
-        },
-        {
-            "id": "prepare_research_vars",
-            "type": "set",
-            "assignments": {
-                "objective": "{current_task.objective}",
-                "context_refs": "{current_task.context_refs}",
-                "depth": "{current_task.depth}"
-            },
-            "next": "stelis_start"
-        },
-        {
-            "id": "stelis_start",
-            "type": "stelis_start",
-            "label": "Research: {current_task.objective}",
-            "stelis_config": {
-                "window_ratio": 0.7,
-                "max_depth": 2,
-                "chronicle_prompt": "この調査スレッドで行われた調査の内容と結果を包括的にまとめてください。調査対象、検索で見つかった情報、得られた知見、未解決の点を漏らさず記録してください。"
-            },
-            "next": "exec_research"
         },
         {
             "id": "exec_research",
@@ -193,19 +177,15 @@
             "playbook": "research_task",
             "input_template": "{current_task.objective}",
             "propagate_output": false,
-            "next": "stelis_end"
-        },
-        {
-            "id": "stelis_end",
-            "type": "stelis_end",
-            "generate_chronicle": true,
+            "execution": "subagent",
+            "subagent_chronicle": true,
             "next": "accumulate_result"
         },
         {
             "id": "accumulate_result",
             "type": "set",
             "assignments": {
-                "phase_results": "{phase_results}\n\n### タスク{task_index}: {current_task.objective}\n結果: {research_result.summary}\nステータス: {research_result.status} (信頼度: {research_result.confidence})\nStelis要約: {stelis_chronicle}",
+                "phase_results": "{phase_results}\n\n### タスク{task_index}: {current_task.objective}\n結果: {research_result.summary}\nステータス: {research_result.status} (信頼度: {research_result.confidence})\nサブエージェント要約: {_subagent_chronicle}",
                 "task_index": "={task_index} + 1",
                 "total_tasks_done": "={total_tasks_done} + 1"
             },

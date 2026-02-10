@@ -72,7 +72,16 @@ else
     echo "[OK] .env は既に存在します"
 fi
 
-# --- 9. Pre-download embedding model ---
+# --- 9. SearXNG setup ---
+echo ""
+echo "[SETUP] SearXNG (Web検索エンジン) をセットアップ中..."
+if bash ./scripts/setup_searxng.sh; then
+    echo "[OK] SearXNG のセットアップ完了"
+else
+    echo "[WARN] SearXNG のセットアップに失敗しましたが、Web検索なしでも動作します。"
+fi
+
+# --- 10. Pre-download embedding model ---
 echo ""
 echo "[SETUP] 埋め込みモデルをダウンロード中 (初回のみ、数分かかります)..."
 python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-m3')" || {
@@ -80,7 +89,7 @@ python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-m3')" ||
 }
 echo "[OK] 埋め込みモデルのダウンロード完了"
 
-# --- 10. Complete ---
+# --- 11. Complete ---
 echo ""
 echo "========================================"
 echo "  セットアップ完了!"

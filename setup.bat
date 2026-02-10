@@ -100,7 +100,17 @@ if not exist ".env" (
     echo [OK] .env は既に存在します
 )
 
-REM --- 9. Pre-download embedding model ---
+REM --- 9. SearXNG setup ---
+echo.
+echo [SETUP] SearXNG (Web検索エンジン) をセットアップ中...
+powershell -ExecutionPolicy Bypass -File scripts\setup_searxng.ps1
+if %errorlevel% neq 0 (
+    echo [WARN] SearXNG のセットアップに失敗しましたが、Web検索なしでも動作します。
+) else (
+    echo [OK] SearXNG のセットアップ完了
+)
+
+REM --- 10. Pre-download embedding model ---
 echo.
 echo [SETUP] 埋め込みモデルをダウンロード中 (初回のみ、数分かかります)...
 python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-m3')"
@@ -110,7 +120,7 @@ if %errorlevel% neq 0 (
     echo [OK] 埋め込みモデルのダウンロード完了
 )
 
-REM --- 10. Complete ---
+REM --- 11. Complete ---
 echo.
 echo ========================================
 echo   セットアップ完了!

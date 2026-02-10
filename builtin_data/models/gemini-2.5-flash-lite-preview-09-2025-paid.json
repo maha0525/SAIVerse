@@ -35,7 +35,7 @@
         "16384",
         "24576"
       ],
-      "default": "default",
+      "default": "24576",
       "label": "Thinking Budget",
       "description": "思考トークン予算。defaultで思考なし(Liteのデフォルト)。数値で思考を有効化し予算を指定(512〜24576)。"
     },

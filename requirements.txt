@@ -22,7 +22,7 @@ Pillow>=11.0.0
 markdownify>=0.12.0
 
 # PDF processing
-pymupdf>=1.25.0
+pypdf>=4.0.0
 
 # ローカルLLM (llama.cpp) を使う場合:
 #   pip install -r requirements-local-llm.txt

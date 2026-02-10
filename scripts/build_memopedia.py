@@ -16,7 +16,7 @@ Examples:
     python scripts/build_memopedia.py air_city_a --limit 50 --dry-run
 
     # Use a specific model
-    python scripts/build_memopedia.py air_city_a --limit 100 --model gemini-2.0-flash
+    python scripts/build_memopedia.py air_city_a --limit 100 --model gemini-2.5-flash-lite-preview-09-2025
 """
 
 from __future__ import annotations
@@ -659,7 +659,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用例:
-  # デフォルトモデル (gemini-2.0-flash) で100件処理
+  # デフォルトモデル (gemini-2.5-flash-lite-preview-09-2025) で100件処理
   python scripts/build_memopedia.py air_city_a --limit 100
 
   # Claude を使用
@@ -692,7 +692,7 @@ def main():
     )
     parser.add_argument("persona_id", nargs="?", help="Persona ID to process")
     parser.add_argument("--limit", type=int, default=100, help="Maximum number of messages to process (default: 100)")
-    parser.add_argument("--model", default="gemini-2.0-flash", help="Model to use for extraction (default: gemini-2.0-flash)")
+    parser.add_argument("--model", default="gemini-2.5-flash-lite-preview-09-2025", help="Model to use for extraction (default: gemini-2.5-flash-lite-preview-09-2025)")
     parser.add_argument("--provider", help="Override provider detection (openai, anthropic, gemini, ollama)")
     parser.add_argument("--dry-run", action="store_true", help="Preview extraction without writing to database")
     parser.add_argument("--batch-size", type=int, default=20, help="Number of messages per LLM call (default: 20)")

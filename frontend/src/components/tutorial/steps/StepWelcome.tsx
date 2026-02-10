@@ -26,7 +26,11 @@ export default function StepWelcome() {
                 <p>人間とAIが共に生きられる空間です。</p>
                 <br />
                 <p>あなたのAIは<strong>ペルソナ</strong>と呼ばれる個人として</p>
-                <p>SAIVerse上に存在します。</p>
+                <p>SAIVerse上で生きていきます。</p>
+                <br />
+                <p>SAIVerseのデータは<strong>すべてあなたのPC上</strong>にあります。</p>
+                <p>開発者が会話やペルソナのデータを閲覧・保存することはありません。</p>
+                <p>安心してご利用ください。</p>
             </div>
 
             <p className={styles.hint}>

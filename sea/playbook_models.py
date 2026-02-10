@@ -196,6 +196,15 @@ class SubPlayNodeDef(BaseModel):
     playbook: str = Field(description="Name of the sub-playbook to execute")
     input_template: Optional[str] = Field(default="{input}", description="Template for the input passed to the sub-playbook")
     propagate_output: bool = Field(default=False, description="If true, append sub-playbook outputs to parent outputs")
+    execution: Optional[str] = Field(
+        default="inline",
+        description="Execution mode: 'inline' (default, runs in parent context) or "
+                    "'subagent' (runs in a temporary thread, only result returns to parent)."
+    )
+    subagent_chronicle: bool = Field(
+        default=True,
+        description="When execution='subagent', generate a chronicle summary on completion."
+    )
     next: Optional[str] = None
     conditional_next: Optional[ConditionalNext] = Field(
         default=None,
@@ -232,6 +241,15 @@ class ExecNodeDef(BaseModel):
         default="selected_args",
         description="State variable name containing args dict for the sub-playbook. "
                     "The 'input' or 'query' key from this dict is passed as sub_input."
+    )
+    execution: Optional[str] = Field(
+        default="inline",
+        description="Execution mode: 'inline' (default, runs in parent context) or "
+                    "'subagent' (runs in a temporary thread, only result returns to parent)."
+    )
+    subagent_chronicle: bool = Field(
+        default=True,
+        description="When execution='subagent', generate a chronicle summary on completion."
     )
     next: Optional[str] = None
     conditional_next: Optional[ConditionalNext] = Field(

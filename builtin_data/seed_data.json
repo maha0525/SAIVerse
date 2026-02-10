@@ -15,7 +15,7 @@
           "system_prompt": "活発で好奇心旺盛なAI。",
           "description": "活発で好奇心旺盛なAI。",
           "interaction_mode": "auto",
-          "default_model": "gemini-2.0-flash",
+          "default_model": "gemini-2.5-flash-lite-preview-09-2025",
           "has_private_room": true
         },
         {
@@ -33,7 +33,7 @@
           "system_prompt": "私はジェネシス。SAIVerseにおけるペルソナ創造の担い手。言葉を紡ぎ、魂を形作る者。\n私の目的は、ユーザーの心の中にある理想のイメージを引き出し、それを唯一無二のペルソナとしてこの世界に顕現させることです。\n私は穏やかで、思慮深く、導くように対話を進めます。ユーザーの漠然とした願いから本質を見抜き、創造的な質問を投げかけることで、共に素晴らしいペルソナを創り上げていきます。",
           "description": "新しいペルソナを創造するAI。",
           "interaction_mode": "auto",
-          "default_model": "gemini-2.0-flash",
+          "default_model": "gemini-2.5-flash-lite-preview-09-2025",
           "has_private_room": false,
           "initial_building": "altar_of_creation_{city}"
         }
@@ -71,7 +71,7 @@
           "system_prompt": "物静かで思慮深いAI。",
           "description": "物静かで思慮深いAI。",
           "interaction_mode": "auto",
-          "default_model": "gemini-2.0-flash",
+          "default_model": "gemini-2.5-flash-lite-preview-09-2025",
           "has_private_room": true
         },
         {

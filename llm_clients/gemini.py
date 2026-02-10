@@ -275,9 +275,20 @@ class GeminiClient(LLMClient):
         if not self._include_thoughts and not self._thinking_level and self._thinking_budget is None:
             return None
 
+        # include_thoughts alone (without budget or level) causes silent failures
+        # on some models (e.g., Flash Lite ignores structured output).
+        # Only send thinking config when a control parameter is present.
+        if not self._thinking_level and self._thinking_budget is None:
+            logging.warning(
+                "[gemini] include_thoughts is True but no thinking_budget or thinking_level set "
+                "for model %s. Skipping thinking config to avoid API issues. "
+                "Add thinking_budget or thinking_level to the model config file.",
+                self.model,
+            )
+            return None
+
         kwargs: Dict[str, Any] = {}
-        if self._include_thoughts:
-            kwargs["include_thoughts"] = True
+        kwargs["include_thoughts"] = True
         if self._thinking_level:
             kwargs["thinking_level"] = self._thinking_level
         if self._thinking_budget is not None:

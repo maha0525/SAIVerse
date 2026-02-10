@@ -129,9 +129,11 @@ export default function TutorialWizard({
 
     const loadInitialData = async () => {
         try {
-            const [modelsRes, keysRes] = await Promise.all([
+            const [modelsRes, keysRes, userRes, citiesRes] = await Promise.all([
                 fetch('/api/tutorial/available-models'),
-                fetch('/api/tutorial/api-keys/status')
+                fetch('/api/tutorial/api-keys/status'),
+                fetch('/api/user/status'),
+                fetch('/api/db/tables/city'),
             ]);
 
             if (modelsRes.ok) {
@@ -140,6 +142,24 @@ export default function TutorialWizard({
             }
             if (keysRes.ok) {
                 setApiKeyStatus(await keysRes.json());
+            }
+
+            // 既存のユーザー名・City名をプリフィル
+            const updates: Partial<TutorialState> = {};
+            if (userRes.ok) {
+                const userData = await userRes.json();
+                if (userData.display_name) {
+                    updates.userName = userData.display_name;
+                }
+            }
+            if (citiesRes.ok) {
+                const cities = await citiesRes.json();
+                if (cities.length > 0 && cities[0].CITYNAME) {
+                    updates.cityName = cities[0].CITYNAME;
+                }
+            }
+            if (Object.keys(updates).length > 0) {
+                setState(prev => ({ ...prev, ...updates }));
             }
         } catch (e) {
             console.error('Failed to load tutorial data', e);

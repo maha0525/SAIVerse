@@ -1,0 +1,136 @@
+{
+    "name": "web_search_step",
+    "description": "Web検索の1イテレーション。クエリ生成→検索→ページ選択→読み込み→要約。サブエージェントで実行されることを想定。",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "調査トピック"
+        },
+        {
+            "name": "previous_findings",
+            "param_type": "string",
+            "source": "parent.all_findings",
+            "description": "これまでの調査結果（前回までのChronicle蓄積）",
+            "required": false,
+            "default": ""
+        },
+        {
+            "name": "known_sources",
+            "param_type": "string",
+            "source": "parent.known_sources",
+            "description": "既に調べたソースURL一覧",
+            "required": false,
+            "default": ""
+        }
+    ],
+    "output_schema": [
+        "step_summary"
+    ],
+    "router_callable": false,
+    "user_selectable": false,
+    "nodes": [
+        {
+            "id": "build_query",
+            "type": "llm",
+            "context_profile": "worker_light",
+            "action": "調査トピック「{input}」についてWeb検索クエリを生成してください。\n\nこれまでの調査結果:\n{previous_findings}\n\n情報がまだない場合は基本的な検索から、既にある場合は不足している観点を補う検索を行ってください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "検索クエリ"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "取得件数（3-10）"
+                    }
+                },
+                "required": [
+                    "query"
+                ]
+            },
+            "output_key": "search_args",
+            "next": "search"
+        },
+        {
+            "id": "search",
+            "type": "tool",
+            "action": "searxng_search",
+            "args_input": {
+                "query": "search_args.query",
+                "max_results": "search_args.max_results"
+            },
+            "output_key": "search_results",
+            "next": "select_page"
+        },
+        {
+            "id": "select_page",
+            "type": "llm",
+            "context_profile": "worker_light",
+            "action": "検索結果から、調査トピック「{input}」に最も関連する有用なページを1件選んでください。既に調べたソースは避けてください。\n\n検索結果:\n{search_results}\n\n既に調べたソース:\n{known_sources}",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "読み込むURL"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "ページタイトル"
+                    }
+                },
+                "required": [
+                    "url"
+                ]
+            },
+            "output_key": "selected_page",
+            "next": "read_page"
+        },
+        {
+            "id": "read_page",
+            "type": "tool",
+            "action": "read_url_content",
+            "args_input": {
+                "url": "selected_page.url",
+                "max_chars": 8000
+            },
+            "output_key": "page_content",
+            "next": "summarize"
+        },
+        {
+            "id": "summarize",
+            "type": "llm",
+            "context_profile": "worker_light",
+            "action": "以下のページ内容から、調査トピック「{input}」に関連する重要な情報を要約してください。事実と数字を優先的に抽出すること。\n\nURL: {selected_page.url}\nタイトル: {selected_page.title}\n\nページ内容:\n{page_content}",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "ページの要約"
+                    },
+                    "key_facts": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "重要な事実のリスト"
+                    },
+                    "source_url": {
+                        "type": "string",
+                        "description": "情報源URL"
+                    }
+                },
+                "required": [
+                    "summary",
+                    "source_url"
+                ]
+            },
+            "output_key": "step_summary",
+            "next": null
+        }
+    ],
+    "start_node": "build_query"
+}

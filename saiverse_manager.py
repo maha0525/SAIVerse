@@ -62,7 +62,7 @@ from database.models import (
 
 
 #DEFAULT_MODEL = "gpt-4o"
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-2.5-flash-lite-preview-09-2025"
 
 
 def _get_default_model() -> str:

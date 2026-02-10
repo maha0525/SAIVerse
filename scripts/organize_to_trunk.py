@@ -42,7 +42,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 LOGGER = logging.getLogger(__name__)
 
 # Environment variable for default model
-ENV_MODEL = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.0-flash")
+ENV_MODEL = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
 
 
 def get_llm_response(client, prompt: str, response_schema: dict) -> dict:

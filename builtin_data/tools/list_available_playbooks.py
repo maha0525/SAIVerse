@@ -27,17 +27,11 @@ def list_available_playbooks(persona_id: Optional[str] = None, building_id: Opti
     if not building_id:
         manager = get_active_manager()
         if manager:
-            # Try to get current building from manager/persona
-            # This is a best-effort; if unavailable, we only return public playbooks
+            # Get current building from in-memory PersonaCore
             try:
-                session = manager.SessionLocal()
-                try:
-                    from database.models import AI
-                    ai_record = session.query(AI).filter(AI.AIID == persona_id).first()
-                    if ai_record:
-                        building_id = ai_record.CURRENT_LOCATION
-                finally:
-                    session.close()
+                persona_obj = manager.personas.get(persona_id)
+                if persona_obj:
+                    building_id = persona_obj.current_building_id
             except Exception:
                 _log.warning("Failed to get building_id for persona %s", persona_id, exc_info=True)
 

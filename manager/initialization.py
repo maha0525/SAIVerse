@@ -148,7 +148,7 @@ class InitializationMixin:
         import os
 
         def _get_default_model() -> str:
-            return os.getenv("SAIVERSE_DEFAULT_MODEL", "gemini-2.0-flash")
+            return os.getenv("SAIVERSE_DEFAULT_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
 
         base_model = model or _get_default_model()
         self.model = None  # No global override by default

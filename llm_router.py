@@ -13,7 +13,7 @@ load_dotenv()
 
 log = logging.getLogger("saiverse.router")
 
-ROUTER_MODEL = "gemini-2.0-flash"
+ROUTER_MODEL = "gemini-2.5-flash-lite-preview-09-2025"
 _free_client, _paid_client, client = build_gemini_clients()
 _CLIENT_LABELS = {
     id(_free_client): "free",

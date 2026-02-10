@@ -1650,7 +1650,23 @@ class SEARuntime:
                 sub_input = state.get("inputs", {}).get("input")
 
             eff_bid = self._effective_building_id(persona, building_id)
-            log_sea_trace(playbook.name, node_id, "EXEC", f"→ {sub_name} (input=\"{str(sub_input)[:150]}\")")
+
+            # Determine execution mode
+            execution = getattr(node_def, "execution", "inline") or "inline"
+            subagent_thread_id = None
+            subagent_parent_id = None
+
+            if execution == "subagent":
+                label = f"Subagent: {sub_name}"
+                subagent_thread_id, subagent_parent_id = self._start_subagent_thread(persona, label=label)
+                if not subagent_thread_id:
+                    LOGGER.warning("[sea][exec] Failed to start subagent thread for '%s', falling back to inline", sub_name)
+                    execution = "inline"  # Fallback
+                else:
+                    log_sea_trace(playbook.name, node_id, "EXEC", f"→ {sub_name} [subagent thread={subagent_thread_id}] (input=\"{str(sub_input)[:150]}\")")
+
+            if execution == "inline":
+                log_sea_trace(playbook.name, node_id, "EXEC", f"→ {sub_name} (input=\"{str(sub_input)[:150]}\")")
 
             try:
                 sub_outputs = await asyncio.to_thread(
@@ -1658,6 +1674,9 @@ class SEARuntime:
                 )
             except Exception as exc:
                 LOGGER.exception("SEA LangGraph exec sub-playbook failed")
+                # End subagent thread on error (no chronicle)
+                if execution == "subagent" and subagent_thread_id:
+                    self._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False)
                 error_msg = f"Sub-playbook error: {type(exc).__name__}: {exc}"
                 state["last"] = error_msg
                 state["_exec_error"] = True
@@ -1683,6 +1702,14 @@ class SEARuntime:
                 if outputs is not None:
                     outputs.append(error_msg)
                 return state
+
+            # End subagent thread on success
+            if execution == "subagent" and subagent_thread_id:
+                gen_chronicle = getattr(node_def, "subagent_chronicle", True)
+                chronicle = self._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=gen_chronicle)
+                if chronicle:
+                    state["_subagent_chronicle"] = chronicle
+                log_sea_trace(playbook.name, node_id, "EXEC", f"← {sub_name} [subagent ended, chronicle={'yes' if chronicle else 'no'}]")
 
             # Success path: clear error flag
             state["_exec_error"] = False
@@ -1881,7 +1908,23 @@ class SEARuntime:
             })
             sub_input = _format(template, variables)
             eff_bid = self._effective_building_id(persona, building_id)
-            log_sea_trace(playbook.name, node_id, "SUBPLAY", f"→ {sub_name} (input=\"{str(sub_input)[:150]}\")")
+
+            # Determine execution mode
+            execution = getattr(node_def, "execution", "inline") or "inline"
+            subagent_thread_id = None
+            subagent_parent_id = None
+
+            if execution == "subagent":
+                label = f"Subagent: {sub_name}"
+                subagent_thread_id, subagent_parent_id = self._start_subagent_thread(persona, label=label)
+                if not subagent_thread_id:
+                    LOGGER.warning("[sea][subplay] Failed to start subagent thread for '%s', falling back to inline", sub_name)
+                    execution = "inline"  # Fallback
+                else:
+                    log_sea_trace(playbook.name, node_id, "SUBPLAY", f"→ {sub_name} [subagent thread={subagent_thread_id}] (input=\"{str(sub_input)[:150]}\")")
+
+            if execution == "inline":
+                log_sea_trace(playbook.name, node_id, "SUBPLAY", f"→ {sub_name} (input=\"{str(sub_input)[:150]}\")")
 
             # Execute subplaybook
             # Note: We call _run_playbook directly (not via asyncio.to_thread) to keep
@@ -1891,8 +1934,20 @@ class SEARuntime:
                 sub_outputs = self._run_playbook(sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback)
             except Exception as exc:
                 LOGGER.exception("[sea][subplay] Failed to execute subplaybook '%s'", sub_name)
+                # End subagent thread on error (no chronicle)
+                if execution == "subagent" and subagent_thread_id:
+                    self._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False)
                 state["last"] = f"Sub-playbook error: {exc}"
                 return state
+
+            # End subagent thread on success
+            if execution == "subagent" and subagent_thread_id:
+                gen_chronicle = getattr(node_def, "subagent_chronicle", True)
+                chronicle = self._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=gen_chronicle)
+                if chronicle:
+                    state["_subagent_chronicle"] = chronicle
+                log_sea_trace(playbook.name, node_id, "SUBPLAY", f"← {sub_name} [subagent ended, chronicle={'yes' if chronicle else 'no'}]")
+
             last_text = sub_outputs[-1] if sub_outputs else ""
             state["last"] = last_text
 
@@ -2009,6 +2064,101 @@ class SEARuntime:
         except Exception as exc:
             LOGGER.warning("[sea][set] Failed to evaluate expression '%s': %s", expr, exc)
             return 0
+
+    # ---------------- Subagent Thread Helpers -----------------
+
+    def _start_subagent_thread(self, persona, label: Optional[str] = None):
+        """Create a temporary Stelis thread and switch the active thread to it.
+
+        Used by subplay/exec nodes with execution='subagent' to isolate
+        sub-playbook execution in a temporary thread.
+
+        Returns:
+            (thread_id, parent_thread_id) on success, (None, None) on failure.
+        """
+        memory_adapter = getattr(persona, "sai_memory", None)
+        if not memory_adapter:
+            LOGGER.warning("[subagent] No memory adapter found for persona %s", persona.persona_id)
+            return None, None
+
+        # Check depth limit (subagent uses max_depth=2 to prevent deep nesting)
+        if not memory_adapter.can_start_stelis(max_depth=2):
+            LOGGER.warning("[subagent] Stelis max depth exceeded for persona %s", persona.persona_id)
+            return None, None
+
+        # Get current thread as parent
+        parent_thread_id = memory_adapter.get_current_thread()
+        if parent_thread_id is None:
+            parent_thread_id = memory_adapter._thread_id(None)
+
+        # Create a new Stelis thread (no anchor message — subagent is transparent)
+        stelis = memory_adapter.start_stelis_thread(
+            parent_thread_id=parent_thread_id,
+            window_ratio=0.8,
+            max_depth=2,
+            label=label or "Subagent",
+        )
+
+        if not stelis:
+            LOGGER.error("[subagent] Failed to create subagent thread for persona %s", persona.persona_id)
+            return None, None
+
+        # Switch to the new thread
+        memory_adapter.set_active_thread(stelis.thread_id)
+        LOGGER.info(
+            "[subagent] Started subagent thread %s (parent=%s, label=%s)",
+            stelis.thread_id, parent_thread_id, label,
+        )
+        return stelis.thread_id, parent_thread_id
+
+    def _end_subagent_thread(
+        self,
+        persona,
+        thread_id: str,
+        parent_thread_id: str,
+        generate_chronicle: bool = True,
+    ) -> Optional[str]:
+        """End a subagent thread and switch back to the parent thread.
+
+        Args:
+            generate_chronicle: If True, generate a Chronicle summary before ending.
+
+        Returns:
+            Chronicle summary string if generated, else None.
+        """
+        memory_adapter = getattr(persona, "sai_memory", None)
+        if not memory_adapter:
+            return None
+
+        chronicle_summary = None
+        if generate_chronicle:
+            stelis_info = memory_adapter.get_stelis_info(thread_id)
+            chronicle_prompt = stelis_info.chronicle_prompt if stelis_info else None
+            chronicle_summary = self._generate_stelis_chronicle(
+                persona, thread_id, chronicle_prompt
+            )
+            if chronicle_summary:
+                LOGGER.info(
+                    "[subagent] Generated Chronicle for thread %s: %s...",
+                    thread_id, chronicle_summary[:100],
+                )
+
+        # End the Stelis thread
+        success = memory_adapter.end_stelis_thread(
+            thread_id=thread_id,
+            status="completed",
+            chronicle_summary=chronicle_summary,
+        )
+        if not success:
+            LOGGER.error("[subagent] Failed to end subagent thread %s", thread_id)
+
+        # Switch back to parent thread
+        memory_adapter.set_active_thread(parent_thread_id)
+        LOGGER.info(
+            "[subagent] Ended subagent thread %s, returned to parent %s",
+            thread_id, parent_thread_id,
+        )
+        return chronicle_summary
 
     # ---------------- Stelis Thread Nodes -----------------
 
@@ -2802,7 +2952,7 @@ class SEARuntime:
         from sai_memory.memory.storage import get_messages_paginated
 
         # Get LLM client using MEMORY_WEAVE_MODEL
-        model_name = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.0-flash")
+        model_name = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
         model_id, model_config = find_model_config(model_name)
         if not model_config:
             LOGGER.warning("[metabolism] Model '%s' not found for Chronicle generation", model_name)
@@ -3338,7 +3488,7 @@ class SEARuntime:
             messages.append({"role": "user", "content": user_input})
 
         # Classify each message into a section
-        persona_model = getattr(persona, "model", None) or "gemini-2.0-flash"
+        persona_model = getattr(persona, "model", None) or "gemini-2.5-flash-lite-preview-09-2025"
         provider = get_model_provider(persona_model)
 
         section_order = [

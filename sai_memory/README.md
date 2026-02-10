@@ -47,7 +47,7 @@ python sai_memory/scripts/diag.py
 
 - プロバイダ/モデル
   - `LLM_PROVIDER`: `openai` もしくは `google`
-  - `LLM_MODEL`: 例 `gpt-5`, `gemini-2.0-flash`
+  - `LLM_MODEL`: 例 `gpt-5`, `gemini-2.5-flash-lite-preview-09-2025`
   - `OPENAI_API_KEY`, `GEMINI_API_KEY`（`GOOGLE_API_KEY`も可）
   - Gemini利用時のPython SDK: `google-genai`（import: `from google import genai`）
 

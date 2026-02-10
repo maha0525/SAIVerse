@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
+import SaiverseLink from '../SaiverseLink';
 import { Book, ChevronRight, ChevronDown, ChevronLeft, History, Clock, GitCommit, Tag, Edit2, Trash2, Save, X, Plus, FolderTree, Sparkles, Star } from 'lucide-react';
 import styles from './MemopediaViewer.module.css';
 
@@ -995,7 +996,12 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                     </>
                                 )}
                                 <div className={styles.markdown}>
-                                    <ReactMarkdown>{pageContent}</ReactMarkdown>
+                                    <ReactMarkdown
+                                        urlTransform={(url) => url.startsWith('saiverse://') ? url : defaultUrlTransform(url)}
+                                        components={{
+                                            a: ({ href, children }) => <SaiverseLink href={href} personaId={personaId}>{children}</SaiverseLink>,
+                                        }}
+                                    >{pageContent}</ReactMarkdown>
                                 </div>
                             </div>
                         )

@@ -241,10 +241,10 @@ def get_agentic_model() -> str:
 
     Priority:
     1. SAIVERSE_AGENTIC_MODEL environment variable
-    2. Built-in default: gemini-2.0-flash
+    2. Built-in default: gemini-2.5-flash-lite-preview-09-2025
     """
     import os
-    return os.environ.get("SAIVERSE_AGENTIC_MODEL", "gemini-2.0-flash")
+    return os.environ.get("SAIVERSE_AGENTIC_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
 
 
 def get_model_pricing(model: str) -> Dict[str, Any] | None:

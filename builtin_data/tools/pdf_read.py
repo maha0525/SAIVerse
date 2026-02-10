@@ -28,9 +28,9 @@ def pdf_read(
         Extracted text content from the PDF
     """
     try:
-        import fitz  # PyMuPDF
+        from pypdf import PdfReader
     except ImportError:
-        return "(PyMuPDF (fitz) is not installed. Run: pip install pymupdf)"
+        return "(pypdf is not installed. Run: pip install pypdf)"
 
     manager = get_active_manager()
     if not manager:
@@ -55,11 +55,11 @@ def pdf_read(
         LOGGER.warning("Failed to get item name for %s", item_id, exc_info=True)
 
     try:
-        doc = fitz.open(str(file_path))
+        reader = PdfReader(str(file_path))
     except Exception as exc:
         return f"(Failed to open PDF: {exc})"
 
-    total_pages = len(doc)
+    total_pages = len(reader.pages)
 
     # Parse page range
     start_page = 0  # 0-based
@@ -77,7 +77,6 @@ def pdf_read(
             start_page = max(0, start_page)
             end_page = min(total_pages, end_page)
         except ValueError:
-            doc.close()
             return f"(Invalid page range: {pages}. Use format like '1-5' or '3')"
 
     # Extract text
@@ -92,8 +91,8 @@ def pdf_read(
 
     total_chars = 0
     for page_num in range(start_page, end_page):
-        page = doc[page_num]
-        text = page.get_text().strip()
+        page = reader.pages[page_num]
+        text = (page.extract_text() or "").strip()
         parts.append(f"--- Page {page_num + 1} ---")
         parts.append(text)
         parts.append("")
@@ -101,8 +100,6 @@ def pdf_read(
         if total_chars >= max_chars:
             parts.append(f"... (truncated at {max_chars} chars)")
             break
-
-    doc.close()
 
     result = "\n".join(parts)
     if len(result) > max_chars:
@@ -117,7 +114,7 @@ def schema() -> ToolSchema:
         description=(
             "Extract and read text from a PDF document item. "
             "Specify page range to read specific pages. "
-            "Requires PyMuPDF (pymupdf) to be installed."
+            "Requires pypdf to be installed."
         ),
         parameters={
             "type": "object",
