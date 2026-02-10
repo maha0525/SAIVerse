@@ -1,14 +1,13 @@
 # SAIVerse Development Startup Script
 # Creates session-specific log directory and captures all process outputs
 
-# Create timestamp-based log directory
+# Log directory is managed by Python logging_config.py at ~/.saiverse/user_data/logs/
+# We only need a local log dir for SearXNG and Frontend output
 $LogTimestamp = Get-Date -Format "yyyyMMdd_HHMMss"
-$LogDir = "user_data\logs\$LogTimestamp"
+$SaiverseHome = Join-Path $env:USERPROFILE ".saiverse"
+$LogDir = Join-Path $SaiverseHome "user_data\logs\$LogTimestamp"
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 Write-Host "Session logs will be saved to: $LogDir"
-
-# Set environment variable for Backend to use the same log directory
-$env:SAIVERSE_SESSION_LOG_DIR = $LogDir
 
 # Start Backend in a new window using the SAIVerse conda environment
 # Note: Python logging_config.py already handles backend.log via TeeHandler
@@ -24,4 +23,4 @@ Start-Process -FilePath "powershell.exe" -ArgumentList "-NoExit", "-ExecutionPol
 Write-Host "Starting Frontend..."
 $FrontendLogPath = Join-Path $LogDir "frontend.log"
 Set-Location frontend
-npm run dev 2>&1 | Tee-Object -FilePath "..\$FrontendLogPath"
+npm run dev 2>&1 | Tee-Object -FilePath "$FrontendLogPath"

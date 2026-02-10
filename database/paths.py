@@ -44,7 +44,4 @@ def default_db_path() -> Path:
     return new_db
 
 
-# For backwards compatibility, expose DATA_DIR
-DATA_DIR = _get_data_dir()
-
-__all__ = ["DATA_DIR", "DEFAULT_DB_NAME", "default_db_path", "ensure_data_dir", "LEGACY_DATA_DIR"]
+__all__ = ["DEFAULT_DB_NAME", "default_db_path", "ensure_data_dir", "LEGACY_DATA_DIR"]
