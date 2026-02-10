@@ -228,7 +228,7 @@ def get_item_content(item_id: str, manager = Depends(get_manager)):
 @router.get("/models")
 def list_available_models():
     """Get list of available models for persona configuration."""
-    from model_configs import get_model_choices_with_display_names
+    from saiverse.model_configs import get_model_choices_with_display_names
     choices = get_model_choices_with_display_names()
     return [{"id": mid, "name": name} for mid, name in choices]
 

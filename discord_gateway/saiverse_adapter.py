@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from saiverse_manager import SAIVerseManager
+    from saiverse.saiverse_manager import SAIVerseManager
 
 from discord_gateway.mapping import ChannelContext
 from discord_gateway.orchestrator import (

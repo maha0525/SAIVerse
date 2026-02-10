@@ -6,7 +6,7 @@ from typing import Tuple
 import requests
 
 from database.models import AI as AIModel, BuildingOccupancyLog, VisitingAI
-from remote_persona_proxy import RemotePersonaProxy
+from saiverse.remote_persona_proxy import RemotePersonaProxy
 
 
 class VisitorMixin:

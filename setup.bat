@@ -75,7 +75,8 @@ popd
 echo [OK] フロントエンドパッケージのインストール完了
 
 REM --- 7. Database seed (only if not exists) ---
-if not exist "user_data\database\saiverse.db" (
+set SAIVERSE_DB=%USERPROFILE%\.saiverse\user_data\database\saiverse.db
+if not exist "%SAIVERSE_DB%" (
     echo.
     echo [SETUP] データベースを初期化中...
     python database\seed.py --force

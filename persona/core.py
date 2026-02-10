@@ -7,11 +7,11 @@ from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
-from buildings import Building
+from saiverse.buildings import Building
 from saiverse_memory import SAIMemoryAdapter
 from llm_clients import get_llm_client
-from model_configs import model_supports_images
-from action_handler import ActionHandler
+from saiverse.model_configs import model_supports_images
+from saiverse.action_handler import ActionHandler
 from persona.history_manager import HistoryManager
 from persona.emotion_module import EmotionControlModule
 from database.models import AI as AIModel
@@ -90,14 +90,14 @@ class PersonaCore(
         self.user_room_id = user_room_id
         self.common_prompt_path = common_prompt_path  # ファイルパスを保持
         if emotion_prompt_path is None:
-            from data_paths import find_file, PROMPTS_DIR
+            from saiverse.data_paths import find_file, PROMPTS_DIR
             emotion_prompt_path = find_file(PROMPTS_DIR, "emotion_parameter.txt") or Path("system_prompts/emotion_parameter.txt")
         self.emotion_prompt = emotion_prompt_path.read_text(encoding="utf-8")
         self.persona_id = persona_id
         self.persona_name = persona_name
         self.persona_system_instruction = persona_system_instruction
         self.avatar_image = avatar_image
-        from data_paths import get_saiverse_home
+        from saiverse.data_paths import get_saiverse_home
         self.saiverse_home = get_saiverse_home()
         self.persona_log_path = (
             self.saiverse_home / "personas" / self.persona_id / "log.json"
@@ -255,7 +255,7 @@ class PersonaCore(
             self._lightweight_llm_client_initialized = True
             if self.lightweight_model and str(self.lightweight_model).strip():
                 try:
-                    from model_configs import get_context_length, get_model_provider
+                    from saiverse.model_configs import get_context_length, get_model_provider
                     lw_context_length = get_context_length(self.lightweight_model)
                     lw_provider = get_model_provider(self.lightweight_model)
                     logging.info(

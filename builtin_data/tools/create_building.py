@@ -32,7 +32,7 @@ def create_building(
         Result message indicating success or failure.
     """
     from tools.context import get_active_manager, get_active_persona_id
-    from media_utils import resolve_extended_media_uri
+    from saiverse.media_utils import resolve_extended_media_uri
 
     manager = get_active_manager()
     persona_id = get_active_persona_id()

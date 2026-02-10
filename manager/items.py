@@ -483,7 +483,7 @@ class ItemService:
         except OSError as exc:
             raise RuntimeError(f"ファイルの更新に失敗しました: {exc}") from exc
 
-        from media_summary import ensure_document_summary
+        from saiverse.media_summary import ensure_document_summary
         new_summary = ensure_document_summary(file_path)
 
         db = self.manager.SessionLocal()
@@ -610,13 +610,13 @@ class ItemService:
         if not building_id:
             raise RuntimeError("現在地が不明なため、文書を作成できません。")
 
-        from media_utils import store_document_text
+        from saiverse.media_utils import store_document_text
         try:
             metadata, file_path = store_document_text(content, source="tool:document_create")
         except Exception as exc:
             raise RuntimeError(f"ファイルの保存に失敗しました: {exc}") from exc
 
-        from media_summary import ensure_document_summary
+        from saiverse.media_summary import ensure_document_summary
         summary = ensure_document_summary(file_path)
         if not summary:
             summary = description

@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from buildings import Building
+from saiverse.buildings import Building
 from database.models import City as CityModel
 
 if TYPE_CHECKING:
@@ -38,7 +38,7 @@ class InitializationMixin:
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
         # Configure UsageTracker to use the same database
-        from usage_tracker import get_usage_tracker
+        from saiverse.usage_tracker import get_usage_tracker
         get_usage_tracker().configure(self.SessionLocal)
 
     def _init_city_config(self, city_name: str) -> None:
@@ -96,7 +96,7 @@ class InitializationMixin:
 
     def _init_file_paths(self) -> None:
         """Step 2: Setup File Paths and Default Avatars."""
-        from data_paths import get_saiverse_home
+        from saiverse.data_paths import get_saiverse_home
         self.saiverse_home = get_saiverse_home()
         self.backup_dir = self.saiverse_home / "backups"
         self.backup_dir.mkdir(parents=True, exist_ok=True)
@@ -144,7 +144,7 @@ class InitializationMixin:
 
     def _init_model_config(self, model: Optional[str]) -> None:
         """Step 4a: Initialize model configuration."""
-        from model_configs import get_context_length, get_model_provider
+        from saiverse.model_configs import get_context_length, get_model_provider
         import os
 
         def _get_default_model() -> str:

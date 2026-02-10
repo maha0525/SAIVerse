@@ -125,7 +125,7 @@ def _load_module_from_path(module_name: str, file_path: Path) -> Any:
 def _autodiscover_phenomena() -> None:
     """phenomena/defs/ 以下のモジュールを自動的に読み込み、レジストリに登録する"""
     # Import here to avoid circular imports at module load time
-    from data_paths import iter_project_subdirs, PHENOMENA_DIR
+    from saiverse.data_paths import iter_project_subdirs, PHENOMENA_DIR
 
     registered_names: set[str] = set()
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from llm_clients import get_llm_client
-from model_configs import get_context_length, get_model_provider
+from saiverse.model_configs import get_context_length, get_model_provider
 from persona.tasks.storage import TaskStorage
 
 DEFAULT_MODEL = "gemini-2.5-flash"

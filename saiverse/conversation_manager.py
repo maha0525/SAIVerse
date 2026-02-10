@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
     # SAIVerseManagerとRouterの循環参照を避けるための型チェック用インポート
-    from saiverse_manager import SAIVerseManager
+    from .saiverse_manager import SAIVerseManager
 
 class ConversationManager:
     """

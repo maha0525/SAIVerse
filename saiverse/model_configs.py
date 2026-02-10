@@ -17,7 +17,7 @@ def load_configs() -> Dict[str, Dict]:
     2. builtin_data/models/
     3. models/ (legacy, for backwards compatibility)
     """
-    from data_paths import iter_files, MODELS_DIR
+    from .data_paths import iter_files, MODELS_DIR
     
     configs: Dict[str, Dict] = {}
     seen_keys: set[str] = set()
@@ -211,7 +211,7 @@ def find_model_config(query: str) -> tuple[str, Dict]:
             return config_key, config
 
     # 3. Check exact filename match - load config directly from file
-    from data_paths import get_data_paths, MODELS_DIR
+    from .data_paths import get_data_paths, MODELS_DIR
 
     for models_path in get_data_paths(MODELS_DIR):
         config_file = models_path / f"{query}.json"

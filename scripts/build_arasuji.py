@@ -71,7 +71,7 @@ from sai_memory.arasuji.context import (
     get_episode_summary_stats,
     get_episode_context_for_timerange,
 )
-from model_configs import find_model_config
+from saiverse.model_configs import find_model_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOGGER = logging.getLogger(__name__)
@@ -326,7 +326,7 @@ def import_arasuji(conn, input_path: Path, clear_existing: bool = False) -> int:
 
 def list_available_models() -> None:
     """Print available models and exit."""
-    from model_configs import MODEL_CONFIGS, get_model_display_name
+    from saiverse.model_configs import MODEL_CONFIGS, get_model_display_name
 
     print("\n利用可能なモデル一覧:")
     print("-" * 60)
@@ -365,7 +365,7 @@ def regenerate_entry_from_messages(
         New ArasujiEntry or None on failure
     """
     import os
-    from model_configs import find_model_config
+    from saiverse.model_configs import find_model_config
     from llm_clients.factory import get_llm_client
     from sai_memory.arasuji.generator import generate_level1_arasuji
     

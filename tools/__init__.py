@@ -137,7 +137,7 @@ def _load_module_from_path(module_name: str, file_path: Path) -> Any:
 def _autodiscover_tools() -> None:
     """Discover and register tools from user_data and builtin_data directories."""
     # Import here to avoid circular imports at module load time
-    from data_paths import iter_project_subdirs, TOOLS_DIR
+    from saiverse.data_paths import iter_project_subdirs, TOOLS_DIR
 
     registered_names: set[str] = set()
 

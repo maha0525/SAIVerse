@@ -2,7 +2,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from usage_tracker import UsageTracker, get_usage_tracker
+from saiverse.usage_tracker import UsageTracker, get_usage_tracker
 
 
 class TestUsageTrackerSingleton(unittest.TestCase):
@@ -81,7 +81,7 @@ class TestFlush(unittest.TestCase):
                 "category": None,
             })
 
-        with patch("usage_tracker.calculate_cost", return_value=0.0):
+        with patch("saiverse.usage_tracker.calculate_cost", return_value=0.0):
             tracker.flush()
 
         self.assertEqual(len(tracker._pending_records), 0)

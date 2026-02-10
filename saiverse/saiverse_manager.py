@@ -17,18 +17,18 @@ import os
 
 from google.genai import errors
 from llm_clients.exceptions import LLMError
-from buildings import Building
+from .buildings import Building
 from sea import SEARuntime
 from sea.pulse_controller import PulseController
 from persona.core import PersonaCore
-from model_configs import get_model_provider, get_context_length
-from occupancy_manager import OccupancyManager
-from conversation_manager import ConversationManager
-from schedule_manager import ScheduleManager
+from .model_configs import get_model_provider, get_context_length
+from .occupancy_manager import OccupancyManager
+from .conversation_manager import ConversationManager
+from .schedule_manager import ScheduleManager
 from phenomena.manager import PhenomenonManager
 from phenomena.triggers import TriggerEvent, TriggerType
 from sqlalchemy.orm import sessionmaker
-from remote_persona_proxy import RemotePersonaProxy
+from .remote_persona_proxy import RemotePersonaProxy
 from manager.sds import SDSMixin
 from manager.background import DatabasePollingMixin
 from manager.history import HistoryMixin

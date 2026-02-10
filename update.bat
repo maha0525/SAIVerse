@@ -79,10 +79,11 @@ if %errorlevel% neq 0 (
 echo [OK] Pythonパッケージの更新完了
 
 REM --- 5. Database migration ---
-if exist "user_data\database\saiverse.db" (
+set SAIVERSE_DB=%USERPROFILE%\.saiverse\user_data\database\saiverse.db
+if exist "%SAIVERSE_DB%" (
     echo.
     echo [UPDATE] データベーススキーマを更新中...
-    python database\migrate.py --db user_data\database\saiverse.db
+    python database\migrate.py --db "%SAIVERSE_DB%"
     if !errorlevel! neq 0 (
         echo [WARN] データベースの更新に失敗しました。
         echo   ログを確認してください。
@@ -148,6 +149,6 @@ echo.
 echo 注意:
 echo   - .env.example に新しい設定項目が追加されている場合があります。
 echo     お手元の .env と比較して、必要な項目を追加してください。
-echo   - 問題が発生した場合は user_data\database\ にバックアップがあります。
+echo   - 問題が発生した場合は %USERPROFILE%\.saiverse\user_data\database\ にバックアップがあります。
 echo.
 pause

@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Dict
 
-from model_configs import get_model_config, get_model_parameter_defaults
+from saiverse.model_configs import get_model_config, get_model_parameter_defaults
 
 from .anthropic import AnthropicClient
 from .gemini import GeminiClient

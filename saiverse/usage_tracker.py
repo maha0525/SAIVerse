@@ -9,7 +9,7 @@ import threading
 from datetime import datetime
 from typing import Any, Optional
 
-from model_configs import calculate_cost
+from .model_configs import calculate_cost
 
 LOGGER = logging.getLogger(__name__)
 

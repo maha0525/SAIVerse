@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from database.models import PersonaSchedule, AI as AIModel, City as CityModel
 
 if TYPE_CHECKING:
-    from saiverse_manager import SAIVerseManager
+    from .saiverse_manager import SAIVerseManager
 
 LOGGER = logging.getLogger(__name__)
 

@@ -33,7 +33,7 @@ def _record_llm_usage(client, persona_id: Optional[str], node_type: str) -> None
     try:
         usage = client.consume_usage()
         if usage:
-            from usage_tracker import get_usage_tracker
+            from saiverse.usage_tracker import get_usage_tracker
             get_usage_tracker().record_usage(
                 model_id=usage.model,
                 input_tokens=usage.input_tokens,

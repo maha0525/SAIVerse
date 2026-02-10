@@ -123,7 +123,7 @@ def _generate_summary(persona: Any, messages: List[Dict], summary_uuid: str) -> 
     """Generate a summary of messages using LLM."""
     try:
         from llm_clients import get_llm_client
-        from model_configs import get_model_config
+        from saiverse.model_configs import get_model_config
 
         # Use lightweight model for summary
         model_name = getattr(persona, "lightweight_model", None)

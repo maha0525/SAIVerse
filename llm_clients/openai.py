@@ -12,9 +12,9 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 import openai
 from openai import OpenAI
 
-from media_utils import iter_image_media, load_image_bytes_for_llm
+from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 from tools import OPENAI_TOOLS_SPEC
-from llm_router import route
+from saiverse.llm_router import route
 
 from .base import LLMClient, get_llm_logger
 from .exceptions import (

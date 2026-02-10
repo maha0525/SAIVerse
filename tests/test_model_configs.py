@@ -1,7 +1,7 @@
 """Tests for model_configs.py — provider resolution, cost calculation, config lookup."""
 import unittest
 
-import model_configs
+from saiverse import model_configs
 
 
 class TestGetModelProvider(unittest.TestCase):

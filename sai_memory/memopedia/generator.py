@@ -29,7 +29,7 @@ from sai_memory.memory.storage import (
 )
 from sai_memory.memory.recall import semantic_recall_groups
 from sai_memory.memopedia import Memopedia
-from usage_tracker import get_usage_tracker
+from saiverse.usage_tracker import get_usage_tracker
 
 LOGGER = logging.getLogger(__name__)
 

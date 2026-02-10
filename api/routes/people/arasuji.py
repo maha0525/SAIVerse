@@ -384,7 +384,7 @@ def _run_chronicle_generation(
     from sai_memory.arasuji import init_arasuji_tables
     from sai_memory.arasuji.storage import get_progress, update_progress
     from sai_memory.arasuji.generator import ArasujiGenerator
-    from model_configs import find_model_config
+    from saiverse.model_configs import find_model_config
     from llm_clients.factory import get_llm_client
 
     _update_job(job_id, status="running", message="Loading database...")

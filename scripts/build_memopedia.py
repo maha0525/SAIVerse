@@ -41,7 +41,7 @@ os.environ["SAIVERSE_SKIP_TOOL_IMPORTS"] = "1"
 
 from sai_memory.memory.storage import init_db, get_messages_paginated, Message
 from sai_memory.memopedia import Memopedia, init_memopedia_tables, CATEGORY_PEOPLE, CATEGORY_TERMS, CATEGORY_PLANS
-from model_configs import get_model_config, find_model_config
+from saiverse.model_configs import get_model_config, find_model_config
 
 # Import llm_clients lazily to avoid circular import
 # (llm_clients imports tools which imports persona which imports llm_clients)
@@ -53,7 +53,7 @@ LOGGER = logging.getLogger(__name__)
 def _get_prompts_dir() -> Path:
     """Get prompts directory using data_paths or fallback to legacy."""
     try:
-        from data_paths import find_file, PROMPTS_DIR as DATA_PROMPTS_DIR, BUILTIN_DATA_DIR
+        from saiverse.data_paths import find_file, PROMPTS_DIR as DATA_PROMPTS_DIR, BUILTIN_DATA_DIR
         return BUILTIN_DATA_DIR / DATA_PROMPTS_DIR
     except ImportError:
         return Path(__file__).resolve().parents[1] / "system_prompts"
@@ -64,7 +64,7 @@ PROMPTS_DIR = _get_prompts_dir()
 def load_prompt(name: str) -> str:
     """Load a prompt template, checking user_data first then builtin_data."""
     try:
-        from data_paths import load_prompt as dp_load_prompt
+        from saiverse.data_paths import load_prompt as dp_load_prompt
         return dp_load_prompt(name)
     except ImportError:
         # Fallback to legacy
@@ -636,7 +636,7 @@ def apply_pages_to_memopedia(
 
 def list_available_models() -> None:
     """Print available models and exit."""
-    from model_configs import MODEL_CONFIGS, get_model_display_name
+    from saiverse.model_configs import MODEL_CONFIGS, get_model_display_name
 
     print("\n利用可能なモデル一覧:")
     print("-" * 60)

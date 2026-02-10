@@ -12,7 +12,7 @@ import logging
 from sqlalchemy import func
 from api.deps import get_manager
 from database.models import LLMUsageLog, AI
-from model_configs import get_model_pricing, get_model_display_name, MODEL_CONFIGS
+from saiverse.model_configs import get_model_pricing, get_model_display_name, MODEL_CONFIGS
 
 router = APIRouter()
 LOGGER = logging.getLogger(__name__)

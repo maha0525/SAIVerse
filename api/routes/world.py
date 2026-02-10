@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 
 from api.deps import get_manager
-from saiverse_manager import SAIVerseManager
+from saiverse.saiverse_manager import SAIVerseManager
 
 router = APIRouter()
 
@@ -150,7 +150,7 @@ def delete_building(building_id: str, manager: SAIVerseManager = Depends(get_man
 @router.get("/prompts/available")
 def get_available_prompts():
     """Get list of available prompt files from prompts directories."""
-    from data_paths import iter_files, PROMPTS_DIR
+    from saiverse.data_paths import iter_files, PROMPTS_DIR
     prompts = []
     for path in iter_files(PROMPTS_DIR, "*.txt"):
         prompts.append(path.name)
@@ -245,14 +245,14 @@ def create_item(i: ItemCreate, manager: SAIVerseManager = Depends(get_manager)):
             if full_path.exists():
                 item_type = i.item_type.lower()
                 if item_type == "picture":
-                    from media_summary import ensure_image_summary
+                    from saiverse.media_summary import ensure_image_summary
                     import mimetypes
                     mime_type = mimetypes.guess_type(str(full_path))[0] or "image/png"
                     summary = ensure_image_summary(full_path, mime_type)
                     if summary:
                         description = summary
                 elif item_type == "document":
-                    from media_summary import ensure_document_summary
+                    from saiverse.media_summary import ensure_document_summary
                     summary = ensure_document_summary(full_path)
                     if summary:
                         description = summary

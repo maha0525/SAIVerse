@@ -163,13 +163,13 @@ _install_gemini_stream_patch()
 
 from .gemini_utils import build_gemini_clients
 
-from media_utils import iter_image_media, load_image_bytes_for_llm
-from media_summary import ensure_image_summary
+from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
+from saiverse.media_summary import ensure_image_summary
 from tools import GEMINI_TOOLS_SPEC
-from llm_router import route
+from saiverse.llm_router import route
 
 from .base import EmptyResponseError, IncompleteStreamError, LLMClient, get_llm_logger
-from logging_config import log_timeout_event
+from saiverse.logging_config import log_timeout_event
 from .utils import content_to_text, is_truthy_flag, merge_reasoning_strings
 
 

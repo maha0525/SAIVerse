@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 if TYPE_CHECKING:
-    from saiverse_manager import SAIVerseManager
+    from .saiverse_manager import SAIVerseManager
 
 # --- Core application state ---
 manager: Optional["SAIVerseManager"] = None

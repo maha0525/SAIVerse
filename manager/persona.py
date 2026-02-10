@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 from PIL import Image
 from sqlalchemy import func
-from buildings import Building
+from saiverse.buildings import Building
 from database.models import (
     AI as AIModel,
     Building as BuildingModel,
@@ -18,7 +18,7 @@ from database.models import (
     UserAiLink,
 )
 from persona.core import PersonaCore
-from model_configs import get_context_length, get_model_provider
+from saiverse.model_configs import get_context_length, get_model_provider
 
 
 class PersonaMixin:
@@ -71,7 +71,7 @@ class PersonaMixin:
 
     def _process_avatar_upload(self, ai_id: str, upload_path: Path) -> str:
         """Resize & convert avatar uploads to WebP for caching."""
-        from data_paths import get_user_icons_dir
+        from saiverse.data_paths import get_user_icons_dir
         avatars_dir = get_user_icons_dir()
         dest_name = f"{ai_id}_{int(time.time())}.webp"
         dest_path = avatars_dir / dest_name
@@ -137,7 +137,7 @@ class PersonaMixin:
         persona_provider = get_model_provider(persona_model)
         persona_lightweight_model = db_ai.LIGHTWEIGHT_MODEL
 
-        from data_paths import find_file, PROMPTS_DIR
+        from saiverse.data_paths import find_file, PROMPTS_DIR
         common_prompt_file = find_file(PROMPTS_DIR, "common.txt") or Path("system_prompts/common.txt")
 
         # Get linked user name (first linked user, or "the user" as fallback)
@@ -347,7 +347,7 @@ class PersonaMixin:
             new_persona_provider = get_model_provider(new_persona_model)  # Get provider for model
             new_persona_context_length = get_context_length(new_persona_model)
 
-            from data_paths import find_file, PROMPTS_DIR
+            from saiverse.data_paths import find_file, PROMPTS_DIR
             common_prompt_file = find_file(PROMPTS_DIR, "common.txt") or Path("system_prompts/common.txt")
             new_persona_core = PersonaCore(
                 city_name=self.city_name,

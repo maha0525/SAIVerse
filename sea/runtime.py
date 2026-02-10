@@ -11,13 +11,13 @@ import json
 import re
 
 from llm_clients.exceptions import LLMError
-from logging_config import log_sea_trace
+from saiverse.logging_config import log_sea_trace
 from sea.playbook_models import NodeType, PlaybookSchema, PlaybookValidationError, validate_playbook_graph
 from sea.langgraph_runner import compile_playbook
 from sea.cancellation import CancellationToken, ExecutionCancelledException
 from database.models import Playbook as PlaybookModel
-from model_configs import get_model_parameter_defaults
-from usage_tracker import get_usage_tracker
+from saiverse.model_configs import get_model_parameter_defaults
+from saiverse.usage_tracker import get_usage_tracker
 
 LOGGER = logging.getLogger(__name__)
 
@@ -531,7 +531,7 @@ class SEARuntime:
                 # Inject model-specific system prompt if configured
                 _model_config_key = getattr(llm_client, "config_key", None)
                 if _model_config_key:
-                    from model_configs import get_model_system_prompt
+                    from saiverse.model_configs import get_model_system_prompt
                     _model_sys_prompt = get_model_system_prompt(_model_config_key)
                     if _model_sys_prompt:
                         _injected = False
@@ -585,7 +585,7 @@ class SEARuntime:
                             category="persona_speak",
                         )
                         # Accumulate into pulse total
-                        from model_configs import calculate_cost
+                        from saiverse.model_configs import calculate_cost
                         cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
                         self._accumulate_usage(state, usage.model, usage.input_tokens, usage.output_tokens, cost, usage.cached_tokens, usage.cache_write_tokens)
 
@@ -788,7 +788,7 @@ class SEARuntime:
                             )
                             LOGGER.info("[DEBUG] Usage recorded: model=%s in=%d out=%d cached=%d cache_write=%d", usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens)
                             # Build llm_usage metadata for message
-                            from model_configs import calculate_cost, get_model_display_name
+                            from saiverse.model_configs import calculate_cost, get_model_display_name
                             cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
                             llm_usage_metadata = {
                                 "model": usage.model,
@@ -863,7 +863,7 @@ class SEARuntime:
                                 category="persona_speak",
                             )
                             # Build llm_usage metadata for message
-                            from model_configs import calculate_cost, get_model_display_name
+                            from saiverse.model_configs import calculate_cost, get_model_display_name
                             cost = calculate_cost(usage.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.cache_write_tokens, cache_ttl=usage.cache_ttl)
                             llm_usage_metadata = {
                                 "model": usage.model,
@@ -1148,7 +1148,7 @@ class SEARuntime:
                 LOGGER.info("[sea] Using lightweight model: %s", lightweight_model_name)
                 try:
                     from llm_clients import get_llm_client
-                    from model_configs import get_context_length, get_model_provider
+                    from saiverse.model_configs import get_context_length, get_model_provider
                     lw_context = get_context_length(lightweight_model_name)
                     provider = get_model_provider(lightweight_model_name)
                     base_client = get_llm_client(lightweight_model_name, provider, lw_context)
@@ -1166,7 +1166,7 @@ class SEARuntime:
 
         # If structured output is needed, check if the selected model supports it
         if needs_structured_output:
-            from model_configs import supports_structured_output, get_agentic_model, get_context_length, get_model_provider
+            from saiverse.model_configs import supports_structured_output, get_agentic_model, get_context_length, get_model_provider
             if not supports_structured_output(base_model):
                 # Model doesn't support structured output, switch to agentic model
                 agentic_model = get_agentic_model()
@@ -1241,7 +1241,7 @@ class SEARuntime:
     ) -> None:
         """Log LLM I/O to the unified LLM log file."""
         try:
-            from logging_config import log_llm_request, log_llm_response
+            from saiverse.logging_config import log_llm_request, log_llm_response
             persona_id = getattr(persona, "persona_id", None)
             persona_name = getattr(persona, "persona_name", None)
             source = f"sea/{playbook_name}"
@@ -2577,7 +2577,7 @@ class SEARuntime:
             if client is None:
                 # Fallback: create a temporary client
                 from llm_clients import get_llm_client
-                from model_configs import get_context_length, get_model_provider
+                from saiverse.model_configs import get_context_length, get_model_provider
 
                 lightweight_model = getattr(persona, "lightweight_model", None) or _get_default_lightweight_model()
                 lw_context = get_context_length(lightweight_model)
@@ -2839,7 +2839,7 @@ class SEARuntime:
         override = getattr(self.manager, "max_history_messages_override", None) if self.manager else None
         if override is not None:
             return override
-        from model_configs import get_default_max_history_messages
+        from saiverse.model_configs import get_default_max_history_messages
         persona_model = getattr(persona, "model", None)
         if persona_model:
             return get_default_max_history_messages(persona_model)
@@ -2850,7 +2850,7 @@ class SEARuntime:
         override = getattr(self.manager, "metabolism_keep_messages_override", None) if self.manager else None
         if override is not None:
             return override
-        from model_configs import get_metabolism_keep_messages
+        from saiverse.model_configs import get_metabolism_keep_messages
         persona_model = getattr(persona, "model", None)
         if persona_model:
             return get_metabolism_keep_messages(persona_model)
@@ -2903,7 +2903,7 @@ class SEARuntime:
         - Others (implicit/no cache): 1200s (20 min)
         """
         try:
-            from model_configs import get_cache_config
+            from saiverse.model_configs import get_cache_config
             cache_config = get_cache_config(model_key)
             cache_type = cache_config.get("type", "implicit")
             if cache_type == "explicit":
@@ -3079,7 +3079,7 @@ class SEARuntime:
     ) -> None:
         """Generate Chronicle entries from all unprocessed messages."""
         from llm_clients.factory import get_llm_client
-        from model_configs import find_model_config
+        from saiverse.model_configs import find_model_config
         from sai_memory.arasuji import init_arasuji_tables
         from sai_memory.arasuji.generator import ArasujiGenerator, DEFAULT_BATCH_SIZE
         from sai_memory.memory.storage import get_messages_paginated
@@ -3394,7 +3394,7 @@ class SEARuntime:
                             # Metabolism disabled — traditional count/char retrieval
                             max_hist_msgs = getattr(self.manager, "max_history_messages_override", None) if self.manager else None
                             if max_hist_msgs is None:
-                                from model_configs import get_default_max_history_messages
+                                from saiverse.model_configs import get_default_max_history_messages
                                 persona_model = getattr(persona, "model", None)
                                 if persona_model:
                                     max_hist_msgs = get_default_max_history_messages(persona_model)
@@ -3499,8 +3499,8 @@ class SEARuntime:
 
         # ---- Token budget check ----
         try:
-            from token_estimator import estimate_messages_tokens
-            from model_configs import get_context_length, get_model_provider
+            from saiverse.token_estimator import estimate_messages_tokens
+            from saiverse.model_configs import get_context_length, get_model_provider
 
             persona_model = getattr(persona, "model", None)
             if persona_model:
@@ -3593,8 +3593,8 @@ class SEARuntime:
         Returns a dict with messages, token estimates, cost estimates, and model info.
         Does NOT record the user message to history or call any LLM.
         """
-        from token_estimator import estimate_messages_tokens, estimate_image_tokens
-        from model_configs import (
+        from saiverse.token_estimator import estimate_messages_tokens, estimate_image_tokens
+        from saiverse.model_configs import (
             get_model_provider, get_context_length,
             get_model_display_name, get_model_pricing, calculate_cost,
         )

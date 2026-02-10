@@ -8,7 +8,7 @@ from typing import Optional
 # Model for image summary generation (vision-capable model required)
 IMAGE_SUMMARY_MODEL = os.getenv("SAIVERSE_IMAGE_SUMMARY_MODEL", "gemini-2.5-flash-lite")
 
-from media_utils import (
+from .media_utils import (
     get_media_summary,
     load_image_bytes_for_llm,
     save_media_summary,

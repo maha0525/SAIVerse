@@ -16,14 +16,8 @@ from typing import Iterator
 
 LOGGER = logging.getLogger(__name__)
 
-# Root directories
-PROJECT_ROOT = Path(__file__).resolve().parent
-
-# USER_DATA_DIR can be overridden via environment variable (for testing)
-_user_data_env = os.getenv("SAIVERSE_USER_DATA_DIR")
-USER_DATA_DIR = Path(_user_data_env) if _user_data_env else PROJECT_ROOT / "user_data"
-
-BUILTIN_DATA_DIR = PROJECT_ROOT / "builtin_data"
+# Root directories (parent.parent because this file is now in saiverse/)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def get_saiverse_home() -> Path:
@@ -34,11 +28,19 @@ def get_saiverse_home() -> Path:
         - cities/<city>/buildings/<building>/: Building logs
         - image/: Uploaded images
         - backups/: Backup files
+        - user_data/: User customization data (tools, playbooks, database, etc.)
     """
     env_home = os.getenv("SAIVERSE_HOME")
     if env_home:
         return Path(env_home)
     return Path.home() / ".saiverse"
+
+
+# USER_DATA_DIR can be overridden via environment variable (for testing)
+_user_data_env = os.getenv("SAIVERSE_USER_DATA_DIR")
+USER_DATA_DIR = Path(_user_data_env) if _user_data_env else get_saiverse_home() / "user_data"
+
+BUILTIN_DATA_DIR = PROJECT_ROOT / "builtin_data"
 
 # Subdirectory names
 TOOLS_DIR = "tools"
@@ -269,6 +271,51 @@ def ensure_user_data_dirs() -> None:
         (USER_DATA_DIR / subdir).mkdir(parents=True, exist_ok=True)
 
 
+def migrate_legacy_user_data() -> bool:
+    """Migrate legacy user_data/ (inside repository) to ~/.saiverse/user_data/.
+
+    Called at startup to transparently move user data to the new location.
+
+    Returns:
+        True if migration was performed, False otherwise.
+    """
+    legacy_dir = PROJECT_ROOT / "user_data"
+
+    # Skip if legacy dir doesn't exist or is already the target
+    if not legacy_dir.exists() or legacy_dir.resolve() == USER_DATA_DIR.resolve():
+        return False
+
+    # Skip if new location already has content
+    if USER_DATA_DIR.exists() and any(USER_DATA_DIR.iterdir()):
+        LOGGER.warning(
+            "Both legacy user_data (%s) and new location (%s) contain data. "
+            "Please migrate manually.",
+            legacy_dir, USER_DATA_DIR,
+        )
+        return False
+
+    import shutil
+
+    LOGGER.info("Migrating user_data from %s to %s ...", legacy_dir, USER_DATA_DIR)
+    USER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    for item in legacy_dir.iterdir():
+        dest = USER_DATA_DIR / item.name
+        LOGGER.info("  Moving %s -> %s", item.name, dest)
+        shutil.move(str(item), str(dest))
+
+    # Rename old directory so it's clear it's been migrated
+    migrated_marker = legacy_dir.parent / "user_data.migrated"
+    try:
+        legacy_dir.rename(migrated_marker)
+        LOGGER.info("Legacy user_data renamed to %s", migrated_marker)
+    except OSError:
+        LOGGER.warning("Could not rename legacy user_data directory. Please remove it manually.")
+
+    LOGGER.info("user_data migration complete.")
+    return True
+
+
 __all__ = [
     "PROJECT_ROOT",
     "USER_DATA_DIR",
@@ -293,4 +340,5 @@ __all__ = [
     "get_user_icons_dir",
     "get_user_database_dir",
     "ensure_user_data_dirs",
+    "migrate_legacy_user_data",
 ]

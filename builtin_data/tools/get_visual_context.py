@@ -38,7 +38,7 @@ def _resolve_image_path(path_or_url: Optional[str]) -> Optional[str]:
     # Handle saiverse:// URI format
     if path_or_url.startswith("saiverse://"):
         try:
-            from media_utils import resolve_media_uri
+            from saiverse.media_utils import resolve_media_uri
             resolved = resolve_media_uri(path_or_url)
             return str(resolved) if resolved else None
         except ImportError:

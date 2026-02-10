@@ -1,7 +1,7 @@
 """Tests for buildings.py — Building data class."""
 import unittest
 
-from buildings import Building
+from saiverse.buildings import Building
 
 
 class TestBuilding(unittest.TestCase):

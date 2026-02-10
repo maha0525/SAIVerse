@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from zoneinfo import ZoneInfo
 
-from buildings import Building
+from saiverse.buildings import Building
 from database.models import (
     AI as AIModel,
     Building as BuildingModel,
@@ -803,7 +803,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 if persona.model != new_model:
                     persona.model = new_model
                     from llm_clients import get_llm_client
-                    from model_configs import get_context_length, get_model_provider, model_supports_images
+                    from saiverse.model_configs import get_context_length, get_model_provider, model_supports_images
                     try:
                         context_len = get_context_length(new_model)
                         provider = get_model_provider(new_model)
@@ -824,7 +824,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 # Recreate lightweight LLM client if model changed
                 if lightweight_model:
                     from llm_clients import get_llm_client
-                    from model_configs import get_context_length, get_model_provider
+                    from saiverse.model_configs import get_context_length, get_model_provider
                     try:
                         lw_context = get_context_length(lightweight_model)
                         lw_provider = get_model_provider(lightweight_model)
@@ -1112,7 +1112,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
     def reimport_all_playbooks(self, base_dir: Optional[str] = None) -> str:
         """Re-import all playbooks from builtin_data and user_data directories."""
         try:
-            from data_paths import get_all_data_paths, PLAYBOOKS_DIR
+            from saiverse.data_paths import get_all_data_paths, PLAYBOOKS_DIR
             
             # Collect all directories to scan
             roots: list[Path] = []

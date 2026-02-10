@@ -225,7 +225,7 @@ def get_api_keys_status():
 @router.get("/available-models", response_model=AvailableModelsResponse)
 def get_available_models():
     """Get list of models with availability status based on API keys."""
-    from model_configs import (
+    from saiverse.model_configs import (
         get_model_choices_with_display_names,
         get_model_config,
         get_model_provider
@@ -461,7 +461,7 @@ def auto_configure_models(
     session model on the manager.
     """
     from api.routes.admin import write_env_updates
-    from model_configs import get_model_display_name
+    from saiverse.model_configs import get_model_display_name
 
     # 1. Determine provider
     provider = req.provider or _detect_best_provider()
@@ -537,7 +537,7 @@ def auto_configure_models(
 @router.get("/model-roles")
 def get_model_roles():
     """Get current model role assignments and available provider presets."""
-    from model_configs import get_model_display_name
+    from saiverse.model_configs import get_model_display_name
 
     current = {}
     for role, env_key in MODEL_ROLES.items():

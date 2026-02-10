@@ -12,7 +12,7 @@ import anthropic
 from anthropic import Anthropic
 from anthropic.types import Message, TextBlock, ToolUseBlock
 
-from media_utils import iter_image_media, load_image_bytes_for_llm
+from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 
 from .base import EmptyResponseError, LLMClient, get_llm_logger
 from .exceptions import (

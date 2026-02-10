@@ -15,16 +15,20 @@ from pathlib import Path
 
 load_dotenv()
 
+# Migrate legacy user_data/ to ~/.saiverse/user_data/ if needed
+from saiverse.data_paths import migrate_legacy_user_data
+migrate_legacy_user_data()
+
 try:
     import psutil  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
     psutil = None  # type: ignore
 
-from saiverse_manager import SAIVerseManager
+from saiverse.saiverse_manager import SAIVerseManager
 from database.paths import default_db_path
 from database.backup import run_startup_backup
-from model_configs import get_model_choices, get_model_choices_with_display_names
-import app_state
+from saiverse.model_configs import get_model_choices, get_model_choices_with_display_names
+from saiverse import app_state
 try:
     from discord_gateway import ensure_gateway_runtime
 except ImportError:  # pragma: no cover - optional dependency
@@ -42,7 +46,7 @@ level_name = os.getenv("SAIVERSE_LOG_LEVEL", "INFO").upper()
 if level_name not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
     level_name = "INFO"
 # Configure logging with terminal mirroring and per-startup log files
-from logging_config import configure_logging
+from saiverse.logging_config import configure_logging
 SESSION_LOG_DIR = configure_logging(level_name)
 try:
     _chat_limit_env = int(os.getenv("SAIVERSE_CHAT_HISTORY_LIMIT", "120"))
@@ -323,10 +327,10 @@ def main():
     uploads_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/api/static/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 
-    # Mount user_data/icons for user-uploaded avatars (new structure)
+    # Mount user icons for user-uploaded avatars
     # Access via /api/static/user_icons/filename.webp
-    user_icons_dir = Path(__file__).parent / "user_data" / "icons"
-    user_icons_dir.mkdir(parents=True, exist_ok=True)
+    from saiverse.data_paths import get_user_icons_dir
+    user_icons_dir = get_user_icons_dir()
     app.mount("/api/static/user_icons", StaticFiles(directory=str(user_icons_dir)), name="user_icons")
 
     # Mount builtin_data/icons for default icons (host.png, user.png)

@@ -13,7 +13,7 @@ from .models import (
     UserAiLink, AiToolLink, BuildingToolLink, BuildingOccupancyLog,
     ThinkingRequest, VisitingAI
 )
-from model_configs import get_model_choices
+from saiverse.model_configs import get_model_choices
 
 
 # テーブル名とモデルクラスのマッピング

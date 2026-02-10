@@ -68,7 +68,7 @@ class SAIMemoryAdapter:
         if persona_dir:
             self.persona_dir = persona_dir
         else:
-            from data_paths import get_saiverse_home
+            from saiverse.data_paths import get_saiverse_home
             self.persona_dir = get_saiverse_home() / "personas" / persona_id
         self.persona_dir.mkdir(parents=True, exist_ok=True)
         db_path = self.persona_dir / "memory.db"

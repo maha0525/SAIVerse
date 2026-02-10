@@ -15,8 +15,8 @@ from database.models import (
     Tool as ToolModel,
 )
 from persona.core import PersonaCore
-from buildings import Building
-from model_configs import get_context_length, get_model_provider
+from saiverse.buildings import Building
+from saiverse.model_configs import get_context_length, get_model_provider
 
 
 class BlueprintMixin:
@@ -258,7 +258,7 @@ class BlueprintMixin:
                 blueprint_provider = get_model_provider(blueprint_model)  # Get provider for model
                 blueprint_context_length = get_context_length(blueprint_model)
 
-                from data_paths import find_file, PROMPTS_DIR
+                from saiverse.data_paths import find_file, PROMPTS_DIR
                 common_prompt_file = find_file(PROMPTS_DIR, "common.txt") or Path("system_prompts/common.txt")
                 new_persona_core = PersonaCore(
                     city_name=self.city_name,

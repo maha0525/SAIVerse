@@ -43,7 +43,7 @@ python scripts/import_all_playbooks.py --force
 python scripts/import_all_playbooks.py --dry-run
 
 # Run migrations (for schema changes - preserves data)
-python database/migrate.py --db user_data/database/saiverse.db
+python database/migrate.py
 ```
 
 **Safety Notes:**
@@ -156,7 +156,7 @@ python test_fixtures/setup_test_env.py --clean
 
 SAIVerse automatically backs up both saiverse.db and persona memory.db files on startup:
 
-- **saiverse.db**: Backed up to `user_data/database/saiverse.db_backup_YYYYMMDD_HHMMSS_mmm.bak`
+- **saiverse.db**: Backed up to `~/.saiverse/user_data/database/saiverse.db_backup_YYYYMMDD_HHMMSS_mmm.bak`
   - Keeps last 10 backups by default (configurable via `SAIVERSE_DB_BACKUP_KEEP`)
   - Enable/disable: `SAIVERSE_DB_BACKUP_ON_START=true` (enabled by default)
 
@@ -197,7 +197,7 @@ python scripts/migrate_to_user_data.py             # Execute
 
 ### Core Components
 
-**SAIVerseManager** (`saiverse_manager.py`)
+**SAIVerseManager** (`saiverse/saiverse_manager.py`)
 - Central orchestrator for the entire world
 - Manages all PersonaCore and Building instances in memory
 - Polls `VisitingAI` and `ThinkingRequest` tables for inter-city coordination
@@ -220,16 +220,16 @@ python scripts/migrate_to_user_data.py             # Execute
   - Persona model priority: chat UI override > persona `DEFAULT_MODEL` (DB) > env `SAIVERSE_DEFAULT_MODEL` > built-in `gemini-2.5-flash-lite-preview-09-25`.
   - Use lightweight models for router nodes and simple decision-making; use default models for complex reasoning and tool parameter generation
 
-**OccupancyManager** (`occupancy_manager.py`)
+**OccupancyManager** (`saiverse/occupancy_manager.py`)
 - Handles all entity movement (users, AI personas, visitors)
 - Enforces building capacity limits
 - Updates `BuildingOccupancyLog` and in-memory state
 
-**ConversationManager** (`conversation_manager.py`)
+**ConversationManager** (`saiverse/conversation_manager.py`)
 - Drives autonomous conversations in each building
 - Periodically calls `run_pulse()` on occupants in round-robin fashion
 
-**RemotePersonaProxy** (`remote_persona_proxy.py`)
+**RemotePersonaProxy** (`saiverse/remote_persona_proxy.py`)
 - Lightweight proxy for visiting personas from other cities
 - Delegates thinking to home city via `/persona-proxy/{id}/think` API
 
@@ -258,7 +258,7 @@ python scripts/migrate_to_user_data.py             # Execute
 
 ## Model Configuration
 
-**Model Configuration** (`models/` directory, `model_configs.py`)
+**Model Configuration** (`models/` directory, `saiverse/model_configs.py`)
 - Model configurations are stored as individual JSON files in `models/` directory
 - Each file represents one model with its provider, context length, and parameters
 - Legacy `models.json` is supported as fallback for backward compatibility
@@ -295,33 +295,58 @@ python scripts/migrate_to_user_data.py             # Execute
 **Migration Script**:
 - `scripts/migrate_models_to_directory.py`: Migrates legacy `models.json` to `models/` directory structure
 
-## User Data Directory Structure
+## Directory Structure
 
-SAIVerse separates user-customizable data from built-in defaults:
-
+### Repository Root
 ```
 SAIVerse/
-├── builtin_data/           ← Built-in defaults (git tracked)
-│   ├── tools/              ← Default tool definitions
-│   ├── phenomena/          ← Default phenomena definitions  
-│   ├── playbooks/public/   ← Default playbooks
-│   ├── models/             ← Default model configurations
-│   ├── prompts/            ← Default system prompts
-│   └── icons/              ← Default icons
+├── main.py                 ← Main entry point
+├── sds_server.py           ← SDS entry point
+├── setup.bat / setup.sh    ← User setup scripts
+├── start.bat / start.sh    ← Launch scripts
+├── update.bat              ← Update script
 │
-├── user_data/              ← User customizations (gitignored)
+├── saiverse/               ← Core package (managers, configs, utilities)
+├── api/                    ← FastAPI routes
+├── database/               ← DB models, session, migration
+├── llm_clients/            ← LLM provider clients
+├── manager/                ← SAIVerseManager mixins
+├── persona/                ← PersonaCore
+├── sea/                    ← SEA runtime & playbooks
+├── tools/                  ← Tool registry
+├── sai_memory/             ← SAIMemory
+├── saiverse_memory/        ← Memory adapter
+├── phenomena/              ← Phenomena system
+├── builtin_data/           ← Built-in defaults (git tracked)
+├── frontend/               ← Next.js frontend
+├── scripts/                ← Utility scripts
+└── tests/                  ← Test suite
+```
+
+### User Data (`~/.saiverse/`)
+User data is stored outside the repository in `~/.saiverse/` (or `SAIVERSE_HOME` env var):
+
+```
+~/.saiverse/
+├── user_data/              ← User customizations (overrides builtin_data/)
 │   ├── tools/              ← Custom tools (priority over builtin)
 │   ├── phenomena/          ← Custom phenomena
 │   ├── playbooks/          ← Custom playbooks
 │   ├── models/             ← Custom model configs
-│   ├── database/           ← SQLite database
+│   ├── database/           ← SQLite database (saiverse.db)
 │   ├── prompts/            ← Custom prompts
-│   └── icons/              ← User-uploaded avatars
+│   ├── icons/              ← User-uploaded avatars
+│   └── logs/               ← Session logs
+├── personas/<id>/          ← Per-persona memory (memory.db, tasks.db)
+├── cities/<city>/          ← City/building logs
+├── image/                  ← Uploaded images
+├── documents/              ← Uploaded documents
+└── backups/                ← Database backups
 ```
 
-**Priority**: When loading resources, `user_data/` takes precedence over `builtin_data/`. This allows users to override defaults without modifying tracked files.
+**Priority**: When loading resources, `~/.saiverse/user_data/` takes precedence over `builtin_data/`. This allows users to override defaults without modifying tracked files.
 
-**Migration**: Run `python scripts/migrate_to_user_data.py` to migrate existing data from legacy locations to the new structure.
+**Migration**: On startup, `main.py` automatically migrates legacy `user_data/` (in-repo) to `~/.saiverse/user_data/`. Override with `SAIVERSE_USER_DATA_DIR` env var for testing.
 
 ## Key Files and Patterns
 
@@ -337,7 +362,7 @@ SAIVerse/
 - **Blueprint**: templates for creating new personas
 - **Playbook** (on sea_framework branch): stores SEA playbook schemas and nodes
 
-### LLM Integration (`llm_clients/`, `llm_router.py`)
+### LLM Integration (`llm_clients/`, `saiverse/llm_router.py`)
 - Factory pattern: `get_llm_client(model_name, config)` returns provider-specific client
 - Providers: OpenAI (`openai.py`), Anthropic (`anthropic.py`), Gemini (`gemini.py`), Ollama (`ollama.py`), llama.cpp (`llama_cpp.py`)
 - Ollama auto-probes localhost and falls back to Gemini 2.0 Flash if unreachable
@@ -349,7 +374,7 @@ SAIVerse/
 
 ### Tools (`tools/`)
 - **Registry**: `tools/__init__.py` exports `TOOL_REGISTRY` dict (function_name → schema + callable)
-- **Loading**: Tools are loaded from both `user_data/tools/` (priority) and `builtin_data/tools/`
+- **Loading**: Tools are loaded from both `~/.saiverse/user_data/tools/` (priority) and `builtin_data/tools/`
 - **Subdirectory support**: Tools can be organized in subdirectories with `schema.py` (e.g., git-cloned tool repos)
 - **Context**: `tools/context.py` uses contextvars to inject persona/manager references during tool execution
 - **Built-in tools** (`builtin_data/tools/defs/` or `tools/defs/`):
@@ -361,7 +386,7 @@ SAIVerse/
   - `memory_recall.py`: semantic recall via MemoryCore
   - `save_playbook.py`: persist new playbook to DB (sea_framework branch)
 
-### Action Handler (`action_handler.py`)
+### Action Handler (`saiverse/action_handler.py`)
 - Parses `::act ... ::end` blocks from LLM responses
 - Executes special actions: move, pickup_item, create_persona, summon, dispatch_persona, use_item
 
@@ -425,7 +450,7 @@ Intent documents record the "why" that code alone cannot express. They prevent w
   - PersonaCore attributes (`persona/core.py`)
   - Database model columns (`database/models.py`)
   - LLM client methods (`llm_clients/base.py`, `llm_clients/*.py`)
-  - Manager methods (`manager/*.py`, `saiverse_manager.py`)
+  - Manager methods (`manager/*.py`, `saiverse/saiverse_manager.py`)
   - Any existing class or object in the codebase
 
   **Only guess/invent names for NEW code you are creating.**
@@ -472,7 +497,7 @@ Intent documents record the "why" that code alone cannot express. They prevent w
 
 ### Logging
 
-All session logs are written under `user_data/logs/{YYYYMMDD_HHMMSS}/`:
+All session logs are written under `~/.saiverse/user_data/logs/{YYYYMMDD_HHMMSS}/`:
 
 | File | Logger | Purpose |
 |------|--------|---------|
@@ -536,9 +561,9 @@ Critical settings (see `.env.example`):
 
 **Move persona between buildings**: `OccupancyManager.move_to(persona, building_id)` (do not call PersonaCore methods directly)
 
-**Add new tool**: Define in `tools/defs/` (or `user_data/tools/` for custom tools), register automatically on startup. Tools in subdirectories need a `schema.py` file. Link to buildings via `BuildingToolLink` table or frontend UI
+**Add new tool**: Define in `tools/defs/` (or `~/.saiverse/user_data/tools/` for custom tools), register automatically on startup. Tools in subdirectories need a `schema.py` file. Link to buildings via `BuildingToolLink` table or frontend UI
 
-**Modify playbook**: Edit JSON in `builtin_data/playbooks/` or `user_data/playbooks/`, then run `python scripts/import_playbook.py --file <path>` to import to database. Alternatively, use `save_playbook` tool (validates graph before saving)
+**Modify playbook**: Edit JSON in `builtin_data/playbooks/` or `~/.saiverse/user_data/playbooks/`, then run `python scripts/import_playbook.py --file <path>` to import to database. Alternatively, use `save_playbook` tool (validates graph before saving)
 
 **Playbook design philosophy**:
 - **Router simplicity**: The router node in meta playbooks is designed to run on lightweight LLMs. It should ONLY select which playbook to execute (enum selection), not decide complex arguments.
@@ -552,8 +577,8 @@ Critical settings (see `.env.example`):
   1. **MUST update** `sea/playbook_models.py` node definitions (`LLMNodeDef`, `ToolNodeDef`, etc.) with the new field
   2. Without this, `save_playbook` tool and `import_playbook.py` will silently drop the field during Pydantic validation
   3. After updating the schema, **re-import all affected playbooks** using `python scripts/import_playbook.py --file <path>`
-   4. Verify the field is stored in DB: `sqlite3 user_data/database/saiverse.db "SELECT nodes_json FROM playbooks WHERE name='<playbook_name>'"`
+   4. Verify the field is stored in DB: `sqlite3 ~/.saiverse/user_data/database/saiverse.db "SELECT nodes_json FROM playbooks WHERE name='<playbook_name>'"`
 
-**Debug LLM calls**: Check `user_data/logs/{session}/llm_io.log` for LLM I/O, `sea_trace.log` for playbook execution traces
+**Debug LLM calls**: Check `~/.saiverse/user_data/logs/{session}/llm_io.log` for LLM I/O, `sea_trace.log` for playbook execution traces
 
 **Access persona memory**: Use `scripts/recall_persona_memory.py` or Memory Settings UI tab

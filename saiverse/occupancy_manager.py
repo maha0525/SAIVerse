@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from database.models import BuildingOccupancyLog, User as UserModel
 
 if TYPE_CHECKING:
-    from buildings import Building
+    from .buildings import Building
 
 
 class OccupancyManager:

@@ -23,7 +23,7 @@ from typing import List, Literal, Optional, Tuple
 from dotenv import load_dotenv
 
 from tools.core import ToolSchema, ToolResult
-from media_utils import store_image_bytes, resolve_extended_media_uri
+from saiverse.media_utils import store_image_bytes, resolve_extended_media_uri
 
 load_dotenv()
 

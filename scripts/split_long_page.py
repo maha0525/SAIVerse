@@ -236,7 +236,7 @@ JSON形式で回答してください。"""
     # Get LLM client
     print(f"\n[Analysis] Analyzing page content with LLM ({args.model})...")
 
-    from model_configs import find_model_config
+    from saiverse.model_configs import find_model_config
     from llm_clients.factory import get_llm_client
 
     resolved_model_id, model_config = find_model_config(args.model)

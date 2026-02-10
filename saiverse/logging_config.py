@@ -16,9 +16,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-# Determine project root
-PROJECT_ROOT = Path(__file__).parent
-LOGS_BASE_DIR = PROJECT_ROOT / "user_data" / "logs"
+# Log directory inside user_data
+from .data_paths import USER_DATA_DIR as _USER_DATA_DIR
+LOGS_BASE_DIR = _USER_DATA_DIR / "logs"
 
 # Session-specific log directory (created once per startup)
 _session_log_dir: Optional[Path] = None

@@ -19,7 +19,7 @@ def resolve_uri(
     Returns:
         JSON with uri, content, content_type, and metadata.
     """
-    from uri_resolver import UriResolver
+    from saiverse.uri_resolver import UriResolver
 
     if not uri.startswith("saiverse://"):
         raise HTTPException(status_code=400, detail="URI must start with saiverse://")

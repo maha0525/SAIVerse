@@ -8,7 +8,7 @@ from pathlib import Path
 def _get_data_dir() -> Path:
     """Get the database directory from data_paths module."""
     try:
-        from data_paths import get_user_database_dir
+        from saiverse.data_paths import get_user_database_dir
         return get_user_database_dir()
     except ImportError:
         # Fallback to legacy location if data_paths not available

@@ -32,7 +32,7 @@ def resolve_uri(
     persona_id = get_active_persona_id()
     manager = get_active_manager()
 
-    from uri_resolver import UriResolver
+    from saiverse.uri_resolver import UriResolver
 
     resolver = UriResolver(manager=manager)
     results = resolver.resolve_many(

@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from api.deps import get_manager
-from model_configs import (
+from saiverse.model_configs import (
     get_model_choices_with_display_names,
     get_model_parameters,
     get_model_parameter_defaults,
@@ -82,7 +82,7 @@ def get_models():
 @router.post("/reload-models")
 def reload_models():
     """Reload model configurations from disk without restarting the server."""
-    from model_configs import reload_configs
+    from saiverse.model_configs import reload_configs
 
     reload_configs()
     choices = get_model_choices_with_display_names()
@@ -277,7 +277,7 @@ def get_current_config(manager = Depends(get_manager)):
         current_values.update(manager.model_parameter_overrides)
 
     # Max history messages
-    from model_configs import get_default_max_history_messages, get_metabolism_keep_messages
+    from saiverse.model_configs import get_default_max_history_messages, get_metabolism_keep_messages
     override = getattr(manager, "max_history_messages_override", None)
     model_default = get_default_max_history_messages(current_model)
 
@@ -349,7 +349,7 @@ def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
         current_values.update(manager.model_parameter_overrides)
 
     # Max history messages (reset override on model change)
-    from model_configs import get_default_max_history_messages, get_metabolism_keep_messages
+    from saiverse.model_configs import get_default_max_history_messages, get_metabolism_keep_messages
     manager.max_history_messages_override = None
     model_default = get_default_max_history_messages(current_model)
 
@@ -540,7 +540,7 @@ def get_max_history_messages(manager=Depends(get_manager)):
 
     Returns the session override if set, otherwise the model default.
     """
-    from model_configs import get_default_max_history_messages
+    from saiverse.model_configs import get_default_max_history_messages
 
     override = getattr(manager, "max_history_messages_override", None)
     current_model = manager.model if manager.model != "None" else None
@@ -576,7 +576,7 @@ class MetabolismConfigRequest(BaseModel):
 @router.get("/metabolism")
 def get_metabolism_settings(manager=Depends(get_manager)):
     """Get current metabolism settings."""
-    from model_configs import get_metabolism_keep_messages, get_default_max_history_messages
+    from saiverse.model_configs import get_metabolism_keep_messages, get_default_max_history_messages
 
     current_model = manager.model if manager.model != "None" else None
     metab_override = getattr(manager, "metabolism_keep_messages_override", None)
@@ -605,7 +605,7 @@ def set_metabolism_settings(req: MetabolismConfigRequest, manager=Depends(get_ma
         if req.keep_messages < 1:
             raise HTTPException(status_code=400, detail="keep_messages must be >= 1")
         # Validate: high_wm - keep_messages >= 20
-        from model_configs import get_default_max_history_messages
+        from saiverse.model_configs import get_default_max_history_messages
         current_model = manager.model if manager.model != "None" else None
         high_wm_override = getattr(manager, "max_history_messages_override", None)
         high_wm = high_wm_override

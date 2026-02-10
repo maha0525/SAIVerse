@@ -22,7 +22,7 @@ class UsageInfo:
 # LLM logging is now handled by logging_config module
 # Import convenience functions for backward compatibility
 try:
-    from logging_config import log_llm_request, log_llm_response, get_llm_logger
+    from saiverse.logging_config import log_llm_request, log_llm_response, get_llm_logger
 except ImportError:
     # Fallback if logging_config not available (e.g., standalone script usage)
     def log_llm_request(*args, **kwargs): pass

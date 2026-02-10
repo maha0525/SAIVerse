@@ -24,14 +24,14 @@ SUMMARY_SUFFIX = ".summary.txt"
 
 
 def _ensure_image_dir() -> Path:
-    from data_paths import get_saiverse_home
+    from .data_paths import get_saiverse_home
     dest_dir = get_saiverse_home() / "image"
     dest_dir.mkdir(parents=True, exist_ok=True)
     return dest_dir
 
 
 def _ensure_document_dir() -> Path:
-    from data_paths import get_saiverse_home
+    from .data_paths import get_saiverse_home
     dest_dir = get_saiverse_home() / "documents"
     dest_dir.mkdir(parents=True, exist_ok=True)
     return dest_dir
@@ -85,7 +85,7 @@ def resolve_extended_media_uri(
     if basic_result is not None:
         return basic_result
 
-    from data_paths import get_saiverse_home
+    from .data_paths import get_saiverse_home
     saiverse_home = get_saiverse_home()
 
     # saiverse://item/<item_id>/image

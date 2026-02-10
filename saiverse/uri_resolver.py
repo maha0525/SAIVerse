@@ -828,7 +828,7 @@ class UriResolver:
 
     def _resolve_image(self, parsed: SaiUri) -> ResolvedContent:
         """画像URIの解決 (パスのみ返す)。"""
-        from media_utils import resolve_media_uri
+        from .media_utils import resolve_media_uri
 
         path = resolve_media_uri(parsed.raw)
         if path and path.exists():
@@ -842,7 +842,7 @@ class UriResolver:
 
     def _resolve_document(self, parsed: SaiUri) -> ResolvedContent:
         """ドキュメントファイルURIの解決。"""
-        from media_utils import resolve_media_uri
+        from .media_utils import resolve_media_uri
 
         path = resolve_media_uri(parsed.raw)
         if path and path.exists():
@@ -861,7 +861,7 @@ class UriResolver:
     def _resolve_persona(self, parsed: SaiUri) -> ResolvedContent:
         """ペルソナ情報の解決 (基本的に既存互換)。"""
         # 主にimage用なのでパス返却のみ
-        from media_utils import resolve_extended_media_uri
+        from .media_utils import resolve_extended_media_uri
 
         path = resolve_extended_media_uri(parsed.raw)
         if path and path.exists():
@@ -915,7 +915,7 @@ class UriResolver:
 
         # フォールバック: 直接adapter作成
         try:
-            from data_paths import get_saiverse_home
+            from .data_paths import get_saiverse_home
             from saiverse_memory import SAIMemoryAdapter
 
             persona_dir = get_saiverse_home() / "personas" / persona_id

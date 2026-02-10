@@ -33,7 +33,7 @@ from .protocol import (
 )
 
 if TYPE_CHECKING:
-    from saiverse_manager import SAIVerseManager
+    from saiverse.saiverse_manager import SAIVerseManager
 
 logger = logging.getLogger(__name__)
 

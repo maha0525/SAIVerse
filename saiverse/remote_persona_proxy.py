@@ -2,7 +2,7 @@ import logging
 from typing import Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from saiverse_manager import SAIVerseManager
+    from .saiverse_manager import SAIVerseManager
 
 class RemotePersonaProxy:
     """

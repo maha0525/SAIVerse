@@ -14,7 +14,7 @@ from persona.constants import (
     RECALL_SNIPPET_MAX_CHARS,
     RECALL_SNIPPET_STREAM_MAX_CHARS,
 )
-from model_configs import model_supports_images, get_model_parameters
+from saiverse.model_configs import model_supports_images, get_model_parameters
 from llm_clients.base import IncompleteStreamError
 
 
@@ -137,7 +137,7 @@ class PersonaGenerationMixin:
         # Load extra prompt files from Building configuration
         extra_prompt_files = getattr(building, "extra_prompt_files", []) or []
         if extra_prompt_files:
-            from data_paths import find_file, PROMPTS_DIR
+            from saiverse.data_paths import find_file, PROMPTS_DIR
             for filename in extra_prompt_files:
                 prompt_path = find_file(PROMPTS_DIR, filename)
                 if prompt_path:
