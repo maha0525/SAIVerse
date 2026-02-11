@@ -88,6 +88,9 @@ echo [OK] Node.js %NODE_VERSION%
 
 :node_done
 
+REM Restore working directory (winget/MSI install can change CWD to System32)
+cd /d "%~dp0"
+
 REM --- 3. Create venv if not exists ---
 if not exist ".venv" (
     echo.
