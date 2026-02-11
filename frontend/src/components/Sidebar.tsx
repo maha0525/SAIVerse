@@ -27,9 +27,10 @@ interface SidebarProps {
     isOpen: boolean;
     onOpen: () => void;
     onClose: () => void;
+    refreshTrigger?: boolean;
 }
 
-export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProps) {
+export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigger }: SidebarProps) {
     const [status, setStatus] = useState<UserStatus | null>(null);
     const [buildings, setBuildings] = useState<Building[]>([]);
     const [cityId, setCityId] = useState<number | null>(null);
@@ -69,10 +70,10 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
         }
     };
 
-    // Fetch data only once on mount
+    // Fetch data on mount and when refreshTrigger changes
     useEffect(() => {
         refreshData();
-    }, []);
+    }, [refreshTrigger]);
 
     // Global Touch Handlers for swipe-to-open (separate effect to avoid re-fetching on onOpen change)
     useEffect(() => {
