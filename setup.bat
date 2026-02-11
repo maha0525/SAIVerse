@@ -90,7 +90,15 @@ if not exist "%SAIVERSE_DB%" (
     echo [OK] データベースは既に存在します
 )
 
-REM --- 8. Create .env from example if not exists ---
+REM --- 8. Create expansion_data directory ---
+if not exist "expansion_data" (
+    mkdir expansion_data
+    echo [OK] expansion_data を作成しました（拡張パック配置用）
+) else (
+    echo [OK] expansion_data は既に存在します
+)
+
+REM --- 9. Create .env from example if not exists ---
 if not exist ".env" (
     echo.
     echo [SETUP] .env ファイルを作成中...
@@ -101,7 +109,7 @@ if not exist ".env" (
     echo [OK] .env は既に存在します
 )
 
-REM --- 9. SearXNG setup ---
+REM --- 10. SearXNG setup ---
 echo.
 echo [SETUP] SearXNG (Web検索エンジン) をセットアップ中...
 powershell -ExecutionPolicy Bypass -File scripts\setup_searxng.ps1
@@ -111,7 +119,7 @@ if %errorlevel% neq 0 (
     echo [OK] SearXNG のセットアップ完了
 )
 
-REM --- 10. Pre-download embedding model ---
+REM --- 11. Pre-download embedding model ---
 echo.
 echo [SETUP] 埋め込みモデルをダウンロード中 (初回のみ、数分かかります)...
 python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-m3')"
@@ -121,7 +129,7 @@ if %errorlevel% neq 0 (
     echo [OK] 埋め込みモデルのダウンロード完了
 )
 
-REM --- 11. Complete ---
+REM --- 12. Complete ---
 echo.
 echo ========================================
 echo   セットアップ完了!

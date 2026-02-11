@@ -318,9 +318,26 @@ SAIVerse/
 ├── saiverse_memory/        ← Memory adapter
 ├── phenomena/              ← Phenomena system
 ├── builtin_data/           ← Built-in defaults (git tracked)
+├── expansion_data/         ← User-installed expansion packs (gitignored)
 ├── frontend/               ← Next.js frontend
 ├── scripts/                ← Utility scripts
 └── tests/                  ← Test suite
+```
+
+### Expansion Data (`expansion_data/`)
+A repository-local directory for user-installed expansion packs (tools, phenomena, models, playbooks). Created by `setup.bat`/`setup.sh` and gitignored. Users can git clone tool packages here.
+
+```
+expansion_data/
+├── some_tool_pack/         ← git clone'd tool package
+│   ├── tools/
+│   │   ├── my_tool.py
+│   │   └── complex_tool/schema.py
+│   ├── phenomena/
+│   ├── playbooks/public/
+│   └── models/
+└── another_pack/
+    └── tools/
 ```
 
 ### User Data (`~/.saiverse/`)
@@ -328,8 +345,8 @@ User data is stored outside the repository in `~/.saiverse/` (or `SAIVERSE_HOME`
 
 ```
 ~/.saiverse/
-├── user_data/              ← User customizations (overrides builtin_data/)
-│   ├── tools/              ← Custom tools (priority over builtin)
+├── user_data/              ← User customizations (highest priority)
+│   ├── tools/              ← Custom tools (priority over all)
 │   ├── phenomena/          ← Custom phenomena
 │   ├── playbooks/          ← Custom playbooks
 │   ├── models/             ← Custom model configs
@@ -344,7 +361,7 @@ User data is stored outside the repository in `~/.saiverse/` (or `SAIVERSE_HOME`
 └── backups/                ← Database backups
 ```
 
-**Priority**: When loading resources, `~/.saiverse/user_data/` takes precedence over `builtin_data/`. This allows users to override defaults without modifying tracked files.
+**Priority** (3 levels): When loading resources: `user_data/` (highest) > `expansion_data/` (middle) > `builtin_data/` (lowest). This allows users to override expansion packs, and expansion packs to override built-in defaults.
 
 **Migration**: On startup, `main.py` automatically migrates legacy `user_data/` (in-repo) to `~/.saiverse/user_data/`. Override with `SAIVERSE_USER_DATA_DIR` env var for testing.
 

@@ -1,7 +1,9 @@
 """Unified data path management for SAIVerse.
 
-Provides centralized access to user_data and builtin_data directories.
-Files in user_data take priority over builtin_data.
+Provides centralized access to three data sources with priority:
+    1. user_data (~/.saiverse/user_data/)  — highest priority
+    2. expansion_data (<repo>/expansion_data/) — middle priority
+    3. builtin_data (<repo>/builtin_data/)  — lowest priority
 
 Environment variables:
     SAIVERSE_USER_DATA_DIR: Override user_data directory (for testing)
@@ -41,6 +43,7 @@ _user_data_env = os.getenv("SAIVERSE_USER_DATA_DIR")
 USER_DATA_DIR = Path(_user_data_env) if _user_data_env else get_saiverse_home() / "user_data"
 
 BUILTIN_DATA_DIR = PROJECT_ROOT / "builtin_data"
+EXPANSION_DATA_DIR = PROJECT_ROOT / "expansion_data"
 
 # Subdirectory names
 TOOLS_DIR = "tools"
@@ -53,77 +56,105 @@ ICONS_DIR = "icons"
 
 
 def get_data_paths(subdir: str) -> list[Path]:
-    """Get both user_data and builtin_data paths for a subdirectory.
-    
-    Returns paths in priority order (user_data first, then builtin_data).
+    """Get user_data, expansion_data, and builtin_data paths for a subdirectory.
+
+    Returns paths in priority order (user_data > expansion_data > builtin_data).
     Only returns paths that exist.
     """
     paths = []
     user_path = USER_DATA_DIR / subdir
+    expansion_path = EXPANSION_DATA_DIR / subdir
     builtin_path = BUILTIN_DATA_DIR / subdir
-    
+
     if user_path.exists():
         paths.append(user_path)
+    if expansion_path.exists():
+        paths.append(expansion_path)
     if builtin_path.exists():
         paths.append(builtin_path)
-    
+
     return paths
 
 
 def get_all_data_paths(subdir: str) -> list[Path]:
-    """Get both user_data and builtin_data paths, creating them if needed."""
+    """Get user_data, expansion_data, and builtin_data paths."""
     user_path = USER_DATA_DIR / subdir
+    expansion_path = EXPANSION_DATA_DIR / subdir
     builtin_path = BUILTIN_DATA_DIR / subdir
-    return [user_path, builtin_path]
+    return [user_path, expansion_path, builtin_path]
 
 
 def find_file(subdir: str, filename: str) -> Path | None:
-    """Find a file in user_data or builtin_data (user_data takes priority).
-    
+    """Find a file in user_data, expansion_data, or builtin_data.
+
+    Priority: user_data > expansion_data > builtin_data.
+
     Args:
         subdir: Subdirectory name (e.g., "prompts", "models")
         filename: Name of the file to find
-        
+
     Returns:
         Path to the file if found, None otherwise
     """
-    # Check user_data first
+    # Check user_data first (highest priority)
     user_file = USER_DATA_DIR / subdir / filename
     if user_file.exists():
         return user_file
-    
-    # Fall back to builtin_data
+
+    # Check expansion_data projects
+    if EXPANSION_DATA_DIR.exists():
+        for project_dir in sorted(EXPANSION_DATA_DIR.iterdir()):
+            if not project_dir.is_dir() or project_dir.name.startswith(("_", ".")):
+                continue
+            exp_file = project_dir / subdir / filename
+            if exp_file.exists():
+                return exp_file
+
+    # Fall back to builtin_data (lowest priority)
     builtin_file = BUILTIN_DATA_DIR / subdir / filename
     if builtin_file.exists():
         return builtin_file
-    
+
     return None
 
 
 def iter_files(subdir: str, pattern: str = "*") -> Iterator[Path]:
-    """Iterate over files in both user_data and builtin_data.
-    
-    Files from user_data take priority - if the same filename exists in both,
-    only the user_data version is yielded.
-    
+    """Iterate over files in user_data, expansion_data, and builtin_data.
+
+    Priority: user_data > expansion_data (project-based) > builtin_data.
+    If the same filename exists in multiple sources, only the highest-priority
+    version is yielded.
+
     Args:
         subdir: Subdirectory name
         pattern: Glob pattern for files (default: "*")
-        
+
     Yields:
         Path objects for matching files
     """
     seen_names: set[str] = set()
-    
-    # User data first (higher priority)
+
+    # 1. User data (highest priority)
     user_path = USER_DATA_DIR / subdir
     if user_path.exists():
         for file_path in user_path.glob(pattern):
             if file_path.is_file():
                 seen_names.add(file_path.name)
                 yield file_path
-    
-    # Builtin data (skip if already seen in user_data)
+
+    # 2. Expansion data - project-based structure
+    if EXPANSION_DATA_DIR.exists():
+        for project_dir in sorted(EXPANSION_DATA_DIR.iterdir()):
+            if not project_dir.is_dir() or project_dir.name.startswith(("_", ".")):
+                continue
+            exp_path = project_dir / subdir
+            if exp_path.exists():
+                for file_path in exp_path.glob(pattern):
+                    if file_path.is_file() and file_path.name not in seen_names:
+                        seen_names.add(file_path.name)
+                        yield file_path
+
+    # 3. Builtin data (lowest priority)
     builtin_path = BUILTIN_DATA_DIR / subdir
     if builtin_path.exists():
         for file_path in builtin_path.glob(pattern):
@@ -132,19 +163,33 @@ def iter_files(subdir: str, pattern: str = "*") -> Iterator[Path]:
 
 
 def iter_directories(subdir: str) -> Iterator[Path]:
-    """Iterate over subdirectories in both user_data and builtin_data.
-    
-    Directories from user_data take priority.
+    """Iterate over subdirectories in user_data, expansion_data, and builtin_data.
+
+    Priority: user_data > expansion_data > builtin_data.
     """
     seen_names: set[str] = set()
-    
+
+    # 1. User data (highest priority)
     user_path = USER_DATA_DIR / subdir
     if user_path.exists():
         for dir_path in user_path.iterdir():
             if dir_path.is_dir():
                 seen_names.add(dir_path.name)
                 yield dir_path
-    
+
+    # 2. Expansion data - project-based structure
+    if EXPANSION_DATA_DIR.exists():
+        for project_dir in sorted(EXPANSION_DATA_DIR.iterdir()):
+            if not project_dir.is_dir() or project_dir.name.startswith(("_", ".")):
+                continue
+            exp_path = project_dir / subdir
+            if exp_path.exists():
+                for dir_path in exp_path.iterdir():
+                    if dir_path.is_dir() and dir_path.name not in seen_names:
+                        seen_names.add(dir_path.name)
+                        yield dir_path
+
+    # 3. Builtin data (lowest priority)
     builtin_path = BUILTIN_DATA_DIR / subdir
     if builtin_path.exists():
         for dir_path in builtin_path.iterdir():
@@ -179,15 +224,17 @@ def iter_project_files(subdir: str, pattern: str = "*") -> Iterator[Path]:
 
 
 def iter_project_subdirs(subdir: str) -> Iterator[Path]:
-    """Iterate over subdirectories across all projects in user_data.
+    """Iterate over subdirectories across all projects.
 
-    This supports the project-based directory structure:
-        user_data/<project>/<subdir>/
+    Scans three sources in priority order:
+        1. user_data/<project>/<subdir>/     (highest priority)
+        2. expansion_data/<project>/<subdir>/ (middle priority)
+        3. builtin_data/<subdir>/             (lowest priority)
 
     For example, iter_project_subdirs("tools") yields:
         - user_data/discord/tools/
-        - user_data/another_project/tools/
-        - builtin_data/tools/  (legacy/builtin compatibility)
+        - expansion_data/some_pack/tools/
+        - builtin_data/tools/
 
     Args:
         subdir: Subdirectory name (e.g., "tools", "phenomena", "playbooks")
@@ -195,21 +242,27 @@ def iter_project_subdirs(subdir: str) -> Iterator[Path]:
     Yields:
         Path objects for each project's subdirectory
     """
-    seen_project_names: set[str] = set()
-
-    # Scan all projects in user_data
+    # 1. Scan all projects in user_data (highest priority)
     if USER_DATA_DIR.exists():
         for project_dir in sorted(USER_DATA_DIR.iterdir()):
-            # Skip hidden directories and non-directories
             if not project_dir.is_dir() or project_dir.name.startswith(("_", ".")):
                 continue
 
             subdir_path = project_dir / subdir
             if subdir_path.exists() and subdir_path.is_dir():
-                seen_project_names.add(project_dir.name)
                 yield subdir_path
 
-    # Also yield builtin_data for backwards compatibility
+    # 2. Scan all projects in expansion_data (middle priority)
+    if EXPANSION_DATA_DIR.exists():
+        for project_dir in sorted(EXPANSION_DATA_DIR.iterdir()):
+            if not project_dir.is_dir() or project_dir.name.startswith(("_", ".")):
+                continue
+
+            subdir_path = project_dir / subdir
+            if subdir_path.exists() and subdir_path.is_dir():
+                yield subdir_path
+
+    # 3. builtin_data (lowest priority)
     builtin_path = BUILTIN_DATA_DIR / subdir
     if builtin_path.exists() and builtin_path.is_dir():
         yield builtin_path
@@ -379,6 +432,7 @@ def migrate_legacy_user_data() -> bool:
 __all__ = [
     "PROJECT_ROOT",
     "USER_DATA_DIR",
+    "EXPANSION_DATA_DIR",
     "BUILTIN_DATA_DIR",
     "TOOLS_DIR",
     "PHENOMENA_DIR",

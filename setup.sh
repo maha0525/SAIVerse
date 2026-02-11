@@ -61,7 +61,15 @@ else
     echo "[OK] データベースは既に存在します"
 fi
 
-# --- 8. Create .env from example if not exists ---
+# --- 8. Create expansion_data directory ---
+if [ ! -d "expansion_data" ]; then
+    mkdir expansion_data
+    echo "[OK] expansion_data を作成しました（拡張パック配置用）"
+else
+    echo "[OK] expansion_data は既に存在します"
+fi
+
+# --- 9. Create .env from example if not exists ---
 if [ ! -f ".env" ]; then
     echo ""
     echo "[SETUP] .env ファイルを作成中..."
@@ -72,7 +80,7 @@ else
     echo "[OK] .env は既に存在します"
 fi
 
-# --- 9. SearXNG setup ---
+# --- 10. SearXNG setup ---
 echo ""
 echo "[SETUP] SearXNG (Web検索エンジン) をセットアップ中..."
 if bash ./scripts/setup_searxng.sh; then
@@ -81,7 +89,7 @@ else
     echo "[WARN] SearXNG のセットアップに失敗しましたが、Web検索なしでも動作します。"
 fi
 
-# --- 10. Pre-download embedding model ---
+# --- 11. Pre-download embedding model ---
 echo ""
 echo "[SETUP] 埋め込みモデルをダウンロード中 (初回のみ、数分かかります)..."
 python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-m3')" || {
@@ -89,7 +97,7 @@ python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-m3')" ||
 }
 echo "[OK] 埋め込みモデルのダウンロード完了"
 
-# --- 11. Complete ---
+# --- 12. Complete ---
 echo ""
 echo "========================================"
 echo "  セットアップ完了!"

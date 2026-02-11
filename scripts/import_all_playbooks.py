@@ -161,13 +161,40 @@ def import_playbooks_from_directory(
     return (imported_count, updated_count, skipped_count)
 
 
+def _collect_default_playbook_dirs() -> list[Path]:
+    """Collect playbook directories from builtin_data and expansion_data.
+
+    Returns directories in priority order:
+        1. expansion_data/<project>/playbooks/public/  (higher priority)
+        2. builtin_data/playbooks/public/               (lower priority)
+    """
+    dirs = []
+
+    # Expansion data projects
+    expansion_dir = ROOT / "expansion_data"
+    if expansion_dir.exists():
+        for project_dir in sorted(expansion_dir.iterdir()):
+            if not project_dir.is_dir() or project_dir.name.startswith(("_", ".")):
+                continue
+            pb_dir = project_dir / "playbooks" / "public"
+            if pb_dir.exists() and any(pb_dir.glob("*.json")):
+                dirs.append(pb_dir)
+
+    # Builtin data (always included)
+    builtin_pb = ROOT / "builtin_data" / "playbooks" / "public"
+    if builtin_pb.exists():
+        dirs.append(builtin_pb)
+
+    return dirs
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Import all playbooks from builtin_data/playbooks/ directory",
+        description="Import all playbooks from builtin_data/playbooks/ and expansion_data/",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Import all playbooks from default directory
+  # Import all playbooks (builtin_data + expansion_data)
   python scripts/import_all_playbooks.py
 
   # Update existing playbooks
@@ -176,15 +203,15 @@ Examples:
   # Dry run to see what would be imported
   python scripts/import_all_playbooks.py --dry-run
 
-  # Import from specific directory
+  # Import from specific directory only
   python scripts/import_all_playbooks.py --directory builtin_data/playbooks/custom
 """
     )
     parser.add_argument(
         "--directory",
         type=Path,
-        default=ROOT / "builtin_data" / "playbooks" / "public",
-        help="Directory containing playbook JSON files (default: builtin_data/playbooks/public)"
+        default=None,
+        help="Directory containing playbook JSON files (default: auto-scan builtin_data + expansion_data)"
     )
     parser.add_argument(
         "--force",
@@ -198,17 +225,30 @@ Examples:
     )
     args = parser.parse_args()
 
-    directory = args.directory
-    if not directory.is_absolute():
-        directory = ROOT / directory
+    total_imported = 0
+    total_updated = 0
+    total_skipped = 0
 
-    logging.info(f"Importing playbooks from: {directory}")
+    if args.directory is not None:
+        # Explicit directory specified — import from that only
+        directory = args.directory
+        if not directory.is_absolute():
+            directory = ROOT / directory
+        directories = [directory]
+    else:
+        # Default: scan builtin_data + expansion_data
+        directories = _collect_default_playbook_dirs()
 
-    imported, updated, skipped = import_playbooks_from_directory(
-        directory,
-        force_update=args.force,
-        dry_run=args.dry_run
-    )
+    for directory in directories:
+        logging.info(f"Importing playbooks from: {directory}")
+        imported, updated, skipped = import_playbooks_from_directory(
+            directory,
+            force_update=args.force,
+            dry_run=args.dry_run
+        )
+        total_imported += imported
+        total_updated += updated
+        total_skipped += skipped
 
     print("\n" + "=" * 60)
     if args.dry_run:
@@ -216,17 +256,18 @@ Examples:
     else:
         print("IMPORT SUMMARY")
     print("=" * 60)
-    print(f"Imported: {imported}")
-    print(f"Updated:  {updated}")
-    print(f"Skipped:  {skipped}")
-    print(f"Total:    {imported + updated + skipped}")
+    print(f"Imported: {total_imported}")
+    print(f"Updated:  {total_updated}")
+    print(f"Skipped:  {total_skipped}")
+    print(f"Total:    {total_imported + total_updated + total_skipped}")
+    print(f"Sources:  {len(directories)} directories")
     print("=" * 60)
 
     if args.dry_run:
         print("\nNo changes were made. Remove --dry-run to actually import.")
-    elif imported > 0 or updated > 0:
+    elif total_imported > 0 or total_updated > 0:
         print("\n✓ Playbooks successfully imported!")
-    elif skipped > 0:
+    elif total_skipped > 0:
         print("\n✓ All playbooks already exist. Use --force to update them.")
 
 
