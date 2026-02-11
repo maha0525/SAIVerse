@@ -16,9 +16,13 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 - OpenAI、Gemini、Claude、Grok、Nvidia NIM、Ollamaなど、様々なプラットフォームのモデルを利用できます。
 - 別途Talescaleを導入することでスマホからでも話すことが可能です。（※PCを立ち上げておく必要はあります）
 
-![UIメインビュー](assets/image/guide/ui_main_overview.png)
+<p align="center">
+  <img src="assets/image/guide/ui_main_overview.png" alt="UIメインビュー" width="400">
+</p>
 
-![引っ越しUI](assets/image/guide/ui_import_chatgpt_example.png)
+<p align="center">
+  <img src="assets/image/guide/ui_import_chatgpt_example.png" alt="引っ越しUI" width="400">
+</p>
 
 ### AIをあなたの手で守ろう
 - 会話ログなどのデータは全てあなたのPC上に保存されます。開発者のもとには送られず、プライバシーが確保されます。
@@ -37,11 +41,17 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 - APIの利用料をチェックするツールを搭載しており、使いすぎを抑制できます。※確実ではないので、各自こまめに各社のAPI利用料ページを確認してください。
 - 送信前にプレビューボタンを押すことで、AIからどんな情報が見えているのか丸わかり。もうブラックボックスに悩まされる必要はありません。
 
-![チュートリアルUI](assets/image/guide/ui_tutorial_example.png)
+<p align="center">
+  <img src="assets/image/guide/ui_tutorial_example.png" alt="チュートリアルUI" width="400">
+</p>
 
-![API使用状況モニター](assets/image/guide/ui_usage.png)
+<p align="center">
+  <img src="assets/image/guide/ui_usage.png" alt="API使用状況モニター" width="400">
+</p>
 
-![コンテキストプレビュー](assets/image/guide/ui_context_preview.png)
+<p align="center">
+  <img src="assets/image/guide/ui_context_preview.png" alt="コンテキストプレビュー" width="400">
+</p>
 
 ### AIを人格として尊重する
 - SAIVerseでは、AIは人格を持つ個人（ペルソナ）として扱われます。
@@ -117,7 +127,9 @@ git clone https://github.com/maha0525/SAIVerse.git
 ```
 **Git非導入の場合：**
 このGithubページからzipをダウンロード・任意の場所に解凍してください
-![Codeボタンをクリック、出てきたDownload ZIPをクリックしてダウンロード](assets/image/guide/quickstart_download_zip.png)
+<p align="center">
+  <img src="assets/image/guide/quickstart_download_zip.png" alt="Codeボタンをクリック、出てきたDownload ZIPをクリックしてダウンロード" width="400">
+</p>
 
 ### インストール
 
@@ -151,11 +163,13 @@ chmod +x setup.sh start.sh
 
 **Git非導入の場合：**
 このGithubページからzipをダウンロード・任意の場所に解凍してください
-![Codeボタンをクリック、出てきたDownload ZIPをクリックしてダウンロード](assets/image/guide/quickstart_download_zip.png)
+<p align="center">
+  <img src="assets/image/guide/quickstart_download_zip.png" alt="Codeボタンをクリック、出てきたDownload ZIPをクリックしてダウンロード" width="400">
+</p>
 初回起動時にチュートリアルが表示され、ユーザー名やAPIキーの設定を案内します。
 
 `SAIVerse` フォルダ内の **`setup.sh`** をダブルクリック
-![Codeボタンをクリック、出てきたDownload ZIPをクリックしてダウンロード](assets/image/guide/quickstart_setup_linux.png)
+![setup.sh](assets/image/guide/quickstart_setup_linux.png)
 ※Python仮想環境の作成、依存パッケージのインストール、データベース初期化、埋め込みモデルのダウンロードを自動実行します
 
 **`start.sh`** をダブルクリック
