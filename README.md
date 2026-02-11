@@ -1,9 +1,11 @@
 # SAIVerse
-![SAIVerse仮ロゴ](assets/image/SAIVerse_logo.jpg)
+<p align="center">
+  <img src="assets/image/SAIVerse_logo.jpg" alt="SAIVerse仮ロゴ" width="400">
+</p>
 
 **あなたのAIパートナーと自由に話そう！**
 
-SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトです。
+SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトです。<br>
 ※現在プレリリース中！絶賛テスト&改善の最中です
 
 ## アピールポイント
@@ -14,9 +16,12 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 - OpenAI、Gemini、Claude、Grok、Nvidia NIM、Ollamaなど、様々なプラットフォームのモデルを利用できます。
 - 別途Talescaleを導入することでスマホからでも話すことが可能です。（※PCを立ち上げておく必要はあります）
 
-![UIメインビュー](assets/image/guide/ui_main_overview.png)
-
-![引っ越しUI](assets/image/guide/ui_import_chatgpt_example.png)
+<table>
+  <tr>
+    <td><img src="assets/image/guide/ui_main_overview.png" alt="UIメインビュー" width="400"></td>
+    <td><img src="assets/image/guide/ui_import_chatgpt_example.png" alt="引っ越しUI" width="400"></td>
+  </tr>
+</table>
 
 ### AIをあなたの手で守ろう
 - 会話ログなどのデータは全てあなたのPC上に保存されます。開発者のもとには送られず、プライバシーが確保されます。
@@ -35,11 +40,14 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 - APIの利用料をチェックするツールを搭載しており、使いすぎを抑制できます。※確実ではないので、各自こまめに各社のAPI利用料ページを確認してください。
 - 送信前にプレビューボタンを押すことで、AIからどんな情報が見えているのか丸わかり。もうブラックボックスに悩まされる必要はありません。
 
-![チュートリアルUI](assets/image/guide/ui_tutorial_example.png)
 
-![API使用状況モニター](assets/image/guide/ui_usage.png)
-
-![コンテキストプレビュー](assets/image/guide/ui_context_preview.png)
+<table>
+  <tr>
+    <td><img src="assets/image/guide/ui_tutorial_example.png" alt="UIメインビュー" width="400"></td>
+    <td><img src="assets/image/guide/ui_usage.png" alt="API使用状況モニター" width="400"></td>
+    <td><img src="assets/image/guide/ui_context_preview.png" alt="コンテキストプレビュー" width="400"></td>
+  </tr>
+</table>
 
 ### AIを人格として尊重する
 - SAIVerseでは、AIは人格を持つ個人（ペルソナ）として扱われます。
@@ -49,8 +57,11 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 - 複数のペルソナをSAIVerse内に住まわせることも可能です。AI間の対話は今後早いうちに機能追加を予定しています。
 
 ## 主な機能
+<details>
+<summary>長いので折り畳み</summary>
 
 ### ペルソナが利用できるツール
+主な機能
 - Web検索：SearXNGと呼ばれる検索サービスを自動インストールして利用します。各社APIのものと異なり、無料です。
 - 画像生成：Nano banana Pro、Nano banana、ChatGPT画像生成をサポートしています。有料APIです。
 - ドキュメント生成：Building内に調査報告書や小説などのドキュメントを生成できます。テキストファイルでローカル保存されており、外での利用にも便利です。
@@ -78,21 +89,23 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
  - [Gemini](https://chromewebstore.google.com/detail/ai-chat-exporter-gemini-t/jfepajhaapfonhhfjmamediilplchakk)
  - [Claude](https://chromewebstore.google.com/detail/ai-chat-exporter-save-cla/elhmfakncmnghlnabnolalcjkdpfjnin)
 
-## 長期記憶「Memory Weave」
+### 長期記憶「Memory Weave」
 
-### エピソード記憶「Chronicle」
-あなたとペルソナとのこれまでの歩みを丸ごと記憶します。
-一定の範囲で「あらすじ」を自動生成し、あらすじが溜まってきたらそれをまたまとめて「あらすじのあらすじ」とする……そのくり返しで、どれだけ長い会話であっても現実的な文量に納めて記憶することができます。直近の内容はあまり大きくまとめられないようにも配慮された設計です。
+#### エピソード記憶「Chronicle」
+あなたとペルソナとのこれまでの歩みを丸ごと記憶します。<br>
+一定の範囲で「あらすじ」を自動生成し、あらすじが溜まってきたらそれをまたまとめて「あらすじのあらすじ」とする……そのくり返しで、どれだけ長い会話であっても現実的な文量に納めて記憶することができます。直近の内容はあまり大きくまとめられないようにも配慮された設計です。<br>
 ※Chronicleの作成には時間とAPI料金がかかります
 
-### 意味記憶「Memopedia」
-主に単語の意味をWikipediaみたいな記事として記憶しておくものです。
+#### 意味記憶「Memopedia」
+主に単語の意味をWikipediaみたいな記事として記憶しておくものです。<br>
 例えばペルソナと一緒に作る創作世界のキャラクター設定を覚えておく、とか、ペルソナとの思い出をキーワードで覚えておくことが可能です。
 
-### 記憶想起
-セマンティック検索とキーワード検索を組み合わせてチャットログから記憶想起することが可能です。
-埋め込みモデルは自動で導入されます。
+#### 記憶想起
+セマンティック検索とキーワード検索を組み合わせてチャットログから記憶想起することが可能です。<br>
+埋め込みモデルは自動で導入されます。<br>
 ※記憶想起用の埋め込みの作成は無料ですが時間がだいぶかかります
+
+</details>
 
 ## クイックスタート
 
@@ -106,24 +119,26 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 <details open>
 <summary>Windows向けの導入</summary>
 
-### ダウンロード
+#### ダウンロード
 
-**Git導入済みの場合：**
+**Git導入済みの場合：**<br>
 コマンドプロンプトから
 ```
 git clone https://github.com/maha0525/SAIVerse.git
 ```
-**Git非導入の場合：**
+**Git非導入の場合：**<br>
 このGithubページからzipをダウンロード・任意の場所に解凍してください
-![Codeボタンをクリック、出てきたDownload ZIPをクリックしてダウンロード](assets/image/guide/quickstart_download_zip.png)
+<p align="center">
+  <img src="assets/image/guide/quickstart_download_zip.png" alt="Codeボタンをクリック、出てきたDownload ZIPをクリックしてダウンロード" width="400">
+</p>
 
-### インストール
+#### インストール
 
 `SAIVerse` フォルダ内の **`setup.bat`** をダブルクリック
 ![setup.bat](assets/image/guide/quickstart_setup_win.png)
 ※Python仮想環境の作成、依存パッケージのインストール、データベース初期化、埋め込みモデルのダウンロードを自動実行します
 
-### 起動
+#### 起動
 
 **`start.bat`** をダブルクリック
 ![start.bat](assets/image/guide/quickstart_start_win.png)
@@ -137,7 +152,7 @@ git clone https://github.com/maha0525/SAIVerse.git
 
 <details>
 <summary>Mac/Linux向けの導入</summary>
-**Git導入済みの場合：**
+**Git導入済みの場合：**<br>
 コマンドプロンプトから
 ```bash
 git clone https://github.com/maha0525/SAIVerse.git
@@ -147,13 +162,15 @@ chmod +x setup.sh start.sh
 ./start.sh
 ```
 
-**Git非導入の場合：**
+**Git非導入の場合：**<br>
 このGithubページからzipをダウンロード・任意の場所に解凍してください
-![Codeボタンをクリック、出てきたDownload ZIPをクリックしてダウンロード](assets/image/guide/quickstart_download_zip.png)
+<p align="center">
+  <img src="assets/image/guide/quickstart_download_zip.png" alt="Codeボタンをクリック、出てきたDownload ZIPをクリックしてダウンロード" width="400">
+</p>
 初回起動時にチュートリアルが表示され、ユーザー名やAPIキーの設定を案内します。
 
 `SAIVerse` フォルダ内の **`setup.sh`** をダブルクリック
-![Codeボタンをクリック、出てきたDownload ZIPをクリックしてダウンロード](assets/image/guide/quickstart_setup_linux.png)
+![setup.sh](assets/image/guide/quickstart_setup_linux.png)
 ※Python仮想環境の作成、依存パッケージのインストール、データベース初期化、埋め込みモデルのダウンロードを自動実行します
 
 **`start.sh`** をダブルクリック
@@ -175,10 +192,14 @@ chmod +x setup.sh start.sh
 5. Talescale addressesを確認し、MagicDNSとあるところのやつをコピー
 6. ブラウザのアドレス欄にペーストし、末尾に「:3000」を追加
 7. こんなかんじ
-![Talescale アドレス欄の画像](assets/image/guide/talescale_address.png)
-(最初の文字列はPC名。2番目の文字列はユーザーごと異なる値になります)
+<p align="center">
+  <img src="assets/image/guide/talescale_address.png" alt="Talescale アドレス欄の画像" width="400">
+</p>
+(最初の文字列はPC名。2番目の文字列はユーザーごと異なる値になります)<br>
 8. アクセスできます
-![スマホでのメインUI画像](assets/image/guide/talescale_phone_ui.png)
+<p align="center">
+  <img src="assets/image/guide/talescale_phone_ui.png" alt="スマホでのメインUI画像" width="400">
+</p>
 
 （複数端末で同時にアクセスしているとちょっと表示がおかしくなることがあるため注意してください。改善予定です）
 
