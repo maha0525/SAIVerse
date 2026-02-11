@@ -257,6 +257,9 @@ export default function Home() {
     const [showTutorial, setShowTutorial] = useState(false);
     const [tutorialChecked, setTutorialChecked] = useState(false);
 
+    // Backend connection status
+    const [backendConnected, setBackendConnected] = useState(true);
+
     // Startup warnings
     const [startupWarnings, setStartupWarnings] = useState<string[]>([]);
     const [showStartupWarnings, setShowStartupWarnings] = useState(false);
@@ -379,6 +382,7 @@ export default function Home() {
 
             const res = await fetch(`/api/chat/history?${params.toString()}`);
             if (res.ok) {
+                setBackendConnected(true);
                 const data = await res.json();
                 const newMessages: Message[] = data.history || [];
                 // Use server-provided has_more flag if available, fallback to count-based heuristic
@@ -404,10 +408,12 @@ export default function Home() {
                 }
             } else {
                 console.error("[DEBUG] Fetch failed", res.status);
+                if (res.status >= 500) setBackendConnected(false);
                 if (!beforeId) setMessages([]);
             }
         } catch (err) {
             console.error("Failed to load history", err);
+            setBackendConnected(false);
             if (!beforeId) setIsHistoryLoaded(true);
         } finally {
             setIsLoadingMore(false);
@@ -518,14 +524,21 @@ export default function Home() {
     useEffect(() => {
         // Fetch current building_id for multi-device safety
         fetch('/api/user/status')
-            .then(res => res.ok ? res.json() : null)
+            .then(res => {
+                if (!res.ok) {
+                    setBackendConnected(false);
+                    return null;
+                }
+                setBackendConnected(true);
+                return res.json();
+            })
             .then(data => {
                 if (data?.current_building_id) {
                     setCurrentBuildingId(data.current_building_id);
                     currentBuildingIdRef.current = data.current_building_id;
                 }
             })
-            .catch(err => console.error('Failed to fetch user status', err));
+            .catch(() => setBackendConnected(false));
         fetchHistory();
         fetchBuildingInfo();
         // Fetch saved playbook setting and params from server
@@ -613,6 +626,27 @@ export default function Home() {
 
         return () => clearInterval(pollInterval);
     }, [isHistoryLoaded]);
+
+    // Backend reconnection polling: when disconnected, check every 10 seconds
+    useEffect(() => {
+        if (backendConnected) return;
+
+        const reconnectInterval = setInterval(async () => {
+            try {
+                const res = await fetch('/api/user/status');
+                if (res.ok) {
+                    setBackendConnected(true);
+                    // Refresh data after reconnection
+                    fetchHistory();
+                    fetchBuildingInfo();
+                }
+            } catch {
+                // Still disconnected
+            }
+        }, 10000);
+
+        return () => clearInterval(reconnectInterval);
+    }, [backendConnected]);
 
     const handleSendMessage = async () => {
         if ((!inputValue.trim() && attachments.length === 0) || loadingStatus) return;
@@ -1106,6 +1140,16 @@ export default function Home() {
                         </button>
                     </div>
                 </header>
+
+                {!backendConnected && (
+                    <div className={styles.backendErrorBanner}>
+                        <AlertTriangle size={16} />
+                        <div className={styles.backendErrorContent}>
+                            <div>Backend server is not running.</div>
+                            <div>Please make sure the &quot;SAIVerse Backend&quot; window is open. This page will reconnect automatically.</div>
+                        </div>
+                    </div>
+                )}
 
                 {showStartupWarnings && startupWarnings.length > 0 && (
                     <div className={styles.startupWarningBanner}>

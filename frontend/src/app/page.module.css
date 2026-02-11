@@ -40,6 +40,25 @@
     flex-shrink: 0;
 }
 
+.backendErrorBanner {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.6rem 1rem;
+    background: #fee2e2;
+    border-bottom: 1px solid #ef4444;
+    color: #991b1b;
+    font-size: 0.82rem;
+    line-height: 1.4;
+    flex-shrink: 0;
+}
+
+.backendErrorContent {
+    flex: 1;
+    min-width: 0;
+    word-break: break-word;
+}
+
 .startupWarningBanner {
     display: flex;
     align-items: flex-start;
@@ -644,6 +663,12 @@
 :global([data-theme="dark"]) .header {
     background: rgba(10, 10, 10, 0.8);
     border-color: rgba(255, 255, 255, 0.1);
+}
+
+:global([data-theme="dark"]) .backendErrorBanner {
+    background: #450a0a;
+    border-color: #dc2626;
+    color: #fca5a5;
 }
 
 :global([data-theme="dark"]) .startupWarningBanner {
