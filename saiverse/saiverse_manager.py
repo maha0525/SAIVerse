@@ -956,7 +956,7 @@ class SAIVerseManager(
 
     def create_ai(
         self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None
-    ) -> str:
+    ) -> Tuple[bool, str, Optional[str], Optional[str]]:
         """Creates a new AI and their private room."""
         return self.admin.create_ai(name, system_prompt, home_city_id, custom_ai_id)
 

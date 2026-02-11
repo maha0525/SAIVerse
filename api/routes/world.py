@@ -160,10 +160,10 @@ def get_available_prompts():
 # AI
 @router.post("/ais")
 def create_ai(ai: AICreate, manager: SAIVerseManager = Depends(get_manager)):
-    success, msg = manager.create_ai(ai.name, ai.system_prompt, ai.home_city_id, ai.ai_id)
+    success, msg, ai_id, room_id = manager.create_ai(ai.name, ai.system_prompt, ai.home_city_id, ai.ai_id)
     if not success:
         raise HTTPException(status_code=400, detail=msg)
-    return {"message": msg}
+    return {"message": msg, "ai_id": ai_id, "room_id": room_id}
 
 @router.put("/ais/{ai_id}")
 def update_ai(ai_id: str, ai: AIUpdate, manager: SAIVerseManager = Depends(get_manager)):
