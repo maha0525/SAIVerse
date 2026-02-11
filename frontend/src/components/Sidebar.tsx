@@ -235,14 +235,19 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose }: SidebarProp
                 onTouchStart={handleSidebarTouchStart}
                 onTouchMove={handleSidebarTouchMove}
             >
-                {/* Create Persona Button */}
-                <div style={{ padding: '0 1rem 1rem 1rem' }}>
+                {/* Brand + Create Persona */}
+                <div className={styles.brandRow}>
+                    <img
+                        src="/icon.jpg"
+                        alt="SAIVerse"
+                        className={styles.brandIcon}
+                    />
                     <button
                         onClick={() => setIsWizardOpen(true)}
                         className={styles.createPersonaBtn}
                     >
                         <UserPlus size={18} />
-                        ペルソナを作成
+                        ペルソナ作成
                     </button>
                 </div>
 

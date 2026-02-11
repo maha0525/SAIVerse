@@ -8,6 +8,9 @@ export const viewport: Viewport = {
 export const metadata: Metadata = {
     title: "SAIVerse City Interface",
     description: "Next Generation UI for SAIVerse",
+    icons: {
+        icon: "/icon.jpg",
+    },
 };
 
 export default function RootLayout({
