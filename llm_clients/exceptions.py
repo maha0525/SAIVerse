@@ -79,6 +79,13 @@ class AuthenticationError(LLMError):
     user_message = "APIキーが無効または期限切れです。管理者にお問い合わせください。"
 
 
+class PaymentError(LLMError):
+    """Raised when payment is required (402) or billing limit exceeded."""
+
+    error_code = "payment"
+    user_message = "APIの利用料金が上限に達しました。APIキーの残高や支払い設定を確認してください。"
+
+
 class ModelNotFoundError(LLMError):
     """Raised when the specified model is not found or unavailable."""
 

@@ -547,8 +547,8 @@ def _run_chronicle_generation(
         context_length = model_config.get("context_length", 128000)
         provider = model_config.get("provider", "gemini")
         
-        client = get_llm_client(actual_model_id, provider, context_length, config=model_config)
-        LOGGER.info(f"[Chronicle Gen] LLM client initialized: {actual_model_id} / {provider}")
+        client = get_llm_client(resolved_model_id, provider, context_length, config=model_config)
+        LOGGER.info(f"[Chronicle Gen] LLM client initialized: {actual_model_id} / {provider} (config_key={resolved_model_id})")
 
         # Get Memopedia context if available
         memopedia_context = None

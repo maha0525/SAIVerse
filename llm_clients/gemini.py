@@ -12,10 +12,12 @@ from google import genai
 from google.genai import types
 
 from .exceptions import (
+    AuthenticationError,
     EmptyResponseError as LLMEmptyResponseError,
     LLMError,
     LLMTimeoutError,
     ModelNotFoundError,
+    PaymentError,
     RateLimitError,
     SafetyFilterError,
     ServerError,
@@ -471,9 +473,17 @@ class GeminiClient(LLMClient):
         msg = str(err).lower()
         return "404" in msg and ("not found" in msg or "not_found" in msg)
 
+    @staticmethod
+    def _is_payment_error(err: Exception) -> bool:
+        """Check if the error is a payment/billing error (402)."""
+        msg = str(err).lower()
+        return "402" in msg or "payment required" in msg or "spend limit" in msg or "billing" in msg
+
     def _convert_to_llm_error(self, err: Exception, context: str = "API call") -> LLMError:
         """Convert a generic exception to an appropriate LLMError subclass."""
-        if self._is_rate_limit_error(err):
+        if self._is_payment_error(err):
+            return PaymentError(f"Gemini {context} failed: payment required", err)
+        elif self._is_rate_limit_error(err):
             return RateLimitError(f"Gemini {context} failed: rate limit exceeded", err)
         elif self._is_timeout_error(err):
             return LLMTimeoutError(f"Gemini {context} failed: timeout", err)
@@ -486,7 +496,6 @@ class GeminiClient(LLMClient):
                 user_message=f"指定されたモデルが見つかりません: {self.model}",
             )
         elif self._is_authentication_error(err):
-            from .exceptions import AuthenticationError
             return AuthenticationError(f"Gemini {context} failed: authentication error", err)
         else:
             return LLMError(f"Gemini {context} failed: {err}", err)

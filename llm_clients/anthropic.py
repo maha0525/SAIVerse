@@ -21,6 +21,7 @@ from .exceptions import (
     InvalidRequestError,
     LLMError,
     LLMTimeoutError,
+    PaymentError,
     RateLimitError,
     ServerError,
 )
@@ -76,9 +77,17 @@ def _is_authentication_error(err: Exception) -> bool:
     return "401" in msg or "403" in msg or "authentication" in msg or "invalid api key" in msg
 
 
+def _is_payment_error(err: Exception) -> bool:
+    """Check if the error is a payment/billing error (402)."""
+    msg = str(err).lower()
+    return "402" in msg or "payment required" in msg or "spend limit" in msg or "billing" in msg
+
+
 def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError:
     """Convert a generic exception to an appropriate LLMError subclass."""
-    if _is_rate_limit_error(err):
+    if _is_payment_error(err):
+        return PaymentError(f"Anthropic {context} failed: payment required", err)
+    elif _is_rate_limit_error(err):
         return RateLimitError(f"Anthropic {context} failed: rate limit exceeded", err)
     elif _is_timeout_error(err):
         return LLMTimeoutError(f"Anthropic {context} failed: timeout", err)

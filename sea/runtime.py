@@ -2055,6 +2055,11 @@ class SEARuntime:
             # async/sync boundary internally via ThreadPoolExecutor.
             try:
                 sub_outputs = self._run_playbook(sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback)
+            except LLMError:
+                LOGGER.exception("[sea][subplay] LLM error in subplaybook '%s'", sub_name)
+                if execution == "subagent" and subagent_thread_id:
+                    self._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False)
+                raise
             except Exception as exc:
                 LOGGER.exception("[sea][subplay] Failed to execute subplaybook '%s'", sub_name)
                 # End subagent thread on error (no chronicle)
@@ -3107,7 +3112,7 @@ class SEARuntime:
         actual_model_id = model_config.get("model", model_name)
         provider = model_config.get("provider")
         context_length = model_config.get("context_length", 128000)
-        client = get_llm_client(actual_model_id, provider, context_length, config=model_config)
+        client = get_llm_client(model_id, provider, context_length, config=model_config)
 
         # Initialize arasuji tables and fetch all messages
         adapter = getattr(persona, "sai_memory", None)

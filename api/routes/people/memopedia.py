@@ -385,8 +385,8 @@ def _run_memopedia_generation(
         context_length = model_config.get("context_length", 128000)
         actual_model_id = model_config.get("model", resolved_model_id)
         
-        client = get_llm_client(actual_model_id, provider, context_length, config=model_config)
-        LOGGER.info(f"[Memopedia Gen] LLM client initialized: {actual_model_id} / {provider}")
+        client = get_llm_client(resolved_model_id, provider, context_length, config=model_config)
+        LOGGER.info(f"[Memopedia Gen] LLM client initialized: {actual_model_id} / {provider} (config_key={resolved_model_id})")
         
         _update_memopedia_job(job_id, message=f"Searching for keyword: {keyword}")
         

@@ -13,8 +13,35 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 
 from database.models import Base
+from database.paths import default_db_path
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def needs_migration(db_path: str) -> bool:
+    """Check if the database schema differs from the current models.
+
+    Compares columns in each table between the existing DB and the model
+    definitions. Returns True if any table has missing or extra columns.
+    """
+    if not os.path.exists(db_path):
+        return False
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        db_inspector = inspect(engine)
+        for table in Base.metadata.sorted_tables:
+            if not db_inspector.has_table(table.name):
+                # New table that doesn't exist yet
+                return True
+            db_columns = {c["name"] for c in db_inspector.get_columns(table.name)}
+            model_columns = {c.name for c in table.columns}
+            if db_columns != model_columns:
+                return True
+        return False
+    finally:
+        engine.dispose()
+
 
 def migrate_database_in_place(db_path: str):
     """
@@ -122,7 +149,22 @@ def migrate_database_in_place(db_path: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SAIVerse データベース マイグレーションツール")
-    parser.add_argument("--db", required=True, help="SQLiteデータベースへのパス (例: database/city_A.db)")
+    parser.add_argument(
+        "--db",
+        default=None,
+        help="SQLiteデータベースへのパス（省略時は ~/.saiverse/user_data/database/saiverse.db）",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="スキーマ差分がなくてもマイグレーションを実行する",
+    )
     args = parser.parse_args()
-    
-    migrate_database_in_place(args.db)
+
+    db_path = args.db or str(default_db_path())
+    logging.info(f"対象データベース: {db_path}")
+
+    if not args.force and not needs_migration(db_path):
+        logging.info("スキーマに変更はありません。マイグレーションは不要です。")
+    else:
+        migrate_database_in_place(db_path)

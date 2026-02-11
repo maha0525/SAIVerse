@@ -1166,7 +1166,8 @@ export default function Home() {
                                                     {msg.errorCode === 'server_error' && '🔧'}
                                                     {msg.errorCode === 'empty_response' && '📭'}
                                                     {msg.errorCode === 'authentication' && '🔑'}
-                                                    {(!msg.errorCode || msg.errorCode === 'unknown' || !['rate_limit', 'timeout', 'safety_filter', 'server_error', 'empty_response', 'authentication'].includes(msg.errorCode)) && '⚠️'}
+                                                    {msg.errorCode === 'payment' && '💳'}
+                                                    {(!msg.errorCode || msg.errorCode === 'unknown' || !['rate_limit', 'timeout', 'safety_filter', 'server_error', 'empty_response', 'authentication', 'payment'].includes(msg.errorCode)) && '⚠️'}
                                                 </span>
                                                 <span className={styles.errorMessage}>{msg.content}</span>
                                             </div>

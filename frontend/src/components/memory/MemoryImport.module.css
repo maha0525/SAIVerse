@@ -723,3 +723,15 @@
     border-color: #cbd5e1;
     color: #1f2937;
 }
+
+:global([data-theme="light"]) .result.success {
+    background-color: #f0fdf4;
+    border-color: #86efac;
+    color: #166534;
+}
+
+:global([data-theme="light"]) .result.error {
+    background-color: #fef2f2;
+    border-color: #fca5a5;
+    color: #991b1b;
+}
