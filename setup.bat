@@ -25,7 +25,7 @@ echo.
 echo [SETUP] Node.js not found. Attempting auto-install...
 where winget >nul 2>nul
 if %errorlevel% neq 0 (
-    echo [ERROR] Could not auto-install Node.js (winget not available).
+    echo [ERROR] Could not auto-install Node.js. winget is not available.
     echo   Please install manually from https://nodejs.org/
     pause
     exit /b 1
