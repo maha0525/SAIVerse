@@ -1,5 +1,4 @@
 @echo off
-chcp 65001 >nul 2>nul
 setlocal enabledelayedexpansion
 
 echo ========================================
@@ -9,56 +8,56 @@ echo.
 
 REM --- 1. Check venv exists ---
 if not exist ".venv\Scripts\activate.bat" (
-    echo [ERROR] .venv が見つかりません。先に setup.bat を実行してください。
+    echo [ERROR] .venv not found. Please run setup.bat first.
     pause
     exit /b 1
 )
 
-REM --- 2. コードの更新 ---
+REM --- 2. Update code ---
 set CODE_UPDATED=0
 where git >nul 2>nul
 if %errorlevel% equ 0 (
     if exist ".git" (
-        echo [UPDATE] git pull で最新のコードを取得中...
+        echo [UPDATE] Fetching latest code with git pull...
         git pull
         if !errorlevel! neq 0 (
             echo.
-            echo [WARN] git pull に失敗しました。
-            echo   マージの競合がある場合は手動で解決してください。
-            echo   続行しますか？ (Ctrl+C で中断)
+            echo [WARN] git pull failed.
+            echo   If there are merge conflicts, please resolve them manually.
+            echo   Press any key to continue, or Ctrl+C to abort.
             pause
         ) else (
-            echo [OK] コードの更新完了
+            echo [OK] Code updated
             set CODE_UPDATED=1
         )
         goto :code_update_done
     )
 )
 
-REM git が使えない場合: GitHub から自動ダウンロードするか確認
-echo [INFO] git が利用できません。
+REM git not available: offer GitHub download
+echo [INFO] git is not available.
 echo.
-echo   コードの更新方法を選択してください:
-echo     1. GitHub から自動ダウンロード (推奨)
-echo     2. スキップ (既に手動でファイルを更新済みの場合)
+echo   Choose how to update the code:
+echo     1. Download from GitHub (recommended)
+echo     2. Skip (if you already updated files manually)
 echo.
-set /p UPDATE_CHOICE="選択 (1 or 2): "
+set /p UPDATE_CHOICE="Choice (1 or 2): "
 if "!UPDATE_CHOICE!"=="1" (
     echo.
-    echo [UPDATE] GitHub からコードをダウンロード中...
+    echo [UPDATE] Downloading from GitHub...
     powershell -ExecutionPolicy Bypass -File scripts\update_from_github.ps1
     if !errorlevel! neq 0 (
-        echo [ERROR] ダウンロードに失敗しました。
-        echo   手動で zip をダウンロードして上書きしてください:
+        echo [ERROR] Download failed.
+        echo   Please download and extract manually:
         echo   https://github.com/maha0525/SAIVerse/archive/refs/heads/main.zip
         echo.
-        echo   続行しますか？ (Ctrl+C で中断)
+        echo   Press any key to continue, or Ctrl+C to abort.
         pause
     ) else (
         set CODE_UPDATED=1
     )
 ) else (
-    echo [INFO] コードの更新をスキップしました。
+    echo [INFO] Skipped code update.
 )
 
 :code_update_done
@@ -68,87 +67,85 @@ echo.
 call .venv\Scripts\activate.bat
 
 REM --- 4. pip install ---
-echo [UPDATE] Pythonパッケージを更新中...
+echo [UPDATE] Updating Python packages...
 python -m pip install --upgrade pip >nul 2>nul
 pip install -r requirements.txt
 if %errorlevel% neq 0 (
-    echo [ERROR] pip install に失敗しました。
+    echo [ERROR] pip install failed.
     pause
     exit /b 1
 )
-echo [OK] Pythonパッケージの更新完了
+echo [OK] Python packages updated
 
 REM --- 5. Database migration ---
 set SAIVERSE_DB=%USERPROFILE%\.saiverse\user_data\database\saiverse.db
 if exist "%SAIVERSE_DB%" (
     echo.
-    echo [UPDATE] データベーススキーマを更新中...
+    echo [UPDATE] Updating database schema...
     python database\migrate.py --db "%SAIVERSE_DB%"
     if !errorlevel! neq 0 (
-        echo [WARN] データベースの更新に失敗しました。
-        echo   ログを確認してください。
+        echo [WARN] Database update failed. Check logs for details.
     ) else (
-        echo [OK] データベーススキーマの更新完了
+        echo [OK] Database schema updated
     )
 ) else (
     echo.
-    echo [INFO] データベースが見つかりません。初回セットアップが必要です。
-    echo   setup.bat を実行してください。
+    echo [INFO] Database not found. Initial setup is required.
+    echo   Please run setup.bat first.
     pause
     exit /b 1
 )
 
 REM --- 6. Import playbooks ---
 echo.
-echo [UPDATE] Playbook を更新中...
+echo [UPDATE] Updating playbooks...
 python scripts\import_all_playbooks.py --force
 if %errorlevel% neq 0 (
-    echo [WARN] Playbook の更新に失敗しました。
+    echo [WARN] Playbook update failed.
 ) else (
-    echo [OK] Playbook の更新完了
+    echo [OK] Playbooks updated
 )
 
 REM --- 7. Frontend update ---
 where node >nul 2>nul
 if %errorlevel% equ 0 (
     echo.
-    echo [UPDATE] フロントエンドパッケージを更新中...
+    echo [UPDATE] Updating frontend packages...
     pushd frontend
     call npm install
     if !errorlevel! neq 0 (
-        echo [WARN] npm install に失敗しました。
+        echo [WARN] npm install failed.
         popd
     ) else (
         popd
-        echo [OK] フロントエンドパッケージの更新完了
+        echo [OK] Frontend packages updated
     )
 ) else (
     echo.
-    echo [WARN] Node.js が見つかりません。フロントエンドの更新をスキップします。
-    echo   https://nodejs.org/ からインストールしてください。
+    echo [WARN] Node.js not found. Skipping frontend update.
+    echo   Please install from https://nodejs.org/
 )
 
 REM --- 8. Check for new .env variables ---
 echo.
 if exist ".env.example" (
     if exist ".env" (
-        echo [INFO] .env.example に新しい設定項目が追加されている可能性があります。
-        echo   .env.example と .env を比較して、必要な項目を追加してください。
+        echo [INFO] New settings may have been added to .env.example.
+        echo   Please compare .env.example with your .env and add any missing entries.
     )
 )
 
 REM --- 9. Complete ---
 echo.
 echo ========================================
-echo   アップデート完了!
+echo   Update Complete!
 echo ========================================
 echo.
-echo 起動方法:
-echo   start.bat をダブルクリック
+echo To start SAIVerse:
+echo   Double-click start.bat
 echo.
-echo 注意:
-echo   - .env.example に新しい設定項目が追加されている場合があります。
-echo     お手元の .env と比較して、必要な項目を追加してください。
-echo   - 問題が発生した場合は %USERPROFILE%\.saiverse\user_data\database\ にバックアップがあります。
+echo Note:
+echo   - Check .env.example for any new settings and add them to your .env.
+echo   - If something goes wrong, backups are in %USERPROFILE%\.saiverse\user_data\database\
 echo.
 pause

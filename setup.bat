@@ -1,5 +1,4 @@
 @echo off
-chcp 65001 >nul 2>nul
 setlocal enabledelayedexpansion
 
 echo ========================================
@@ -10,9 +9,9 @@ echo.
 REM --- 1. Python check ---
 where python >nul 2>nul
 if %errorlevel% neq 0 (
-    echo [ERROR] Python が見つかりません。
-    echo   https://www.python.org/downloads/ からインストールしてください。
-    echo   インストール時に "Add Python to PATH" にチェックを入れてください。
+    echo [ERROR] Python not found.
+    echo   Please install from https://www.python.org/downloads/
+    echo   Make sure to check "Add Python to PATH" during installation.
     pause
     exit /b 1
 )
@@ -23,18 +22,18 @@ REM --- 2. Node.js check & auto-install ---
 where node >nul 2>nul
 if %errorlevel% equ 0 goto :node_found
 echo.
-echo [SETUP] Node.js が見つかりません。自動インストールを試みます...
+echo [SETUP] Node.js not found. Attempting auto-install...
 where winget >nul 2>nul
 if %errorlevel% neq 0 (
-    echo [ERROR] Node.js の自動インストールに失敗しました。
-    echo   https://nodejs.org/ から手動でインストールしてください。
+    echo [ERROR] Could not auto-install Node.js (winget not available).
+    echo   Please install manually from https://nodejs.org/
     pause
     exit /b 1
 )
 winget install OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements
 if %errorlevel% neq 0 (
-    echo [ERROR] Node.js の自動インストールに失敗しました。
-    echo   https://nodejs.org/ から手動でインストールしてください。
+    echo [ERROR] Node.js auto-install failed.
+    echo   Please install manually from https://nodejs.org/
     pause
     exit /b 1
 )
@@ -42,13 +41,13 @@ REM Add default install path to current session
 set "PATH=%PATH%;C:\Program Files\nodejs"
 where node >nul 2>nul
 if %errorlevel% neq 0 (
-    echo [OK] Node.js をインストールしました。
-    echo   PATH を反映するため、このウィンドウを閉じて setup.bat を再実行してください。
+    echo [OK] Node.js installed.
+    echo   Please close this window and run setup.bat again to refresh PATH.
     pause
     exit /b 0
 )
 for /f "tokens=*" %%v in ('node --version') do set NODE_VERSION=%%v
-echo [OK] Node.js %NODE_VERSION% をインストールしました
+echo [OK] Node.js %NODE_VERSION% installed
 goto :node_done
 
 :node_found
@@ -60,16 +59,16 @@ echo [OK] Node.js %NODE_VERSION%
 REM --- 3. Create venv if not exists ---
 if not exist ".venv" (
     echo.
-    echo [SETUP] Python仮想環境を作成中...
+    echo [SETUP] Creating Python virtual environment...
     python -m venv .venv
     if %errorlevel% neq 0 (
-        echo [ERROR] 仮想環境の作成に失敗しました。
+        echo [ERROR] Failed to create virtual environment.
         pause
         exit /b 1
     )
-    echo [OK] .venv を作成しました
+    echo [OK] Created .venv
 ) else (
-    echo [OK] .venv は既に存在します
+    echo [OK] .venv already exists
 )
 
 REM --- 4. Activate venv ---
@@ -77,98 +76,98 @@ call .venv\Scripts\activate.bat
 
 REM --- 5. pip install ---
 echo.
-echo [SETUP] Pythonパッケージをインストール中...
+echo [SETUP] Installing Python packages...
 python -m pip install --upgrade pip >nul 2>nul
 pip install -r requirements.txt
 if %errorlevel% neq 0 (
-    echo [ERROR] pip install に失敗しました。
+    echo [ERROR] pip install failed.
     pause
     exit /b 1
 )
-echo [OK] Pythonパッケージのインストール完了
+echo [OK] Python packages installed
 
 REM --- 6. npm install ---
 echo.
-echo [SETUP] フロントエンドパッケージをインストール中...
+echo [SETUP] Installing frontend packages...
 pushd frontend
 call npm install
 if %errorlevel% neq 0 (
-    echo [ERROR] npm install に失敗しました。
+    echo [ERROR] npm install failed.
     popd
     pause
     exit /b 1
 )
 popd
-echo [OK] フロントエンドパッケージのインストール完了
+echo [OK] Frontend packages installed
 
 REM --- 7. Database seed (only if not exists) ---
 set SAIVERSE_DB=%USERPROFILE%\.saiverse\user_data\database\saiverse.db
 if not exist "%SAIVERSE_DB%" (
     echo.
-    echo [SETUP] データベースを初期化中...
+    echo [SETUP] Initializing database...
     python database\seed.py --force
     if %errorlevel% neq 0 (
-        echo [ERROR] データベースの初期化に失敗しました。
+        echo [ERROR] Database initialization failed.
         pause
         exit /b 1
     )
-    echo [OK] データベースの初期化完了
+    echo [OK] Database initialized
 ) else (
-    echo [OK] データベースは既に存在します
+    echo [OK] Database already exists
 )
 
 REM --- 8. Create expansion_data directory ---
 if not exist "expansion_data" (
     mkdir expansion_data
-    echo [OK] expansion_data を作成しました（拡張パック配置用）
+    echo [OK] Created expansion_data directory
 ) else (
-    echo [OK] expansion_data は既に存在します
+    echo [OK] expansion_data already exists
 )
 
 REM --- 9. Create .env from example if not exists ---
 if not exist ".env" (
     echo.
-    echo [SETUP] .env ファイルを作成中...
+    echo [SETUP] Creating .env file...
     copy .env.example .env >nul
-    echo [OK] .env を作成しました
-    echo   APIキーの設定は初回起動時のチュートリアルで行えます。
+    echo [OK] Created .env
+    echo   API keys can be configured in the first-run tutorial.
 ) else (
-    echo [OK] .env は既に存在します
+    echo [OK] .env already exists
 )
 
 REM --- 10. SearXNG setup ---
 echo.
-echo [SETUP] SearXNG (Web検索エンジン) をセットアップ中...
+echo [SETUP] Setting up SearXNG (web search engine)...
 powershell -ExecutionPolicy Bypass -File scripts\setup_searxng.ps1
 if %errorlevel% neq 0 (
-    echo [WARN] SearXNG のセットアップに失敗しましたが、Web検索なしでも動作します。
+    echo [WARN] SearXNG setup failed. Web search will be unavailable, but the app still works.
 ) else (
-    echo [OK] SearXNG のセットアップ完了
+    echo [OK] SearXNG setup complete
 )
 
 REM --- 11. Pre-download embedding model ---
 echo.
-echo [SETUP] 埋め込みモデルをダウンロード中 (初回のみ、数分かかります)...
+echo [SETUP] Downloading embedding model (first time only, may take a few minutes)...
 python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-m3')"
 if %errorlevel% neq 0 (
-    echo [WARN] 埋め込みモデルのダウンロードに失敗しましたが、初回起動時に再試行されます。
+    echo [WARN] Embedding model download failed. It will retry on first launch.
 ) else (
-    echo [OK] 埋め込みモデルのダウンロード完了
+    echo [OK] Embedding model downloaded
 )
 
 REM --- 12. Complete ---
 echo.
 echo ========================================
-echo   セットアップ完了!
+echo   Setup Complete!
 echo ========================================
 echo.
-echo 起動方法:
-echo   start.bat をダブルクリック
-echo   または以下のコマンドを実行:
+echo To start SAIVerse:
+echo   Double-click start.bat
+echo   Or run these commands:
 echo     .venv\Scripts\activate
 echo     python main.py city_a
-echo     (別ターミナルで) cd frontend ^&^& npm run dev
+echo     (in another terminal) cd frontend ^&^& npm run dev
 echo.
-echo ブラウザで http://localhost:3000 を開いてください。
+echo Then open http://localhost:3000 in your browser.
 echo.
 pause
