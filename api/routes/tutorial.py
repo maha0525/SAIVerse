@@ -114,9 +114,18 @@ PROVIDER_ENV_KEYS = {
 
 
 def _is_env_key_set(env_key: str) -> bool:
-    """Check if an environment variable is set and non-empty."""
-    value = os.environ.get(env_key, "")
-    return bool(value.strip())
+    """Check if an environment variable is set and non-empty.
+
+    Returns False for common placeholder patterns from .env.example
+    (e.g., 'sk-...', 'AIza...', 'nvapi-...', 'xai-...').
+    """
+    value = os.environ.get(env_key, "").strip()
+    if not value:
+        return False
+    # Reject common placeholder patterns (prefix + only dots)
+    if value.endswith("...") and len(value) < 20:
+        return False
+    return True
 
 
 def _is_provider_available(provider: str, api_key_env: Optional[str] = None) -> bool:

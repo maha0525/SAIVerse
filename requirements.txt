@@ -12,6 +12,8 @@ python-dotenv==1.1.1
 requests==2.32.4
 SQLAlchemy==2.0.41
 uvicorn==0.35.0
+python-multipart>=0.0.9
+tzdata
 
 # SAIMemory embeddings
 fastembed>=0.7.3

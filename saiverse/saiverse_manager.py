@@ -958,7 +958,14 @@ class SAIVerseManager(
         self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None
     ) -> Tuple[bool, str, Optional[str], Optional[str]]:
         """Creates a new AI and their private room."""
-        return self.admin.create_ai(name, system_prompt, home_city_id, custom_ai_id)
+        result = self.admin.create_ai(name, system_prompt, home_city_id, custom_ai_id)
+        success = result[0]
+        if success:
+            # Reload buildings from DB to ensure in-memory list is consistent.
+            # _create_persona() appends to self.buildings manually, but this
+            # defensive reload guarantees the list matches the DB state.
+            self._reload_buildings()
+        return result
 
     def update_ai(
         self,

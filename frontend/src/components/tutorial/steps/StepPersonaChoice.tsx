@@ -71,6 +71,7 @@ export default function StepPersonaChoice({
                     onPersonaCreated(personaId, roomId);
                     setShowPersonaWizard(false);
                 }}
+                embedded
             />
         </div>
     );

@@ -10,6 +10,8 @@ interface PersonaWizardProps {
     isOpen: boolean;
     onClose: () => void;
     onComplete?: (personaId: string, roomId: string) => void;
+    /** When true, hides "チャットする" button to prevent page reload (used inside TutorialWizard). */
+    embedded?: boolean;
 }
 
 interface City {
@@ -19,7 +21,7 @@ interface City {
 
 type Step = 1 | 2 | 3;
 
-export default function PersonaWizard({ isOpen, onClose, onComplete }: PersonaWizardProps) {
+export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }: PersonaWizardProps) {
     const [step, setStep] = useState<Step>(1);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -253,16 +255,18 @@ export default function PersonaWizard({ isOpen, onClose, onComplete }: PersonaWi
             <CheckCircle size={64} className={styles.successIcon} />
             <h2 className={styles.completeTitle}>ペルソナを作成しました</h2>
             <p className={styles.completeSubtitle}>
-                {name} の部屋が作成されました。チャットを始めましょう！
+                {name} の部屋が作成されました。{embedded ? 'セットアップを続けましょう！' : 'チャットを始めましょう！'}
             </p>
             <div className={styles.completeActions}>
-                <button className={styles.primaryButton} onClick={goToRoom}>
-                    <MessageSquare size={18} />
-                    チャットを始める
-                </button>
-                <button className={styles.secondaryButton} onClick={handleComplete}>
-                    <Settings size={18} />
-                    後で設定する
+                {!embedded && (
+                    <button className={styles.primaryButton} onClick={goToRoom}>
+                        <MessageSquare size={18} />
+                        チャットを始める
+                    </button>
+                )}
+                <button className={embedded ? styles.primaryButton : styles.secondaryButton} onClick={handleComplete}>
+                    {embedded ? <ArrowRight size={18} /> : <Settings size={18} />}
+                    {embedded ? 'セットアップに戻る' : '後で設定する'}
                 </button>
             </div>
             {error && <p className={styles.error}>{error}</p>}

@@ -112,7 +112,9 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 ### 前提条件
 
 下記のソフトをダウンロード&インストールしてください。
-- [Python 3.12](https://www.python.org/downloads/release/python-31212/)（3.11, 3.13も可。3.14等の最新版はパッケージ未対応のためNG）
+- [Python 3.12](https://www.python.org/downloads/release/python-31210/)（3.11, 3.13も可。3.14等の最新版はパッケージ未対応のためNG）
+  - リンク先ページを下にスクロールし、**Windows**: `Windows installer (64-bit)`、**Mac**: `macOS 64-bit universal2 installer` をダウンロードしてください**（目立つボタンの「Download Python install manager」ではありません）**
+  - **重要**: インストーラー実行時に「**Add python.exe to PATH**」にチェックを入れてください（デフォルトではオフ）。チェックを入れないとsetup.bat実行時にエラーになります
 - [Node.js 18以上](https://nodejs.org/)（未インストールの場合、setup.batが自動でインストールします）
 - できれば[Git](https://git-scm.com/)（これはなくても動きます）
 
@@ -147,6 +149,27 @@ git clone https://github.com/maha0525/SAIVerse.git
 
 ### 終了
 出てきた各ウィンドウでCtrl+Cを押下すると終了できます。画面が落ち着いたらウィンドウを閉じてください。
+
+<details>
+<summary>手動でバックエンドを起動する場合</summary>
+
+start.batを使わずに手動で起動する場合は、先に仮想環境を有効化してください。
+
+**Windows (コマンドプロンプト):**
+```
+.venv\Scripts\activate
+python main.py city_a
+```
+
+**Windows (PowerShell):**
+```
+.venv\Scripts\Activate.ps1
+python main.py city_a
+```
+
+仮想環境を有効化しないと `No module named` エラーが発生します。
+
+</details>
 
 </details>
 

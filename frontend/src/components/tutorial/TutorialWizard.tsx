@@ -126,6 +126,7 @@ export default function TutorialWizard({
                 autoConfiguredProvider: '',
                 autoConfiguredAssignments: [],
                 autoConfigureWarnings: [],
+                chronicleEnabled: false,
             });
             loadInitialData();
         }

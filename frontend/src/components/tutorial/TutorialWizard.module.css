@@ -20,6 +20,7 @@
     max-height: 90vh;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
 }
 
@@ -134,7 +135,7 @@
     flex: 1;
     overflow-y: auto;
     padding: 2rem;
-    min-height: 300px;
+    min-height: 0;
 }
 
 /* Error message */
