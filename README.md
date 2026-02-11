@@ -112,8 +112,8 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 ### 前提条件
 
 下記のソフトをダウンロード&インストールしてください。
-- [Python 3.11以上](https://www.python.org/downloads/)
-- [Node.js 18以上](https://nodejs.org/)
+- [Python 3.12](https://www.python.org/downloads/release/python-31212/)（3.11, 3.13も可。3.14等の最新版はパッケージ未対応のためNG）
+- [Node.js 18以上](https://nodejs.org/)（未インストールの場合、setup.batが自動でインストールします）
 - できれば[Git](https://git-scm.com/)（これはなくても動きます）
 
 <details open>
