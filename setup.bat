@@ -19,16 +19,43 @@ if %errorlevel% neq 0 (
 for /f "tokens=*" %%v in ('python --version 2^>^&1') do set PY_VERSION=%%v
 echo [OK] %PY_VERSION%
 
-REM --- 2. Node.js check ---
+REM --- 2. Node.js check & auto-install ---
 where node >nul 2>nul
+if %errorlevel% equ 0 goto :node_found
+echo.
+echo [SETUP] Node.js が見つかりません。自動インストールを試みます...
+where winget >nul 2>nul
 if %errorlevel% neq 0 (
-    echo [ERROR] Node.js が見つかりません。
-    echo   https://nodejs.org/ からインストールしてください。
+    echo [ERROR] Node.js の自動インストールに失敗しました。
+    echo   https://nodejs.org/ から手動でインストールしてください。
     pause
     exit /b 1
 )
+winget install OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements
+if %errorlevel% neq 0 (
+    echo [ERROR] Node.js の自動インストールに失敗しました。
+    echo   https://nodejs.org/ から手動でインストールしてください。
+    pause
+    exit /b 1
+)
+REM Add default install path to current session
+set "PATH=%PATH%;C:\Program Files\nodejs"
+where node >nul 2>nul
+if %errorlevel% neq 0 (
+    echo [OK] Node.js をインストールしました。
+    echo   PATH を反映するため、このウィンドウを閉じて setup.bat を再実行してください。
+    pause
+    exit /b 0
+)
+for /f "tokens=*" %%v in ('node --version') do set NODE_VERSION=%%v
+echo [OK] Node.js %NODE_VERSION% をインストールしました
+goto :node_done
+
+:node_found
 for /f "tokens=*" %%v in ('node --version') do set NODE_VERSION=%%v
 echo [OK] Node.js %NODE_VERSION%
+
+:node_done
 
 REM --- 3. Create venv if not exists ---
 if not exist ".venv" (
