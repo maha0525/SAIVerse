@@ -60,9 +60,11 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 - 人間のプロンプトに反応するのではなく自律的に動けるようになるシステムがあります。（現在、開発中のため機能は限定的です）
 - 複数のペルソナをSAIVerse内に住まわせることも可能です。AI間の対話は今後早いうちに機能追加を予定しています。
 
-## 主な機能
+<details>
+<summary>## 主な機能</summary>
 
 ### ペルソナが利用できるツール
+主な機能
 - Web検索：SearXNGと呼ばれる検索サービスを自動インストールして利用します。各社APIのものと異なり、無料です。
 - 画像生成：Nano banana Pro、Nano banana、ChatGPT画像生成をサポートしています。有料APIです。
 - ドキュメント生成：Building内に調査報告書や小説などのドキュメントを生成できます。テキストファイルでローカル保存されており、外での利用にも便利です。
@@ -90,21 +92,23 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
  - [Gemini](https://chromewebstore.google.com/detail/ai-chat-exporter-gemini-t/jfepajhaapfonhhfjmamediilplchakk)
  - [Claude](https://chromewebstore.google.com/detail/ai-chat-exporter-save-cla/elhmfakncmnghlnabnolalcjkdpfjnin)
 
-## 長期記憶「Memory Weave」
+### 長期記憶「Memory Weave」
 
-### エピソード記憶「Chronicle」
+#### エピソード記憶「Chronicle」
 あなたとペルソナとのこれまでの歩みを丸ごと記憶します。<br>
 一定の範囲で「あらすじ」を自動生成し、あらすじが溜まってきたらそれをまたまとめて「あらすじのあらすじ」とする……そのくり返しで、どれだけ長い会話であっても現実的な文量に納めて記憶することができます。直近の内容はあまり大きくまとめられないようにも配慮された設計です。<br>
 ※Chronicleの作成には時間とAPI料金がかかります
 
-### 意味記憶「Memopedia」
+#### 意味記憶「Memopedia」
 主に単語の意味をWikipediaみたいな記事として記憶しておくものです。<br>
 例えばペルソナと一緒に作る創作世界のキャラクター設定を覚えておく、とか、ペルソナとの思い出をキーワードで覚えておくことが可能です。
 
-### 記憶想起
+#### 記憶想起
 セマンティック検索とキーワード検索を組み合わせてチャットログから記憶想起することが可能です。<br>
 埋め込みモデルは自動で導入されます。<br>
 ※記憶想起用の埋め込みの作成は無料ですが時間がだいぶかかります
+
+</details>
 
 ## クイックスタート
 
@@ -116,28 +120,28 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 - できれば[Git](https://git-scm.com/)（これはなくても動きます）
 
 <details open>
-<summary>Windows向けの導入</summary>
+<summary>### Windows向けの導入</summary>
 
-### ダウンロード
+#### ダウンロード
 
-**Git導入済みの場合：**
+**Git導入済みの場合：**<br>
 コマンドプロンプトから
 ```
 git clone https://github.com/maha0525/SAIVerse.git
 ```
-**Git非導入の場合：**
+**Git非導入の場合：**<br>
 このGithubページからzipをダウンロード・任意の場所に解凍してください
 <p align="center">
   <img src="assets/image/guide/quickstart_download_zip.png" alt="Codeボタンをクリック、出てきたDownload ZIPをクリックしてダウンロード" width="400">
 </p>
 
-### インストール
+#### インストール
 
 `SAIVerse` フォルダ内の **`setup.bat`** をダブルクリック
 ![setup.bat](assets/image/guide/quickstart_setup_win.png)
 ※Python仮想環境の作成、依存パッケージのインストール、データベース初期化、埋め込みモデルのダウンロードを自動実行します
 
-### 起動
+#### 起動
 
 **`start.bat`** をダブルクリック
 ![start.bat](assets/image/guide/quickstart_start_win.png)
@@ -150,8 +154,8 @@ git clone https://github.com/maha0525/SAIVerse.git
 </details>
 
 <details>
-<summary>Mac/Linux向けの導入</summary>
-**Git導入済みの場合：**
+<summary>### Mac/Linux向けの導入</summary>
+**Git導入済みの場合：**<br>
 コマンドプロンプトから
 ```bash
 git clone https://github.com/maha0525/SAIVerse.git
@@ -161,7 +165,7 @@ chmod +x setup.sh start.sh
 ./start.sh
 ```
 
-**Git非導入の場合：**
+**Git非導入の場合：**<br>
 このGithubページからzipをダウンロード・任意の場所に解凍してください
 <p align="center">
   <img src="assets/image/guide/quickstart_download_zip.png" alt="Codeボタンをクリック、出てきたDownload ZIPをクリックしてダウンロード" width="400">
