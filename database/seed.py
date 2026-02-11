@@ -1,8 +1,15 @@
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from datetime import datetime
+
+# Ensure project root is on sys.path so saiverse package is importable
+# (when run as `python database/seed.py`, sys.path[0] is database/ not project root)
+_project_root = str(Path(__file__).resolve().parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker

@@ -134,7 +134,8 @@ echo [OK] Frontend packages installed
 
 REM --- 7. Database seed (only if not exists) ---
 set SAIVERSE_DB=%USERPROFILE%\.saiverse\user_data\database\saiverse.db
-if not exist "%SAIVERSE_DB%" (
+set SAIVERSE_DB_LEGACY=database\data\saiverse.db
+if not exist "%SAIVERSE_DB%" if not exist "%SAIVERSE_DB_LEGACY%" (
     echo.
     echo [SETUP] Initializing database...
     python database\seed.py --force
