@@ -1096,6 +1096,7 @@ export default function Home() {
             onTouchMove={handleTouchMove}
         >
             <Sidebar
+                refreshTrigger={backendConnected}
                 onMove={(buildingId?: string) => {
                     if (!buildingId) return;
                     setCurrentBuildingId(buildingId);
