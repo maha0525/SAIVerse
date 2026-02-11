@@ -15,7 +15,7 @@ import TutorialWizard from '@/components/tutorial/TutorialWizard';
 import SaiverseLink from '@/components/SaiverseLink';
 import ItemModal from '@/components/ItemModal';
 import ContextPreviewModal, { ContextPreviewData } from '@/components/ContextPreviewModal';
-import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle } from 'lucide-react';
+import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
 
 // Allow className on HTML elements used by thinking blocks (<details>, <div>, <summary>)
@@ -263,6 +263,17 @@ export default function Home() {
     // Startup warnings
     const [startupWarnings, setStartupWarnings] = useState<string[]>([]);
     const [showStartupWarnings, setShowStartupWarnings] = useState(false);
+
+    // Update system
+    const [app_state_version, setAppStateVersion] = useState('');
+    const [updateAvailable, setUpdateAvailable] = useState<{version: string; url: string} | null>(null);
+    const [isUpdating, setIsUpdating] = useState(() => {
+        if (typeof window !== 'undefined') {
+            return sessionStorage.getItem('saiverse_updating') === 'true';
+        }
+        return false;
+    });
+    const updatingTargetVersion = useRef<string>('');
 
     // Toast notifications
     const [toasts, setToasts] = useState<{id: string; content: string}[]>([]);
@@ -579,6 +590,22 @@ export default function Home() {
                 }
             })
             .catch(err => console.error('Failed to fetch startup warnings', err));
+
+        // Check for updates
+        fetch('/api/system/version')
+            .then(res => res.ok ? res.json() : null)
+            .then(data => {
+                if (data?.version) {
+                    setAppStateVersion(data.version);
+                }
+                if (data?.update_available) {
+                    setUpdateAvailable({
+                        version: data.latest_version,
+                        url: data.latest_release_url || '',
+                    });
+                }
+            })
+            .catch(() => { /* ignore - backend may not support this endpoint yet */ });
     }, []);
 
     // Polling for new messages (schedule-triggered persona speech, etc.)
@@ -639,14 +666,49 @@ export default function Home() {
                     // Refresh data after reconnection
                     fetchHistory();
                     fetchBuildingInfo();
+
+                    // If we were updating, show completion toast
+                    if (isUpdating) {
+                        setIsUpdating(false);
+                        sessionStorage.removeItem('saiverse_updating');
+                        const toastId = `update-complete-${Date.now()}`;
+                        setToasts(prev => [...prev, { id: toastId, content: 'Update complete! Application has been restarted.' }]);
+                        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
+                    }
                 }
             } catch {
                 // Still disconnected
             }
-        }, 10000);
+        }, isUpdating ? 5000 : 10000); // Poll faster during update
 
         return () => clearInterval(reconnectInterval);
-    }, [backendConnected]);
+    }, [backendConnected, isUpdating]);
+
+    const handleTriggerUpdate = async () => {
+        if (!updateAvailable) return;
+        const confirmed = window.confirm(
+            `Update to v${updateAvailable.version}?\n\nThe application will restart automatically. This may take a few minutes.`
+        );
+        if (!confirmed) return;
+
+        try {
+            const res = await fetch('/api/system/update', { method: 'POST' });
+            if (res.ok) {
+                updatingTargetVersion.current = updateAvailable.version;
+                setIsUpdating(true);
+                sessionStorage.setItem('saiverse_updating', 'true');
+                setUpdateAvailable(null);
+            } else {
+                const toastId = `update-error-${Date.now()}`;
+                setToasts(prev => [...prev, { id: toastId, content: 'Failed to start update. Check backend logs.' }]);
+                setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
+            }
+        } catch {
+            const toastId = `update-error-${Date.now()}`;
+            setToasts(prev => [...prev, { id: toastId, content: 'Failed to start update. Backend may be unreachable.' }]);
+            setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
+        }
+    };
 
     const handleSendMessage = async () => {
         if ((!inputValue.trim() && attachments.length === 0) || loadingStatus) return;
@@ -1142,13 +1204,38 @@ export default function Home() {
                     </div>
                 </header>
 
-                {!backendConnected && (
+                {isUpdating && (
+                    <div className={styles.updatingBanner}>
+                        <Loader size={16} className={styles.spinIcon} />
+                        <div className={styles.updatingContent}>
+                            <div>Updating{updatingTargetVersion.current ? ` to v${updatingTargetVersion.current}` : ''}... Please wait.</div>
+                            <div>The application will restart automatically.</div>
+                        </div>
+                    </div>
+                )}
+
+                {!backendConnected && !isUpdating && (
                     <div className={styles.backendErrorBanner}>
                         <AlertTriangle size={16} />
                         <div className={styles.backendErrorContent}>
                             <div>Backend server is not running.</div>
                             <div>Please make sure the &quot;SAIVerse Backend&quot; window is open. This page will reconnect automatically.</div>
                         </div>
+                    </div>
+                )}
+
+                {updateAvailable && !isUpdating && (
+                    <div className={styles.updateAvailableBanner}>
+                        <ArrowUpCircle size={16} />
+                        <div className={styles.updateAvailableContent}>
+                            <div>New version available: v{updateAvailable.version} (current: v{app_state_version})</div>
+                        </div>
+                        <button
+                            className={styles.updateButton}
+                            onClick={handleTriggerUpdate}
+                        >
+                            Update
+                        </button>
                     </div>
                 )}
 

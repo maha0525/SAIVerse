@@ -59,6 +59,68 @@
     word-break: break-word;
 }
 
+.updateAvailableBanner {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.6rem 1rem;
+    background: #dbeafe;
+    border-bottom: 1px solid #3b82f6;
+    color: #1e3a5f;
+    font-size: 0.82rem;
+    line-height: 1.4;
+    flex-shrink: 0;
+}
+
+.updateAvailableContent {
+    flex: 1;
+    min-width: 0;
+}
+
+.updateButton {
+    background: #2563eb;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    padding: 0.3rem 0.8rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.updateButton:hover {
+    background: #1d4ed8;
+}
+
+.updatingBanner {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.6rem 1rem;
+    background: #fef3c7;
+    border-bottom: 1px solid #f59e0b;
+    color: #92400e;
+    font-size: 0.82rem;
+    line-height: 1.4;
+    flex-shrink: 0;
+}
+
+.updatingContent {
+    flex: 1;
+    min-width: 0;
+}
+
+.spinIcon {
+    animation: spin 1.5s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
 .startupWarningBanner {
     display: flex;
     align-items: flex-start;
@@ -669,6 +731,26 @@
     background: #450a0a;
     border-color: #dc2626;
     color: #fca5a5;
+}
+
+:global([data-theme="dark"]) .updateAvailableBanner {
+    background: #1e3a5f;
+    border-color: #3b82f6;
+    color: #93c5fd;
+}
+
+:global([data-theme="dark"]) .updateButton {
+    background: #3b82f6;
+}
+
+:global([data-theme="dark"]) .updateButton:hover {
+    background: #2563eb;
+}
+
+:global([data-theme="dark"]) .updatingBanner {
+    background: #422006;
+    border-color: #b45309;
+    color: #fbbf24;
 }
 
 :global([data-theme="dark"]) .startupWarningBanner {

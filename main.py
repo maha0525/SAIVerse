@@ -60,7 +60,15 @@ MODEL_CHOICES = [("None", "None")] + [(display_name, model_id) for model_id, dis
 logging.info("Loaded %d model choices with display names", len(MODEL_CHOICES))
 logging.debug("Sample model choices: %s", MODEL_CHOICES[:5])
 
-VERSION = time.strftime("%Y%m%d%H%M%S")  # 例: 20251008121530
+def _read_version() -> str:
+    """Read semantic version from VERSION file, fallback to timestamp."""
+    version_file = Path(__file__).parent / "VERSION"
+    try:
+        return version_file.read_text(encoding="utf-8").strip()
+    except (FileNotFoundError, OSError):
+        return time.strftime("%Y%m%d%H%M%S")
+
+VERSION = _read_version()
 
 
 
@@ -249,6 +257,8 @@ def main():
     app_state.set_model_choices(MODEL_CHOICES)
     app_state.set_chat_history_limit(CHAT_HISTORY_LIMIT)
     app_state.set_version(VERSION)
+    app_state.set_city_name(args.city_name)
+    app_state.set_project_dir(str(Path(__file__).parent.resolve()))
 
     # Unity Gateway の起動（オプション）
     unity_gateway_port = int(os.getenv("UNITY_GATEWAY_PORT", "8765"))

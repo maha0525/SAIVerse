@@ -19,6 +19,8 @@ manager: Optional["SAIVerseManager"] = None
 model_choices: List[Union[str, Tuple[str, str]]] = []
 chat_history_limit: int = 120
 version: str = ""
+city_name: str = ""
+project_dir: str = ""
 
 
 def bind_manager(instance: "SAIVerseManager") -> None:
@@ -43,3 +45,15 @@ def set_version(value: str) -> None:
     """Set the application version string."""
     global version
     version = value
+
+
+def set_city_name(value: str) -> None:
+    """Set the city name for the running instance."""
+    global city_name
+    city_name = value
+
+
+def set_project_dir(value: str) -> None:
+    """Set the project root directory path."""
+    global project_dir
+    project_dir = value

@@ -31,6 +31,10 @@ test_data/
 database/data/*
 !database/data/.gitkeep
 
+# Self-update temporary files
+.update_config.json
+self_update.log
+
 # Temporary files and work-in-progress
 temp/
 !temp/.gitkeep

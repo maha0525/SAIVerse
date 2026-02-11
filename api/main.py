@@ -8,7 +8,7 @@ api_router.include_router(user.router, prefix="/user", tags=["user"])
 api_router.include_router(info.router, prefix="/info", tags=["info"])
 api_router.include_router(people.router, prefix="/people", tags=["people"])
 
-from api.routes import admin, db_manager, world, media, phenomena, usage, tutorial, uri
+from api.routes import admin, db_manager, world, media, phenomena, usage, tutorial, uri, system
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
 api_router.include_router(db_manager.router, prefix="/db", tags=["db"])
 api_router.include_router(world.router, prefix="/world", tags=["world"])
@@ -17,4 +17,5 @@ api_router.include_router(phenomena.router, prefix="/phenomena", tags=["phenomen
 api_router.include_router(usage.router, prefix="/usage", tags=["usage"])
 api_router.include_router(tutorial.router, prefix="/tutorial", tags=["tutorial"])
 api_router.include_router(uri.router, prefix="/uri", tags=["uri"])
+api_router.include_router(system.router, prefix="/system", tags=["system"])
 
