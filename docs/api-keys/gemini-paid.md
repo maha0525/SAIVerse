@@ -24,30 +24,35 @@
 
 ## 3. 料金について
 
-### 主なモデルの料金（参考）
-| モデル | 入力 | 出力 |
-|--------|------|------|
-| Gemini 2.5 Pro | $1.25/1M tokens | $10.00/1M tokens |
-| Gemini 2.5 Flash | $0.075/1M tokens | $0.30/1M tokens |
-| Gemini 2.0 Flash | $0.10/1M tokens | $0.40/1M tokens |
+### 主なモデルの料金（参考・2026年2月時点）
+| モデル | 入力 | キャッシュ入力 | 出力 |
+|--------|------|---------------|------|
+| Gemini 3 Pro | $2.00/1M tokens | $0.20/1M tokens | $12.00/1M tokens |
+| Gemini 3 Flash | $0.50/1M tokens | $0.05/1M tokens | $3.00/1M tokens |
+| Gemini 2.5 Pro | $1.25/1M tokens | $0.125/1M tokens | $10.00/1M tokens |
+| Gemini 2.5 Flash | $0.30/1M tokens | $0.03/1M tokens | $2.50/1M tokens |
+| Gemini 2.5 Flash Lite | $0.10/1M tokens | $0.01/1M tokens | $0.40/1M tokens |
+
+> **注意**: Gemini 3 Pro / 2.5 Proは200Kトークンを超えるプロンプトで料金が上がります（入力・キャッシュ・出力とも約1.5〜2倍）。
 
 ### 特徴
 - **従量課金制**: 使った分だけ支払い
-- **キャッシュ割引**: 繰り返しコンテンツは割引
+- **キャッシュ割引**: 繰り返しコンテンツは割引（入力料金の10分の1）
 - **コンテキストキャッシュ**: 長いプロンプトの再利用でコスト削減
 
 ## 4. 利用可能なモデル
 
-- **Gemini 2.5 Pro**: 最新・最高性能（推奨）
+- **Gemini 3 Pro**: 最新・最高性能（推奨）
+- **Gemini 3 Flash**: 最新の高速モデル
+- **Gemini 2.5 Pro**: 高性能モデル
 - **Gemini 2.5 Flash**: 高速・コスト効率（軽量タスク向け）
-- **Gemini 2.0 Pro**: バランス型
+- **Gemini 2.5 Flash Lite**: 超軽量・超低価格版
 
 ## 5. レート制限（有料版）
 
-| 項目 | 制限 |
-|------|------|
-| リクエスト/分 | 2,000 RPM |
-| トークン/分 | 400万 TPM |
+モデルとTierによって変化します。AIStudio内でレート制限をご確認ください。
+https://aistudio.google.com/usage
+
 
 ## 環境変数
 

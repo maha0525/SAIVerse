@@ -110,19 +110,26 @@ export default function PersonaWizard({ isOpen, onClose, onComplete }: PersonaWi
                 }),
             });
 
+            const data = await res.json().catch(() => ({ detail: res.statusText }));
+
             if (!res.ok) {
-                const err = await res.json().catch(() => ({ detail: res.statusText }));
-                setError(err.detail || '不明なエラーが発生しました');
+                setError(data.detail || '不明なエラーが発生しました');
                 return;
             }
 
-            // Construct persona ID and room ID
-            const baseId = customId.trim() || name.toLowerCase().replace(/\s+/g, '_');
-            const personaId = `${baseId}_${cityName}`;
-            const roomId = `${baseId}_${cityName}_room`;
+            // Use IDs from API response (authoritative source)
+            const personaId = data.ai_id;
+            const roomId = data.room_id;
 
-            setCreatedPersonaId(personaId);
-            setCreatedRoomId(roomId);
+            if (!personaId || !roomId) {
+                // Fallback: reconstruct locally (should not happen with updated API)
+                const baseId = customId.trim() || name.trim().toLowerCase().replace(/\s+/g, '_');
+                setCreatedPersonaId(`${baseId}_${cityName}`);
+                setCreatedRoomId(`${baseId}_${cityName}_room`);
+            } else {
+                setCreatedPersonaId(personaId);
+                setCreatedRoomId(roomId);
+            }
             setStep(2);
         } catch (e) {
             console.error('Failed to create persona', e);

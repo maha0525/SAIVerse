@@ -18,8 +18,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 
 def import_initial_playbooks() -> None:
-    """Import all playbooks from sea/playbooks/public/ directory."""
-    playbooks_dir = Path(__file__).parent.parent / "sea" / "playbooks" / "public"
+    """Import all playbooks from builtin_data/playbooks/public/ directory."""
+    playbooks_dir = Path(__file__).parent.parent / "builtin_data" / "playbooks" / "public"
     if not playbooks_dir.exists():
         logging.warning(f"Playbooks directory not found: {playbooks_dir}")
         return

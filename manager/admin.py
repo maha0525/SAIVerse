@@ -663,21 +663,25 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
 
     def create_ai(
         self, name: str, system_prompt: str, home_city_id: int, custom_ai_id: Optional[str] = None
-    ) -> Tuple[bool, str]:
+    ) -> Tuple[bool, str, Optional[str], Optional[str]]:
         if home_city_id != self.state.city_id:
             return (
                 False,
                 "Creating personas in a different city is not supported. "
                 "Use dispatch to move personas between cities.",
+                None,
+                None,
             )
-        success, message = self._create_persona(name, system_prompt, custom_ai_id)
+        success, message, ai_id, room_id = self._create_persona(name, system_prompt, custom_ai_id)
         if success:
             return (
                 True,
                 f"AI '{name}' and their room created successfully. "
                 "A restart is required for the AI to become active.",
+                ai_id,
+                room_id,
             )
-        return False, message
+        return False, message, None, None
 
     def update_ai(
         self,

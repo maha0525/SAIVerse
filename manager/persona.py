@@ -239,7 +239,7 @@ class PersonaMixin:
 
     def _create_persona(
         self, name: str, system_prompt: str, custom_ai_id: Optional[str] = None
-    ) -> Tuple[bool, str]:
+    ) -> Tuple[bool, str, Optional[str], Optional[str]]:
         """
         Dynamically creates a new persona, their private room, and places them in it.
         This is triggered by an AI action.
@@ -261,7 +261,7 @@ class PersonaMixin:
                 .first()
             )
             if existing_ai:
-                return False, f"A persona named '{name}' already exists in this city."
+                return False, f"A persona named '{name}' already exists in this city.", None, None
 
             # Use custom ID if provided, otherwise auto-generate from name
             if custom_ai_id:
@@ -273,6 +273,8 @@ class PersonaMixin:
                 return (
                     False,
                     f"A persona with the ID '{new_ai_id}' already exists.",
+                    None,
+                    None,
                 )
 
             # Building ID based on AI ID
@@ -389,13 +391,13 @@ class PersonaMixin:
             self.persona_map[name] = new_ai_id
 
             db.commit()
-            return True, f"Persona '{name}' created successfully."
+            return True, f"Persona '{name}' created successfully.", new_ai_id, new_building_id
         except Exception as exc:
             db.rollback()
             logging.error(
                 "Failed to create new persona '%s': %s", name, exc, exc_info=True
             )
-            return False, f"An internal error occurred: {exc}"
+            return False, f"An internal error occurred: {exc}", None, None
         finally:
             db.close()
 
@@ -422,7 +424,7 @@ class PersonaMixin:
 
     def create_ai(self, name: str, system_prompt: str) -> str:
         """Creates a new AI and their private room, similar to _create_persona."""
-        success, message = self._create_persona(name, system_prompt)
+        success, message, _ai_id, _room_id = self._create_persona(name, system_prompt)
         if success:
             return (
                 f"AI '{name}' and their room created successfully. "

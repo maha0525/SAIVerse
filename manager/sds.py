@@ -61,10 +61,26 @@ class SDSMixin:
         except Exception as exc:
             logging.error("Failed to add HOST_AVATAR_IMAGE column to city table: %s", exc)
 
+    # SDS backoff constants
+    _SDS_BASE_INTERVAL = 30      # Normal polling interval (seconds)
+    _SDS_MAX_INTERVAL = 300      # Max backoff interval (5 minutes)
+    _SDS_BACKOFF_FACTOR = 2      # Exponential backoff multiplier
+
     def _sds_background_loop(self):
-        while not self.sds_stop_event.wait(30):
-            self._send_heartbeat()
+        interval = self._SDS_BASE_INTERVAL
+        consecutive_failures = 0
+        while not self.sds_stop_event.wait(interval):
+            success = self._send_heartbeat()
             self._update_cities_from_sds()
+            if success:
+                consecutive_failures = 0
+                interval = self._SDS_BASE_INTERVAL
+            else:
+                consecutive_failures += 1
+                interval = min(
+                    self._SDS_BASE_INTERVAL * (self._SDS_BACKOFF_FACTOR ** consecutive_failures),
+                    self._SDS_MAX_INTERVAL,
+                )
 
     def _register_with_sds(self):
         register_url = f"{self.sds_url}/register"
@@ -80,15 +96,24 @@ class SDSMixin:
         except requests.exceptions.RequestException as exc:
             logging.error("Could not register with SDS: %s. Will retry in the background.", exc)
 
-    def _send_heartbeat(self):
+    def _send_heartbeat(self) -> bool:
+        """Send heartbeat to SDS. Returns True on success, False on failure."""
         heartbeat_url = f"{self.sds_url}/heartbeat"
         payload = {"city_name": self.city_name}
         try:
             response = self.sds_session.post(heartbeat_url, json=payload, timeout=2)
             response.raise_for_status()
+            if self.sds_status != "Online":
+                logging.info("SDS heartbeat restored for %s", self.city_name)
             logging.debug("Heartbeat sent to SDS for %s", self.city_name)
+            return True
         except requests.exceptions.RequestException as exc:
-            logging.warning("Could not send heartbeat to SDS: %s", exc)
+            # First failure: WARNING, subsequent: DEBUG (avoid log flooding)
+            if self.sds_status == "Online":
+                logging.warning("Could not send heartbeat to SDS: %s", exc)
+            else:
+                logging.debug("Could not send heartbeat to SDS: %s", exc)
+            return False
 
     def _update_cities_from_sds(self):
         cities_url = f"{self.sds_url}/cities"
