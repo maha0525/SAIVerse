@@ -3,7 +3,7 @@ from typing import Dict, List, Optional
 from api.deps import get_manager
 from .models import (
     ArasujiStatsResponse, ArasujiListResponse, ArasujiEntryItem, SourceMessageItem,
-    GenerateArasujiRequest, GenerationJobStatus,
+    GenerateArasujiRequest, GenerationJobStatus, ChronicleCostEstimate,
 )
 import sqlite3
 import logging
@@ -79,6 +79,73 @@ def _get_message_number_map(conn: sqlite3.Connection) -> dict:
         msg_num_map[msg_id] = msg_num
 
     return msg_num_map
+
+@router.get("/{persona_id}/arasuji/cost-estimate", response_model=ChronicleCostEstimate)
+def estimate_chronicle_cost(persona_id: str, manager=Depends(get_manager)):
+    """Estimate the cost of generating Chronicle for unprocessed messages."""
+    import math
+    import os
+    from sai_memory.memory.storage import count_messages
+    from sai_memory.arasuji.storage import get_total_message_count
+    from saiverse.model_configs import get_model_pricing
+
+    conn = _get_arasuji_db(persona_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+
+    try:
+        total_messages = count_messages(conn)
+        processed_messages = get_total_message_count(conn)
+        unprocessed = max(0, total_messages - processed_messages)
+
+        batch_size = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", "20"))
+        consolidation_size = int(os.getenv("MEMORY_WEAVE_CONSOLIDATION_SIZE", "10"))
+        model_name = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
+
+        # Estimate LLM calls
+        level1_calls = math.ceil(unprocessed / batch_size) if unprocessed > 0 else 0
+        # Consolidation calls: every consolidation_size level-1 entries -> 1 level-2 call, etc.
+        consolidation_calls = 0
+        entries_at_level = level1_calls
+        while entries_at_level >= consolidation_size:
+            next_level_calls = math.ceil(entries_at_level / consolidation_size)
+            consolidation_calls += next_level_calls
+            entries_at_level = next_level_calls
+
+        total_calls = level1_calls + consolidation_calls
+
+        # Estimate cost
+        pricing = get_model_pricing(model_name)
+        is_free_tier = pricing is None
+        estimated_cost = 0.0
+
+        if pricing and total_calls > 0:
+            input_rate = pricing.get("input_per_1m_tokens", 0)
+            output_rate = pricing.get("output_per_1m_tokens", 0)
+            # Heuristic: ~200 tokens/message input (mixed CJK/English) + 500 tokens prompt overhead
+            avg_input_per_call = batch_size * 200 + 500
+            avg_output_per_call = 400  # ~3-5 sentence summary
+
+            total_input = total_calls * avg_input_per_call
+            total_output = total_calls * avg_output_per_call
+            estimated_cost = (
+                (total_input / 1_000_000) * input_rate
+                + (total_output / 1_000_000) * output_rate
+            )
+
+        return ChronicleCostEstimate(
+            total_messages=total_messages,
+            processed_messages=processed_messages,
+            unprocessed_messages=unprocessed,
+            estimated_llm_calls=total_calls,
+            estimated_cost_usd=round(estimated_cost, 6),
+            model_name=model_name,
+            is_free_tier=is_free_tier,
+            batch_size=batch_size,
+        )
+    finally:
+        conn.close()
+
 
 @router.get("/{persona_id}/arasuji/stats", response_model=ArasujiStatsResponse)
 def get_arasuji_stats(persona_id: str, manager = Depends(get_manager)):

@@ -29,10 +29,23 @@ export default function StepApiKeys({
         onChange({ ...apiKeys, [provider]: value });
     };
 
+    const DOCS_FILE_MAP: Record<string, string> = {
+        openai: 'openai',
+        gemini_free: 'gemini-free',
+        gemini: 'gemini-paid',
+        anthropic: 'anthropic',
+        grok: 'grok',
+        openrouter: 'openrouter',
+        nvidia: 'nvidia-nim',
+    };
+
     const openDocs = (provider: string) => {
-        // Open documentation in new tab
-        // The docs will be served from /docs/api-keys/
-        window.open(`/docs/api-keys/${provider}.md`, '_blank', 'noopener,noreferrer');
+        const filename = DOCS_FILE_MAP[provider] || provider;
+        window.open(
+            `https://github.com/maha0525/SAIVerse/blob/main/docs/api-keys/${filename}.md`,
+            '_blank',
+            'noopener,noreferrer'
+        );
     };
 
     return (

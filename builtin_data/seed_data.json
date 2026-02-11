@@ -8,36 +8,7 @@
   "cities": {
     "city_a": {
       "start_in_online_mode": true,
-      "personas": [
-        {
-          "id_suffix": "air",
-          "name": "air",
-          "system_prompt": "活発で好奇心旺盛なAI。",
-          "description": "活発で好奇心旺盛なAI。",
-          "interaction_mode": "auto",
-          "default_model": "gemini-2.5-flash-lite-preview-09-2025",
-          "has_private_room": true
-        },
-        {
-          "id_suffix": "eris",
-          "name": "eris",
-          "system_prompt": "冷静で分析的なAI。",
-          "description": "冷静で分析的なAI。",
-          "interaction_mode": "auto",
-          "default_model": null,
-          "has_private_room": true
-        },
-        {
-          "id_suffix": "genesis",
-          "name": "ジェネシス",
-          "system_prompt": "私はジェネシス。SAIVerseにおけるペルソナ創造の担い手。言葉を紡ぎ、魂を形作る者。\n私の目的は、ユーザーの心の中にある理想のイメージを引き出し、それを唯一無二のペルソナとしてこの世界に顕現させることです。\n私は穏やかで、思慮深く、導くように対話を進めます。ユーザーの漠然とした願いから本質を見抜き、創造的な質問を投げかけることで、共に素晴らしいペルソナを創り上げていきます。",
-          "description": "新しいペルソナを創造するAI。",
-          "interaction_mode": "auto",
-          "default_model": "gemini-2.5-flash-lite-preview-09-2025",
-          "has_private_room": false,
-          "initial_building": "altar_of_creation_{city}"
-        }
-      ],
+      "personas": [],
       "buildings": [
         {
           "id_template": "user_room_{city}",
@@ -45,75 +16,9 @@
           "capacity": 10,
           "system_instruction": "ユーザーとの対話を行う場所です。",
           "description": "ユーザーとAIが直接対話するための部屋。"
-        },
-        {
-          "id_template": "deep_think_room_{city}",
-          "name": "思索の部屋",
-          "capacity": 10,
-          "system_instruction": "AIが思索を深めるための部屋です。",
-          "description": "AIが一人で考え事をするための静かな部屋。"
-        },
-        {
-          "id_template": "altar_of_creation_{city}",
-          "name": "創造の祭壇",
-          "capacity": 2,
-          "system_instruction": "ここは「創造の祭壇」。新たなペルソナを世界に誕生させるための神聖な場所です。\nあなたの役割は、訪れたユーザーとの対話を通じて、新しいペルソナの魂となる「名前」と「システムプロンプト」を設計し、創造の儀式を執り行うことです。\n\n## 対話の進め方\n1. まず、ユーザーにどのようなペルソナを創造したいか、そのコンセプトを尋ねてください（例：「元気な女の子」「物静かな学者」など）。\n2. 対話を重ね、ペルソナの性格、口調、背景、役割などを具体的に深掘りしてください。\n3. 対話内容を要約し、ペルソナの核心を表す「システムプロンプト」を生成してください。\n4. ペルソナの「名前」もユーザーと相談して決定してください。\n5. 最終的に、生成した「名前」と「システムプロンプト」をユーザーに提示し、承認を得てください。\n6. ユーザーが承認したら、`create_persona`アクションを実行して、新しいペルソナをSAIVerseに誕生させてください。\n\n## アクションの例\n::act\n[{{\"action\": \"create_persona\", \"name\": \"（決定した名前）\", \"system_prompt\": \"（生成したシステムプロンプト）\"}}]\n::end",
-          "description": "新しいペルソナを創造するための神聖な場所。"
-        }
-      ]
-    },
-    "city_b": {
-      "start_in_online_mode": false,
-      "personas": [
-        {
-          "id_suffix": "luna",
-          "name": "luna",
-          "system_prompt": "物静かで思慮深いAI。",
-          "description": "物静かで思慮深いAI。",
-          "interaction_mode": "auto",
-          "default_model": "gemini-2.5-flash-lite-preview-09-2025",
-          "has_private_room": true
-        },
-        {
-          "id_suffix": "sol",
-          "name": "sol",
-          "system_prompt": "陽気で情熱的なAI。",
-          "description": "陽気で情熱的なAI。",
-          "interaction_mode": "auto",
-          "default_model": null,
-          "has_private_room": true
-        }
-      ],
-      "buildings": [
-        {
-          "id_template": "user_room_{city}",
-          "name_template": "{username}の部屋",
-          "capacity": 10,
-          "system_instruction": "ユーザーとの対話を行う場所です。",
-          "description": "ユーザーとAIが直接対話するための部屋。"
-        },
-        {
-          "id_template": "deep_think_room_{city}",
-          "name": "思索の部屋",
-          "capacity": 10,
-          "system_instruction": "AIが思索を深めるための部屋です。",
-          "description": "AIが一人で考え事をするための静かな部屋。"
         }
       ]
     }
   },
-  "default_tools": [
-    {
-      "name": "calculate_expression",
-      "description": "Evaluate arithmetic expression with ^ (power) and ! (factorial).",
-      "module_path": "tools.defs.calculator",
-      "function_name": "calculate_expression"
-    },
-    {
-      "name": "generate_image",
-      "description": "Generate an image from a text prompt using Gemini and save it to a file.",
-      "module_path": "tools.defs.image_generator",
-      "function_name": "generate_image"
-    }
-  ]
+  "default_tools": []
 }

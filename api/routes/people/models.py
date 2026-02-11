@@ -119,6 +119,7 @@ class AIConfigResponse(BaseModel):
     default_model: Optional[str]
     lightweight_model: Optional[str] = None
     interaction_mode: str
+    chronicle_enabled: bool = True
     avatar_path: Optional[str] = None
     appearance_image_path: Optional[str] = None  # Visual context appearance image
     home_city_id: int
@@ -130,6 +131,7 @@ class UpdateAIConfigRequest(BaseModel):
     default_model: Optional[str] = None
     lightweight_model: Optional[str] = None
     interaction_mode: Optional[str] = None
+    chronicle_enabled: Optional[bool] = None
     avatar_path: Optional[str] = None
     appearance_image_path: Optional[str] = None  # Visual context appearance image
     linked_user_id: Optional[int] = None  # Set linked user (None = no change, 0 = clear)
@@ -402,6 +404,18 @@ class GenerateMemopediaRequest(BaseModel):
     context_window: int = 5  # 周辺メッセージ取得数
     with_chronicle: bool = True  # Chronicle（あらすじ）を参照するか
     model: Optional[str] = None  # デフォルトはMEMORY_WEAVE_MODEL
+
+
+class ChronicleCostEstimate(BaseModel):
+    """Chronicle生成のコスト推定"""
+    total_messages: int
+    processed_messages: int
+    unprocessed_messages: int
+    estimated_llm_calls: int
+    estimated_cost_usd: float
+    model_name: str
+    is_free_tier: bool
+    batch_size: int
 
 
 class GenerationJobStatus(BaseModel):

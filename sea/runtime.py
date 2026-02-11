@@ -3045,9 +3045,9 @@ class SEARuntime:
                 "content": f"記憶を整理しています（{len(current_messages)}件 → {keep_count}件）...",
             })
 
-        # 2. Chronicle generation (only if Memory Weave is enabled)
+        # 2. Chronicle generation (only if Memory Weave is enabled AND per-persona toggle is on)
         memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
-        if memory_weave_enabled:
+        if memory_weave_enabled and self._is_chronicle_enabled_for_persona(persona):
             try:
                 self._generate_chronicle(persona, event_callback)
             except Exception as exc:
@@ -3071,6 +3071,19 @@ class SEARuntime:
                 "evicted": evict_count,
                 "kept": keep_count,
             })
+
+    def _is_chronicle_enabled_for_persona(self, persona) -> bool:
+        """Check per-persona Chronicle auto-generation toggle from DB."""
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id or not self.manager:
+            return True  # fallback: enabled
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            return ai.CHRONICLE_ENABLED if ai else True
+        finally:
+            db.close()
 
     def _generate_chronicle(
         self,
@@ -3359,7 +3372,7 @@ class SEARuntime:
                             else:
                                 # Case 3: no valid anchor — minimal load + Chronicle generation
                                 memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
-                                if memory_weave_enabled:
+                                if memory_weave_enabled and self._is_chronicle_enabled_for_persona(persona):
                                     try:
                                         LOGGER.info("[metabolism] Triggering Chronicle generation on anchor expiry")
                                         self._generate_chronicle(persona)
@@ -3697,6 +3710,11 @@ class SEARuntime:
         cache_enabled = cache_kwargs.get("enable_cache", False)
         cache_ttl = cache_kwargs.get("cache_ttl", "5m")
 
+        # Determine cache type (explicit for Anthropic, implicit for Gemini, etc.)
+        from saiverse.model_configs import get_cache_config
+        cache_config = get_cache_config(persona_model)
+        cache_type = cache_config.get("type", "implicit")
+
         if cache_enabled and pricing and pricing.get("cached_input_per_1m_tokens") is not None:
             # Best case: everything is a cache hit
             cost_best = calculate_cost(
@@ -3739,6 +3757,7 @@ class SEARuntime:
             "estimated_cost_worst_usd": round(cost_worst, 6),
             "cache_enabled": cache_enabled,
             "cache_ttl": cache_ttl if cache_enabled else None,
+            "cache_type": cache_type if cache_enabled else None,
             "pricing": pricing or {},
             "messages": annotated_messages,
         }

@@ -656,6 +656,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "DEFAULT_MODEL": ai.DEFAULT_MODEL,
                 "LIGHTWEIGHT_MODEL": ai.LIGHTWEIGHT_MODEL,
                 "INTERACTION_MODE": ai.INTERACTION_MODE,
+                "CHRONICLE_ENABLED": ai.CHRONICLE_ENABLED,
             }
         finally:
             db.close()
@@ -691,6 +692,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
         appearance_image_path: Optional[str] = None,
+        chronicle_enabled: Optional[bool] = None,
     ) -> str:
         db = self.SessionLocal()
         try:
@@ -789,6 +791,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             # Update appearance image path if provided
             if appearance_image_path is not None:
                 ai.APPEARANCE_IMAGE_PATH = appearance_image_path.strip() if appearance_image_path.strip() else None
+            # Update Chronicle auto-generation toggle
+            if chronicle_enabled is not None:
+                ai.CHRONICLE_ENABLED = chronicle_enabled
             db.commit()
 
             if ai_id in self.personas:

@@ -12,3 +12,9 @@
     z-index: 1000;
     padding: 1rem;
 }
+
+@media (max-width: 768px) {
+    .overlay {
+        padding: 0;
+    }
+}

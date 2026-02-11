@@ -136,6 +136,7 @@
     border-radius: 6px;
     font-size: 0.95rem;
     transition: border-color 0.2s;
+    box-sizing: border-box;
 }
 
 .field input:focus,
@@ -211,6 +212,7 @@
     .pane {
         flex-direction: column;
         gap: 1rem;
+        min-width: 0;
     }
 
     .list {
@@ -256,6 +258,7 @@
         padding-right: 0;
         padding-bottom: 2rem;
         flex: 1;
+        min-width: 0;
     }
 
     .tabs {

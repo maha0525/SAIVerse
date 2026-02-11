@@ -32,6 +32,7 @@ interface PersonaPreview {
     estimated_cost_worst_usd: number;
     cache_enabled: boolean;
     cache_ttl: string | null;
+    cache_type: string | null;
     pricing: Record<string, number>;
     messages: AnnotatedMessage[];
 }
@@ -168,7 +169,9 @@ function PersonaPreviewView({ persona }: { persona: PersonaPreview }) {
                 </div>
                 {persona.cache_enabled && (
                     <div className={styles.costNote}>
-                        キャッシュ{persona.cache_ttl === '1h' ? '(1時間)' : '(5分)'}有効 — 左: 全ヒット時 / 右: 全書き込み時
+                        {persona.cache_type === 'explicit'
+                            ? `キャッシュ${persona.cache_ttl === '1h' ? '(1時間)' : '(5分)'}有効 — 左: 全ヒット時 / 右: 全書き込み時`
+                            : 'キャッシュ(暗黙的)有効 — 左: 全ヒット時 / 右: キャッシュなし時'}
                     </div>
                 )}
                 {outputRate != null && outputRate > 0 && (

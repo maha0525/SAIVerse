@@ -305,12 +305,15 @@
 .cardFooter {
     align-self: flex-end;
     font-size: 0.7rem;
-    opacity: 0.6;
     margin-top: 0.2rem;
     display: flex;
     gap: 0.75rem;
     flex-wrap: wrap;
     align-items: center;
+}
+
+.cardFooter > span:not(.llmUsageWrap) {
+    opacity: 0.6;
 }
 
 .llmUsageWrap {
@@ -326,6 +329,12 @@
     font-size: 0.65rem;
     user-select: none;
     -webkit-tap-highlight-color: transparent;
+    opacity: 0.6;
+    transition: opacity 0.15s ease;
+}
+
+.llmUsage:hover {
+    opacity: 1;
 }
 
 .usageTooltip {
@@ -461,6 +470,18 @@
 
 :global([data-theme="light"]) .cardBody th {
     background: rgba(0, 0, 0, 0.05);
+}
+
+:global([data-theme="light"]) .llmUsage {
+    background: rgba(0, 0, 0, 0.08);
+    color: #374151;
+}
+
+:global([data-theme="light"]) .usageTooltip {
+    background: #ffffff;
+    border-color: #d1d5db;
+    color: #1f2937;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
 }
 
 :global([data-theme="dark"]) .user .card {

@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useRef } from 'react';
+import { createPortal } from 'react-dom';
 import styles from './ModalOverlay.module.css';
 
 interface ModalOverlayProps {
@@ -51,7 +52,7 @@ export default function ModalOverlay({ onClose, children, className }: ModalOver
     const handleTouchStart = (e: React.TouchEvent) => e.stopPropagation();
     const handleTouchMove = (e: React.TouchEvent) => e.stopPropagation();
 
-    return (
+    const overlay = (
         <div
             className={`${styles.overlay} ${className || ''}`}
             onMouseDown={handleMouseDown}
@@ -62,4 +63,11 @@ export default function ModalOverlay({ onClose, children, className }: ModalOver
             {children}
         </div>
     );
+
+    // Portal to document.body to escape any ancestor transforms
+    // (which break position:fixed containment)
+    if (typeof document !== 'undefined') {
+        return createPortal(overlay, document.body);
+    }
+    return overlay;
 }

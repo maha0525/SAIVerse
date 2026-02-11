@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from 'react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { ArrowLeft, RefreshCw } from 'lucide-react';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { ArrowLeft, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
 import styles from './page.module.css';
 
 interface UsageSummary {
@@ -78,6 +78,7 @@ export default function UsagePage() {
     const [days, setDays] = useState(30);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [legendExpanded, setLegendExpanded] = useState(false);
 
     const fetchData = async () => {
         setLoading(true);
@@ -251,6 +252,7 @@ export default function UsagePage() {
             <div className={styles.chartContainer}>
                 <h2 className={styles.chartTitle}>モデル別日次コスト</h2>
                 {chartData.data.length > 0 ? (
+                    <>
                     <ResponsiveContainer width="100%" height={400}>
                         <BarChart data={chartData.data}>
                             <CartesianGrid strokeDasharray="3 3" stroke="#444" />
@@ -274,7 +276,6 @@ export default function UsagePage() {
                                     name,
                                 ]}
                             />
-                            <Legend />
                             {chartData.models.map((model) => (
                                 <Bar
                                     key={model}
@@ -286,6 +287,41 @@ export default function UsagePage() {
                             ))}
                         </BarChart>
                     </ResponsiveContainer>
+                    {/* Custom Legend */}
+                    {chartData.models.length > 0 && (() => {
+                        const COLLAPSE_THRESHOLD = 5;
+                        const needsCollapse = chartData.models.length > COLLAPSE_THRESHOLD;
+                        const visibleModels = needsCollapse && !legendExpanded
+                            ? chartData.models.slice(0, COLLAPSE_THRESHOLD)
+                            : chartData.models;
+                        return (
+                            <div className={styles.legend}>
+                                <div className={styles.legendItems}>
+                                    {visibleModels.map((model) => (
+                                        <span key={model} className={styles.legendItem}>
+                                            <span
+                                                className={styles.legendSwatch}
+                                                style={{ background: getModelColor(model) }}
+                                            />
+                                            {model}
+                                        </span>
+                                    ))}
+                                </div>
+                                {needsCollapse && (
+                                    <button
+                                        className={styles.legendToggle}
+                                        onClick={() => setLegendExpanded(!legendExpanded)}
+                                    >
+                                        {legendExpanded
+                                            ? <><ChevronUp size={14} /> 折りたたむ</>
+                                            : <><ChevronDown size={14} /> 他 {chartData.models.length - COLLAPSE_THRESHOLD} モデルを表示</>
+                                        }
+                                    </button>
+                                )}
+                            </div>
+                        );
+                    })()}
+                    </>
                 ) : (
                     <div className={styles.noData}>
                         {loading ? '読み込み中...' : '使用データがありません'}

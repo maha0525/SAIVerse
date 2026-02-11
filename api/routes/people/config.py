@@ -31,6 +31,7 @@ def get_persona_config(persona_id: str, manager = Depends(get_manager)):
         default_model=details["DEFAULT_MODEL"],
         lightweight_model=details.get("LIGHTWEIGHT_MODEL"),
         interaction_mode=details["INTERACTION_MODE"],
+        chronicle_enabled=details.get("CHRONICLE_ENABLED", True),
         avatar_path=avatar_path_to_url(details.get("AVATAR_IMAGE")),
         appearance_image_path=avatar_path_to_url(details.get("APPEARANCE_IMAGE_PATH")),
         home_city_id=details["HOME_CITYID"],
@@ -76,6 +77,7 @@ def update_persona_config(
         avatar_path=new_avatar,
         avatar_upload=None,
         appearance_image_path=new_appearance,
+        chronicle_enabled=req.chronicle_enabled,
     )
 
     if result.startswith("Error:"):
@@ -148,6 +150,15 @@ def organize_persona_memory(persona_id: str, manager=Depends(get_manager)):
     # 3. Generate Chronicle for unprocessed messages
     chronicle_generated = False
     memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
+    # Check per-persona Chronicle toggle
+    if memory_weave_enabled:
+        db2 = manager.SessionLocal()
+        try:
+            ai_check = db2.query(AI).filter_by(AIID=persona_id).first()
+            if ai_check and not ai_check.CHRONICLE_ENABLED:
+                memory_weave_enabled = False
+        finally:
+            db2.close()
     if memory_weave_enabled and hasattr(manager, "runtime") and manager.runtime:
         try:
             manager.runtime._generate_chronicle(persona)

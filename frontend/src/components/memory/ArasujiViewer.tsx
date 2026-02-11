@@ -48,6 +48,16 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
 
     // Generation state
     const [showGenerateModal, setShowGenerateModal] = useState(false);
+    const [costEstimate, setCostEstimate] = useState<{
+        total_messages: number;
+        processed_messages: number;
+        unprocessed_messages: number;
+        estimated_llm_calls: number;
+        estimated_cost_usd: number;
+        model_name: string;
+        is_free_tier: boolean;
+        batch_size: number;
+    } | null>(null);
     const [generateSettings, setGenerateSettings] = useState({
         maxMessages: 500,
         batchSize: 20,
@@ -192,6 +202,18 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     };
 
     // Chronicle Generation
+    const openGenerateModal = async () => {
+        setShowGenerateModal(true);
+        try {
+            const res = await fetch(`/api/people/${personaId}/arasuji/cost-estimate`);
+            if (res.ok) {
+                setCostEstimate(await res.json());
+            }
+        } catch {
+            // Non-critical
+        }
+    };
+
     const startGeneration = async () => {
         setShowGenerateModal(false);
         try {
@@ -340,7 +362,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     <div className={styles.headerActions}>
                         <button
                             className={styles.generateBtn}
-                            onClick={() => setShowGenerateModal(true)}
+                            onClick={openGenerateModal}
                             disabled={generationJob?.status === 'running'}
                             title="Chronicleを生成"
                         >
@@ -416,7 +438,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             <p>Chronicle がまだ生成されていません</p>
                             <button
                                 className={styles.generateBtnLarge}
-                                onClick={() => setShowGenerateModal(true)}
+                                onClick={openGenerateModal}
                             >
                                 <Play size={16} />
                                 Chronicle を生成
@@ -635,6 +657,42 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 <ModalOverlay onClose={() => setShowGenerateModal(false)} className={styles.modalOverlay}>
                     <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
                         <h3>Chronicle 生成設定</h3>
+                        {costEstimate && (
+                            <div style={{
+                                padding: '0.75rem',
+                                marginBottom: '1rem',
+                                background: costEstimate.unprocessed_messages === 0
+                                    ? 'rgba(100, 200, 100, 0.1)'
+                                    : costEstimate.unprocessed_messages > 500
+                                        ? 'rgba(255, 150, 0, 0.1)'
+                                        : 'rgba(100, 100, 100, 0.1)',
+                                borderRadius: '6px',
+                                fontSize: '0.85rem',
+                                lineHeight: '1.6',
+                            }}>
+                                {costEstimate.unprocessed_messages === 0 ? (
+                                    <div>生成するメッセージはありません（全て処理済み）</div>
+                                ) : (
+                                    <>
+                                        <div>未処理メッセージ: <strong>{costEstimate.unprocessed_messages.toLocaleString()}</strong>件 / 全{costEstimate.total_messages.toLocaleString()}件</div>
+                                        <div>推定LLM呼び出し: <strong>{costEstimate.estimated_llm_calls}</strong>回</div>
+                                        <div>
+                                            推定コスト: <strong>
+                                                {costEstimate.is_free_tier
+                                                    ? '$0.00 (Free tier)'
+                                                    : costEstimate.estimated_cost_usd < 0.001
+                                                        ? `~$${costEstimate.estimated_cost_usd.toFixed(6)}`
+                                                        : costEstimate.estimated_cost_usd < 0.01
+                                                            ? `~$${costEstimate.estimated_cost_usd.toFixed(4)}`
+                                                            : `~$${costEstimate.estimated_cost_usd.toFixed(3)}`
+                                                }
+                                            </strong>
+                                            {' '}({costEstimate.model_name})
+                                        </div>
+                                    </>
+                                )}
+                            </div>
+                        )}
                         <div className={styles.formGroup}>
                             <label>最大処理メッセージ数</label>
                             <input

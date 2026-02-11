@@ -291,6 +291,7 @@ class PersonaMixin:
                 INTERACTION_MODE="manual",
                 IS_DISPATCHED=False,
                 DEFAULT_MODEL=self.model or self._base_model,
+                CHRONICLE_ENABLED=False,
                 PRIVATE_ROOM_ID=new_building_id,
             )
             db.add(new_ai_model)
@@ -440,6 +441,7 @@ class PersonaMixin:
         interaction_mode: str,
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
+        chronicle_enabled: Optional[bool] = None,
     ) -> str:
         """ワールドエディタからAIの設定を更新する"""
         db = self.SessionLocal()

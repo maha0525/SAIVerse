@@ -973,6 +973,7 @@ class SAIVerseManager(
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
         appearance_image_path: Optional[str] = None,
+        chronicle_enabled: Optional[bool] = None,
     ) -> str:
         """ワールドエディタからAIの設定を更新する"""
         return self.admin.update_ai(
@@ -987,6 +988,7 @@ class SAIVerseManager(
             avatar_path,
             avatar_upload,
             appearance_image_path,
+            chronicle_enabled=chronicle_enabled,
         )
 
     def delete_ai(self, ai_id: str) -> str:

@@ -12,6 +12,7 @@ import StepCityName from './steps/StepCityName';
 import StepPersonaChoice from './steps/StepPersonaChoice';
 import StepApiKeys from './steps/StepApiKeys';
 import StepModelSummary from './steps/StepModelSummary';
+import StepChronicle from './steps/StepChronicle';
 import StepComplete from './steps/StepComplete';
 
 interface TutorialWizardProps {
@@ -21,7 +22,7 @@ interface TutorialWizardProps {
     startAtStep?: number;
 }
 
-type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7;
+type Step = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 
 interface ApiKeyStatus {
     provider: string;
@@ -59,6 +60,7 @@ interface TutorialState {
     autoConfiguredProvider: string;
     autoConfiguredAssignments: ModelRoleAssignment[];
     autoConfigureWarnings: string[];
+    chronicleEnabled: boolean;
 }
 
 const STEP_TITLES = [
@@ -68,6 +70,7 @@ const STEP_TITLES = [
     'ペルソナ',
     'APIキー',
     'モデル設定',
+    'Chronicle',
     '完了'
 ];
 
@@ -102,6 +105,7 @@ export default function TutorialWizard({
         autoConfiguredProvider: '',
         autoConfiguredAssignments: [],
         autoConfigureWarnings: [],
+        chronicleEnabled: false,
     });
 
     const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
@@ -190,9 +194,13 @@ export default function TutorialWizard({
                     await loadInitialData(); // Reload models with updated availability
                     await autoConfigureModels();
                     break;
+                case 7:
+                    // Save Chronicle setting for the created persona
+                    await saveChronicleSettings();
+                    break;
             }
 
-            if (step < 7) {
+            if (step < 8) {
                 setStep((step + 1) as Step);
             }
         } catch (e) {
@@ -210,7 +218,7 @@ export default function TutorialWizard({
     };
 
     const handleSkip = () => {
-        if (step < 8) {
+        if (step < 9) {
             setStep((step + 1) as Step);
         }
     };
@@ -290,6 +298,19 @@ export default function TutorialWizard({
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ updates })
             });
+        }
+    };
+
+    const saveChronicleSettings = async () => {
+        if (!state.createdPersonaId) return;
+        try {
+            await fetch(`/api/people/${state.createdPersonaId}/config`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chronicle_enabled: state.chronicleEnabled }),
+            });
+        } catch (e) {
+            console.error('Failed to save Chronicle settings', e);
         }
     };
 
@@ -378,12 +399,20 @@ export default function TutorialWizard({
                     />
                 );
             case 7:
+                return (
+                    <StepChronicle
+                        enabled={state.chronicleEnabled}
+                        onChange={(v) => updateState({ chronicleEnabled: v })}
+                        personaId={state.createdPersonaId}
+                    />
+                );
+            case 8:
                 return <StepComplete onStart={handleComplete} />;
         }
     };
 
     // Steps that can be skipped
-    const canSkip = [2, 3, 5, 6].includes(step);
+    const canSkip = [2, 3, 5, 6, 7].includes(step);
 
     if (!isOpen) return null;
 
@@ -420,7 +449,7 @@ export default function TutorialWizard({
                 </div>
 
                 {/* Actions */}
-                {step !== 7 && (
+                {step !== 8 && (
                     <div className={styles.actions}>
                         <div className={styles.actionsLeft}>
                             {step > 1 && (
