@@ -194,28 +194,6 @@ export default function Home() {
         return () => window.removeEventListener('resize', checkMobile);
     }, []);
 
-    // Check tutorial status on mount
-    useEffect(() => {
-        const checkTutorial = async () => {
-            try {
-                const res = await fetch('/api/tutorial/status');
-                if (res.ok) {
-                    const data = await res.json();
-                    // Show tutorial if not completed or if initial setup is needed
-                    if (!data.tutorial_completed || data.needs_initial_setup) {
-                        setShowTutorial(true);
-                    }
-                }
-            } catch (e) {
-                console.error('Failed to check tutorial status', e);
-            } finally {
-                setTutorialChecked(true);
-            }
-        };
-
-        checkTutorial();
-    }, []);
-
     // Auto-resize textarea based on content (max 10 lines)
     const adjustTextareaHeight = useCallback(() => {
         const textarea = textareaRef.current;
@@ -263,6 +241,31 @@ export default function Home() {
 
     // Backend connection status
     const [backendConnected, setBackendConnected] = useState(true);
+
+    // Check tutorial status on mount and when backend reconnects
+    useEffect(() => {
+        // Skip if tutorial is already showing
+        if (showTutorial) return;
+
+        const checkTutorial = async () => {
+            try {
+                const res = await fetch('/api/tutorial/status');
+                if (res.ok) {
+                    const data = await res.json();
+                    // Show tutorial if not completed or if initial setup is needed
+                    if (!data.tutorial_completed || data.needs_initial_setup) {
+                        setShowTutorial(true);
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to check tutorial status', e);
+            } finally {
+                setTutorialChecked(true);
+            }
+        };
+
+        checkTutorial();
+    }, [backendConnected]);
 
     // Startup warnings
     const [startupWarnings, setStartupWarnings] = useState<string[]>([]);
