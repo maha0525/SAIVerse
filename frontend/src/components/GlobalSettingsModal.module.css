@@ -907,3 +907,217 @@
         min-width: 0;
     }
 }
+
+/* ── About Tab ── */
+.aboutContainer {
+    max-width: 600px;
+    margin: 0 auto;
+    width: 100%;
+}
+
+.aboutCard {
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 1.25rem;
+    margin-bottom: 1rem;
+}
+
+.aboutVersion {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #60a5fa;
+    font-family: monospace;
+}
+
+.aboutUpdateNotice {
+    margin-top: 0.5rem;
+    font-size: 0.85rem;
+    color: #fbbf24;
+}
+
+.aboutCardTitle {
+    font-weight: 600;
+    color: #94a3b8;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.75rem;
+}
+
+.aboutDeveloper {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    color: #f1f5f9;
+    font-weight: 500;
+}
+
+.aboutLink {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    color: #60a5fa;
+    text-decoration: none;
+    font-size: 0.9rem;
+}
+
+.aboutLink:hover {
+    color: #93c5fd;
+    text-decoration: underline;
+}
+
+.aboutLinks {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.aboutLinkItem {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem;
+    border-radius: 6px;
+    color: #f1f5f9;
+    text-decoration: none;
+    transition: background 0.15s;
+}
+
+.aboutLinkItem:hover {
+    background: #1e293b;
+}
+
+.aboutLinkIcon {
+    font-size: 1.25rem;
+    width: 2rem;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.aboutLinkName {
+    font-weight: 500;
+    font-size: 0.9rem;
+}
+
+.aboutLinkDesc {
+    font-size: 0.8rem;
+    color: #94a3b8;
+}
+
+.aboutLinkArrow {
+    margin-left: auto;
+    color: #475569;
+    flex-shrink: 0;
+}
+
+.aboutSupportText {
+    color: #cbd5e1;
+    font-size: 0.9rem;
+    margin-bottom: 0.75rem;
+}
+
+.aboutSupportItems {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.aboutSupportItem {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    color: #cbd5e1;
+    font-size: 0.9rem;
+    text-decoration: none;
+    transition: background 0.15s;
+}
+
+.aboutSupportItem:hover {
+    background: #1e293b;
+}
+
+.aboutSupportBadge {
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    background: #475569;
+    color: #94a3b8;
+    flex-shrink: 0;
+}
+
+.aboutSupportBadge.active {
+    background: #166534;
+    color: #86efac;
+}
+
+/* ── Light Mode: About ── */
+:global([data-theme="light"]) .aboutCard {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .aboutVersion {
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .aboutUpdateNotice {
+    color: #d97706;
+}
+
+:global([data-theme="light"]) .aboutCardTitle {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .aboutDeveloper {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .aboutLink {
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .aboutLink:hover {
+    color: #1d4ed8;
+}
+
+:global([data-theme="light"]) .aboutLinkItem {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .aboutLinkItem:hover {
+    background: #f1f5f9;
+}
+
+:global([data-theme="light"]) .aboutLinkDesc {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .aboutLinkArrow {
+    color: #cbd5e1;
+}
+
+:global([data-theme="light"]) .aboutSupportText {
+    color: #475569;
+}
+
+:global([data-theme="light"]) .aboutSupportItem {
+    color: #475569;
+}
+
+:global([data-theme="light"]) .aboutSupportItem:hover {
+    background: #f1f5f9;
+}
+
+:global([data-theme="light"]) .aboutSupportBadge {
+    background: #e2e8f0;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .aboutSupportBadge.active {
+    background: #dcfce7;
+    color: #166534;
+}

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Settings, Database, Globe, Layers, Save, RefreshCw, Power, Play, Pause, Monitor, Sun, Moon, Cpu, ChevronDown } from 'lucide-react';
+import { X, Settings, Database, Globe, Layers, Save, RefreshCw, Power, Play, Pause, Monitor, Sun, Moon, Cpu, ChevronDown, Info, ExternalLink } from 'lucide-react';
 import styles from './GlobalSettingsModal.module.css';
 import WorldEditor from './settings/WorldEditor';
 import ModalOverlay from './common/ModalOverlay';
@@ -42,7 +42,7 @@ interface ModelInfo {
     is_available: boolean;
 }
 
-type TabId = 'env' | 'world' | 'db' | 'models';
+type TabId = 'env' | 'world' | 'db' | 'models' | 'about';
 
 export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsModalProps) {
     const [activeTab, setActiveTab] = useState<TabId>('env');
@@ -66,6 +66,9 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     // Theme
     const [theme, setTheme] = useState<'system' | 'light' | 'dark'>('system');
 
+    // About
+    const [versionInfo, setVersionInfo] = useState<{ version: string; latest_version?: string; update_available?: boolean } | null>(null);
+
     // Model Roles
     const [modelRoles, setModelRoles] = useState<Record<string, ModelRoleInfo>>({});
     const [modelPresets, setModelPresets] = useState<PresetInfo[]>([]);
@@ -87,6 +90,9 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         }
         if (isOpen && activeTab === 'models') {
             loadModelRoles();
+        }
+        if (isOpen && activeTab === 'about') {
+            loadVersionInfo();
         }
     }, [isOpen, activeTab]);
 
@@ -239,6 +245,18 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         }
     };
 
+    // --- About ---
+    const loadVersionInfo = async () => {
+        try {
+            const res = await fetch('/api/version');
+            if (res.ok) {
+                setVersionInfo(await res.json());
+            }
+        } catch (e) {
+            console.error('Failed to load version info', e);
+        }
+    };
+
     // --- Model Roles ---
     const loadModelRoles = async () => {
         setModelRolesLoading(true);
@@ -335,6 +353,12 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                             onClick={() => setActiveTab('models')}
                         >
                             <Cpu size={18} /> モデルロール
+                        </div>
+                        <div
+                            className={`${styles.navItem} ${activeTab === 'about' ? styles.active : ''}`}
+                            onClick={() => setActiveTab('about')}
+                        >
+                            <Info size={18} /> 情報
                         </div>
                     </div>
 
@@ -582,6 +606,89 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                         </div>
                                     </>
                                 )}
+                            </div>
+                        )}
+
+                        {activeTab === 'about' && (
+                            <div className={styles.aboutContainer}>
+                                <div className={styles.sectionHeader}>
+                                    <h3>SAIVerseについて</h3>
+                                </div>
+
+                                {/* Version */}
+                                {versionInfo && (
+                                    <div className={styles.aboutCard}>
+                                        <div className={styles.aboutVersion}>
+                                            v{versionInfo.version}
+                                        </div>
+                                        {versionInfo.update_available && (
+                                            <div className={styles.aboutUpdateNotice}>
+                                                新しいバージョン v{versionInfo.latest_version} が利用可能です
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+                                {/* Developer */}
+                                <div className={styles.aboutCard}>
+                                    <div className={styles.aboutCardTitle}>開発者</div>
+                                    <div className={styles.aboutDeveloper}>
+                                        <span>まはー</span>
+                                        <a href="https://x.com/Lize_san_suki" target="_blank" rel="noopener noreferrer" className={styles.aboutLink}>
+                                            <ExternalLink size={14} /> @Lize_san_suki
+                                        </a>
+                                    </div>
+                                </div>
+
+                                {/* Links */}
+                                <div className={styles.aboutCard}>
+                                    <div className={styles.aboutCardTitle}>リンク</div>
+                                    <div className={styles.aboutLinks}>
+                                        <a href="https://discord.gg/sqDKjtZV" target="_blank" rel="noopener noreferrer" className={styles.aboutLinkItem}>
+                                            <span className={styles.aboutLinkIcon}>💬</span>
+                                            <div>
+                                                <div className={styles.aboutLinkName}>Discord コミュニティ</div>
+                                                <div className={styles.aboutLinkDesc}>質問・雑談・バグ報告など</div>
+                                            </div>
+                                            <ExternalLink size={14} className={styles.aboutLinkArrow} />
+                                        </a>
+                                        <a href="https://github.com/maha0525/SAIVerse" target="_blank" rel="noopener noreferrer" className={styles.aboutLinkItem}>
+                                            <span className={styles.aboutLinkIcon}>📦</span>
+                                            <div>
+                                                <div className={styles.aboutLinkName}>GitHub</div>
+                                                <div className={styles.aboutLinkDesc}>ソースコード・Issues</div>
+                                            </div>
+                                            <ExternalLink size={14} className={styles.aboutLinkArrow} />
+                                        </a>
+                                        <a href="https://note.com/maha0525/n/n5a63f572be8f" target="_blank" rel="noopener noreferrer" className={styles.aboutLinkItem}>
+                                            <span className={styles.aboutLinkIcon}>📝</span>
+                                            <div>
+                                                <div className={styles.aboutLinkName}>Note</div>
+                                                <div className={styles.aboutLinkDesc}>開発記録・サポート（チップ）</div>
+                                            </div>
+                                            <ExternalLink size={14} className={styles.aboutLinkArrow} />
+                                        </a>
+                                    </div>
+                                </div>
+
+                                {/* Support */}
+                                <div className={styles.aboutCard}>
+                                    <div className={styles.aboutCardTitle}>支援について</div>
+                                    <div className={styles.aboutSupportText}>
+                                        SAIVerseはフリーソフトウェアとして開発を続けています。
+                                    </div>
+                                    <div className={styles.aboutSupportItems}>
+                                        <div className={styles.aboutSupportItem}>
+                                            <span className={styles.aboutSupportBadge}>準備中</span>
+                                            GitHub Sponsors
+                                        </div>
+                                        <a href="https://note.com/maha0525/n/n5a63f572be8f" target="_blank" rel="noopener noreferrer" className={styles.aboutSupportItem} style={{ cursor: 'pointer' }}>
+                                            <span className={`${styles.aboutSupportBadge} ${styles.active}`}>受付中</span>
+                                            Noteからチップを送る
+                                            <ExternalLink size={14} className={styles.aboutLinkArrow} />
+                                        </a>
+                                    </div>
+                                </div>
                             </div>
                         )}
                     </div>
