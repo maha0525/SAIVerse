@@ -22,10 +22,12 @@ class EnumResolverContext:
         city_id: Optional[int] = None,
         building_id: Optional[str] = None,
         persona_id: Optional[str] = None,
+        developer_mode: bool = False,
     ):
         self.city_id = city_id
         self.building_id = building_id
         self.persona_id = persona_id
+        self.developer_mode = developer_mode
 
 
 def resolve_enum_source(
@@ -81,6 +83,10 @@ def _resolve_playbooks(scope: str, context: EnumResolverContext) -> List[Dict[st
             pass  # No filter
         else:
             raise ValueError(f"Unknown playbooks scope: {scope}")
+
+        # Filter out dev_only playbooks when developer mode is off
+        if not context.developer_mode:
+            query = query.filter(Playbook.dev_only == False)
 
         playbooks = query.all()
         return [

@@ -40,9 +40,17 @@ def list_available_playbooks(persona_id: Optional[str] = None, building_id: Opti
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
 
+    # Check developer mode
+    developer_mode = False
+    manager = get_active_manager()
+    if manager and hasattr(manager, "state"):
+        developer_mode = getattr(manager.state, "developer_mode", False)
+
     with Session() as session:
         # Get all router_callable playbooks
         query = session.query(Playbook).filter(Playbook.router_callable == True)
+        if not developer_mode:
+            query = query.filter(Playbook.dev_only == False)
         all_playbooks = query.all()
 
         available = []
