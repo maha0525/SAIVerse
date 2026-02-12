@@ -2,7 +2,7 @@
 
 ## これは何か
 
-metaプレイブック（meta_user, meta_agentic 等）がサブプレイブック（deep_work, memory_recall 等）を実行した後、その結果をどうやって最終応答のLLMに届けるか、という経路の設計。
+metaプレイブック（meta_user, meta_agentic 等）がサブプレイブック（memory_research, memory_recall 等）を実行した後、その結果をどうやって最終応答のLLMに届けるか、という経路の設計。
 
 ## なぜ必要か
 
@@ -18,7 +18,7 @@ metaプレイブック（meta_user, meta_agentic 等）がサブプレイブッ�
 この設計には3つの根本的な問題がある:
 
 **1. 結果が届かない**
-sub_speak_meta.compose は `action: null` のため、input_template で渡された参考情報は `state["inputs"]["input"]` に格納されるだけで、LLM の messages には含まれない。LLM は会話履歴しか見ない。deep_work の場合、finalize_log が回答を SAIMemory に conversation タグで保存していたため「たまたま」履歴に載っていたが、これが「既に回答済み」と判断される原因になり、空テキストが生成されていた。
+sub_speak_meta.compose は `action: null` のため、input_template で渡された参考情報は `state["inputs"]["input"]` に格納されるだけで、LLM の messages には含まれない。LLM は会話履歴しか見ない。memory_research の場合、finalize_log が回答を SAIMemory に conversation タグで保存していたため「たまたま」履歴に載っていたが、これが「既に回答済み」と判断される原因になり、空テキストが生成されていた。
 
 **2. 経路が見えにくい**
 `_lg_outputs` → `_ingest_context_from_subplaybook` → `context_bundle_text` → `input_template` という変換チェーンは、プレイブックの JSON 定義からは読み取れない。なぜ memorize ノードが必要なのか、なぜ output_keys が必要なのかが暗黙的で、保守が困難。
@@ -45,9 +45,9 @@ deep_work のように内部で結果をLLMでまとめ直してから sub_speak
 {
     "id": "save_results",
     "type": "memorize",
-    "action": "<system>\nサブプレイブック実行結果 (deep_work)\n{all_results}\n{phase_results}\n\n※この結果はユーザーには見えていません。\n</system>",
+    "action": "<system>\nサブプレイブック実行結果 (memory_research)\n{all_results}\n{phase_results}\n\n※この結果はユーザーには見えていません。\n</system>",
     "role": "user",
-    "tags": ["deep_work", "sub_save_results"],
+    "tags": ["memory_research", "sub_save_results"],
     "next": null
 }
 ```
@@ -99,7 +99,7 @@ exec が複数回呼ばれる場合:
 ## 具体的な変更対象
 
 ### プレイブック
-- `deep_work.json`: finalize (LLM) + finalize_log (memorize) → save_results (memorize, user ロール) に置換
+- `memory_research.json`（旧 deep_work）: finalize (LLM) + finalize_log (memorize) → save_results (memorize, user ロール) に置換
 - `sub_speak_meta.json` → `sub_speak.json` に統合（speak: true, action: null, ツールなし）
 - `sub_speak_simple.json` → 廃止（sub_speak に統合）
 - `meta_user.json`: finalize の playbook を sub_speak に、input_template を簡素化
