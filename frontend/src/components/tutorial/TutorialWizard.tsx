@@ -405,7 +405,10 @@ export default function TutorialWizard({
                     <StepPersonaChoice
                         choice={state.personaChoice}
                         onChange={(v) => updateState({ personaChoice: v })}
-                        onPersonaCreated={(id, roomId) => updateState({ createdPersonaId: id, createdRoomId: roomId })}
+                        onPersonaCreated={(id, roomId) => {
+                            updateState({ createdPersonaId: id, createdRoomId: roomId });
+                            setStep(5);
+                        }}
                     />
                 );
             case 5:
