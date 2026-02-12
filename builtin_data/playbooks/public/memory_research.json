@@ -1,0 +1,536 @@
+{
+    "name": "memory_research",
+    "display_name": "メモリリサーチ",
+    "description": "複数の情報ソースを横断して深く調査し、総合的な回答を生成するオーケストレーター。Memopediaキャッシュ確認→計画立案→タスク実行（サブエージェント隔離）→結果集約→Memopedia書き戻し→最終出力。",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "ユーザーの要求"
+        }
+    ],
+    "router_callable": true,
+    "user_selectable": false,
+    "nodes": [
+        {
+            "id": "get_context",
+            "type": "tool",
+            "action": "get_since_last_user_conversation",
+            "args_input": {
+                "include_raw_log": false,
+                "max_raw_messages": 5
+            },
+            "output_key": "recent_context",
+            "next": "analyze"
+        },
+        {
+            "id": "analyze",
+            "type": "llm",
+            "context_profile": "router",
+            "action": "現在必要な情報を特定して調査タスクに分解してください。\n\n## タスク設計のルール\n1. 各タスクに明確な objective（何を調べるか）を設定する\n2. context_refs には手がかりとなるSAIVerse URIを指定する（例: saiverse://self/memopedia/page?title=SAIVerse）\n3. 同じフェーズのタスクは独立して実行可能なものにする\n4. フェーズ間に依存関係がある場合は phase 番号を分ける\n5. depth は shallow（1回検索）/ normal（2回）/ deep（3-4回）から選ぶ\n6. タスク数は必要最小限に（多くても5つ程度）",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "understanding": {
+                        "type": "string",
+                        "description": "現在必要な情報を簡潔に"
+                    },
+                    "research_tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "objective": {
+                                    "type": "string",
+                                    "description": "調査目的"
+                                },
+                                "context_refs": {
+                                    "type": "string",
+                                    "description": "コンマ区切りのSAIVerse URI群"
+                                },
+                                "depth": {
+                                    "type": "string",
+                                    "description": "shallow/normal/deep"
+                                },
+                                "phase": {
+                                    "type": "integer",
+                                    "description": "実行フェーズ番号（1から）"
+                                }
+                            },
+                            "required": [
+                                "objective",
+                                "depth",
+                                "phase"
+                            ]
+                        },
+                        "description": "調査タスクのリスト"
+                    },
+                    "total_phases": {
+                        "type": "integer",
+                        "description": "フェーズの総数"
+                    }
+                },
+                "required": [
+                    "understanding",
+                    "research_tasks",
+                    "total_phases"
+                ]
+            },
+            "memorize": {
+                "tags": [
+                    "internal",
+                    "memory_research"
+                ]
+            },
+            "output_key": "plan",
+            "next": "check_memopedia"
+        },
+        {
+            "id": "check_memopedia",
+            "type": "tool",
+            "action": "memopedia_search",
+            "args_input": {
+                "query": "plan.understanding",
+                "max_results": 5
+            },
+            "output_key": "memopedia_cache",
+            "next": "get_top_pages"
+        },
+        {
+            "id": "get_top_pages",
+            "type": "llm",
+            "context_profile": "router",
+            "action": "Memopedia検索結果から、ユーザーの要求に関連するページを最大2件選んでください。\n\n## Memopedia検索結果\n{memopedia_cache}\n\n関連するページがない場合はpage_idsを空配列にしてください。\nページIDはカッコ内のUUID文字列です。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "page_ids": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "選択したページIDのリスト（最大2件、なければ空配列）"
+                    },
+                    "has_relevant_pages": {
+                        "type": "string",
+                        "enum": [
+                            "true",
+                            "false"
+                        ],
+                        "description": "関連ページがあるか"
+                    }
+                },
+                "required": [
+                    "page_ids",
+                    "has_relevant_pages"
+                ]
+            },
+            "memorize": {
+                "tags": [
+                    "internal",
+                    "memory_research"
+                ]
+            },
+            "output_key": "cache_selection",
+            "next": "route_cache_selection"
+        },
+        {
+            "id": "route_cache_selection",
+            "type": "pass",
+            "next": "init_loop",
+            "conditional_next": {
+                "field": "cache_selection.has_relevant_pages",
+                "operator": "eq",
+                "cases": {
+                    "true": "get_cache_page",
+                    "default": "init_loop"
+                }
+            }
+        },
+        {
+            "id": "get_cache_page",
+            "type": "tool",
+            "action": "memopedia_get_page",
+            "args_input": {
+                "page_id": "cache_selection.page_ids.0"
+            },
+            "output_key": "cache_page_content",
+            "next": "evaluate_cache"
+        },
+        {
+            "id": "evaluate_cache",
+            "type": "llm",
+            "context_profile": "router",
+            "action": "Memopediaに既存の知識が見つかりました。この情報がユーザーの要求に十分に回答できるか判断してください。\n\n## Memopediaの検索結果一覧\n{memopedia_cache}\n\n## 取得したページ内容\n{cache_page_content}\n\n## 判断基準\n- この情報だけでユーザーの質問に完全に回答できるか\n- 追加調査なしで十分な品質の回答が可能か\n- 情報が古くなっている可能性はないか",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "is_sufficient": {
+                        "type": "string",
+                        "enum": [
+                            "true",
+                            "false"
+                        ],
+                        "description": "既存情報で十分か"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "判断理由"
+                    },
+                    "relevant_uris": {
+                        "type": "string",
+                        "description": "見つかったMemopediaページのURI群（コンマ区切り、saiverse://self/memopedia/page/xxx形式）"
+                    }
+                },
+                "required": [
+                    "is_sufficient",
+                    "reason",
+                    "relevant_uris"
+                ]
+            },
+            "memorize": {
+                "tags": [
+                    "internal",
+                    "memory_research"
+                ]
+            },
+            "output_key": "cache_eval",
+            "next": "route_cache_eval"
+        },
+        {
+            "id": "route_cache_eval",
+            "type": "pass",
+            "next": "enrich_context_refs",
+            "conditional_next": {
+                "field": "cache_eval.is_sufficient",
+                "operator": "eq",
+                "cases": {
+                    "true": "save_cache_result",
+                    "default": "enrich_context_refs"
+                }
+            }
+        },
+        {
+            "id": "save_cache_result",
+            "type": "memorize",
+            "action": "<system>\nサブプレイブック実行結果 (memory_research / cache hit)\n\n## 調査計画\n{plan.understanding}\n\n## Memopedia内から回答\n{cache_page_content}\n\n## 評価\n{cache_eval.reason}\n\n## 参照URI\n{cache_eval.relevant_uris}\n\n※この結果はユーザーには見えていません。\n</system>",
+            "role": "user",
+            "tags": [
+                "memory_research",
+                "save_results",
+                "cache_hit"
+            ],
+            "next": null
+        },
+        {
+            "id": "enrich_context_refs",
+            "type": "set",
+            "assignments": {
+                "memopedia_context": "{cache_eval.relevant_uris}"
+            },
+            "next": "init_loop"
+        },
+        {
+            "id": "init_loop",
+            "type": "set",
+            "assignments": {
+                "current_phase": 1,
+                "task_index": 0,
+                "all_results": "",
+                "phase_results": "",
+                "total_tasks_done": 0,
+                "max_retries": 1,
+                "retry_count": 0
+            },
+            "next": "check_phase_done"
+        },
+        {
+            "id": "check_phase_done",
+            "type": "pass",
+            "next": "prepare_task",
+            "conditional_next": {
+                "field": "current_phase",
+                "operator": "gt",
+                "cases": {
+                    "{plan.total_phases}": "aggregate",
+                    "default": "prepare_task"
+                }
+            }
+        },
+        {
+            "id": "prepare_task",
+            "type": "llm",
+            "context_profile": "router",
+            "action": "以下のタスクリストからフェーズ{current_phase}のタスク番号{task_index}（0始まり）の情報を抽出してください。\n\n## タスクリスト\n{plan.research_tasks}\n\n## 現在のフェーズ\n{current_phase}\n\n## これまでの結果\n{all_results}\n\n## Memopediaから得た参考情報のURI\n{memopedia_context}\n\nフェーズ{current_phase}に該当するタスクのうち、{task_index}番目のタスクの情報を返してください。該当するタスクがなければ has_task を false にしてください。\ncontext_refsにはタスクリストのcontext_refsに加え、上記のMemopedia URIも関連があれば含めてください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "has_task": {
+                        "type": "string",
+                        "enum": [
+                            "true",
+                            "false"
+                        ],
+                        "description": "該当タスクがあるか"
+                    },
+                    "objective": {
+                        "type": "string",
+                        "description": "タスクの調査目的"
+                    },
+                    "context_refs": {
+                        "type": "string",
+                        "description": "コンマ区切りのSAIVerse URI群"
+                    },
+                    "depth": {
+                        "type": "string",
+                        "description": "調査深度"
+                    }
+                },
+                "required": [
+                    "has_task"
+                ]
+            },
+            "output_key": "current_task",
+            "output_mapping": {
+                "objective": "objective",
+                "context_refs": "context_refs",
+                "depth": "depth"
+            },
+            "memorize": {
+                "tags": [
+                    "internal",
+                    "memory_research"
+                ]
+            },
+            "next": "check_has_task"
+        },
+        {
+            "id": "check_has_task",
+            "type": "pass",
+            "next": "next_phase",
+            "conditional_next": {
+                "field": "current_task.has_task",
+                "operator": "eq",
+                "cases": {
+                    "true": "exec_research",
+                    "default": "next_phase"
+                }
+            }
+        },
+        {
+            "id": "exec_research",
+            "type": "subplay",
+            "playbook": "research_task",
+            "input_template": "{current_task.objective}",
+            "propagate_output": false,
+            "execution": "subagent",
+            "subagent_chronicle": true,
+            "next": "accumulate_result"
+        },
+        {
+            "id": "accumulate_result",
+            "type": "set",
+            "assignments": {
+                "phase_results": "{phase_results}\n\n### タスク{task_index}: {current_task.objective}\nステータス: {research_result.status} (信頼度: {research_result.confidence})\n要約: {research_result.summary}\n調査詳細:\n{research_result.findings}\nサブエージェント要約: {_subagent_chronicle}",
+                "task_index": "={task_index} + 1",
+                "total_tasks_done": "={total_tasks_done} + 1"
+            },
+            "next": "prepare_task"
+        },
+        {
+            "id": "next_phase",
+            "type": "set",
+            "assignments": {
+                "current_phase": "={current_phase} + 1",
+                "all_results": "{all_results}\n\n## フェーズ{current_phase}の結果\n{phase_results}",
+                "phase_results": "",
+                "task_index": 0
+            },
+            "next": "check_phase_done"
+        },
+        {
+            "id": "aggregate",
+            "type": "llm",
+            "context_profile": "router",
+            "action": "すべての調査結果を踏まえて、元のユーザー要求に十分に回答できるか判断してください。\n\n## 計画時の理解\n{plan.understanding}\n\n## 全調査結果\n{all_results}\n{phase_results}\n\n## 判断基準\n- ユーザーの要求に対して必要な情報が揃っているか\n- 情報の質と信頼性は十分か\n- 追加調査が必要な観点はないか",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "is_complete": {
+                        "type": "string",
+                        "enum": [
+                            "true",
+                            "false"
+                        ],
+                        "description": "情報が十分か"
+                    },
+                    "missing": {
+                        "type": "string",
+                        "description": "不足している情報（十分な場合は空文字）"
+                    },
+                    "additional_tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "objective": {
+                                    "type": "string"
+                                },
+                                "context_refs": {
+                                    "type": "string"
+                                },
+                                "depth": {
+                                    "type": "string"
+                                },
+                                "phase": {
+                                    "type": "integer"
+                                }
+                            },
+                            "required": [
+                                "objective",
+                                "depth",
+                                "phase"
+                            ]
+                        },
+                        "description": "追加タスク（不十分な場合）"
+                    }
+                },
+                "required": [
+                    "is_complete"
+                ]
+            },
+            "memorize": {
+                "tags": [
+                    "internal",
+                    "memory_research"
+                ]
+            },
+            "output_key": "completion_check",
+            "next": "route_completion"
+        },
+        {
+            "id": "route_completion",
+            "type": "pass",
+            "next": "consider_writeback",
+            "conditional_next": {
+                "field": "completion_check.is_complete",
+                "operator": "eq",
+                "cases": {
+                    "true": "consider_writeback",
+                    "default": "check_retry"
+                }
+            }
+        },
+        {
+            "id": "check_retry",
+            "type": "pass",
+            "next": "consider_writeback",
+            "conditional_next": {
+                "field": "retry_count",
+                "operator": "gte",
+                "cases": {
+                    "{max_retries}": "consider_writeback",
+                    "default": "add_tasks"
+                }
+            }
+        },
+        {
+            "id": "add_tasks",
+            "type": "set",
+            "assignments": {
+                "retry_count": "={retry_count} + 1",
+                "current_phase": "={current_phase}",
+                "task_index": 0,
+                "phase_results": ""
+            },
+            "next": "prepare_task"
+        },
+        {
+            "id": "consider_writeback",
+            "type": "llm",
+            "context_profile": "router",
+            "action": "この調査結果の中に、Memopediaに記録すべき知識がありますか？\n\n## 調査結果\n{all_results}\n{phase_results}\n\n## 判断基準\n- 人物、概念、計画に関する新しい情報が含まれているか\n- 今後のやり取りで参照する価値がある知識か\n- 一時的な情報（今日の天気等）ではなく、持続的な知識か\n\n記録すべき知識がある場合、Memopediaに保存するパラメータを生成してください。\n記録する知識は再利用性のある情報を選び、調査結果全体ではなく本質を凝縮してください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "should_save": {
+                        "type": "string",
+                        "enum": [
+                            "true",
+                            "false"
+                        ],
+                        "description": "Memopediaに記録すべきか"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "ページタイトル（保存する場合）"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "記録する知識（Markdown形式、保存する場合）"
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": [
+                            "people",
+                            "terms",
+                            "plans"
+                        ],
+                        "description": "カテゴリ（保存する場合）"
+                    },
+                    "keywords": {
+                        "type": "string",
+                        "description": "カンマ区切りのキーワード（保存する場合）"
+                    }
+                },
+                "required": [
+                    "should_save"
+                ]
+            },
+            "memorize": {
+                "tags": [
+                    "internal",
+                    "memory_research"
+                ]
+            },
+            "output_key": "writeback",
+            "next": "route_writeback"
+        },
+        {
+            "id": "route_writeback",
+            "type": "pass",
+            "next": "save_results",
+            "conditional_next": {
+                "field": "writeback.should_save",
+                "operator": "eq",
+                "cases": {
+                    "true": "exec_writeback",
+                    "default": "save_results"
+                }
+            }
+        },
+        {
+            "id": "exec_writeback",
+            "type": "tool",
+            "action": "memopedia_note",
+            "args_input": {
+                "content": "writeback.content",
+                "title": "writeback.title",
+                "category": "writeback.category"
+            },
+            "output_key": "writeback_result",
+            "next": "save_results"
+        },
+        {
+            "id": "save_results",
+            "type": "memorize",
+            "action": "<system>\nサブプレイブック実行結果 (memory_research)\n\n## 調査計画\n{plan.understanding}\n\n## 全調査結果\n{all_results}\n{phase_results}\n\n## 完了判断\n{completion_check}\n\n※この結果はユーザーには見えていません。\n</system>",
+            "role": "user",
+            "tags": [
+                "memory_research",
+                "save_results"
+            ],
+            "next": null
+        }
+    ],
+    "start_node": "get_context"
+}

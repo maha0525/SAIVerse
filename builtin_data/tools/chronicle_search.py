@@ -111,11 +111,8 @@ def chronicle_search(
 
         lines.append(f"[{i}] ({entry.id}) Lv.{entry.level} | {start} ~ {end} | {entry.message_count}msg")
 
-        # Show content snippet (first 200 chars)
-        snippet = entry.content.strip()
-        if len(snippet) > 200:
-            snippet = snippet[:200] + "..."
-        lines.append(f"    {snippet}")
+        # Show full content (chronicles are summaries, not long)
+        lines.append(f"    {entry.content.strip()}")
         lines.append("")
 
     return "\n".join(lines)

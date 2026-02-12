@@ -384,10 +384,16 @@ class GeminiClient(LLMClient):
             if "const" in node:
                 kwargs["enum"] = [node["const"]]
 
+            has_props = False
             if "properties" in node and isinstance(node["properties"], dict):
                 props = {k: _to_schema(v) for k, v in node["properties"].items()}
-                kwargs["properties"] = props
-                kwargs["property_ordering"] = list(node["properties"].keys())
+                if props:
+                    kwargs["properties"] = props
+                    kwargs["property_ordering"] = list(node["properties"].keys())
+                    has_props = True
+            # Gemini rejects OBJECT type with empty/missing properties
+            if not has_props and kwargs.get("type") == types.Type.OBJECT:
+                kwargs["type"] = types.Type.STRING
             if "additionalProperties" in node:
                 ap = node["additionalProperties"]
                 if isinstance(ap, dict):

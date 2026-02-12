@@ -8,19 +8,6 @@
             "description": "User input"
         }
     ],
-    "context_requirements": {
-        "history_depth": "full",
-        "history_balanced": false,
-        "include_internal": false,
-        "system_prompt": true,
-        "memory_weave": true,
-        "working_memory": false,
-        "inventory": true,
-        "building_items": true,
-        "available_playbooks": false,
-        "visual_context": false,
-        "realtime_context": true
-    },
     "router_callable": false,
     "user_selectable": true,
     "nodes": [

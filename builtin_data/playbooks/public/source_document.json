@@ -30,19 +30,6 @@
     "output_schema": [
         "research_result"
     ],
-    "context_requirements": {
-        "history_depth": "5messages",
-        "history_balanced": false,
-        "include_internal": false,
-        "system_prompt": true,
-        "memory_weave": true,
-        "working_memory": false,
-        "inventory": false,
-        "building_items": false,
-        "available_playbooks": false,
-        "visual_context": false,
-        "realtime_context": true
-    },
     "router_callable": false,
     "user_selectable": false,
     "nodes": [
@@ -59,6 +46,7 @@
             "id": "generate_params",
             "type": "llm",
             "model_type": "lightweight",
+            "context_profile": "worker_light",
             "action": "ドキュメント検索のパラメータを生成してください。\n\n## 調査目的\n{objective}\n\n## 補足コンテキスト（URIから解決済みの情報。item_idが含まれている場合があります）\n{context_text}\n\n## これまでに収集した情報\n{accumulated_info}\n\n## 現在のイテレーション\n{iterations} / {max_iterations}\n\nコンテキストからドキュメントのitem_idを特定し、目的に合った検索パターン（正規表現可）を生成してください。\nイテレーションが2回目以降の場合、前回と異なるパターンを試してください。",
             "response_schema": {
                 "type": "object",
@@ -101,6 +89,7 @@
             "id": "extract_lines",
             "type": "llm",
             "model_type": "lightweight",
+            "context_profile": "worker_light",
             "action": "検索結果から、調査目的「{objective}」に最も関連する箇所を特定し、その行範囲を返してください。\n\n検索結果:\n{search_results}\n\n最も関連性の高い箇所の行番号範囲を指定してください。関連する箇所がない場合はstart_lineを0にしてください。",
             "response_schema": {
                 "type": "object",
@@ -157,6 +146,7 @@
         {
             "id": "evaluate",
             "type": "llm",
+            "context_profile": "worker",
             "action": "調査目的に対して、ドキュメント検索から収集した情報を評価し、構造化された調査結果を生成してください。\n\n## 調査目的\n{objective}\n\n## 検索結果\n{search_results}\n\n## 読み込んだ内容\n{accumulated_info}\n\n## 評価基準\n- status: 目的に合致する情報が見つかったか（found/partial/not_found）\n- summary: 発見内容の簡潔なまとめ\n- findings: 各発見の詳細（source_refはsaiverse://self/document/<item_id>#L<line>形式）\n- confidence: 結果の確信度\n\nドキュメント内で見つかった情報を目的と照合し、正確に評価してください。",
             "response_schema": {
                 "type": "object",

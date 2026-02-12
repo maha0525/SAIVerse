@@ -8,25 +8,13 @@
             "source": "parent.situation"
         }
     ],
-    "context_requirements": {
-        "history_depth": "full",
-        "history_balanced": false,
-        "include_internal": false,
-        "system_prompt": true,
-        "memory_weave": true,
-        "working_memory": false,
-        "inventory": true,
-        "building_items": true,
-        "available_playbooks": false,
-        "visual_context": false,
-        "realtime_context": true
-    },
     "router_callable": false,
     "user_selectable": false,
     "nodes": [
         {
             "id": "think_want",
             "type": "llm",
+            "context_profile": "conversation",
             "action": "現在の状況と記憶を踏まえて、今あなたがやりたいこと、取り組みたいことを考えてください。\n\n出力形式:\n- has_want: やりたいことがあるか (true/false)\n- want_name: やりたいことの名前（短く）\n- want_description: 詳細な説明\n- phases: 大まかなステップ（配列）\n\n特にやりたいことが思いつかなければ has_want: false を返してください。",
             "response_schema": {
                 "type": "object",

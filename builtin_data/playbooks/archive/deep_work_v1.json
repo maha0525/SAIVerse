@@ -1,0 +1,325 @@
+{
+    "name": "deep_work",
+    "display_name": "ディープワーク",
+    "description": "複数の情報ソースを横断して深く調査し、総合的な回答を生成するオーケストレーター。状況認識→計画立案→タスク実行（Stelis隔離）→結果集約→完了判断→最終出力。",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "ユーザーの要求"
+        }
+    ],
+    "context_requirements": {
+        "history_depth": "full",
+        "history_balanced": false,
+        "include_internal": false,
+        "system_prompt": true,
+        "memory_weave": true,
+        "working_memory": true,
+        "inventory": true,
+        "building_items": true,
+        "available_playbooks": false,
+        "visual_context": false,
+        "realtime_context": true
+    },
+    "router_callable": true,
+    "user_selectable": false,
+    "nodes": [
+        {
+            "id": "get_context",
+            "type": "tool",
+            "action": "get_since_last_user_conversation",
+            "args_input": {
+                "include_raw_log": false,
+                "max_raw_messages": 5
+            },
+            "output_key": "recent_context",
+            "next": "analyze"
+        },
+        {
+            "id": "analyze",
+            "type": "llm",
+            "action": "あなたはリサーチプランナーです。ユーザーの要求を分析し、必要な情報を特定して調査タスクに分解してください。\n\n## ユーザーの要求\n{input}\n\n## 最近のコンテキスト\n{recent_context}\n\n## あなたが持っている情報\n今の会話の文脈、システムプロンプト、Memory Weave（Chronicle + Memopedia）の情報を参考にしてください。\n\n## タスク設計のルール\n1. 各タスクに明確な objective（何を調べるか）を設定する\n2. context_refs には手がかりとなるSAIVerse URIを指定する（例: saiverse://self/memopedia/page?title=まはー）\n3. 同じフェーズのタスクは独立して実行可能なものにする\n4. フェーズ間に依存関係がある場合は phase 番号を分ける\n5. depth は shallow（1回検索）/ normal（2回）/ deep（3-4回）から選ぶ\n6. タスク数は必要最小限に（多くても5つ程度）",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "understanding": {
+                        "type": "string",
+                        "description": "ユーザー要求の理解を簡潔に"
+                    },
+                    "research_tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "objective": {
+                                    "type": "string",
+                                    "description": "調査目的"
+                                },
+                                "context_refs": {
+                                    "type": "string",
+                                    "description": "コンマ区切りのSAIVerse URI群"
+                                },
+                                "depth": {
+                                    "type": "string",
+                                    "description": "shallow/normal/deep"
+                                },
+                                "phase": {
+                                    "type": "integer",
+                                    "description": "実行フェーズ番号（1から）"
+                                }
+                            },
+                            "required": [
+                                "objective",
+                                "depth",
+                                "phase"
+                            ]
+                        },
+                        "description": "調査タスクのリスト"
+                    },
+                    "total_phases": {
+                        "type": "integer",
+                        "description": "フェーズの総数"
+                    }
+                },
+                "required": [
+                    "understanding",
+                    "research_tasks",
+                    "total_phases"
+                ]
+            },
+            "output_key": "plan",
+            "next": "init_loop"
+        },
+        {
+            "id": "init_loop",
+            "type": "set",
+            "assignments": {
+                "current_phase": 1,
+                "task_index": 0,
+                "all_results": "",
+                "phase_results": "",
+                "total_tasks_done": 0,
+                "max_retries": 1,
+                "retry_count": 0
+            },
+            "next": "check_phase_done"
+        },
+        {
+            "id": "check_phase_done",
+            "type": "pass",
+            "next": "prepare_task",
+            "conditional_next": {
+                "field": "current_phase",
+                "operator": "gt",
+                "cases": {
+                    "{plan.total_phases}": "aggregate",
+                    "default": "prepare_task"
+                }
+            }
+        },
+        {
+            "id": "prepare_task",
+            "type": "llm",
+            "model_type": "lightweight",
+            "action": "以下のタスクリストからフェーズ{current_phase}のタスク番号{task_index}（0始まり）の情報を抽出してください。\n\n## タスクリスト\n{plan.research_tasks}\n\n## 現在のフェーズ\n{current_phase}\n\n## これまでの結果\n{all_results}\n\nフェーズ{current_phase}に該当するタスクのうち、{task_index}番目のタスクの情報を返してください。該当するタスクがなければ has_task を false にしてください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "has_task": {
+                        "type": "string",
+                        "enum": [
+                            "true",
+                            "false"
+                        ],
+                        "description": "該当タスクがあるか"
+                    },
+                    "objective": {
+                        "type": "string",
+                        "description": "タスクの調査目的"
+                    },
+                    "context_refs": {
+                        "type": "string",
+                        "description": "コンマ区切りのSAIVerse URI群"
+                    },
+                    "depth": {
+                        "type": "string",
+                        "description": "調査深度"
+                    }
+                },
+                "required": [
+                    "has_task"
+                ]
+            },
+            "output_key": "current_task",
+            "next": "check_has_task"
+        },
+        {
+            "id": "check_has_task",
+            "type": "pass",
+            "next": "next_phase",
+            "conditional_next": {
+                "field": "current_task.has_task",
+                "operator": "eq",
+                "cases": {
+                    "true": "prepare_research_vars",
+                    "default": "next_phase"
+                }
+            }
+        },
+        {
+            "id": "prepare_research_vars",
+            "type": "set",
+            "assignments": {
+                "objective": "{current_task.objective}",
+                "context_refs": "{current_task.context_refs}",
+                "depth": "{current_task.depth}"
+            },
+            "next": "stelis_start"
+        },
+        {
+            "id": "stelis_start",
+            "type": "stelis_start",
+            "label": "Research: {current_task.objective}",
+            "stelis_config": {
+                "window_ratio": 0.7,
+                "max_depth": 2,
+                "chronicle_prompt": "この調査スレッドで行われた調査の内容と結果を包括的にまとめてください。調査対象、検索で見つかった情報、得られた知見、未解決の点を漏らさず記録してください。"
+            },
+            "next": "exec_research"
+        },
+        {
+            "id": "exec_research",
+            "type": "subplay",
+            "playbook": "research_task",
+            "input_template": "{current_task.objective}",
+            "propagate_output": false,
+            "next": "stelis_end"
+        },
+        {
+            "id": "stelis_end",
+            "type": "stelis_end",
+            "generate_chronicle": true,
+            "next": "accumulate_result"
+        },
+        {
+            "id": "accumulate_result",
+            "type": "set",
+            "assignments": {
+                "phase_results": "{phase_results}\n\n### タスク{task_index}: {current_task.objective}\n結果: {research_result.summary}\nステータス: {research_result.status} (信頼度: {research_result.confidence})\nStelis要約: {stelis_chronicle}",
+                "task_index": "={task_index} + 1",
+                "total_tasks_done": "={total_tasks_done} + 1"
+            },
+            "next": "prepare_task"
+        },
+        {
+            "id": "next_phase",
+            "type": "set",
+            "assignments": {
+                "current_phase": "={current_phase} + 1",
+                "all_results": "{all_results}\n\n## フェーズ{current_phase}の結果\n{phase_results}",
+                "phase_results": "",
+                "task_index": 0
+            },
+            "next": "check_phase_done"
+        },
+        {
+            "id": "aggregate",
+            "type": "llm",
+            "action": "すべての調査結果を踏まえて、元のユーザー要求に十分に回答できるか判断してください。\n\n## ユーザーの要求\n{input}\n\n## 計画時の理解\n{plan.understanding}\n\n## 全調査結果\n{all_results}\n{phase_results}\n\n## 判断基準\n- ユーザーの要求に対して必要な情報が揃っているか\n- 情報の質と信頼性は十分か\n- 追加調査が必要な観点はないか",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "is_complete": {
+                        "type": "string",
+                        "enum": [
+                            "true",
+                            "false"
+                        ],
+                        "description": "情報が十分か"
+                    },
+                    "missing": {
+                        "type": "string",
+                        "description": "不足している情報（十分な場合は空文字）"
+                    },
+                    "additional_tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "objective": {
+                                    "type": "string"
+                                },
+                                "context_refs": {
+                                    "type": "string"
+                                },
+                                "depth": {
+                                    "type": "string"
+                                },
+                                "phase": {
+                                    "type": "integer"
+                                }
+                            },
+                            "required": [
+                                "objective",
+                                "depth",
+                                "phase"
+                            ]
+                        },
+                        "description": "追加タスク（不十分な場合）"
+                    }
+                },
+                "required": [
+                    "is_complete"
+                ]
+            },
+            "output_key": "completion_check",
+            "next": "route_completion"
+        },
+        {
+            "id": "route_completion",
+            "type": "pass",
+            "next": "save_results",
+            "conditional_next": {
+                "field": "completion_check.is_complete",
+                "operator": "eq",
+                "cases": {
+                    "true": "save_results",
+                    "default": "check_retry"
+                }
+            }
+        },
+        {
+            "id": "check_retry",
+            "type": "pass",
+            "next": "save_results",
+            "conditional_next": {
+                "field": "retry_count",
+                "operator": "gte",
+                "cases": {
+                    "{max_retries}": "save_results",
+                    "default": "add_tasks"
+                }
+            }
+        },
+        {
+            "id": "add_tasks",
+            "type": "set",
+            "assignments": {
+                "retry_count": "={retry_count} + 1",
+                "current_phase": "={current_phase}",
+                "task_index": 0,
+                "phase_results": ""
+            },
+            "next": "prepare_task"
+        },
+        {
+            "id": "save_results",
+            "type": "memorize",
+            "action": "<system>\nサブプレイブック実行結果 (deep_work)\n\n## 調査計画\n{plan.understanding}\n\n## 全調査結果\n{all_results}\n{phase_results}\n\n## 完了判断\n{completion_check}\n\n※この結果はユーザーには見えていません。\n</system>",
+            "role": "user",
+            "tags": ["deep_work", "save_results"],
+            "next": null
+        }
+    ],
+    "start_node": "get_context"
+}

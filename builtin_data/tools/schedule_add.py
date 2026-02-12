@@ -61,6 +61,12 @@ def schedule_add(
     if not persona_id:
         return "エラー: 現在のペルソナを取得できませんでした。"
 
+    # enabled の正規化（LLMが空文字やNoneを返す場合の防御）
+    if enabled is None or enabled == "":
+        enabled = True
+    elif isinstance(enabled, str):
+        enabled = enabled.lower() in ("true", "1", "yes")
+
     # バリデーション
     if schedule_type not in ["periodic", "oneshot", "interval"]:
         return f"エラー: 不正なスケジュールタイプです: {schedule_type}"

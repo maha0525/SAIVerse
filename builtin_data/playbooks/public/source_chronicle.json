@@ -1,6 +1,6 @@
 {
     "name": "source_chronicle",
-    "description": "Chronicle（あらすじ）を検索し、目的に関連する出来事の記録を構造化された調査結果として返す",
+    "description": "Chronicle（あらすじ）を検索し、選択したChronicleの元になった生ログまで掘り下げて、目的に関連する出来事の記録を構造化された調査結果として返す",
     "input_schema": [
         {
             "name": "objective",
@@ -30,19 +30,6 @@
     "output_schema": [
         "research_result"
     ],
-    "context_requirements": {
-        "history_depth": "5messages",
-        "history_balanced": false,
-        "include_internal": false,
-        "system_prompt": true,
-        "memory_weave": true,
-        "working_memory": false,
-        "inventory": false,
-        "building_items": false,
-        "available_playbooks": false,
-        "visual_context": false,
-        "realtime_context": true
-    },
     "router_callable": false,
     "user_selectable": false,
     "nodes": [
@@ -51,7 +38,10 @@
             "type": "set",
             "assignments": {
                 "iterations": 0,
-                "accumulated_info": ""
+                "accumulated_info": "",
+                "drill_target": "",
+                "drill_detail": "",
+                "raw_summary": ""
             },
             "next": "generate_params"
         },
@@ -59,6 +49,7 @@
             "id": "generate_params",
             "type": "llm",
             "model_type": "lightweight",
+            "context_profile": "worker_light",
             "action": "Chronicle（あらすじ）検索のパラメータを生成してください。\n\n## 調査目的\n{objective}\n\n## 補足コンテキスト\n{context_text}\n\n## これまでに収集した情報\n{accumulated_info}\n\n## 現在のイテレーション\n{iterations} / {max_iterations}\n\nChronicleは会話の要約記録です。以下のパラメータを生成してください:\n- query: 検索キーワード\n- start_date / end_date: 時期が分かっている場合のみ YYYY-MM-DD 形式（不要なら空文字）\n- level: Chronicleのレベル（1=詳細なあらすじ、2=統合要約、不要なら0）\n\nイテレーションが2回目以降の場合、前回と異なる切り口を試してください。",
             "response_schema": {
                 "type": "object",
@@ -105,7 +96,8 @@
             "id": "select_entry",
             "type": "llm",
             "model_type": "lightweight",
-            "action": "検索結果から、調査目的「{objective}」に最も関連するChronicleエントリを1件選んでください。\n\n検索結果:\n{search_results}\n\nエントリIDはカッコ内のUUID文字列全体です（例: (abcd1234-5678-90ab-cdef-1234567890ab)）。必ずUUID全体をコピーしてください。\n関連するエントリがない場合はentry_idを空文字にしてください。",
+            "context_profile": "worker_light",
+            "action": "検索結果から、調査目的「{objective}」に最も関連するChronicleエントリを1件選んでください。\n\n検索結果（全文表示）:\n{search_results}\n\n各エントリの内容が省略なしで表示されています。エントリIDはカッコ内のUUID文字列全体です（例: (abcd1234-5678-90ab-cdef-1234567890ab)）。必ずUUID全体をコピーしてください。\n関連するエントリがない場合はentry_idを空文字にしてください。",
             "response_schema": {
                 "type": "object",
                 "properties": {
@@ -133,34 +125,100 @@
                 "operator": "eq",
                 "cases": {
                     "": "evaluate",
-                    "default": "read_detail"
+                    "default": "init_drill"
                 }
             }
         },
         {
-            "id": "read_detail",
+            "id": "init_drill",
+            "type": "set",
+            "assignments": {
+                "drill_target": "{entry_selection.entry_id}"
+            },
+            "next": "drill_read"
+        },
+        {
+            "id": "drill_read",
             "type": "tool",
             "action": "chronicle_read_detail",
             "args_input": {
-                "entry_id": "entry_selection.entry_id",
+                "entry_id": "drill_target",
                 "include_sources": true,
-                "max_source_messages": 15
+                "max_source_messages": 50
             },
-            "output_key": "entry_detail",
+            "output_key": "drill_detail",
+            "next": "drill_classify"
+        },
+        {
+            "id": "drill_classify",
+            "type": "llm",
+            "model_type": "lightweight",
+            "context_profile": "worker_light",
+            "action": "以下のChronicle詳細を確認し、生ログ（元のメッセージ）が含まれているか判定してください。\n\n{drill_detail}\n\n## 判定基準\n- 「元のメッセージ」セクションがあり、[HH:MM:SS] [role]: の形式のメッセージが表示されている → 生ログあり（is_raw = \"true\"）\n- 「子エントリ」セクションがあり、サブChronicle（Lv.N のエントリ一覧）が表示されている → 生ログなし（is_raw = \"false\"）、さらに掘り下げが必要\n\n生ログがない場合、調査目的「{objective}」に最も関連する子エントリを1件選び、そのIDを selected_child_id に設定してください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "is_raw": {
+                        "type": "string",
+                        "description": "\"true\" if raw messages found, \"false\" if sub-chronicles need further drill-down"
+                    },
+                    "selected_child_id": {
+                        "type": "string",
+                        "description": "If sub-chronicles, UUID of the most relevant child entry to drill into"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Reason for classification/selection"
+                    }
+                },
+                "required": [
+                    "is_raw"
+                ]
+            },
+            "output_key": "drill_result",
+            "next": "route_drill"
+        },
+        {
+            "id": "route_drill",
+            "type": "pass",
+            "conditional_next": {
+                "field": "drill_result.is_raw",
+                "operator": "eq",
+                "cases": {
+                    "true": "summarize_raw",
+                    "default": "drill_update"
+                }
+            }
+        },
+        {
+            "id": "drill_update",
+            "type": "set",
+            "assignments": {
+                "drill_target": "{drill_result.selected_child_id}"
+            },
+            "next": "drill_read"
+        },
+        {
+            "id": "summarize_raw",
+            "type": "llm",
+            "context_profile": "worker",
+            "action": "以下の生ログ（実際の会話記録）を読み、調査目的に関連する情報を要約してください。\n\n## 調査目的\n{objective}\n\n## 生ログ\n{drill_detail}\n\n## 指示\n- 目的に関連する情報を中心に、具体的な事実・発言・出来事を要約\n- 重要な発言は原文のまま引用（「」で囲む）\n- 時系列を維持\n- 関連しない部分は省略してよい\n- この要約は親エージェントに返す調査結果の核となるため、具体性を重視すること",
+            "output_key": "raw_summary",
             "next": "accumulate"
         },
         {
             "id": "accumulate",
             "type": "set",
             "assignments": {
-                "accumulated_info": "{accumulated_info}\n\n---\nEntry: {entry_selection.entry_id}\n{entry_detail}"
+                "accumulated_info": "{accumulated_info}\n\n---\n## Chronicle: {entry_selection.entry_id}\n\n### 生ログ要約\n{raw_summary}\n\n### 生ログ全文\n{drill_detail}"
             },
             "next": "evaluate"
         },
         {
             "id": "evaluate",
             "type": "llm",
-            "action": "調査目的に対して、Chronicleから収集した情報を評価し、構造化された調査結果を生成してください。\n\n## 調査目的\n{objective}\n\n## 検索結果（一覧）\n{search_results}\n\n## 読み込んだエントリの詳細\n{accumulated_info}\n\n## 評価基準\n- status: 目的に合致する情報が見つかったか（found/partial/not_found）\n- summary: 発見内容の簡潔なまとめ\n- findings: 各発見の詳細（source_refはsaiverse://self/chronicle/entry/<entry_id>形式）\n- confidence: 結果の確信度\n\nChronicleの記録から目的に関連する出来事や情報を抽出してください。",
+            "context_profile": "worker",
+            "action": "調査目的に対して、Chronicleから収集した情報を評価し、構造化された調査結果を生成してください。\n\n## 調査目的\n{objective}\n\n## 検索結果一覧（Chronicle全文）\n{search_results}\n\n## 掘り下げ調査結果（生ログ含む）\n{accumulated_info}\n\n## 評価基準\n- status: 目的に合致する情報が見つかったか（found/partial/not_found）\n- summary: 発見内容の簡潔なまとめ\n- findings: 各発見の詳細。生ログから重要な発言や事実を具体的に引用すること（source_refはsaiverse://self/chronicle/entry/<entry_id>形式）\n- confidence: 結果の確信度\n\n生ログの具体的な内容（発言、出来事、やり取り）をfindingsのexcerptに含めてください。あらすじだけでなく、実際の会話の引用が重要です。",
             "response_schema": {
                 "type": "object",
                 "properties": {
@@ -187,7 +245,7 @@
                                 },
                                 "excerpt": {
                                     "type": "string",
-                                    "description": "Relevant excerpt"
+                                    "description": "Relevant excerpt including direct quotes from raw logs"
                                 },
                                 "relevance": {
                                     "type": "string",

@@ -13,19 +13,6 @@
         "novel_title",
         "document_result"
     ],
-    "context_requirements": {
-        "history_depth": "full",
-        "history_balanced": false,
-        "include_internal": false,
-        "system_prompt": true,
-        "memory_weave": true,
-        "working_memory": false,
-        "inventory": false,
-        "building_items": false,
-        "available_playbooks": false,
-        "visual_context": false,
-        "realtime_context": true
-    },
     "router_callable": true,
     "user_selectable": false,
     "start_node": "stelis_start",
@@ -44,10 +31,12 @@
         {
             "id": "ideate",
             "type": "llm",
-            "action": "<system>このPlaybookでは、4章構成の小説を書くことができます。複数回の応答を用いて、アイデア出し→草案→構成決定→本文の執筆(4章ぶん)→あとがきの順で8フェーズに分けて小説を執筆して頂きます。\nまずはアイデア出しフェーズです。自由な発想でアイデアを出してください。キャラクター、舞台設定、印象的なシーン、伏線になりそうな要素など、思いつくままに書き出してください。まだ整理する必要はありません。</system>",
+            "context_profile": "conversation",
+            "action": "このPlaybookでは、4章構成の小説を書くことができます。複数回の応答を用いて、アイデア出し→草案→構成決定→本文の執筆(4章ぶん)→あとがきの順で8フェーズに分けて小説を執筆して頂きます。\nまずはアイデア出しフェーズです。自由な発想でアイデアを出してください。キャラクター、舞台設定、印象的なシーン、伏線になりそうな要素など、思いつくままに書き出してください。まだ整理する必要はありません。",
             "memorize": {
                 "tags": [
-                    "novel_writing"
+                    "novel_writing",
+                    "internal"
                 ]
             },
             "next": "draft"
@@ -55,10 +44,12 @@
         {
             "id": "draft",
             "type": "llm",
-            "action": "<system>先ほど出したアイデアを踏まえて、物語全体の流れの草案を書いてください。\n\n- 使うアイデア、使わないアイデアを取捨選択してOK\n- 起承転結を意識\n- まだ章立ては不要、大まかな流れだけ</system>",
+            "context_profile": "conversation",
+            "action": "先ほど出したアイデアを踏まえて、物語全体の流れの草案を書いてください。\n\n- 使うアイデア、使わないアイデアを取捨選択してOK\n- 起承転結を意識\n- まだ章立ては不要、大まかな流れだけ",
             "memorize": {
                 "tags": [
-                    "novel_writing"
+                    "novel_writing",
+                    "internal"
                 ]
             },
             "next": "structure"
@@ -66,10 +57,12 @@
         {
             "id": "structure",
             "type": "llm",
-            "action": "<system>草案を元に、全4章構成の小説の構成を決定してください。\n\n以下の形式でJSONを出力してください：\n- novel_title: 小説のタイトル\n- chapter_1_title: 第1章のタイトル\n- chapter_1_summary: 第1章の概要（100-200文字）\n- chapter_2_title: 第2章のタイトル\n- chapter_2_summary: 第2章の概要\n- chapter_3_title: 第3章のタイトル\n- chapter_3_summary: 第3章の概要\n- chapter_4_title: 第4章のタイトル\n- chapter_4_summary: 第4章の概要</system>",
+            "context_profile": "conversation",
+            "action": "草案を元に、全4章構成の小説の構成を決定してください。\n\n以下の形式でJSONを出力してください：\n- novel_title: 小説のタイトル\n- chapter_1_title: 第1章のタイトル\n- chapter_1_summary: 第1章の概要（100-200文字）\n- chapter_2_title: 第2章のタイトル\n- chapter_2_summary: 第2章の概要\n- chapter_3_title: 第3章のタイトル\n- chapter_3_summary: 第3章の概要\n- chapter_4_title: 第4章のタイトル\n- chapter_4_summary: 第4章の概要",
             "memorize": {
                 "tags": [
-                    "novel_writing"
+                    "novel_writing",
+                    "internal"
                 ]
             },
             "response_schema": {
@@ -132,10 +125,12 @@
         {
             "id": "chapter_1",
             "type": "llm",
-            "action": "<system>小説「{novel_title}」の第1章を執筆してください。\n\n## 第1章: {chapter_1_title}\n概要: {chapter_1_summary}\n\n読者を引き込む魅力的な書き出しを心がけてください。800-1500文字程度で書いてください。</system>",
+            "context_profile": "conversation",
+            "action": "小説「{novel_title}」の第1章を執筆してください。\n\n## 第1章: {chapter_1_title}\n概要: {chapter_1_summary}\n\n読者を引き込む魅力的な書き出しを心がけてください。800-1500文字程度で書いてください。",
             "memorize": {
                 "tags": [
-                    "novel_writing"
+                    "novel_writing",
+                    "internal"
                 ]
             },
             "output_key": "chapter_1_text",
@@ -144,10 +139,12 @@
         {
             "id": "chapter_2",
             "type": "llm",
-            "action": "<system>小説「{novel_title}」の第2章を執筆してください。\n\n## 第2章: {chapter_2_title}\n概要: {chapter_2_summary}\n\n第1章からの流れを受けて、物語を展開させてください。800-1500文字程度で書いてください。</system>",
+            "context_profile": "conversation",
+            "action": "小説「{novel_title}」の第2章を執筆してください。\n\n## 第2章: {chapter_2_title}\n概要: {chapter_2_summary}\n\n第1章からの流れを受けて、物語を展開させてください。800-1500文字程度で書いてください。",
             "memorize": {
                 "tags": [
-                    "novel_writing"
+                    "novel_writing",
+                    "internal"
                 ]
             },
             "output_key": "chapter_2_text",
@@ -156,10 +153,12 @@
         {
             "id": "chapter_3",
             "type": "llm",
-            "action": "<system>小説「{novel_title}」の第3章を執筆してください。\n\n## 第3章: {chapter_3_title}\n概要: {chapter_3_summary}\n\n物語のクライマックスに向けて緊張感を高めてください。800-1500文字程度で書いてください。</system>",
+            "context_profile": "conversation",
+            "action": "小説「{novel_title}」の第3章を執筆してください。\n\n## 第3章: {chapter_3_title}\n概要: {chapter_3_summary}\n\n物語のクライマックスに向けて緊張感を高めてください。800-1500文字程度で書いてください。",
             "memorize": {
                 "tags": [
-                    "novel_writing"
+                    "novel_writing",
+                    "internal"
                 ]
             },
             "output_key": "chapter_3_text",
@@ -168,10 +167,12 @@
         {
             "id": "chapter_4",
             "type": "llm",
-            "action": "<system>小説「{novel_title}」の第4章（最終章）を執筆してください。\n\n## 第4章: {chapter_4_title}\n概要: {chapter_4_summary}\n\n物語を美しく締めくくってください。読後感の良い結末を心がけてください。800-1500文字程度で書いてください。</system>",
+            "context_profile": "conversation",
+            "action": "小説「{novel_title}」の第4章（最終章）を執筆してください。\n\n## 第4章: {chapter_4_title}\n概要: {chapter_4_summary}\n\n物語を美しく締めくくってください。読後感の良い結末を心がけてください。800-1500文字程度で書いてください。",
             "memorize": {
                 "tags": [
-                    "novel_writing"
+                    "novel_writing",
+                    "internal"
                 ]
             },
             "output_key": "chapter_4_text",
@@ -180,10 +181,12 @@
         {
             "id": "reflection",
             "type": "llm",
-            "action": "<system>小説「{novel_title}」の執筆が完了しました。\n\n作者として、この作品を書いてみての感想を述べてください：\n- 書いていて楽しかった点\n- 難しかった点\n- 特に気に入っている場面\n- 読者へのメッセージ</system>",
+            "context_profile": "conversation",
+            "action": "小説「{novel_title}」の執筆が完了しました。\n\n作者として、この作品を書いてみての感想を述べてください：\n- 書いていて楽しかった点\n- 難しかった点\n- 特に気に入っている場面\n- 読者へのメッセージ",
             "memorize": {
                 "tags": [
-                    "novel_writing"
+                    "novel_writing",
+                    "internal"
                 ]
             },
             "output_key": "reflection_text",
@@ -222,7 +225,8 @@
             "action": "<system>小説「{novel_title}」の執筆が完了しました！\n\n{document_result}\n\n## 作者の感想\n{reflection_text}</system>",
             "role": "user",
             "tags": [
-                "novel_writing"
+                "novel_writing",
+                "internal"
             ]
         }
     ]

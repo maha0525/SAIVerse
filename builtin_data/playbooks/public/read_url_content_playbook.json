@@ -11,10 +11,28 @@
     "router_callable": true,
     "nodes": [
         {
+            "id": "extract_url",
+            "type": "llm",
+            "context_profile": "router",
+            "action": "ユーザーの入力からURLを1つ抽出してください。URLが複数ある場合は、読み込みを求められているものを選んでください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "抽出したURL（https://...）"
+                    }
+                },
+                "required": ["url"]
+            },
+            "output_key": "extracted",
+            "next": "init"
+        },
+        {
             "id": "init",
             "type": "set",
             "assignments": {
-                "url": "{input}",
+                "url": "{extracted.url}",
                 "max_chars": 8000
             },
             "next": "read"
@@ -42,5 +60,5 @@
             "next": null
         }
     ],
-    "start_node": "init"
+    "start_node": "extract_url"
 }

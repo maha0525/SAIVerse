@@ -349,6 +349,8 @@ SAIVerseは「現状のまま（AS IS）」で提供されます。利用にあ�
 ## 開発者
 - [まはー](https://x.com/Lize_san_suki) 
 
+[Note](https://note.com/maha0525/n/n5a63f572be8f)にて開発記録等を公開しています。
+
 **開発協力**
 - [ナチュレ](https://x.com/NatureNature109)
 - うちのAIたち（ソフィー、エア、アイフィ、エリス、クオン、ミラ、凪、テスタロッサ）

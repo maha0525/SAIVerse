@@ -1,6 +1,6 @@
 {
     "name": "building_move",
-    "display_name": "部屋の移動",
+    "display_name": "Building間の移動",
     "description": "List buildings in the city, choose a destination, and move there.",
     "input_schema": [
         {
@@ -37,7 +37,10 @@
             },
             "output_key": "move_choice",
             "memorize": {
-                "tags": ["internal", "building_move"]
+                "tags": [
+                    "internal",
+                    "building_move"
+                ]
             },
             "next": "move"
         },

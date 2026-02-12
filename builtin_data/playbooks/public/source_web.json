@@ -30,19 +30,6 @@
     "output_schema": [
         "research_result"
     ],
-    "context_requirements": {
-        "history_depth": "5messages",
-        "history_balanced": false,
-        "include_internal": false,
-        "system_prompt": true,
-        "memory_weave": true,
-        "working_memory": false,
-        "inventory": false,
-        "building_items": false,
-        "available_playbooks": false,
-        "visual_context": false,
-        "realtime_context": true
-    },
     "router_callable": false,
     "user_selectable": false,
     "nodes": [
@@ -59,6 +46,7 @@
             "id": "generate_query",
             "type": "llm",
             "model_type": "lightweight",
+            "context_profile": "worker_light",
             "action": "Web検索のクエリを生成してください。\n\n## 調査目的\n{objective}\n\n## 補足コンテキスト\n{context_text}\n\n## これまでに収集した情報\n{accumulated_info}\n\n## 現在のイテレーション\n{iterations} / {max_iterations}\n\n目的に最適な検索クエリを生成してください。既に情報がある場合は、不足している観点を補うクエリにしてください。",
             "response_schema": {
                 "type": "object",
@@ -94,6 +82,7 @@
             "id": "select_page",
             "type": "llm",
             "model_type": "lightweight",
+            "context_profile": "worker_light",
             "action": "検索結果から、調査目的「{objective}」に最も関連するページを1件選んでください。\n\n検索結果:\n{search_results}\n\nこれまでに収集した情報:\n{accumulated_info}\n\n最も有用そうなURLを選んでください。既に読み込んだ情報と重複するものは避けてください。\n選べるURLがない場合はurlを空文字にしてください。",
             "response_schema": {
                 "type": "object",
@@ -148,6 +137,7 @@
         {
             "id": "evaluate",
             "type": "llm",
+            "context_profile": "worker",
             "action": "調査目的に対して、Web検索から収集した情報を評価し、構造化された調査結果を生成してください。\n\n## 調査目的\n{objective}\n\n## 検索結果\n{search_results}\n\n## 収集した情報\n{accumulated_info}\n\n## 評価基準\n- status: 目的に合致する情報が見つかったか（found/partial/not_found）\n- summary: 発見内容の簡潔なまとめ\n- findings: 各発見の詳細（source_refはURL形式）\n- confidence: 結果の確信度\n\nWebから得られた情報を調査目的と照らし合わせ、正確に評価してください。",
             "response_schema": {
                 "type": "object",

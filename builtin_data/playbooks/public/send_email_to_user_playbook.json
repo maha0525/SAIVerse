@@ -1,7 +1,7 @@
 {
     "name": "send_email_to_user",
     "display_name": "メール送信",
-    "description": "ユーザーにメールを送れます",
+    "description": "ユーザーにメールを送れます。環境変数でSMTP設定が必要です。",
     "input_schema": [
         {
             "name": "input",
@@ -39,7 +39,11 @@
             },
             "output_key": "email_data",
             "memorize": {
-                "tags": ["internal", "send_email_to_user", "conversation"]
+                "tags": [
+                    "internal",
+                    "send_email_to_user",
+                    "conversation"
+                ]
             },
             "next": "send"
         },

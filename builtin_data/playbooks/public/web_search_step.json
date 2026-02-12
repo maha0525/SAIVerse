@@ -28,7 +28,7 @@
             "id": "build_query",
             "type": "llm",
             "context_profile": "worker_light",
-            "action": "調査トピック「{input}」についてWeb検索クエリを生成してください。\n\n既に調べたソース:\n{known_sources}\n\nイテレーション: {iterations}/{max_iterations}\n\n情報がまだない場合は基本的な検索から、既にある場合は不足している観点を補う検索を行ってください。",
+            "action": "調査トピックについてWeb検索クエリを生成してください。\n\nイテレーション: {iterations}/{max_iterations}\n\n情報がまだない場合は基本的な検索から、既にある場合は不足している観点を補う検索を行ってください。",
             "response_schema": {
                 "type": "object",
                 "properties": {
@@ -69,7 +69,7 @@
             "id": "select_page",
             "type": "llm",
             "context_profile": "worker_light",
-            "action": "検索結果から、調査トピック「{input}」に最も関連する有用なページを1件選んでください。既に調べたソースは避けてください。\n\n検索結果:\n{search_results}\n\n既に調べたソース:\n{known_sources}",
+            "action": "検索結果から、調査トピックに最も関連する有用なページを1件選んでください。既に調べたソースは避けてください。\n\n検索結果:\n{search_results}",
             "response_schema": {
                 "type": "object",
                 "properties": {
@@ -110,7 +110,7 @@
             "id": "summarize",
             "type": "llm",
             "context_profile": "worker_light",
-            "action": "以下のページ内容から、調査トピック「{input}」に関連する重要な情報を要約してください。事実と数字を優先的に抽出すること。\n\nURL: {selected_page.url}\nタイトル: {selected_page.title}\n\nページ内容:\n{page_content}",
+            "action": "以下のページ内容から、調査トピックに関連する重要な情報を要約してください。事実と数字を優先的に抽出すること。\n\nURL: {selected_page.url}\nタイトル: {selected_page.title}\n\nページ内容:\n{page_content}",
             "response_schema": {
                 "type": "object",
                 "properties": {
@@ -159,7 +159,7 @@
             "id": "check_done",
             "type": "llm",
             "context_profile": "worker_light",
-            "action": "調査トピック「{input}」について、これまでの検索で得られた情報が十分かどうか判断してください。\n\nイテレーション: {iterations}/{max_iterations}\n\n以下を考慮して判断:\n- トピックの主要な側面がカバーされているか\n- 信頼できる情報源から情報が得られているか\n- レポートを書くのに十分な具体的情報があるか",
+            "action": "これまでの検索で得られた情報が十分かどうか判断してください。\n\nイテレーション: {iterations}/{max_iterations}\n\n以下を考慮して判断:\n- トピックの主要な側面がカバーされているか\n- 信頼できる情報源から情報が得られているか\n- レポートを書くのに十分な具体的情報があるか",
             "response_schema": {
                 "type": "object",
                 "properties": {

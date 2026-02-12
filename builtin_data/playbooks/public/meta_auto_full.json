@@ -9,19 +9,6 @@
         }
     ],
     "output_schema": null,
-    "context_requirements": {
-        "history_depth": 0,
-        "history_balanced": false,
-        "include_internal": false,
-        "system_prompt": false,
-        "memory_weave": true,
-        "working_memory": true,
-        "inventory": false,
-        "building_items": false,
-        "available_playbooks": false,
-        "visual_context": false,
-        "realtime_context": true
-    },
     "router_callable": false,
     "user_selectable": false,
     "nodes": [
@@ -39,6 +26,7 @@
             "id": "branch_task",
             "type": "llm",
             "model_type": "lightweight",
+            "context_profile": "worker_light",
             "action": "タスク情報:\n{task_summary}\n\nアクティブなタスクがあるかどうかを判定してください。\n- has_active_task: true/false",
             "response_schema": {
                 "type": "object",
@@ -94,6 +82,7 @@
             "id": "react_check",
             "type": "llm",
             "model_type": "lightweight",
+            "context_profile": "worker_light",
             "action": "現在の状況:\n{current_snapshot}\n\n新規メッセージ:\n{perception_summary}\n\n状況変化:\n{change_info.change_summary}\n\n上記を踏まえて、今すぐリアクション（発言や行動）すべき外部刺激があるか判定してください。\n\n例:\n- 他のペルソナから話しかけられた → should_react: true\n- 重要なイベント通知を受けた → should_react: true\n- 新しいペルソナが部屋に来た → should_react: true (挨拶するため)\n- 特に何もない → should_react: false",
             "response_schema": {
                 "type": "object",

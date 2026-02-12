@@ -77,8 +77,6 @@ def chronicle_read_detail(
                         ts = dt.strftime("%H:%M:%S")
                         role = msg.role if msg.role != "model" else "assistant"
                         content = (msg.content or "").strip()
-                        if len(content) > 300:
-                            content = content[:300] + "..."
                         parts.append(f"[{ts}] [{role}]: {content}")
                         count += 1
 
@@ -95,9 +93,8 @@ def chronicle_read_detail(
                         c_start = datetime.fromtimestamp(child.start_time).strftime("%Y-%m-%d %H:%M") if child.start_time else "?"
                         c_end = datetime.fromtimestamp(child.end_time).strftime("%Y-%m-%d %H:%M") if child.end_time else "?"
                         parts.append(f"[{child.id}] Lv.{child.level} | {c_start} ~ {c_end} | {child.message_count}msg")
-                        # Show first 200 chars of child content
-                        snippet = child.content[:200] + "..." if len(child.content) > 200 else child.content
-                        parts.append(f"  {snippet}")
+                        # Show full child content
+                        parts.append(f"  {child.content}")
                         parts.append("")
 
     return "\n".join(parts)

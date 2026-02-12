@@ -266,9 +266,9 @@ Examples:
     if args.dry_run:
         print("\nNo changes were made. Remove --dry-run to actually import.")
     elif total_imported > 0 or total_updated > 0:
-        print("\n✓ Playbooks successfully imported!")
+        print("\nPlaybooks successfully imported!")
     elif total_skipped > 0:
-        print("\n✓ All playbooks already exist. Use --force to update them.")
+        print("\nAll playbooks already exist. Use --force to update them.")
 
 
 if __name__ == "__main__":

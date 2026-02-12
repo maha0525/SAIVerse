@@ -30,19 +30,6 @@
     "output_schema": [
         "research_result"
     ],
-    "context_requirements": {
-        "history_depth": "5messages",
-        "history_balanced": false,
-        "include_internal": false,
-        "system_prompt": true,
-        "memory_weave": true,
-        "working_memory": false,
-        "inventory": false,
-        "building_items": false,
-        "available_playbooks": false,
-        "visual_context": false,
-        "realtime_context": true
-    },
     "router_callable": false,
     "user_selectable": false,
     "nodes": [
@@ -59,6 +46,7 @@
             "id": "generate_params",
             "type": "llm",
             "model_type": "lightweight",
+            "context_profile": "worker_light",
             "action": "Memopedia検索のパラメータを生成してください。\n\n## 調査目的\n{objective}\n\n## 補足コンテキスト\n{context_text}\n\n## 現在のイテレーション\n{iterations} / {max_iterations}\n\nMemopediaはペルソナの知識ベースで、people（人物）、terms（用語）、plans（計画）のカテゴリがあります。\n目的に最適な検索キーワードと、必要ならカテゴリフィルタを指定してください。\nイテレーションが2回目以降の場合、前回と異なるキーワードやカテゴリを試してください。",
             "response_schema": {
                 "type": "object",
@@ -95,6 +83,7 @@
             "id": "select_page",
             "type": "llm",
             "model_type": "lightweight",
+            "context_profile": "worker_light",
             "action": "検索結果から、調査目的「{objective}」に最も関連するページを1件選んでください。\n\n検索結果:\n{search_results}\n\nページIDはカッコ内のUUID文字列全体です（例: (abcd1234-5678-90ab-cdef-1234567890ab)）。必ずUUID全体をコピーしてください。\n関連するページがない場合はpage_idを空文字にしてください。",
             "response_schema": {
                 "type": "object",
@@ -140,6 +129,7 @@
         {
             "id": "evaluate",
             "type": "llm",
+            "context_profile": "worker",
             "action": "調査目的に対して、Memopediaから収集した知識を評価し、構造化された調査結果を生成してください。\n\n## 調査目的\n{objective}\n\n## 検索結果（一覧）\n{search_results}\n\n## 選択したページの内容\n{page_content}\n\n## 評価基準\n- status: 目的に合致する情報が見つかったか（found/partial/not_found）\n- summary: 発見内容の簡潔なまとめ\n- findings: 各発見の詳細（source_refはsaiverse://self/memopedia/page/<page_id>形式）\n- confidence: 結果の確信度\n\nMemopediaの知識ページから目的に関連する情報を抽出してください。",
             "response_schema": {
                 "type": "object",

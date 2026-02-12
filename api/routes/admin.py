@@ -113,6 +113,15 @@ def write_env_updates(updates: Dict[str, str]) -> None:
     for key, val in updates.items():
         os.environ[key] = val
 
+    # Rebuild router Gemini clients if relevant keys changed
+    _GEMINI_ENV_KEYS = {"GEMINI_FREE_API_KEY", "GEMINI_API_KEY"}
+    if updates.keys() & _GEMINI_ENV_KEYS:
+        try:
+            from saiverse.llm_router import rebuild_clients
+            rebuild_clients()
+        except Exception as e:
+            LOGGER.warning("Failed to rebuild router Gemini clients: %s", e)
+
 
 @router.post("/env")
 def update_env_vars(req: EnvUpdateRequest):

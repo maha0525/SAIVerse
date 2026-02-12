@@ -8,19 +8,6 @@
             "description": "スケジュール管理のリクエスト（例: スケジュールを追加して、明日の朝9時にリマインドしてほしい）"
         }
     ],
-    "context_requirements": {
-        "history_depth": "full",
-        "history_balanced": false,
-        "include_internal": false,
-        "system_prompt": true,
-        "memory_weave": true,
-        "working_memory": false,
-        "inventory": true,
-        "building_items": true,
-        "available_playbooks": false,
-        "visual_context": false,
-        "realtime_context": true
-    },
     "router_callable": true,
     "nodes": [
         {
@@ -44,8 +31,8 @@
         {
             "id": "determine_action",
             "type": "llm",
-            "model_type": "lightweight",
-            "action": "現在のスケジュール一覧とユーザーのリクエストから、どのスケジュール操作を行うか判断してください。\n\n選択肢：\n- add: 新しいスケジュールを追加する\n- delete: 既存のスケジュールを削除する\n- none: 何もしない（一覧表示のみで終了）",
+            "context_profile": "router",
+            "action": "現在のスケジュール一覧をふまえて、どのスケジュール操作を行うか判断してください。\n\n選択肢：\n- add: 新しいスケジュールを追加する\n- delete: 既存のスケジュールを削除する\n- none: 何もしない（一覧表示のみで終了）",
             "next": null,
             "conditional_next": {
                 "field": "action_decision.action",
@@ -72,12 +59,19 @@
                     "action"
                 ]
             },
+            "memorize": {
+                "tags": [
+                    "internal",
+                    "schedule_management"
+                ]
+            },
             "output_key": "action_decision"
         },
         {
             "id": "prepare_add",
             "type": "llm",
-            "action": "schedule_addツールの引数を決定します。ユーザーのリクエストに基づいてスケジュールを作成してください。\n\n### スケジュールタイプ：\n- periodic: 定期実行（曜日と時刻を指定）\n- oneshot: 単発実行（日時を指定）\n- interval: 一定間隔実行（秒数を指定）\n\n### メタプレイブック：\n- 通常は「meta_user」を指定してください。\n- 特定のPlaybookを直接実行したい場合は「meta_user_manual」を指定し、playbook_paramsでselected_playbookを設定してください。\n  例: meta_playbook=\"meta_user_manual\", playbook_params={\"selected_playbook\": \"send_email_to_user\"}\n\n### 現在の日時：\n{current_datetime}\n\n### 注意：\n- 日時や時刻はペルソナのタイムゾーンで指定してください\n- descriptionフィールドには、実行時にAIに伝えたい内容を書いてください（例：「まはーさんに今日のタスクを報告して」）",
+            "context_profile": "conversation",
+            "action": "schedule_addツールの引数を決定してください。\n\n### スケジュールタイプ：\n- periodic: 定期実行（曜日と時刻を指定）\n- oneshot: 単発実行（日時を指定）\n- interval: 一定間隔実行（秒数を指定）\n\n### メタプレイブック：\n- 通常は「meta_user」を指定してください。\n- 特定のPlaybookを直接実行したい場合は「meta_user_manual」を指定し、playbook_paramsでselected_playbookを設定してください。\n  例: meta_playbook=\"meta_user_manual\", playbook_params={\"selected_playbook\": \"send_email_to_user\"}\n\n### 現在の日時：\nリアルタイム情報（会話コンテキスト内）に記載されている現在時刻を参照してください。\n\n### 注意：\n- 日時や時刻はペルソナのタイムゾーンで指定してください\n- descriptionフィールドには、実行時にAIに伝えたい内容を書いてください（例：「まはーさんに今日のタスクを報告して」）",
             "next": "record_add_params",
             "response_schema": {
                 "type": "object",
@@ -97,19 +91,17 @@
                     },
                     "playbook_params": {
                         "type": "object",
-                        "description": "Playbookパラメータ。meta_user_manual使用時にselected_playbookで実行するサブPlaybookを指定。例: {\"selected_playbook\": \"send_email_to_user\"}"
+                        "description": "Playbookパラメータ。meta_user_manual使用時にselected_playbookで実行するサブPlaybookを指定",
+                        "properties": {
+                            "selected_playbook": {
+                                "type": "string",
+                                "description": "meta_user_manual使用時に実行するサブPlaybook名（例: send_email_to_user）"
+                            }
+                        }
                     },
                     "description": {
                         "type": "string",
                         "description": "スケジュールの説明（実行時にAIに渡される）"
-                    },
-                    "priority": {
-                        "type": "integer",
-                        "description": "優先度（0～100、デフォルト: 0）"
-                    },
-                    "enabled": {
-                        "type": "boolean",
-                        "description": "有効にするか（デフォルト: true）"
                     },
                     "days_of_week": {
                         "type": "array",
@@ -137,6 +129,12 @@
                     "description"
                 ]
             },
+            "memorize": {
+                "tags": [
+                    "internal",
+                    "schedule_management"
+                ]
+            },
             "output_key": "add_params"
         },
         {
@@ -159,8 +157,6 @@
                 "meta_playbook": "add_params.meta_playbook",
                 "playbook_params": "add_params.playbook_params",
                 "description": "add_params.description",
-                "priority": "add_params.priority",
-                "enabled": "add_params.enabled",
                 "days_of_week": "add_params.days_of_week",
                 "time_of_day": "add_params.time_of_day",
                 "scheduled_datetime": "add_params.scheduled_datetime",
@@ -182,7 +178,8 @@
         {
             "id": "prepare_delete",
             "type": "llm",
-            "action": "schedule_deleteツールの引数を決定します。先ほど取得したスケジュール一覧を参照して、削除対象のスケジュールIDを特定してください。\n\nユーザーのリクエストに基づいて、削除すべきスケジュールのIDを決定してください。",
+            "context_profile": "router",
+            "action": "schedule_deleteツールの引数を決定してください。先ほど取得したスケジュール一覧を参照して、削除対象のスケジュールIDを特定してください。",
             "next": "record_delete_params",
             "response_schema": {
                 "type": "object",
@@ -194,6 +191,12 @@
                 },
                 "required": [
                     "schedule_id"
+                ]
+            },
+            "memorize": {
+                "tags": [
+                    "internal",
+                    "schedule_management"
                 ]
             },
             "output_key": "delete_params"

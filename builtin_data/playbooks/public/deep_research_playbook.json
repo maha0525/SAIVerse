@@ -1,6 +1,6 @@
 {
     "name": "deep_research",
-    "display_name": "深い調査",
+    "display_name": "ディープリサーチ",
     "description": "トピックについて深く調査し、複数の情報源から情報を収集してレポートドキュメントを作成する。ペルソナの知識を活用して調査計画を立て、Web検索ループをサブエージェントで実行し、構造化された調査結果からレポートを生成する。",
     "input_schema": [
         {
@@ -123,6 +123,64 @@
                 "content": "report.content"
             },
             "output_key": "doc_result",
+            "next": "consider_writeback"
+        },
+        {
+            "id": "consider_writeback",
+            "type": "llm",
+            "model_type": "lightweight",
+            "context_profile": "worker_light",
+            "action": "このリサーチレポートの中から、Memopediaに記録すべき知識を抽出してください。\n\n## レポートタイトル\n{report.title}\n\n## レポート要約\n{report.summary}\n\n## レポート内容\n{report.content}\n\n## 判断基準\n- 今後のやり取りで参照する価値がある知識か\n- 人物、概念、技術、計画に関する定義的・百科事典的な情報か\n- 一時的な調査結果ではなく、持続的に有用な知識か\n\n記録すべき知識がある場合、Memopediaに保存するパラメータを生成してください。\nレポート全体を記録するのではなく、本質的な知識を凝縮してください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "should_save": {
+                        "type": "string",
+                        "enum": ["true", "false"],
+                        "description": "Memopediaに記録すべきか"
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "ページタイトル（保存する場合）"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "記録する知識（Markdown形式、保存する場合）"
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["people", "terms", "plans"],
+                        "description": "カテゴリ（保存する場合）"
+                    }
+                },
+                "required": ["should_save"]
+            },
+            "output_key": "writeback",
+            "next": "route_writeback"
+        },
+        {
+            "id": "route_writeback",
+            "type": "pass",
+            "next": "notify_complete",
+            "conditional_next": {
+                "field": "writeback.should_save",
+                "operator": "eq",
+                "cases": {
+                    "true": "exec_writeback",
+                    "default": "notify_complete"
+                }
+            }
+        },
+        {
+            "id": "exec_writeback",
+            "type": "tool",
+            "action": "memopedia_note",
+            "args_input": {
+                "content": "writeback.content",
+                "title": "writeback.title",
+                "category": "writeback.category"
+            },
+            "output_key": "writeback_result",
             "next": "notify_complete"
         },
         {

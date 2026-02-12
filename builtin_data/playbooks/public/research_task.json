@@ -30,19 +30,6 @@
     "output_schema": [
         "research_result"
     ],
-    "context_requirements": {
-        "history_depth": "5messages",
-        "history_balanced": false,
-        "include_internal": false,
-        "system_prompt": true,
-        "memory_weave": true,
-        "working_memory": false,
-        "inventory": false,
-        "building_items": false,
-        "available_playbooks": false,
-        "visual_context": false,
-        "realtime_context": true
-    },
     "router_callable": false,
     "user_selectable": false,
     "nodes": [
@@ -51,7 +38,7 @@
             "type": "tool",
             "action": "resolve_uri",
             "args_input": {
-                "uris": "context_ref_list",
+                "uris": "context_refs",
                 "max_total_chars": 6000
             },
             "output_key": "resolved_context",
@@ -94,6 +81,7 @@
             "id": "route",
             "type": "llm",
             "model_type": "lightweight",
+            "context_profile": "worker_light",
             "action": "あなたはリサーチタスクのソースルーターです。以下の調査目的と手がかり情報から、最適な情報ソースを1つ選んでください。\n\n## 調査目的\n{objective}\n\n## 手がかり情報\n{resolved_context}\n\n## context_refs (URI)\n{context_refs}\n\n## 選択可能なソース\n- messagelog: 過去の会話ログを意味検索で探す。「あのとき話した」「言ってた」など過去の発言を探す場合。\n- memopedia: 知識ベースのページを検索する。人物・用語・概念の定義や情報を探す場合。\n- chronicle: あらすじ（時系列の出来事サマリー）を検索する。「いつ何があった」「時期ごとの出来事」を探す場合。\n- web: Webを検索する。外部の情報が必要な場合。\n- document: ドキュメントアイテムを検索する。特定のドキュメントの内容を探す場合。context_refsにsaiverse://item/やsaiverse://document/が含まれている場合。\n- pdf: PDFアイテムを読む。context_refsにPDFアイテムのURIが含まれている場合。\n\n## 判断のヒント\n- context_refsのURIスキーム（messagelog, memopedia, chronicle等）はソース選択の手がかりになる\n- 手がかり情報の内容もどのソースが適切かの判断材料\n- 迷った場合はmessagelogが最も汎用的",
             "response_schema": {
                 "type": "object",
@@ -158,6 +146,7 @@
             "id": "fallback_check",
             "type": "llm",
             "model_type": "lightweight",
+            "context_profile": "worker_light",
             "action": "リサーチ結果が見つかりませんでした。別のソースで再検索するべきか判断してください。\n\n## 調査目的\n{objective}\n\n## 使用したソース\n{route_result.source}\n\n## 結果\n{research_result}\n\n別のソースで検索する必要がありますか？",
             "response_schema": {
                 "type": "object",

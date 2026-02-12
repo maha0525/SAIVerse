@@ -1,6 +1,6 @@
 {
     "name": "memopedia_edit",
-    "display_name": "メモペディア編集",
+    "display_name": "Memopedia編集",
     "description": "既存のMemopediaページを編集する（加筆・修正・更新）",
     "input_schema": [
         {
@@ -33,7 +33,11 @@
                     },
                     "edit_type": {
                         "type": "string",
-                        "enum": ["add", "fix", "update"],
+                        "enum": [
+                            "add",
+                            "fix",
+                            "update"
+                        ],
                         "description": "編集の種類: add=加筆, fix=修正, update=全体更新"
                     },
                     "edit_details": {
@@ -49,11 +53,19 @@
                         "description": "情報収集が必要な場合の検索クエリ"
                     }
                 },
-                "required": ["target_title", "edit_type", "edit_details", "needs_search"]
+                "required": [
+                    "target_title",
+                    "edit_type",
+                    "edit_details",
+                    "needs_search"
+                ]
             },
             "output_key": "parsed",
             "memorize": {
-                "tags": ["internal", "memopedia_edit"]
+                "tags": [
+                    "internal",
+                    "memopedia_edit"
+                ]
             },
             "next": "set_initial_target"
         },
@@ -102,7 +114,9 @@
                         "description": "選択理由"
                     }
                 },
-                "required": ["selected_title"]
+                "required": [
+                    "selected_title"
+                ]
             },
             "output_key": "selection",
             "next": "set_target"
@@ -142,7 +156,11 @@
             "type": "memorize",
             "action": "指定されたページが見つかりませんでした: {target_title}",
             "role": "assistant",
-            "tags": ["internal", "memopedia_edit", "playbook_result"],
+            "tags": [
+                "internal",
+                "memopedia_edit",
+                "playbook_result"
+            ],
             "next": null
         },
         {
@@ -209,11 +227,20 @@
                         "description": "何を編集したかの要約"
                     }
                 },
-                "required": ["title", "summary", "content", "keywords", "edit_summary"]
+                "required": [
+                    "title",
+                    "summary",
+                    "content",
+                    "keywords",
+                    "edit_summary"
+                ]
             },
             "output_key": "edited",
             "memorize": {
-                "tags": ["internal", "memopedia_edit"]
+                "tags": [
+                    "internal",
+                    "memopedia_edit"
+                ]
             },
             "next": "save_page"
         },
@@ -235,7 +262,11 @@
             "type": "memorize",
             "action": "Memopediaページ編集完了\n\nページ: {edited.title}\n編集内容: {edited.edit_summary}\n結果: {save_result}",
             "role": "user",
-            "tags": ["internal", "memopedia_edit", "playbook_result"],
+            "tags": [
+                "internal",
+                "memopedia_edit",
+                "playbook_result"
+            ],
             "next": null
         }
     ],

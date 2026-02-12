@@ -1,6 +1,6 @@
 {
     "name": "searxng_search",
-    "display_name": "ウェブ検索",
+    "display_name": "ウェブ検索（単発）",
     "description": "SearXNGでウェブ検索を実行し、結果を取得するためのPlaybook",
     "input_schema": [
         {
@@ -45,7 +45,10 @@
             },
             "output_key": "search_args",
             "memorize": {
-                "tags": ["internal", "searxng_search"]
+                "tags": [
+                    "internal",
+                    "searxng_search"
+                ]
             },
             "next": "search"
         },

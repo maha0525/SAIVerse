@@ -1,6 +1,6 @@
 {
     "name": "agentic_chat",
-    "display_name": "エージェントチャット",
+    "display_name": "ツール自由使用",
     "description": "ツールを自由に使って情報を集め、回答するエージェント型チャット",
     "input_schema": [
         {
@@ -16,7 +16,7 @@
             "type": "set",
             "assignments": {
                 "loop_count": 0,
-                "max_loops": 5,
+                "max_loops": 30,
                 "tool_history": "",
                 "response_text": ""
             },
@@ -32,13 +32,27 @@
                 "read_url_content",
                 "memopedia_search",
                 "chronicle_search",
+                "chronicle_read_detail",
+                "document_create",
                 "document_read",
-                "calculator"
+                "document_search",
+                "calculator",
+                "image_generator",
+                "item_pickup",
+                "item_place",
+                "item_view",
+                "memory_recall",
+                "schedule_add",
+                "send_email_to_user"
             ],
-            "action": "ユーザーの要求に答えてください。必要な情報が不足している場合はツールを使って調べてから回答してください。\n\nこれまでのツール呼び出し結果:\n{tool_history}\n\nツールが不要、または十分な情報が集まった場合はテキストで直接回答してください。ツールを呼ぶ場合は1回に1つだけ選んでください。",
+            "action": "必要な情報が不足している場合はツールコールを使い調査を行ってください。これ以上ツールを利用する必要がない時はそのまま通常発話してください。\n\nこれまでのツール呼び出し結果:\n{tool_history}\n\nツールを呼ぶ場合は1回に1つだけ選んでください。",
             "output_keys": [
-                {"text": "response_text"},
-                {"function_call": "fc"}
+                {
+                    "text": "response_text"
+                },
+                {
+                    "function_call": "fc"
+                }
             ],
             "next": "check_tool_call"
         },
@@ -89,7 +103,10 @@
             "action": "ツール呼び出しの上限に達しました。これまでに収集した情報を基に回答を生成してください。\n\n収集情報:\n{tool_history}",
             "output_key": "response_text",
             "memorize": {
-                "tags": ["internal", "agentic_chat"]
+                "tags": [
+                    "internal",
+                    "agentic_chat"
+                ]
             },
             "next": "record"
         },
@@ -98,7 +115,11 @@
             "type": "memorize",
             "action": "{response_text}",
             "role": "assistant",
-            "tags": ["internal", "agentic_chat", "playbook_result"],
+            "tags": [
+                "internal",
+                "agentic_chat",
+                "playbook_result"
+            ],
             "next": null
         }
     ],

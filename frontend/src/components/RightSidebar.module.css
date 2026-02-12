@@ -401,3 +401,26 @@
 :global([data-theme="light"]) .cardDesc {
     color: #64748b;
 }
+
+:global([data-theme="light"]) .cardIcon {
+    color: #374151;
+}
+
+:global([data-theme="light"]) .toggleOpenBtn {
+    background: rgba(148, 163, 184, 0.2);
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .toggleOpenBtn:hover {
+    background: rgba(148, 163, 184, 0.35);
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .toggleOpenBtn.isOpen {
+    background: rgba(16, 185, 129, 0.15);
+    color: #059669;
+}
+
+:global([data-theme="light"]) .toggleOpenBtn.isOpen:hover {
+    background: rgba(16, 185, 129, 0.25);
+}

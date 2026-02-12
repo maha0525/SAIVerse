@@ -1,6 +1,6 @@
 {
     "name": "memopedia_note",
-    "display_name": "メモペディア直接書き込み",
+    "display_name": "Memopedia直接書き込み",
     "description": "会話コンテキストから直接Memopediaに書き込む（調査なし）。既存ページへのURI指定追記も可能",
     "input_schema": [
         {
@@ -44,7 +44,11 @@
                     },
                     "category": {
                         "type": "string",
-                        "enum": ["people", "terms", "plans"],
+                        "enum": [
+                            "people",
+                            "terms",
+                            "plans"
+                        ],
                         "description": "カテゴリ"
                     },
                     "keywords": {
@@ -65,7 +69,10 @@
             },
             "output_key": "note",
             "memorize": {
-                "tags": ["internal", "memopedia_note"]
+                "tags": [
+                    "internal",
+                    "memopedia_note"
+                ]
             },
             "next": "write"
         },

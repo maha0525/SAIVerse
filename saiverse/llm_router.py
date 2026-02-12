@@ -21,6 +21,21 @@ _CLIENT_LABELS = {
 }
 
 
+def rebuild_clients():
+    """Rebuild Gemini clients from current os.environ.
+
+    Called after API keys are updated at runtime (e.g. via tutorial or admin UI)
+    so that the router uses the latest credentials.
+    """
+    global _free_client, _paid_client, client, _CLIENT_LABELS
+    _free_client, _paid_client, client = build_gemini_clients()
+    _CLIENT_LABELS = {
+        id(_free_client): "free",
+        id(_paid_client): "paid",
+    }
+    log.info("Router Gemini clients rebuilt with updated API keys")
+
+
 def _is_rate_limit_error(err: Exception) -> bool:
     msg = str(err).lower()
     for keyword in ("rate", "quota", "429", "503", "unavailable", "overload"):

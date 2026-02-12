@@ -10,6 +10,7 @@ import threading
 import queue
 from google.genai import errors
 
+from api.deps import avatar_path_to_url
 from llm_clients.exceptions import LLMError
 from discord_gateway.translator import GatewayCommand
 from manager.persona import PersonaMixin
@@ -429,6 +430,21 @@ class RuntimeService(
         # SEAモード: タイムアウト回避のためのスレッド実行とKeep-Alive
         response_queue = queue.Queue()
 
+        def _enrich_event(event):
+            """Enrich streaming events with resolved persona name and avatar URL."""
+            if isinstance(event, dict) and event.get("persona_id"):
+                pid = event["persona_id"]
+                p = self.personas.get(pid)
+                if p:
+                    if not event.get("persona_name"):
+                        event["persona_name"] = p.persona_name
+                    if not event.get("persona_avatar"):
+                        event["persona_avatar"] = (
+                            avatar_path_to_url(p.avatar_image)
+                            or "/api/static/builtin_icons/host.png"
+                        )
+            response_queue.put(event)
+
         def backend_worker():
             try:
                 for persona in responding_personas:
@@ -438,7 +454,7 @@ class RuntimeService(
                         metadata=metadata,
                         meta_playbook=meta_playbook,
                         playbook_params=playbook_params,
-                        event_callback=response_queue.put
+                        event_callback=_enrich_event
                     )
             except LLMError as e:
                 logging.error("SEA worker LLM error: %s", e, exc_info=True)

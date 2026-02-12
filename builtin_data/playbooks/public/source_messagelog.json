@@ -30,19 +30,6 @@
     "output_schema": [
         "research_result"
     ],
-    "context_requirements": {
-        "history_depth": "5messages",
-        "history_balanced": false,
-        "include_internal": false,
-        "system_prompt": true,
-        "memory_weave": true,
-        "working_memory": false,
-        "inventory": false,
-        "building_items": false,
-        "available_playbooks": false,
-        "visual_context": false,
-        "realtime_context": true
-    },
     "router_callable": false,
     "user_selectable": false,
     "nodes": [
@@ -50,7 +37,8 @@
             "id": "init",
             "type": "set",
             "assignments": {
-                "iterations": 0
+                "iterations": 0,
+                "context_around": ""
             },
             "next": "generate_query"
         },
@@ -58,6 +46,7 @@
             "id": "generate_query",
             "type": "llm",
             "model_type": "lightweight",
+            "context_profile": "worker_light",
             "action": "会話ログの検索パラメータを生成してください。\n\n## 調査目的\n{objective}\n\n## 補足コンテキスト\n{context_text}\n\n## 現在のイテレーション\n{iterations} / {max_iterations}\n\n以下のルールに従って検索パラメータを生成してください:\n- query: 思い出したい内容を自然文で記述（意味検索に使われます）\n- keywords: メッセージに含まれているはずの具体的な単語・固有名詞を配列で指定（部分一致検索）\n- start_date / end_date: 時期が分かっている場合のみ YYYY-MM-DD 形式で指定（不要なら空文字）\n\nイテレーションが2回目以降の場合、前回と異なる切り口のクエリを試してください。",
             "response_schema": {
                 "type": "object",
@@ -109,6 +98,7 @@
             "id": "select_hits",
             "type": "llm",
             "model_type": "lightweight",
+            "context_profile": "worker_light",
             "action": "以下の検索結果から、調査目的「{objective}」に最も関連する上位のメッセージIDを選んでください。\n\n検索結果:\n{search_results}\n\n最も関連性が高いメッセージを最大3件選び、そのメッセージIDを返してください。カッコ内の文字列がメッセージIDです。\n結果がなさそうな場合は空の配列を返してください。",
             "response_schema": {
                 "type": "object",
@@ -154,6 +144,7 @@
         {
             "id": "evaluate",
             "type": "llm",
+            "context_profile": "worker",
             "action": "調査目的に対して、収集した会話ログの情報を評価し、構造化された調査結果を生成してください。\n\n## 調査目的\n{objective}\n\n## 検索結果（概要）\n{search_results}\n\n## 選択したメッセージの前後文脈\n{context_around}\n\n## 評価基準\n- status: 目的に合致する情報が見つかったか（found/partial/not_found）\n- summary: 発見内容の簡潔なまとめ\n- findings: 各発見の詳細（source_refはsaiverse://self/messagelog/message/<message_id>形式）\n- confidence: 結果の確信度\n\n会話ログの中から目的に関連する情報を抽出し、各findingのexcerptには該当部分の引用を含めてください。",
             "response_schema": {
                 "type": "object",

@@ -30,19 +30,6 @@
     "output_schema": [
         "research_result"
     ],
-    "context_requirements": {
-        "history_depth": "5messages",
-        "history_balanced": false,
-        "include_internal": false,
-        "system_prompt": true,
-        "memory_weave": true,
-        "working_memory": false,
-        "inventory": false,
-        "building_items": false,
-        "available_playbooks": false,
-        "visual_context": false,
-        "realtime_context": true
-    },
     "router_callable": false,
     "user_selectable": false,
     "nodes": [
@@ -59,6 +46,7 @@
             "id": "generate_params",
             "type": "llm",
             "model_type": "lightweight",
+            "context_profile": "worker_light",
             "action": "PDF読み込みのパラメータを生成してください。\n\n## 調査目的\n{objective}\n\n## 補足コンテキスト（URIから解決済みの情報。item_idが含まれている場合があります）\n{context_text}\n\n## これまでに読み込んだテキスト\n{accumulated_text}\n\n## 現在のイテレーション\n{iterations} / {max_iterations}\n\nコンテキストからPDFのitem_idを特定し、読み込むページ範囲を指定してください。\n- pages: ページ範囲（例: \"1-5\", \"3\", \"10-20\"）。1始まり。\n  - 最初のイテレーションでは、全体を把握するため最初の数ページ（例: \"1-5\"）を推奨\n  - 2回目以降は、目的に関連しそうなページを指定\n  - ページ範囲が不明な場合は空文字（全ページ読み込み）\n- max_chars: 最大文字数（デフォルト: 8000）",
             "response_schema": {
                 "type": "object",
@@ -106,6 +94,7 @@
         {
             "id": "evaluate",
             "type": "llm",
+            "context_profile": "worker",
             "action": "調査目的に対して、PDFから読み込んだ内容を評価し、構造化された調査結果を生成してください。\n\n## 調査目的\n{objective}\n\n## 読み込んだPDFの内容\n{accumulated_text}\n\n## 評価基準\n- status: 目的に合致する情報が見つかったか（found/partial/not_found）\n- summary: 発見内容の簡潔なまとめ\n- findings: 各発見の詳細（source_refはsaiverse://self/document/<item_id>#page=<N>形式）\n- confidence: 結果の確信度\n\nPDFの内容を目的と照合し、正確に評価してください。\npartialの場合、他のページに情報がある可能性を考慮してください。",
             "response_schema": {
                 "type": "object",

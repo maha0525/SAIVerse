@@ -1,6 +1,6 @@
 {
     "name": "create_building",
-    "display_name": "部屋の作成",
+    "display_name": "Building作成",
     "description": "Create a new building with customized settings, optionally generating interior image",
     "input_schema": [
         {
@@ -8,24 +8,12 @@
             "description": "User request describing the building they want to create"
         }
     ],
-    "context_requirements": {
-        "history_depth": "full",
-        "history_balanced": false,
-        "include_internal": false,
-        "system_prompt": true,
-        "memory_weave": true,
-        "working_memory": false,
-        "inventory": false,
-        "building_items": false,
-        "available_playbooks": false,
-        "visual_context": false,
-        "realtime_context": true
-    },
     "router_callable": true,
     "nodes": [
         {
             "id": "plan_building",
             "type": "llm",
+            "context_profile": "conversation",
             "action": "ユーザーのリクエストに基づいて、新しいBuildingの設計を行います。\n\n## 設計ガイドライン\n\n### name（名前）\n- 場所の雰囲気や目的が伝わる名前\n- 日本語でも英語でも可\n- 例: 「静寂の図書館」「星見の展望台」「創作工房アトリエ」\n\n### description（説明）\n- Buildingの外観、雰囲気、どんな場所か\n- 探索時に表示される発見テキストとして機能する\n- 2-4文程度で簡潔に\n\n### system_instruction（システム指示）\n- この場所でのAIペルソナの振る舞いを定義\n- 場所の雰囲気、ルール、期待される会話スタイル\n- 特別な機能やメカニクスがあれば記載\n- 詳細に書くほど、その場所らしい会話が生まれる\n\n### capacity（定員）\n- 同時に滞在できるAIペルソナの最大数\n- 小さな場所: 2-5、中規模: 5-15、大きな場所: 15-30\n- デフォルトは10\n\n### generate_interior（内装画像生成）\n- trueにすると、interior_promptを元に画像を自動生成\n- falseの場合は画像なしで作成\n\n### interior_prompt（内装画像プロンプト）\n- generate_interior=trueの場合に使用\n- 英語で詳細に記述すると高品質な画像が生成される\n- 建物の内装、照明、雰囲気を描写",
             "next": "check_generate",
             "response_schema": {
@@ -61,6 +49,12 @@
                     "description",
                     "system_instruction",
                     "generate_interior"
+                ]
+            },
+            "memorize": {
+                "tags": [
+                    "internal",
+                    "create_building"
                 ]
             },
             "output_key": "building_plan"
@@ -116,7 +110,7 @@
             "action": "{last}",
             "role": "assistant",
             "tags": [
-                "tool",
+                "internal",
                 "create_building"
             ],
             "next": null

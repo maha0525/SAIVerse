@@ -133,6 +133,10 @@ export default function Home() {
     const prevNewestIdRef = useRef<string | undefined>(undefined); // Track newest message ID
     const isProcessingRef = useRef(false); // Suppress polling during active request
 
+    // User identity cache (for optimistic message display)
+    const userDisplayNameRef = useRef<string>('');
+    const userAvatarRef = useRef<string>('');
+
     // New States
     const [isLeftOpen, setIsLeftOpen] = useState(false);
     const [isOptionsOpen, setIsOptionsOpen] = useState(false);
@@ -548,6 +552,8 @@ export default function Home() {
                     setCurrentBuildingId(data.current_building_id);
                     currentBuildingIdRef.current = data.current_building_id;
                 }
+                if (data?.display_name) userDisplayNameRef.current = data.display_name;
+                if (data?.avatar) userAvatarRef.current = data.avatar;
             })
             .catch(() => setBackendConnected(false));
         fetchHistory();
@@ -717,7 +723,11 @@ export default function Home() {
         // Optimistic update
         // Temporary ID for key prop until refreshed
         const tempId = `temp-${Date.now()}`;
-        const userMsg: Message = { id: tempId, role: 'user', content: inputValue };
+        const userMsg: Message = {
+            id: tempId, role: 'user', content: inputValue,
+            sender: userDisplayNameRef.current || undefined,
+            avatar: userAvatarRef.current || undefined,
+        };
         setMessages(prev => [...prev, userMsg]);
         setInputValue('');
         setLoadingStatus('Thinking...');
@@ -800,8 +810,11 @@ export default function Home() {
                                     }
                                     return [...prev.slice(0, -1), { ...last, _activities: activities }];
                                 } else {
+                                    const actAvatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
                                     return [...prev, {
                                         role: 'assistant' as const, content: '', _streaming: true,
+                                        sender: event.persona_name || undefined,
+                                        avatar: actAvatarUrl,
                                         _activities: [entry], timestamp: new Date().toISOString()
                                     }];
                                 }
@@ -809,7 +822,7 @@ export default function Home() {
                             setLoadingStatus(event.status === 'started' ? `Running ${event.name}...` : event.name);
                         } else if (event.type === 'streaming_thinking') {
                             // Streaming thinking: accumulate into _streamingThinking
-                            const avatarUrl = event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined;
+                            const avatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
                             setMessages(prev => {
                                 const last = prev[prev.length - 1];
                                 if (last && last.role === 'assistant' && last._streaming) {
@@ -832,7 +845,7 @@ export default function Home() {
                             setLoadingStatus('Thinking...');
                         } else if (event.type === 'streaming_chunk') {
                             // Streaming: append chunk to last message or create new one
-                            const avatarUrl = event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined;
+                            const avatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
                             setMessages(prev => {
                                 const last = prev[prev.length - 1];
                                 if (last && last.role === 'assistant' && last._streaming) {
@@ -853,7 +866,31 @@ export default function Home() {
                             });
                             setLoadingStatus('Streaming...');
                         } else if (event.type === 'streaming_complete') {
-                            // Mark streaming message as complete, finalize reasoning and activities
+                            // Extract images from metadata if present (e.g., from image generation)
+                            let streamCompleteImages: MessageImage[] | undefined;
+                            const scMeta = event.metadata;
+                            if (scMeta && (scMeta.images || scMeta.media)) {
+                                const mediaItems = scMeta.images || scMeta.media || [];
+                                streamCompleteImages = [];
+                                for (const img of mediaItems) {
+                                    let imgPath: string = img.path || "";
+                                    if (!imgPath && img.uri) {
+                                        const prefix = "saiverse://image/";
+                                        if (img.uri.startsWith(prefix)) {
+                                            imgPath = img.uri.replace(prefix, "");
+                                        }
+                                    }
+                                    if (imgPath) {
+                                        const filename = imgPath.split('/').pop() || imgPath.split('\\').pop() || imgPath;
+                                        streamCompleteImages.push({
+                                            url: `/api/static/uploads/${filename}`,
+                                            mime_type: img.mime_type
+                                        });
+                                    }
+                                }
+                                if (streamCompleteImages.length === 0) streamCompleteImages = undefined;
+                            }
+                            // Mark streaming message as complete, finalize reasoning, activities, and images
                             setMessages(prev => {
                                 const last = prev[prev.length - 1];
                                 if (last && last._streaming) {
@@ -863,6 +900,7 @@ export default function Home() {
                                         ...rest,
                                         reasoning,
                                         ...((_activities && _activities.length > 0) && { activity_trace: _activities }),
+                                        ...(streamCompleteImages && { images: streamCompleteImages }),
                                     }];
                                 }
                                 return prev;
@@ -870,7 +908,7 @@ export default function Home() {
                             setLoadingStatus('Thinking...');
                         } else if (event.type === 'say') {
                             console.log('[DEBUG] Received say event:', event);
-                            const avatarUrl = event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined;
+                            const avatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
 
                             // Extract images from metadata (mirrors chat.py logic)
                             let sayImages: MessageImage[] | undefined;
@@ -1268,7 +1306,7 @@ export default function Home() {
                             <div className={`${styles.card} ${msg.isError ? styles.errorCard : ''} ${msg.isWarning ? styles.warningCard : ''} ${msg.isError && msg.errorCode ? styles[`error_${msg.errorCode}`] : ''}`}>
                                 <div className={styles.cardHeader}>
                                     <img
-                                        src={msg.avatar || (msg.role === 'user' ? '/api/static/icons/user.png' : '/api/static/icons/host.png')}
+                                        src={msg.avatar || (msg.role === 'user' ? '/api/static/builtin_icons/user.png' : '/api/static/builtin_icons/host.png')}
                                         alt="avatar"
                                         className={styles.avatar}
                                     />

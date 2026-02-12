@@ -310,7 +310,10 @@ class SEARuntime:
                 persona.execution_state["playbook"] = None
                 persona.execution_state["node"] = None
                 persona.execution_state["status"] = "idle"
-            return None
+            raise LLMError(
+                f"Playbook '{playbook.name}' graph compilation failed",
+                user_message=f"プレイブック '{playbook.name}' のグラフ構築に失敗しました。",
+            )
 
         # Process input_schema to inherit variables from parent_state
         inherited_vars = {}
@@ -414,14 +417,20 @@ class SEARuntime:
                 persona.execution_state["node"] = None
                 persona.execution_state["status"] = "idle"
             raise
-        except Exception:
+        except Exception as exc:
             LOGGER.exception("SEA LangGraph execution failed")
             # Update execution state: execution failed, reset to idle
             if hasattr(persona, "execution_state"):
                 persona.execution_state["playbook"] = None
                 persona.execution_state["node"] = None
                 persona.execution_state["status"] = "idle"
-            return None
+            # Wrap as LLMError so existing error propagation chain
+            # delivers it to the frontend instead of silently swallowing.
+            raise LLMError(
+                f"Playbook execution failed: {type(exc).__name__}: {exc}",
+                original_error=exc,
+                user_message=f"プレイブックの実行中にエラーが発生しました: {exc}",
+            ) from exc
 
         # Write back state variables to parent_state based on output_schema
         if parent_state is not None and isinstance(final_state, dict) and playbook.output_schema:
@@ -604,10 +613,8 @@ class SEARuntime:
                             if "thought" in mapping:
                                 thought_key = mapping["thought"]
 
-                    import json
-
                     # Debug: log result type and keys
-                    LOGGER.info("[DEBUG] LLM result type='%s', has content=%s, has tool_name=%s", 
+                    LOGGER.info("[DEBUG] LLM result type='%s', has content=%s, has tool_name=%s",
                                result.get("type"), "content" in result, "tool_name" in result)
 
                     if result["type"] == "tool_call":
@@ -810,7 +817,11 @@ class SEARuntime:
                             e.get("text", "") for e in reasoning_entries if e.get("text")
                         ) if reasoning_entries else ""
 
-                        # Send completion event with reasoning
+                        # Resolve metadata_key for speak (e.g., media attachments from tool execution)
+                        _speak_metadata_key = getattr(node_def, "metadata_key", None)
+                        _speak_base_metadata = state.get(_speak_metadata_key) if _speak_metadata_key else None
+
+                        # Send completion event with reasoning and metadata
                         completion_event: Dict[str, Any] = {
                             "type": "streaming_complete",
                             "persona_id": getattr(persona, "persona_id", None),
@@ -818,11 +829,16 @@ class SEARuntime:
                         }
                         if reasoning_text:
                             completion_event["reasoning"] = reasoning_text
+                        if _speak_base_metadata and isinstance(_speak_base_metadata, dict):
+                            completion_event["metadata"] = _speak_base_metadata
                         event_callback(completion_event)
 
                         # Record to Building history with usage metadata (include pulse total)
                         pulse_id = state.get("pulse_id")
                         msg_metadata: Dict[str, Any] = {}
+                        # Merge base metadata first (e.g., media from tool execution)
+                        if _speak_base_metadata and isinstance(_speak_base_metadata, dict):
+                            msg_metadata.update(_speak_base_metadata)
                         if llm_usage_metadata:
                             msg_metadata["llm_usage"] = llm_usage_metadata
                         if reasoning_text:
@@ -888,7 +904,13 @@ class SEARuntime:
                                    speak_flag, event_callback is not None, len(text) if text else 0)
                         if speak_flag is True:
                             pulse_id = state.get("pulse_id")
+                            # Resolve metadata_key for speak (e.g., media attachments from tool execution)
+                            _speak_metadata_key2 = getattr(node_def, "metadata_key", None)
+                            _speak_base_metadata2 = state.get(_speak_metadata_key2) if _speak_metadata_key2 else None
                             msg_metadata: Dict[str, Any] = {}
+                            # Merge base metadata first (e.g., media from tool execution)
+                            if _speak_base_metadata2 and isinstance(_speak_base_metadata2, dict):
+                                msg_metadata.update(_speak_base_metadata2)
                             if llm_usage_metadata:
                                 msg_metadata["llm_usage"] = llm_usage_metadata
                             if reasoning_text:
@@ -912,6 +934,8 @@ class SEARuntime:
                                     say_event["reasoning"] = reasoning_text
                                 if _at_speak:
                                     say_event["activity_trace"] = list(_at_speak)
+                                if msg_metadata:
+                                    say_event["metadata"] = msg_metadata
                                 event_callback(say_event)
 
                         # Store remaining reasoning for say/speak node (non-speak path)
@@ -957,14 +981,17 @@ class SEARuntime:
                     original_error=exc,
                 ) from exc
             state["last"] = text
-            state["messages"] = messages + [{"role": "assistant", "content": text}]
+            # Structured output may return a dict; serialise to JSON string
+            # so that subsequent LLM calls receive valid message content.
+            _msg_content = json.dumps(text, ensure_ascii=False) if isinstance(text, dict) else text
+            state["messages"] = messages + [{"role": "assistant", "content": _msg_content}]
 
             # Track intermediate messages for profile-based nodes in the same playbook
             if "_intermediate_msgs" in state:
                 _im = list(state.get("_intermediate_msgs", []))
                 if prompt:
                     _im.append({"role": "user", "content": prompt})
-                _im.append({"role": "assistant", "content": text})
+                _im.append({"role": "assistant", "content": _msg_content})
                 state["_intermediate_msgs"] = _im
 
             # Trace: log prompt→response (truncation handled by log_sea_trace)
@@ -1013,7 +1040,6 @@ class SEARuntime:
                     # If structured output was consumed, format as JSON string for memory
                     content_to_save = text
                     if schema_consumed and isinstance(text, dict):
-                        import json
                         content_to_save = json.dumps(text, ensure_ascii=False, indent=2)
                         LOGGER.debug("[sea][llm] Structured output formatted as JSON for memory")
 
@@ -1039,7 +1065,12 @@ class SEARuntime:
                     if isinstance(_at, list):
                         _at.append({"action": "memorize", "name": node_label, "playbook": pb_display})
                     if event_callback:
-                        event_callback({"type": "activity", "action": "memorize", "name": node_label, "playbook": pb_display, "status": "completed"})
+                        event_callback({
+                            "type": "activity", "action": "memorize", "name": node_label,
+                            "playbook": pb_display, "status": "completed",
+                            "persona_id": getattr(persona, "persona_id", None),
+                            "persona_name": getattr(persona, "persona_name", None),
+                        })
 
             # Debug: log speak_content at end of LLM node
             speak_content = state.get("speak_content", "")
@@ -1602,7 +1633,12 @@ class SEARuntime:
                     if isinstance(_at, list):
                         _at.append({"action": "tool", "name": tool_name, "playbook": pb_display})
                     if event_callback:
-                        event_callback({"type": "activity", "action": "tool", "name": tool_name, "playbook": pb_display, "status": "completed"})
+                        event_callback({
+                            "type": "activity", "action": "tool", "name": tool_name,
+                            "playbook": pb_display, "status": "completed",
+                            "persona_id": getattr(persona, "persona_id", None),
+                            "persona_name": getattr(persona, "persona_name", None),
+                        })
 
                 # Handle tuple results with output_keys (for multi-value returns)
                 if output_keys and isinstance(result, tuple):
@@ -1710,7 +1746,12 @@ class SEARuntime:
                     if isinstance(_at, list):
                         _at.append({"action": "tool_call", "name": tool_name, "playbook": pb_display})
                     if event_callback:
-                        event_callback({"type": "activity", "action": "tool_call", "name": tool_name, "playbook": pb_display, "status": "completed"})
+                        event_callback({
+                            "type": "activity", "action": "tool_call", "name": tool_name,
+                            "playbook": pb_display, "status": "completed",
+                            "persona_id": getattr(persona, "persona_id", None),
+                            "persona_name": getattr(persona, "persona_name", None),
+                        })
 
                 state["last"] = result_str
                 if output_key:
@@ -1823,8 +1864,7 @@ class SEARuntime:
             if execution == "subagent" and subagent_thread_id:
                 gen_chronicle = getattr(node_def, "subagent_chronicle", True)
                 chronicle = self._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=gen_chronicle)
-                if chronicle:
-                    state["_subagent_chronicle"] = chronicle
+                state["_subagent_chronicle"] = chronicle or ""
                 log_sea_trace(playbook.name, node_id, "EXEC", f"← {sub_name} [subagent ended, chronicle={'yes' if chronicle else 'no'}]")
 
             # Success path: clear error flag
@@ -1902,7 +1942,12 @@ class SEARuntime:
                 if isinstance(_at, list):
                     _at.append({"action": "memorize", "name": node_label, "playbook": pb_display})
                 if event_callback:
-                    event_callback({"type": "activity", "action": "memorize", "name": node_label, "playbook": pb_display, "status": "completed"})
+                    event_callback({
+                        "type": "activity", "action": "memorize", "name": node_label,
+                        "playbook": pb_display, "status": "completed",
+                        "persona_id": getattr(persona, "persona_id", None),
+                        "persona_name": getattr(persona, "persona_name", None),
+                    })
 
             # Debug: log speak_content at end of memorize node
             speak_content = state.get("speak_content", "")
@@ -2072,8 +2117,7 @@ class SEARuntime:
             if execution == "subagent" and subagent_thread_id:
                 gen_chronicle = getattr(node_def, "subagent_chronicle", True)
                 chronicle = self._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=gen_chronicle)
-                if chronicle:
-                    state["_subagent_chronicle"] = chronicle
+                state["_subagent_chronicle"] = chronicle or ""
                 log_sea_trace(playbook.name, node_id, "SUBPLAY", f"← {sub_name} [subagent ended, chronicle={'yes' if chronicle else 'no'}]")
 
             last_text = sub_outputs[-1] if sub_outputs else ""
@@ -2594,7 +2638,7 @@ class SEARuntime:
                 {"role": "user", "content": f"Session content:\n\n{conversation_text}"}
             ]
 
-            response, _ = client.generate(summary_messages, temperature=0.3)
+            response = client.generate(summary_messages, temperature=0.3)
             if response and isinstance(response, str):
                 return response.strip()
 

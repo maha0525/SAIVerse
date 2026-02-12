@@ -92,6 +92,11 @@ class LLMNodeDef(BaseModel):
                     "When SAIVERSE_LLM_STREAMING=true (default), streams response chunks in real-time. "
                     "When false, sends complete response after generation."
     )
+    metadata_key: Optional[str] = Field(
+        default=None,
+        description="State key containing metadata dict to attach to the speak message "
+                    "(e.g., media attachments from tool execution). Only used when speak=true."
+    )
 
 
 class ToolNodeDef(BaseModel):

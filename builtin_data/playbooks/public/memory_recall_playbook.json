@@ -8,7 +8,7 @@
             "description": "Recall query"
         }
     ],
-    "router_callable": true,
+    "router_callable": false,
     "nodes": [
         {
             "id": "generate_query",

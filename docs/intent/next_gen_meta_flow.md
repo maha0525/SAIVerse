@@ -12,7 +12,7 @@
 
 | 種類 | 例 | 特徴 |
 |---|---|---|
-| **自律型** | deep_research, memopedia_write | 独自ループ持ち、自己完結、サブエージェントとして意味がある |
+| **自律型** | deep_research, memory_research, memopedia_write | 独自ループ持ち、自己完結、サブエージェントとして意味がある |
 | **ツールラッパー型** | searxng_search, read_url_content, memory_recall, building_move | 実質「LLMで引数決め→ツール1回呼ぶ」だけ |
 
 ツールラッパー型は単体では不十分なケースがある：
@@ -53,7 +53,7 @@
 
 ### 残るサブPlaybook
 
-- **自律型**: deep_research, memopedia_write, novel_writing（独自ループ・成果物生成）
+- **自律型**: deep_research, memory_research, memopedia_write, novel_writing（独自ループ・成果物生成）
 - **行動系**: building_move, item_action（世界に影響を与える操作、ただしツール直接化も検討可能）
 
 ### コスト制御

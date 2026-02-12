@@ -1,6 +1,6 @@
 {
     "name": "document_search",
-    "display_name": "ドキュメント検索",
+    "display_name": "ドキュメント内検索",
     "description": "Search within a document item for specific content using pattern matching or line navigation",
     "input_schema": [
         {
@@ -51,7 +51,10 @@
             },
             "output_key": "params",
             "memorize": {
-                "tags": ["internal", "document_search"]
+                "tags": [
+                    "internal",
+                    "document_search"
+                ]
             },
             "conditional_next": {
                 "field": "params.action",

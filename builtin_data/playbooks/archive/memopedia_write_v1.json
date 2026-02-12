@@ -1,11 +1,11 @@
 {
     "name": "memopedia_write",
-    "display_name": "Memopedia作成・編集",
-    "description": "Memopediaページの新規作成と既存ページの編集を統合的に行う。指示を解析し、既存ページの有無を確認、必要に応じて記憶を調査してからページを生成・更新する。",
+    "display_name": "Memopedia作成",
+    "description": "記憶を調査してMemopediaページを生成・更新する（Deep Research方式）",
     "input_schema": [
         {
             "name": "input",
-            "description": "Memopediaへの書き込み指示（新規作成: 「まはーについてMemopediaに書いて」、編集: 「ソフィアのページに追記して」など）"
+            "description": "調査・記録したいトピック（人物名、用語、イベントなど）"
         }
     ],
     "router_callable": true,
@@ -14,144 +14,28 @@
             "id": "init",
             "type": "set",
             "assignments": {
-                "instruction": "{input}",
                 "loop_count": 0,
                 "max_loops": 3,
                 "accumulated_info": "",
                 "queries_tried": "",
                 "processed_ids": "",
-                "existing_page": "",
-                "target_page_id": ""
+                "research_topic": "{input}"
             },
-            "next": "analyze_instruction"
+            "next": "get_existing"
         },
         {
-            "id": "analyze_instruction",
-            "type": "llm",
-            "context_profile": "router",
-            "action": "指示を解析してください。Memopediaに関する操作を特定します。\n\n指示: {instruction}\n\n以下を判断してください:\n1. 操作タイプ: write（新規作成またはトピック調査して書く）か edit（既存ページの修正・加筆）か\n2. 対象ページタイトル（既知の場合）\n3. 検索トピック（Memopedia検索に使うキーワード。editの場合はページタイトル、writeの場合はトピック名）\n4. 記憶の調査が必要か（指示に具体的な情報が含まれていない場合はtrue）\n5. 編集の場合の具体的な編集内容",
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "operation": {
-                        "type": "string",
-                        "enum": ["write", "edit"],
-                        "description": "操作タイプ"
-                    },
-                    "target_title": {
-                        "type": "string",
-                        "description": "対象ページのタイトル（不明なら空文字列）"
-                    },
-                    "search_topic": {
-                        "type": "string",
-                        "description": "Memopedia検索に使うキーワード"
-                    },
-                    "needs_research": {
-                        "type": "string",
-                        "enum": ["true", "false"],
-                        "description": "記憶の調査が必要か"
-                    },
-                    "edit_details": {
-                        "type": "string",
-                        "description": "編集内容の説明（editの場合）"
-                    }
-                },
-                "required": ["operation", "target_title", "search_topic", "needs_research"]
-            },
-            "output_key": "analysis",
-            "memorize": {
-                "tags": ["internal", "memopedia_write"]
-            },
-            "next": "search_existing"
-        },
-        {
-            "id": "search_existing",
+            "id": "get_existing",
             "type": "tool",
-            "action": "memopedia_search",
-            "args_input": {
-                "query": "analysis.search_topic",
-                "max_results": 5
-            },
-            "output_key": "existing_search",
-            "next": "select_target"
+            "action": "memopedia_get_tree",
+            "args_input": {},
+            "output_key": "existing_pages",
+            "next": "build_query"
         },
-        {
-            "id": "select_target",
-            "type": "llm",
-            "model_type": "lightweight",
-            "context_profile": "worker_light",
-            "action": "検索結果から、操作対象となるページを選んでください。\n\n操作: {analysis.operation}\n指示: {instruction}\n対象タイトル: {analysis.target_title}\n\n検索結果:\n{existing_search}\n\nルール:\n- edit操作: 編集対象のページを選んでください。見つからなければpage_idを空文字に。\n- write操作: 同じタイトルや内容のページがあれば選んでください（上書き更新）。なければpage_idを空文字に。\n\nページIDはカッコ内のUUID文字列です。",
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "page_id": {
-                        "type": "string",
-                        "description": "選択したページID（なければ空文字列）"
-                    },
-                    "page_title": {
-                        "type": "string",
-                        "description": "選択したページタイトル"
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "選択理由"
-                    }
-                },
-                "required": ["page_id"]
-            },
-            "output_key": "target_selection",
-            "next": "route_target"
-        },
-        {
-            "id": "route_target",
-            "type": "pass",
-            "next": "check_needs_research",
-            "conditional_next": {
-                "field": "target_selection.page_id",
-                "operator": "eq",
-                "cases": {
-                    "": "check_needs_research",
-                    "default": "get_target_page"
-                }
-            }
-        },
-        {
-            "id": "get_target_page",
-            "type": "tool",
-            "action": "memopedia_get_page",
-            "args_input": {
-                "page_id": "target_selection.page_id"
-            },
-            "output_key": "existing_page",
-            "next": "set_target_id"
-        },
-        {
-            "id": "set_target_id",
-            "type": "set",
-            "assignments": {
-                "target_page_id": "{target_selection.page_id}"
-            },
-            "next": "check_needs_research"
-        },
-        {
-            "id": "check_needs_research",
-            "type": "pass",
-            "next": "generate_page",
-            "conditional_next": {
-                "field": "analysis.needs_research",
-                "operator": "eq",
-                "cases": {
-                    "true": "build_query",
-                    "default": "generate_page"
-                }
-            }
-        },
-
         {
             "id": "build_query",
             "type": "llm",
             "context_profile": "router",
-            "action": "トピック「{analysis.search_topic}」について記憶を検索するためのクエリとキーワードを生成してください。\n\n既存ページ情報:\n{existing_page}\n\nこれまでに収集した情報:\n{accumulated_info}\n\n過去のクエリ:\n{queries_tried}\n\nルール:\n- query: 思い出したい内容を自然文で記述（意味的な検索に使われます）\n- keywords: メッセージ本文に含まれているはずの具体的な単語・固有名詞を配列で指定（部分一致検索）\n- queryとkeywordsの両方を指定すると検索精度が上がります\n- 過去のクエリとは異なる観点で検索してください",
+            "action": "トピック「{research_topic}」について記憶を検索するためのクエリとキーワードを生成してください。\n\n既存Memopediaページ:\n{existing_pages}\n\nこれまでに収集した情報:\n{accumulated_info}\n\n過去のクエリ:\n{queries_tried}\n\nルール:\n- query: 思い出したい内容を自然文で記述（意味的な検索に使われます）\n- keywords: メッセージ本文に含まれているはずの具体的な単語・固有名詞を配列で指定（部分一致検索）\n- queryとkeywordsの両方を指定すると検索精度が上がります\n- 過去のクエリとは異なる観点で検索してください\n- 既存ページにない新情報を得られるようなクエリにしてください",
             "response_schema": {
                 "type": "object",
                 "properties": {
@@ -171,11 +55,17 @@
                         "description": "このクエリを選んだ理由"
                     }
                 },
-                "required": ["query", "keywords"]
+                "required": [
+                    "query",
+                    "keywords"
+                ]
             },
             "output_key": "search_params",
             "memorize": {
-                "tags": ["internal", "memopedia_write"]
+                "tags": [
+                    "internal",
+                    "memopedia_write"
+                ]
             },
             "next": "search"
         },
@@ -204,7 +94,7 @@
             "id": "select_hits",
             "type": "llm",
             "context_profile": "worker_light",
-            "action": "検索結果から、トピック「{analysis.search_topic}」に関連する有望なメッセージを最大2件選んでください。\n\n検索結果:\n{search_results}\n\n処理済みID（除外してください）:\n{processed_ids}\n\nこれまでに収集した情報:\n{accumulated_info}\n\n各結果の形式: [番号] (メッセージID) 日時 ロール: スニペット (スコア)\nメッセージIDは括弧内の文字列です（例: msg_xxxxx）。\n新しい情報が得られそうなメッセージを優先してください。",
+            "action": "検索結果から、トピック「{research_topic}」に関連する有望なメッセージを最大2件選んでください。\n\n検索結果:\n{search_results}\n\n処理済みID（除外してください）:\n{processed_ids}\n\nこれまでに収集した情報:\n{accumulated_info}\n\n各結果の形式: [番号] (メッセージID) 日時 ロール: スニペット (スコア)\nメッセージIDは括弧内の文字列です（例: msg_xxxxx）。\n新しい情報が得られそうなメッセージを優先してください。",
             "response_schema": {
                 "type": "object",
                 "properties": {
@@ -220,7 +110,9 @@
                         "description": "選択しなかった場合の理由"
                     }
                 },
-                "required": ["selected_ids"]
+                "required": [
+                    "selected_ids"
+                ]
             },
             "output_key": "hit_selection",
             "next": "check_selection"
@@ -252,7 +144,7 @@
             "id": "extract_1",
             "type": "llm",
             "context_profile": "worker_light",
-            "action": "以下の会話ログから、トピック「{analysis.search_topic}」に関する知識を抽出してください。\n\n会話ログ:\n{context_1}\n\nこれまでに収集済みの情報:\n{accumulated_info}\n\nルール:\n- 収集済み情報と重複しない新しい情報のみ抽出してください\n- 事実、エピソード、具体的な日付や数値を優先してください\n- 関連する人物や概念があれば記録してください",
+            "action": "以下の会話ログから、トピック「{research_topic}」に関する知識を抽出してください。\n\n会話ログ:\n{context_1}\n\nこれまでに収集済みの情報:\n{accumulated_info}\n\nルール:\n- 収集済み情報と重複しない新しい情報のみ抽出してください\n- 事実、エピソード、具体的な日付や数値を優先してください\n- 関連する人物や概念があれば記録してください",
             "response_schema": {
                 "type": "object",
                 "properties": {
@@ -268,7 +160,9 @@
                         "description": "重要な事実のリスト"
                     }
                 },
-                "required": ["extracted_info"]
+                "required": [
+                    "extracted_info"
+                ]
             },
             "output_key": "extraction_1",
             "next": "accumulate_1"
@@ -309,7 +203,7 @@
             "id": "extract_2",
             "type": "llm",
             "context_profile": "worker_light",
-            "action": "以下の会話ログから、トピック「{analysis.search_topic}」に関する知識を抽出してください。\n\n会話ログ:\n{context_2}\n\nこれまでに収集済みの情報:\n{accumulated_info}\n\nルール:\n- 収集済み情報と重複しない新しい情報のみ抽出してください\n- 事実、エピソード、具体的な日付や数値を優先してください\n- 関連する人物や概念があれば記録してください",
+            "action": "以下の会話ログから、トピック「{research_topic}」に関する知識を抽出してください。\n\n会話ログ:\n{context_2}\n\nこれまでに収集済みの情報:\n{accumulated_info}\n\nルール:\n- 収集済み情報と重複しない新しい情報のみ抽出してください\n- 事実、エピソード、具体的な日付や数値を優先してください\n- 関連する人物や概念があれば記録してください",
             "response_schema": {
                 "type": "object",
                 "properties": {
@@ -325,7 +219,9 @@
                         "description": "重要な事実のリスト"
                     }
                 },
-                "required": ["extracted_info"]
+                "required": [
+                    "extracted_info"
+                ]
             },
             "output_key": "extraction_2",
             "next": "accumulate_2"
@@ -343,7 +239,7 @@
             "id": "check_done",
             "type": "llm",
             "context_profile": "worker_light",
-            "action": "トピック「{analysis.search_topic}」について、収集した情報がMemopediaページを書くのに十分かどうか判断してください。\n\n収集済み情報:\n{accumulated_info}\n\nループ回数: {loop_count}/{max_loops}\n\n判断基準:\n- トピックの基本的な情報（誰/何/いつ/どのような）が揃っているか\n- 具体的なエピソードや詳細があるか\n- 情報が全くない場合は不十分と判断してください",
+            "action": "トピック「{research_topic}」について、収集した情報がMemopediaページを書くのに十分かどうか判断してください。\n\n収集済み情報:\n{accumulated_info}\n\nループ回数: {loop_count}/{max_loops}\n\n判断基準:\n- トピックの基本的な情報（誰/何/いつ/どのような）が揃っているか\n- 具体的なエピソードや詳細があるか\n- 情報が全くない場合は不十分と判断してください",
             "response_schema": {
                 "type": "object",
                 "properties": {
@@ -360,7 +256,9 @@
                         "description": "次に検索すべき内容"
                     }
                 },
-                "required": ["is_sufficient"]
+                "required": [
+                    "is_sufficient"
+                ]
             },
             "output_key": "sufficiency_check",
             "next": "decide_continue"
@@ -397,12 +295,11 @@
                 }
             }
         },
-
         {
             "id": "generate_page",
             "type": "llm",
             "context_profile": "conversation",
-            "action": "Memopediaページを生成してください。\n\n## 操作モード\n{analysis.operation}\n\n## 指示\n{instruction}\n\n## 編集の詳細（editの場合）\n{analysis.edit_details}\n\n## 既存ページ内容（ある場合）\n{existing_page}\n\n## 収集済み情報（調査結果）\n{accumulated_info}\n\n## Memopedia検索結果\n{existing_search}\n\n## ページ生成ルール\n- write（新規）の場合: 収集した情報を基に新しいページを作成\n- edit（編集）の場合: 既存ページの内容を保持しつつ、指示に従って修正・加筆。既存の正しい情報は必ず保持すること\n- category: 人物なら\"people\"、用語・概念なら\"terms\"、予定・計画なら\"plans\"\n- title: 簡潔で分かりやすいタイトル（editの場合は基本的に既存タイトルを引き継ぐ）\n- summary: 1-2文の要約\n- content: 本文（Markdown形式）。具体的なエピソードや日付を含める\n- keywords: 検索に使えるキーワード（3-5個）",
+            "action": "トピック「{research_topic}」について、収集した情報を基にMemopediaページを生成してください。\n\n収集済み情報:\n{accumulated_info}\n\n既存Memopediaページ:\n{existing_pages}\n\nページ生成ルール:\n- category: 人物なら\"people\"、用語・概念なら\"terms\"、予定・計画なら\"plans\"\n- title: 簡潔で分かりやすいタイトル\n- summary: 1-2文の要約\n- content: 本文（Markdown形式）。具体的なエピソードや日付を含める\n- keywords: 検索に使えるキーワード（3-5個）\n- 既存ページと重複する内容は避け、新しい情報を中心に記述してください\n- 情報が不十分な場合でも、分かっている範囲で記述してください",
             "response_schema": {
                 "type": "object",
                 "properties": {
@@ -428,10 +325,6 @@
                             "type": "string"
                         },
                         "description": "検索用キーワード"
-                    },
-                    "edit_summary": {
-                        "type": "string",
-                        "description": "何を変更したかの要約（editの場合）"
                     }
                 },
                 "required": [
@@ -444,7 +337,10 @@
             },
             "output_key": "page_content",
             "memorize": {
-                "tags": ["internal", "memopedia_write"]
+                "tags": [
+                    "internal",
+                    "memopedia_write"
+                ]
             },
             "next": "save_page"
         },
@@ -465,7 +361,7 @@
         {
             "id": "record",
             "type": "memorize",
-            "action": "Memopediaページ{analysis.operation}完了\n\nタイトル: {page_content.title}\n操作: {analysis.operation}\n結果: {save_result}\n調査ループ: {loop_count}回",
+            "action": "Memopediaページ生成完了\n\nトピック: {research_topic}\n結果: {save_result}\n調査ループ: {loop_count}回\n過去のクエリ: {queries_tried}",
             "role": "user",
             "tags": [
                 "internal",

@@ -10,19 +10,6 @@
         }
     ],
     "output_schema": [],
-    "context_requirements": {
-        "history_depth": 0,
-        "history_balanced": false,
-        "include_internal": false,
-        "system_prompt": false,
-        "memory_weave": true,
-        "working_memory": false,
-        "inventory": false,
-        "building_items": false,
-        "available_playbooks": false,
-        "visual_context": false,
-        "realtime_context": true
-    },
     "router_callable": true,
     "user_selectable": false,
     "nodes": [

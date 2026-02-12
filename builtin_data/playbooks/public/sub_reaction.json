@@ -8,25 +8,13 @@
             "source": "parent.react_decision.reaction_trigger"
         }
     ],
-    "context_requirements": {
-        "history_depth": "full",
-        "history_balanced": false,
-        "include_internal": false,
-        "system_prompt": true,
-        "memory_weave": true,
-        "working_memory": true,
-        "inventory": true,
-        "building_items": true,
-        "available_playbooks": false,
-        "visual_context": false,
-        "realtime_context": true
-    },
     "router_callable": false,
     "user_selectable": false,
     "nodes": [
         {
             "id": "react",
             "type": "llm",
+            "context_profile": "conversation",
             "action": "外部からの刺激にリアクションしてください。\n\nトリガー情報:\n{trigger}\n\n適切なリアクション（発言、行動、思考など）を決定してください。",
             "response_schema": {
                 "type": "object",
