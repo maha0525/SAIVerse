@@ -159,8 +159,9 @@ export default function TutorialWizard({
             }
             if (citiesRes.ok) {
                 const cities = await citiesRes.json();
-                if (cities.length > 0 && cities[0].CITYNAME) {
-                    updates.cityName = cities[0].CITYNAME;
+                if (cities.length > 0) {
+                    // Use DESCRIPTION (display name) if available, else CITYNAME
+                    updates.cityName = cities[0].DESCRIPTION || cities[0].CITYNAME || '';
                 }
             }
             if (Object.keys(updates).length > 0) {
@@ -284,13 +285,14 @@ export default function TutorialWizard({
         }
 
         const city = cities[0];
-        // PUT requires all fields, so send current values with updated name
+        // PUT requires all fields. Keep CITYNAME (internal ID) unchanged,
+        // save user-entered display name to DESCRIPTION.
         const updateRes = await fetch(`/api/world/cities/${city.CITYID}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                name,
-                description: city.DESCRIPTION || '',
+                name: city.CITYNAME,
+                description: name,
                 online_mode: city.START_IN_ONLINE_MODE ?? false,
                 ui_port: city.UI_PORT ?? 8000,
                 api_port: city.API_PORT ?? 8001,

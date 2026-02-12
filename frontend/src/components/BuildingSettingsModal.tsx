@@ -12,6 +12,7 @@ interface Tool {
 interface City {
     CITYID: number;
     CITYNAME: string;
+    DESCRIPTION?: string;
 }
 
 interface BuildingSettingsModalProps {
@@ -216,7 +217,7 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                             <label>都市</label>
                             <select value={cityId} onChange={e => setCityId(parseInt(e.target.value))}>
                                 {cities.map(c => (
-                                    <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME}</option>
+                                    <option key={c.CITYID} value={c.CITYID}>{c.DESCRIPTION || c.CITYNAME}</option>
                                 ))}
                             </select>
                         </div>
