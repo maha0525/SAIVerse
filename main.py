@@ -215,6 +215,58 @@ manager: Optional[SAIVerseManager] = None
 unity_gateway_task: Optional[asyncio.Task] = None
 
 
+def _sync_builtin_playbook_flags(session_factory) -> None:
+    """Sync playbook metadata flags from builtin JSON files to DB.
+
+    Only updates flag fields (user_selectable, dev_only, display_name,
+    router_callable) without touching nodes_json or schema_json.
+    """
+    from database.models import Playbook
+
+    playbooks_dir = Path(__file__).parent / "builtin_data" / "playbooks" / "public"
+    if not playbooks_dir.exists():
+        return
+
+    db = session_factory()
+    try:
+        updated = 0
+        for json_path in playbooks_dir.glob("*.json"):
+            try:
+                data = json.loads(json_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            name = data.get("name")
+            if not name:
+                continue
+
+            pb = db.query(Playbook).filter(Playbook.name == name).first()
+            if not pb:
+                continue
+
+            changed = False
+            for field in ("user_selectable", "dev_only", "router_callable"):
+                json_val = data.get(field, False)
+                if getattr(pb, field) != json_val:
+                    setattr(pb, field, json_val)
+                    changed = True
+
+            json_display = data.get("display_name")
+            if pb.display_name != json_display:
+                pb.display_name = json_display
+                changed = True
+
+            if changed:
+                updated += 1
+
+        if updated:
+            db.commit()
+            logging.info("Synced %d builtin playbook flag(s)", updated)
+    except Exception:
+        logging.warning("Failed to sync builtin playbook flags", exc_info=True)
+    finally:
+        db.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run a SAIVerse City instance.")
     parser.add_argument("city_name", type=str, nargs='?', default='city_a', help="The name of the city to run (defaults to city_a).")
@@ -259,6 +311,10 @@ def main():
     app_state.set_version(VERSION)
     app_state.set_city_name(args.city_name)
     app_state.set_project_dir(str(Path(__file__).parent.resolve()))
+
+    # Sync builtin playbook flags from JSON definitions to DB.
+    # Fixes seed.py bug where user_selectable/dev_only/display_name were not set.
+    _sync_builtin_playbook_flags(manager.SessionLocal)
 
     # Unity Gateway の起動（オプション）
     unity_gateway_port = int(os.getenv("UNITY_GATEWAY_PORT", "8765"))

@@ -52,7 +52,10 @@ def import_initial_playbooks() -> None:
                     continue
 
                 description = data.get("description", "")
+                display_name = data.get("display_name")
                 router_callable = data.get("router_callable", False)
+                user_selectable = data.get("user_selectable", False)
+                dev_only = data.get("dev_only", False)
                 schema_payload = {
                     "name": name,
                     "description": description,
@@ -65,12 +68,15 @@ def import_initial_playbooks() -> None:
                 record = Playbook(
                     name=name,
                     description=description,
+                    display_name=display_name,
                     scope="public",
                     created_by_persona_id=None,
                     building_id=None,
                     schema_json=schema_json,
                     nodes_json=nodes_json,
                     router_callable=router_callable,
+                    user_selectable=user_selectable,
+                    dev_only=dev_only,
                 )
                 session.add(record)
                 imported_count += 1
