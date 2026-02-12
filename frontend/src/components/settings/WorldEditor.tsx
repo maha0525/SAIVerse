@@ -321,7 +321,7 @@ export default function WorldEditor() {
                     <div className={styles.pane}>
                         <div className={styles.list}>
                             <h3>City 一覧</h3>
-                            {cities.map(c => <div key={c.CITYID} className={`${styles.item} ${selectedCity?.CITYID === c.CITYID ? styles.selected : ''}`} onClick={() => handleCitySelect(c)}>{c.CITYNAME}</div>)}
+                            {cities.map(c => <div key={c.CITYID} className={`${styles.item} ${selectedCity?.CITYID === c.CITYID ? styles.selected : ''}`} onClick={() => handleCitySelect(c)}>{c.DESCRIPTION || c.CITYNAME}</div>)}
                             <button className={styles.newBtn} onClick={() => { setSelectedCity(null); setFormData({}); }}>+ 新規作成</button>
                         </div>
                         <div className={styles.form}>
@@ -354,7 +354,7 @@ export default function WorldEditor() {
                                 : <Field label="ID（任意）"><Input value={formData.building_id || ''} placeholder="空欄で自動生成" onChange={(e: any) => setFormData({ ...formData, building_id: e.target.value })} /></Field>
                             }
                             <Field label="都市"><Select value={formData.city_id || ''} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
-                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME}</option>)}
+                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.DESCRIPTION || c.CITYNAME}</option>)}
                             </Select></Field>
                             <div className={styles.row}>
                                 <Field label="定員"><NumInput value={formData.capacity || 1} onChange={(e: any) => setFormData({ ...formData, capacity: parseInt(e.target.value) })} /></Field>
@@ -425,7 +425,7 @@ export default function WorldEditor() {
                             <h3>{selectedAI ? `ペルソナを編集` : '新しいペルソナ'}</h3>
                             <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
                             <Field label="ホーム都市"><Select value={formData.home_city_id || ''} onChange={(e: any) => setFormData({ ...formData, home_city_id: parseInt(e.target.value) })}>
-                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME}</option>)}
+                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.DESCRIPTION || c.CITYNAME}</option>)}
                             </Select></Field>
                             {selectedAI && <>
                                 <Field label="デフォルトモデル"><Select value={formData.default_model || ''} onChange={(e: any) => setFormData({ ...formData, default_model: e.target.value })}>
@@ -488,7 +488,7 @@ export default function WorldEditor() {
                             <Field label="名前"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value })} /></Field>
                             <Field label="タイプ"><Input value={formData.entity_type || 'ai'} onChange={(e: any) => setFormData({ ...formData, entity_type: e.target.value })} /></Field>
                             <Field label="都市"><Select value={formData.city_id || ''} onChange={(e: any) => setFormData({ ...formData, city_id: parseInt(e.target.value) })}>
-                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME}</option>)}
+                                <option value="">City を選択...</option>{cities.map(c => <option key={c.CITYID} value={c.CITYID}>{c.DESCRIPTION || c.CITYNAME}</option>)}
                             </Select></Field>
                             <Field label="システムプロンプト"><TextArea style={{ minHeight: 200 }} value={formData.system_prompt || ''} onChange={(e: any) => setFormData({ ...formData, system_prompt: e.target.value })} /></Field>
                             <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>

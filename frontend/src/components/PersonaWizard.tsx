@@ -17,6 +17,7 @@ interface PersonaWizardProps {
 interface City {
     CITYID: number;
     CITYNAME: string;
+    DESCRIPTION?: string;
 }
 
 type Step = 1 | 2 | 3;
@@ -210,7 +211,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                         onChange={(e) => handleCityChange(parseInt(e.target.value))}
                     >
                         {cities.map(c => (
-                            <option key={c.CITYID} value={c.CITYID}>{c.CITYNAME}</option>
+                            <option key={c.CITYID} value={c.CITYID}>{c.DESCRIPTION || c.CITYNAME}</option>
                         ))}
                     </select>
                 </div>
