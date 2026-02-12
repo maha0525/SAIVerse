@@ -15,10 +15,11 @@ log = logging.getLogger("saiverse.router")
 
 ROUTER_MODEL = "gemini-2.5-flash-lite-preview-09-2025"
 _free_client, _paid_client, client = build_gemini_clients()
-_CLIENT_LABELS = {
-    id(_free_client): "free",
-    id(_paid_client): "paid",
-}
+_CLIENT_LABELS = {}
+if _free_client is not None:
+    _CLIENT_LABELS[id(_free_client)] = "free"
+if _paid_client is not None:
+    _CLIENT_LABELS[id(_paid_client)] = "paid"
 
 
 def rebuild_clients():
@@ -29,10 +30,11 @@ def rebuild_clients():
     """
     global _free_client, _paid_client, client, _CLIENT_LABELS
     _free_client, _paid_client, client = build_gemini_clients()
-    _CLIENT_LABELS = {
-        id(_free_client): "free",
-        id(_paid_client): "paid",
-    }
+    _CLIENT_LABELS = {}
+    if _free_client is not None:
+        _CLIENT_LABELS[id(_free_client)] = "free"
+    if _paid_client is not None:
+        _CLIENT_LABELS[id(_paid_client)] = "paid"
     log.info("Router Gemini clients rebuilt with updated API keys")
 
 
@@ -131,6 +133,12 @@ def extract_tool_names(tools_spec: list) -> set[str]:
 
 def route(user_message: str, tools_spec: List[Any]) -> Dict[str, Any]:
     """Return {"call":"yes/no","tool": name, "args": {...}}"""
+    global client
+
+    if client is None:
+        log.warning("Router unavailable: no Gemini API key configured. Skipping tool routing.")
+        return {"call": "no", "tool": "", "args": {}}
+
     sys_prompt = SYS_TEMPLATE.format(
         tools_block=build_tools_block(tools_spec),
     )
@@ -155,7 +163,6 @@ def route(user_message: str, tools_spec: List[Any]) -> Dict[str, Any]:
             ),
         )
 
-    global client
     active_client = client
     try:
         resp = _invoke(active_client)

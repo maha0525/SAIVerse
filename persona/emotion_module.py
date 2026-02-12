@@ -20,6 +20,11 @@ class EmotionControlModule:
         self.model = model
         self.free_client, self.paid_client, self.client = build_gemini_clients()
 
+    @property
+    def available(self) -> bool:
+        """Return True if a Gemini client is configured."""
+        return self.client is not None
+
     def evaluate(
         self,
         user_message: str,
@@ -27,6 +32,10 @@ class EmotionControlModule:
         current_emotion: Optional[Dict[str, Dict[str, float]]] = None,
     ):
         """Return emotion delta dict based on the latest interaction."""
+        if not self.available:
+            logging.debug("Emotion module skipped: no Gemini API key configured.")
+            return None
+
         emotion_vals = current_emotion or {}
         prompt = self.prompt_template.format(
             user_message=user_message,

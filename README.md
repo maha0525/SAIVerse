@@ -61,7 +61,6 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 <summary>長いので折り畳み</summary>
 
 ### ペルソナが利用できるツール
-主な機能
 - Web検索：SearXNGと呼ばれる検索サービスを自動インストールして利用します。各社APIのものと異なり、無料です。
 - 画像生成：Nano banana Pro、Nano banana、ChatGPT画像生成をサポートしています。有料APIです。
 - ドキュメント生成：Building内に調査報告書や小説などのドキュメントを生成できます。テキストファイルでローカル保存されており、外での利用にも便利です。
@@ -98,12 +97,12 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 
 #### 意味記憶「Memopedia」
 主に単語の意味をWikipediaみたいな記事として記憶しておくものです。<br>
-例えばペルソナと一緒に作る創作世界のキャラクター設定を覚えておく、とか、ペルソナとの思い出をキーワードで覚えておくことが可能です。
+例えばペルソナと一緒に作る創作世界のキャラクター設定を覚えておくこと、ペルソナとの思い出をキーワードで覚えておくことなどが可能です。
 
 #### 記憶想起
 セマンティック検索とキーワード検索を組み合わせてチャットログから記憶想起することが可能です。<br>
 埋め込みモデルは自動で導入されます。<br>
-※記憶想起用の埋め込みの作成は無料ですが時間がだいぶかかります
+※記憶想起用の埋め込みの作成は無料ですが時間がだいぶかかります。ログが数万件以上ある方は注意してください。
 
 </details>
 
@@ -112,11 +111,13 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 ### 前提条件
 
 下記のソフトをダウンロード&インストールしてください。
-- [Python 3.12](https://www.python.org/downloads/release/python-31210/)（3.11, 3.13も可。3.14等の最新版はパッケージ未対応のためNG）
-  - リンク先ページを下にスクロールし、**Windows**: `Windows installer (64-bit)`、**Mac**: `macOS 64-bit universal2 installer` をダウンロードしてください**（目立つボタンの「Download Python install manager」ではありません）**
+- [Python 3.12.10](https://www.python.org/downloads/release/python-31210/)（推奨。3.11〜3.13も可。3.14以降は非対応）
+  - リンク先ページを下にスクロールし、**Windows**: `Windows installer (64-bit)`、**Mac**: `macOS 64-bit universal2 installer` をダウンロードしてください<br>
+  **（目立つボタンの「Download Python install manager」ではありません）**
   - **重要**: インストーラー実行時に「**Add python.exe to PATH**」にチェックを入れてください（デフォルトではオフ）。チェックを入れないとsetup.bat実行時にエラーになります
 - [Node.js 18以上](https://nodejs.org/)（未インストールの場合、setup.batが自動でインストールします）
-- できれば[Git](https://git-scm.com/)（これはなくても動きます）
+- できれば[Git](https://git-scm.com/)<br>
+  →なくても本体は動きますが、検索ツールの導入に必要です。ネット上の解説（[おすすめ](https://qiita.com/takeru-hirai/items/4fbe6593d42f9a844b1c)）などを見て導入頂くことを勧めます。
 
 <details open>
 <summary>Windows向けの導入</summary>
