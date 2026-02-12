@@ -1,9 +1,12 @@
 """Shared helpers for Gemini SDK client setup."""
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from typing import Any, Tuple
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _get_genai_module():
@@ -17,15 +20,19 @@ def _get_genai_module():
     return google_genai
 
 
-def build_gemini_clients(*, prefer_paid: bool = False) -> Tuple[Any | None, Any | None, Any]:
-    """Create (free, paid, active) Gemini SDK clients with shared env handling."""
+def build_gemini_clients(*, prefer_paid: bool = False) -> Tuple[Any | None, Any | None, Any | None]:
+    """Create (free, paid, active) Gemini SDK clients with shared env handling.
+
+    Returns ``(None, None, None)`` when no API key is configured so that
+    callers can start up without Gemini and handle the absence gracefully.
+    """
     genai = _get_genai_module()
-    
+
     # Get timeout from environment variable (in seconds)
     # Default: 300 seconds (5 minutes), 0 = no timeout
     timeout_seconds = int(os.getenv("GEMINI_TIMEOUT_SECONDS", "300"))
     timeout_ms = None if timeout_seconds == 0 else timeout_seconds * 1000
-    
+
     def _http_options() -> Any:
         if timeout_ms is None:
             # No timeout
@@ -51,7 +58,10 @@ def build_gemini_clients(*, prefer_paid: bool = False) -> Tuple[Any | None, Any 
     free_key = os.getenv("GEMINI_FREE_API_KEY")
     paid_key = os.getenv("GEMINI_API_KEY")
     if not free_key and not paid_key:
-        raise RuntimeError("GEMINI_FREE_API_KEY or GEMINI_API_KEY environment variable is not set.")
+        LOGGER.warning("No Gemini API key configured (GEMINI_FREE_API_KEY / GEMINI_API_KEY). "
+                       "Gemini features will be unavailable until a key is set.")
+        return None, None, None
+
     def _make_client(api_key: str | None):
         if not api_key:
             return None
@@ -61,7 +71,8 @@ def build_gemini_clients(*, prefer_paid: bool = False) -> Tuple[Any | None, Any 
     paid_client = _make_client(paid_key)
     active_client = paid_client if prefer_paid and paid_client is not None else (free_client or paid_client)
     if active_client is None:
-        raise RuntimeError("Failed to initialize Gemini client; no API key available.")
+        LOGGER.warning("Failed to initialize Gemini client despite having keys.")
+        return None, None, None
     return free_client, paid_client, active_client
 
 __all__ = ["build_gemini_clients"]

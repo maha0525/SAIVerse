@@ -18,8 +18,8 @@
 
 ## 3. 料金について
 
-- **従量課金制**: 使った分だけ支払い
-- **新規登録時**: 無料クレジットが付与される場合あり（$5程度）
+- **従量課金制**: あらかじめチャージしたクレジットから、使った分だけ支払い
+- **無料クレジット**: 設定→Data Controls→Sharing→Share inputs and outputs with OpenAIでEnabled for all projectsを選択することで、日ごとに250kトークンが gpt-5.2, gpt-5.1, gpt-4o, o3などに対して無料で使えます（同様に2.5Mトークンがmini系に対して無料で使えます）
 - **詳細**: [OpenAI Pricing](https://openai.com/pricing)
 
 ### 主なモデルの料金（参考・2026年2月時点）

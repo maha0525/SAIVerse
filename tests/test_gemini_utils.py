@@ -20,12 +20,14 @@ def _make_dummy_genai(created_clients):
     return SimpleNamespace(Client=client_factory, types=types_ns)
 
 
-def test_build_gemini_clients_requires_key(monkeypatch):
+def test_build_gemini_clients_no_key_returns_none(monkeypatch):
     monkeypatch.delenv("GEMINI_FREE_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
-    with pytest.raises(RuntimeError):
-        gemini_utils.build_gemini_clients()
+    free_client, paid_client, active_client = gemini_utils.build_gemini_clients()
+    assert free_client is None
+    assert paid_client is None
+    assert active_client is None
 
 
 def test_build_gemini_clients_free_only(monkeypatch):

@@ -214,3 +214,50 @@
 :global([data-theme="dark"]) .collapsibleTitle:hover {
     color: #ccc;
 }
+
+.errorBanner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.8rem;
+    padding: 0.75rem 1rem;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    border-radius: 0.5rem;
+    color: #991b1b;
+    font-size: 0.85rem;
+    line-height: 1.4;
+}
+
+.retryBtn {
+    flex-shrink: 0;
+    background: none;
+    border: 1px solid #991b1b;
+    color: #991b1b;
+    padding: 0.3rem 0.8rem;
+    border-radius: 0.4rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.retryBtn:hover {
+    background: #991b1b;
+    color: white;
+}
+
+:global([data-theme="dark"]) .errorBanner {
+    background: #3b1111;
+    border-color: #6b2020;
+    color: #fca5a5;
+}
+
+:global([data-theme="dark"]) .retryBtn {
+    border-color: #fca5a5;
+    color: #fca5a5;
+}
+
+:global([data-theme="dark"]) .retryBtn:hover {
+    background: #991b1b;
+    color: white;
+}

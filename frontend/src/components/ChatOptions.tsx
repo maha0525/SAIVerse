@@ -84,6 +84,7 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
     const [metabolismKeepMessagesDefault, setMetabolismKeepMessagesDefault] = useState<number | null>(null);
     const [historySettingsOpen, setHistorySettingsOpen] = useState(false);
     const [modelParamsOpen, setModelParamsOpen] = useState(false);
+    const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
         if (isOpen) {
@@ -93,53 +94,94 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
 
     const fetchData = async () => {
         setLoading(true);
+        setError(null);
+
+        // Abort after 10 seconds to prevent infinite hang
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+
         try {
-            const [modelsRes, playbooksRes, configRes, cacheRes] = await Promise.all([
-                fetch('/api/config/models'),
-                fetch('/api/config/playbooks'),
-                fetch('/api/config/config'),
-                fetch('/api/config/cache')
+            const results = await Promise.allSettled([
+                fetch('/api/config/models', { signal: controller.signal }),
+                fetch('/api/config/playbooks', { signal: controller.signal }),
+                fetch('/api/config/config', { signal: controller.signal }),
+                fetch('/api/config/cache', { signal: controller.signal })
             ]);
 
+            const failures: string[] = [];
             let fetchedModels: ModelInfo[] = [];
-            if (modelsRes.ok) {
-                fetchedModels = await modelsRes.json();
-                setModels(fetchedModels);
-            }
-            if (playbooksRes.ok) setPlaybooks(await playbooksRes.json());
 
-            if (configRes.ok) {
-                const config = await configRes.json();
-                const modelId = config.current_model || '';
-                setCurrentModel(modelId);
-                // Find display name from models list
-                const modelInfo = fetchedModels.find(m => m.id === modelId);
-                onModelChange(modelId, modelInfo?.name || ''); // Sync with parent
-                setParamSpecs(config.parameters || {});
-                setParams(config.current_values || {});
-                setMaxHistoryMessages(config.max_history_messages ?? null);
-                setMaxHistoryMessagesDefault(config.max_history_messages_model_default ?? null);
-                setMetabolismEnabled(config.metabolism_enabled ?? true);
-                setMetabolismKeepMessages(config.metabolism_keep_messages ?? null);
-                setMetabolismKeepMessagesDefault(config.metabolism_keep_messages_model_default ?? null);
+            // Models
+            if (results[0].status === 'fulfilled' && results[0].value.ok) {
+                try {
+                    fetchedModels = await results[0].value.json();
+                    setModels(fetchedModels);
+                } catch { failures.push('models'); }
+            } else {
+                failures.push('models');
             }
 
-            if (cacheRes.ok) {
-                const cache = await cacheRes.json();
-                setCacheConfig(cache);
+            // Playbooks
+            if (results[1].status === 'fulfilled' && results[1].value.ok) {
+                try { setPlaybooks(await results[1].value.json()); }
+                catch { failures.push('playbooks'); }
+            } else {
+                failures.push('playbooks');
             }
 
-            // If a playbook is already selected, fetch its parameters
-            if (currentPlaybook) {
-                const paramsRes = await fetch(`/api/config/playbooks/${encodeURIComponent(currentPlaybook)}/params`);
-                if (paramsRes.ok) {
-                    const data = await paramsRes.json();
-                    setPlaybookParamSpecs(data.params || []);
-                }
+            // Config
+            if (results[2].status === 'fulfilled' && results[2].value.ok) {
+                try {
+                    const config = await results[2].value.json();
+                    const modelId = config.current_model || '';
+                    setCurrentModel(modelId);
+                    const modelInfo = fetchedModels.find(m => m.id === modelId);
+                    onModelChange(modelId, modelInfo?.name || '');
+                    setParamSpecs(config.parameters || {});
+                    setParams(config.current_values || {});
+                    setMaxHistoryMessages(config.max_history_messages ?? null);
+                    setMaxHistoryMessagesDefault(config.max_history_messages_model_default ?? null);
+                    setMetabolismEnabled(config.metabolism_enabled ?? true);
+                    setMetabolismKeepMessages(config.metabolism_keep_messages ?? null);
+                    setMetabolismKeepMessagesDefault(config.metabolism_keep_messages_model_default ?? null);
+                } catch { failures.push('config'); }
+            } else {
+                failures.push('config');
+            }
+
+            // Cache
+            if (results[3].status === 'fulfilled' && results[3].value.ok) {
+                try { setCacheConfig(await results[3].value.json()); }
+                catch { failures.push('cache'); }
+            } else {
+                failures.push('cache');
+            }
+
+            if (failures.length === 4) {
+                setError("バックエンドサーバーに接続できません。サーバーが起動しているか確認してください。");
+            } else if (failures.length > 0) {
+                setError(`一部の設定を読み込めませんでした (${failures.join(', ')})`);
+            }
+
+            // If a playbook is already selected, fetch its parameters (best effort)
+            if (currentPlaybook && !controller.signal.aborted) {
+                try {
+                    const paramsRes = await fetch(`/api/config/playbooks/${encodeURIComponent(currentPlaybook)}/params`, { signal: controller.signal });
+                    if (paramsRes.ok) {
+                        const data = await paramsRes.json();
+                        setPlaybookParamSpecs(data.params || []);
+                    }
+                } catch { /* non-critical */ }
             }
         } catch (e) {
             console.error("Failed to load config", e);
+            if (e instanceof DOMException && e.name === 'AbortError') {
+                setError("設定の読み込みがタイムアウトしました。バックエンドサーバーの応答を確認してください。");
+            } else {
+                setError("設定の読み込み中にエラーが発生しました。");
+            }
         } finally {
+            clearTimeout(timeoutId);
             setLoading(false);
         }
     };
@@ -354,6 +396,12 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
                         <div>設定を読み込み中...</div>
                     ) : (
                         <>
+                            {error && (
+                                <div className={styles.errorBanner}>
+                                    <span>{error}</span>
+                                    <button className={styles.retryBtn} onClick={fetchData}>再試行</button>
+                                </div>
+                            )}
                             <div className={styles.section}>
                                 <div className={styles.formGroup}>
                                     <label>モデル</label>
