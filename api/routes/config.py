@@ -178,6 +178,7 @@ def get_playbook_params(name: str, manager=Depends(get_manager)):
             city_id=getattr(manager, 'city_id', None),
             building_id=getattr(manager.state, 'current_building_id', None) if hasattr(manager, 'state') else None,
             persona_id=getattr(manager.state, 'current_persona_id', None) if hasattr(manager, 'state') else None,
+            developer_mode=getattr(manager.state, 'developer_mode', False) if hasattr(manager, 'state') else False,
         )
 
         # Filter to user_configurable and resolve enum_source
