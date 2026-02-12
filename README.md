@@ -130,10 +130,16 @@ SAIVerseは、AIと人が共に生きる世界を目指すプロジェクトで�
 git clone https://github.com/maha0525/SAIVerse.git
 ```
 **Git非導入の場合：**<br>
-このGithubページからzipをダウンロード・任意の場所に解凍してください
+[**最新版をダウンロード（ZIP）**](https://github.com/maha0525/SAIVerse/releases/latest/download/SAIVerse.zip)して任意の場所に解凍してください
+
+<details>
+<summary>上記リンクが使えない場合</summary>
+
+このGithubページのCodeボタンからもダウンロードできます（ただしリリース版ではなく開発中の最新版になります）
 <p align="center">
   <img src="assets/image/guide/quickstart_download_zip.png" alt="Codeボタンをクリック、出てきたDownload ZIPをクリックしてダウンロード" width="400">
 </p>
+</details>
 
 #### インストール
 
@@ -187,10 +193,17 @@ chmod +x setup.sh start.sh
 ```
 
 **Git非導入の場合：**<br>
-このGithubページからzipをダウンロード・任意の場所に解凍してください
+[**最新版をダウンロード（ZIP）**](https://github.com/maha0525/SAIVerse/releases/latest/download/SAIVerse.zip)して任意の場所に解凍してください
+
+<details>
+<summary>上記リンクが使えない場合</summary>
+
+このGithubページのCodeボタンからもダウンロードできます（ただしリリース版ではなく開発中の最新版になります）
 <p align="center">
   <img src="assets/image/guide/quickstart_download_zip.png" alt="Codeボタンをクリック、出てきたDownload ZIPをクリックしてダウンロード" width="400">
 </p>
+</details>
+
 初回起動時にチュートリアルが表示され、ユーザー名やAPIキーの設定を案内します。
 
 `SAIVerse` フォルダ内の **`setup.sh`** をダブルクリック
