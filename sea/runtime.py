@@ -1195,6 +1195,14 @@ class SEARuntime:
             base_model = getattr(persona, "model", "unknown")
             LOGGER.info("[sea] persona.model=%s, llm_client type=%s", base_model, type(base_client).__name__)
 
+        # Guard: if no client was resolved, raise a clear error
+        if base_client is None:
+            persona_name = getattr(persona, "persona_name", "unknown")
+            raise LLMError(
+                f"LLM client is not initialized for persona '{persona_name}' (model={base_model})",
+                user_message=f"ペルソナ「{persona_name}」のLLMクライアントが初期化されていません。チャットオプションでモデルを選択してください。",
+            )
+
         # If structured output is needed, check if the selected model supports it
         if needs_structured_output:
             from saiverse.model_configs import supports_structured_output, get_agentic_model, get_context_length, get_model_provider

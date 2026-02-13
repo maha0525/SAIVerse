@@ -183,7 +183,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
 
             if (res.ok) {
                 const data = await res.json();
-                // Close on success
+                if (data.warning) {
+                    alert(`設定は保存されましたが、警告があります:\n${data.warning}`);
+                }
                 onClose();
             } else {
                 const err = await res.json();

@@ -837,6 +837,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 ai.CHRONICLE_ENABLED = chronicle_enabled
             db.commit()
 
+            llm_warnings = []
             if ai_id in self.personas:
                 persona = self.personas[ai_id]
                 persona.persona_name = name
@@ -847,11 +848,11 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 # Update default model and recreate LLM client if model changed
                 # If a global chat-option override is active, preserve it;
                 # only the DB value (ai.DEFAULT_MODEL) was updated above.
-                if self.model and self.model != "None":
+                if self.model:
                     new_model = self.model
                 else:
-                    new_model = default_model or self.model
-                if persona.model != new_model:
+                    new_model = default_model
+                if new_model and persona.model != new_model:
                     persona.model = new_model
                     from llm_clients import get_llm_client
                     from saiverse.model_configs import get_context_length, get_model_provider, model_supports_images
@@ -871,6 +872,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                             name,
                             exc,
                         )
+                        llm_warnings.append(f"モデル '{new_model}' のLLMクライアント作成に失敗: {exc}")
 
                 # Recreate lightweight LLM client if model changed
                 if lightweight_model:
@@ -894,6 +896,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                             exc,
                         )
                         persona.lightweight_llm_client = None
+                        llm_warnings.append(f"軽量モデル '{lightweight_model}' のLLMクライアント作成に失敗: {exc}")
                 else:
                     persona.lightweight_llm_client = None
 
@@ -901,6 +904,8 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             self._set_persona_avatar(ai_id, avatar_value)
 
             status_message = f"AI '{name}' updated successfully."
+            if llm_warnings:
+                status_message += " [WARNING:LLM] " + "; ".join(llm_warnings)
             if mode_changed:
                 status_message += (
                     f" Mode changed from '{original_mode}' to '{interaction_mode}'."
