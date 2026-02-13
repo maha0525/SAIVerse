@@ -15,7 +15,7 @@ class CoreState:
     session_factory: Session
     city_id: int
     city_name: str
-    model: str
+    model: Optional[str]
     provider: str
     context_length: int
     saiverse_home: Path

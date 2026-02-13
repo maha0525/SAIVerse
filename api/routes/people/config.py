@@ -83,6 +83,13 @@ def update_persona_config(
     if result.startswith("Error:"):
         raise HTTPException(status_code=400, detail=result)
 
+    # Extract LLM warnings if present
+    llm_warning = None
+    if "[WARNING:LLM]" in result:
+        parts = result.split("[WARNING:LLM]", 1)
+        result = parts[0].strip()
+        llm_warning = parts[1].strip()
+
     # Handle linked user update
     if req.linked_user_id is not None:
         session = manager.SessionLocal()
@@ -112,7 +119,10 @@ def update_persona_config(
         finally:
             session.close()
 
-    return {"success": True, "message": result}
+    response = {"success": True, "message": result}
+    if llm_warning:
+        response["warning"] = llm_warning
+    return response
 
 
 @router.post("/{persona_id}/organize-memory")

@@ -225,7 +225,7 @@ def get_playbook_params(name: str, manager=Depends(get_manager)):
 @router.get("/config", response_model=ModelConfigResponse)
 def get_current_config(manager = Depends(get_manager)):
     """Get current model and parameter configuration."""
-    current_model = manager.model if manager.model != "None" else None
+    current_model = manager.model or None
     
     # If no model selected, return empty (but still include overrides)
     if not current_model:
@@ -303,7 +303,7 @@ def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
     manager.set_model(req.model, req.parameters)
     
     # Return full config inline to avoid a separate /config fetch
-    current_model = manager.model if manager.model != "None" else None
+    current_model = manager.model or None
     
     if not current_model:
         return {
@@ -488,7 +488,7 @@ class CacheConfigRequest(BaseModel):
 @router.get("/cache", response_model=CacheConfigResponse)
 def get_cache_settings(manager = Depends(get_manager)):
     """Get current cache settings and model cache support info."""
-    current_model = manager.model if manager.model != "None" else None
+    current_model = manager.model or None
 
     # Get cache config for current model
     cache_config = {}
@@ -544,7 +544,7 @@ def get_max_history_messages(manager=Depends(get_manager)):
     from saiverse.model_configs import get_default_max_history_messages
 
     override = getattr(manager, "max_history_messages_override", None)
-    current_model = manager.model if manager.model != "None" else None
+    current_model = manager.model or None
 
     model_default = None
     if current_model:
@@ -579,7 +579,7 @@ def get_metabolism_settings(manager=Depends(get_manager)):
     """Get current metabolism settings."""
     from saiverse.model_configs import get_metabolism_keep_messages, get_default_max_history_messages
 
-    current_model = manager.model if manager.model != "None" else None
+    current_model = manager.model or None
     metab_override = getattr(manager, "metabolism_keep_messages_override", None)
     metab_model_default = None
     high_wm = None
@@ -607,7 +607,7 @@ def set_metabolism_settings(req: MetabolismConfigRequest, manager=Depends(get_ma
             raise HTTPException(status_code=400, detail="keep_messages must be >= 1")
         # Validate: high_wm - keep_messages >= 20
         from saiverse.model_configs import get_default_max_history_messages
-        current_model = manager.model if manager.model != "None" else None
+        current_model = manager.model or None
         high_wm_override = getattr(manager, "max_history_messages_override", None)
         high_wm = high_wm_override
         if high_wm is None and current_model:

@@ -655,7 +655,7 @@ class SAIVerseManager(
         - If model is "None" or empty: clear the override and reset each persona to its DB-defined default model.
         - Otherwise: set the given model for all personas (temporary, not persisted).
         """
-        if model == "None" or not model or not model.strip():
+        if not model or not model.strip():
             logging.info("Clearing global model override; restoring each persona's DB default model.")
             self.model_parameter_overrides = {}
             db = self.SessionLocal()
@@ -667,7 +667,7 @@ class SAIVerseManager(
                     m = ai.DEFAULT_MODEL or getattr(self, '_base_model', None) or _get_default_model()
                     persona.set_model(m, get_context_length(m), get_model_provider(m))
                 # Reflect no-override state in manager
-                self.model = "None"
+                self.model = None
                 self.state.model = self.model
                 if hasattr(self.runtime, "model"):
                     self.runtime.model = self.model
@@ -695,7 +695,7 @@ class SAIVerseManager(
     def set_model_parameters(self, parameters: Optional[Dict[str, Any]] = None) -> None:
         """Update model parameters for the current override model."""
         self.model_parameter_overrides = dict(parameters or {})
-        if self.model == "None":
+        if not self.model:
             logging.info("Parameter overrides ignored because no global model override is active.")
             return
         for persona in self.personas.values():
