@@ -22,13 +22,20 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 for /f "tokens=*" %%v in ('python --version 2^>^&1') do set PY_VERSION=%%v
-if "%PY_VERSION%"=="Python" (
-    echo [WARN] Python found but version unknown.
-    echo   Windows App Execution Aliases may be intercepting the command.
+echo %PY_VERSION% | findstr /r "[0-9]" >nul 2>nul
+if %errorlevel% neq 0 (
+    echo [ERROR] Python found but version number is missing.
+    echo   Output was: "%PY_VERSION%"
+    echo.
+    echo   This usually means Windows App Execution Aliases are intercepting
+    echo   the "python" command instead of a real Python installation.
+    echo.
     echo   To fix:
-    echo     Settings ^> Apps ^> App Execution Aliases
-    echo     Turn off "python.exe" and "python3.exe"
-    echo   Then close this window and run setup.bat again.
+    echo     1. Settings ^> Apps ^> Advanced app settings ^> App Execution Aliases
+    echo     2. Turn off "python.exe" and "python3.exe"
+    echo     3. Install Python from https://www.python.org/downloads/
+    echo        Make sure to check "Add Python to PATH" during installation.
+    echo     4. Run setup.bat again.
     pause
     exit /b 1
 )
@@ -92,12 +99,35 @@ REM Restore working directory (winget/MSI install can change CWD to System32)
 cd /d "%~dp0"
 
 REM --- 3. Create venv if not exists ---
-if not exist ".venv" (
+if not exist ".venv\Scripts\activate.bat" (
+    if exist ".venv" (
+        echo.
+        echo [WARN] .venv exists but appears broken ^(activate.bat missing^). Recreating...
+        rmdir /s /q .venv
+    )
     echo.
     echo [SETUP] Creating Python virtual environment...
     python -m venv .venv
     if %errorlevel% neq 0 (
         echo [ERROR] Failed to create virtual environment.
+        pause
+        exit /b 1
+    )
+    if not exist ".venv\Scripts\activate.bat" (
+        echo [ERROR] Virtual environment was created but is incomplete.
+        echo   .venv\Scripts\activate.bat was not generated.
+        echo.
+        echo   This usually means your Python installation is missing "ensurepip".
+        echo   Common causes:
+        echo     - Microsoft Store version of Python ^(uninstall and use python.org^)
+        echo     - Python installed without pip ^(reinstall with default options^)
+        echo.
+        echo   To fix:
+        echo     1. Uninstall your current Python
+        echo     2. Download from https://www.python.org/downloads/
+        echo     3. Run installer, check "Add Python to PATH", use default settings
+        echo     4. Delete the .venv folder and run setup.bat again
+        rmdir /s /q .venv
         pause
         exit /b 1
     )
