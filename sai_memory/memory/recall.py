@@ -198,8 +198,10 @@ def _build_local_model_kwargs(
         raise FileNotFoundError(f"SAIMemory embedding model path does not exist: {model_dir}")
 
     model_file = _resolve_model_file(model_dir)
-    model_file_path = (model_dir / model_file).resolve()
-    model_base = model_file_path.parent if model_file_path.exists() else model_dir
+    # Always use model_dir as the base: fastembed resolves model_file
+    # (e.g. "onnx/model.onnx") relative to specific_model_path, so using
+    # model_file_path.parent would double the "onnx/" prefix.
+    model_base = model_dir
     embedding_dim = explicit_dim or _infer_embedding_dimension(model_dir)
     pooling = _infer_pooling(model_dir)
     normalization = _infer_normalization(model_dir)
