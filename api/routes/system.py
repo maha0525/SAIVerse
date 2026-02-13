@@ -149,12 +149,24 @@ async def trigger_update():
     if sys.platform == "win32":
         DETACHED_PROCESS = 0x00000008
         CREATE_NEW_PROCESS_GROUP = 0x00000200
-        subprocess.Popen(
-            cmd,
-            cwd=str(project_path),
-            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
-            close_fds=True,
-        )
+        CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+        flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB
+        try:
+            subprocess.Popen(
+                cmd,
+                cwd=str(project_path),
+                creationflags=flags,
+                close_fds=True,
+            )
+        except OSError:
+            # Job Object may not allow breakaway; fall back without it
+            LOGGER.warning("CREATE_BREAKAWAY_FROM_JOB failed, retrying without it")
+            subprocess.Popen(
+                cmd,
+                cwd=str(project_path),
+                creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                close_fds=True,
+            )
     else:
         subprocess.Popen(
             cmd,
