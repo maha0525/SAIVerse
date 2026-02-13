@@ -663,30 +663,38 @@ export default function Home() {
         return () => clearInterval(pollInterval);
     }, [isHistoryLoaded]);
 
-    // Backend reconnection polling: when disconnected, check every 10 seconds
+    // Backend reconnection polling
+    // During update: poll regardless of connection status (detect shutdown + restart)
+    // Otherwise: only poll when disconnected
     useEffect(() => {
-        if (backendConnected) return;
+        if (!isUpdating && backendConnected) return;
 
         const reconnectInterval = setInterval(async () => {
             try {
                 const res = await fetch('/api/user/status');
                 if (res.ok) {
-                    setBackendConnected(true);
-                    // Refresh data after reconnection
-                    fetchHistory();
-                    fetchBuildingInfo();
+                    if (!backendConnected) {
+                        setBackendConnected(true);
+                        // Refresh data after reconnection
+                        fetchHistory();
+                        fetchBuildingInfo();
 
-                    // If we were updating, show completion toast
-                    if (isUpdating) {
-                        setIsUpdating(false);
-                        sessionStorage.removeItem('saiverse_updating');
-                        const toastId = `update-complete-${Date.now()}`;
-                        setToasts(prev => [...prev, { id: toastId, content: 'Update complete! Application has been restarted.' }]);
-                        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
+                        // If we were updating, show completion toast
+                        if (isUpdating) {
+                            setIsUpdating(false);
+                            sessionStorage.removeItem('saiverse_updating');
+                            const toastId = `update-complete-${Date.now()}`;
+                            setToasts(prev => [...prev, { id: toastId, content: 'Update complete! Application has been restarted.' }]);
+                            setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
+                        }
                     }
+                    // backendConnected && isUpdating: backend hasn't shut down yet, keep waiting
                 }
             } catch {
-                // Still disconnected
+                // Backend not responding
+                if (backendConnected) {
+                    setBackendConnected(false);
+                }
             }
         }, isUpdating ? 5000 : 10000); // Poll faster during update
 
