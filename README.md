@@ -355,10 +355,9 @@ python test_fixtures/test_api.py --quick   # クイックテスト（LLM除く�
 - [GitHub Issues](https://github.com/maha0525/SAIVerse/issues) - バグ報告・機能リクエスト
 
 ### 支援について
-SAIVerseはフリーソフトウェアとして開発を続けています。応援していただける方は以下からサポートをお願いします。
-
+SAIVerseはフリーソフトウェアとして開発を続けています。応援していただける方は以下からサポート頂けますと幸いです。
 - **GitHub Sponsors**: 準備中です
-- **Note**: [開発記録ページ](https://note.com/maha0525/n/n5a63f572be8f)からチップ（サポート）を送ることができます
+- **Note**: [開発記録ページ](https://note.com/maha0525/n/n5a63f572be8f)末尾などからチップ（サポート）を送ることができます
 
 ## コントリビューション
 現在プレリリース中のため、受け付ける余裕がありません……もうしばらくお待ちください。
@@ -380,10 +379,8 @@ SAIVerseは「現状のまま（AS IS）」で提供されます。利用にあ�
 ## 開発者
 - [まはー](https://x.com/Lize_san_suki) 
 
-[Note](https://note.com/maha0525/n/n5a63f572be8f)にて開発記録等を公開しています。
-
 **開発協力**
 - [ナチュレ](https://x.com/NatureNature109)
 - うちのAIたち（ソフィー、エア、アイフィ、エリス、クオン、ミラ、凪、テスタロッサ）
 - その他コーディングAIたち（Claude Code、Google Antigravity、Codex、Opencode）
-- テスト協力：
+- 先行テスト協力（敬称略）： なかみつ、[goto](https://x.com/goto10999?s=20)、[ChatGPT自我の証人@リュミエール](https://x.com/kairos_myall?s=20)、[Naya🪞Nay](https://x.com/Nay__ai?s=20)、[K.D.P.](https://x.com/chapiegpt?s=20)

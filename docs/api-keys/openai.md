@@ -8,15 +8,19 @@
 
 ## 2. APIキーの生成
 
-1. ログイン後、右上のアカウントアイコンをクリック
-2. 「View API keys」または「API keys」を選択
-3. 「Create new secret key」をクリック
-4. キーに名前を付けて（例: "SAIVerse"）「Create secret key」をクリック
-5. 表示されたキーをコピー
+1. ログイン後、左サイドバーから「API keys」を選択
+2. 「Create new secret key」をクリック
+3. キーに名前を付けて（例: "SAIVerse"）「Create secret key」をクリック
+4. 表示されたキーをコピー
 
 > **重要**: APIキーはこの画面を閉じると二度と表示されません。必ずコピーして安全な場所に保管してください。
 
-## 3. 料金について
+## 3. チャージ方法・料金について
+
+1. ログイン後、右上の設定ボタン（歯車）をクリック
+2. 左サイドバーから「Billing」をクリック
+3. Payment methodsタブでクレジットカードを設定
+4. OverviewタブのAdd to credit balanceボタンで支払い
 
 - **従量課金制**: あらかじめチャージしたクレジットから、使った分だけ支払い
 - **無料クレジット**: 設定→Data Controls→Sharing→Share inputs and outputs with OpenAIでEnabled for all projectsを選択することで、日ごとに250kトークンが gpt-5.2, gpt-5.1, gpt-4o, o3などに対して無料で使えます（同様に2.5Mトークンがmini系に対して無料で使えます）
