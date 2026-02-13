@@ -188,7 +188,16 @@ export default function WorldEditor() {
     };
     const handleCreateBuilding = async () => { if (await apiCall('/api/world/buildings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: formData.name, description: formData.description || "", capacity: formData.capacity || 1, system_instruction: formData.system_instruction || "", city_id: formData.city_id, building_id: formData.building_id || null }) })) { loadBuildings(); setFormData({}); } };
     const handleUpdateBuilding = async () => { if (await apiCall(`/api/world/buildings/${selectedBuilding!.BUILDINGID}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...formData, tool_ids: formData.tool_ids || [] }) })) { loadBuildings(); } };
-    const handleDeleteBuilding = async () => { if (confirm("この Building を削除しますか？") && await apiCall(`/api/world/buildings/${selectedBuilding!.BUILDINGID}`, { method: 'DELETE' })) { setSelectedBuilding(null); setFormData({}); loadBuildings(); } };
+    const handleDeleteBuilding = async () => {
+        const deletedId = selectedBuilding!.BUILDINGID;
+        if (confirm("この Building を削除しますか？") && await apiCall(`/api/world/buildings/${deletedId}`, { method: 'DELETE' })) {
+            setSelectedBuilding(null);
+            setFormData({});
+            loadBuildings();
+            // Notify main page so it can update if the deleted building was current
+            window.dispatchEvent(new CustomEvent('building-deleted', { detail: { buildingId: deletedId } }));
+        }
+    };
 
     // --- AI Handlers ---
     const handleAISelect = (ai: AI) => {
