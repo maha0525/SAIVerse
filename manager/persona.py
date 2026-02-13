@@ -362,6 +362,11 @@ class PersonaMixin:
             )
             self.building_histories[new_building_id] = []
 
+            # Commit DB records before creating PersonaCore so that
+            # load_session_data (which opens a separate DB session) can
+            # find the AI record.
+            db.commit()
+
             new_persona_model = self.model or self._base_model
             new_persona_provider = get_model_provider(new_persona_model)  # Get provider for model
             new_persona_context_length = get_context_length(new_persona_model)
@@ -406,7 +411,6 @@ class PersonaMixin:
             self.id_to_name_map[new_ai_id] = name
             self.persona_map[name] = new_ai_id
 
-            db.commit()
             return True, f"Persona '{name}' created successfully.", new_ai_id, new_building_id
         except Exception as exc:
             db.rollback()
