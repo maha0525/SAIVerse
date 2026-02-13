@@ -308,7 +308,7 @@ class PersonaMixin:
                 AUTO_COUNT=0,
                 INTERACTION_MODE="manual",
                 IS_DISPATCHED=False,
-                DEFAULT_MODEL=self.model or self._base_model,
+                DEFAULT_MODEL=self.model,
                 CHRONICLE_ENABLED=False,
                 PRIVATE_ROOM_ID=new_building_id,
             )
