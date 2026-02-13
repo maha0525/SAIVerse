@@ -1218,20 +1218,13 @@ export default function Home() {
     };
 
     const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-        // Mobile: only send button sends (Enter = newline)
-        // PC: Ctrl+Enter sends (Enter = newline)
-        if (e.key === 'Enter') {
-            if (isMobile) {
-                // On mobile, Enter always inserts newline (default behavior)
-                return;
-            } else {
-                // On PC, Ctrl+Enter sends, regular Enter inserts newline
-                if (e.ctrlKey || e.metaKey) {
-                    e.preventDefault();
-                    handleSendMessage();
-                }
-                // Regular Enter: let default behavior insert newline
-            }
+        // Ctrl+Enter (or Cmd+Enter) sends the message on any device.
+        // Regular Enter always inserts a newline.
+        // No isMobile gate needed: actual mobile devices have no Ctrl key,
+        // while touch-screen laptops do need Ctrl+Enter to work.
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            handleSendMessage();
         }
     };
 
