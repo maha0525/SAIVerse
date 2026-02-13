@@ -122,6 +122,24 @@ def write_env_updates(updates: Dict[str, str]) -> None:
         except Exception as e:
             LOGGER.warning("Failed to rebuild router Gemini clients: %s", e)
 
+    # Invalidate cached LLM clients on all personas when API keys change
+    _API_KEY_KEYWORDS = {"KEY", "TOKEN", "SECRET"}
+    changed_api_keys = {k for k in updates if any(kw in k.upper() for kw in _API_KEY_KEYWORDS)}
+    if changed_api_keys:
+        LOGGER.info("API key env vars changed: %s — invalidating persona LLM clients", changed_api_keys)
+        try:
+            from saiverse.app_state import manager
+            if manager is not None:
+                count = 0
+                for persona in manager.personas.values():
+                    persona._llm_client = None
+                    persona._lightweight_llm_client = None
+                    persona._lightweight_llm_client_initialized = False
+                    count += 1
+                LOGGER.info("Invalidated LLM clients on %d personas (will re-create on next use)", count)
+        except Exception as e:
+            LOGGER.warning("Failed to invalidate persona LLM clients: %s", e)
+
 
 @router.post("/env")
 def update_env_vars(req: EnvUpdateRequest):
