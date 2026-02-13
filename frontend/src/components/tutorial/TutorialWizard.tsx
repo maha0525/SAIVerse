@@ -279,9 +279,6 @@ export default function TutorialWizard({
     };
 
     const saveCityName = async () => {
-        const name = state.cityName.trim();
-        if (!name) return; // Skip if empty, will use default
-
         const res = await fetch('/api/db/tables/city');
         if (!res.ok) {
             throw new Error('City情報の取得に失敗しました');
@@ -292,8 +289,10 @@ export default function TutorialWizard({
         }
 
         const city = cities[0];
+        const name = state.cityName.trim() || city.DESCRIPTION || city.CITYNAME;
         // PUT requires all fields. Keep CITYNAME (internal ID) unchanged,
         // save user-entered display name to DESCRIPTION.
+        // Always send the timezone — even if city name was left empty.
         const updateRes = await fetch(`/api/world/cities/${city.CITYID}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },

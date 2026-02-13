@@ -185,7 +185,12 @@ class InitializationMixin:
         self.startup_warnings: List[Dict[str, str]] = []
 
     def _update_timezone_cache(self, tz_name: Optional[str]) -> None:
-        """Update cached timezone information for this manager."""
+        """Update cached timezone information for this manager.
+
+        Updates the manager's own attributes AND the CoreState object
+        (if it exists) so that AdminService / PersonaMixin always see
+        the latest timezone when creating or loading personas.
+        """
         name = (tz_name or "UTC").strip() or "UTC"
         try:
             tz = ZoneInfo(name)
@@ -195,6 +200,12 @@ class InitializationMixin:
             tz = ZoneInfo("UTC")
         self.timezone_name = name
         self.timezone_info = tz
+        # Propagate to CoreState so AdminService (which reads from state)
+        # also picks up the change.
+        state = getattr(self, "state", None)
+        if state is not None:
+            state.timezone_name = name
+            state.timezone_info = tz
 
 
 __all__ = ["InitializationMixin"]

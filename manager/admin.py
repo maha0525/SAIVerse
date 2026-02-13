@@ -166,6 +166,15 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 self.manager.user_room_id = self.state.user_room_id
                 self.user_room_id = self.state.user_room_id
                 self._update_timezone_cache(tz_candidate)
+                # _update_timezone_cache updates manager & state; sync admin's
+                # own cached copies so _create_persona / _load_single_persona
+                # pick up the new timezone immediately.
+                self.timezone_name = self.state.timezone_name
+                self.timezone_info = self.state.timezone_info
+                # Propagate to existing in-memory personas
+                for persona in self.state.personas.values():
+                    persona.timezone = self.state.timezone_info
+                    persona.timezone_name = self.state.timezone_name
                 self.manager.reload_host_avatar(avatar_value)
 
             self._load_cities_from_db()
