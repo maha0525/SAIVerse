@@ -1273,3 +1273,101 @@
 :global([data-theme="dark"]) .toastClose {
     color: #fbbf24;
 }
+
+/* Timezone Mismatch Popup */
+.tzPopup {
+    background-color: #ffffff;
+    border-radius: 12px;
+    padding: 2rem;
+    max-width: 480px;
+    width: 90%;
+    margin: auto;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
+}
+
+.tzPopupTitle {
+    font-size: 1.2rem;
+    font-weight: 600;
+    color: #1f2937;
+    margin: 0 0 1rem 0;
+}
+
+.tzPopupText {
+    color: #475569;
+    font-size: 0.95rem;
+    line-height: 1.6;
+    margin: 0 0 0.5rem 0;
+}
+
+.tzPopupText strong {
+    color: #2563eb;
+}
+
+.tzPopupActions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    margin-top: 1.5rem;
+}
+
+.tzPopupDismiss {
+    background: none;
+    border: 1px solid #cbd5e1;
+    color: #64748b;
+    padding: 0.6rem 1.2rem;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+
+.tzPopupDismiss:hover {
+    border-color: #94a3b8;
+    color: #334155;
+}
+
+.tzPopupUpdate {
+    background-color: #4dabf7;
+    border: none;
+    color: #fff;
+    padding: 0.6rem 1.2rem;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-weight: 500;
+}
+
+.tzPopupUpdate:hover {
+    background-color: #339af0;
+}
+
+.tzPopupUpdate:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+:global([data-theme="dark"]) .tzPopup {
+    background-color: #1e1f22;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+}
+
+:global([data-theme="dark"]) .tzPopupTitle {
+    color: #e0e0e0;
+}
+
+:global([data-theme="dark"]) .tzPopupText {
+    color: #aaa;
+}
+
+:global([data-theme="dark"]) .tzPopupText strong {
+    color: #4dabf7;
+}
+
+:global([data-theme="dark"]) .tzPopupDismiss {
+    border-color: #555;
+    color: #aaa;
+}
+
+:global([data-theme="dark"]) .tzPopupDismiss:hover {
+    border-color: #888;
+    color: #ccc;
+}

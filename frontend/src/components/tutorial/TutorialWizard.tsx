@@ -53,6 +53,7 @@ interface ModelRoleAssignment {
 interface TutorialState {
     userName: string;
     cityName: string;
+    timezone: string;
     personaChoice: 'new' | 'import' | null;
     apiKeys: Record<string, string>;
     createdPersonaId: string | null;
@@ -98,6 +99,7 @@ export default function TutorialWizard({
     const [state, setState] = useState<TutorialState>({
         userName: '',
         cityName: '',
+        timezone: '',
         personaChoice: null,
         apiKeys: {},
         createdPersonaId: null,
@@ -119,6 +121,7 @@ export default function TutorialWizard({
             setState({
                 userName: '',
                 cityName: '',
+                timezone: '',
                 personaChoice: null,
                 apiKeys: {},
                 createdPersonaId: null,
@@ -162,6 +165,10 @@ export default function TutorialWizard({
                 if (cities.length > 0) {
                     // Use DESCRIPTION (display name) if available, else CITYNAME
                     updates.cityName = cities[0].DESCRIPTION || cities[0].CITYNAME || '';
+                    // Auto-detect timezone from browser if city still has default 'UTC'
+                    const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+                    const cityTz = cities[0].TIMEZONE || 'UTC';
+                    updates.timezone = (cityTz === 'UTC') ? browserTz : cityTz;
                 }
             }
             if (Object.keys(updates).length > 0) {
@@ -296,7 +303,7 @@ export default function TutorialWizard({
                 online_mode: city.START_IN_ONLINE_MODE ?? false,
                 ui_port: city.UI_PORT ?? 8000,
                 api_port: city.API_PORT ?? 8001,
-                timezone: city.TIMEZONE || 'UTC',
+                timezone: state.timezone || city.TIMEZONE || 'UTC',
             })
         });
         if (!updateRes.ok) {
@@ -398,6 +405,8 @@ export default function TutorialWizard({
                     <StepCityName
                         value={state.cityName}
                         onChange={(v) => updateState({ cityName: v })}
+                        timezone={state.timezone}
+                        onTimezoneChange={(v) => updateState({ timezone: v })}
                     />
                 );
             case 4:

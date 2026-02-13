@@ -15,6 +15,7 @@ import TutorialWizard from '@/components/tutorial/TutorialWizard';
 import SaiverseLink from '@/components/SaiverseLink';
 import ItemModal from '@/components/ItemModal';
 import ContextPreviewModal, { ContextPreviewData } from '@/components/ContextPreviewModal';
+import ModalOverlay from '@/components/common/ModalOverlay';
 import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
 
@@ -270,6 +271,10 @@ export default function Home() {
     // Startup warnings
     const [startupWarnings, setStartupWarnings] = useState<string[]>([]);
     const [showStartupWarnings, setShowStartupWarnings] = useState(false);
+
+    // Timezone mismatch popup
+    const [tzMismatch, setTzMismatch] = useState<{cityTz: string; browserTz: string; cityId: number} | null>(null);
+    const [tzUpdating, setTzUpdating] = useState(false);
 
     // Update system
     const [app_state_version, setAppStateVersion] = useState('');
@@ -600,6 +605,23 @@ export default function Home() {
             })
             .catch(err => console.error('Failed to fetch startup warnings', err));
 
+        // Check timezone mismatch
+        fetch('/api/db/tables/city')
+            .then(res => res.ok ? res.json() : null)
+            .then(cities => {
+                if (!cities || cities.length === 0) return;
+                const city = cities[0];
+                const cityTz = city.TIMEZONE || 'UTC';
+                const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+                if (cityTz !== browserTz) {
+                    const dismissKey = `saiverse_tz_dismissed_${cityTz}_${browserTz}`;
+                    if (!localStorage.getItem(dismissKey)) {
+                        setTzMismatch({ cityTz, browserTz, cityId: city.CITYID });
+                    }
+                }
+            })
+            .catch(err => console.error('Timezone check failed:', err));
+
         // Check for updates
         fetch('/api/system/version')
             .then(res => res.ok ? res.json() : null)
@@ -717,6 +739,52 @@ export default function Home() {
             setToasts(prev => [...prev, { id: toastId, content: 'Failed to start update. Backend may be unreachable.' }]);
             setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
         }
+    };
+
+    const handleTzUpdate = async () => {
+        if (!tzMismatch) return;
+        setTzUpdating(true);
+        try {
+            const citiesRes = await fetch('/api/db/tables/city');
+            if (!citiesRes.ok) throw new Error('Failed to fetch city data');
+            const cities = await citiesRes.json();
+            const city = cities.find((c: any) => c.CITYID === tzMismatch.cityId);
+            if (!city) throw new Error('City not found');
+
+            const res = await fetch(`/api/world/cities/${city.CITYID}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: city.CITYNAME,
+                    description: city.DESCRIPTION || '',
+                    online_mode: city.START_IN_ONLINE_MODE ?? false,
+                    ui_port: city.UI_PORT,
+                    api_port: city.API_PORT,
+                    timezone: tzMismatch.browserTz,
+                })
+            });
+            if (!res.ok) throw new Error('Failed to update timezone');
+
+            const toastId = `tz-update-${Date.now()}`;
+            setToasts(prev => [...prev, { id: toastId, content: `タイムゾーンを ${tzMismatch.browserTz} に更新しました` }]);
+            setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
+            setTzMismatch(null);
+        } catch (err) {
+            console.error('Failed to update timezone:', err);
+            const toastId = `tz-error-${Date.now()}`;
+            setToasts(prev => [...prev, { id: toastId, content: 'タイムゾーンの更新に失敗しました' }]);
+            setTimeout(() => setToasts(prev => prev.filter(t => t.id !== toastId)), 5000);
+        } finally {
+            setTzUpdating(false);
+        }
+    };
+
+    const handleTzDismiss = () => {
+        if (tzMismatch) {
+            const dismissKey = `saiverse_tz_dismissed_${tzMismatch.cityTz}_${tzMismatch.browserTz}`;
+            localStorage.setItem(dismissKey, 'true');
+        }
+        setTzMismatch(null);
     };
 
     const handleSendMessage = async () => {
@@ -1647,6 +1715,37 @@ export default function Home() {
                         window.location.reload();
                     }}
                 />
+            )}
+
+            {/* Timezone Mismatch Popup */}
+            {tzMismatch && !showTutorial && (
+                <ModalOverlay onClose={handleTzDismiss}>
+                    <div className={styles.tzPopup} onClick={(e) => e.stopPropagation()}>
+                        <h3 className={styles.tzPopupTitle}>タイムゾーンの不一致</h3>
+                        <p className={styles.tzPopupText}>
+                            City のタイムゾーンは <strong>{tzMismatch.cityTz}</strong> に設定されていますが、
+                            システムのタイムゾーンは <strong>{tzMismatch.browserTz}</strong> です。
+                        </p>
+                        <p className={styles.tzPopupText}>
+                            タイムゾーンを更新しますか？
+                        </p>
+                        <div className={styles.tzPopupActions}>
+                            <button
+                                className={styles.tzPopupDismiss}
+                                onClick={handleTzDismiss}
+                            >
+                                閉じる
+                            </button>
+                            <button
+                                className={styles.tzPopupUpdate}
+                                onClick={handleTzUpdate}
+                                disabled={tzUpdating}
+                            >
+                                {tzUpdating ? '更新中...' : `${tzMismatch.browserTz} に更新`}
+                            </button>
+                        </div>
+                    </div>
+                </ModalOverlay>
             )}
 
             {/* Toast notifications */}
