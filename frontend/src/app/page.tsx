@@ -639,6 +639,52 @@ export default function Home() {
             .catch(() => { /* ignore - backend may not support this endpoint yet */ });
     }, []);
 
+    // Handle building deletion from WorldEditor — switch to another building
+    // if the current building was the one deleted.
+    useEffect(() => {
+        const handleBuildingDeleted = async (e: Event) => {
+            const deletedId = (e as CustomEvent).detail?.buildingId;
+            if (!deletedId) return;
+
+            if (currentBuildingIdRef.current === deletedId) {
+                // Current building was deleted — move to the first available building
+                try {
+                    const res = await fetch('/api/user/buildings');
+                    if (res.ok) {
+                        const data = await res.json();
+                        const buildings = data.buildings || [];
+                        if (buildings.length > 0) {
+                            const target = buildings[0];
+                            const moveRes = await fetch('/api/user/move', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ target_building_id: target.id }),
+                            });
+                            if (moveRes.ok) {
+                                setCurrentBuildingId(target.id);
+                                currentBuildingIdRef.current = target.id;
+                                setMessages([]);
+                                setIsHistoryLoaded(false);
+                                fetchHistory(undefined, target.id);
+                                fetchBuildingInfo(target.id);
+                                setMoveTrigger(prev => prev + 1);
+                            }
+                        }
+                    }
+                } catch (err) {
+                    console.error('Failed to handle building deletion', err);
+                }
+            } else {
+                // Another building was deleted — just refresh building info
+                // to ensure sidebar/right panel are up to date
+                fetchBuildingInfo();
+                setMoveTrigger(prev => prev + 1);
+            }
+        };
+        window.addEventListener('building-deleted', handleBuildingDeleted);
+        return () => window.removeEventListener('building-deleted', handleBuildingDeleted);
+    }, []);
+
     // Polling for new messages (schedule-triggered persona speech, etc.)
     const latestMessageIdRef = useRef<string | undefined>(undefined);
 

@@ -910,15 +910,33 @@ class SAIVerseManager(
 
     def _reload_buildings(self) -> None:
         """Reload buildings list from database to reflect recent changes."""
-        self.buildings = self._load_and_create_buildings_from_db()
+        new_buildings = self._load_and_create_buildings_from_db()
+        if not new_buildings and self.buildings:
+            # DB load failed — keep existing state to avoid wiping all buildings
+            logging.warning(
+                "_reload_buildings: DB returned empty list but %d buildings "
+                "exist in memory; keeping current state.",
+                len(self.buildings),
+            )
+            return
 
-        # Update existing dicts in-place to preserve references held by OccupancyManager
+        self.buildings = new_buildings
         new_building_map = {b.building_id: b for b in self.buildings}
-        self.building_map.clear()
+
+        # Diff-based update: remove deleted, add/update existing — avoids
+        # the race condition where clear()+update() leaves an empty map
+        # visible to concurrent request threads.
+        removed_ids = set(self.building_map) - set(new_building_map)
+        for bid in removed_ids:
+            del self.building_map[bid]
+            self.capacities.pop(bid, None)
+            # Clean up in-memory occupants and histories for deleted buildings
+            self.occupants.pop(bid, None)
+            self.building_histories.pop(bid, None)
+
         self.building_map.update(new_building_map)
 
         new_capacities = {b.building_id: b.capacity for b in self.buildings}
-        self.capacities.clear()
         self.capacities.update(new_capacities)
 
         # Update building memory paths

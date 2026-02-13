@@ -388,6 +388,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             if not building:
                 return "Error: Building not found."
 
+            # Check AI occupancy
             occupancy = (
                 db.query(BuildingOccupancyLog)
                 .filter_by(BUILDINGID=building_id, EXIT_TIMESTAMP=None)
@@ -397,6 +398,19 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 return (
                     f"Error: Cannot delete '{building.BUILDINGNAME}' because it is "
                     "occupied."
+                )
+
+            # Check user occupancy (users are tracked via User.CURRENT_BUILDINGID,
+            # not BuildingOccupancyLog)
+            user_in_building = (
+                db.query(UserModel)
+                .filter_by(CURRENT_BUILDINGID=building_id)
+                .first()
+            )
+            if user_in_building:
+                return (
+                    f"Error: Cannot delete '{building.BUILDINGNAME}' because a "
+                    "user is currently in it."
                 )
 
             db.query(BuildingOccupancyLog).filter_by(BUILDINGID=building_id).delete()
