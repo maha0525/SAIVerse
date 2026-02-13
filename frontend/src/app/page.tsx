@@ -1841,10 +1841,10 @@ export default function Home() {
                     isOpen={showTutorial}
                     onClose={() => setShowTutorial(false)}
                     onComplete={(roomId) => {
-                        setShowTutorial(false);
-                        // Reload page to apply new settings
-                        // User move is already handled in TutorialWizard.handleComplete,
-                        // so after reload the page will load the persona's room
+                        // Reload page to apply new settings.
+                        // Do NOT call setShowTutorial(false) before reload — keeping
+                        // showTutorial=true prevents stale tzMismatch state from
+                        // flashing the timezone modal for one frame before the reload.
                         window.location.reload();
                     }}
                 />

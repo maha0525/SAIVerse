@@ -129,6 +129,8 @@ class SAIVerseManager(
             start_in_online_mode=self.start_in_online_mode,
             ui_port=self.ui_port,
             api_port=self.api_port,
+            timezone_name=self.timezone_name,
+            timezone_info=self.timezone_info,
         )
         self.state.items = self.items
         self.state.item_locations = self.item_locations
