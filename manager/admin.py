@@ -845,7 +845,12 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 persona.lightweight_model = lightweight_model
 
                 # Update default model and recreate LLM client if model changed
-                new_model = default_model or self.model
+                # If a global chat-option override is active, preserve it;
+                # only the DB value (ai.DEFAULT_MODEL) was updated above.
+                if self.model and self.model != "None":
+                    new_model = self.model
+                else:
+                    new_model = default_model or self.model
                 if persona.model != new_model:
                     persona.model = new_model
                     from llm_clients import get_llm_client
