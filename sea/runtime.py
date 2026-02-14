@@ -2717,6 +2717,13 @@ class SEARuntime:
         if not text:
             return True
         adapter = getattr(persona, "sai_memory", None)
+        if not adapter or not adapter.is_ready():
+            LOGGER.warning(
+                "[_store_memory] SAIMemory adapter unavailable for persona=%s — message will NOT be stored. "
+                "Check embedding model setup.",
+                getattr(persona, "persona_id", None),
+            )
+            return False
         try:
             if adapter and adapter.is_ready():
                 current_thread = adapter.get_current_thread()

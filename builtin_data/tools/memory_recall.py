@@ -36,8 +36,8 @@ def memory_recall(
     except Exception as exc:
         raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
 
-    if not adapter.is_ready():
-        raise RuntimeError(f"SAIMemory not ready for {persona_id}")
+    if not adapter.can_embed():
+        raise RuntimeError(f"SAIMemory semantic search not available for {persona_id} (embedding model may be missing)")
 
     # Parse date range to timestamps
     start_ts = None

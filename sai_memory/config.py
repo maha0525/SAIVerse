@@ -19,6 +19,19 @@ def _get_int(name: str, default: int) -> int:
         return default
 
 
+def _has_onnx_model(directory: Path) -> bool:
+    """Check if a directory contains an ONNX model file."""
+    for candidate in [
+        "onnx/model.onnx",
+        "onnx/model_optimized.onnx",
+        "model.onnx",
+        "model_optimized.onnx",
+    ]:
+        if (directory / candidate).exists():
+            return True
+    return False
+
+
 def _get_float(name: str, default: float) -> float:
     v = os.getenv(name)
     try:
@@ -99,8 +112,14 @@ def load_settings() -> Settings:
     model_suffix = embed_model.split("/")[-1]
     preferred_dir = sbert_root / model_suffix
 
-    if not embed_model_path and preferred_dir.exists():
+    if not embed_model_path and preferred_dir.exists() and _has_onnx_model(preferred_dir):
         embed_model_path = str(preferred_dir)
+    elif not embed_model_path and preferred_dir.exists() and not _has_onnx_model(preferred_dir):
+        logging.getLogger(__name__).warning(
+            "SAIMemory local model directory %s exists but contains no ONNX model. "
+            "Will attempt online download instead.",
+            preferred_dir,
+        )
 
     if embed_model_env and not embed_model_path:
         logging.getLogger(__name__).warning(
@@ -117,7 +136,7 @@ def load_settings() -> Settings:
             ("multilingual-e5-base", "intfloat/multilingual-e5-base"),
         ]:
             fallback_dir = sbert_root / fallback_suffix
-            if fallback_dir.exists():
+            if fallback_dir.exists() and _has_onnx_model(fallback_dir):
                 embed_model_path = str(fallback_dir)
                 embed_model = fallback_model
                 break
