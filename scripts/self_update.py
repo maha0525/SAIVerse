@@ -267,10 +267,10 @@ def update_dependencies(project_dir: str, venv_python: str) -> None:
     """Run pip install, migrate, import playbooks, npm install."""
     def _run(cmd, label, **kwargs):
         logging.info("Running: %s", label)
+        kwargs.setdefault("cwd", project_dir)
         try:
             result = subprocess.run(
                 cmd,
-                cwd=project_dir,
                 capture_output=True,
                 text=True,
                 timeout=300,
