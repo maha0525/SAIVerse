@@ -377,7 +377,7 @@ def _regenerate_embeddings(
         persona_id = first_thread.split(":")[0] if ":" in first_thread else first_thread
 
         adapter = SAIMemoryAdapter(persona_id)
-        if not adapter.is_ready() or adapter.embedder is None:
+        if not adapter.can_embed():
             LOGGER.warning("Embedder not available, skipping embedding generation")
             return
 

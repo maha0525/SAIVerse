@@ -106,10 +106,14 @@ class SAIMemoryAdapter:
                 local_model_path=self.settings.embed_model_path,
                 model_dim=self.settings.embed_model_dim,
             )
-        except Exception as exc:
-            LOGGER.exception("Failed to load embedding model '%s'", self.settings.embed_model)
+        except Exception:
+            LOGGER.warning(
+                "Failed to load embedding model '%s'. "
+                "Message storage will work but semantic search/recall will be unavailable.",
+                self.settings.embed_model,
+                exc_info=True,
+            )
             self.embedder = None
-            raise exc
 
         # Detect embedding model changes
         self.embed_model_changed = False
@@ -689,7 +693,7 @@ class SAIMemoryAdapter:
         range_before: Optional[int] = None,
         range_after: Optional[int] = None,
     ) -> str:
-        if not self._ready:
+        if not self.can_embed():
             return ""
         if not query_text or not query_text.strip():
             return ""
@@ -788,7 +792,7 @@ class SAIMemoryAdapter:
         end_ts: Optional[int] = None,
     ) -> str:
         """Hybrid recall: keyword matching + semantic search, combined with RRF."""
-        if not self._ready:
+        if not self.can_embed():
             return ""
         if not query_text and not keywords:
             return ""
@@ -951,6 +955,11 @@ class SAIMemoryAdapter:
     # Internal helpers
     # ------------------------------------------------------------------
     def is_ready(self) -> bool:
+        """Check if the adapter can store and retrieve messages (requires DB connection)."""
+        return self.conn is not None
+
+    def can_embed(self) -> bool:
+        """Check if the adapter can perform semantic search (requires DB + embedding model)."""
         return self.conn is not None and self.embedder is not None
 
     @property

@@ -48,8 +48,8 @@ def detail_recall(
         raise RuntimeError(f"Persona {persona_id} not found in manager")
 
     adapter = getattr(persona, "sai_memory", None)
-    if not adapter or not adapter.is_ready():
-        return "メモリが利用できません"
+    if not adapter or not adapter.can_embed():
+        return "メモリのセマンティック検索が利用できません（エンベディングモデルが未設定の可能性があります）"
 
     # Find the summary message by UUID
     if summary_uuid:

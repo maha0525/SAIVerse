@@ -81,8 +81,8 @@ def memory_search_brief(
     except Exception as exc:
         raise RuntimeError(f"Failed to init SAIMemory for {persona_id}: {exc}")
 
-    if not adapter.is_ready():
-        raise RuntimeError(f"SAIMemory not ready for {persona_id}")
+    if not adapter.can_embed():
+        raise RuntimeError(f"SAIMemory semantic search not available for {persona_id} (embedding model may be missing)")
 
     if not query and not keywords:
         return "(no query or keywords provided)"
