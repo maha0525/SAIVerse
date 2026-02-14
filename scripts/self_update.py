@@ -88,6 +88,38 @@ def find_pid_for_port(port: int) -> list:
     return pids
 
 
+def is_process_alive(pid: int) -> bool:
+    """Check if a process is still running.
+
+    On Unix, os.kill(pid, 0) checks without sending a signal.
+    On Windows, os.kill(pid, 0) sends CTRL_C_EVENT (completely different!),
+    so we use the Windows API directly instead.
+    """
+    if sys.platform == "win32":
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return exit_code.value == STILL_ACTIVE
+            return False
+        finally:
+            kernel32.CloseHandle(handle)
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True  # Process exists but we don't have permission
+
+
 def kill_pid(pid: int) -> None:
     """Kill a process by PID."""
     logging.info("Killing PID %d", pid)
@@ -235,10 +267,10 @@ def update_dependencies(project_dir: str, venv_python: str) -> None:
     """Run pip install, migrate, import playbooks, npm install."""
     def _run(cmd, label, **kwargs):
         logging.info("Running: %s", label)
+        kwargs.setdefault("cwd", project_dir)
         try:
             result = subprocess.run(
                 cmd,
-                cwd=project_dir,
                 capture_output=True,
                 text=True,
                 timeout=300,
@@ -348,17 +380,13 @@ def main():
 
     # Kill main process if still alive
     if main_pid:
-        try:
-            os.kill(main_pid, 0)  # Check if alive
+        if is_process_alive(main_pid):
             logging.info("Main process (PID %d) still alive, waiting...", main_pid)
             time.sleep(5)
-            try:
-                os.kill(main_pid, 0)
+            if is_process_alive(main_pid):
                 logging.info("Force killing main process PID %d", main_pid)
                 kill_pid(main_pid)
-            except (ProcessLookupError, PermissionError):
-                pass
-        except (ProcessLookupError, PermissionError):
+        else:
             logging.info("Main process (PID %d) already exited", main_pid)
 
     if not wait_for_port_free(backend_port, timeout=30):

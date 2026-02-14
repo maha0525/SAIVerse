@@ -7,6 +7,7 @@ and accessed by API endpoints via dependency injection.
 """
 from __future__ import annotations
 
+import subprocess
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 if TYPE_CHECKING:
@@ -21,6 +22,9 @@ chat_history_limit: int = 120
 version: str = ""
 city_name: str = ""
 project_dir: str = ""
+
+# --- Child process tracking (for clean shutdown) ---
+child_processes: List[subprocess.Popen] = []
 
 
 def bind_manager(instance: "SAIVerseManager") -> None:

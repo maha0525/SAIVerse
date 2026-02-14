@@ -347,6 +347,7 @@ def main():
         "API Server",
         str(db_path),
     )
+    app_state.child_processes.append(api_server_process)
 
     # --- アプリケーション終了時のクリーンアップ ---
     shutdown_called = False
