@@ -703,6 +703,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "LIGHTWEIGHT_MODEL": ai.LIGHTWEIGHT_MODEL,
                 "INTERACTION_MODE": ai.INTERACTION_MODE,
                 "CHRONICLE_ENABLED": ai.CHRONICLE_ENABLED,
+                "MEMORY_WEAVE_CONTEXT": ai.MEMORY_WEAVE_CONTEXT,
             }
         finally:
             db.close()
@@ -743,6 +744,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         avatar_upload: Optional[str],
         appearance_image_path: Optional[str] = None,
         chronicle_enabled: Optional[bool] = None,
+        memory_weave_context: Optional[bool] = None,
     ) -> str:
         db = self.SessionLocal()
         try:
@@ -844,6 +846,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             # Update Chronicle auto-generation toggle
             if chronicle_enabled is not None:
                 ai.CHRONICLE_ENABLED = chronicle_enabled
+            # Update Memory Weave context injection toggle
+            if memory_weave_context is not None:
+                ai.MEMORY_WEAVE_CONTEXT = memory_weave_context
             db.commit()
 
             llm_warnings = []

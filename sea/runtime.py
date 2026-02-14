@@ -3150,6 +3150,19 @@ class SEARuntime:
         finally:
             db.close()
 
+    def _is_memory_weave_context_enabled(self, persona) -> bool:
+        """Check per-persona Memory Weave context injection toggle from DB."""
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id or not self.manager:
+            return True  # fallback: enabled
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            return ai.MEMORY_WEAVE_CONTEXT if ai else True
+        finally:
+            db.close()
+
     def _generate_chronicle(
         self,
         persona,
@@ -3352,8 +3365,9 @@ class SEARuntime:
 
         # ---- Memory Weave context (Chronicle + Memopedia) ----
         # Inserted between system prompt and visual context
-        LOGGER.info("[sea][prepare-context] memory_weave=%s", reqs.memory_weave)
-        if reqs.memory_weave:
+        _mw_persona_enabled = self._is_memory_weave_context_enabled(persona) if reqs.memory_weave else False
+        LOGGER.info("[sea][prepare-context] memory_weave=%s, persona_enabled=%s", reqs.memory_weave, _mw_persona_enabled)
+        if reqs.memory_weave and _mw_persona_enabled:
             try:
                 from builtin_data.tools.get_memory_weave_context import get_memory_weave_context
                 from tools.context import persona_context
@@ -3686,10 +3700,14 @@ class SEARuntime:
             playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
 
         # Build context messages (without recording user message to history)
+        # Use "conversation" profile requirements to match what sub_speak actually sees,
+        # not the meta-playbook's own context_requirements (which may lack memory_weave etc.)
+        from sea.playbook_models import CONTEXT_PROFILES
+        preview_requirements = CONTEXT_PROFILES["conversation"]["requirements"]
         context_warnings: List[Dict[str, Any]] = []
         messages = self._prepare_context(
             persona, building_id, user_input=None,
-            requirements=playbook.context_requirements,
+            requirements=preview_requirements,
             warnings=context_warnings,
             preview_only=True,
         )

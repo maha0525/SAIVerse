@@ -293,6 +293,13 @@ def main():
     else:
         db_path = default_db_path()
 
+    # Auto-migrate database schema if needed (must run before backup to avoid file lock conflicts)
+    from database.migrate import needs_migration, migrate_database_in_place
+    if needs_migration(str(db_path)):
+        logging.info("Database schema change detected. Running auto-migration...")
+        migrate_database_in_place(str(db_path))
+        logging.info("Database migration completed.")
+
     # Start database backup in background thread
     threading.Thread(target=run_startup_backup, args=(db_path,), daemon=True).start()
 

@@ -4,8 +4,7 @@ import argparse
 import logging
 import shutil
 from datetime import datetime
-from sqlalchemy import create_engine, inspect
-import pandas as pd
+from sqlalchemy import create_engine, inspect, text
 
 # プロジェクトのルートディレクトリをPythonのパスに追加し、
 # 他のモジュール（例: database.models）をインポートできるようにします。
@@ -94,12 +93,16 @@ def migrate_database_in_place(db_path: str):
                 continue
 
             try:
-                df = pd.read_sql_table(table_name, source_engine)
-                if df.empty:
+                # ソーステーブルからデータを読み取る
+                with source_engine.connect() as src_conn:
+                    result = src_conn.execute(text(f'SELECT * FROM "{table_name}"'))
+                    source_columns = list(result.keys())
+                    rows = result.fetchall()
+
+                if not rows:
                     logging.info(f"  - テーブル '{table_name}' は空なので、スキップします。")
                     continue
 
-                source_columns = df.columns.tolist()
                 target_columns_info = target_inspector.get_columns(table_name)
                 target_columns = [c['name'] for c in target_columns_info]
 
@@ -107,28 +110,42 @@ def migrate_database_in_place(db_path: str):
                 new_columns = set(target_columns) - set(source_columns)
                 model_table = Base.metadata.tables[table_name]
 
+                # 新しいNOT NULLカラムのデフォルト値を収集
+                new_col_defaults = {}
                 for col_name in new_columns:
                     column = model_table.columns.get(col_name)
-                    # デフォルト値が設定されているNOT NULLカラムにデフォルト値を設定
                     if column is not None and column.default is not None and not column.nullable:
                         default_value = column.default.arg
                         logging.info(f"  - 新しいNOT NULLカラム '{col_name}' にデフォルト値 '{default_value}' を設定します。")
-                        df[col_name] = default_value
+                        new_col_defaults[col_name] = default_value
                     elif column is not None and not column.nullable:
                         logging.warning(f"  - 警告: 新しいNOT NULLカラム '{col_name}' にデフォルト値がありません。移行に失敗する可能性があります。")
 
-                # ターゲットテーブルに存在するカラムのみを移行対象とする
-                df_to_load = df[[col for col in df.columns if col in target_columns]]
+                # 移行対象のカラムを決定（ソースに存在しターゲットにもあるカラム + デフォルト値付き新カラム）
+                cols_from_source = [c for c in source_columns if c in target_columns]
+                cols_with_defaults = sorted(new_col_defaults.keys())
+                all_insert_cols = cols_from_source + cols_with_defaults
+
+                # INSERT文を構築
+                col_names = ", ".join(f'"{c}"' for c in all_insert_cols)
+                placeholders = ", ".join([":" + c for c in all_insert_cols])
+                insert_sql = text(f'INSERT INTO "{table_name}" ({col_names}) VALUES ({placeholders})')
 
                 # データを新しいテーブルに書き込む
-                df_to_load.to_sql(table_name, target_engine, if_exists='append', index=False)
-                logging.info(f"  - {len(df_to_load)} 件のレコードを '{table_name}' に移行しました。")
+                with target_engine.begin() as tgt_conn:
+                    for row in rows:
+                        row_dict = dict(zip(source_columns, row))
+                        # ソースカラムのうちターゲットに存在するもの + 新カラムのデフォルト値
+                        insert_values = {c: row_dict[c] for c in cols_from_source}
+                        for c in cols_with_defaults:
+                            insert_values[c] = new_col_defaults[c]
+                        tgt_conn.execute(insert_sql, insert_values)
+
+                logging.info(f"  - {len(rows)} 件のレコードを '{table_name}' に移行しました。")
 
             except Exception as e:
                 logging.error(f"テーブル '{table_name}' の移行中にエラーが発生しました: {e}", exc_info=True)
-                # このテーブルでエラーが発生しても、他のテーブルの移行を試みる場合はここにロジックを追加できます。
-                # 今回は、いずれかのテーブルで失敗したら全体をロールバックします。
-                raise # エラーを再送出して、外側のtry-exceptブロックでキャッチさせる
+                raise
 
         logging.info("すべてのテーブルのデータ移行が正常に完了しました。")
         

@@ -120,6 +120,7 @@ class AIConfigResponse(BaseModel):
     lightweight_model: Optional[str] = None
     interaction_mode: str
     chronicle_enabled: bool = True
+    memory_weave_context: bool = True
     avatar_path: Optional[str] = None
     appearance_image_path: Optional[str] = None  # Visual context appearance image
     home_city_id: int
@@ -132,6 +133,7 @@ class UpdateAIConfigRequest(BaseModel):
     lightweight_model: Optional[str] = None
     interaction_mode: Optional[str] = None
     chronicle_enabled: Optional[bool] = None
+    memory_weave_context: Optional[bool] = None
     avatar_path: Optional[str] = None
     appearance_image_path: Optional[str] = None  # Visual context appearance image
     linked_user_id: Optional[int] = None  # Set linked user (None = no change, 0 = clear)

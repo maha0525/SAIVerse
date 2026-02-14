@@ -38,13 +38,6 @@ def get_memory_weave_context(
         List of messages to insert into context.
         Returns empty list if Memory Weave is not available.
     """
-    # Check environment variable
-    env_value = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "false")
-    LOGGER.info("get_memory_weave_context: ENABLE_MEMORY_WEAVE_CONTEXT=%s", env_value)
-    if env_value.lower() != "true":
-        LOGGER.debug("get_memory_weave_context: Disabled by environment variable")
-        return []
-
     # Get persona context
     from tools.context import get_active_persona_id, get_active_persona_path
 

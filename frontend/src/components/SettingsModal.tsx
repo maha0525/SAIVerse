@@ -18,6 +18,7 @@ interface AIConfig {
     lightweight_model: string | null;
     interaction_mode: string;
     chronicle_enabled: boolean;
+    memory_weave_context: boolean;
     avatar_path: string | null;
     appearance_image_path: string | null;  // Visual context appearance image
     linked_user_id: number | null;  // First linked user ID
@@ -72,6 +73,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [lightweightModel, setLightweightModel] = useState<string>('');
     const [interactionMode, setInteractionMode] = useState<string>('auto');
     const [chronicleEnabled, setChronicleEnabled] = useState(true);
+    const [memoryWeaveContext, setMemoryWeaveContext] = useState(true);
     const [costEstimate, setCostEstimate] = useState<ChronicleCostEstimate | null>(null);
     const [avatarPath, setAvatarPath] = useState('');
     const [appearanceImagePath, setAppearanceImagePath] = useState('');
@@ -131,6 +133,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setLightweightModel(data.lightweight_model || '');
                 setInteractionMode(data.interaction_mode || 'auto');
                 setChronicleEnabled(data.chronicle_enabled ?? true);
+                setMemoryWeaveContext(data.memory_weave_context ?? true);
                 setAvatarPath(data.avatar_path || '');
                 setAppearanceImagePath(data.appearance_image_path || '');
                 setLinkedUserId(data.linked_user_id ? String(data.linked_user_id) : '');
@@ -175,6 +178,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     lightweight_model: lightweightModel,  // empty string = clear to None
                     interaction_mode: interactionMode,
                     chronicle_enabled: chronicleEnabled,
+                    memory_weave_context: memoryWeaveContext,
                     avatar_path: avatarPath || null,
                     appearance_image_path: appearanceImagePath || null,
                     linked_user_id: linkedUserId ? parseInt(linkedUserId) : 0  // 0 = clear link
@@ -332,6 +336,23 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                         <div>推定LLM呼び出し: {costEstimate.estimated_llm_calls}回</div>
                                     </div>
                                 )}
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>Memory Weave コンテキスト</label>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={memoryWeaveContext}
+                                            onChange={(e) => setMemoryWeaveContext(e.target.checked)}
+                                        />
+                                        <span>{memoryWeaveContext ? '有効' : '無効'}</span>
+                                    </label>
+                                </div>
+                                <div className={styles.description}>
+                                    会話時にChronicle・Memopediaの情報をLLMに提供します。無効にするとコンテキスト量が減りますが、長期記憶を参照できなくなります。
+                                </div>
                             </div>
 
                             <div className={styles.fieldGroup}>
