@@ -165,14 +165,29 @@ if %errorlevel% neq 0 (
 popd
 echo [OK] Frontend packages installed
 
-REM --- 7. Database seed (only if not exists) ---
+REM --- 7. Database seed (only if not exists or core tables missing) ---
 set SAIVERSE_DB=%USERPROFILE%\.saiverse\user_data\database\saiverse.db
 set SAIVERSE_DB_LEGACY=database\data\saiverse.db
-if not exist "%SAIVERSE_DB%" if not exist "%SAIVERSE_DB_LEGACY%" (
+set NEED_SEED=1
+
+if exist "%SAIVERSE_DB%" (
+    python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('SELECT 1 FROM city LIMIT 1'); c.close()" "%SAIVERSE_DB%" >nul 2>nul
+    if !errorlevel! equ 0 set NEED_SEED=0
+)
+if "!NEED_SEED!"=="1" if exist "%SAIVERSE_DB_LEGACY%" (
+    python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('SELECT 1 FROM city LIMIT 1'); c.close()" "%SAIVERSE_DB_LEGACY%" >nul 2>nul
+    if !errorlevel! equ 0 set NEED_SEED=0
+)
+
+if "!NEED_SEED!"=="1" (
+    if exist "%SAIVERSE_DB%" (
+        echo.
+        echo [WARN] Database file exists but core tables are missing. Re-initializing...
+    )
     echo.
     echo [SETUP] Initializing database...
     python database\seed.py --force
-    if %errorlevel% neq 0 (
+    if !errorlevel! neq 0 (
         echo [ERROR] Database initialization failed.
         pause
         exit /b 1

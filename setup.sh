@@ -51,10 +51,27 @@ echo "[SETUP] フロントエンドパッケージをインストール中..."
 (cd frontend && npm install)
 echo "[OK] フロントエンドパッケージのインストール完了"
 
-# --- 7. Database seed (only if not exists) ---
+# --- 7. Database seed (only if not exists or core tables missing) ---
 SAIVERSE_DB="$HOME/.saiverse/user_data/database/saiverse.db"
 SAIVERSE_DB_LEGACY="database/data/saiverse.db"
-if [ ! -f "$SAIVERSE_DB" ] && [ ! -f "$SAIVERSE_DB_LEGACY" ]; then
+NEED_SEED=true
+
+if [ -f "$SAIVERSE_DB" ]; then
+    if python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('SELECT 1 FROM city LIMIT 1'); c.close()" "$SAIVERSE_DB" 2>/dev/null; then
+        NEED_SEED=false
+    fi
+fi
+if [ "$NEED_SEED" = true ] && [ -f "$SAIVERSE_DB_LEGACY" ]; then
+    if python -c "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute('SELECT 1 FROM city LIMIT 1'); c.close()" "$SAIVERSE_DB_LEGACY" 2>/dev/null; then
+        NEED_SEED=false
+    fi
+fi
+
+if [ "$NEED_SEED" = true ]; then
+    if [ -f "$SAIVERSE_DB" ]; then
+        echo ""
+        echo "[WARN] データベースファイルは存在しますが、コアテーブルがありません。再初期化します..."
+    fi
     echo ""
     echo "[SETUP] データベースを初期化中..."
     python database/seed.py --force
