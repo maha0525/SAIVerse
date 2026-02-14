@@ -1,6 +1,5 @@
 """System-level API endpoints: version check, update trigger."""
 
-import asyncio
 import json
 import logging
 import os
@@ -182,6 +181,18 @@ async def trigger_update():
     # even if the event loop is blocked by long-running synchronous tasks.
     def _force_exit():
         LOGGER.info("Shutting down for update...")
+        # Kill child processes (e.g., api_server) that os._exit won't clean up.
+        for proc in app_state.child_processes:
+            try:
+                if proc.poll() is None:
+                    LOGGER.info("Terminating child process PID %d", proc.pid)
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+            except OSError as e:
+                LOGGER.warning("Failed to terminate child process: %s", e)
         os._exit(0)
 
     timer = threading.Timer(3.0, _force_exit)
