@@ -5,6 +5,8 @@ import { X, ChevronDown } from 'lucide-react';
 interface ModelInfo {
     id: string;
     name: string;
+    input_price?: number | null;   // USD per 1M input tokens
+    output_price?: number | null;  // USD per 1M output tokens
 }
 
 interface PlaybookParamOption {
@@ -423,6 +425,18 @@ export default function ChatOptions({ isOpen, onClose, currentPlaybook, onPlaybo
                                             <option key={m.id} value={m.id}>{m.name}</option>
                                         ))}
                                     </select>
+                                    {(() => {
+                                        const sel = models.find(m => m.id === currentModel);
+                                        if (!sel || (sel.input_price == null && sel.output_price == null)) return null;
+                                        const fmt = (v: number) => v < 1 ? `$${v}` : `$${v}`;
+                                        return (
+                                            <span className={styles.hint}>
+                                                {sel.input_price != null && `入力: ${fmt(sel.input_price)}/1M tokens`}
+                                                {sel.input_price != null && sel.output_price != null && ' ・ '}
+                                                {sel.output_price != null && `出力: ${fmt(sel.output_price)}/1M tokens`}
+                                            </span>
+                                        );
+                                    })()}
                                 </div>
                                 <div className={styles.formGroup}>
                                     <label>Playbook（次のメッセージに適用）</label>

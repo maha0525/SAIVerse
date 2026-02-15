@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict
 
@@ -336,6 +337,51 @@ def calculate_cost(
         total, non_cached_input, input_rate, cached_tokens, cached_rate, cache_write_tokens, cache_write_rate, output_tokens, output_rate
     )
     return total
+
+
+def _get_required_env_vars(model: str) -> list[str]:
+    """Return the environment variable names required for a model's API key.
+
+    Returns an empty list for local models (ollama, llama_cpp) that need no key.
+    For models with multiple possible keys (e.g. Gemini), returns all alternatives
+    — the model is available if ANY of them is set.
+    """
+    config = MODEL_CONFIGS.get(model, {})
+    provider = config.get("provider", "")
+
+    # Local models need no API key
+    if provider in ("ollama", "llama_cpp"):
+        return []
+
+    # Explicit api_key_env in config takes priority
+    api_key_env = config.get("api_key_env")
+    if api_key_env:
+        return [api_key_env]
+
+    # Provider defaults
+    if provider == "anthropic":
+        return ["CLAUDE_API_KEY"]
+    if provider == "gemini":
+        return ["GEMINI_API_KEY", "GEMINI_FREE_API_KEY"]
+    if provider in ("openai",):
+        return ["OPENAI_API_KEY"]
+
+    # Unknown provider — assume available (don't hide by mistake)
+    return []
+
+
+def is_model_available(model: str) -> bool:
+    """Check if a model's required API key is configured.
+
+    Returns True if:
+    - The model needs no API key (local models), or
+    - At least one of the required env vars is set, or
+    - The provider is unknown (don't hide by mistake).
+    """
+    env_vars = _get_required_env_vars(model)
+    if not env_vars:
+        return True
+    return any(os.environ.get(var) for var in env_vars)
 
 
 def is_local_model(model: str) -> bool:

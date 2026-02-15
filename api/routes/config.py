@@ -10,9 +10,11 @@ from pydantic import BaseModel
 from api.deps import get_manager
 from saiverse.model_configs import (
     get_model_choices_with_display_names,
+    get_model_config,
     get_model_parameters,
     get_model_parameter_defaults,
     get_cache_config,
+    is_model_available,
 )
 
 router = APIRouter()
@@ -20,6 +22,8 @@ router = APIRouter()
 class ModelInfo(BaseModel):
     id: str
     name: str
+    input_price: Optional[float] = None   # USD per 1M input tokens
+    output_price: Optional[float] = None  # USD per 1M output tokens
 
 class PlaybookParamInfo(BaseModel):
     """Parameter info for playbook input_schema."""
@@ -74,9 +78,24 @@ class ModelConfigResponse(BaseModel):
 
 @router.get("/models", response_model=List[ModelInfo])
 def get_models():
-    """List available LLM models."""
+    """List available LLM models.
+
+    Only models whose required API key is configured are returned.
+    Includes pricing info (USD per 1M tokens) when available.
+    """
     choices = get_model_choices_with_display_names()
-    return [{"id": mid, "name": name} for mid, name in choices]
+    result = []
+    for mid, name in choices:
+        if not is_model_available(mid):
+            continue
+        pricing = get_model_config(mid).get("pricing", {})
+        result.append({
+            "id": mid,
+            "name": name,
+            "input_price": pricing.get("input_per_1m_tokens"),
+            "output_price": pricing.get("output_per_1m_tokens"),
+        })
+    return result
 
 
 @router.post("/reload-models")
