@@ -600,6 +600,36 @@ class ItemService:
                     open_items.append(item)
         return open_items
 
+    def get_open_items_for_persona(self, persona_id: str) -> List[Dict]:
+        """Get all items in a persona's inventory that have is_open = True."""
+        open_items = []
+        item_ids = self.items_by_persona.get(persona_id, [])
+        for item_id in item_ids:
+            item = self.items.get(item_id)
+            if item:
+                state = item.get("state", {})
+                if isinstance(state, dict) and state.get("is_open", False):
+                    open_items.append(item)
+        return open_items
+
+    def get_all_items_in_building(self, building_id: str) -> List[Dict]:
+        """Get all items in a building (regardless of open state)."""
+        all_items = []
+        for item_id in self.items_by_building.get(building_id, []):
+            item = self.items.get(item_id)
+            if item:
+                all_items.append(item)
+        return all_items
+
+    def get_all_items_for_persona(self, persona_id: str) -> List[Dict]:
+        """Get all items in a persona's inventory (regardless of open state)."""
+        all_items = []
+        for item_id in self.items_by_persona.get(persona_id, []):
+            item = self.items.get(item_id)
+            if item:
+                all_items.append(item)
+        return all_items
+
     def create_document_item(self, persona_id: str, name: str, description: str, content: str, source_context: Optional[str] = None) -> str:
         """Create a new document item and place it in the current building."""
         persona = self.manager.personas.get(persona_id)
