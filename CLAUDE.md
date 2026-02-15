@@ -216,7 +216,7 @@ python scripts/migrate_to_user_data.py             # Execute
 - Playbooks are JSON files in `sea/playbooks/` or stored in DB `playbooks` table
 - **Lightweight model support**: LLM nodes can specify `model_type: "lightweight"` to use a faster, cheaper model for simple tasks (e.g., router decisions)
   - Each persona has two model settings: `DEFAULT_MODEL` (normal) and `LIGHTWEIGHT_MODEL` (optional)
-  - If `LIGHTWEIGHT_MODEL` is not set, system falls back to environment variable `SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL` or `gemini-2.5-flash-lite`
+  - If `LIGHTWEIGHT_MODEL` is not set, system falls back to environment variable `SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL` or `gemini-2.5-flash-lite-preview-09-2025`
   - Persona model priority: chat UI override > persona `DEFAULT_MODEL` (DB) > env `SAIVERSE_DEFAULT_MODEL` > built-in `gemini-2.5-flash-lite-preview-09-25`.
   - Use lightweight models for router nodes and simple decision-making; use default models for complex reasoning and tool parameter generation
 

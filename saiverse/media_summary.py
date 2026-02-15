@@ -13,7 +13,7 @@ from .media_utils import (
 LOGGER = logging.getLogger(__name__)
 
 # Model config key or API model name for summary generation (vision-capable model required for images)
-_IMAGE_SUMMARY_MODEL_RAW = os.getenv("SAIVERSE_IMAGE_SUMMARY_MODEL", "gemini-2.5-flash-lite")
+_IMAGE_SUMMARY_MODEL_RAW = os.getenv("SAIVERSE_IMAGE_SUMMARY_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
 
 # Cached client
 _summary_client: Any = None
@@ -38,13 +38,13 @@ def _get_summary_client() -> Any:
     if not config:
         LOGGER.warning(
             "Image summary model '%s' not found in model configs; "
-            "falling back to 'gemini-2.5-flash-lite'",
+            "falling back to 'gemini-2.5-flash-lite-preview-09-2025'",
             _IMAGE_SUMMARY_MODEL_RAW,
         )
-        config_key, config = find_model_config("gemini-2.5-flash-lite")
+        config_key, config = find_model_config("gemini-2.5-flash-lite-preview-09-2025")
         if not config:
             LOGGER.error(
-                "Fallback model 'gemini-2.5-flash-lite' also not found in model configs"
+                "Fallback model 'gemini-2.5-flash-lite-preview-09-2025' also not found in model configs"
             )
             return None
 

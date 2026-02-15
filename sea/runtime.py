@@ -24,7 +24,7 @@ LOGGER = logging.getLogger(__name__)
 
 def _get_default_lightweight_model() -> str:
     """Get the default lightweight model from environment or fallback."""
-    return os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gemini-2.5-flash-lite")
+    return os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
 
 
 def _is_llm_streaming_enabled() -> bool:
