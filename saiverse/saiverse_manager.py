@@ -458,6 +458,18 @@ class SAIVerseManager(
         """Get all items in a building that have is_open = True."""
         return self.item_service.get_open_items_in_building(building_id)
 
+    def get_open_items_for_persona(self, persona_id: str) -> list:
+        """Get all items in a persona's inventory that have is_open = True."""
+        return self.item_service.get_open_items_for_persona(persona_id)
+
+    def get_all_items_in_building(self, building_id: str) -> list:
+        """Get all items in a building (regardless of open state)."""
+        return self.item_service.get_all_items_in_building(building_id)
+
+    def get_all_items_for_persona(self, persona_id: str) -> list:
+        """Get all items in a persona's inventory (regardless of open state)."""
+        return self.item_service.get_all_items_for_persona(persona_id)
+
     def create_document_item(self, persona_id: str, name: str, description: str, content: str, source_context: Optional[str] = None) -> str:
         """Create a new document item and place it in the current building."""
         return self.item_service.create_document_item(persona_id, name, description, content, source_context=source_context)

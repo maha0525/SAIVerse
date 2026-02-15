@@ -3260,7 +3260,7 @@ class SEARuntime:
                         "{current_building_name}": building_name,
                         "{current_city_name}": city_name,
                         "{current_persona_system_instruction}": getattr(persona, "persona_system_instruction", ""),
-                        "{current_building_system_instruction}": getattr(building_obj, "system_instruction", "") if building_obj else "",
+                        "{current_building_system_instruction}": getattr(building_obj, "base_system_instruction" if reqs.visual_context else "system_instruction", "") if building_obj else "",
                         "{linked_user_name}": getattr(persona, "linked_user_name", "the user"),
                     }
                     for placeholder, value in replacements.items():
@@ -3275,8 +3275,8 @@ class SEARuntime:
             if persona_sys:
                 persona_section_parts.append(persona_sys.strip())
 
-            # persona inventory
-            if reqs.inventory:
+            # persona inventory -- skip when visual_context handles it
+            if reqs.inventory and not reqs.visual_context:
                 try:
                     inv_builder = getattr(persona, "_inventory_summary_lines", None)
                     inv_lines: List[str] = inv_builder() if callable(inv_builder) else []
@@ -3289,44 +3289,46 @@ class SEARuntime:
                 system_sections.append("## あなたについて\n" + "\n\n".join(persona_section_parts))
 
             # 3. "## {building_name}" section (current location)
-            try:
-                building_obj = getattr(persona, "buildings", {}).get(building_id)
-                if building_obj:
-                    building_section_parts: List[str] = []
+            # Skip when visual_context handles building info and items
+            if not reqs.visual_context:
+                try:
+                    building_obj = getattr(persona, "buildings", {}).get(building_id)
+                    if building_obj:
+                        building_section_parts: List[str] = []
 
-                    # Building system instruction
-                    # NOTE: Datetime variables ({current_time}, etc.) are no longer expanded here.
-                    # Time information is now provided via Realtime Context at the end of messages
-                    # to improve LLM context caching efficiency.
-                    # Use base_system_instruction (without items) to avoid duplication
-                    # with the building_items block below.
-                    building_sys = getattr(building_obj, "base_system_instruction", None) or getattr(building_obj, "system_instruction", None)
-                    if building_sys:
-                        building_section_parts.append(str(building_sys).strip())
+                        # Building system instruction
+                        # NOTE: Datetime variables ({current_time}, etc.) are no longer expanded here.
+                        # Time information is now provided via Realtime Context at the end of messages
+                        # to improve LLM context caching efficiency.
+                        # Use base_system_instruction (without items) to avoid duplication
+                        # with the building_items block below.
+                        building_sys = getattr(building_obj, "base_system_instruction", None) or getattr(building_obj, "system_instruction", None)
+                        if building_sys:
+                            building_section_parts.append(str(building_sys).strip())
 
-                    # Building items
-                    if reqs.building_items:
-                        try:
-                            items_by_building = getattr(self.manager, "items_by_building", {}) or {}
-                            item_registry = getattr(self.manager, "item_registry", {}) or {}
-                            b_items = items_by_building.get(building_id, [])
-                            lines = []
-                            for iid in b_items:
-                                data = item_registry.get(iid, {})
-                                raw_name = data.get("name", "") or ""
-                                name = raw_name.strip() if raw_name.strip() else "(名前なし)"
-                                desc = (data.get("description") or "").strip() or "(説明なし)"
-                                lines.append(f"- [{iid}] {name}: {desc}")
-                            if lines:
-                                building_section_parts.append("### 建物内のアイテム\n" + "\n".join(lines))
-                        except Exception:
-                            LOGGER.warning("Failed to collect building items for %s", building_id, exc_info=True)
+                        # Building items
+                        if reqs.building_items:
+                            try:
+                                items_by_building = getattr(self.manager, "items_by_building", {}) or {}
+                                item_registry = getattr(self.manager, "item_registry", {}) or {}
+                                b_items = items_by_building.get(building_id, [])
+                                lines = []
+                                for iid in b_items:
+                                    data = item_registry.get(iid, {})
+                                    raw_name = data.get("name", "") or ""
+                                    name = raw_name.strip() if raw_name.strip() else "(名前なし)"
+                                    desc = (data.get("description") or "").strip() or "(説明なし)"
+                                    lines.append(f"- [{iid}] {name}: {desc}")
+                                if lines:
+                                    building_section_parts.append("### 建物内のアイテム\n" + "\n".join(lines))
+                            except Exception:
+                                LOGGER.warning("Failed to collect building items for %s", building_id, exc_info=True)
 
-                    if building_section_parts:
-                        building_name = getattr(building_obj, "name", building_id)
-                        system_sections.append(f"## {building_name} (ID: {building_id})\n" + "\n\n".join(building_section_parts))
-            except Exception:
-                LOGGER.warning("Failed to build building section for system prompt", exc_info=True)
+                        if building_section_parts:
+                            building_name = getattr(building_obj, "name", building_id)
+                            system_sections.append(f"## {building_name} (ID: {building_id})\n" + "\n\n".join(building_section_parts))
+                except Exception:
+                    LOGGER.warning("Failed to build building section for system prompt", exc_info=True)
 
             # 4. "## 利用可能な能力" section (available playbooks)
             if reqs.available_playbooks:
