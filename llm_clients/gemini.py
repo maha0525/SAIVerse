@@ -512,20 +512,8 @@ class GeminiClient(LLMClient):
     ) -> Tuple[str, List[types.Content]]:
         system_lines: List[str] = []
         contents: List[types.Content] = []
-        attachment_limit_env = os.getenv("SAIVERSE_GEMINI_ATTACHMENT_LIMIT")
-        max_image_embeds: Optional[int] = None
-        if attachment_limit_env is not None:
-            try:
-                max_image_embeds = int(attachment_limit_env.strip())
-            except ValueError:
-                logging.warning(
-                    "Invalid SAIVERSE_GEMINI_ATTACHMENT_LIMIT=%s; ignoring",
-                    attachment_limit_env,
-                )
-                max_image_embeds = None
-            else:
-                if max_image_embeds < 0:
-                    max_image_embeds = 0
+        from .utils import parse_attachment_limit
+        max_image_embeds = parse_attachment_limit("GEMINI")
         logging.debug(
             "[gemini] attachment limit=%s",
             "∞" if max_image_embeds is None else max_image_embeds,
@@ -534,6 +522,9 @@ class GeminiClient(LLMClient):
         attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
         # Track messages that are exempt from attachment limits (visual context)
         exempt_message_indices: Set[int] = set()
+        # Track messages where image summary generation should be skipped
+        # (e.g. summary generation requests themselves, to prevent infinite recursion)
+        skip_summary_indices: Set[int] = set()
         if self.supports_images:
             for idx, message in enumerate(msgs):
                 if isinstance(message, dict):
@@ -541,6 +532,9 @@ class GeminiClient(LLMClient):
                     # Check for visual context marker - these are exempt from limits
                     if isinstance(metadata, dict) and metadata.get("__visual_context__"):
                         exempt_message_indices.add(idx)
+                    # Check for skip-image-summary marker (set by media_summary module)
+                    if isinstance(metadata, dict) and metadata.get("__skip_image_summary__"):
+                        skip_summary_indices.add(idx)
                     media_items = iter_image_media(metadata)
                     if media_items:
                         attachment_cache[idx] = media_items
@@ -596,8 +590,12 @@ class GeminiClient(LLMClient):
                 selected_attachments: List[Dict[str, Any]] = []
                 skipped_attachments: List[Dict[str, Any]] = []
                 attachment_records: List[Tuple[int, Dict[str, Any], Optional[str]]] = []
+                skip_summary = idx in skip_summary_indices
                 for att_idx, attachment in enumerate(attachments):
-                    summary_text = ensure_image_summary(attachment["path"], attachment["mime_type"])
+                    summary_text = (
+                        None if skip_summary
+                        else ensure_image_summary(attachment["path"], attachment["mime_type"])
+                    )
                     key = (idx, att_idx)
                     if allowed_attachment_keys is not None and key not in allowed_attachment_keys:
                         attachment_records.append((att_idx, attachment, summary_text))
@@ -641,7 +639,10 @@ class GeminiClient(LLMClient):
                         self.supports_images,
                     )
                     for attachment in attachments:
-                        summary = ensure_image_summary(attachment["path"], attachment["mime_type"])
+                        if idx in skip_summary_indices:
+                            summary = None
+                        else:
+                            summary = ensure_image_summary(attachment["path"], attachment["mime_type"])
                         summary_note = summary or "(要約を取得できませんでした)"
                         note = f"[画像: {attachment['uri']}] {summary_note}"
                         text_content = f"{text_content}\n{note}" if text_content else note
