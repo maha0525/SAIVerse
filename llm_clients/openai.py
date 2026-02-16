@@ -27,7 +27,14 @@ from .exceptions import (
     RateLimitError,
     ServerError,
 )
-from .utils import content_to_text, merge_reasoning_strings, obj_to_dict
+from .utils import (
+    compute_allowed_attachment_keys,
+    content_to_text,
+    image_summary_note,
+    merge_reasoning_strings,
+    obj_to_dict,
+    parse_attachment_limit,
+)
 
 
 # Retry configuration
@@ -101,7 +108,7 @@ def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError
         return LLMError(f"OpenAI {context} failed: {err}", err)
 
 
-def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_image_bytes: Optional[int] = None, convert_system_to_user: bool = False) -> List[Any]:
+def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_image_bytes: Optional[int] = None, convert_system_to_user: bool = False, reasoning_passback_field: Optional[str] = None) -> List[Any]:
     """
     Prepare messages for OpenAI API by extracting only allowed fields.
     Removes SAIMemory-specific fields (id, thread_id, created_at, metadata).
@@ -133,10 +140,43 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
             return content_empty
         return False
 
+    # ------------------------------------------------------------------
+    # Pre-scan: build attachment cache and metadata flags
+    # ------------------------------------------------------------------
+    max_image_embeds = parse_attachment_limit("OPENAI")
+    attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
+    skip_summary_indices: set = set()
+    exempt_indices: set = set()
+
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        metadata = msg.get("metadata")
+        if isinstance(metadata, dict):
+            if metadata.get("__skip_image_summary__"):
+                skip_summary_indices.add(idx)
+            if metadata.get("__visual_context__"):
+                exempt_indices.add(idx)
+        media_items = iter_image_media(metadata)
+        if media_items:
+            attachment_cache[idx] = media_items
+
+    allowed_attachment_keys = compute_allowed_attachment_keys(
+        attachment_cache, max_image_embeds, exempt_indices,
+    )
+    logging.debug(
+        "[openai] attachment limit=%s, cached=%d msgs with images",
+        "∞" if max_image_embeds is None else max_image_embeds,
+        len(attachment_cache),
+    )
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
     prepared: List[Any] = []
     seen_non_system = False  # Track if we've seen any non-system messages
 
-    for msg in messages:
+    for idx, msg in enumerate(messages):
         if not isinstance(msg, dict):
             prepared.append(msg)
             continue
@@ -151,7 +191,8 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
             continue
 
         metadata = msg.get("metadata")
-        attachments = iter_image_media(metadata)
+        attachments = attachment_cache.get(idx, [])
+        skip_summary = idx in skip_summary_indices
 
         # Extract only allowed fields
         clean_msg: Dict[str, Any] = {}
@@ -162,6 +203,12 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
         # Override role if it was "host"
         if role:
             clean_msg["role"] = role
+
+        # Preserve reasoning_details for multi-turn reasoning pass-back
+        if reasoning_passback_field and role == "assistant":
+            rd = (metadata or {}).get("reasoning_details") if isinstance(metadata, dict) else None
+            if rd is not None:
+                clean_msg[reasoning_passback_field] = rd
 
         # Skip if the cleaned message is also empty
         if _is_empty_message(clean_msg):
@@ -190,33 +237,63 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
             parts: List[Dict[str, Any]] = []
             if text:
                 parts.append({"type": "text", "text": text})
-            for att in attachments:
-                data, effective_mime = load_image_bytes_for_llm(att["path"], att["mime_type"], max_bytes=max_image_bytes)
-                if data and effective_mime:
-                    b64 = base64.b64encode(data).decode("ascii")
-                    parts.append(
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{effective_mime};base64,{b64}"},
-                        }
+            for att_idx, att in enumerate(attachments):
+                # Determine whether to embed this attachment as binary
+                should_embed = (
+                    allowed_attachment_keys is None
+                    or (idx, att_idx) in allowed_attachment_keys
+                )
+                if should_embed:
+                    data, effective_mime = load_image_bytes_for_llm(
+                        att["path"], att["mime_type"], max_bytes=max_image_bytes,
                     )
-                else:
-                    logging.warning("Image file not found or unreadable, skipping attachment: %s", att.get("uri") or att.get("path"))
-                    parts.append({"type": "text", "text": f"[画像: {att['uri']}]"})
+                    if data and effective_mime:
+                        b64 = base64.b64encode(data).decode("ascii")
+                        parts.append(
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{effective_mime};base64,{b64}"},
+                            }
+                        )
+                        continue
+                    else:
+                        logging.warning(
+                            "Image file not found or unreadable, skipping attachment: %s",
+                            att.get("uri") or att.get("path"),
+                        )
+                # Not embedding — produce a text summary instead
+                note = image_summary_note(
+                    att["path"], att["mime_type"],
+                    att.get("uri", att.get("path", "unknown")),
+                    skip_summary=skip_summary,
+                )
+                parts.append({"type": "text", "text": note})
             clean_msg["content"] = parts if parts else text
             prepared.append(clean_msg)
         else:
+            # Model doesn't support images or non-user role — use text summaries
             note_lines: List[str] = []
             if text:
                 note_lines.append(text)
             for att in attachments:
-                note_lines.append(f"[画像: {att['uri']}]")
+                note = image_summary_note(
+                    att["path"], att["mime_type"],
+                    att.get("uri", att.get("path", "unknown")),
+                    skip_summary=skip_summary,
+                )
+                note_lines.append(note)
             clean_msg["content"] = "\n".join(note_lines)
             prepared.append(clean_msg)
     return prepared
 
 
-def _extract_reasoning_from_openai_message(message: Any) -> Tuple[str, List[Dict[str, str]]]:
+def _extract_reasoning_from_openai_message(message: Any) -> Tuple[str, List[Dict[str, str]], Any]:
+    """Extract text, reasoning entries, and raw reasoning_details from an OpenAI message.
+
+    Returns:
+        (final_text, reasoning_entries, reasoning_details)
+        reasoning_details is the raw provider data for multi-turn pass-back (or None).
+    """
     msg_dict = obj_to_dict(message) or {}
     content = msg_dict.get("content")
     reasoning_entries: List[Dict[str, str]] = []
@@ -250,8 +327,11 @@ def _extract_reasoning_from_openai_message(message: Any) -> Tuple[str, List[Dict
         if isinstance(rc, str):
             _append_reasoning(rc)
 
+    # Capture raw reasoning_details for multi-turn pass-back (e.g., OpenRouter)
+    reasoning_details = msg_dict.get("reasoning_details")
+
     final_text = "".join(text_segments)
-    return final_text, reasoning_entries
+    return final_text, reasoning_entries, reasoning_details
 
 
 def _extract_reasoning_from_delta(delta: Any) -> List[str]:
@@ -315,6 +395,7 @@ class OpenAIClient(LLMClient):
         max_image_bytes: Optional[int] = None,
         convert_system_to_user: bool = False,
         structured_output_backend: Optional[str] = None,
+        reasoning_passback_field: Optional[str] = None,
     ) -> None:
         super().__init__(supports_images=supports_images)
         key_env = api_key_env or "OPENAI_API_KEY"
@@ -335,6 +416,7 @@ class OpenAIClient(LLMClient):
         self.max_image_bytes = max_image_bytes
         self.convert_system_to_user = convert_system_to_user
         self.structured_output_backend = structured_output_backend
+        self.reasoning_passback_field = reasoning_passback_field
 
     def _create_completion(self, **kwargs: Any):
         return self.client.chat.completions.create(**kwargs)
@@ -446,7 +528,7 @@ class OpenAIClient(LLMClient):
                 try:
                     resp = self._create_completion(
                         model=self.model,
-                        messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
+                        messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user, self.reasoning_passback_field),
                         n=1,
                         **_build_request_kwargs(),
                     )
@@ -484,11 +566,12 @@ class OpenAIClient(LLMClient):
                 )
 
             choice = resp.choices[0]
-            text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
+            text_body, reasoning_entries, reasoning_details = _extract_reasoning_from_openai_message(choice.message)
             if not text_body:
                 text_body = choice.message.content or ""
             self._store_reasoning(reasoning_entries)
-            
+            self._store_reasoning_details(reasoning_details)
+
             if response_schema:
                 try:
                     parsed = json.loads(text_body)
@@ -527,7 +610,7 @@ class OpenAIClient(LLMClient):
             try:
                 resp = self._create_completion(
                     model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
+                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user, self.reasoning_passback_field),
                     tools=tools_spec,
                     tool_choice="auto",
                     n=1,
@@ -570,8 +653,9 @@ class OpenAIClient(LLMClient):
         tool_calls = getattr(choice.message, "tool_calls", [])
 
         # Extract reasoning if present
-        text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
+        text_body, reasoning_entries, reasoning_details = _extract_reasoning_from_openai_message(choice.message)
         self._store_reasoning(reasoning_entries)
+        self._store_reasoning_details(reasoning_details)
 
         if tool_calls and len(tool_calls) > 0:
             tc = tool_calls[0]
@@ -651,7 +735,7 @@ class OpenAIClient(LLMClient):
                         req_kwargs["stream_options"] = {"include_usage": True}
                     resp = self._create_completion(
                         model=self.model,
-                        messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
+                        messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user, self.reasoning_passback_field),
                         n=1,
                         **req_kwargs,
                     )
@@ -714,13 +798,17 @@ class OpenAIClient(LLMClient):
                     )
                 # Store reasoning collected during streaming
                 self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
+                # Store collected reasoning text as reasoning_details for multi-turn pass-back
+                if reasoning_chunks:
+                    self._store_reasoning_details("".join(reasoning_chunks))
             else:
                 # Non-streaming mode (response_schema case)
                 choice = resp.choices[0]
-                text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
+                text_body, reasoning_entries, reasoning_details = _extract_reasoning_from_openai_message(choice.message)
                 if not text_body:
                     text_body = choice.message.content or ""
                 self._store_reasoning(reasoning_entries)
+                self._store_reasoning_details(reasoning_details)
                 prefix = "\n".join(history_snippets) + ("\n" if history_snippets and text_body else "")
                 if prefix:
                     yield prefix
@@ -750,7 +838,7 @@ class OpenAIClient(LLMClient):
                 stream_req_kwargs["stream_options"] = {"include_usage": True}
                 resp = self._create_completion(
                     model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
+                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user, self.reasoning_passback_field),
                     tools=tools_spec,
                     tool_choice=force_tool_choice,
                     stream=True,
@@ -847,6 +935,8 @@ class OpenAIClient(LLMClient):
 
             # Store reasoning
             self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
+            if reasoning_chunks:
+                self._store_reasoning_details("".join(reasoning_chunks))
 
             # Store tool detection result if tool calls were detected
             if call_buffer:

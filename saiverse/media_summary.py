@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from .media_utils import (
     get_media_summary,
@@ -11,6 +12,12 @@ from .media_utils import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+# Re-entrancy guard: tracks image paths currently being summarised
+# to prevent infinite recursion when the summary LLM client itself
+# triggers ensure_image_summary() via _convert_messages().
+_generating_lock = threading.Lock()
+_generating_paths: Set[str] = set()
 
 # Model config key or API model name for summary generation (vision-capable model required for images)
 _IMAGE_SUMMARY_MODEL_RAW = os.getenv("SAIVERSE_IMAGE_SUMMARY_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
@@ -76,15 +83,35 @@ def invalidate_summary_client() -> None:
 
 
 def ensure_image_summary(path: Path, mime_type: str) -> Optional[str]:
-    """Ensure an image summary exists; generate if missing."""
+    """Ensure an image summary exists; generate if missing.
+
+    Includes a re-entrancy guard so that summary generation requests
+    (which themselves contain the image) do not trigger another round
+    of summary generation, which would otherwise cause infinite recursion.
+    """
     summary = get_media_summary(path)
     if summary:
         return summary
-    generated = _generate_image_summary(path, mime_type)
-    if generated:
-        save_media_summary(path, generated)
-        return generated
-    return None
+
+    path_key = str(path)
+    with _generating_lock:
+        if path_key in _generating_paths:
+            LOGGER.debug(
+                "Skipping image summary for %s (already generating — re-entrancy guard)",
+                path,
+            )
+            return None
+        _generating_paths.add(path_key)
+
+    try:
+        generated = _generate_image_summary(path, mime_type)
+        if generated:
+            save_media_summary(path, generated)
+            return generated
+        return None
+    finally:
+        with _generating_lock:
+            _generating_paths.discard(path_key)
 
 
 def ensure_document_summary(path: Path) -> Optional[str]:
@@ -128,6 +155,11 @@ def _generate_image_summary(path: Path, mime_type: str) -> Optional[str]:
                         "uri": str(path),
                     },
                 ],
+                # Signal to LLM clients: do NOT call ensure_image_summary()
+                # on images in this message.  This prevents infinite recursion
+                # (summary request → _convert_messages → ensure_image_summary
+                #  → summary request → …).
+                "__skip_image_summary__": True,
             },
         },
     ]

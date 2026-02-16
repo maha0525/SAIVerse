@@ -25,7 +25,12 @@ from .exceptions import (
     RateLimitError,
     ServerError,
 )
-from .utils import content_to_text
+from .utils import (
+    compute_allowed_attachment_keys,
+    content_to_text,
+    image_summary_note,
+    parse_attachment_limit,
+)
 
 
 # Retry configuration
@@ -193,6 +198,39 @@ def _prepare_anthropic_messages(
         enable_cache: Whether to add cache_control markers
         cache_ttl: Cache TTL ("5m" or "1h")
     """
+    # ------------------------------------------------------------------
+    # Pre-scan: build attachment cache and metadata flags
+    # ------------------------------------------------------------------
+    max_image_embeds = parse_attachment_limit("ANTHROPIC")
+    attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
+    skip_summary_indices: set = set()
+    exempt_indices: set = set()
+
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        metadata = msg.get("metadata")
+        if isinstance(metadata, dict):
+            if metadata.get("__skip_image_summary__"):
+                skip_summary_indices.add(idx)
+            if metadata.get("__visual_context__"):
+                exempt_indices.add(idx)
+        media_items = iter_image_media(metadata) if metadata else []
+        if media_items:
+            attachment_cache[idx] = list(media_items)
+
+    allowed_attachment_keys = compute_allowed_attachment_keys(
+        attachment_cache, max_image_embeds, exempt_indices,
+    )
+    logging.debug(
+        "[anthropic] attachment limit=%s, cached=%d msgs with images",
+        "∞" if max_image_embeds is None else max_image_embeds,
+        len(attachment_cache),
+    )
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
     prepared: List[Dict[str, Any]] = []
     # Track index of first dynamic content (realtime context, etc.)
     first_dynamic_index: Optional[int] = None
@@ -217,7 +255,8 @@ def _prepare_anthropic_messages(
             if metadata.get("__realtime_context__"):
                 is_dynamic = True
 
-        attachments = list(iter_image_media(metadata)) if metadata else []
+        attachments = attachment_cache.get(i, [])
+        skip_summary = i in skip_summary_indices
 
         # Skip empty messages
         if not content and not attachments:
@@ -236,32 +275,53 @@ def _prepare_anthropic_messages(
 
         # Handle images for user messages
         if supports_images and role == "user" and attachments:
-            for att in attachments:
-                data, effective_mime = load_image_bytes_for_llm(
-                    att["path"], att["mime_type"], max_bytes=max_image_bytes
+            for att_idx, att in enumerate(attachments):
+                # Determine whether to embed this attachment as binary
+                should_embed = (
+                    allowed_attachment_keys is None
+                    or (i, att_idx) in allowed_attachment_keys
                 )
-                if data and effective_mime:
-                    b64 = base64.b64encode(data).decode("ascii")
-                    content_blocks.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": effective_mime,
-                            "data": b64,
-                        },
-                    })
-                else:
-                    logging.warning("Image file not found or unreadable: %s", att.get("uri") or att.get("path"))
-                    content_blocks.append({
-                        "type": "text",
-                        "text": f"[画像: {att['uri']}]",
-                    })
-        elif attachments:
-            # Non-image-supporting case: add text placeholders
-            for att in attachments:
+                if should_embed:
+                    data, effective_mime = load_image_bytes_for_llm(
+                        att["path"], att["mime_type"], max_bytes=max_image_bytes
+                    )
+                    if data and effective_mime:
+                        b64 = base64.b64encode(data).decode("ascii")
+                        content_blocks.append({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": effective_mime,
+                                "data": b64,
+                            },
+                        })
+                        continue
+                    else:
+                        logging.warning(
+                            "Image file not found or unreadable: %s",
+                            att.get("uri") or att.get("path"),
+                        )
+                # Not embedding — produce a text summary instead
+                note = image_summary_note(
+                    att["path"], att["mime_type"],
+                    att.get("uri", att.get("path", "unknown")),
+                    skip_summary=skip_summary,
+                )
                 content_blocks.append({
                     "type": "text",
-                    "text": f"[画像: {att['uri']}]",
+                    "text": note,
+                })
+        elif attachments:
+            # Non-image-supporting case or non-user role: use text summaries
+            for att in attachments:
+                note = image_summary_note(
+                    att["path"], att["mime_type"],
+                    att.get("uri", att.get("path", "unknown")),
+                    skip_summary=skip_summary,
+                )
+                content_blocks.append({
+                    "type": "text",
+                    "text": note,
                 })
 
         if content_blocks:
