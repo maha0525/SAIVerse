@@ -20,7 +20,7 @@ interface MessageItem {
     role: string;
     content: string;
     created_at: number;
-    metadata?: { tags?: string[] };
+    metadata?: { tags?: string[]; reasoning?: string };
 }
 
 interface MemoryBrowserProps {
@@ -688,6 +688,17 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                         )}
                                     </div>
                                 </div>
+                                {msg.metadata?.reasoning && (
+                                    <details className={styles.thinkingBlock}>
+                                        <summary className={styles.thinkingSummary}>
+                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                            <span>Thought process</span>
+                                        </summary>
+                                        <div className={styles.thinkingContent}>
+                                            {msg.metadata.reasoning}
+                                        </div>
+                                    </details>
+                                )}
                                 <div
                                     className={`${styles.content} ${overflowingMsgs.has(msg.id) && !expandedMsgs.has(msg.id) && editingMsgId !== msg.id ? styles.contentCollapsed : ''}`}
                                     ref={contentRefCallback(msg.id)}

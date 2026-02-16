@@ -74,6 +74,11 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
                 extra_kwargs["structured_output_backend"] = structured_output_backend
                 logging.info("Using structured_output_backend='%s' for model '%s'", structured_output_backend, api_model)
 
+            # Multi-turn reasoning pass-back field (e.g., "reasoning_details" for OpenRouter)
+            reasoning_passback = config.get("reasoning_passback_field")
+            if isinstance(reasoning_passback, str) and reasoning_passback.strip():
+                extra_kwargs["reasoning_passback_field"] = reasoning_passback.strip()
+
         logging.debug("Creating OpenAI client for model '%s' with kwargs: %s", api_model, extra_kwargs)
         client = OpenAIClient(api_model, supports_images=supports_images, **extra_kwargs)
     elif provider == "nvidia_nim":
@@ -94,6 +99,10 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
             convert_system = config.get("convert_system_to_user")
             if isinstance(convert_system, bool):
                 extra_kwargs["convert_system_to_user"] = convert_system
+
+            reasoning_passback = config.get("reasoning_passback_field")
+            if isinstance(reasoning_passback, str) and reasoning_passback.strip():
+                extra_kwargs["reasoning_passback_field"] = reasoning_passback.strip()
 
         logging.debug("Creating Nvidia NIM client for model '%s' with kwargs: %s", api_model, extra_kwargs)
         client = NvidiaNIMClient(api_model, supports_images=supports_images, **extra_kwargs)

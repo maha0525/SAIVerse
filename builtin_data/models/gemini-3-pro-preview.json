@@ -1,7 +1,7 @@
 {
   "model": "gemini-3-pro-preview",
   "system_prompt": "",
-  "display_name": "Gemini 3 Pro (有料Tier, <200k)",
+  "display_name": "Gemini 3 Pro(有料Tier, <200k)",
   "provider": "gemini",
   "context_length": 200000,
   "default_max_history_messages": 80,

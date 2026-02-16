@@ -205,9 +205,11 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
             clean_msg["role"] = role
 
         # Preserve reasoning_details for multi-turn reasoning pass-back
+        # Only pass back structured data (list of objects); skip plain strings
+        # which were stored by older code and would cause provider errors
         if reasoning_passback_field and role == "assistant":
             rd = (metadata or {}).get("reasoning_details") if isinstance(metadata, dict) else None
-            if rd is not None:
+            if isinstance(rd, list):
                 clean_msg[reasoning_passback_field] = rd
 
         # Skip if the cleaned message is also empty
@@ -351,12 +353,58 @@ def _extract_reasoning_from_delta(delta: Any) -> List[str]:
     elif isinstance(raw_reasoning, str):
         reasoning_chunks.append(raw_reasoning)
 
-    # Check "reasoning_content" field (used by o-series models)
+    # Check "reasoning_content" field (used by o-series models, NIM)
     reasoning_content = delta_dict.get("reasoning_content")
     if isinstance(reasoning_content, str) and reasoning_content:
         reasoning_chunks.append(reasoning_content)
 
+    # Check "reasoning_details" field (used by OpenRouter)
+    # Extract text for display; raw objects are collected separately for passback
+    raw_rd = delta_dict.get("reasoning_details")
+    if isinstance(raw_rd, list) and not reasoning_chunks:
+        # Only extract text if no other reasoning source was found (avoid duplicates)
+        for item in raw_rd:
+            item_dict = obj_to_dict(item) or item if isinstance(item, dict) else {}
+            text = item_dict.get("text") or item_dict.get("summary") or ""
+            if text:
+                reasoning_chunks.append(text)
+
     return reasoning_chunks
+
+
+def _extract_raw_reasoning_details_from_delta(delta: Any) -> List[Dict[str, Any]]:
+    """Extract raw reasoning_details objects from a streaming delta for multi-turn passback."""
+    delta_dict = obj_to_dict(delta)
+    if not isinstance(delta_dict, dict):
+        return []
+    raw_rd = delta_dict.get("reasoning_details")
+    if not isinstance(raw_rd, list):
+        return []
+    result: List[Dict[str, Any]] = []
+    for item in raw_rd:
+        d = obj_to_dict(item) if not isinstance(item, dict) else item
+        if isinstance(d, dict):
+            result.append(d)
+    return result
+
+
+def _merge_streaming_reasoning_details(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Merge incremental reasoning_details chunks from streaming into consolidated entries.
+
+    Groups by 'index' field and concatenates 'text'/'summary' values.
+    """
+    by_index: Dict[int, Dict[str, Any]] = {}
+    for item in items:
+        idx = item.get("index", 0)
+        if idx not in by_index:
+            by_index[idx] = dict(item)
+        else:
+            existing = by_index[idx]
+            for text_key in ("text", "summary"):
+                chunk_text = item.get(text_key, "")
+                if chunk_text:
+                    existing[text_key] = existing.get(text_key, "") + chunk_text
+    return [by_index[k] for k in sorted(by_index.keys())]
 
 
 def _process_openai_stream_content(content: Any) -> Tuple[str, List[str]]:
@@ -765,6 +813,7 @@ class OpenAIClient(LLMClient):
                 if prefix:
                     yield prefix + "\n"
                 last_chunk = None
+                reasoning_details_raw: List[Dict[str, Any]] = []
                 for chunk in resp:
                     last_chunk = chunk
                     if chunk.choices and chunk.choices[0].delta:
@@ -775,6 +824,9 @@ class OpenAIClient(LLMClient):
                         for r in extra_reasoning:
                             reasoning_chunks.append(r)
                             yield {"type": "thinking", "content": r}
+
+                        # Collect raw reasoning_details objects for multi-turn passback
+                        reasoning_details_raw.extend(_extract_raw_reasoning_details_from_delta(delta))
 
                         content = delta.content
                         if content:
@@ -798,9 +850,9 @@ class OpenAIClient(LLMClient):
                     )
                 # Store reasoning collected during streaming
                 self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
-                # Store collected reasoning text as reasoning_details for multi-turn pass-back
-                if reasoning_chunks:
-                    self._store_reasoning_details("".join(reasoning_chunks))
+                # Store reasoning_details for multi-turn pass-back (structured objects only)
+                if reasoning_details_raw:
+                    self._store_reasoning_details(_merge_streaming_reasoning_details(reasoning_details_raw))
             else:
                 # Non-streaming mode (response_schema case)
                 choice = resp.choices[0]
@@ -866,6 +918,7 @@ class OpenAIClient(LLMClient):
         call_buffer: dict[str, dict] = {}
         state = "TEXT"
         prefix_yielded = False
+        reasoning_details_raw: List[Dict[str, Any]] = []
 
         try:
             current_call_id = None
@@ -921,6 +974,9 @@ class OpenAIClient(LLMClient):
                     reasoning_chunks.append(r)
                     yield {"type": "thinking", "content": r}
 
+                # Collect raw reasoning_details objects for multi-turn passback
+                reasoning_details_raw.extend(_extract_raw_reasoning_details_from_delta(delta))
+
             # Store usage from last chunk (when stream_options.include_usage=True)
             if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
                 # Check for cached tokens (OpenAI Prompt Caching)
@@ -935,8 +991,9 @@ class OpenAIClient(LLMClient):
 
             # Store reasoning
             self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
-            if reasoning_chunks:
-                self._store_reasoning_details("".join(reasoning_chunks))
+            # Store reasoning_details for multi-turn pass-back (structured objects only)
+            if reasoning_details_raw:
+                self._store_reasoning_details(_merge_streaming_reasoning_details(reasoning_details_raw))
 
             # Store tool detection result if tool calls were detected
             if call_buffer:

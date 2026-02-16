@@ -576,6 +576,9 @@ class SEARuntime:
                     ) if _tool_reasoning else ""
                     if _tool_reasoning_text:
                         state["_reasoning_text"] = _tool_reasoning_text
+                    _tool_reasoning_details = llm_client.consume_reasoning_details()
+                    if _tool_reasoning_details is not None:
+                        state["_reasoning_details"] = _tool_reasoning_details
 
                     # Record usage
                     usage = llm_client.consume_usage()
@@ -816,6 +819,7 @@ class SEARuntime:
                         reasoning_text = "\n\n".join(
                             e.get("text", "") for e in reasoning_entries if e.get("text")
                         ) if reasoning_entries else ""
+                        reasoning_details = llm_client.consume_reasoning_details()
 
                         # Resolve metadata_key for speak (e.g., media attachments from tool execution)
                         _speak_metadata_key = getattr(node_def, "metadata_key", None)
@@ -843,6 +847,8 @@ class SEARuntime:
                             msg_metadata["llm_usage"] = llm_usage_metadata
                         if reasoning_text:
                             msg_metadata["reasoning"] = reasoning_text
+                        if reasoning_details is not None:
+                            msg_metadata["reasoning_details"] = reasoning_details
                         _at_stream = state.get("_activity_trace")
                         if _at_stream:
                             msg_metadata["activity_trace"] = list(_at_stream)
@@ -851,6 +857,12 @@ class SEARuntime:
                             msg_metadata["llm_usage_total"] = dict(accumulator)
                         eff_bid = self._effective_building_id(persona, building_id)
                         self._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+
+                        # Store reasoning in state for downstream speak/say nodes
+                        if reasoning_text:
+                            state["_reasoning_text"] = reasoning_text
+                        if reasoning_details is not None:
+                            state["_reasoning_details"] = reasoning_details
                     else:
                         # Non-streaming mode
                         text = llm_client.generate(
@@ -898,6 +910,7 @@ class SEARuntime:
                         reasoning_text = "\n\n".join(
                             e.get("text", "") for e in reasoning_entries if e.get("text")
                         ) if reasoning_entries else ""
+                        reasoning_details = llm_client.consume_reasoning_details()
 
                         # If speak=true but streaming disabled, send complete text and record to Building history
                         LOGGER.info("[DEBUG] speak_flag=%s, event_callback=%s, text_len=%d",
@@ -915,6 +928,8 @@ class SEARuntime:
                                 msg_metadata["llm_usage"] = llm_usage_metadata
                             if reasoning_text:
                                 msg_metadata["reasoning"] = reasoning_text
+                            if reasoning_details is not None:
+                                msg_metadata["reasoning_details"] = reasoning_details
                             _at_speak = state.get("_activity_trace")
                             if _at_speak:
                                 msg_metadata["activity_trace"] = list(_at_speak)
@@ -941,6 +956,8 @@ class SEARuntime:
                         # Store remaining reasoning for say/speak node (non-speak path)
                         if reasoning_text:
                             state["_reasoning_text"] = reasoning_text
+                        if reasoning_details is not None:
+                            state["_reasoning_details"] = reasoning_details
 
                     self._dump_llm_io(playbook.name, getattr(node_def, "id", ""), persona, messages, text)
                     schema_consumed = self._process_structured_output(node_def, text, state)
@@ -1043,12 +1060,22 @@ class SEARuntime:
                         content_to_save = json.dumps(text, ensure_ascii=False, indent=2)
                         LOGGER.debug("[sea][llm] Structured output formatted as JSON for memory")
 
+                    # Build metadata for memorize (reasoning text + reasoning_details for multi-turn)
+                    _memorize_metadata: Dict[str, Any] = {}
+                    _mem_reasoning = state.get("_reasoning_text", "")
+                    if _mem_reasoning:
+                        _memorize_metadata["reasoning"] = _mem_reasoning
+                    _mem_rd = state.get("_reasoning_details")
+                    if _mem_rd is not None:
+                        _memorize_metadata["reasoning_details"] = _mem_rd
+
                     if not self._store_memory(
                         persona,
                         content_to_save,
                         role="assistant",
                         tags=list(memorize_tags),
                         pulse_id=pulse_id,
+                        metadata=_memorize_metadata if _memorize_metadata else None,
                     ):
                         _memorize_ok = False
                     else:
@@ -1979,16 +2006,25 @@ class SEARuntime:
             event_callback({"type": "status", "content": f"{playbook.name} / speak", "playbook": playbook.name, "node": "speak"})
         text = state.get("last") or ""
         reasoning_text = state.pop("_reasoning_text", "")
+        reasoning_details_val = state.pop("_reasoning_details", None)
         activity_trace = state.get("_activity_trace")
         pulse_id = state.get("pulse_id")
         eff_bid = self._effective_building_id(persona, building_id)
-        self._emit_speak(persona, eff_bid, text, pulse_id=pulse_id)
+        # Build extra metadata with reasoning for SAIMemory storage
+        speak_metadata: Dict[str, Any] = {}
+        if reasoning_text:
+            speak_metadata["reasoning"] = reasoning_text
+        if reasoning_details_val is not None:
+            speak_metadata["reasoning_details"] = reasoning_details_val
+        self._emit_speak(persona, eff_bid, text, pulse_id=pulse_id, extra_metadata=speak_metadata if speak_metadata else None)
         if outputs is not None:
             outputs.append(text)
         if event_callback:
             say_event: Dict[str, Any] = {"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None)}
             if reasoning_text:
                 say_event["reasoning"] = reasoning_text
+            if reasoning_details_val is not None:
+                say_event["reasoning_details"] = reasoning_details_val
             if activity_trace:
                 say_event["activity_trace"] = list(activity_trace)
             event_callback(say_event)
@@ -2002,6 +2038,7 @@ class SEARuntime:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             text = state.get("last") or ""
             reasoning_text = state.pop("_reasoning_text", "")
+            reasoning_details_val = state.pop("_reasoning_details", None)
             pulse_id = state.get("pulse_id")
             metadata_key = getattr(node_def, "metadata_key", None)
             base_metadata = state.get(metadata_key) if metadata_key else None
@@ -2015,6 +2052,8 @@ class SEARuntime:
                     msg_metadata["metadata"] = base_metadata
             if reasoning_text:
                 msg_metadata["reasoning"] = reasoning_text
+            if reasoning_details_val is not None:
+                msg_metadata["reasoning_details"] = reasoning_details_val
 
             # Include pulse usage accumulator total for UI display
             accumulator = state.get("pulse_usage_accumulator")
@@ -2801,12 +2840,20 @@ class SEARuntime:
                     return bid
         return fallback
 
-    def _emit_speak(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, record_history: bool = True) -> None:
+    def _emit_speak(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, record_history: bool = True, extra_metadata: Optional[Dict[str, Any]] = None) -> None:
         msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
         # Build metadata with tags and conversation partners
         metadata: Dict[str, Any] = {"tags": ["conversation"]}
         if pulse_id:
             metadata["tags"].append(f"pulse:{pulse_id}")
+        # Merge extra metadata (reasoning, reasoning_details, etc.)
+        if isinstance(extra_metadata, dict):
+            for key, value in extra_metadata.items():
+                if key == "tags":
+                    extra_tags = [str(t) for t in value if t] if isinstance(value, list) else []
+                    metadata["tags"].extend(extra_tags)
+                else:
+                    metadata[key] = value
         # Add conversation partners to "with" field
         partners = []
         occupants = self.manager.occupants.get(building_id, [])
