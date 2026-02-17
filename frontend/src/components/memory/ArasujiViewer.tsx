@@ -45,6 +45,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     const [showList, setShowList] = useState(true);
     const [sourceMessages, setSourceMessages] = useState<SourceMessage[]>([]);
     const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+    const [developerMode, setDeveloperMode] = useState(false);
 
     // Generation state
     const [showGenerateModal, setShowGenerateModal] = useState(false);
@@ -78,6 +79,10 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
     useEffect(() => {
         loadStats();
         loadEntries(null);
+        fetch('/api/config/developer-mode')
+            .then(res => res.ok ? res.json() : null)
+            .then(data => { if (data) setDeveloperMode(data.enabled); })
+            .catch(() => {});
     }, [personaId]);
 
     useEffect(() => {
@@ -729,16 +734,21 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                             />
                             <span className={styles.hint}>上位レベルにまとめるエントリ数</span>
                         </div>
-                        <div className={styles.formGroup}>
-                            <label className={styles.checkboxLabel}>
-                                <input
-                                    type="checkbox"
-                                    checked={generateSettings.withMemopedia}
-                                    onChange={(e) => setGenerateSettings(s => ({ ...s, withMemopedia: e.target.checked }))}
-                                />
-                                Memopedia も同時生成
-                            </label>
-                        </div>
+                        {developerMode && (
+                            <div className={styles.formGroup}>
+                                <label className={styles.checkboxLabel}>
+                                    <input
+                                        type="checkbox"
+                                        checked={generateSettings.withMemopedia}
+                                        onChange={(e) => setGenerateSettings(s => ({ ...s, withMemopedia: e.target.checked }))}
+                                    />
+                                    Memopedia も同時生成
+                                </label>
+                                <span className={styles.hint} style={{ color: '#e8a838' }}>
+                                    （非推奨：生成コストが高く、大量のページが作られます。推定コストには反映されません）
+                                </span>
+                            </div>
+                        )}
                         <div className={styles.modalActions}>
                             <button className={styles.cancelBtn} onClick={() => setShowGenerateModal(false)}>
                                 キャンセル
