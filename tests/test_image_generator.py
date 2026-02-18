@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from conftest import load_builtin_tool
+from tool_loader import load_builtin_tool
 from tools.core import ToolResult
 
 _mod = load_builtin_tool("image_generator")

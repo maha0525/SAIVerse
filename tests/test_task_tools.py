@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from conftest import load_builtin_tool
+from tool_loader import load_builtin_tool
 from persona.tasks import TaskStorage
 from tools.context import persona_context
 

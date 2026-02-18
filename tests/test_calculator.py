@@ -1,6 +1,6 @@
 import unittest
 
-from conftest import load_builtin_tool
+from tool_loader import load_builtin_tool
 
 calculator = load_builtin_tool("calculator")
 calculate_expression = calculator.calculate_expression
