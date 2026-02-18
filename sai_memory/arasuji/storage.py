@@ -623,6 +623,41 @@ def has_overlapping_entries(
     return row[0] > 0 if row else False
 
 
+def find_covering_entry(
+    conn: sqlite3.Connection,
+    start_time: int,
+    end_time: int,
+    level: int,
+) -> Optional[ArasujiEntry]:
+    """Find an entry at the given level whose time range covers [start_time, end_time].
+
+    Used to detect gap-fill scenarios where a new level-1 entry falls within
+    an existing higher-level entry's time range.
+
+    Args:
+        conn: Database connection
+        start_time: Start of time range to check
+        end_time: End of time range to check
+        level: Level to search at (typically 2 for gap-fill detection)
+
+    Returns:
+        Matching ArasujiEntry or None if no covering entry exists
+    """
+    cur = conn.execute(
+        """
+        SELECT id, level, content, source_ids_json, start_time, end_time,
+               source_count, message_count, parent_id, is_consolidated, created_at
+        FROM arasuji_entries
+        WHERE level = ? AND start_time <= ? AND end_time >= ?
+        ORDER BY start_time ASC
+        LIMIT 1
+        """,
+        (level, start_time, end_time),
+    )
+    row = cur.fetchone()
+    return _row_to_entry(row) if row else None
+
+
 def search_entries(
     conn: sqlite3.Connection,
     query: Optional[str] = None,

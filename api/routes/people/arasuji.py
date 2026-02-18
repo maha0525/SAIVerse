@@ -529,11 +529,11 @@ def _run_chronicle_generation(
     with_memopedia: bool,
 ):
     """Background worker for Chronicle generation."""
+    import json
     import os
     from pathlib import Path
     from sai_memory.memory.storage import init_db, Message
     from sai_memory.arasuji import init_arasuji_tables
-    from sai_memory.arasuji.storage import get_progress, update_progress
     from sai_memory.arasuji.generator import ArasujiGenerator
     from saiverse.model_configs import find_model_config
     from llm_clients.factory import get_llm_client
@@ -550,41 +550,25 @@ def _run_chronicle_generation(
         conn = init_db(str(db_path), check_same_thread=False)
         init_arasuji_tables(conn)
 
-        # Fetch unprocessed messages (not in any existing Chronicle's source_ids)
-        _update_job(job_id, message="Fetching unprocessed messages...")
-        
-        # Get all message IDs already included in level-1 Chronicles
-        # Using json_each to extract source_ids_json array elements
-        cur = conn.execute("""
-            SELECT DISTINCT json_each.value 
-            FROM arasuji_entries, json_each(source_ids_json)
-            WHERE level = 1
-        """)
-        processed_ids = {row[0] for row in cur.fetchall()}
-        LOGGER.info(f"[Chronicle Gen] Found {len(processed_ids)} already-processed message IDs")
-        
-        # Fetch messages NOT in processed_ids, ordered by time (oldest first)
+        # Fetch all messages ordered by time (oldest first)
+        _update_job(job_id, message="Fetching messages...")
+
         cur = conn.execute("""
             SELECT id, thread_id, role, content, resource_id, created_at, metadata
             FROM messages
             ORDER BY created_at ASC
         """)
-        
-        import json
-        all_rows = cur.fetchall()
-        messages = []
-        for row in all_rows:
+
+        all_messages = []
+        for row in cur.fetchall():
             msg_id, tid, role, content, resource_id, created_at, metadata_raw = row
-            # Skip messages already in existing Chronicles
-            if msg_id in processed_ids:
-                continue
             metadata = {}
             if metadata_raw:
                 try:
                     metadata = json.loads(metadata_raw)
                 except Exception:
                     LOGGER.warning("Failed to parse metadata JSON for message %s", msg_id, exc_info=True)
-            messages.append(Message(
+            all_messages.append(Message(
                 id=msg_id,
                 thread_id=tid,
                 role=role,
@@ -593,34 +577,20 @@ def _run_chronicle_generation(
                 created_at=created_at,
                 metadata=metadata,
             ))
-            # Stop once we have enough messages
-            if len(messages) >= max_messages:
-                break
 
-        total_messages = len(messages)
-        
-        # Batch minimum threshold check
-        if total_messages < batch_size:
-            _update_job(
-                job_id, 
-                status="completed",
-                progress=0,
-                total=total_messages,
-                entries_created=0,
-                message=f"Not enough unprocessed messages ({total_messages} < batch_size {batch_size}). Skipping."
-            )
+        if not all_messages:
+            _update_job(job_id, status="completed", progress=0, total=0, entries_created=0, message="No messages found")
             conn.close()
             return
 
-        LOGGER.info(f"[Chronicle Gen] Found {total_messages} messages to process")
-        _update_job(job_id, total=total_messages, message=f"Found {total_messages} messages to process")
+        LOGGER.info(f"[Chronicle Gen] Loaded {len(all_messages)} messages")
 
         # Initialize LLM client
         _update_job(job_id, message="Initializing LLM client...")
-        
+
         env_model = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
         model_to_use = model_name or env_model
-        
+
         resolved_model_id, model_config = find_model_config(model_to_use)
         if not resolved_model_id:
             _update_job(job_id, status="failed", error=f"Model '{model_to_use}' not found")
@@ -630,7 +600,7 @@ def _run_chronicle_generation(
         actual_model_id = model_config.get("model", resolved_model_id)
         context_length = model_config.get("context_length", 128000)
         provider = model_config.get("provider", "gemini")
-        
+
         client = get_llm_client(resolved_model_id, provider, context_length, config=model_config)
         LOGGER.info(f"[Chronicle Gen] LLM client initialized: {actual_model_id} / {provider} (config_key={resolved_model_id})")
 
@@ -664,11 +634,11 @@ def _run_chronicle_generation(
         # Memopedia batch callback if enabled
         batch_callback = None
         memopedia_pages_total = 0
-        
+
         if with_memopedia:
             try:
                 from scripts.build_memopedia import extract_knowledge
-                
+
                 def memopedia_batch_callback(batch_messages):
                     nonlocal memopedia_pages_total
                     if not batch_messages:
@@ -690,30 +660,42 @@ def _run_chronicle_generation(
                         )
                     except Exception as e:
                         LOGGER.error(f"Memopedia extraction failed: {e}")
-                
+
                 batch_callback = memopedia_batch_callback
             except ImportError as e:
                 LOGGER.warning(f"Memopedia modules not available: {e}")
 
-        # Generate
+        # Generate using unified method (filters processed, groups into runs, generates)
         _update_job(job_id, message="Generating Chronicle entries...")
-        LOGGER.info(f"[Chronicle Gen] Starting generation for {len(messages)} messages with batch_size={batch_size}")
-        
-        level1_entries, consolidated_entries = generator.generate_from_messages(
-            messages,
-            dry_run=False,
+
+        def cancel_check():
+            job = _get_job(job_id)
+            return job is not None and job.get("status") == "cancelling"
+
+        level1_entries, consolidated_entries = generator.generate_unprocessed(
+            all_messages,
             progress_callback=progress_callback,
             batch_callback=batch_callback,
+            cancel_check=cancel_check,
         )
 
         total_entries = len(level1_entries) + len(consolidated_entries)
 
         conn.close()
 
+        # Check if cancelled
+        if cancel_check():
+            _update_job(
+                job_id,
+                status="cancelled",
+                entries_created=total_entries,
+                message=f"ユーザーにより中止されました（{total_entries}件生成済み）",
+            )
+            return
+
         _update_job(
             job_id,
             status="completed",
-            progress=total_messages,
             entries_created=total_entries,
             message=f"Completed. Created {len(level1_entries)} level-1 + {len(consolidated_entries)} consolidated entries."
             + (f" Memopedia pages: {memopedia_pages_total}" if with_memopedia else "")
@@ -757,6 +739,26 @@ async def start_arasuji_generation(
     )
 
     return {"job_id": job_id, "status": "started"}
+
+
+@router.post("/{persona_id}/arasuji/generate/{job_id}/cancel", tags=["Chronicle"])
+async def cancel_arasuji_generation(
+    persona_id: str,
+    job_id: str,
+):
+    """Cancel a running Chronicle generation job."""
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    if job.get("persona_id") != persona_id:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found for persona {persona_id}")
+
+    if job.get("status") not in ("pending", "running", "started"):
+        return {"cancelled": False, "reason": "Job is not running"}
+
+    _update_job(job_id, status="cancelling")
+    return {"cancelled": True}
 
 
 @router.get("/{persona_id}/arasuji/generate/{job_id}", response_model=GenerationJobStatus, tags=["Chronicle"])

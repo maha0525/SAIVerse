@@ -1191,10 +1191,11 @@ export default function Home() {
                                 timestamp: new Date().toISOString()
                             }]);
                         } else if (event.type === 'metabolism') {
-                            if (event.status === 'started') {
-                                setLoadingStatus(event.content || '記憶を整理しています...');
-                            } else if (event.status === 'completed') {
+                            if (event.status === 'completed') {
                                 setLoadingStatus('Thinking...');
+                            } else {
+                                // started, running, etc. — show content as loading status
+                                setLoadingStatus(event.content || '記憶を整理しています...');
                             }
                         } else if (event.type === 'permission_request') {
                             setPermissionRequest({

@@ -235,7 +235,7 @@ class SEARuntime:
                     playbook.context_requirements.history_depth if playbook.context_requirements else "None",
                     pulse_id)
         context_warnings: List[Dict[str, Any]] = []
-        base_messages = self._prepare_context(persona, building_id, user_input, playbook.context_requirements, pulse_id=pulse_id, warnings=context_warnings)
+        base_messages = self._prepare_context(persona, building_id, user_input, playbook.context_requirements, pulse_id=pulse_id, warnings=context_warnings, event_callback=wrapped_event_callback, cancellation_token=cancellation_token)
         LOGGER.info("[sea][run-playbook] %s: _prepare_context returned %d messages", playbook.name, len(base_messages))
         conversation_msgs = list(base_messages)
 
@@ -510,6 +510,7 @@ class SEARuntime:
                                 state.get("inputs", {}).get("input") or None,
                                 _profile["requirements"],
                                 pulse_id=state.get("pulse_id"),
+                                event_callback=event_callback,
                             )
                             LOGGER.info("[sea] Prepared context for profile '%s' (node=%s, %d messages)",
                                         _profile_name, node_id, len(state[_cache_key]))
@@ -3431,6 +3432,7 @@ class SEARuntime:
         self,
         persona,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancellation_token: Optional[CancellationToken] = None,
     ) -> None:
         """Generate Chronicle entries from all unprocessed messages."""
         from llm_clients.factory import get_llm_client
@@ -3472,6 +3474,20 @@ class SEARuntime:
         if not all_messages:
             return
 
+        # Build progress callback for streaming status to frontend
+        def progress_fn(processed, total):
+            if event_callback:
+                event_callback({
+                    "type": "metabolism",
+                    "status": "running",
+                    "content": f"Chronicleを生成しています ({processed}/{total})...",
+                })
+
+        # Build cancellation check from cancellation token
+        cancel_fn = None
+        if cancellation_token:
+            cancel_fn = lambda: cancellation_token.is_cancelled
+
         batch_size = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)))
         generator = ArasujiGenerator(
             client, adapter.conn,
@@ -3479,7 +3495,11 @@ class SEARuntime:
             consolidation_size=10,
             persona_id=getattr(persona, "persona_id", None),
         )
-        level1, consolidated = generator.generate_from_messages(all_messages)
+        level1, consolidated = generator.generate_unprocessed(
+            all_messages,
+            progress_callback=progress_fn,
+            cancel_check=cancel_fn,
+        )
         LOGGER.info(
             "[metabolism] Chronicle generation complete: %d level1, %d consolidated entries",
             len(level1), len(consolidated),
@@ -3487,7 +3507,7 @@ class SEARuntime:
 
     # ---------------- context preparation -----------------
 
-    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False) -> List[Dict[str, Any]]:
+    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[CancellationToken] = None) -> List[Dict[str, Any]]:
         from sea.playbook_models import ContextRequirements
 
         # Use provided requirements or default to full context
@@ -3718,11 +3738,27 @@ class SEARuntime:
                                 # Case 3: no valid anchor — minimal load + Chronicle generation
                                 memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
                                 if memory_weave_enabled and self._is_chronicle_enabled_for_persona(persona):
+                                    if event_callback:
+                                        event_callback({
+                                            "type": "metabolism",
+                                            "status": "started",
+                                            "content": "Chronicleを生成しています...",
+                                        })
                                     try:
                                         LOGGER.info("[metabolism] Triggering Chronicle generation on anchor expiry")
-                                        self._generate_chronicle(persona)
+                                        self._generate_chronicle(
+                                            persona,
+                                            event_callback=event_callback,
+                                            cancellation_token=cancellation_token,
+                                        )
                                     except Exception as exc:
                                         LOGGER.warning("[metabolism] Chronicle generation on anchor expiry failed: %s", exc)
+                                    if event_callback:
+                                        event_callback({
+                                            "type": "metabolism",
+                                            "status": "completed",
+                                            "content": "Chronicle生成が完了しました",
+                                        })
 
                                 # Load minimal history (low watermark)
                                 low_wm = self._get_low_watermark(persona)

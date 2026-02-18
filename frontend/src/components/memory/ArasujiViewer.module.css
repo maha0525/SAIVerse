@@ -562,6 +562,26 @@
     margin-bottom: 8px;
 }
 
+.stopGenerationBtn {
+    background: none;
+    border: none;
+    color: #4dabf7;
+    padding: 2px;
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    margin-left: auto;
+    opacity: 0.7;
+    transition: opacity 0.2s, color 0.2s, background-color 0.2s;
+}
+
+.stopGenerationBtn:hover {
+    opacity: 1;
+    color: #fa5252;
+    background-color: rgba(250, 82, 82, 0.1);
+}
+
 .progressTrack {
     height: 4px;
     background-color: rgba(77, 171, 247, 0.2);

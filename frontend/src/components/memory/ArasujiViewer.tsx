@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Loader2, ChevronLeft, BookOpen, Layers, Trash2, Play, Settings } from 'lucide-react';
+import { Loader2, ChevronLeft, BookOpen, Layers, Trash2, Play, Settings, Square } from 'lucide-react';
 import styles from './ArasujiViewer.module.css';
 import ModalOverlay from '../common/ModalOverlay';
 
@@ -287,7 +287,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         entriesCreated: data.entries_created,
                         error: data.error,
                     });
-                    if (data.status === 'completed' || data.status === 'failed') {
+                    if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
                         if (pollingRef.current) clearInterval(pollingRef.current);
                         // Refresh data
                         loadStats();
@@ -299,6 +299,17 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
             }
         }, 2000);
     }, [personaId, levelFilter]);
+
+    const cancelGeneration = async () => {
+        if (!generationJob?.jobId) return;
+        try {
+            await fetch(`/api/people/${personaId}/arasuji/generate/${generationJob.jobId}/cancel`, {
+                method: 'POST',
+            });
+        } catch (e) {
+            console.error('Failed to cancel generation', e);
+        }
+    };
 
     // Cleanup polling on unmount
     useEffect(() => {
@@ -405,6 +416,13 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         <div className={styles.progressInfo}>
                             <Loader2 className={styles.loader} size={14} />
                             <span>{generationJob.message || '処理中...'}</span>
+                            <button
+                                className={styles.stopGenerationBtn}
+                                onClick={cancelGeneration}
+                                title="生成を中止"
+                            >
+                                <Square size={12} />
+                            </button>
                         </div>
                         {generationJob.total && generationJob.total > 0 && (
                             <div className={styles.progressTrack}>
@@ -421,6 +439,12 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 {generationJob && generationJob.status === 'completed' && (
                     <div className={styles.generationResult}>
                         <span>✅ {generationJob.message}</span>
+                        <button onClick={() => setGenerationJob(null)}>×</button>
+                    </div>
+                )}
+                {generationJob && generationJob.status === 'cancelled' && (
+                    <div className={styles.generationResult}>
+                        <span>{generationJob.message || '生成が中止されました'}</span>
                         <button onClick={() => setGenerationJob(null)}>×</button>
                     </div>
                 )}
