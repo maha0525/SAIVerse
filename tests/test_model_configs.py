@@ -19,7 +19,7 @@ class TestGetModelProvider(unittest.TestCase):
 class TestGetContextLength(unittest.TestCase):
     def test_known_model_returns_configured_length(self):
         length = model_configs.get_context_length("claude-sonnet-4-5")
-        self.assertEqual(length, 64000)
+        self.assertEqual(length, 200000)
 
     def test_unknown_model_raises_error(self):
         with self.assertRaises(ValueError) as ctx:
@@ -75,7 +75,7 @@ class TestModelSupportsImages(unittest.TestCase):
         self.assertTrue(model_configs.model_supports_images("claude-sonnet-4-5"))
 
     def test_non_vision_model(self):
-        self.assertFalse(model_configs.model_supports_images("stockmark-stockmark-2-100b-instruct"))
+        self.assertFalse(model_configs.model_supports_images("nim-deepseek-v3.2"))
 
 
 class TestFindModelConfig(unittest.TestCase):
@@ -85,9 +85,9 @@ class TestFindModelConfig(unittest.TestCase):
         self.assertEqual(config.get("provider"), "anthropic")
 
     def test_find_by_api_model_name(self):
-        key, config = model_configs.find_model_config("stockmark/stockmark-2-100b-instruct")
+        key, config = model_configs.find_model_config("mistralai/mistral-large-3-675b-instruct-2512")
         self.assertTrue(key)
-        self.assertEqual(config.get("model"), "stockmark/stockmark-2-100b-instruct")
+        self.assertEqual(config.get("model"), "mistralai/mistral-large-3-675b-instruct-2512")
 
     def test_not_found(self):
         key, config = model_configs.find_model_config("nonexistent-model-xyz-abc")
@@ -110,7 +110,7 @@ class TestSupportsStructuredOutput(unittest.TestCase):
         self.assertTrue(model_configs.supports_structured_output("claude-sonnet-4-5"))
 
     def test_explicit_false(self):
-        self.assertFalse(model_configs.supports_structured_output("stockmark-stockmark-2-100b-instruct"))
+        self.assertFalse(model_configs.supports_structured_output("nim-step-3.5-flash"))
 
 
 if __name__ == "__main__":

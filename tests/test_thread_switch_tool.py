@@ -77,7 +77,7 @@ class ThreadSwitchToolTest(unittest.TestCase):
         state_file = self.persona_path / "active_state.json"
         state_file.write_text(json.dumps({"active_thread_id": sns_suffix}), encoding="utf-8")
 
-        from conftest import load_builtin_tool
+        from tool_loader import load_builtin_tool
         switch_active_thread = load_builtin_tool("thread_switch").switch_active_thread
 
         from tools.context import persona_context
@@ -137,7 +137,7 @@ class ThreadSwitchToolTest(unittest.TestCase):
         state_file = self.persona_path / "active_state.json"
         state_file.write_text(json.dumps({"active_thread_id": sns_suffix}), encoding="utf-8")
 
-        from conftest import load_builtin_tool
+        from tool_loader import load_builtin_tool
         switch_active_thread = load_builtin_tool("thread_switch").switch_active_thread
         from tools.context import persona_context
 
@@ -156,7 +156,7 @@ class ThreadSwitchToolTest(unittest.TestCase):
     def test_switch_without_origin_messages_raises(self) -> None:
         follow_suffix = "follow-no-origin"
 
-        from conftest import load_builtin_tool
+        from tool_loader import load_builtin_tool
         switch_active_thread = load_builtin_tool("thread_switch").switch_active_thread
         from tools.context import persona_context
 
