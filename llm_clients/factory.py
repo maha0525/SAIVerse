@@ -74,6 +74,12 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
                 extra_kwargs["structured_output_backend"] = structured_output_backend
                 logging.info("Using structured_output_backend='%s' for model '%s'", structured_output_backend, api_model)
 
+            # Structured output mode: "native" (default) or "json_object" (prompt-based schema)
+            structured_output_mode = config.get("structured_output_mode")
+            if isinstance(structured_output_mode, str) and structured_output_mode.strip():
+                extra_kwargs["structured_output_mode"] = structured_output_mode.strip()
+                logging.info("Using structured_output_mode='%s' for model '%s'", structured_output_mode, api_model)
+
             # Multi-turn reasoning pass-back field (e.g., "reasoning_details" for OpenRouter)
             reasoning_passback = config.get("reasoning_passback_field")
             if isinstance(reasoning_passback, str) and reasoning_passback.strip():

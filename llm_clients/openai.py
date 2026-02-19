@@ -443,6 +443,7 @@ class OpenAIClient(LLMClient):
         max_image_bytes: Optional[int] = None,
         convert_system_to_user: bool = False,
         structured_output_backend: Optional[str] = None,
+        structured_output_mode: Optional[str] = None,
         reasoning_passback_field: Optional[str] = None,
     ) -> None:
         super().__init__(supports_images=supports_images)
@@ -464,6 +465,7 @@ class OpenAIClient(LLMClient):
         self.max_image_bytes = max_image_bytes
         self.convert_system_to_user = convert_system_to_user
         self.structured_output_backend = structured_output_backend
+        self.structured_output_mode = structured_output_mode or "native"
         self.reasoning_passback_field = reasoning_passback_field
 
     def _create_completion(self, **kwargs: Any):
@@ -505,6 +507,26 @@ class OpenAIClient(LLMClient):
                 return node
 
         return _process(schema)
+
+    @staticmethod
+    def _inject_schema_prompt(
+        messages: List[Dict[str, Any]],
+        response_schema: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Inject response schema into messages as a system instruction.
+
+        Used when structured_output_mode is 'json_object': the server only
+        guarantees valid JSON, so we describe the expected schema in the
+        prompt so the model knows which fields and types to produce.
+        """
+        schema_text = json.dumps(response_schema, ensure_ascii=False, indent=2)
+        instruction = (
+            "You must respond with a JSON object that conforms to the following JSON schema.\n"
+            "Output ONLY the JSON object with no additional text.\n\n"
+            f"```json\n{schema_text}\n```"
+        )
+        # Prepend as a system message so it takes priority
+        return [{"role": "system", "content": instruction}] + list(messages)
 
     def generate(
         self,
@@ -548,24 +570,36 @@ class OpenAIClient(LLMClient):
             if temperature is not None:
                 req["temperature"] = temperature
             if response_schema:
-                schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
-                openai_schema = self._add_additional_properties(response_schema)
-                json_schema_config: Dict[str, Any] = {
-                    "name": schema_name or "saiverse_structured_output",
-                    "schema": openai_schema,
-                    "strict": True,
-                }
-                response_format_config: Dict[str, Any] = {
-                    "type": "json_schema",
-                    "json_schema": json_schema_config,
-                }
-                if self.structured_output_backend:
-                    json_schema_config["backend"] = self.structured_output_backend
-                    response_format_config["backend"] = self.structured_output_backend
-                    logging.info("Applying structured_output_backend='%s' to request (both locations)", self.structured_output_backend)
-                req["response_format"] = response_format_config
-                logging.debug("response_format: %s", req["response_format"])
+                if self.structured_output_mode == "json_object":
+                    # json_object mode: only guarantee valid JSON output;
+                    # schema adherence is handled by prompt injection
+                    req["response_format"] = {"type": "json_object"}
+                    logging.debug("[openai] Using json_object mode with prompt-based schema")
+                else:
+                    # native mode: strict json_schema enforcement
+                    schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
+                    openai_schema = self._add_additional_properties(response_schema)
+                    json_schema_config: Dict[str, Any] = {
+                        "name": schema_name or "saiverse_structured_output",
+                        "schema": openai_schema,
+                        "strict": True,
+                    }
+                    response_format_config: Dict[str, Any] = {
+                        "type": "json_schema",
+                        "json_schema": json_schema_config,
+                    }
+                    if self.structured_output_backend:
+                        json_schema_config["backend"] = self.structured_output_backend
+                        response_format_config["backend"] = self.structured_output_backend
+                        logging.info("Applying structured_output_backend='%s' to request (both locations)", self.structured_output_backend)
+                    req["response_format"] = response_format_config
+                    logging.debug("response_format: %s", req["response_format"])
             return req
+
+        # If json_object mode, inject schema into messages as a system instruction
+        effective_messages = messages
+        if response_schema and self.structured_output_mode == "json_object":
+            effective_messages = self._inject_schema_prompt(messages, response_schema)
 
         # Non-tool mode: return str or dict (if response_schema)
         if not use_tools:
@@ -576,7 +610,7 @@ class OpenAIClient(LLMClient):
                 try:
                     resp = self._create_completion(
                         model=self.model,
-                        messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user, self.reasoning_passback_field),
+                        messages=_prepare_openai_messages(effective_messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user, self.reasoning_passback_field),
                         n=1,
                         **_build_request_kwargs(),
                     )
@@ -752,6 +786,11 @@ class OpenAIClient(LLMClient):
         self._store_reasoning([])
         reasoning_chunks: List[str] = []
 
+        # If json_object mode, inject schema into messages as a system instruction
+        effective_messages = messages
+        if response_schema and self.structured_output_mode == "json_object":
+            effective_messages = self._inject_schema_prompt(messages, response_schema)
+
         if not use_tools:
             resp = None
             last_stream_error: Optional[Exception] = None
@@ -762,28 +801,32 @@ class OpenAIClient(LLMClient):
                     if temperature is not None:
                         req_kwargs["temperature"] = temperature
                     if response_schema:
-                        schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
-                        openai_schema = self._add_additional_properties(response_schema)
-                        json_schema_config: Dict[str, Any] = {
-                            "name": schema_name or "saiverse_structured_output",
-                            "schema": openai_schema,
-                            "strict": True,
-                        }
-                        response_format_config: Dict[str, Any] = {
-                            "type": "json_schema",
-                            "json_schema": json_schema_config,
-                        }
-                        if self.structured_output_backend:
-                            json_schema_config["backend"] = self.structured_output_backend
-                            response_format_config["backend"] = self.structured_output_backend
-                            logging.info("Applying structured_output_backend='%s' to request (stream)", self.structured_output_backend)
-                        req_kwargs["response_format"] = response_format_config
+                        if self.structured_output_mode == "json_object":
+                            req_kwargs["response_format"] = {"type": "json_object"}
+                            logging.debug("[openai] Using json_object mode with prompt-based schema (stream)")
+                        else:
+                            schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
+                            openai_schema = self._add_additional_properties(response_schema)
+                            json_schema_config: Dict[str, Any] = {
+                                "name": schema_name or "saiverse_structured_output",
+                                "schema": openai_schema,
+                                "strict": True,
+                            }
+                            response_format_config: Dict[str, Any] = {
+                                "type": "json_schema",
+                                "json_schema": json_schema_config,
+                            }
+                            if self.structured_output_backend:
+                                json_schema_config["backend"] = self.structured_output_backend
+                                response_format_config["backend"] = self.structured_output_backend
+                                logging.info("Applying structured_output_backend='%s' to request (stream)", self.structured_output_backend)
+                            req_kwargs["response_format"] = response_format_config
                     else:
                         req_kwargs["stream"] = True
                         req_kwargs["stream_options"] = {"include_usage": True}
                     resp = self._create_completion(
                         model=self.model,
-                        messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user, self.reasoning_passback_field),
+                        messages=_prepare_openai_messages(effective_messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user, self.reasoning_passback_field),
                         n=1,
                         **req_kwargs,
                     )
