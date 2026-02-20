@@ -75,6 +75,8 @@ def _is_timeout_error(err: Exception) -> bool:
 
 def _should_retry(err: Exception) -> bool:
     """Check if the error should trigger a retry."""
+    if _is_payment_error(err) or _is_authentication_error(err):
+        return False
     return _is_rate_limit_error(err) or _is_server_error(err) or _is_timeout_error(err)
 
 
@@ -87,9 +89,15 @@ def _is_authentication_error(err: Exception) -> bool:
 
 
 def _is_payment_error(err: Exception) -> bool:
-    """Check if the error is a payment/billing error (402)."""
+    """Check if the error is a payment/billing error (402) or quota exhaustion."""
     msg = str(err).lower()
-    return "402" in msg or "payment required" in msg or "spend limit" in msg or "billing" in msg
+    return (
+        "402" in msg
+        or "payment required" in msg
+        or "spend limit" in msg
+        or "billing" in msg
+        or "insufficient_quota" in msg
+    )
 
 
 def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError:

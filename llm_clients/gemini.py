@@ -481,9 +481,15 @@ class GeminiClient(LLMClient):
 
     @staticmethod
     def _is_payment_error(err: Exception) -> bool:
-        """Check if the error is a payment/billing error (402)."""
+        """Check if the error is a payment/billing error (402) or quota exhaustion."""
         msg = str(err).lower()
-        return "402" in msg or "payment required" in msg or "spend limit" in msg or "billing" in msg
+        return (
+            "402" in msg
+            or "payment required" in msg
+            or "spend limit" in msg
+            or "billing" in msg
+            or "insufficient_quota" in msg
+        )
 
     def _convert_to_llm_error(self, err: Exception, context: str = "API call") -> LLMError:
         """Convert a generic exception to an appropriate LLMError subclass."""
@@ -1027,6 +1033,8 @@ class GeminiClient(LLMClient):
                     if attempt < max_retries - 1:
                         time.sleep(2 ** attempt)
                     continue
+                if self._is_payment_error(exc) or self._is_authentication_error(exc):
+                    raise self._convert_to_llm_error(exc, "API call") from exc
                 if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
                     logging.info("Retrying with paid Gemini API key due to rate limit")
                     active_client = self.paid_client
@@ -1112,6 +1120,8 @@ class GeminiClient(LLMClient):
         try:
             stream = self._start_stream(active_client, messages, tools_spec, tool_cfg, use_tools, temperature, response_schema)
         except Exception as exc:
+            if self._is_payment_error(exc) or self._is_authentication_error(exc):
+                raise self._convert_to_llm_error(exc, "streaming")
             if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
                 logging.info("Retrying with paid Gemini API key due to rate limit")
                 active_client = self.paid_client

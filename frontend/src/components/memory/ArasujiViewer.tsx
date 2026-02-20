@@ -73,6 +73,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         message: string | null;
         entriesCreated: number | null;
         error: string | null;
+        error_code: string | null;
+        error_detail: string | null;
     } | null>(null);
     const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -259,6 +261,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     message: '開始中...',
                     entriesCreated: null,
                     error: null,
+                    error_code: null,
+                    error_detail: null,
                 });
                 startPolling(data.job_id);
             } else {
@@ -286,6 +290,8 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         message: data.message,
                         entriesCreated: data.entries_created,
                         error: data.error,
+                        error_code: data.error_code || null,
+                        error_detail: data.error_detail || null,
                     });
                     if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
                         if (pollingRef.current) clearInterval(pollingRef.current);
@@ -450,7 +456,23 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                 )}
                 {generationJob && generationJob.status === 'failed' && (
                     <div className={styles.generationError}>
-                        <span>❌ {generationJob.error || '生成に失敗しました'}</span>
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', flex: 1 }}>
+                            <span>
+                                {generationJob.error_code === 'payment' && '💳 '}
+                                {generationJob.error_code === 'authentication' && '🔑 '}
+                                {generationJob.error_code === 'rate_limit' && '⏱️ '}
+                                {generationJob.error_code === 'timeout' && '⏰ '}
+                                {generationJob.error_code === 'server_error' && '🔧 '}
+                                {(!generationJob.error_code || !['payment', 'authentication', 'rate_limit', 'timeout', 'server_error'].includes(generationJob.error_code)) && '❌ '}
+                                {generationJob.error || '生成に失敗しました'}
+                            </span>
+                            {generationJob.error_detail && (
+                                <details style={{ fontSize: '0.85em', marginTop: '4px' }}>
+                                    <summary style={{ cursor: 'pointer', opacity: 0.7 }}>Technical Details</summary>
+                                    <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: '4px 0', fontSize: '0.9em', opacity: 0.8 }}>{generationJob.error_detail}</pre>
+                                </details>
+                            )}
+                        </div>
                         <button onClick={() => setGenerationJob(null)}>×</button>
                     </div>
                 )}

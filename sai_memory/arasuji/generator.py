@@ -279,6 +279,9 @@ def generate_level1_arasuji(
 
     except Exception as e:
         LOGGER.error(f"Error generating level-1 arasuji: {e}")
+        from llm_clients.exceptions import PaymentError, AuthenticationError
+        if isinstance(e, (PaymentError, AuthenticationError)):
+            raise
         return None
 
 
@@ -380,6 +383,9 @@ def generate_consolidated_arasuji(
                 f"(attempt {attempt + 1}/{max_retries})"
             )
         except Exception as e:
+            from llm_clients.exceptions import PaymentError, AuthenticationError
+            if isinstance(e, (PaymentError, AuthenticationError)):
+                raise
             LOGGER.warning(
                 f"LLM error for level-{target_level} arasuji "
                 f"(attempt {attempt + 1}/{max_retries}): {e}"

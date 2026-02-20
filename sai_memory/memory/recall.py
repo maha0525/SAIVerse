@@ -165,7 +165,16 @@ def _auto_download_model(model_name: str) -> str:
     model_suffix = model_name.split("/")[-1]
     target_dir = sbert_root / model_suffix
     if target_dir.exists():
-        return str(target_dir)
+        try:
+            _resolve_model_file(target_dir)
+            return str(target_dir)
+        except FileNotFoundError:
+            logger.warning(
+                "Directory %s exists but contains no ONNX model file. "
+                "Re-downloading model '%s'...",
+                target_dir,
+                model_name,
+            )
 
     logger.info(
         "Downloading model '%s' to %s (this may take a few minutes)...",

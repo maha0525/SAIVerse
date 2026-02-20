@@ -11,6 +11,8 @@ import uuid
 import time
 import threading
 
+from llm_clients.exceptions import LLMError
+
 LOGGER = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -33,6 +35,8 @@ def _create_job(persona_id: str) -> str:
             "message": "Initializing...",
             "entries_created": 0,
             "error": None,
+            "error_code": None,
+            "error_detail": None,
             "created_at": time.time(),
         }
     return job_id
@@ -701,9 +705,22 @@ def _run_chronicle_generation(
             + (f" Memopedia pages: {memopedia_pages_total}" if with_memopedia else "")
         )
 
+    except LLMError as e:
+        LOGGER.exception(f"Chronicle generation failed (LLM error): {e}")
+        _update_job(
+            job_id, status="failed",
+            error=e.user_message,
+            error_code=e.error_code,
+            error_detail=str(e),
+        )
     except Exception as e:
         LOGGER.exception(f"Chronicle generation failed: {e}")
-        _update_job(job_id, status="failed", error=str(e))
+        _update_job(
+            job_id, status="failed",
+            error=str(e),
+            error_code="unknown",
+            error_detail=str(e),
+        )
 
 
 @router.post("/{persona_id}/arasuji/generate", tags=["Chronicle"])
@@ -783,4 +800,6 @@ async def get_arasuji_generation_status(
         message=job.get("message"),
         entries_created=job.get("entries_created"),
         error=job.get("error"),
+        error_code=job.get("error_code"),
+        error_detail=job.get("error_detail"),
     )
