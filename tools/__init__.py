@@ -190,5 +190,46 @@ def _autodiscover_tools() -> None:
     LOGGER.info("Autodiscovered %d tools", len(TOOL_REGISTRY))
 
 
+def register_external_tool(name: str, schema: ToolSchema, func: Callable) -> None:
+    """Register an externally-provided tool at runtime (e.g. from MCP servers).
+
+    Unlike autodiscovery which runs at import time, this can be called
+    after MCP servers connect.  Duplicate names are skipped with a warning
+    so that built-in tools are never overwritten.
+    """
+    if name in TOOL_REGISTRY:
+        LOGGER.warning("register_external_tool: '%s' already registered, skipping", name)
+        return
+    TOOL_REGISTRY[name] = func
+    OPENAI_TOOLS_SPEC.append(oa.to_openai(schema))
+    GEMINI_TOOLS_SPEC.append(gm.to_gemini(schema))
+    TOOL_SCHEMAS.append(schema)
+    LOGGER.info("Registered external tool '%s'", name)
+
+
+def unregister_external_tool(name: str) -> None:
+    """Remove an externally-registered tool from all registries."""
+    if name not in TOOL_REGISTRY:
+        return
+    del TOOL_REGISTRY[name]
+    OPENAI_TOOLS_SPEC[:] = [
+        t for t in OPENAI_TOOLS_SPEC
+        if t.get("function", {}).get("name") != name
+    ]
+    # Gemini specs: each entry is a types.Tool with function_declarations list
+    new_gemini: List[Any] = []
+    for t in GEMINI_TOOLS_SPEC:
+        decls = getattr(t, "function_declarations", None)
+        if decls:
+            filtered = [d for d in decls if getattr(d, "name", None) != name]
+            if filtered:
+                new_gemini.append(t)
+        else:
+            new_gemini.append(t)
+    GEMINI_TOOLS_SPEC[:] = new_gemini
+    TOOL_SCHEMAS[:] = [s for s in TOOL_SCHEMAS if s.name != name]
+    LOGGER.info("Unregistered external tool '%s'", name)
+
+
 if os.getenv("SAIVERSE_SKIP_TOOL_IMPORTS") != "1":
     _autodiscover_tools()

@@ -1677,12 +1677,24 @@ class SEARuntime:
                 else:
                     LOGGER.info("[sea][tool] Tool function found: %s", tool_func)
 
-                # Execute tool with persona context
+                # Execute tool with persona context (supports async MCP tools)
                 if persona_id and persona_dir:
                     with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode):
-                        result = tool_func(**kwargs) if callable(tool_func) else None
+                        if callable(tool_func):
+                            if asyncio.iscoroutinefunction(tool_func):
+                                result = await tool_func(**kwargs)
+                            else:
+                                result = tool_func(**kwargs)
+                        else:
+                            result = None
                 else:
-                    result = tool_func(**kwargs) if callable(tool_func) else None
+                    if callable(tool_func):
+                        if asyncio.iscoroutinefunction(tool_func):
+                            result = await tool_func(**kwargs)
+                        else:
+                            result = tool_func(**kwargs)
+                    else:
+                        result = None
 
                 # Log tool result
                 result_str = str(result)
@@ -1794,9 +1806,15 @@ class SEARuntime:
 
                 if persona_id and persona_dir:
                     with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode):
-                        result = tool_func(**tool_args)
+                        if asyncio.iscoroutinefunction(tool_func):
+                            result = await tool_func(**tool_args)
+                        else:
+                            result = tool_func(**tool_args)
                 else:
-                    result = tool_func(**tool_args)
+                    if asyncio.iscoroutinefunction(tool_func):
+                        result = await tool_func(**tool_args)
+                    else:
+                        result = tool_func(**tool_args)
 
                 result_str = str(result)
                 result_preview = result_str[:500] + "..." if len(result_str) > 500 else result_str
