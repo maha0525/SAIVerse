@@ -80,5 +80,6 @@ SAIVerseのペルソナは、Function Calling を通じて様々なツールを�
 
 ## 次のステップ
 
+- [MCP連携](mcp-integration.md) - 外部MCPサーバーのツールを使う
 - [ツールカタログ](../reference/tool-catalog.md) - 全ツールの詳細
 - [ツールの追加](../developer-guide/adding-tools.md) - 開発者向け

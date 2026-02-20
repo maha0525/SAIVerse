@@ -341,6 +341,23 @@ def main():
     else:
         manager.unity_gateway = None
 
+    # Initialize MCP (Model Context Protocol) server connections
+    from tools.mcp_client import initialize_mcp
+    try:
+        _mcp_loop = asyncio.new_event_loop()
+        _mcp_mgr = _mcp_loop.run_until_complete(initialize_mcp())
+        _mcp_loop.close()
+        if _mcp_mgr:
+            _mcp_tool_names = _mcp_mgr.get_registered_tool_names()
+            logging.info(
+                "MCP: connected to %d server(s), registered %d tool(s)",
+                len(_mcp_mgr._connections), len(_mcp_tool_names),
+            )
+            for tn in _mcp_tool_names:
+                logging.info("  MCP tool: %s", tn)
+    except Exception:
+        logging.warning("MCP initialization failed (non-fatal)", exc_info=True)
+
     api_server_process = cleanup_and_start_server_with_args(
         manager.api_port,
         Path(__file__).parent / "database" / "api_server.py",
@@ -357,6 +374,15 @@ def main():
         if shutdown_called:
             return
         shutdown_called = True
+        # MCP servers shutdown
+        import asyncio
+        from tools.mcp_client import shutdown_mcp
+        try:
+            _mcp_shutdown_loop = asyncio.new_event_loop()
+            _mcp_shutdown_loop.run_until_complete(shutdown_mcp())
+            _mcp_shutdown_loop.close()
+        except Exception as e:
+            logging.debug("MCP shutdown error: %s", e)
         # Unity Gatewayの停止
         if manager and manager.unity_gateway:
             import asyncio
