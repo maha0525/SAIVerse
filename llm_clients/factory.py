@@ -12,6 +12,7 @@ from .ollama import OllamaClient
 from .openai import OpenAIClient
 from .nvidia_nim import NvidiaNIMClient
 from .llama_cpp import LlamaCppClient
+from .xai import XAIClient
 from .base import LLMClient
 
 
@@ -135,6 +136,19 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
 
         logging.debug("Creating llama.cpp client for model path '%s' with kwargs: %s", model_path, extra_kwargs)
         client = LlamaCppClient(model_path, context_length, supports_images=supports_images, **extra_kwargs)
+    elif provider == "xai":
+        extra_kwargs: Dict[str, object] = {}
+        if isinstance(config, dict):
+            api_key_env = config.get("api_key_env")
+            if isinstance(api_key_env, str) and api_key_env.strip():
+                extra_kwargs["api_key_env"] = api_key_env.strip()
+
+            reasoning_effort = config.get("reasoning_effort")
+            if isinstance(reasoning_effort, str) and reasoning_effort.strip():
+                extra_kwargs["reasoning_effort"] = reasoning_effort.strip()
+
+        logging.debug("Creating xAI client for model '%s' with kwargs: %s", api_model, extra_kwargs)
+        client = XAIClient(api_model, supports_images=supports_images, **extra_kwargs)
     elif provider == "ollama":
         extra_kwargs: Dict[str, object] = {}
         if isinstance(config, dict):
@@ -151,7 +165,7 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
     else:
         raise ValueError(
             f"Unknown provider '{provider}' for model '{model}'. "
-            f"Valid providers: openai, nvidia_nim, anthropic, gemini, llama_cpp, ollama"
+            f"Valid providers: openai, nvidia_nim, anthropic, gemini, xai, llama_cpp, ollama"
         )
 
     # Set config_key for pricing lookup (model param is the config key/filename)

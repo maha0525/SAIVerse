@@ -365,6 +365,8 @@ def _get_required_env_vars(model: str) -> list[str]:
         return ["GEMINI_API_KEY", "GEMINI_FREE_API_KEY"]
     if provider in ("openai",):
         return ["OPENAI_API_KEY"]
+    if provider == "xai":
+        return ["XAI_API_KEY"]
 
     # Unknown provider — assume available (don't hide by mistake)
     return []

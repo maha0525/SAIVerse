@@ -30,7 +30,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Type definitions
-ModelType = Literal["nano_banana", "nano_banana_pro", "gpt_image_1_5"]
+ModelType = Literal["nano_banana", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"]
 AspectRatioType = Literal["1:1", "16:9", "9:16", "4:3", "3:4"]
 QualityType = Literal["low", "medium", "high", "auto"]
 
@@ -245,6 +245,74 @@ def _generate_with_gpt_image(
     return image_bytes, "image/png"
 
 
+def _generate_with_grok_imagine(
+    prompt: str,
+    aspect_ratio: str = "1:1",
+    quality: str = "high",
+    input_image_paths: Optional[List[Path]] = None,
+) -> Tuple[bytes, str]:
+    """Generate image using xAI Grok Imagine Image Pro."""
+    import xai_sdk
+
+    api_key = os.getenv("XAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("XAI_API_KEY environment variable is not set.")
+
+    client = xai_sdk.Client(api_key=api_key)
+
+    # Map quality to resolution
+    resolution = "2k" if quality in ("high", "auto") else "1k"
+
+    kwargs: dict = {
+        "prompt": prompt,
+        "model": "grok-imagine-image-pro",
+        "aspect_ratio": aspect_ratio,
+        "resolution": resolution,
+        "image_format": "base64",
+    }
+
+    # Input images for editing mode
+    if input_image_paths:
+        image_urls = []
+        for img_path in input_image_paths:
+            img_bytes, img_mime = _load_image_bytes(img_path)
+            b64 = base64.b64encode(img_bytes).decode("ascii")
+            image_urls.append(f"data:{img_mime};base64,{b64}")
+            logger.info(f"[grok_imagine] Added input image: {img_path.name}")
+        kwargs["image_urls"] = image_urls
+
+    logger.info(
+        f"[grok_imagine] Generating with aspect_ratio={aspect_ratio}, "
+        f"resolution={resolution}"
+    )
+
+    response = client.image.sample(**kwargs)
+
+    # Extract base64 image data from response
+    image_data = getattr(response, "data", None)
+    if image_data is None:
+        # Try alternative attribute names
+        image_data = getattr(response, "b64_json", None)
+    if image_data is None:
+        # Response might contain image bytes directly
+        if hasattr(response, "image") and response.image:
+            return response.image, "image/png"
+        raise RuntimeError(
+            f"No image data in xAI response. Response attributes: "
+            f"{[a for a in dir(response) if not a.startswith('_')]}"
+        )
+
+    if isinstance(image_data, str):
+        # base64-encoded string
+        image_bytes = base64.b64decode(image_data)
+    elif isinstance(image_data, bytes):
+        image_bytes = image_data
+    else:
+        raise RuntimeError(f"Unexpected image data type: {type(image_data)}")
+
+    return image_bytes, "image/png"
+
+
 def _log_gemini_response(resp) -> None:
     """Log Gemini response details for debugging."""
     candidates_count = len(resp.candidates) if resp.candidates else 0
@@ -348,6 +416,10 @@ def generate_image(
             image_data, mime = _generate_with_gpt_image(
                 prompt, aspect_ratio, quality, input_image_paths
             )
+        elif model == "grok_imagine":
+            image_data, mime = _generate_with_grok_imagine(
+                prompt, aspect_ratio, quality, input_image_paths
+            )
         else:
             raise ValueError(f"Unknown model: {model}")
 
@@ -409,7 +481,8 @@ def schema() -> ToolSchema:
             "Supports multiple AI models:\n"
             "- nano_banana: Fast generation with aspect ratio control (Gemini 2.5 Flash)\n"
             "- nano_banana_pro: High quality with aspect ratio and resolution control (Gemini 3 Pro)\n"
-            "- gpt_image_1_5: State of the art photorealistic quality (OpenAI)\n\n"
+            "- gpt_image_1_5: State of the art photorealistic quality (OpenAI)\n"
+            "- grok_imagine: High quality image generation (xAI Grok Imagine Pro)\n\n"
             "Prompt tips:\n"
             "- Be specific and detailed about what you want\n"
             "- Include art style, lighting, mood, and composition\n"
@@ -430,11 +503,11 @@ def schema() -> ToolSchema:
                 },
                 "model": {
                     "type": "string",
-                    "enum": ["nano_banana", "nano_banana_pro", "gpt_image_1_5"],
+                    "enum": ["nano_banana", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"],
                     "description": (
                         "Image generation model: "
                         "nano_banana (fast, aspect ratio), nano_banana_pro (high quality, aspect ratio + resolution), "
-                        "gpt_image_1_5 (state of the art)"
+                        "gpt_image_1_5 (state of the art), grok_imagine (xAI Grok Imagine Pro)"
                     ),
                     "default": "nano_banana_pro"
                 },

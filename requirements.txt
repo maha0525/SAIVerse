@@ -26,6 +26,9 @@ markdownify>=0.12.0
 # PDF processing
 pypdf>=4.0.0
 
+# xAI (Grok) native SDK
+xai-sdk>=1.6.0
+
 # ローカルLLM (llama.cpp) を使う場合:
 #   pip install -r requirements-local-llm.txt
 
