@@ -146,6 +146,22 @@ def delete_memopedia_page(persona_id: str, page_id: str, manager = Depends(get_m
             raise HTTPException(status_code=500, detail=f"Memopedia error: {e}")
 
 
+@router.delete("/{persona_id}/memopedia/pages", tags=["Memopedia"])
+def delete_all_memopedia_pages(persona_id: str, manager=Depends(get_manager)):
+    """Delete ALL non-root Memopedia pages (and their edit history)."""
+    with get_adapter(persona_id, manager) as adapter:
+        try:
+            memopedia = _get_memopedia(adapter)
+            deleted_count = memopedia.clear_all_pages()
+            return {
+                "success": True,
+                "deleted_count": deleted_count,
+                "message": f"Deleted {deleted_count} Memopedia pages",
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to delete Memopedia pages: {e}")
+
+
 @router.post("/{persona_id}/memopedia/pages")
 def create_memopedia_page(
     persona_id: str,

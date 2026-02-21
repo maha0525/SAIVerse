@@ -324,6 +324,123 @@
     color: #ccc;
 }
 
+/* Danger Zone */
+.dangerZone {
+    margin-top: 3rem;
+    padding: 1.25rem;
+    border: 1px solid rgba(250, 82, 82, 0.3);
+    border-radius: 8px;
+    background-color: rgba(250, 82, 82, 0.05);
+}
+
+.dangerTitle {
+    margin: 0 0 0.5rem 0;
+    font-size: 1rem;
+    font-weight: 600;
+    color: #fa5252;
+}
+
+.dangerDescription {
+    margin: 0 0 1rem 0;
+    font-size: 0.85rem;
+    color: #888;
+}
+
+.dangerButtons {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.dangerButton {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.5rem 1rem;
+    background-color: transparent;
+    border: 1px solid rgba(250, 82, 82, 0.4);
+    border-radius: 6px;
+    color: #fa5252;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.dangerButton:hover:not(:disabled) {
+    background-color: rgba(250, 82, 82, 0.1);
+    border-color: #fa5252;
+}
+
+.dangerButton:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.confirmGroup {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.confirmText {
+    font-size: 0.85rem;
+    color: #ffc9c9;
+}
+
+.confirmYes {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.4rem 0.75rem;
+    background-color: #fa5252;
+    border: none;
+    border-radius: 6px;
+    color: #fff;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.confirmYes:hover:not(:disabled) {
+    background-color: #e03131;
+}
+
+.confirmYes:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+}
+
+.confirmNo {
+    padding: 0.4rem 0.75rem;
+    background-color: transparent;
+    border: 1px solid #444;
+    border-radius: 6px;
+    color: #aaa;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.confirmNo:hover:not(:disabled) {
+    border-color: #666;
+    color: #ccc;
+}
+
+.confirmNo:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.deleteResult {
+    margin-top: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 6px;
+    font-size: 0.85rem;
+    color: #ccc;
+}
+
 /* Light Mode Overrides */
 :global([data-theme="light"]) .container {
     color: #1f2937;
@@ -442,4 +559,54 @@
 :global([data-theme="light"]) .clearDateBtn:hover {
     border-color: #cbd5e1;
     color: #1f2937;
+}
+
+:global([data-theme="light"]) .dangerZone {
+    border-color: rgba(220, 38, 38, 0.3);
+    background-color: rgba(220, 38, 38, 0.03);
+}
+
+:global([data-theme="light"]) .dangerTitle {
+    color: #dc2626;
+}
+
+:global([data-theme="light"]) .dangerDescription {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .dangerButton {
+    border-color: rgba(220, 38, 38, 0.4);
+    color: #dc2626;
+}
+
+:global([data-theme="light"]) .dangerButton:hover:not(:disabled) {
+    background-color: rgba(220, 38, 38, 0.05);
+    border-color: #dc2626;
+}
+
+:global([data-theme="light"]) .confirmText {
+    color: #dc2626;
+}
+
+:global([data-theme="light"]) .confirmYes {
+    background-color: #dc2626;
+}
+
+:global([data-theme="light"]) .confirmYes:hover:not(:disabled) {
+    background-color: #b91c1c;
+}
+
+:global([data-theme="light"]) .confirmNo {
+    border-color: #e2e8f0;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .confirmNo:hover:not(:disabled) {
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .deleteResult {
+    background-color: rgba(0, 0, 0, 0.03);
+    color: #374151;
 }

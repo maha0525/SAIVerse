@@ -428,6 +428,28 @@ def delete_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_m
     finally:
         conn.close()
 
+@router.delete("/{persona_id}/arasuji", tags=["Chronicle"])
+def delete_all_arasuji_entries(persona_id: str, manager=Depends(get_manager)):
+    """Delete ALL Chronicle entries and reset progress."""
+    from sai_memory.arasuji.storage import clear_all_entries
+
+    conn = _get_arasuji_db(persona_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+
+    try:
+        deleted_count = clear_all_entries(conn)
+        return {
+            "success": True,
+            "deleted_count": deleted_count,
+            "message": f"Deleted {deleted_count} Chronicle entries",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete Chronicle entries: {e}")
+    finally:
+        conn.close()
+
+
 @router.get("/{persona_id}/arasuji/{entry_id}/messages", response_model=List[SourceMessageItem], tags=["Chronicle"])
 def get_arasuji_messages(
     persona_id: str,
