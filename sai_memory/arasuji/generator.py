@@ -225,7 +225,7 @@ def generate_level1_arasuji(
             f.write(prompt)
             f.write("\n")
 
-    # --- LLM call (no retry here; caller handles LLM retry) ---
+    # --- LLM call (no retry here; provider handles retry internally) ---
     try:
         response = client.generate(
             messages=[{"role": "user", "content": prompt}],
@@ -234,9 +234,9 @@ def generate_level1_arasuji(
         _record_llm_usage(client, persona_id, "chronicle_level1")
     except Exception as e:
         LOGGER.error(f"LLM call failed for level-1 arasuji: {e}")
-        from llm_clients.exceptions import PaymentError, AuthenticationError
-        if isinstance(e, (PaymentError, AuthenticationError)):
-            raise
+        from llm_clients.exceptions import LLMError
+        if isinstance(e, LLMError):
+            raise  # Propagate all LLM errors (empty, safety, timeout, etc.)
         return None
 
     # Debug log: write response
@@ -384,38 +384,22 @@ def generate_consolidated_arasuji(
 
     prompt = "\n".join(prompt_parts)
 
-    # Retry LLM call with exponential backoff
-    max_retries = 3
-    response = None
-    for attempt in range(max_retries):
-        try:
-            response = client.generate(
-                messages=[{"role": "user", "content": prompt}],
-                tools=[],
-            )
-            _record_llm_usage(client, persona_id, f"chronicle_level{target_level}")
-            if response and response.strip():
-                break
-            LOGGER.warning(
-                f"Empty response for level-{target_level} arasuji "
-                f"(attempt {attempt + 1}/{max_retries})"
-            )
-        except Exception as e:
-            from llm_clients.exceptions import PaymentError, AuthenticationError
-            if isinstance(e, (PaymentError, AuthenticationError)):
-                raise
-            LOGGER.warning(
-                f"LLM error for level-{target_level} arasuji "
-                f"(attempt {attempt + 1}/{max_retries}): {e}"
-            )
-        response = None
-        if attempt < max_retries - 1:
-            time.sleep(2 ** attempt)
+    # LLM call (no retry here; provider handles retry internally)
+    try:
+        response = client.generate(
+            messages=[{"role": "user", "content": prompt}],
+            tools=[],
+        )
+        _record_llm_usage(client, persona_id, f"chronicle_level{target_level}")
+    except Exception as e:
+        LOGGER.error(f"LLM call failed for level-{target_level} arasuji: {e}")
+        from llm_clients.exceptions import LLMError
+        if isinstance(e, LLMError):
+            raise  # Propagate all LLM errors (empty, safety, timeout, etc.)
+        return None
 
     if not response or not response.strip():
-        LOGGER.error(
-            f"Failed to generate level-{target_level} arasuji after {max_retries} attempts"
-        )
+        LOGGER.warning(f"Empty response from LLM for level-{target_level} arasuji")
         return None
 
     content = response.strip()
@@ -894,6 +878,8 @@ class ArasujiGenerator:
         Returns:
             Tuple of (level1_entries, consolidated_entries)
         """
+        from llm_clients.exceptions import LLMError
+
         level1_entries: List[ArasujiEntry] = []
         consolidated_entries: List[ArasujiEntry] = []
 
@@ -919,16 +905,23 @@ class ArasujiGenerator:
             LOGGER.info(f"Processing messages {i+1}-{i+len(batch)} of {total}")
 
             # Generate level-1 arasuji (retries are handled inside each LLM client)
-            entry = generate_level1_arasuji(
-                self.client,
-                self.conn,
-                batch,
-                dry_run=dry_run,
-                include_timestamp=self.include_timestamp,
-                memopedia_context=self.memopedia_context,
-                debug_log_path=self.debug_log_path,
-                persona_id=self.persona_id,
-            )
+            try:
+                entry = generate_level1_arasuji(
+                    self.client,
+                    self.conn,
+                    batch,
+                    dry_run=dry_run,
+                    include_timestamp=self.include_timestamp,
+                    memopedia_context=self.memopedia_context,
+                    debug_log_path=self.debug_log_path,
+                    persona_id=self.persona_id,
+                )
+            except LLMError as e:
+                # Add batch context to user_message and re-raise
+                e.user_message = (
+                    f"メッセージ {i+1}〜{i+len(batch)} の処理中: {e.user_message}"
+                )
+                raise
             if not entry:
                 raise RuntimeError(
                     f"Level-1 generation failed for messages {i+1}-{i+len(batch)}"

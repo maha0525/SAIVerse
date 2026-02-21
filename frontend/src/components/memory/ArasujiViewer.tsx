@@ -454,28 +454,49 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         <button onClick={() => setGenerationJob(null)}>×</button>
                     </div>
                 )}
-                {generationJob && generationJob.status === 'failed' && (
-                    <div className={styles.generationError}>
-                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', flex: 1 }}>
-                            <span>
-                                {generationJob.error_code === 'payment' && '💳 '}
-                                {generationJob.error_code === 'authentication' && '🔑 '}
-                                {generationJob.error_code === 'rate_limit' && '⏱️ '}
-                                {generationJob.error_code === 'timeout' && '⏰ '}
-                                {generationJob.error_code === 'server_error' && '🔧 '}
-                                {(!generationJob.error_code || !['payment', 'authentication', 'rate_limit', 'timeout', 'server_error'].includes(generationJob.error_code)) && '❌ '}
-                                {generationJob.error || '生成に失敗しました'}
-                            </span>
-                            {generationJob.error_detail && (
-                                <details style={{ fontSize: '0.85em', marginTop: '4px' }}>
-                                    <summary style={{ cursor: 'pointer', opacity: 0.7 }}>Technical Details</summary>
-                                    <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: '4px 0', fontSize: '0.9em', opacity: 0.8 }}>{generationJob.error_detail}</pre>
-                                </details>
-                            )}
+                {generationJob && generationJob.status === 'failed' && (() => {
+                    const code = generationJob.error_code;
+                    const iconMap: Record<string, string> = {
+                        payment: '💳',
+                        authentication: '🔑',
+                        rate_limit: '⏱️',
+                        timeout: '⏰',
+                        server_error: '🔧',
+                        empty_response: '📭',
+                        safety_filter: '🛡️',
+                    };
+                    const guidanceMap: Record<string, string> = {
+                        empty_response: 'しばらく時間を置いてから再実行してください。繰り返し発生する場合は、サーバーの障害情報を確認してください。',
+                        safety_filter: '該当メッセージに不適切と判定された内容が含まれている可能性があります。メッセージの内容を確認し、必要に応じて修正・削除してから再実行してください。',
+                        timeout: 'サーバーが混雑している可能性があります。しばらく時間を置いてから再実行してください。',
+                        rate_limit: 'API利用制限に達しています。しばらく時間を置いてから再実行してください。',
+                        payment: 'APIキーの残高や支払い設定を確認してください。',
+                        authentication: 'APIキーの設定を確認してください。',
+                        server_error: 'LLMサーバーで障害が発生しています。しばらく時間を置いてから再実行してください。',
+                    };
+                    const icon = (code && iconMap[code]) || '❌';
+                    const guidance = (code && guidanceMap[code]) || '予期しないエラーが発生しました。Technical Detailsを確認し、問題が続く場合は管理者に連絡してください。';
+                    return (
+                        <div className={styles.generationError}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1 }}>
+                                <span>
+                                    {icon}{' '}
+                                    {generationJob.error || '生成に失敗しました'}
+                                </span>
+                                <span style={{ fontSize: '0.85em', opacity: 0.75, lineHeight: 1.4 }}>
+                                    {guidance}
+                                </span>
+                                {generationJob.error_detail && (
+                                    <details style={{ fontSize: '0.85em', marginTop: '2px' }}>
+                                        <summary style={{ cursor: 'pointer', opacity: 0.7 }}>Technical Details</summary>
+                                        <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: '4px 0', fontSize: '0.9em', opacity: 0.8 }}>{generationJob.error_detail}</pre>
+                                    </details>
+                                )}
+                            </div>
+                            <button onClick={() => setGenerationJob(null)}>×</button>
                         </div>
-                        <button onClick={() => setGenerationJob(null)}>×</button>
-                    </div>
-                )}
+                    );
+                })()}
 
                 {/* Level Filter */}
                 {stats && stats.max_level > 0 && (

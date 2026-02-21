@@ -835,6 +835,8 @@ class GeminiClient(LLMClient):
                     last_chunk_time = time.time()
                     saw_any_chunk = False
                     last_chunk = None
+                    last_finish_reason = None
+                    last_safety_ratings = None
 
                     for chunk in stream:
                         last_chunk = chunk
@@ -846,16 +848,40 @@ class GeminiClient(LLMClient):
                         last_chunk_time = now
                         saw_any_chunk = True
                         get_llm_logger().debug("Gemini stream chunk:\n%s", chunk)
-                        
+
                         if chunk.candidates:
                             candidate = chunk.candidates[0]
+                            fr = getattr(candidate, "finish_reason", None)
+                            if fr is not None:
+                                last_finish_reason = fr
+                            sr = getattr(candidate, "safety_ratings", None)
+                            if sr is not None:
+                                last_safety_ratings = sr
                             if candidate.content and candidate.content.parts:
                                 all_parts.extend(candidate.content.parts)
-                    
+
                     if not saw_any_chunk:
                         raise EmptyResponseError("No chunks received from stream")
                     if not all_parts:
-                        raise EmptyResponseError("No parts in stream response")
+                        logging.warning(
+                            "[gemini] Stream had chunks but no content parts. "
+                            "finish_reason=%s, safety_ratings=%s",
+                            last_finish_reason,
+                            [str(r) for r in (last_safety_ratings or [])],
+                        )
+                        if last_finish_reason and "SAFETY" in str(last_finish_reason).upper():
+                            blocked = [
+                                str(getattr(r, "category", "unknown"))
+                                for r in (last_safety_ratings or [])
+                                if str(getattr(r, "probability", "")).upper() in ("HIGH", "MEDIUM")
+                            ]
+                            raise SafetyFilterError(
+                                f"Content blocked by safety filter (streaming). Blocked: {blocked}",
+                                user_message="コンテンツが安全性フィルターによりブロックされました。入力内容を変更してお試しください。"
+                            )
+                        raise EmptyResponseError(
+                            f"No parts in stream response (finish_reason={last_finish_reason})"
+                        )
 
                     # Store usage from last chunk (uses self.config_key for pricing)
                     if last_chunk:
@@ -909,8 +935,10 @@ class GeminiClient(LLMClient):
                     if not text.strip():
                         logging.error(
                             "[gemini] Empty streaming response (attempt %d/%d). "
-                            "Received parts but text is empty/whitespace-only.",
-                            attempt + 1, max_retries
+                            "Received parts but text is empty/whitespace-only. "
+                            "finish_reason=%s, parts_count=%d, reasoning_count=%d",
+                            attempt + 1, max_retries,
+                            last_finish_reason, len(all_parts), len(reasoning_entries),
                         )
                         continue
 
