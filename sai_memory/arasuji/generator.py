@@ -225,47 +225,40 @@ def generate_level1_arasuji(
             f.write(prompt)
             f.write("\n")
 
+    # --- LLM call (no retry here; caller handles LLM retry) ---
     try:
         response = client.generate(
             messages=[{"role": "user", "content": prompt}],
             tools=[],
         )
         _record_llm_usage(client, persona_id, "chronicle_level1")
+    except Exception as e:
+        LOGGER.error(f"LLM call failed for level-1 arasuji: {e}")
+        from llm_clients.exceptions import PaymentError, AuthenticationError
+        if isinstance(e, (PaymentError, AuthenticationError)):
+            raise
+        return None
 
-        # Debug log: write response
-        if debug_log_path:
-            with open(debug_log_path, "a", encoding="utf-8") as f:
-                f.write("--- RESPONSE ---\n")
-                f.write(response or "(empty)")
-                f.write("\n")
+    # Debug log: write response
+    if debug_log_path:
+        with open(debug_log_path, "a", encoding="utf-8") as f:
+            f.write("--- RESPONSE ---\n")
+            f.write(response or "(empty)")
+            f.write("\n")
 
-        if not response or not response.strip():
-            LOGGER.warning("Empty response from LLM for level-1 arasuji")
-            return None
+    if not response or not response.strip():
+        LOGGER.warning("Empty response from LLM for level-1 arasuji")
+        return None
 
-        content = response.strip()
+    content = response.strip()
 
-        # Extract message IDs (time range already calculated at the beginning)
-        source_ids = [msg.id for msg in messages]
+    # Extract message IDs (time range already calculated at the beginning)
+    source_ids = [msg.id for msg in messages]
 
-        if dry_run:
-            LOGGER.info(f"[DRY RUN] Would create level-1 arasuji: {content}")
-            return ArasujiEntry(
-                id="dry-run",
-                level=1,
-                content=content,
-                source_ids=source_ids,
-                start_time=start_time,
-                end_time=end_time,
-                source_count=len(messages),
-                message_count=len(messages),
-                parent_id=None,
-                is_consolidated=False,
-                created_at=0,
-            )
-
-        entry = create_entry(
-            conn,
+    if dry_run:
+        LOGGER.info(f"[DRY RUN] Would create level-1 arasuji: {content}")
+        return ArasujiEntry(
+            id="dry-run",
             level=1,
             content=content,
             source_ids=source_ids,
@@ -273,16 +266,41 @@ def generate_level1_arasuji(
             end_time=end_time,
             source_count=len(messages),
             message_count=len(messages),
+            parent_id=None,
+            is_consolidated=False,
+            created_at=0,
         )
-        LOGGER.info(f"Created level-1 arasuji: {content}")
-        return entry
 
-    except Exception as e:
-        LOGGER.error(f"Error generating level-1 arasuji: {e}")
-        from llm_clients.exceptions import PaymentError, AuthenticationError
-        if isinstance(e, (PaymentError, AuthenticationError)):
-            raise
-        return None
+    # --- DB save with retry (LLM result is already obtained, no re-call) ---
+    max_db_retries = 3
+    for attempt in range(max_db_retries):
+        try:
+            entry = create_entry(
+                conn,
+                level=1,
+                content=content,
+                source_ids=source_ids,
+                start_time=start_time,
+                end_time=end_time,
+                source_count=len(messages),
+                message_count=len(messages),
+            )
+            LOGGER.info(f"Created level-1 arasuji: {content}")
+            return entry
+        except Exception as e:
+            LOGGER.warning(
+                "DB save failed for level-1 arasuji (attempt %d/%d): %s",
+                attempt + 1, max_db_retries, e,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            if attempt < max_db_retries - 1:
+                time.sleep(2 ** attempt)
+
+    LOGGER.error("DB save failed after %d attempts for level-1 arasuji", max_db_retries)
+    return None
 
 
 def generate_consolidated_arasuji(
@@ -425,20 +443,63 @@ def generate_consolidated_arasuji(
             created_at=0,
         )
 
-    # Create the new entry
-    entry = create_entry(
-        conn,
-        level=target_level,
-        content=content,
-        source_ids=source_ids,
-        start_time=start_time,
-        end_time=end_time,
-        source_count=len(entries),
-        message_count=total_messages,
-    )
+    # --- DB save with retry (LLM result is already obtained, no re-call) ---
+    max_db_retries = 3
+    entry = None
+    for attempt in range(max_db_retries):
+        try:
+            entry = create_entry(
+                conn,
+                level=target_level,
+                content=content,
+                source_ids=source_ids,
+                start_time=start_time,
+                end_time=end_time,
+                source_count=len(entries),
+                message_count=total_messages,
+            )
+            break
+        except Exception as e:
+            LOGGER.warning(
+                "DB save failed for level-%d arasuji (attempt %d/%d): %s",
+                target_level, attempt + 1, max_db_retries, e,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            if attempt < max_db_retries - 1:
+                time.sleep(2 ** attempt)
 
-    # Mark source entries as consolidated
-    mark_consolidated(conn, source_ids, entry.id)
+    if not entry:
+        LOGGER.error(
+            "DB save failed after %d attempts for level-%d arasuji",
+            max_db_retries, target_level,
+        )
+        return None
+
+    # Mark source entries as consolidated (retry separately)
+    for attempt in range(max_db_retries):
+        try:
+            mark_consolidated(conn, source_ids, entry.id)
+            break
+        except Exception as e:
+            LOGGER.warning(
+                "mark_consolidated failed for level-%d arasuji (attempt %d/%d): %s",
+                target_level, attempt + 1, max_db_retries, e,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            if attempt < max_db_retries - 1:
+                time.sleep(2 ** attempt)
+    else:
+        LOGGER.error(
+            "mark_consolidated failed after %d attempts for level-%d arasuji "
+            "(entry %s created but children not marked)",
+            max_db_retries, target_level, entry.id,
+        )
 
     LOGGER.info(f"Created level-{target_level} arasuji ({total_messages} messages): {content}")
     return entry
