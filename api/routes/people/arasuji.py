@@ -678,6 +678,7 @@ def _run_chronicle_generation(
 
         level1_entries, consolidated_entries = generator.generate_unprocessed(
             all_messages,
+            max_messages=max_messages,
             progress_callback=progress_callback,
             batch_callback=batch_callback,
             cancel_check=cancel_check,

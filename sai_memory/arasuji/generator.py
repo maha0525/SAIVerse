@@ -936,6 +936,7 @@ class ArasujiGenerator:
         self,
         messages: List[Message],
         *,
+        max_messages: Optional[int] = None,
         dry_run: bool = False,
         progress_callback: Optional[Callable[[int, int], None]] = None,
         batch_callback: Optional[Callable[[List[Message]], None]] = None,
@@ -947,13 +948,17 @@ class ArasujiGenerator:
         1. Querying existing level-1 source_ids to find already-processed message IDs
         2. Grouping unprocessed messages into contiguous runs (separated by processed messages)
         3. Filtering out runs smaller than batch_size
-        4. Calling generate_from_messages() for each qualifying run
+        4. Applying max_messages limit across all runs
+        5. Calling generate_from_messages() for each qualifying run
 
         Args:
             messages: All messages (chronologically ordered). Already-processed ones
                       will be filtered out automatically.
+            max_messages: Maximum number of unprocessed messages to process.
+                          None or 0 means no limit.
             dry_run: If True, don't save to database
-            progress_callback: Optional callback(processed, total) for progress updates
+            progress_callback: Optional callback(processed, total) for progress updates.
+                               Reports global progress across all runs.
             batch_callback: Optional callback(batch_messages) called after each batch
             cancel_check: Optional callback that returns True if generation should stop
 
@@ -994,12 +999,33 @@ class ArasujiGenerator:
             len(qualifying_runs), total_qualifying, isolated_count,
         )
 
+        # 4. Apply max_messages limit
+        if max_messages and max_messages > 0:
+            limited_runs: List[List[Message]] = []
+            remaining = max_messages
+            for run in qualifying_runs:
+                if remaining <= 0:
+                    break
+                if len(run) <= remaining:
+                    limited_runs.append(run)
+                    remaining -= len(run)
+                else:
+                    limited_runs.append(run[:remaining])
+                    remaining = 0
+            qualifying_runs = limited_runs
+            total_qualifying = sum(len(r) for r in qualifying_runs)
+            LOGGER.info(
+                "Chronicle: max_messages=%d applied, %d msgs in %d runs after limit",
+                max_messages, total_qualifying, len(qualifying_runs),
+            )
+
         if not qualifying_runs:
             return [], []
 
-        # 4. Generate for each qualifying run
+        # 5. Generate for each qualifying run with global progress tracking
         level1_total: List[ArasujiEntry] = []
         consolidated_total: List[ArasujiEntry] = []
+        global_offset = 0
         for run_idx, run in enumerate(qualifying_runs):
             if cancel_check and cancel_check():
                 LOGGER.info("Chronicle generation cancelled after %d runs", run_idx)
@@ -1008,14 +1034,29 @@ class ArasujiGenerator:
                 "Processing run %d/%d (%d messages)",
                 run_idx + 1, len(qualifying_runs), len(run),
             )
+
+            # Wrap progress_callback to report global progress across all runs
+            run_progress: Optional[Callable[[int, int], None]] = None
+            if progress_callback:
+                _offset = global_offset
+                _global_total = total_qualifying
+
+                def _make_progress(offset: int, global_total: int):
+                    def _progress(processed: int, _local_total: int):
+                        progress_callback(offset + processed, global_total)
+                    return _progress
+
+                run_progress = _make_progress(_offset, _global_total)
+
             level1, consolidated = self.generate_from_messages(
                 run,
                 dry_run=dry_run,
-                progress_callback=progress_callback,
+                progress_callback=run_progress,
                 batch_callback=batch_callback,
                 cancel_check=cancel_check,
             )
             level1_total.extend(level1)
             consolidated_total.extend(consolidated)
+            global_offset += len(run)
 
         return level1_total, consolidated_total
