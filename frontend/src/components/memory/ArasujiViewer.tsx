@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Loader2, ChevronLeft, BookOpen, Layers, Trash2, Play, Settings, Square } from 'lucide-react';
+import { Loader2, ChevronLeft, BookOpen, Layers, Trash2, Play, Settings, Square, Edit2, Save, X } from 'lucide-react';
 import styles from './ArasujiViewer.module.css';
 import ModalOverlay from '../common/ModalOverlay';
 
@@ -75,7 +75,12 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         error: string | null;
         error_code: string | null;
         error_detail: string | null;
+        error_meta: { message_ids: string[]; start_time: number; end_time: number } | null;
     } | null>(null);
+    const [errorBatchMessages, setErrorBatchMessages] = useState<SourceMessage[]>([]);
+    const [isLoadingErrorBatch, setIsLoadingErrorBatch] = useState(false);
+    const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
+    const [editContent, setEditContent] = useState("");
     const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
     useEffect(() => {
@@ -137,6 +142,45 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         }
     };
 
+    // Fetch batch messages for error investigation
+    const fetchErrorBatchMessages = async (messageIds: string[]) => {
+        setIsLoadingErrorBatch(true);
+        try {
+            const res = await fetch(`/api/people/${personaId}/arasuji/messages-by-ids`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ids: messageIds }),
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setErrorBatchMessages(data);
+            }
+        } catch (e) {
+            console.error("Failed to fetch error batch messages", e);
+        } finally {
+            setIsLoadingErrorBatch(false);
+        }
+    };
+
+    // Delete a message from the error batch (for removing problematic messages)
+    const deleteErrorBatchMessage = async (messageId: string) => {
+        if (!confirm("このメッセージを削除しますか？この操作は元に戻せません。")) return;
+        try {
+            const res = await fetch(`/api/people/${personaId}/messages/${messageId}`, {
+                method: 'DELETE',
+            });
+            if (res.ok) {
+                setErrorBatchMessages(prev => prev.filter(m => m.id !== messageId));
+            } else {
+                const err = await res.json().catch(() => ({}));
+                alert(`削除に失敗しました: ${err.detail || 'Unknown error'}`);
+            }
+        } catch (e) {
+            console.error("Failed to delete message", e);
+            alert('メッセージの削除中にエラーが発生しました');
+        }
+    };
+
     // Load source messages when a level-1 entry is selected
     useEffect(() => {
         if (selectedEntry && selectedEntry.level === 1 && selectedEntry.source_ids.length > 0) {
@@ -145,6 +189,43 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
             setSourceMessages([]);
         }
     }, [selectedEntry?.id]);
+
+    const handleEditStart = (entry: ArasujiEntry) => {
+        setEditingEntryId(entry.id);
+        setEditContent(entry.content);
+    };
+
+    const handleEditCancel = () => {
+        setEditingEntryId(null);
+        setEditContent("");
+    };
+
+    const handleEditSave = async () => {
+        if (!editingEntryId) return;
+        try {
+            const res = await fetch(`/api/people/${personaId}/arasuji/${editingEntryId}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ content: editContent }),
+            });
+            if (res.ok) {
+                // Update local state
+                setEntries(prev => prev.map(e =>
+                    e.id === editingEntryId ? { ...e, content: editContent } : e
+                ));
+                if (selectedEntry?.id === editingEntryId) {
+                    setSelectedEntry({ ...selectedEntry, content: editContent });
+                }
+                setEditingEntryId(null);
+                setEditContent("");
+            } else {
+                alert("保存に失敗しました");
+            }
+        } catch (error) {
+            console.error("Failed to update arasuji", error);
+            alert("保存中にエラーが発生しました");
+        }
+    };
 
     const handleDelete = async (entryId: string, e: React.MouseEvent) => {
         e.stopPropagation();
@@ -263,7 +344,9 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     error: null,
                     error_code: null,
                     error_detail: null,
+                    error_meta: null,
                 });
+                setErrorBatchMessages([]);
                 startPolling(data.job_id);
             } else {
                 const err = await res.json();
@@ -292,6 +375,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         error: data.error,
                         error_code: data.error_code || null,
                         error_detail: data.error_detail || null,
+                        error_meta: data.error_meta || null,
                     });
                     if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled') {
                         if (pollingRef.current) clearInterval(pollingRef.current);
@@ -430,7 +514,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                 <Square size={12} />
                             </button>
                         </div>
-                        {generationJob.total && generationJob.total > 0 && (
+                        {generationJob.total != null && generationJob.total > 0 && (
                             <div className={styles.progressTrack}>
                                 <div
                                     className={styles.progressFill}
@@ -454,28 +538,107 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                         <button onClick={() => setGenerationJob(null)}>×</button>
                     </div>
                 )}
-                {generationJob && generationJob.status === 'failed' && (
-                    <div className={styles.generationError}>
-                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', flex: 1 }}>
-                            <span>
-                                {generationJob.error_code === 'payment' && '💳 '}
-                                {generationJob.error_code === 'authentication' && '🔑 '}
-                                {generationJob.error_code === 'rate_limit' && '⏱️ '}
-                                {generationJob.error_code === 'timeout' && '⏰ '}
-                                {generationJob.error_code === 'server_error' && '🔧 '}
-                                {(!generationJob.error_code || !['payment', 'authentication', 'rate_limit', 'timeout', 'server_error'].includes(generationJob.error_code)) && '❌ '}
-                                {generationJob.error || '生成に失敗しました'}
-                            </span>
-                            {generationJob.error_detail && (
-                                <details style={{ fontSize: '0.85em', marginTop: '4px' }}>
-                                    <summary style={{ cursor: 'pointer', opacity: 0.7 }}>Technical Details</summary>
-                                    <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: '4px 0', fontSize: '0.9em', opacity: 0.8 }}>{generationJob.error_detail}</pre>
-                                </details>
-                            )}
+                {generationJob && generationJob.status === 'failed' && (() => {
+                    const code = generationJob.error_code;
+                    const iconMap: Record<string, string> = {
+                        payment: '💳',
+                        authentication: '🔑',
+                        rate_limit: '⏱️',
+                        timeout: '⏰',
+                        server_error: '🔧',
+                        empty_response: '📭',
+                        safety_filter: '🛡️',
+                    };
+                    const guidanceMap: Record<string, string> = {
+                        empty_response: 'しばらく時間を置いてから再実行してください。繰り返し発生する場合は、サーバーの障害情報を確認してください。',
+                        safety_filter: '該当メッセージに不適切と判定された内容が含まれている可能性があります。特に画像生成プロンプト（少年・少女関連など）が含まれる場合、健全な内容でもブロックされることがあります。下の「該当メッセージを表示」で内容を確認し、必要に応じて修正・削除してから再実行してください。',
+                        timeout: 'サーバーが混雑している可能性があります。しばらく時間を置いてから再実行してください。',
+                        rate_limit: 'API利用制限に達しています。しばらく時間を置いてから再実行してください。',
+                        payment: 'APIキーの残高や支払い設定を確認してください。',
+                        authentication: 'APIキーの設定を確認してください。',
+                        server_error: 'LLMサーバーで障害が発生しています。しばらく時間を置いてから再実行してください。',
+                    };
+                    const icon = (code && iconMap[code]) || '❌';
+                    const guidance = (code && guidanceMap[code]) || '予期しないエラーが発生しました。Technical Detailsを確認し、問題が続く場合は管理者に連絡してください。';
+                    const meta = generationJob.error_meta;
+                    return (
+                        <div className={styles.generationError}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1 }}>
+                                <span>
+                                    {icon}{' '}
+                                    {generationJob.error || '生成に失敗しました'}
+                                </span>
+                                <span style={{ fontSize: '0.85em', opacity: 0.75, lineHeight: 1.4 }}>
+                                    {guidance}
+                                </span>
+                                {meta && meta.message_ids && meta.message_ids.length > 0 && (
+                                    <details style={{ fontSize: '0.85em', marginTop: '2px' }}
+                                        onToggle={(e) => {
+                                            if ((e.target as HTMLDetailsElement).open && errorBatchMessages.length === 0 && !isLoadingErrorBatch) {
+                                                fetchErrorBatchMessages(meta.message_ids);
+                                            }
+                                        }}
+                                    >
+                                        <summary style={{ cursor: 'pointer', opacity: 0.8, fontWeight: 500 }}>
+                                            該当メッセージを表示
+                                            {meta.start_time && meta.end_time && (
+                                                <span style={{ fontWeight: 400, opacity: 0.7, marginLeft: '8px' }}>
+                                                    ({new Date(meta.start_time * 1000).toLocaleDateString()} ~ {new Date(meta.end_time * 1000).toLocaleDateString()})
+                                                </span>
+                                            )}
+                                        </summary>
+                                        <div style={{ marginTop: '6px', maxHeight: '300px', overflowY: 'auto' }}>
+                                            {isLoadingErrorBatch ? (
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 0' }}>
+                                                    <Loader2 className={styles.loader} size={14} />
+                                                    <span>メッセージを読み込み中...</span>
+                                                </div>
+                                            ) : errorBatchMessages.length > 0 ? (
+                                                errorBatchMessages.map(msg => (
+                                                    <div key={msg.id} className={styles.sourceMessageItem}>
+                                                        <div className={styles.sourceMessageHeader}>
+                                                            <span className={`${styles.sourceMessageRole} ${styles[msg.role.toLowerCase()] || ''}`}>
+                                                                {msg.role === 'model' ? 'assistant' : msg.role}
+                                                            </span>
+                                                            <span className={styles.sourceMessageTime}>
+                                                                {new Date(msg.created_at * 1000).toLocaleString()}
+                                                            </span>
+                                                            <button
+                                                                onClick={() => deleteErrorBatchMessage(msg.id)}
+                                                                title="このメッセージを削除"
+                                                                style={{
+                                                                    background: 'none', border: 'none', cursor: 'pointer',
+                                                                    opacity: 0.5, padding: '2px', marginLeft: 'auto',
+                                                                    color: 'inherit', display: 'flex', alignItems: 'center',
+                                                                }}
+                                                                onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
+                                                                onMouseLeave={e => (e.currentTarget.style.opacity = '0.5')}
+                                                            >
+                                                                <Trash2 size={13} />
+                                                            </button>
+                                                        </div>
+                                                        <div className={styles.sourceMessageContent}>
+                                                            {msg.content}
+                                                        </div>
+                                                    </div>
+                                                ))
+                                            ) : (
+                                                <span style={{ opacity: 0.6 }}>メッセージが見つかりませんでした</span>
+                                            )}
+                                        </div>
+                                    </details>
+                                )}
+                                {generationJob.error_detail && (
+                                    <details style={{ fontSize: '0.85em', marginTop: '2px' }}>
+                                        <summary style={{ cursor: 'pointer', opacity: 0.7 }}>Technical Details</summary>
+                                        <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: '4px 0', fontSize: '0.9em', opacity: 0.8 }}>{generationJob.error_detail}</pre>
+                                    </details>
+                                )}
+                            </div>
+                            <button onClick={() => { setGenerationJob(null); setErrorBatchMessages([]); }}>×</button>
                         </div>
-                        <button onClick={() => setGenerationJob(null)}>×</button>
-                    </div>
-                )}
+                    );
+                })()}
 
                 {/* Level Filter */}
                 {stats && stats.max_level > 0 && (
@@ -567,6 +730,14 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     </span>
                     {selectedEntry && (
                         <>
+                            <button
+                                className={styles.detailRegenerateBtn}
+                                onClick={() => handleEditStart(selectedEntry)}
+                                title="編集"
+                            >
+                                <Edit2 size={16} />
+                                編集
+                            </button>
                             {selectedEntry.level === 1 && (
                                 <button
                                     className={styles.detailRegenerateBtn}
@@ -623,9 +794,28 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                 </div>
                             </div>
                             <div className={styles.contentSection}>
-                                <div className={styles.contentText}>
-                                    {selectedEntry.content}
-                                </div>
+                                {editingEntryId === selectedEntry.id ? (
+                                    <div className={styles.editInterface}>
+                                        <textarea
+                                            className={styles.editTextarea}
+                                            value={editContent}
+                                            onChange={(e) => setEditContent(e.target.value)}
+                                            rows={8}
+                                        />
+                                        <div className={styles.editButtons}>
+                                            <button onClick={handleEditSave} className={styles.editSaveBtn}>
+                                                <Save size={14} /> 保存
+                                            </button>
+                                            <button onClick={handleEditCancel} className={styles.editCancelBtn}>
+                                                <X size={14} /> キャンセル
+                                            </button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className={styles.contentText}>
+                                        {selectedEntry.content}
+                                    </div>
+                                )}
                             </div>
 
                             {/* Source Items Section */}

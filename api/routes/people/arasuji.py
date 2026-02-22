@@ -4,6 +4,7 @@ from api.deps import get_manager
 from .models import (
     ArasujiStatsResponse, ArasujiListResponse, ArasujiEntryItem, SourceMessageItem,
     GenerateArasujiRequest, GenerationJobStatus, ChronicleCostEstimate,
+    MessagesByIdsRequest, UpdateArasujiEntryRequest,
 )
 import sqlite3
 import logging
@@ -37,6 +38,7 @@ def _create_job(persona_id: str) -> str:
             "error": None,
             "error_code": None,
             "error_detail": None,
+            "error_meta": None,
             "created_at": time.time(),
         }
     return job_id
@@ -386,32 +388,14 @@ def get_arasuji_entry(
 @router.delete("/{persona_id}/arasuji/{entry_id}")
 def delete_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_manager)):
     """Delete a Chronicle entry and unmark child entries as consolidated."""
-    from sai_memory.arasuji.storage import delete_entry, get_entry
+    from sai_memory.arasuji.storage import delete_entry
 
     conn = _get_arasuji_db(persona_id)
     if not conn:
         raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
 
     try:
-        # Get entry first to find child entries
-        entry = get_entry(conn, entry_id)
-        if not entry:
-            raise HTTPException(status_code=404, detail=f"Chronicle entry {entry_id} not found")
-
-        # If this is a consolidated entry (level 2+), unmark children as consolidated
-        if entry.level >= 2 and entry.source_ids:
-            placeholders = ",".join("?" for _ in entry.source_ids)
-            conn.execute(
-                f"""
-                UPDATE arasuji_entries
-                SET is_consolidated = 0, parent_id = NULL
-                WHERE id IN ({placeholders})
-                """,
-                entry.source_ids
-            )
-            conn.commit()
-
-        # Now delete the entry
+        # delete_entry handles child reset (is_consolidated=0, parent_id=NULL)
         success = delete_entry(conn, entry_id)
         if not success:
             raise HTTPException(status_code=404, detail=f"Chronicle entry {entry_id} not found")
@@ -419,7 +403,6 @@ def delete_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_m
         return {
             "success": True,
             "message": f"Deleted Chronicle entry {entry_id}",
-            "children_unmarked": len(entry.source_ids) if entry.level >= 2 else 0
         }
     except HTTPException:
         raise
@@ -427,6 +410,33 @@ def delete_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_m
         raise HTTPException(status_code=500, detail=f"Failed to delete Chronicle entry: {e}")
     finally:
         conn.close()
+
+@router.patch("/{persona_id}/arasuji/{entry_id}", tags=["Chronicle"])
+def update_arasuji_entry(
+    persona_id: str,
+    entry_id: str,
+    request: UpdateArasujiEntryRequest,
+    manager=Depends(get_manager),
+):
+    """Update a Chronicle entry's content."""
+    from sai_memory.arasuji.storage import update_entry_content
+
+    conn = _get_arasuji_db(persona_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+
+    try:
+        success = update_entry_content(conn, entry_id, request.content)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Chronicle entry {entry_id} not found")
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update Chronicle entry: {e}")
+    finally:
+        conn.close()
+
 
 @router.delete("/{persona_id}/arasuji", tags=["Chronicle"])
 def delete_all_arasuji_entries(persona_id: str, manager=Depends(get_manager)):
@@ -494,6 +504,41 @@ def get_arasuji_messages(
         raise HTTPException(status_code=500, detail=f"Failed to get source messages: {e}")
     finally:
         conn.close()
+
+@router.post("/{persona_id}/arasuji/messages-by-ids", response_model=List[SourceMessageItem], tags=["Chronicle"])
+def get_messages_by_ids(
+    persona_id: str,
+    request: MessagesByIdsRequest,
+    manager = Depends(get_manager),
+):
+    """Get messages by their IDs (for error investigation)."""
+    from sai_memory.memory.storage import get_message
+
+    if not request.ids:
+        return []
+
+    conn = _get_arasuji_db(persona_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+
+    try:
+        messages = []
+        for msg_id in request.ids:
+            msg = get_message(conn, msg_id)
+            if msg:
+                messages.append(SourceMessageItem(
+                    id=msg.id,
+                    role=msg.role,
+                    content=msg.content or "",
+                    created_at=msg.created_at,
+                ))
+        messages.sort(key=lambda m: m.created_at)
+        return messages
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get messages: {e}")
+    finally:
+        conn.close()
+
 
 @router.post("/{persona_id}/arasuji/{entry_id}/regenerate", tags=["Chronicle"])
 async def regenerate_arasuji_entry(
@@ -655,7 +700,7 @@ def _run_chronicle_generation(
 
         # Progress callback
         def progress_callback(processed: int, total: int):
-            _update_job(job_id, progress=processed, message=f"Processing... {processed}/{total}")
+            _update_job(job_id, progress=processed, total=total, message=f"Processing... {processed}/{total}")
 
         # Memopedia batch callback if enabled
         batch_callback = None
@@ -700,6 +745,7 @@ def _run_chronicle_generation(
 
         level1_entries, consolidated_entries = generator.generate_unprocessed(
             all_messages,
+            max_messages=max_messages,
             progress_callback=progress_callback,
             batch_callback=batch_callback,
             cancel_check=cancel_check,
@@ -734,6 +780,7 @@ def _run_chronicle_generation(
             error=e.user_message,
             error_code=e.error_code,
             error_detail=str(e),
+            error_meta=getattr(e, "batch_meta", None),
         )
     except Exception as e:
         LOGGER.exception(f"Chronicle generation failed: {e}")
@@ -824,4 +871,5 @@ async def get_arasuji_generation_status(
         error=job.get("error"),
         error_code=job.get("error_code"),
         error_detail=job.get("error_detail"),
+        error_meta=job.get("error_meta"),
     )

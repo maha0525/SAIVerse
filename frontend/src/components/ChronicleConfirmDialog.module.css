@@ -1,0 +1,171 @@
+.modal {
+    background: #1f2937;
+    border-radius: 12px;
+    width: 100%;
+    max-width: 440px;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1.25rem 1.5rem 1rem;
+}
+
+.icon {
+    flex-shrink: 0;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: #374151;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #a78bfa;
+}
+
+.headerText h3 {
+    margin: 0;
+    font-size: 1rem;
+    color: #f9fafb;
+    font-weight: 600;
+}
+
+.headerText p {
+    margin: 0.25rem 0 0;
+    font-size: 0.8rem;
+    color: #9ca3af;
+}
+
+.body {
+    padding: 0 1.5rem 1rem;
+}
+
+.info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    background: #111827;
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+}
+
+.infoRow {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.875rem;
+}
+
+.infoLabel {
+    color: #9ca3af;
+}
+
+.infoValue {
+    color: #f9fafb;
+    font-weight: 500;
+}
+
+.timer {
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+    color: #6b7280;
+    text-align: right;
+}
+
+.timerWarn {
+    color: #f59e0b;
+}
+
+.actions {
+    padding: 0.75rem 1.5rem 1.25rem;
+    display: flex;
+    gap: 0.5rem;
+}
+
+.generateBtn {
+    flex: 1;
+    padding: 0.625rem 1rem;
+    border-radius: 8px;
+    border: none;
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s;
+    background: #7c3aed;
+    color: #fff;
+}
+
+.generateBtn:hover {
+    background: #6d28d9;
+}
+
+.skipBtn {
+    flex: 1;
+    padding: 0.625rem 1rem;
+    border-radius: 8px;
+    border: none;
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s;
+    background: #374151;
+    color: #d1d5db;
+}
+
+.skipBtn:hover {
+    background: #4b5563;
+}
+
+/* ── Light mode overrides ── */
+
+:global([data-theme="light"]) .modal {
+    background: #ffffff;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.15);
+}
+
+:global([data-theme="light"]) .icon {
+    background: #ede9fe;
+    color: #7c3aed;
+}
+
+:global([data-theme="light"]) .headerText h3 {
+    color: #1e293b;
+}
+
+:global([data-theme="light"]) .headerText p {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .info {
+    background: #f8fafc;
+}
+
+:global([data-theme="light"]) .infoLabel {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .infoValue {
+    color: #1e293b;
+}
+
+:global([data-theme="light"]) .timer {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .timerWarn {
+    color: #d97706;
+}
+
+:global([data-theme="light"]) .skipBtn {
+    background: #e2e8f0;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .skipBtn:hover {
+    background: #cbd5e1;
+}

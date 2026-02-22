@@ -225,47 +225,40 @@ def generate_level1_arasuji(
             f.write(prompt)
             f.write("\n")
 
+    # --- LLM call (no retry here; provider handles retry internally) ---
     try:
         response = client.generate(
             messages=[{"role": "user", "content": prompt}],
             tools=[],
         )
         _record_llm_usage(client, persona_id, "chronicle_level1")
+    except Exception as e:
+        LOGGER.error(f"LLM call failed for level-1 arasuji: {e}")
+        from llm_clients.exceptions import LLMError
+        if isinstance(e, LLMError):
+            raise  # Propagate all LLM errors (empty, safety, timeout, etc.)
+        return None
 
-        # Debug log: write response
-        if debug_log_path:
-            with open(debug_log_path, "a", encoding="utf-8") as f:
-                f.write("--- RESPONSE ---\n")
-                f.write(response or "(empty)")
-                f.write("\n")
+    # Debug log: write response
+    if debug_log_path:
+        with open(debug_log_path, "a", encoding="utf-8") as f:
+            f.write("--- RESPONSE ---\n")
+            f.write(response or "(empty)")
+            f.write("\n")
 
-        if not response or not response.strip():
-            LOGGER.warning("Empty response from LLM for level-1 arasuji")
-            return None
+    if not response or not response.strip():
+        LOGGER.warning("Empty response from LLM for level-1 arasuji")
+        return None
 
-        content = response.strip()
+    content = response.strip()
 
-        # Extract message IDs (time range already calculated at the beginning)
-        source_ids = [msg.id for msg in messages]
+    # Extract message IDs (time range already calculated at the beginning)
+    source_ids = [msg.id for msg in messages]
 
-        if dry_run:
-            LOGGER.info(f"[DRY RUN] Would create level-1 arasuji: {content}")
-            return ArasujiEntry(
-                id="dry-run",
-                level=1,
-                content=content,
-                source_ids=source_ids,
-                start_time=start_time,
-                end_time=end_time,
-                source_count=len(messages),
-                message_count=len(messages),
-                parent_id=None,
-                is_consolidated=False,
-                created_at=0,
-            )
-
-        entry = create_entry(
-            conn,
+    if dry_run:
+        LOGGER.info(f"[DRY RUN] Would create level-1 arasuji: {content}")
+        return ArasujiEntry(
+            id="dry-run",
             level=1,
             content=content,
             source_ids=source_ids,
@@ -273,16 +266,41 @@ def generate_level1_arasuji(
             end_time=end_time,
             source_count=len(messages),
             message_count=len(messages),
+            parent_id=None,
+            is_consolidated=False,
+            created_at=0,
         )
-        LOGGER.info(f"Created level-1 arasuji: {content}")
-        return entry
 
-    except Exception as e:
-        LOGGER.error(f"Error generating level-1 arasuji: {e}")
-        from llm_clients.exceptions import PaymentError, AuthenticationError
-        if isinstance(e, (PaymentError, AuthenticationError)):
-            raise
-        return None
+    # --- DB save with retry (LLM result is already obtained, no re-call) ---
+    max_db_retries = 3
+    for attempt in range(max_db_retries):
+        try:
+            entry = create_entry(
+                conn,
+                level=1,
+                content=content,
+                source_ids=source_ids,
+                start_time=start_time,
+                end_time=end_time,
+                source_count=len(messages),
+                message_count=len(messages),
+            )
+            LOGGER.info(f"Created level-1 arasuji: {content}")
+            return entry
+        except Exception as e:
+            LOGGER.warning(
+                "DB save failed for level-1 arasuji (attempt %d/%d): %s",
+                attempt + 1, max_db_retries, e,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            if attempt < max_db_retries - 1:
+                time.sleep(2 ** attempt)
+
+    LOGGER.error("DB save failed after %d attempts for level-1 arasuji", max_db_retries)
+    return None
 
 
 def generate_consolidated_arasuji(
@@ -366,38 +384,22 @@ def generate_consolidated_arasuji(
 
     prompt = "\n".join(prompt_parts)
 
-    # Retry LLM call with exponential backoff
-    max_retries = 3
-    response = None
-    for attempt in range(max_retries):
-        try:
-            response = client.generate(
-                messages=[{"role": "user", "content": prompt}],
-                tools=[],
-            )
-            _record_llm_usage(client, persona_id, f"chronicle_level{target_level}")
-            if response and response.strip():
-                break
-            LOGGER.warning(
-                f"Empty response for level-{target_level} arasuji "
-                f"(attempt {attempt + 1}/{max_retries})"
-            )
-        except Exception as e:
-            from llm_clients.exceptions import PaymentError, AuthenticationError
-            if isinstance(e, (PaymentError, AuthenticationError)):
-                raise
-            LOGGER.warning(
-                f"LLM error for level-{target_level} arasuji "
-                f"(attempt {attempt + 1}/{max_retries}): {e}"
-            )
-        response = None
-        if attempt < max_retries - 1:
-            time.sleep(2 ** attempt)
+    # LLM call (no retry here; provider handles retry internally)
+    try:
+        response = client.generate(
+            messages=[{"role": "user", "content": prompt}],
+            tools=[],
+        )
+        _record_llm_usage(client, persona_id, f"chronicle_level{target_level}")
+    except Exception as e:
+        LOGGER.error(f"LLM call failed for level-{target_level} arasuji: {e}")
+        from llm_clients.exceptions import LLMError
+        if isinstance(e, LLMError):
+            raise  # Propagate all LLM errors (empty, safety, timeout, etc.)
+        return None
 
     if not response or not response.strip():
-        LOGGER.error(
-            f"Failed to generate level-{target_level} arasuji after {max_retries} attempts"
-        )
+        LOGGER.warning(f"Empty response from LLM for level-{target_level} arasuji")
         return None
 
     content = response.strip()
@@ -425,20 +427,63 @@ def generate_consolidated_arasuji(
             created_at=0,
         )
 
-    # Create the new entry
-    entry = create_entry(
-        conn,
-        level=target_level,
-        content=content,
-        source_ids=source_ids,
-        start_time=start_time,
-        end_time=end_time,
-        source_count=len(entries),
-        message_count=total_messages,
-    )
+    # --- DB save with retry (LLM result is already obtained, no re-call) ---
+    max_db_retries = 3
+    entry = None
+    for attempt in range(max_db_retries):
+        try:
+            entry = create_entry(
+                conn,
+                level=target_level,
+                content=content,
+                source_ids=source_ids,
+                start_time=start_time,
+                end_time=end_time,
+                source_count=len(entries),
+                message_count=total_messages,
+            )
+            break
+        except Exception as e:
+            LOGGER.warning(
+                "DB save failed for level-%d arasuji (attempt %d/%d): %s",
+                target_level, attempt + 1, max_db_retries, e,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            if attempt < max_db_retries - 1:
+                time.sleep(2 ** attempt)
 
-    # Mark source entries as consolidated
-    mark_consolidated(conn, source_ids, entry.id)
+    if not entry:
+        LOGGER.error(
+            "DB save failed after %d attempts for level-%d arasuji",
+            max_db_retries, target_level,
+        )
+        return None
+
+    # Mark source entries as consolidated (retry separately)
+    for attempt in range(max_db_retries):
+        try:
+            mark_consolidated(conn, source_ids, entry.id)
+            break
+        except Exception as e:
+            LOGGER.warning(
+                "mark_consolidated failed for level-%d arasuji (attempt %d/%d): %s",
+                target_level, attempt + 1, max_db_retries, e,
+            )
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            if attempt < max_db_retries - 1:
+                time.sleep(2 ** attempt)
+    else:
+        LOGGER.error(
+            "mark_consolidated failed after %d attempts for level-%d arasuji "
+            "(entry %s created but children not marked)",
+            max_db_retries, target_level, entry.id,
+        )
 
     LOGGER.info(f"Created level-{target_level} arasuji ({total_messages} messages): {content}")
     return entry
@@ -833,8 +878,15 @@ class ArasujiGenerator:
         Returns:
             Tuple of (level1_entries, consolidated_entries)
         """
+        from llm_clients.exceptions import LLMError
+
         level1_entries: List[ArasujiEntry] = []
         consolidated_entries: List[ArasujiEntry] = []
+        # Track Level-2 entries created during THIS run to exclude from
+        # gap-fill detection.  Gap-fill is meant for Level-2 entries from
+        # PREVIOUS runs — entries created in the current run are sequential
+        # consolidation results, not gap-fill targets.
+        created_l2_ids: set = set()
 
         total = len(messages)
 
@@ -857,10 +909,8 @@ class ArasujiGenerator:
 
             LOGGER.info(f"Processing messages {i+1}-{i+len(batch)} of {total}")
 
-            # Generate level-1 arasuji with retry
-            max_retries = 3
-            entry = None
-            for attempt in range(max_retries):
+            # Generate level-1 arasuji (retries are handled inside each LLM client)
+            try:
                 entry = generate_level1_arasuji(
                     self.client,
                     self.conn,
@@ -871,19 +921,21 @@ class ArasujiGenerator:
                     debug_log_path=self.debug_log_path,
                     persona_id=self.persona_id,
                 )
-                if entry:
-                    break
-                LOGGER.warning(
-                    f"Level-1 generation failed (attempt {attempt + 1}/{max_retries}) "
-                    f"for messages {i+1}-{i+len(batch)}"
+            except LLMError as e:
+                # Add batch context to user_message and re-raise
+                e.user_message = (
+                    f"メッセージ {i+1}〜{i+len(batch)} の処理中: {e.user_message}"
                 )
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
-            else:
-                # All retries failed — abort generation
+                # Attach batch metadata for frontend navigation
+                e.batch_meta = {
+                    "message_ids": [m.id for m in batch],
+                    "start_time": min(m.created_at for m in batch),
+                    "end_time": max(m.created_at for m in batch),
+                }
+                raise
+            if not entry:
                 raise RuntimeError(
-                    f"Level-1 generation failed after {max_retries} attempts "
-                    f"for messages {i+1}-{i+len(batch)}"
+                    f"Level-1 generation failed for messages {i+1}-{i+len(batch)}"
                 )
 
             level1_entries.append(entry)
@@ -896,11 +948,23 @@ class ArasujiGenerator:
             else:
                 covering = None
 
+            # Exclude Level-2 entries created during this run — they are
+            # sequential consolidation results, not gap-fill targets.
+            if covering and covering.id in created_l2_ids:
+                LOGGER.info(
+                    "Skipping gap-fill for entry %s: covering level-2 %s "
+                    "was created in the current run",
+                    entry.id[:8], covering.id[:8],
+                )
+                covering = None
+
             if covering:
                 # Gap-fill: integrate into existing hierarchy
                 LOGGER.info(
-                    f"Gap-fill detected: integrating entry {entry.id[:8]} "
-                    f"into level-2 {covering.id[:8]}..."
+                    "Gap-fill detected: integrating entry %s "
+                    "(time %s-%s) into level-2 %s (time %s-%s)",
+                    entry.id[:8], entry.start_time, entry.end_time,
+                    covering.id[:8], covering.start_time, covering.end_time,
                 )
                 regenerated = integrate_gap_fill(
                     self.client,
@@ -921,6 +985,10 @@ class ArasujiGenerator:
                     include_timestamp=self.include_timestamp,
                     persona_id=self.persona_id,
                 )
+                # Track Level-2 entries created in this run
+                for c in consolidated:
+                    if c.level == 2:
+                        created_l2_ids.add(c.id)
                 consolidated_entries.extend(consolidated)
 
             # Call batch callback for Memopedia extraction (Memory Weave interleaved mode)
@@ -936,6 +1004,7 @@ class ArasujiGenerator:
         self,
         messages: List[Message],
         *,
+        max_messages: Optional[int] = None,
         dry_run: bool = False,
         progress_callback: Optional[Callable[[int, int], None]] = None,
         batch_callback: Optional[Callable[[List[Message]], None]] = None,
@@ -947,13 +1016,17 @@ class ArasujiGenerator:
         1. Querying existing level-1 source_ids to find already-processed message IDs
         2. Grouping unprocessed messages into contiguous runs (separated by processed messages)
         3. Filtering out runs smaller than batch_size
-        4. Calling generate_from_messages() for each qualifying run
+        4. Applying max_messages limit across all runs
+        5. Calling generate_from_messages() for each qualifying run
 
         Args:
             messages: All messages (chronologically ordered). Already-processed ones
                       will be filtered out automatically.
+            max_messages: Maximum number of unprocessed messages to process.
+                          None or 0 means no limit.
             dry_run: If True, don't save to database
-            progress_callback: Optional callback(processed, total) for progress updates
+            progress_callback: Optional callback(processed, total) for progress updates.
+                               Reports global progress across all runs.
             batch_callback: Optional callback(batch_messages) called after each batch
             cancel_check: Optional callback that returns True if generation should stop
 
@@ -994,12 +1067,33 @@ class ArasujiGenerator:
             len(qualifying_runs), total_qualifying, isolated_count,
         )
 
+        # 4. Apply max_messages limit
+        if max_messages and max_messages > 0:
+            limited_runs: List[List[Message]] = []
+            remaining = max_messages
+            for run in qualifying_runs:
+                if remaining <= 0:
+                    break
+                if len(run) <= remaining:
+                    limited_runs.append(run)
+                    remaining -= len(run)
+                else:
+                    limited_runs.append(run[:remaining])
+                    remaining = 0
+            qualifying_runs = limited_runs
+            total_qualifying = sum(len(r) for r in qualifying_runs)
+            LOGGER.info(
+                "Chronicle: max_messages=%d applied, %d msgs in %d runs after limit",
+                max_messages, total_qualifying, len(qualifying_runs),
+            )
+
         if not qualifying_runs:
             return [], []
 
-        # 4. Generate for each qualifying run
+        # 5. Generate for each qualifying run with global progress tracking
         level1_total: List[ArasujiEntry] = []
         consolidated_total: List[ArasujiEntry] = []
+        global_offset = 0
         for run_idx, run in enumerate(qualifying_runs):
             if cancel_check and cancel_check():
                 LOGGER.info("Chronicle generation cancelled after %d runs", run_idx)
@@ -1008,14 +1102,29 @@ class ArasujiGenerator:
                 "Processing run %d/%d (%d messages)",
                 run_idx + 1, len(qualifying_runs), len(run),
             )
+
+            # Wrap progress_callback to report global progress across all runs
+            run_progress: Optional[Callable[[int, int], None]] = None
+            if progress_callback:
+                _offset = global_offset
+                _global_total = total_qualifying
+
+                def _make_progress(offset: int, global_total: int):
+                    def _progress(processed: int, _local_total: int):
+                        progress_callback(offset + processed, global_total)
+                    return _progress
+
+                run_progress = _make_progress(_offset, _global_total)
+
             level1, consolidated = self.generate_from_messages(
                 run,
                 dry_run=dry_run,
-                progress_callback=progress_callback,
+                progress_callback=run_progress,
                 batch_callback=batch_callback,
                 cancel_check=cancel_check,
             )
             level1_total.extend(level1)
             consolidated_total.extend(consolidated)
+            global_offset += len(run)
 
         return level1_total, consolidated_total

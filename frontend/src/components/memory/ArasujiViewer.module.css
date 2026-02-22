@@ -998,3 +998,84 @@
 :global([data-theme="light"]) .offsetHint {
     color: #64748b;
 }
+
+/* Edit Interface */
+.editInterface {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.editTextarea {
+    width: 100%;
+    min-height: 120px;
+    background-color: #141517;
+    border: 1px solid #444;
+    color: #e0e0e0;
+    padding: 8px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    resize: vertical;
+}
+
+.editButtons {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+.editSaveBtn,
+.editCancelBtn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    border: none;
+}
+
+.editSaveBtn {
+    background-color: #1971c2;
+    color: white;
+}
+
+.editSaveBtn:hover {
+    background-color: #1864ab;
+}
+
+.editCancelBtn {
+    background-color: #343a40;
+    color: #ccc;
+}
+
+.editCancelBtn:hover {
+    background-color: #212529;
+}
+
+:global([data-theme="light"]) .editTextarea {
+    background-color: #ffffff;
+    border-color: #cbd5e1;
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .editSaveBtn {
+    background-color: #2563eb;
+    color: white;
+}
+
+:global([data-theme="light"]) .editSaveBtn:hover {
+    background-color: #1d4ed8;
+}
+
+:global([data-theme="light"]) .editCancelBtn {
+    background-color: #f1f5f9;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .editCancelBtn:hover {
+    background-color: #e2e8f0;
+}

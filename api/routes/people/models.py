@@ -431,3 +431,14 @@ class GenerationJobStatus(BaseModel):
     error: Optional[str] = None  # エラーメッセージ（ユーザー向け）
     error_code: Optional[str] = None  # エラーコード (payment, authentication, rate_limit, etc.)
     error_detail: Optional[str] = None  # 技術的詳細（開発者向け）
+    error_meta: Optional[dict] = None  # エラー発生バッチのメタデータ (message_ids, start_time, end_time)
+
+
+class UpdateArasujiEntryRequest(BaseModel):
+    """Chronicleエントリ更新リクエスト"""
+    content: str
+
+
+class MessagesByIdsRequest(BaseModel):
+    """メッセージID指定取得リクエスト"""
+    ids: List[str]

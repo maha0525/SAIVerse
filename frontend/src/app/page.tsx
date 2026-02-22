@@ -16,6 +16,7 @@ import SaiverseLink from '@/components/SaiverseLink';
 import ItemModal from '@/components/ItemModal';
 import ContextPreviewModal, { ContextPreviewData } from '@/components/ContextPreviewModal';
 import PlaybookPermissionDialog, { PermissionRequestData } from '@/components/PlaybookPermissionDialog';
+import ChronicleConfirmDialog, { ChronicleConfirmData } from '@/components/ChronicleConfirmDialog';
 import ModalOverlay from '@/components/common/ModalOverlay';
 import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
@@ -125,6 +126,7 @@ export default function Home() {
     const [inputValue, setInputValue] = useState('');
     const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
     const [permissionRequest, setPermissionRequest] = useState<PermissionRequestData | null>(null);
+    const [chronicleConfirm, setChronicleConfirm] = useState<ChronicleConfirmData | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const chatAreaRef = useRef<HTMLDivElement>(null); // Ref for the scrollable area
     const [isHistoryLoaded, setIsHistoryLoaded] = useState(false);
@@ -928,6 +930,19 @@ export default function Home() {
         }
     }, []);
 
+    const handleChronicleConfirmResponse = useCallback(async (requestId: string, decision: string) => {
+        setChronicleConfirm(null);
+        try {
+            await fetch('/api/chat/permission-response', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ request_id: requestId, decision }),
+            });
+        } catch (e) {
+            console.error('Failed to send chronicle confirm response', e);
+        }
+    }, []);
+
     const handleSendMessage = async () => {
         if ((!inputValue.trim() && attachments.length === 0) || loadingStatus) return;
         isProcessingRef.current = true;
@@ -1224,6 +1239,15 @@ export default function Home() {
                                 playbookName: event.playbook_name,
                                 playbookDisplayName: event.playbook_display_name || event.playbook_name,
                                 playbookDescription: event.playbook_description || '',
+                                personaName: event.persona_name || '',
+                            });
+                        } else if (event.type === 'chronicle_confirm') {
+                            setChronicleConfirm({
+                                requestId: event.request_id,
+                                unprocessedMessages: event.unprocessed_messages,
+                                totalMessages: event.total_messages,
+                                estimatedLlmCalls: event.estimated_llm_calls,
+                                modelName: event.model_name || '',
                                 personaName: event.persona_name || '',
                             });
                         } else if (event.type === 'warning') {
@@ -1625,16 +1649,20 @@ export default function Home() {
                                         <div className={styles.errorContent}>
                                             <div className={styles.errorHeader}>
                                                 <span className={styles.errorIcon}>
-                                                    {msg.errorCode === 'rate_limit' && '⏱️'}
-                                                    {msg.errorCode === 'timeout' && '⏰'}
-                                                    {msg.errorCode === 'safety_filter' && '🛡️'}
-                                                    {msg.errorCode === 'server_error' && '🔧'}
-                                                    {msg.errorCode === 'empty_response' && '📭'}
-                                                    {msg.errorCode === 'authentication' && '🔑'}
-                                                    {msg.errorCode === 'payment' && '💳'}
-                                                    {(!msg.errorCode || msg.errorCode === 'unknown' || !['rate_limit', 'timeout', 'safety_filter', 'server_error', 'empty_response', 'authentication', 'payment'].includes(msg.errorCode)) && '⚠️'}
+                                                    {({rate_limit: '⏱️', timeout: '⏰', safety_filter: '🛡️', server_error: '🔧', empty_response: '📭', authentication: '🔑', payment: '💳'} as Record<string, string>)[msg.errorCode || ''] || '⚠️'}
                                                 </span>
                                                 <span className={styles.errorMessage}>{msg.content}</span>
+                                            </div>
+                                            <div style={{ fontSize: '0.85em', opacity: 0.75, lineHeight: 1.4, marginTop: '4px' }}>
+                                                {({
+                                                    empty_response: 'しばらく時間を置いてから再送信してください。繰り返し発生する場合は、サーバーの障害情報を確認してください。',
+                                                    safety_filter: '送信した内容が安全性フィルターに該当した可能性があります。内容を変更して再送信してください。',
+                                                    timeout: 'サーバーが混雑している可能性があります。しばらく時間を置いてから再送信してください。',
+                                                    rate_limit: 'API利用制限に達しています。しばらく時間を置いてから再送信してください。',
+                                                    payment: 'APIキーの残高や支払い設定を確認してください。',
+                                                    authentication: 'APIキーの設定を確認してください。',
+                                                    server_error: 'LLMサーバーで障害が発生しています。しばらく時間を置いてから再送信してください。',
+                                                } as Record<string, string>)[msg.errorCode || ''] || '予期しないエラーが発生しました。問題が続く場合は管理者に連絡してください。'}
                                             </div>
                                             {msg.errorDetail && (
                                                 <details className={styles.errorDetails}>
@@ -1940,6 +1968,13 @@ export default function Home() {
                 <PlaybookPermissionDialog
                     request={permissionRequest}
                     onRespond={handlePermissionResponse}
+                />
+            )}
+
+            {chronicleConfirm && (
+                <ChronicleConfirmDialog
+                    request={chronicleConfirm}
+                    onRespond={handleChronicleConfirmResponse}
                 />
             )}
 

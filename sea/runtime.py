@@ -3756,7 +3756,7 @@ class SEARuntime:
         from saiverse.model_configs import find_model_config
         from sai_memory.arasuji import init_arasuji_tables
         from sai_memory.arasuji.generator import ArasujiGenerator, DEFAULT_BATCH_SIZE
-        from sai_memory.memory.storage import get_messages_paginated
+        from sai_memory.memory.storage import Message
 
         # Get LLM client using MEMORY_WEAVE_MODEL
         model_name = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
@@ -3778,17 +3778,90 @@ class SEARuntime:
 
         init_arasuji_tables(adapter.conn)
 
-        thread_id = adapter._thread_id(None)
+        # Fetch ALL messages across all threads (same as UI-triggered generation).
+        # Previously this only fetched from the default persona thread, missing
+        # messages logged on building-specific threads.
+        import json as _json
+        cur = adapter.conn.execute(
+            "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+            "FROM messages ORDER BY created_at ASC"
+        )
         all_messages = []
-        page = 0
-        while True:
-            batch = get_messages_paginated(adapter.conn, thread_id, page=page, page_size=200)
-            if not batch:
-                break
-            all_messages.extend(batch)
-            page += 1
+        for row in cur.fetchall():
+            msg_id, tid, role, content, resource_id, created_at, metadata_raw = row
+            metadata = None
+            if metadata_raw:
+                try:
+                    metadata = _json.loads(metadata_raw)
+                except Exception:
+                    pass
+            all_messages.append(Message(
+                id=msg_id, thread_id=tid, role=role, content=content,
+                resource_id=resource_id, created_at=int(created_at),
+                metadata=metadata,
+            ))
 
         if not all_messages:
+            return
+
+        # Calculate unprocessed message count before confirming
+        from sai_memory.arasuji.storage import get_total_message_count
+        processed_count = get_total_message_count(adapter.conn)
+        total_count = len(all_messages)
+        unprocessed_count = total_count - processed_count
+
+        if unprocessed_count <= 0:
+            LOGGER.info("[metabolism] No unprocessed messages for Chronicle generation")
+            return
+
+        batch_size_for_estimate = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)))
+        estimated_llm_calls = max(1, (unprocessed_count + batch_size_for_estimate - 1) // batch_size_for_estimate)
+
+        # Request user confirmation before generating
+        if event_callback:
+            import threading as _threading
+
+            request_id = str(uuid.uuid4())
+            confirm_event = _threading.Event()
+            self.manager._pending_permission_requests[request_id] = confirm_event
+
+            persona_name = getattr(persona, "persona_name", None)
+            display_model = model_config.get("display_name", model_name)
+
+            event_callback({
+                "type": "chronicle_confirm",
+                "request_id": request_id,
+                "unprocessed_messages": unprocessed_count,
+                "total_messages": total_count,
+                "estimated_llm_calls": estimated_llm_calls,
+                "model_name": display_model,
+                "persona_name": persona_name,
+            })
+            LOGGER.info(
+                "[metabolism] Sent chronicle_confirm: %d unprocessed messages, model=%s (id=%s)",
+                unprocessed_count, display_model, request_id,
+            )
+
+            # Block until user responds or timeout (60s)
+            responded = confirm_event.wait(timeout=60)
+            self.manager._pending_permission_requests.pop(request_id, None)
+            response = self.manager._permission_responses.pop(request_id, None)
+
+            if not responded or response != "allow":
+                reason = "timeout" if not responded else response
+                LOGGER.info("[metabolism] Chronicle generation skipped (user %s)", reason)
+                if event_callback:
+                    event_callback({
+                        "type": "warning",
+                        "content": "Chronicle生成をスキップしました。",
+                        "warning_code": "chronicle_skipped",
+                        "display": "toast",
+                    })
+                return
+            LOGGER.info("[metabolism] Chronicle generation approved by user")
+        else:
+            # No event_callback (e.g. auto pulse without UI) — skip generation
+            LOGGER.info("[metabolism] No event_callback — skipping Chronicle generation confirmation (%d unprocessed)", unprocessed_count)
             return
 
         # Build progress callback for streaming status to frontend
