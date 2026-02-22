@@ -258,6 +258,21 @@ class RuntimeService(
             if pid in conversing_ids
         ]
 
+    def _canonical_building_id(self, building_id: str) -> str:
+        """Resolve building_id to the canonical key used by building_memory_paths."""
+        if building_id in self.building_memory_paths:
+            return building_id
+        if building_id.endswith("_room"):
+            candidate = building_id[:-5]
+            if candidate in self.building_memory_paths:
+                logging.debug(
+                    "[runtime] canonicalized building_id %s -> %s for history routing",
+                    building_id,
+                    candidate,
+                )
+                return candidate
+        return building_id
+
     def summon_persona(self, persona_id: str) -> Tuple[bool, Optional[str]]:
         persona = self.personas.get(persona_id)
         if not persona:
@@ -268,6 +283,7 @@ class RuntimeService(
         if not target_building_id:
             return False, "User's current building is unknown."
 
+        target_history_building_id = self._canonical_building_id(target_building_id)
         prev = persona.current_building_id
         if prev == target_building_id:
             return True, None
@@ -279,7 +295,7 @@ class RuntimeService(
             )
         if not allowed:
             persona.history_manager.add_to_building_only(
-                target_building_id,
+                target_history_building_id,
                 {
                     "role": "assistant",
                     "content": f'<div class="note-box">移動できませんでした。{reason}</div>',
@@ -293,7 +309,7 @@ class RuntimeService(
         persona.auto_count = 0
         persona._mark_entry(target_building_id)
         persona.history_manager.add_to_building_only(
-            target_building_id,
+            target_history_building_id,
             {
                 "role": "assistant",
                 "content": f'<div class="note-box">🏢 Building:<br><b>{persona.persona_name}が入室しました</b></div>',
@@ -330,8 +346,9 @@ class RuntimeService(
             return f"Error: Failed to move: {reason}"
 
         persona.current_building_id = private_room_id
+        history_building_id = self._canonical_building_id(current_user_building)
         persona.history_manager.add_to_building_only(
-            current_user_building,
+            history_building_id,
             {
                 "role": "assistant",
                 "content": f'<div class="note-box">🏢 Building:<br><b>{persona.persona_name}が退室しました</b></div>',

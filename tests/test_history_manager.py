@@ -130,6 +130,13 @@ class TestHistoryManager(unittest.TestCase):
         self.assertIn("seq", entry)
         self.assertEqual(self.history_manager.messages, []) # persona history should be unchanged
 
+    def test_add_to_building_only_with_unknown_building_id_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            self.history_manager.add_to_building_only(
+                "unknown_room",
+                {"role": "assistant", "content": "invalid"},
+            )
+
     def test_add_to_persona_only(self):
         msg = {"role": "system", "content": "Persona specific"}
         self.history_manager.add_to_persona_only(msg)

@@ -196,7 +196,15 @@ class HistoryManager:
         hist = self.building_histories.setdefault(building_id, [])
         building_msg = self._decorate_building_message(building_id, prepared_msg, heard_by)
         hist.append(building_msg)
-        self._ensure_size_limit(hist, self.building_memory_paths[building_id])
+        self._ensure_size_limit(hist, self._get_building_memory_path(building_id))
+
+    def _get_building_memory_path(self, building_id: str) -> Path:
+        path = self.building_memory_paths.get(building_id)
+        if path is None:
+            raise ValueError(
+                f"Unknown building_id '{building_id}'. Expected one of: {sorted(self.building_memory_paths.keys())}"
+            )
+        return path
 
     def add_to_building_only(
         self,
@@ -205,12 +213,15 @@ class HistoryManager:
         *,
         heard_by: Optional[List[str]] = None,
     ) -> None:
-        """Adds a message only to a specific building's history."""
+        """Adds a message only to a specific building's history.
+
+        building_id must be the canonical building ID present in building_memory_paths.
+        """
         prepared_msg = self._prepare_message(msg)
         hist = self.building_histories.setdefault(building_id, [])
         building_msg = self._decorate_building_message(building_id, prepared_msg, heard_by)
         hist.append(building_msg)
-        self._ensure_size_limit(hist, self.building_memory_paths[building_id])
+        self._ensure_size_limit(hist, self._get_building_memory_path(building_id))
 
     def add_to_persona_only(self, msg: Dict[str, str]) -> None:
         """Adds a message only to the persona's main history."""
