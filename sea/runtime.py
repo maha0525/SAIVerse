@@ -37,7 +37,6 @@ from sea.runtime_state import (
 )
 
 from . import runtime_llm as runtime_llm_module
-from .runtime_events import RuntimeEvents
 from .runtime_utils import _format, _is_llm_streaming_enabled
 LOGGER = logging.getLogger(__name__)
 
@@ -56,7 +55,6 @@ class SEARuntime:
         self.playbooks_dir = Path(__file__).parent / "playbooks"
         self._playbook_cache: Dict[str, PlaybookSchema] = {}
         self._trace = bool(os.getenv("SAIVERSE_SEA_TRACE"))
-        self._runtime_events = RuntimeEvents(manager_ref=manager_ref, runtime=self)
         self._runtime_engine = RuntimeEngine(
             runtime=self,
             manager_ref=manager_ref,
@@ -1308,7 +1306,38 @@ class SEARuntime:
         selection: Optional[Dict[str, Any]],
         raw_text: str,
     ) -> None:
-        self._runtime_events.append_router_function_call(state, selection, raw_text)
+        payload = selection if isinstance(selection, dict) else None
+        if payload is None:
+            payload = {"raw": raw_text}
+        try:
+            args_text = json.dumps(payload, ensure_ascii=False)
+        except Exception:
+            args_text = json.dumps({"raw": str(raw_text)}, ensure_ascii=False)
+        conv = state.get("messages")
+        if not isinstance(conv, list):
+            conv = []
+        call_id = f"router_call_{uuid.uuid4().hex}"
+        call_msg = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "route_playbook",
+                        "arguments": args_text,
+                    },
+                }
+            ],
+        }
+        if conv and isinstance(conv[-1], dict) and conv[-1].get("role") == "assistant":
+            conv[-1] = call_msg
+        else:
+            conv.append(call_msg)
+        state["messages"] = conv
+        state["_last_tool_call_id"] = call_id
+        state["_last_tool_name"] = payload.get("playbook") or "sub_playbook"
 
     def _store_memory(
         self,
@@ -1320,14 +1349,55 @@ class SEARuntime:
         pulse_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        return self._runtime_events.store_memory(
-            persona,
-            text,
-            role=role,
-            tags=tags,
-            pulse_id=pulse_id,
-            metadata=metadata,
-        )
+        """Store a message to SAIMemory. Returns True on success, False on failure."""
+        if not text:
+            return True
+        adapter = getattr(persona, "sai_memory", None)
+        if not adapter or not adapter.is_ready():
+            LOGGER.warning(
+                "[_store_memory] SAIMemory adapter unavailable for persona=%s — message will NOT be stored. "
+                "Check embedding model setup.",
+                getattr(persona, "persona_id", None),
+            )
+            return False
+        try:
+            if adapter and adapter.is_ready():
+                current_thread = adapter.get_current_thread()
+                LOGGER.debug("[_store_memory] Active thread: %s (persona_id=%s)", current_thread, getattr(persona, "persona_id", None))
+                # If no active thread, initialize the default __persona__ thread
+                if current_thread is None:
+                    pid = getattr(persona, "persona_id", None) or "unknown"
+                    default_thread = f"{pid}:{adapter._PERSONA_THREAD_SUFFIX}"
+                    adapter.set_active_thread(default_thread)
+                    current_thread = default_thread
+                    LOGGER.info("[_store_memory] No active thread for %s — initialized default: %s", pid, default_thread)
+                message = {"role": role or "assistant", "content": text}
+                clean_tags = [str(tag) for tag in (tags or []) if tag]
+                # Add pulse:uuid tag
+                if pulse_id:
+                    clean_tags.append(f"pulse:{pulse_id}")
+                # Build metadata dict
+                msg_metadata: Dict[str, Any] = {}
+                if clean_tags:
+                    msg_metadata["tags"] = clean_tags
+                # Merge additional metadata (e.g., media attachments)
+                if isinstance(metadata, dict):
+                    for key, value in metadata.items():
+                        if key == "tags":
+                            # Merge tags
+                            extra_tags = [str(t) for t in value if t] if isinstance(value, list) else []
+                            msg_metadata.setdefault("tags", []).extend(extra_tags)
+                        else:
+                            msg_metadata[key] = value
+                if msg_metadata:
+                    message["metadata"] = msg_metadata
+                # Pass thread_suffix to ensure message is saved to correct thread
+                thread_suffix = current_thread.split(":", 1)[1] if ":" in current_thread else current_thread
+                adapter.append_persona_message(message, thread_suffix=thread_suffix)
+            return True
+        except Exception:
+            LOGGER.warning("memorize node not stored", exc_info=True)
+            return False
 
     def _append_tool_result_message(
         self,
@@ -1335,8 +1405,23 @@ class SEARuntime:
         source: str,
         payload: str,
     ) -> None:
-        self._runtime_events.append_tool_result_message(state, source, payload)
+        call_id = state.get("_last_tool_call_id")
+        if not call_id:
+            return
+        conv = state.get("messages")
+        if not isinstance(conv, list):
+            conv = []
+        message = {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "name": source or state.get("_last_tool_name") or "sub_playbook",
+            "content": payload,
+        }
+        conv.append(message)
+        state["messages"] = conv
+        state["_last_tool_call_id"] = None
 
+    # ---------------- helpers -----------------
     def _effective_building_id(self, persona: Any, fallback: str) -> str:
         """Return persona's actual building from occupancy map.
 
@@ -1353,17 +1438,109 @@ class SEARuntime:
         return fallback
 
     def _emit_speak(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, record_history: bool = True) -> None:
-        self._runtime_events.emit_speak(persona, building_id, text, pulse_id=pulse_id, record_history=record_history)
+        msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
+        # Build metadata with tags and conversation partners
+        metadata: Dict[str, Any] = {"tags": ["conversation"]}
+        if pulse_id:
+            metadata["tags"].append(f"pulse:{pulse_id}")
+        # Add conversation partners to "with" field
+        partners = []
+        occupants = self.manager.occupants.get(building_id, [])
+        for oid in occupants:
+            if oid != persona.persona_id:
+                partners.append(oid)
+        # Add user if online/away
+        presence = getattr(self.manager, "user_presence_status", "offline")
+        if presence in ("online", "away"):
+            partners.append("user")
+        if partners:
+            metadata["with"] = partners
+        msg["metadata"] = metadata
+        if record_history:
+            try:
+                persona.history_manager.add_message(msg, building_id, heard_by=None)
+                self.manager.gateway_handle_ai_replies(building_id, persona, [text])
+            except Exception:
+                LOGGER.exception("Failed to emit speak message")
+        # Notify Unity Gateway
+        self._notify_unity_speak(persona, text)
 
     def _emit_say(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> None:
-        self._runtime_events.emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=metadata)
+        msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
+        # Build metadata dict
+        msg_metadata: Dict[str, Any] = {}
+        if pulse_id:
+            msg_metadata["tags"] = [f"pulse:{pulse_id}"]
+        # Merge additional metadata (e.g., media attachments)
+        if isinstance(metadata, dict):
+            for key, value in metadata.items():
+                if key == "tags":
+                    # Merge tags
+                    extra_tags = [str(t) for t in value if t] if isinstance(value, list) else []
+                    msg_metadata.setdefault("tags", []).extend(extra_tags)
+                else:
+                    msg_metadata[key] = value
+        # Add conversation partners to "with" field
+        partners = []
+        occupants = self.manager.occupants.get(building_id, [])
+        for oid in occupants:
+            if oid != persona.persona_id:
+                partners.append(oid)
+        presence = getattr(self.manager, "user_presence_status", "offline")
+        if presence in ("online", "away"):
+            partners.append("user")
+        if partners:
+            msg_metadata["with"] = partners
+        if msg_metadata:
+            msg["metadata"] = msg_metadata
+        try:
+            persona.history_manager.add_to_building_only(building_id, msg)
+            self.manager.gateway_handle_ai_replies(building_id, persona, [text])
+        except Exception:
+            LOGGER.exception("Failed to emit say message")
+        # Notify Unity Gateway
+        self._notify_unity_speak(persona, text)
 
     def _emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True) -> None:
-        self._runtime_events.emit_think(persona, pulse_id, text, record_history=record_history)
+        if not record_history:
+            return
+        adapter = getattr(persona, "sai_memory", None)
+        try:
+            if adapter and adapter.is_ready():
+                adapter.append_persona_message(
+                    {
+                        "role": "assistant",
+                        "content": text,
+                        "metadata": {"tags": ["internal", f"pulse:{pulse_id}"]},
+                        "persona_id": persona.persona_id,
+                    }
+                )
+        except Exception:
+            LOGGER.warning("think message not stored", exc_info=True)
 
     def _notify_unity_speak(self, persona: Any, text: str) -> None:
         """Send persona speak event to Unity Gateway if connected."""
-        self._runtime_events.notify_unity_speak(persona, text)
+        if not text:
+            return
+        unity_gateway = getattr(self.manager, "unity_gateway", None)
+        if not unity_gateway:
+            return
+        try:
+            import asyncio
+            persona_id = getattr(persona, "persona_id", "unknown")
+            # Run async send_speak in a new event loop if not in async context
+            try:
+                loop = asyncio.get_running_loop()
+                asyncio.create_task(unity_gateway.send_speak(persona_id, text))
+            except RuntimeError:
+                # No running event loop
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(unity_gateway.send_speak(persona_id, text))
+                loop.close()
+        except Exception as exc:
+            LOGGER.debug("Failed to notify Unity Gateway: %s", exc)
+
+    # ---------------- history metabolism -----------------
 
     def _get_high_watermark(self, persona) -> Optional[int]:
         """Get the high watermark (max history messages) for metabolism."""
@@ -1391,11 +1568,41 @@ class SEARuntime:
 
     def _load_anchors(self, persona) -> Dict[str, Any]:
         """Load per-model metabolism anchors from DB (AI.METABOLISM_ANCHORS)."""
-        return self._runtime_events.load_anchors(persona)
+        if not self.manager or not hasattr(self.manager, "SessionLocal"):
+            return {}
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id:
+            return {}
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI
+            ai_row = db.query(AI).filter_by(AIID=persona_id).first()
+            if ai_row and ai_row.METABOLISM_ANCHORS:
+                return json.loads(ai_row.METABOLISM_ANCHORS)
+        except Exception as exc:
+            LOGGER.warning("[metabolism] Failed to load anchors for %s: %s", persona_id, exc)
+        finally:
+            db.close()
+        return {}
 
     def _save_anchors(self, persona, anchors: Dict[str, Any]) -> None:
         """Persist per-model metabolism anchors to DB."""
-        self._runtime_events.save_anchors(persona, anchors)
+        if not self.manager or not hasattr(self.manager, "SessionLocal"):
+            return
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id:
+            return
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI
+            ai_row = db.query(AI).filter_by(AIID=persona_id).first()
+            if ai_row:
+                ai_row.METABOLISM_ANCHORS = json.dumps(anchors, ensure_ascii=False)
+                db.commit()
+        except Exception as exc:
+            LOGGER.warning("[metabolism] Failed to save anchors for %s: %s", persona_id, exc)
+        finally:
+            db.close()
 
     def _get_anchor_validity_seconds(self, model_key: str) -> int:
         """Get anchor validity duration in seconds based on model cache config.
@@ -1417,8 +1624,68 @@ class SEARuntime:
         return 1200  # 20 minutes default
 
     def _resolve_metabolism_anchor(self, persona) -> tuple:
-        """Resolve the best metabolism anchor using 3-level fallback."""
-        return self._runtime_events.resolve_metabolism_anchor(persona)
+        """Resolve the best metabolism anchor using 3-level fallback.
+
+        Returns:
+            (anchor_id, resolution_type) where resolution_type is
+            "self" | "other" | "minimal".
+            anchor_id is None for "minimal" (no valid anchor found).
+        """
+        persona_model = getattr(persona, "model", None)
+        if not persona_model:
+            return (None, "minimal")
+
+        anchors = self._load_anchors(persona)
+        now = datetime.now()
+
+        # Case 1: self model's anchor exists and is valid
+        self_entry = anchors.get(persona_model)
+        if self_entry:
+            try:
+                updated_at = datetime.fromisoformat(self_entry["updated_at"])
+                validity = self._get_anchor_validity_seconds(persona_model)
+                age = (now - updated_at).total_seconds()
+                if age <= validity:
+                    LOGGER.debug(
+                        "[metabolism] Anchor resolved: self model '%s' (age=%.0fs, validity=%ds)",
+                        persona_model, age, validity,
+                    )
+                    return (self_entry["anchor_id"], "self")
+                else:
+                    LOGGER.debug(
+                        "[metabolism] Self model anchor expired: '%s' (age=%.0fs > validity=%ds)",
+                        persona_model, age, validity,
+                    )
+            except (KeyError, ValueError, TypeError) as exc:
+                LOGGER.debug("[metabolism] Invalid self anchor entry: %s", exc)
+
+        # Case 2: most recent valid anchor from any model
+        best_entry = None
+        best_updated = None
+        for model_key, entry in anchors.items():
+            if model_key == persona_model:
+                continue  # already checked
+            try:
+                updated_at = datetime.fromisoformat(entry["updated_at"])
+                validity = self._get_anchor_validity_seconds(model_key)
+                age = (now - updated_at).total_seconds()
+                if age <= validity:
+                    if best_updated is None or updated_at > best_updated:
+                        best_entry = entry
+                        best_updated = updated_at
+            except (KeyError, ValueError, TypeError):
+                continue
+
+        if best_entry:
+            LOGGER.debug(
+                "[metabolism] Anchor resolved: other model (age=%.0fs)",
+                (now - best_updated).total_seconds(),
+            )
+            return (best_entry["anchor_id"], "other")
+
+        # Case 3: no valid anchor
+        LOGGER.debug("[metabolism] No valid anchor found — will use minimal load")
+        return (None, "minimal")
 
     def _update_anchor_for_model(self, persona, model_key: str, anchor_id: str) -> None:
         """Update the anchor for a specific model and persist to DB."""
@@ -1438,7 +1705,34 @@ class SEARuntime:
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         """Check if metabolism is needed after response and run if so."""
-        self._runtime_events.maybe_run_metabolism(persona, building_id, event_callback)
+        if not getattr(self.manager, "metabolism_enabled", False):
+            return
+
+        history_mgr = getattr(persona, "history_manager", None)
+        anchor = getattr(history_mgr, "metabolism_anchor_message_id", None)
+        if not history_mgr or not anchor:
+            return
+
+        high_wm = self._get_high_watermark(persona)
+        if high_wm is None:
+            return
+
+        # Get current message count from anchor
+        current_messages = history_mgr.get_history_from_anchor(
+            anchor, required_tags=["conversation"],
+        )
+        if len(current_messages) <= high_wm:
+            return  # Haven't reached high watermark yet
+
+        low_wm = self._get_low_watermark(persona)
+        if low_wm is None or high_wm - low_wm < 20:
+            return  # Gap too small for a Chronicle batch
+
+        LOGGER.info(
+            "[metabolism] Triggering metabolism for %s: %d messages > high_wm=%d, will keep %d",
+            getattr(persona, "persona_id", "?"), len(current_messages), high_wm, low_wm,
+        )
+        self._run_metabolism(persona, building_id, current_messages, low_wm, event_callback)
 
     def _run_metabolism(
         self,
@@ -1449,7 +1743,42 @@ class SEARuntime:
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
         """Execute history metabolism: Chronicle generation + anchor update."""
-        self._runtime_events.run_metabolism(persona, building_id, current_messages, keep_count, event_callback)
+        evict_count = len(current_messages) - keep_count
+
+        # 1. Notify start
+        if event_callback:
+            event_callback({
+                "type": "metabolism",
+                "status": "started",
+                "content": f"記憶を整理しています（{len(current_messages)}件 → {keep_count}件）...",
+            })
+
+        # 2. Chronicle generation (only if Memory Weave is enabled AND per-persona toggle is on)
+        memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
+        if memory_weave_enabled and self._is_chronicle_enabled_for_persona(persona):
+            try:
+                self._generate_chronicle(persona, event_callback)
+            except Exception as exc:
+                LOGGER.warning("[metabolism] Chronicle generation failed: %s", exc)
+
+        # 3. Update anchor to new window start
+        new_anchor_id = current_messages[evict_count].get("id")
+        if new_anchor_id:
+            persona.history_manager.metabolism_anchor_message_id = new_anchor_id
+            persona_model = getattr(persona, "model", None)
+            if persona_model:
+                self._update_anchor_for_model(persona, persona_model, new_anchor_id)
+            LOGGER.info("[metabolism] Updated anchor to %s (evicted %d, kept %d)", new_anchor_id, evict_count, keep_count)
+
+        # 4. Notify completion
+        if event_callback:
+            event_callback({
+                "type": "metabolism",
+                "status": "completed",
+                "content": f"記憶の整理が完了しました（{evict_count}件の会話をChronicleに圧縮）",
+                "evicted": evict_count,
+                "kept": keep_count,
+            })
 
     def _is_chronicle_enabled_for_persona(self, persona) -> bool:
         """Check per-persona Chronicle auto-generation toggle from DB."""

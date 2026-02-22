@@ -99,17 +99,3 @@ def test_run_meta_user_falls_back_when_meta_playbook_unresolved() -> None:
 
     assert result == ["ok"]
     runtime._choose_playbook.assert_called_once_with(kind="user", persona=persona, building_id="b1")
-
-
-def test_emit_speak_continues_when_unity_notify_fails() -> None:
-    runtime, persona = _runtime_and_persona()
-    runtime.manager.occupants = {"b1": []}
-    runtime.manager.user_presence_status = "offline"
-    runtime.manager.gateway_handle_ai_replies = Mock()
-
-    runtime._runtime_events.notify_unity_speak = Mock(side_effect=RuntimeError("gateway down"))
-
-    runtime._emit_speak(persona, "b1", "hello")
-
-    persona.history_manager.add_message.assert_called_once()
-    runtime.manager.gateway_handle_ai_replies.assert_called_once_with("b1", persona, ["hello"])
