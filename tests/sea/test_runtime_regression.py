@@ -201,3 +201,40 @@ def test_run_meta_user_logs_and_continues_on_history_record_exception(monkeypatc
     assert result == ["ok"]
     runtime._run_playbook.assert_called_once()
     logger_exception.assert_called_once_with("Failed to record user input to history")
+
+
+def test_emit_speak_payload_compatibility() -> None:
+    manager = SimpleNamespace(
+        building_histories={"b1": []},
+        occupants={"b1": ["pid", "npc-2"]},
+        user_presence_status="online",
+        gateway_handle_ai_replies=Mock(),
+        unity_gateway=None,
+    )
+    runtime = SEARuntime(manager)
+    persona = SimpleNamespace(persona_id="pid", history_manager=SimpleNamespace(add_message=Mock()))
+
+    runtime._emit_speak(persona, "b1", "hello", pulse_id="p-1")
+
+    persona.history_manager.add_message.assert_called_once()
+    payload = persona.history_manager.add_message.call_args.args[0]
+    assert payload["metadata"] == {"tags": ["conversation", "pulse:p-1"], "with": ["npc-2", "user"]}
+
+
+def test_emit_say_payload_compatibility() -> None:
+    manager = SimpleNamespace(
+        building_histories={"b1": []},
+        occupants={"b1": ["pid", "npc-2"]},
+        user_presence_status="away",
+        gateway_handle_ai_replies=Mock(),
+        unity_gateway=None,
+    )
+    runtime = SEARuntime(manager)
+    history_manager = SimpleNamespace(add_to_building_only=Mock())
+    persona = SimpleNamespace(persona_id="pid", history_manager=history_manager)
+
+    runtime._emit_say(persona, "b1", "hello", pulse_id="p-1", metadata={"tags": ["media"], "image": "x.png"})
+
+    history_manager.add_to_building_only.assert_called_once()
+    payload = history_manager.add_to_building_only.call_args.args[1]
+    assert payload["metadata"] == {"tags": ["pulse:p-1", "media"], "image": "x.png", "with": ["npc-2", "user"]}
