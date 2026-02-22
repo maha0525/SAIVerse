@@ -22,7 +22,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Set, Tuple
 
 # ---------------------------------------------------------------------------
 # Bootstrap: add project root to sys.path
@@ -112,6 +112,51 @@ class NodeReport:
     next_label: str = ""
     indent: int = 0          # for sub-playbook nesting
     path_label: str = ""     # branch identifier
+    machine: Dict[str, Any] = field(default_factory=dict)
+
+
+DRY_RUN_SUPPRESSED_EFFECTS = ("network_call", "db_write", "file_create")
+
+
+class RunnerAdapter(Protocol):
+    def record_tool_call(self, *, playbook_name: str, step: int, node_id: str, tool_name: str, params: Dict[str, Any]) -> None: ...
+
+
+class ToolRunner:
+    """Runtime adapter for real execution (placeholder: no-op for analyzer)."""
+
+    def record_tool_call(self, *, playbook_name: str, step: int, node_id: str, tool_name: str, params: Dict[str, Any]) -> None:
+        return
+
+
+class DryRunner:
+    """Dry-run adapter: records planned calls and suppresses side effects."""
+
+    def __init__(self) -> None:
+        self.plan: List[Dict[str, Any]] = []
+
+    def record_tool_call(self, *, playbook_name: str, step: int, node_id: str, tool_name: str, params: Dict[str, Any]) -> None:
+        effects = _infer_effects(tool_name)
+        self.plan.append({
+            "playbook": playbook_name,
+            "step": step,
+            "node_id": node_id,
+            "tool": tool_name,
+            "params": params,
+            "suppressed_effects": effects,
+        })
+
+
+def _infer_effects(tool_name: str) -> List[str]:
+    name = tool_name.lower()
+    effects: List[str] = []
+    if any(key in name for key in ("http", "web", "api", "fetch", "network")):
+        effects.append("network_call")
+    if any(key in name for key in ("db", "sql", "insert", "update", "write")):
+        effects.append("db_write")
+    if any(key in name for key in ("file", "fs", "save", "create", "mkdir")):
+        effects.append("file_create")
+    return effects
 
 
 # ---------------------------------------------------------------------------
@@ -164,11 +209,13 @@ class PlaybookAnalyzer:
         recursive: bool = True,
         max_loop: int = 2,
         verbose: bool = False,
+        runner: Optional[RunnerAdapter] = None,
     ):
         self.playbook_dirs = playbook_dirs
         self.recursive = recursive
         self.max_loop = max_loop
         self.verbose = verbose
+        self.runner = runner or DryRunner()
         self._cache: Dict[str, PlaybookSchema] = {}
         self._analysis_stack: List[str] = []
         self._analyzed_subplaybooks: Set[str] = set()  # dedup sub-playbook diagnostics
@@ -300,10 +347,20 @@ class PlaybookAnalyzer:
             node_def = node_map[node_id]
             before_keys = set(known.keys())
             step_counter[0] += 1
-            report = self._analyze_node(
-                node_def, playbook, known, ctx,
-                step=step_counter[0], indent=indent, path_label=path_label,
-            )
+            try:
+                report = self._analyze_node(
+                    node_def, playbook, known, ctx,
+                    step=step_counter[0], indent=indent, path_label=path_label,
+                )
+            except Exception as exc:  # noqa: BLE001
+                report = NodeReport(step=step_counter[0], node_id=node_id, node_type="(error)", indent=indent, path_label=path_label)
+                report.diagnostics.append(Diagnostic(
+                    "WARN",
+                    "STEP_ERROR",
+                    f"failed at playbook={playbook.name} step={step_counter[0]} node={node_id} type={getattr(node_def, 'type', '?')} params={getattr(node_def, 'action', None)} error={exc}",
+                    node_id,
+                    playbook.name,
+                ))
             reports.append(report)
             diags.extend(report.diagnostics)
 
@@ -586,6 +643,14 @@ class PlaybookAnalyzer:
         report.details.append(f"Tool: {tool_name}")
 
         args_input = getattr(node_def, "args_input", None) or {}
+        report.machine = {"tool": tool_name, "params": dict(args_input)}
+        self.runner.record_tool_call(
+            playbook_name=playbook.name,
+            step=report.step,
+            node_id=node_id,
+            tool_name=tool_name,
+            params=dict(args_input),
+        )
         if args_input:
             for arg_name, source in args_input.items():
                 if isinstance(source, str):
@@ -900,6 +965,25 @@ def format_report(
     return "\n".join(lines)
 
 
+def build_execution_plan(playbook_name: str, reports: List[NodeReport]) -> Dict[str, Any]:
+    steps = []
+    for report in sorted(reports, key=lambda x: x.step):
+        if report.machine.get("tool"):
+            steps.append(
+                {
+                    "step": report.step,
+                    "node_id": report.node_id,
+                    "tool": report.machine["tool"],
+                    "params": report.machine.get("params", {}),
+                }
+            )
+    return {
+        "playbook": playbook_name,
+        "dry_run_definition": {"suppressed_effects": list(DRY_RUN_SUPPRESSED_EFFECTS)},
+        "steps": steps,
+    }
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -938,6 +1022,10 @@ def main():
         "--all", action="store_true",
         help="Analyze all playbooks in builtin_data/playbooks/public/",
     )
+    parser.add_argument(
+        "--plan-json", action="store_true",
+        help="Output machine-readable dry-run execution plan JSON.",
+    )
 
     args = parser.parse_args()
 
@@ -961,10 +1049,10 @@ def main():
     if args.all:
         _run_all(analyzer, default_dir, args.verbose)
     else:
-        _run_single(analyzer, args.target, args.verbose)
+        _run_single(analyzer, args.target, args.verbose, args.plan_json)
 
 
-def _run_single(analyzer: PlaybookAnalyzer, target: str, verbose: bool):
+def _run_single(analyzer: PlaybookAnalyzer, target: str, verbose: bool, plan_json: bool = False):
     pb = analyzer.load_playbook(target)
     if pb is None:
         print(f"ERROR: Could not load playbook '{target}'", file=sys.stderr)
@@ -973,6 +1061,8 @@ def _run_single(analyzer: PlaybookAnalyzer, target: str, verbose: bool):
     reports, diags = analyzer.analyze(pb)
     output = format_report(pb, target, reports, diags, verbose=verbose)
     print(output)
+    if plan_json:
+        print(json.dumps(build_execution_plan(pb.name, reports), ensure_ascii=False, indent=2))
 
     warns = sum(1 for d in diags if d.level == "WARN")
     sys.exit(1 if warns > 0 else 0)
