@@ -11,8 +11,8 @@ from .base import LLMClient
 
 logger = logging.getLogger(__name__)
 
-# Retry configuration (fewer retries for local models)
-MAX_RETRIES = 2
+# Retry configuration
+MAX_RETRIES = 3
 INITIAL_BACKOFF = 0.5  # seconds
 
 

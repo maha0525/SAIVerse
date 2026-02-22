@@ -4,6 +4,7 @@ from api.deps import get_manager
 from .models import (
     ArasujiStatsResponse, ArasujiListResponse, ArasujiEntryItem, SourceMessageItem,
     GenerateArasujiRequest, GenerationJobStatus, ChronicleCostEstimate,
+    MessagesByIdsRequest,
 )
 import sqlite3
 import logging
@@ -37,6 +38,7 @@ def _create_job(persona_id: str) -> str:
             "error": None,
             "error_code": None,
             "error_detail": None,
+            "error_meta": None,
             "created_at": time.time(),
         }
     return job_id
@@ -495,6 +497,41 @@ def get_arasuji_messages(
     finally:
         conn.close()
 
+@router.post("/{persona_id}/arasuji/messages-by-ids", response_model=List[SourceMessageItem], tags=["Chronicle"])
+def get_messages_by_ids(
+    persona_id: str,
+    request: MessagesByIdsRequest,
+    manager = Depends(get_manager),
+):
+    """Get messages by their IDs (for error investigation)."""
+    from sai_memory.memory.storage import get_message
+
+    if not request.ids:
+        return []
+
+    conn = _get_arasuji_db(persona_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+
+    try:
+        messages = []
+        for msg_id in request.ids:
+            msg = get_message(conn, msg_id)
+            if msg:
+                messages.append(SourceMessageItem(
+                    id=msg.id,
+                    role=msg.role,
+                    content=msg.content or "",
+                    created_at=msg.created_at,
+                ))
+        messages.sort(key=lambda m: m.created_at)
+        return messages
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get messages: {e}")
+    finally:
+        conn.close()
+
+
 @router.post("/{persona_id}/arasuji/{entry_id}/regenerate", tags=["Chronicle"])
 async def regenerate_arasuji_entry(
     persona_id: str,
@@ -700,6 +737,7 @@ def _run_chronicle_generation(
 
         level1_entries, consolidated_entries = generator.generate_unprocessed(
             all_messages,
+            max_messages=max_messages,
             progress_callback=progress_callback,
             batch_callback=batch_callback,
             cancel_check=cancel_check,
@@ -734,6 +772,7 @@ def _run_chronicle_generation(
             error=e.user_message,
             error_code=e.error_code,
             error_detail=str(e),
+            error_meta=getattr(e, "batch_meta", None),
         )
     except Exception as e:
         LOGGER.exception(f"Chronicle generation failed: {e}")
@@ -824,4 +863,5 @@ async def get_arasuji_generation_status(
         error=job.get("error"),
         error_code=job.get("error_code"),
         error_detail=job.get("error_detail"),
+        error_meta=job.get("error_meta"),
     )

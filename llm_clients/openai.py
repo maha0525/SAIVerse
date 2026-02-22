@@ -25,6 +25,7 @@ from .exceptions import (
     LLMTimeoutError,
     PaymentError,
     RateLimitError,
+    SafetyFilterError,
     ServerError,
 )
 from .utils import (
@@ -100,6 +101,19 @@ def _is_payment_error(err: Exception) -> bool:
     )
 
 
+def _is_content_policy_error(err: Exception) -> bool:
+    """Check if the error is a content policy violation (prompt-level block)."""
+    if isinstance(err, openai.BadRequestError):
+        # OpenAI returns error.code="content_policy_violation" for blocked prompts
+        body = getattr(err, "body", None)
+        if isinstance(body, dict):
+            code = body.get("error", {}).get("code", "") or ""
+            if "content_policy" in code or "content_filter" in code:
+                return True
+    msg = str(err).lower()
+    return "content_policy" in msg or "content_filter" in msg and "safety" in msg
+
+
 def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError:
     """Convert a generic exception to an appropriate LLMError subclass."""
     if _is_payment_error(err):
@@ -112,6 +126,11 @@ def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError
         return ServerError(f"OpenAI {context} failed: server error", err)
     elif _is_authentication_error(err):
         return AuthenticationError(f"OpenAI {context} failed: authentication error", err)
+    elif _is_content_policy_error(err):
+        return SafetyFilterError(
+            f"OpenAI {context} failed: content policy violation", err,
+            user_message="入力内容がOpenAIのコンテンツポリシーによりブロックされました。入力内容を変更してお試しください。",
+        )
     else:
         return LLMError(f"OpenAI {context} failed: {err}", err)
 
@@ -656,6 +675,18 @@ class OpenAIClient(LLMClient):
                 )
 
             choice = resp.choices[0]
+
+            # Check for content filter (output-level block)
+            if choice.finish_reason == "content_filter":
+                logging.warning(
+                    "[openai] Output blocked by content filter. finish_reason=%s",
+                    choice.finish_reason,
+                )
+                raise SafetyFilterError(
+                    "OpenAI output blocked by content filter",
+                    user_message="生成された内容がOpenAIのコンテンツフィルターによりブロックされました。入力内容を変更してお試しください。",
+                )
+
             text_body, reasoning_entries, reasoning_details = _extract_reasoning_from_openai_message(choice.message)
             if not text_body:
                 text_body = choice.message.content or ""
@@ -740,6 +771,18 @@ class OpenAIClient(LLMClient):
             )
 
         choice = resp.choices[0]
+
+        # Check for content filter (output-level block)
+        if choice.finish_reason == "content_filter":
+            logging.warning(
+                "[openai] Output blocked by content filter (tool mode). finish_reason=%s",
+                choice.finish_reason,
+            )
+            raise SafetyFilterError(
+                "OpenAI output blocked by content filter",
+                user_message="生成された内容がOpenAIのコンテンツフィルターによりブロックされました。入力内容を変更してお試しください。",
+            )
+
         tool_calls = getattr(choice.message, "tool_calls", [])
 
         # Extract reasoning if present
@@ -864,9 +907,14 @@ class OpenAIClient(LLMClient):
                 if prefix:
                     yield prefix + "\n"
                 last_chunk = None
+                last_finish_reason = None
                 reasoning_details_raw: List[Dict[str, Any]] = []
                 for chunk in resp:
                     last_chunk = chunk
+                    if chunk.choices and chunk.choices[0]:
+                        fr = chunk.choices[0].finish_reason
+                        if fr is not None:
+                            last_finish_reason = fr
                     if chunk.choices and chunk.choices[0].delta:
                         delta = chunk.choices[0].delta
 
@@ -888,6 +936,17 @@ class OpenAIClient(LLMClient):
                                 yield {"type": "thinking", "content": r}
                             if text_fragment:
                                 yield text_fragment
+                # Check for content filter in streaming
+                if last_finish_reason == "content_filter":
+                    logging.warning(
+                        "[openai] Stream output blocked by content filter. finish_reason=%s",
+                        last_finish_reason,
+                    )
+                    raise SafetyFilterError(
+                        "OpenAI streaming output blocked by content filter",
+                        user_message="生成された内容がOpenAIのコンテンツフィルターによりブロックされました。入力内容を変更してお試しください。",
+                    )
+
                 # Store usage from last chunk (when stream_options.include_usage=True)
                 if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
                     # Check for cached tokens (OpenAI Prompt Caching)

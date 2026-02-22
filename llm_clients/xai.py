@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, Iterator, List, Optional
 
 from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
@@ -25,6 +26,7 @@ from .exceptions import (
     LLMTimeoutError,
     PaymentError,
     RateLimitError,
+    SafetyFilterError,
     ServerError,
 )
 from .utils import (
@@ -36,6 +38,19 @@ from .utils import (
 )
 
 _log = logging.getLogger(__name__)
+
+MAX_RETRIES = 3
+
+
+def _should_retry(err: Exception) -> bool:
+    """Check if the error should trigger a retry."""
+    if isinstance(err, (EmptyResponseError, LLMTimeoutError, ServerError, RateLimitError)):
+        return True
+    msg = str(err).lower()
+    return any(kw in msg for kw in (
+        "timeout", "deadline", "unavailable", "502", "503", "429",
+        "rate", "exhausted", "empty",
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -51,9 +66,16 @@ def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError
         import grpc
         if isinstance(err, grpc.RpcError):
             code = err.code()
+            details = (err.details() or "").lower() if hasattr(err, "details") else ""
             if code == grpc.StatusCode.UNAUTHENTICATED:
                 return AuthenticationError(f"xAI {context}: authentication failed", err)
             if code == grpc.StatusCode.PERMISSION_DENIED:
+                # xAI charges $0.05 for usage guideline violations via PERMISSION_DENIED
+                if any(kw in details for kw in ("content", "policy", "guideline", "safety", "violat")):
+                    return SafetyFilterError(
+                        f"xAI {context}: content policy violation", err,
+                        user_message="入力内容がxAIの利用ガイドラインによりブロックされました。入力内容を変更してお試しください。",
+                    )
                 return AuthenticationError(f"xAI {context}: permission denied", err)
             if code == grpc.StatusCode.RESOURCE_EXHAUSTED:
                 return RateLimitError(f"xAI {context}: rate limit exceeded", err)
@@ -357,18 +379,37 @@ class XAIClient(LLMClient):
             self.model, len(xai_messages), len(tools_spec), bool(response_schema),
         )
 
-        try:
-            if use_tools:
-                return self._generate_with_tools(xai_messages, tools_spec)
-            elif response_schema:
-                return self._generate_with_schema(xai_messages, response_schema)
-            else:
-                return self._generate_text(xai_messages, snippets)
-        except LLMError:
-            raise
-        except Exception as e:
-            _log.exception("[xai] generate failed")
-            raise _convert_to_llm_error(e, "generate")
+        last_error: Exception | None = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                if use_tools:
+                    return self._generate_with_tools(xai_messages, tools_spec)
+                elif response_schema:
+                    return self._generate_with_schema(xai_messages, response_schema)
+                else:
+                    return self._generate_text(xai_messages, snippets)
+            except (PaymentError, AuthenticationError):
+                raise
+            except LLMError as e:
+                last_error = e
+                if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                    _log.warning("[xai] Retryable error (attempt %d/%d): %s", attempt + 1, MAX_RETRIES, e)
+                    time.sleep(2 ** attempt)
+                    continue
+                raise
+            except Exception as e:
+                last_error = e
+                converted = _convert_to_llm_error(e, "generate")
+                if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                    _log.warning("[xai] Retryable error (attempt %d/%d): %s", attempt + 1, MAX_RETRIES, e)
+                    time.sleep(2 ** attempt)
+                    continue
+                raise converted from e
+
+        # All retries exhausted
+        if last_error:
+            raise _convert_to_llm_error(last_error, f"generate after {MAX_RETRIES} retries") from last_error
+        raise EmptyResponseError(f"xAI API call failed after {MAX_RETRIES} retries")
 
     def _generate_text(
         self,
@@ -381,13 +422,20 @@ class XAIClient(LLMClient):
             chat.append(msg)
 
         response = chat.sample()
-        get_llm_logger().debug("[xai] response content length: %d", len(response.content or ""))
+        finish_reason = getattr(response, "finish_reason", None)
+        get_llm_logger().debug(
+            "[xai] response content length: %d, finish_reason: %s",
+            len(response.content or ""), finish_reason,
+        )
 
         self._store_usage_from_response(response)
         self._store_reasoning_from_response(response)
 
         text = response.content or ""
         if not text.strip():
+            logging.warning(
+                "[xai] Empty text response. finish_reason=%s", finish_reason,
+            )
             raise EmptyResponseError("xAI returned empty response")
 
         if snippets:
@@ -406,6 +454,8 @@ class XAIClient(LLMClient):
             chat.append(msg)
 
         response = chat.sample()
+        finish_reason = getattr(response, "finish_reason", None)
+        get_llm_logger().debug("[xai] tool mode finish_reason: %s", finish_reason)
         self._store_usage_from_response(response)
         self._store_reasoning_from_response(response)
 
@@ -425,6 +475,10 @@ class XAIClient(LLMClient):
 
         content = response.content or ""
         if not content.strip():
+            logging.warning(
+                "[xai] Empty text response without tool call. finish_reason=%s",
+                finish_reason,
+            )
             raise EmptyResponseError("xAI returned empty response without tool call")
         return {"type": "text", "content": content}
 

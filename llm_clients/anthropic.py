@@ -23,6 +23,7 @@ from .exceptions import (
     LLMTimeoutError,
     PaymentError,
     RateLimitError,
+    SafetyFilterError,
     ServerError,
 )
 from .utils import (
@@ -94,6 +95,20 @@ def _is_payment_error(err: Exception) -> bool:
         or "billing" in msg
         or "insufficient_quota" in msg
     )
+
+
+def _is_content_policy_error(err: Exception) -> bool:
+    """Check if the error is a content policy violation.
+
+    Anthropic returns 400 invalid_request_error when content violates policies.
+    The error message typically contains keywords like 'harmful', 'unsafe',
+    'content policy', or 'violates'.
+    """
+    msg = str(err).lower()
+    return any(kw in msg for kw in (
+        "content policy", "harmful", "unsafe content", "violates",
+        "not allowed", "blocked",
+    ))
 
 
 def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError:
@@ -714,6 +729,11 @@ class AnthropicClient(LLMClient):
                 break  # Success, exit retry loop
             except anthropic.BadRequestError as e:
                 logging.error("[anthropic] Bad request: %s", e)
+                if _is_content_policy_error(e):
+                    raise SafetyFilterError(
+                        f"Anthropic API content policy violation: {e}", e,
+                        user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。入力内容を変更してお試しください。",
+                    )
                 raise InvalidRequestError(f"Anthropic API error: {e}", e)
             except Exception as e:
                 last_error = e
@@ -939,6 +959,11 @@ class AnthropicClient(LLMClient):
 
             except anthropic.BadRequestError as e:
                 logging.error("[anthropic] Bad request: %s", e)
+                if _is_content_policy_error(e):
+                    raise SafetyFilterError(
+                        f"Anthropic streaming content policy violation: {e}", e,
+                        user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。入力内容を変更してお試しください。",
+                    )
                 raise InvalidRequestError(f"Anthropic streaming API error: {e}", e)
             except Exception as e:
                 last_error = e
