@@ -203,6 +203,33 @@ def test_run_meta_user_logs_and_continues_on_history_record_exception(monkeypatc
     logger_exception.assert_called_once_with("Failed to record user input to history")
 
 
+def test_run_playbook_delegates_to_runtime_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime, persona = _runtime_and_persona()
+    playbook = SimpleNamespace(name="meta_user/exec", start_node="exec", context_requirements=None)
+    called: dict[str, object] = {}
+
+    def _fake_runner(*args, **kwargs):
+        called["runtime"] = args[0]
+        called["playbook"] = args[1]
+        called["persona"] = args[2]
+        called["building_id"] = args[3]
+        called["user_input"] = args[4]
+        return ["ok"]
+
+    monkeypatch.setattr("sea.runtime.run_playbook", _fake_runner)
+
+    result = runtime._run_playbook(playbook, persona, "b1", "hello", auto_mode=False)
+
+    assert result == ["ok"]
+    assert called == {
+        "runtime": runtime,
+        "playbook": playbook,
+        "persona": persona,
+        "building_id": "b1",
+        "user_input": "hello",
+    }
+
+
 def test_emit_speak_payload_compatibility() -> None:
     manager = SimpleNamespace(
         building_histories={"b1": []},

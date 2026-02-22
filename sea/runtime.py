@@ -23,6 +23,7 @@ from sea.runtime_engine import RuntimeEngine
 from sea.runtime_context import preview_context as preview_context_impl
 from sea.runtime_graph import compile_with_langgraph as compile_with_langgraph_impl
 from sea.runtime_llm import lg_llm_node as lg_llm_node_impl
+from sea.runtime_runner import run_playbook
 from sea.runtime_state import (
     apply_output_mapping,
     eval_arithmetic_expression,
@@ -174,87 +175,20 @@ class SEARuntime:
         pulse_type: Optional[str] = None,
         initial_params: Optional[Dict[str, Any]] = None,
     ) -> List[str]:
-        # Check for cancellation at start
-        if cancellation_token:
-            cancellation_token.raise_if_cancelled()
-
-        # Generate or inherit pulse_id
-        parent = parent_state or {}
-
-        # Merge initial_params into parent state (these are user-provided playbook parameters)
-        if initial_params:
-            LOGGER.debug("[sea] _run_playbook merging initial_params: %s", list(initial_params.keys()))
-            parent.update(initial_params)
-        LOGGER.debug("[sea] _run_playbook called for %s, parent_state keys: %s", playbook.name, list(parent.keys()) if parent else "(none)")
-        if "pulse_id" in parent:
-            pulse_id = str(parent["pulse_id"])
-        else:
-            pulse_id = str(uuid.uuid4())
-
-        # Build playbook chain for status display (e.g., "meta_user/exec > basic_chat/generate")
-        parent_chain = parent.get("_playbook_chain", "")
-        if parent_chain:
-            current_chain = f"{parent_chain} > {playbook.name}"
-        else:
-            current_chain = playbook.name
-
-        # Store chain in parent_state for sub-playbooks to inherit
-        parent["_playbook_chain"] = current_chain
-        
-        # Store cancellation token in parent_state for propagation
-        if cancellation_token:
-            parent["_cancellation_token"] = cancellation_token
-
-        # Wrap event_callback to include playbook chain in status events
-        def wrapped_event_callback(event: Dict[str, Any]) -> None:
-            if event_callback:
-                if event.get("type") == "status":
-                    # Replace playbook name with full chain
-                    node = event.get("node", "")
-                    event["content"] = f"{current_chain} / {node}"
-                    event["playbook_chain"] = current_chain
-                event_callback(event)
-
-        # Update execution state: playbook started
-        if hasattr(persona, "execution_state"):
-            persona.execution_state["playbook"] = playbook.name
-            persona.execution_state["node"] = playbook.start_node
-            persona.execution_state["status"] = "running"
-
-        # Prepare shared context (system prompt, history, inventories)
-        LOGGER.info("[sea][run-playbook] %s: calling _prepare_context with history_depth=%s, pulse_id=%s",
-                    playbook.name,
-                    playbook.context_requirements.history_depth if playbook.context_requirements else "None",
-                    pulse_id)
-        context_warnings: List[Dict[str, Any]] = []
-        base_messages = self._prepare_context(persona, building_id, user_input, playbook.context_requirements, pulse_id=pulse_id, warnings=context_warnings)
-        LOGGER.info("[sea][run-playbook] %s: _prepare_context returned %d messages", playbook.name, len(base_messages))
-        conversation_msgs = list(base_messages)
-
-        # Emit context budget warnings via event callback
-        for warn in context_warnings:
-            if event_callback:
-                wrapped_event_callback(warn)
-
-        # Execute playbook with LangGraph (use wrapped callback)
-        compiled_ok = self._compile_with_langgraph(
-            playbook, persona, building_id, user_input, auto_mode,
-            conversation_msgs, pulse_id, parent_state=parent,
-            event_callback=wrapped_event_callback,
+        return run_playbook(
+            self,
+            playbook,
+            persona,
+            building_id,
+            user_input,
+            auto_mode,
+            record_history=record_history,
+            parent_state=parent_state,
+            event_callback=event_callback,
             cancellation_token=cancellation_token,
             pulse_type=pulse_type,
+            initial_params=initial_params,
         )
-        if compiled_ok is None:
-            # LangGraph compilation failed - this should not happen as all node types are now supported
-            LOGGER.error("LangGraph compilation failed for playbook '%s'. This indicates a configuration or dependency issue.", playbook.name)
-            # Update execution state: playbook failed
-            if hasattr(persona, "execution_state"):
-                persona.execution_state["playbook"] = None
-                persona.execution_state["node"] = None
-                persona.execution_state["status"] = "idle"
-            return []
-
-        return compiled_ok
 
     # LangGraph compile wrapper -----------------------------------------
     def _compile_with_langgraph(
