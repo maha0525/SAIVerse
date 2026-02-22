@@ -21,7 +21,6 @@ from saiverse.usage_tracker import get_usage_tracker
 
 from sea.runtime_context import prepare_context as prepare_context_impl, preview_context as preview_context_impl
 from sea.runtime_graph import compile_with_langgraph as compile_with_langgraph_impl
-import sea.runtime_llm as runtime_llm_module
 from sea.runtime_llm import lg_llm_node as lg_llm_node_impl
 LOGGER = logging.getLogger(__name__)
 
@@ -299,10 +298,6 @@ class SEARuntime:
         )
 
     def _lg_llm_node(self, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
-        # Backward-compatible safety: ensure extracted module can resolve helpers
-        # even if stale runtime_llm bytecode/path still references module globals.
-        runtime_llm_module._format = _format
-        runtime_llm_module._is_llm_streaming_enabled = _is_llm_streaming_enabled
         return lg_llm_node_impl(self, node_def, persona, building_id, playbook, event_callback)
 
     def _default_temperature(self, persona: Any) -> Optional[float]:

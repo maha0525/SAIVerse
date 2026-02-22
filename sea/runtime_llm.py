@@ -5,7 +5,6 @@ import logging
 import os
 import re
 from typing import Any, Callable, Dict, Optional
-
 from llm_clients.exceptions import LLMError
 from saiverse.logging_config import log_sea_trace
 from sea.playbook_models import PlaybookSchema
@@ -13,35 +12,7 @@ from saiverse.usage_tracker import get_usage_tracker
 
 LOGGER = logging.getLogger(__name__)
 
-
-def _is_llm_streaming_enabled() -> bool:
-    val = os.getenv("SAIVERSE_LLM_STREAMING", "true")
-    result = val.lower() not in ("false", "0", "off", "no")
-    logging.info("[DEBUG] _is_llm_streaming_enabled: raw_val=%r, result=%s", val, result)
-    return result
-
-
-def _format(template: str, variables: Dict[str, Any]) -> str:
-    result = template
-    lookup: Dict[str, str] = {}
-    for key, value in variables.items():
-        lookup[str(key)] = str(value) if value is not None else ""
-
-    def replacer(match: re.Match[str]) -> str:
-        key = match.group(1)
-        if key in lookup:
-            return lookup[key]
-        return match.group(0)
-
-    return re.sub(r"\{([\w.]+)\}", replacer, result)
-
 def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
-    format_fn = globals().get("_format")
-    if not callable(format_fn):
-        def format_fn(template: str, variables: Dict[str, Any]) -> str:
-            lookup = {str(k): ("" if v is None else str(v)) for k, v in variables.items()}
-            return re.sub(r"\{([\w.]+)\}", lambda m: lookup.get(m.group(1), m.group(0)), template)
-
     async def node(state: dict):
         # Check for cancellation at start of node
         cancellation_token = state.get("_cancellation_token")
@@ -107,7 +78,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 base_msgs = state.get("messages", [])
             action_template = getattr(node_def, "action", None)
             if action_template:
-                prompt = format_fn(action_template, variables)
+                prompt = _format(action_template, variables)
                 # Auto-wrap in <system> tags to distinguish from user messages
                 if not prompt.lstrip().startswith("<system>"):
                     prompt = f"<system>{prompt}</system>"
