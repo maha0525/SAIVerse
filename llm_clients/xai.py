@@ -26,6 +26,7 @@ from .exceptions import (
     LLMTimeoutError,
     PaymentError,
     RateLimitError,
+    SafetyFilterError,
     ServerError,
 )
 from .utils import (
@@ -65,9 +66,16 @@ def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError
         import grpc
         if isinstance(err, grpc.RpcError):
             code = err.code()
+            details = (err.details() or "").lower() if hasattr(err, "details") else ""
             if code == grpc.StatusCode.UNAUTHENTICATED:
                 return AuthenticationError(f"xAI {context}: authentication failed", err)
             if code == grpc.StatusCode.PERMISSION_DENIED:
+                # xAI charges $0.05 for usage guideline violations via PERMISSION_DENIED
+                if any(kw in details for kw in ("content", "policy", "guideline", "safety", "violat")):
+                    return SafetyFilterError(
+                        f"xAI {context}: content policy violation", err,
+                        user_message="入力内容がxAIの利用ガイドラインによりブロックされました。入力内容を変更してお試しください。",
+                    )
                 return AuthenticationError(f"xAI {context}: permission denied", err)
             if code == grpc.StatusCode.RESOURCE_EXHAUSTED:
                 return RateLimitError(f"xAI {context}: rate limit exceeded", err)
@@ -414,13 +422,20 @@ class XAIClient(LLMClient):
             chat.append(msg)
 
         response = chat.sample()
-        get_llm_logger().debug("[xai] response content length: %d", len(response.content or ""))
+        finish_reason = getattr(response, "finish_reason", None)
+        get_llm_logger().debug(
+            "[xai] response content length: %d, finish_reason: %s",
+            len(response.content or ""), finish_reason,
+        )
 
         self._store_usage_from_response(response)
         self._store_reasoning_from_response(response)
 
         text = response.content or ""
         if not text.strip():
+            logging.warning(
+                "[xai] Empty text response. finish_reason=%s", finish_reason,
+            )
             raise EmptyResponseError("xAI returned empty response")
 
         if snippets:
@@ -439,6 +454,8 @@ class XAIClient(LLMClient):
             chat.append(msg)
 
         response = chat.sample()
+        finish_reason = getattr(response, "finish_reason", None)
+        get_llm_logger().debug("[xai] tool mode finish_reason: %s", finish_reason)
         self._store_usage_from_response(response)
         self._store_reasoning_from_response(response)
 
@@ -458,6 +475,10 @@ class XAIClient(LLMClient):
 
         content = response.content or ""
         if not content.strip():
+            logging.warning(
+                "[xai] Empty text response without tool call. finish_reason=%s",
+                finish_reason,
+            )
             raise EmptyResponseError("xAI returned empty response without tool call")
         return {"type": "text", "content": content}
 
