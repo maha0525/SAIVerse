@@ -15,8 +15,10 @@ import TutorialWizard from '@/components/tutorial/TutorialWizard';
 import SaiverseLink from '@/components/SaiverseLink';
 import ItemModal from '@/components/ItemModal';
 import ContextPreviewModal, { ContextPreviewData } from '@/components/ContextPreviewModal';
+import PlaybookPermissionDialog, { PermissionRequestData } from '@/components/PlaybookPermissionDialog';
+import ChronicleConfirmDialog, { ChronicleConfirmData } from '@/components/ChronicleConfirmDialog';
 import ModalOverlay from '@/components/common/ModalOverlay';
-import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw } from 'lucide-react';
+import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
 
 // Allow className on HTML elements used by thinking blocks (<details>, <div>, <summary>)
@@ -102,7 +104,7 @@ interface FileAttachment {
 // File type detection
 const TEXT_EXTENSIONS = new Set(['txt', 'md', 'py', 'js', 'ts', 'tsx', 'json', 'yaml', 'yml', 'csv',
     'html', 'css', 'xml', 'log', 'sh', 'bat', 'sql', 'java', 'c', 'cpp',
-    'h', 'hpp', 'go', 'rs', 'rb', 'swift', 'kt', 'scala', 'r', 'lua', 'pl']);
+    'h', 'hpp', 'go', 'rs', 'rb', 'swift', 'kt', 'scala', 'r', 'lua', 'pl', 'pdf']);
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']);
 
 function getFileType(filename: string, mimeType: string): 'image' | 'document' | 'unknown' {
@@ -123,6 +125,8 @@ export default function Home() {
     const [messages, setMessages] = useState<Message[]>([]);
     const [inputValue, setInputValue] = useState('');
     const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
+    const [permissionRequest, setPermissionRequest] = useState<PermissionRequestData | null>(null);
+    const [chronicleConfirm, setChronicleConfirm] = useState<ChronicleConfirmData | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const chatAreaRef = useRef<HTMLDivElement>(null); // Ref for the scrollable area
     const [isHistoryLoaded, setIsHistoryLoaded] = useState(false);
@@ -200,16 +204,27 @@ export default function Home() {
         const textarea = textareaRef.current;
         if (!textarea) return;
 
-        // Reset height to calculate scrollHeight correctly
-        textarea.style.height = 'auto';
-
-        // Calculate line height (approximately 1.5 * font-size of 0.95rem ≈ 22.8px)
-        const lineHeight = 24; // px, approximate
+        const lineHeight = 24; // px (1.5 * ~16px font-size)
         const maxLines = 10;
         const maxHeight = lineHeight * maxLines;
 
-        // Set new height (capped at max)
-        const newHeight = Math.min(textarea.scrollHeight, maxHeight);
+        // Temporarily override styles for accurate scrollHeight measurement
+        // - min-height: 0 prevents CSS min-height from inflating scrollHeight
+        // - overflow: hidden prevents scrollbar from affecting measurement
+        // - height: 0 collapses textarea to measure true content height
+        const prevMinHeight = textarea.style.minHeight;
+        const prevOverflow = textarea.style.overflow;
+        textarea.style.minHeight = '0';
+        textarea.style.overflow = 'hidden';
+        textarea.style.height = '0';
+
+        const scrollH = textarea.scrollHeight;
+
+        // Restore
+        textarea.style.minHeight = prevMinHeight;
+        textarea.style.overflow = prevOverflow;
+
+        const newHeight = Math.max(lineHeight, Math.min(scrollH, maxHeight));
         textarea.style.height = `${newHeight}px`;
     }, []);
 
@@ -902,6 +917,32 @@ export default function Home() {
         setTzMismatch(null);
     };
 
+    const handlePermissionResponse = useCallback(async (requestId: string, decision: string) => {
+        setPermissionRequest(null);
+        try {
+            await fetch('/api/chat/permission-response', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ request_id: requestId, decision }),
+            });
+        } catch (e) {
+            console.error('Failed to send permission response', e);
+        }
+    }, []);
+
+    const handleChronicleConfirmResponse = useCallback(async (requestId: string, decision: string) => {
+        setChronicleConfirm(null);
+        try {
+            await fetch('/api/chat/permission-response', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ request_id: requestId, decision }),
+            });
+        } catch (e) {
+            console.error('Failed to send chronicle confirm response', e);
+        }
+    }, []);
+
     const handleSendMessage = async () => {
         if ((!inputValue.trim() && attachments.length === 0) || loadingStatus) return;
         isProcessingRef.current = true;
@@ -1051,6 +1092,16 @@ export default function Home() {
                                 }
                             });
                             setLoadingStatus('Streaming...');
+                        } else if (event.type === 'streaming_discard') {
+                            // Tool call detected after streaming — discard streamed text
+                            setMessages(prev => {
+                                const last = prev[prev.length - 1];
+                                if (last && last._streaming) {
+                                    return prev.slice(0, -1);
+                                }
+                                return prev;
+                            });
+                            setLoadingStatus('Thinking...');
                         } else if (event.type === 'streaming_complete') {
                             // Extract images from metadata if present (e.g., from image generation)
                             let streamCompleteImages: MessageImage[] | undefined;
@@ -1176,11 +1227,29 @@ export default function Home() {
                                 timestamp: new Date().toISOString()
                             }]);
                         } else if (event.type === 'metabolism') {
-                            if (event.status === 'started') {
-                                setLoadingStatus(event.content || '記憶を整理しています...');
-                            } else if (event.status === 'completed') {
+                            if (event.status === 'completed') {
                                 setLoadingStatus('Thinking...');
+                            } else {
+                                // started, running, etc. — show content as loading status
+                                setLoadingStatus(event.content || '記憶を整理しています...');
                             }
+                        } else if (event.type === 'permission_request') {
+                            setPermissionRequest({
+                                requestId: event.request_id,
+                                playbookName: event.playbook_name,
+                                playbookDisplayName: event.playbook_display_name || event.playbook_name,
+                                playbookDescription: event.playbook_description || '',
+                                personaName: event.persona_name || '',
+                            });
+                        } else if (event.type === 'chronicle_confirm') {
+                            setChronicleConfirm({
+                                requestId: event.request_id,
+                                unprocessedMessages: event.unprocessed_messages,
+                                totalMessages: event.total_messages,
+                                estimatedLlmCalls: event.estimated_llm_calls,
+                                modelName: event.model_name || '',
+                                personaName: event.persona_name || '',
+                            });
                         } else if (event.type === 'warning') {
                             if (event.display === 'toast') {
                                 const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -1197,6 +1266,21 @@ export default function Home() {
                                     timestamp: new Date().toISOString()
                                 }]);
                             }
+                        } else if (event.type === 'cancelled') {
+                            // Server-side cancellation: finalize streaming message
+                            setMessages(prev => {
+                                const last = prev[prev.length - 1];
+                                if (last && last._streaming) {
+                                    const { _streaming, _streamingThinking, _activities, ...rest } = last;
+                                    return [...prev.slice(0, -1), {
+                                        ...rest,
+                                        ...((_streamingThinking) && { reasoning: _streamingThinking }),
+                                        ...((_activities && _activities.length > 0) && { activity_trace: _activities }),
+                                    }];
+                                }
+                                return prev;
+                            });
+                            setLoadingStatus(null);
                         } else if (event.response) {
                             setMessages(prev => [...prev, { role: 'assistant', content: event.response }]);
                         }
@@ -1212,8 +1296,39 @@ export default function Home() {
             setMessages(prev => [...prev, { role: 'assistant', content: "Error: Failed to send message." }]);
         } finally {
             setLoadingStatus(null);
+            // Finalize any orphaned _streaming messages left after the stream ends
+            // (e.g. activity events that arrived after the last streaming_complete)
+            setMessages(prev => {
+                const lastIdx = prev.length - 1;
+                if (lastIdx >= 0 && prev[lastIdx]._streaming) {
+                    const msg = prev[lastIdx];
+                    const { _streaming, _streamingThinking, _activities, ...rest } = msg;
+                    // Empty content + no activities → discard entirely
+                    if (!rest.content && (!_activities || _activities.length === 0)) {
+                        return prev.slice(0, -1);
+                    }
+                    // Has activities or content → finalize as completed message
+                    return [...prev.slice(0, -1), {
+                        ...rest,
+                        ...(_streamingThinking && { reasoning: _streamingThinking }),
+                        ...((_activities && _activities.length > 0) && { activity_trace: _activities }),
+                    }];
+                }
+                return prev;
+            });
             await syncAfterResponse(); // Merge server state (IDs, avatars) without replacing messages
             isProcessingRef.current = false; // Allow polling AFTER sync completes
+        }
+    };
+
+    const handleStopGeneration = async () => {
+        // Signal backend to cancel active LLM generation
+        // Don't abort() the fetch — let the backend's cancellation flow
+        // send streaming_complete and cancelled events naturally.
+        try {
+            await fetch('/api/chat/stop', { method: 'POST' });
+        } catch (e) {
+            console.error('Failed to send stop request:', e);
         }
     };
 
@@ -1534,16 +1649,20 @@ export default function Home() {
                                         <div className={styles.errorContent}>
                                             <div className={styles.errorHeader}>
                                                 <span className={styles.errorIcon}>
-                                                    {msg.errorCode === 'rate_limit' && '⏱️'}
-                                                    {msg.errorCode === 'timeout' && '⏰'}
-                                                    {msg.errorCode === 'safety_filter' && '🛡️'}
-                                                    {msg.errorCode === 'server_error' && '🔧'}
-                                                    {msg.errorCode === 'empty_response' && '📭'}
-                                                    {msg.errorCode === 'authentication' && '🔑'}
-                                                    {msg.errorCode === 'payment' && '💳'}
-                                                    {(!msg.errorCode || msg.errorCode === 'unknown' || !['rate_limit', 'timeout', 'safety_filter', 'server_error', 'empty_response', 'authentication', 'payment'].includes(msg.errorCode)) && '⚠️'}
+                                                    {({rate_limit: '⏱️', timeout: '⏰', safety_filter: '🛡️', server_error: '🔧', empty_response: '📭', authentication: '🔑', payment: '💳'} as Record<string, string>)[msg.errorCode || ''] || '⚠️'}
                                                 </span>
                                                 <span className={styles.errorMessage}>{msg.content}</span>
+                                            </div>
+                                            <div style={{ fontSize: '0.85em', opacity: 0.75, lineHeight: 1.4, marginTop: '4px' }}>
+                                                {({
+                                                    empty_response: 'しばらく時間を置いてから再送信してください。繰り返し発生する場合は、サーバーの障害情報を確認してください。',
+                                                    safety_filter: '送信した内容が安全性フィルターに該当した可能性があります。内容を変更して再送信してください。',
+                                                    timeout: 'サーバーが混雑している可能性があります。しばらく時間を置いてから再送信してください。',
+                                                    rate_limit: 'API利用制限に達しています。しばらく時間を置いてから再送信してください。',
+                                                    payment: 'APIキーの残高や支払い設定を確認してください。',
+                                                    authentication: 'APIキーの設定を確認してください。',
+                                                    server_error: 'LLMサーバーで障害が発生しています。しばらく時間を置いてから再送信してください。',
+                                                } as Record<string, string>)[msg.errorCode || ''] || '予期しないエラーが発生しました。問題が続く場合は管理者に連絡してください。'}
                                             </div>
                                             {msg.errorDetail && (
                                                 <details className={styles.errorDetails}>
@@ -1776,7 +1895,7 @@ export default function Home() {
                             style={{ display: 'none' }}
                             onChange={handleFileUpload}
                             multiple
-                            accept="image/*,.txt,.md,.py,.js,.ts,.tsx,.json,.yaml,.yml,.csv,.html,.css,.xml,.log,.sh,.sql,.java,.c,.cpp,.go,.rs,.rb"
+                            accept="image/*,.txt,.md,.py,.js,.ts,.tsx,.json,.yaml,.yml,.csv,.html,.css,.xml,.log,.sh,.bat,.sql,.java,.c,.cpp,.h,.hpp,.go,.rs,.rb,.swift,.kt,.scala,.r,.lua,.pl,.pdf"
                         />
                         <textarea
                             ref={textareaRef}
@@ -1786,13 +1905,23 @@ export default function Home() {
                             placeholder={selectedPlaybook ? `Message (Playbook: ${selectedPlaybook})...` : "Type a message..."}
                             rows={1}
                         />
-                        <button
-                            className={styles.sendBtn}
-                            onClick={handleSendMessage}
-                            disabled={!!loadingStatus || (!inputValue.trim() && attachments.length === 0)}
-                        >
-                            <Send size={20} />
-                        </button>
+                        {loadingStatus ? (
+                            <button
+                                className={styles.stopBtn}
+                                onClick={handleStopGeneration}
+                                title="Stop generation"
+                            >
+                                <Square size={16} />
+                            </button>
+                        ) : (
+                            <button
+                                className={styles.sendBtn}
+                                onClick={handleSendMessage}
+                                disabled={!inputValue.trim() && attachments.length === 0}
+                            >
+                                <Send size={20} />
+                            </button>
+                        )}
                     </div>
                 </div>
             </main>
@@ -1834,6 +1963,20 @@ export default function Home() {
                 data={contextPreviewData}
                 isLoading={contextPreviewLoading}
             />
+
+            {permissionRequest && (
+                <PlaybookPermissionDialog
+                    request={permissionRequest}
+                    onRespond={handlePermissionResponse}
+                />
+            )}
+
+            {chronicleConfirm && (
+                <ChronicleConfirmDialog
+                    request={chronicleConfirm}
+                    onRespond={handleChronicleConfirmResponse}
+                />
+            )}
 
             {/* Initial Tutorial Wizard */}
             {tutorialChecked && (

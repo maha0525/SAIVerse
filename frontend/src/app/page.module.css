@@ -622,12 +622,15 @@
     outline: none;
     resize: none;
     font-family: inherit;
-    font-size: 0.95rem;
+    font-size: 1rem;
+    /* >= 16px prevents iOS auto-zoom on focus */
     line-height: 1.5;
     max-height: 240px;
     /* 10 lines * 24px line-height */
     min-height: 24px;
     /* 1 line */
+    height: 24px;
+    /* Explicit initial height — JS adjustTextareaHeight overrides dynamically */
     padding: 0.2rem 0;
     overflow-y: auto;
 }
@@ -656,6 +659,25 @@
 .sendBtn:not(:disabled):hover,
 .attachBtn:hover {
     background: rgba(6, 182, 212, 0.1);
+}
+
+.stopBtn {
+    background: none;
+    border: none;
+    color: var(--danger, #ef4444);
+    cursor: pointer;
+    padding: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    transition: background 0.2s;
+    min-width: 36px;
+    min-height: 36px;
+}
+
+.stopBtn:hover {
+    background: rgba(239, 68, 68, 0.1);
 }
 
 /* Plus button active state */

@@ -243,6 +243,7 @@ class TestLLMClients(unittest.TestCase):
 
         # Non-tool mode uses streaming, so mock generate_content_stream
         mock_chunk = MagicMock()
+        mock_chunk.prompt_feedback = None
         mock_candidate = MagicMock()
         mock_candidate.content.parts = [
             MagicMock(text="Test Gemini response", function_call=None, thought=False),
@@ -373,6 +374,7 @@ class TestLLMClients(unittest.TestCase):
 
         # Paid client streaming succeeds
         mock_chunk = MagicMock()
+        mock_chunk.prompt_feedback = None
         cand = MagicMock()
         cand.content.parts = [MagicMock(text="OK", function_call=None, thought=False)]
         mock_chunk.candidates = [cand]
@@ -484,6 +486,7 @@ class TestLLMClients(unittest.TestCase):
 
         # Schema mode with tools=[] goes through non-tool streaming path
         mock_chunk = MagicMock()
+        mock_chunk.prompt_feedback = None
         mock_candidate = MagicMock()
         mock_candidate.content.parts = [MagicMock(text='{"key":"value"}', function_call=None, thought=False)]
         mock_chunk.candidates = [mock_candidate]

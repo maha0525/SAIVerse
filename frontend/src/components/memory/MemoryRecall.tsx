@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Search, Loader2, AlertCircle, Brain, Bug } from 'lucide-react';
+import { Search, Loader2, AlertCircle, Brain, Bug, Trash2 } from 'lucide-react';
 import styles from './MemoryRecall.module.css';
 
 interface MemoryRecallProps {
@@ -38,6 +38,11 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
     const [useHybrid, setUseHybrid] = useState(false);
     const [startDate, setStartDate] = useState('');
     const [endDate, setEndDate] = useState('');
+    const [isDeletingChronicle, setIsDeletingChronicle] = useState(false);
+    const [isDeletingMemopedia, setIsDeletingMemopedia] = useState(false);
+    const [confirmChronicle, setConfirmChronicle] = useState(false);
+    const [confirmMemopedia, setConfirmMemopedia] = useState(false);
+    const [deleteResult, setDeleteResult] = useState<string | null>(null);
 
     const handleRecall = async () => {
         const trimmedQuery = query.trim();
@@ -126,6 +131,50 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         if (score >= 0.7) return '#fab005';
         if (score >= 0.6) return '#fd7e14';
         return '#fa5252';
+    };
+
+    const handleDeleteAllChronicle = async () => {
+        setIsDeletingChronicle(true);
+        setDeleteResult(null);
+        try {
+            const backendUrl = 'http://127.0.0.1:8000';
+            const res = await fetch(`${backendUrl}/api/people/${personaId}/arasuji`, {
+                method: 'DELETE',
+            });
+            if (!res.ok) {
+                const text = await res.text();
+                throw new Error(text.substring(0, 200));
+            }
+            const data = await res.json();
+            setDeleteResult(`Chronicle: ${data.deleted_count}件を削除しました`);
+        } catch (err: any) {
+            setDeleteResult(`Chronicle削除エラー: ${err.message}`);
+        } finally {
+            setIsDeletingChronicle(false);
+            setConfirmChronicle(false);
+        }
+    };
+
+    const handleDeleteAllMemopedia = async () => {
+        setIsDeletingMemopedia(true);
+        setDeleteResult(null);
+        try {
+            const backendUrl = 'http://127.0.0.1:8000';
+            const res = await fetch(`${backendUrl}/api/people/${personaId}/memopedia/pages`, {
+                method: 'DELETE',
+            });
+            if (!res.ok) {
+                const text = await res.text();
+                throw new Error(text.substring(0, 200));
+            }
+            const data = await res.json();
+            setDeleteResult(`Memopedia: ${data.deleted_count}件のページを削除しました`);
+        } catch (err: any) {
+            setDeleteResult(`Memopedia削除エラー: ${err.message}`);
+        } finally {
+            setIsDeletingMemopedia(false);
+            setConfirmMemopedia(false);
+        }
     };
 
     return (
@@ -376,6 +425,88 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                     </div>
                 </div>
             )}
+
+            {/* Danger Zone: Bulk Delete */}
+            <div className={styles.dangerZone}>
+                <h4 className={styles.dangerTitle}>Danger Zone</h4>
+                <p className={styles.dangerDescription}>
+                    データを一括削除します。この操作は取り消せません。
+                </p>
+
+                <div className={styles.dangerButtons}>
+                    {!confirmChronicle ? (
+                        <button
+                            className={styles.dangerButton}
+                            onClick={() => setConfirmChronicle(true)}
+                            disabled={isDeletingChronicle}
+                        >
+                            <Trash2 size={14} />
+                            Chronicle 全削除
+                        </button>
+                    ) : (
+                        <div className={styles.confirmGroup}>
+                            <span className={styles.confirmText}>本当に削除しますか？</span>
+                            <button
+                                className={styles.confirmYes}
+                                onClick={handleDeleteAllChronicle}
+                                disabled={isDeletingChronicle}
+                            >
+                                {isDeletingChronicle ? (
+                                    <><Loader2 size={14} className={styles.loader} /> 削除中...</>
+                                ) : (
+                                    '削除する'
+                                )}
+                            </button>
+                            <button
+                                className={styles.confirmNo}
+                                onClick={() => setConfirmChronicle(false)}
+                                disabled={isDeletingChronicle}
+                            >
+                                キャンセル
+                            </button>
+                        </div>
+                    )}
+
+                    {!confirmMemopedia ? (
+                        <button
+                            className={styles.dangerButton}
+                            onClick={() => setConfirmMemopedia(true)}
+                            disabled={isDeletingMemopedia}
+                        >
+                            <Trash2 size={14} />
+                            Memopedia 全削除
+                        </button>
+                    ) : (
+                        <div className={styles.confirmGroup}>
+                            <span className={styles.confirmText}>本当に削除しますか？</span>
+                            <button
+                                className={styles.confirmYes}
+                                onClick={handleDeleteAllMemopedia}
+                                disabled={isDeletingMemopedia}
+                            >
+                                {isDeletingMemopedia ? (
+                                    <><Loader2 size={14} className={styles.loader} /> 削除中...</>
+                                ) : (
+                                    '削除する'
+                                )}
+                            </button>
+                            <button
+                                className={styles.confirmNo}
+                                onClick={() => setConfirmMemopedia(false)}
+                                disabled={isDeletingMemopedia}
+                            >
+                                キャンセル
+                            </button>
+                        </div>
+                    )}
+                </div>
+
+                {deleteResult && (
+                    <div className={styles.deleteResult}>
+                        {deleteResult}
+                    </div>
+                )}
+            </div>
         </div>
     );
 }

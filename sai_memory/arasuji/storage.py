@@ -275,6 +275,29 @@ def mark_consolidated(
     conn.commit()
 
 
+def update_entry_content(
+    conn: sqlite3.Connection,
+    entry_id: str,
+    content: str,
+) -> bool:
+    """Update the content of an arasuji entry.
+
+    Args:
+        conn: Database connection
+        entry_id: ID of the entry to update
+        content: New content text
+
+    Returns:
+        True if the entry was found and updated, False otherwise
+    """
+    cur = conn.execute(
+        "UPDATE arasuji_entries SET content = ? WHERE id = ?",
+        (content, entry_id),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
 def get_all_entries_ordered(
     conn: sqlite3.Connection,
     *,
@@ -329,10 +352,28 @@ def get_max_level(conn: sqlite3.Connection) -> int:
 
 
 def delete_entry(conn: sqlite3.Connection, entry_id: str) -> bool:
-    """Delete an arasuji entry."""
-    cur = conn.execute("DELETE FROM arasuji_entries WHERE id = ?", (entry_id,))
+    """Delete an arasuji entry.
+
+    If the entry is level 2+, its child entries (referenced by source_ids)
+    are automatically reset: ``is_consolidated`` → 0, ``parent_id`` → NULL.
+    This ensures children become eligible for re-consolidation.
+    """
+    entry = get_entry(conn, entry_id)
+    if not entry:
+        return False
+
+    # Reset children when deleting a consolidated parent
+    if entry.level >= 2 and entry.source_ids:
+        placeholders = ",".join("?" for _ in entry.source_ids)
+        conn.execute(
+            f"UPDATE arasuji_entries SET is_consolidated = 0, parent_id = NULL "
+            f"WHERE id IN ({placeholders})",
+            entry.source_ids,
+        )
+
+    conn.execute("DELETE FROM arasuji_entries WHERE id = ?", (entry_id,))
     conn.commit()
-    return cur.rowcount > 0
+    return True
 
 
 def delete_entry_and_update_parent(
@@ -621,6 +662,41 @@ def has_overlapping_entries(
     )
     row = cur.fetchone()
     return row[0] > 0 if row else False
+
+
+def find_covering_entry(
+    conn: sqlite3.Connection,
+    start_time: int,
+    end_time: int,
+    level: int,
+) -> Optional[ArasujiEntry]:
+    """Find an entry at the given level whose time range covers [start_time, end_time].
+
+    Used to detect gap-fill scenarios where a new level-1 entry falls within
+    an existing higher-level entry's time range.
+
+    Args:
+        conn: Database connection
+        start_time: Start of time range to check
+        end_time: End of time range to check
+        level: Level to search at (typically 2 for gap-fill detection)
+
+    Returns:
+        Matching ArasujiEntry or None if no covering entry exists
+    """
+    cur = conn.execute(
+        """
+        SELECT id, level, content, source_ids_json, start_time, end_time,
+               source_count, message_count, parent_id, is_consolidated, created_at
+        FROM arasuji_entries
+        WHERE level = ? AND start_time <= ? AND end_time > ?
+        ORDER BY start_time ASC
+        LIMIT 1
+        """,
+        (level, start_time, end_time),
+    )
+    row = cur.fetchone()
+    return _row_to_entry(row) if row else None
 
 
 def search_entries(

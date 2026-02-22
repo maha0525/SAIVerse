@@ -86,10 +86,13 @@ export default function UsagePage() {
         try {
             const personaParam = selectedPersona ? `&persona_id=${selectedPersona}` : '';
             const categoryParam = selectedCategory ? `&category=${selectedCategory}` : '';
+            const startDate = new Date();
+            startDate.setDate(startDate.getDate() - days);
+            const startDateStr = startDate.toISOString().split('T')[0];
 
             const [summaryRes, dailyRes, personasRes, categoriesRes, categoryUsageRes] = await Promise.all([
                 fetch(`/api/usage/summary?days=${days}${personaParam}${categoryParam}`),
-                fetch(`/api/usage/daily?${personaParam}${categoryParam}`),
+                fetch(`/api/usage/daily?start_date=${startDateStr}${personaParam}${categoryParam}`),
                 fetch('/api/usage/personas'),
                 fetch('/api/usage/categories'),
                 fetch(`/api/usage/by-category?days=${days}${personaParam}`),

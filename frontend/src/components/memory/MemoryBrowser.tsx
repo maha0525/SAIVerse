@@ -20,7 +20,7 @@ interface MessageItem {
     role: string;
     content: string;
     created_at: number;
-    metadata?: { tags?: string[] };
+    metadata?: { tags?: string[]; reasoning?: string };
 }
 
 interface MemoryBrowserProps {
@@ -43,6 +43,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
     const [editingMsgId, setEditingMsgId] = useState<string | null>(null);
     const [editContent, setEditContent] = useState("");
     const [editTimestamp, setEditTimestamp] = useState<string>("");
+    const [originalEditTimestamp, setOriginalEditTimestamp] = useState<string>("");
 
     // Selection state for bulk delete
     const [selectionMode, setSelectionMode] = useState(false);
@@ -227,18 +228,21 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
     const handleEditStart = (msg: MessageItem) => {
         setEditingMsgId(msg.id);
         setEditContent(msg.content);
-        // Convert Unix timestamp to datetime-local format (local time)
+        // Convert Unix timestamp to datetime-local format (local time, including seconds)
         if (msg.created_at) {
             const d = new Date(msg.created_at * 1000);
-            // Format as YYYY-MM-DDTHH:mm in local time
             const year = d.getFullYear();
             const month = (d.getMonth() + 1).toString().padStart(2, '0');
             const day = d.getDate().toString().padStart(2, '0');
             const hours = d.getHours().toString().padStart(2, '0');
             const minutes = d.getMinutes().toString().padStart(2, '0');
-            setEditTimestamp(`${year}-${month}-${day}T${hours}:${minutes}`);
+            const seconds = d.getSeconds().toString().padStart(2, '0');
+            const formatted = `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
+            setEditTimestamp(formatted);
+            setOriginalEditTimestamp(formatted);
         } else {
             setEditTimestamp("");
+            setOriginalEditTimestamp("");
         }
     };
 
@@ -246,13 +250,15 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
         setEditingMsgId(null);
         setEditContent("");
         setEditTimestamp("");
+        setOriginalEditTimestamp("");
     };
 
     const handleEditSave = async (msgId: string) => {
         try {
             const body: { content?: string; created_at?: number } = {};
             body.content = editContent;
-            if (editTimestamp) {
+            // Only send created_at if the timestamp was actually changed
+            if (editTimestamp && editTimestamp !== originalEditTimestamp) {
                 const ts = new Date(editTimestamp).getTime() / 1000;
                 body.created_at = ts;
             }
@@ -264,6 +270,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
             if (res.ok) {
                 setEditingMsgId(null);
                 setEditTimestamp("");
+                setOriginalEditTimestamp("");
                 // Refresh current page
                 if (selectedThreadId) loadMessages(selectedThreadId, page);
             } else {
@@ -616,6 +623,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                             <label>日時:</label>
                             <input
                                 type="datetime-local"
+                                step="1"
                                 value={newMsgTimestamp}
                                 onChange={(e) => setNewMsgTimestamp(e.target.value)}
                                 className={styles.timestampInput}
@@ -688,6 +696,17 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                         )}
                                     </div>
                                 </div>
+                                {msg.metadata?.reasoning && (
+                                    <details className={styles.thinkingBlock}>
+                                        <summary className={styles.thinkingSummary}>
+                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                            <span>Thought process</span>
+                                        </summary>
+                                        <div className={styles.thinkingContent}>
+                                            {msg.metadata.reasoning}
+                                        </div>
+                                    </details>
+                                )}
                                 <div
                                     className={`${styles.content} ${overflowingMsgs.has(msg.id) && !expandedMsgs.has(msg.id) && editingMsgId !== msg.id ? styles.contentCollapsed : ''}`}
                                     ref={contentRefCallback(msg.id)}
@@ -698,6 +717,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                                 <label>日時:</label>
                                                 <input
                                                     type="datetime-local"
+                                                    step="1"
                                                     className={styles.editTimestampInput}
                                                     value={editTimestamp}
                                                     onChange={(e) => setEditTimestamp(e.target.value)}

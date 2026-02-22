@@ -317,7 +317,7 @@ MODEL_ROLE_DESCRIPTIONS = {
 }
 
 # Provider presets: values are config keys (filename stems).
-# image_summary_model is Gemini API model name (used directly by Gemini SDK).
+# image_summary_model is also a config key (resolved via find_model_config at runtime).
 # None means "not applicable for this provider" — will fall back to Gemini default if available.
 PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
     "gemini_paid": {

@@ -1,0 +1,174 @@
+.modal {
+    background: #1f2937;
+    border-radius: 12px;
+    width: 100%;
+    max-width: 440px;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1.25rem 1.5rem 1rem;
+}
+
+.icon {
+    flex-shrink: 0;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: #374151;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #60a5fa;
+}
+
+.headerText h3 {
+    margin: 0;
+    font-size: 1rem;
+    color: #f9fafb;
+    font-weight: 600;
+}
+
+.headerText p {
+    margin: 0.25rem 0 0;
+    font-size: 0.8rem;
+    color: #9ca3af;
+}
+
+.body {
+    padding: 0 1.5rem 1rem;
+}
+
+.description {
+    font-size: 0.875rem;
+    color: #d1d5db;
+    line-height: 1.5;
+    margin: 0;
+}
+
+.timer {
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+    color: #6b7280;
+    text-align: right;
+}
+
+.timerWarn {
+    color: #f59e0b;
+}
+
+.actions {
+    padding: 0.75rem 1.5rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.primaryRow {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.primaryRow button {
+    flex: 1;
+    padding: 0.625rem 1rem;
+    border-radius: 8px;
+    border: none;
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, opacity 0.15s;
+}
+
+.allowBtn {
+    background: #3b82f6;
+    color: #fff;
+}
+
+.allowBtn:hover {
+    background: #2563eb;
+}
+
+.denyBtn {
+    background: #374151;
+    color: #d1d5db;
+}
+
+.denyBtn:hover {
+    background: #4b5563;
+}
+
+.secondaryRow {
+    display: flex;
+    justify-content: center;
+    gap: 1.5rem;
+}
+
+.secondaryRow button {
+    background: none;
+    border: none;
+    font-size: 0.75rem;
+    color: #6b7280;
+    cursor: pointer;
+    padding: 0.25rem 0;
+    transition: color 0.15s;
+}
+
+.secondaryRow button:hover {
+    color: #d1d5db;
+}
+
+/* ── Light mode overrides ── */
+
+:global([data-theme="light"]) .modal {
+    background: #ffffff;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.15);
+}
+
+:global([data-theme="light"]) .icon {
+    background: #e2e8f0;
+    color: #3b82f6;
+}
+
+:global([data-theme="light"]) .headerText h3 {
+    color: #1e293b;
+}
+
+:global([data-theme="light"]) .headerText p {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .description {
+    color: #475569;
+}
+
+:global([data-theme="light"]) .timer {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .timerWarn {
+    color: #d97706;
+}
+
+:global([data-theme="light"]) .denyBtn {
+    background: #e2e8f0;
+    color: #475569;
+}
+
+:global([data-theme="light"]) .denyBtn:hover {
+    background: #cbd5e1;
+}
+
+:global([data-theme="light"]) .secondaryRow button {
+    color: #94a3b8;
+}
+
+:global([data-theme="light"]) .secondaryRow button:hover {
+    color: #475569;
+}

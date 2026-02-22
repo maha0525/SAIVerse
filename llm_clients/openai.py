@@ -25,9 +25,17 @@ from .exceptions import (
     LLMTimeoutError,
     PaymentError,
     RateLimitError,
+    SafetyFilterError,
     ServerError,
 )
-from .utils import content_to_text, merge_reasoning_strings, obj_to_dict
+from .utils import (
+    compute_allowed_attachment_keys,
+    content_to_text,
+    image_summary_note,
+    merge_reasoning_strings,
+    obj_to_dict,
+    parse_attachment_limit,
+)
 
 
 # Retry configuration
@@ -68,6 +76,8 @@ def _is_timeout_error(err: Exception) -> bool:
 
 def _should_retry(err: Exception) -> bool:
     """Check if the error should trigger a retry."""
+    if _is_payment_error(err) or _is_authentication_error(err):
+        return False
     return _is_rate_limit_error(err) or _is_server_error(err) or _is_timeout_error(err)
 
 
@@ -80,9 +90,28 @@ def _is_authentication_error(err: Exception) -> bool:
 
 
 def _is_payment_error(err: Exception) -> bool:
-    """Check if the error is a payment/billing error (402)."""
+    """Check if the error is a payment/billing error (402) or quota exhaustion."""
     msg = str(err).lower()
-    return "402" in msg or "payment required" in msg or "spend limit" in msg or "billing" in msg
+    return (
+        "402" in msg
+        or "payment required" in msg
+        or "spend limit" in msg
+        or "billing" in msg
+        or "insufficient_quota" in msg
+    )
+
+
+def _is_content_policy_error(err: Exception) -> bool:
+    """Check if the error is a content policy violation (prompt-level block)."""
+    if isinstance(err, openai.BadRequestError):
+        # OpenAI returns error.code="content_policy_violation" for blocked prompts
+        body = getattr(err, "body", None)
+        if isinstance(body, dict):
+            code = body.get("error", {}).get("code", "") or ""
+            if "content_policy" in code or "content_filter" in code:
+                return True
+    msg = str(err).lower()
+    return "content_policy" in msg or "content_filter" in msg and "safety" in msg
 
 
 def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError:
@@ -97,11 +126,16 @@ def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError
         return ServerError(f"OpenAI {context} failed: server error", err)
     elif _is_authentication_error(err):
         return AuthenticationError(f"OpenAI {context} failed: authentication error", err)
+    elif _is_content_policy_error(err):
+        return SafetyFilterError(
+            f"OpenAI {context} failed: content policy violation", err,
+            user_message="入力内容がOpenAIのコンテンツポリシーによりブロックされました。入力内容を変更してお試しください。",
+        )
     else:
         return LLMError(f"OpenAI {context} failed: {err}", err)
 
 
-def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_image_bytes: Optional[int] = None, convert_system_to_user: bool = False) -> List[Any]:
+def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_image_bytes: Optional[int] = None, convert_system_to_user: bool = False, reasoning_passback_field: Optional[str] = None) -> List[Any]:
     """
     Prepare messages for OpenAI API by extracting only allowed fields.
     Removes SAIMemory-specific fields (id, thread_id, created_at, metadata).
@@ -133,10 +167,43 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
             return content_empty
         return False
 
+    # ------------------------------------------------------------------
+    # Pre-scan: build attachment cache and metadata flags
+    # ------------------------------------------------------------------
+    max_image_embeds = parse_attachment_limit("OPENAI")
+    attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
+    skip_summary_indices: set = set()
+    exempt_indices: set = set()
+
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        metadata = msg.get("metadata")
+        if isinstance(metadata, dict):
+            if metadata.get("__skip_image_summary__"):
+                skip_summary_indices.add(idx)
+            if metadata.get("__visual_context__"):
+                exempt_indices.add(idx)
+        media_items = iter_image_media(metadata)
+        if media_items:
+            attachment_cache[idx] = media_items
+
+    allowed_attachment_keys = compute_allowed_attachment_keys(
+        attachment_cache, max_image_embeds, exempt_indices,
+    )
+    logging.debug(
+        "[openai] attachment limit=%s, cached=%d msgs with images",
+        "∞" if max_image_embeds is None else max_image_embeds,
+        len(attachment_cache),
+    )
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
     prepared: List[Any] = []
     seen_non_system = False  # Track if we've seen any non-system messages
 
-    for msg in messages:
+    for idx, msg in enumerate(messages):
         if not isinstance(msg, dict):
             prepared.append(msg)
             continue
@@ -151,7 +218,8 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
             continue
 
         metadata = msg.get("metadata")
-        attachments = iter_image_media(metadata)
+        attachments = attachment_cache.get(idx, [])
+        skip_summary = idx in skip_summary_indices
 
         # Extract only allowed fields
         clean_msg: Dict[str, Any] = {}
@@ -162,6 +230,14 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
         # Override role if it was "host"
         if role:
             clean_msg["role"] = role
+
+        # Preserve reasoning_details for multi-turn reasoning pass-back
+        # Only pass back structured data (list of objects); skip plain strings
+        # which were stored by older code and would cause provider errors
+        if reasoning_passback_field and role == "assistant":
+            rd = (metadata or {}).get("reasoning_details") if isinstance(metadata, dict) else None
+            if isinstance(rd, list):
+                clean_msg[reasoning_passback_field] = rd
 
         # Skip if the cleaned message is also empty
         if _is_empty_message(clean_msg):
@@ -190,33 +266,63 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
             parts: List[Dict[str, Any]] = []
             if text:
                 parts.append({"type": "text", "text": text})
-            for att in attachments:
-                data, effective_mime = load_image_bytes_for_llm(att["path"], att["mime_type"], max_bytes=max_image_bytes)
-                if data and effective_mime:
-                    b64 = base64.b64encode(data).decode("ascii")
-                    parts.append(
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{effective_mime};base64,{b64}"},
-                        }
+            for att_idx, att in enumerate(attachments):
+                # Determine whether to embed this attachment as binary
+                should_embed = (
+                    allowed_attachment_keys is None
+                    or (idx, att_idx) in allowed_attachment_keys
+                )
+                if should_embed:
+                    data, effective_mime = load_image_bytes_for_llm(
+                        att["path"], att["mime_type"], max_bytes=max_image_bytes,
                     )
-                else:
-                    logging.warning("Image file not found or unreadable, skipping attachment: %s", att.get("uri") or att.get("path"))
-                    parts.append({"type": "text", "text": f"[画像: {att['uri']}]"})
+                    if data and effective_mime:
+                        b64 = base64.b64encode(data).decode("ascii")
+                        parts.append(
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{effective_mime};base64,{b64}"},
+                            }
+                        )
+                        continue
+                    else:
+                        logging.warning(
+                            "Image file not found or unreadable, skipping attachment: %s",
+                            att.get("uri") or att.get("path"),
+                        )
+                # Not embedding — produce a text summary instead
+                note = image_summary_note(
+                    att["path"], att["mime_type"],
+                    att.get("uri", att.get("path", "unknown")),
+                    skip_summary=skip_summary,
+                )
+                parts.append({"type": "text", "text": note})
             clean_msg["content"] = parts if parts else text
             prepared.append(clean_msg)
         else:
+            # Model doesn't support images or non-user role — use text summaries
             note_lines: List[str] = []
             if text:
                 note_lines.append(text)
             for att in attachments:
-                note_lines.append(f"[画像: {att['uri']}]")
+                note = image_summary_note(
+                    att["path"], att["mime_type"],
+                    att.get("uri", att.get("path", "unknown")),
+                    skip_summary=skip_summary,
+                )
+                note_lines.append(note)
             clean_msg["content"] = "\n".join(note_lines)
             prepared.append(clean_msg)
     return prepared
 
 
-def _extract_reasoning_from_openai_message(message: Any) -> Tuple[str, List[Dict[str, str]]]:
+def _extract_reasoning_from_openai_message(message: Any) -> Tuple[str, List[Dict[str, str]], Any]:
+    """Extract text, reasoning entries, and raw reasoning_details from an OpenAI message.
+
+    Returns:
+        (final_text, reasoning_entries, reasoning_details)
+        reasoning_details is the raw provider data for multi-turn pass-back (or None).
+    """
     msg_dict = obj_to_dict(message) or {}
     content = msg_dict.get("content")
     reasoning_entries: List[Dict[str, str]] = []
@@ -250,8 +356,11 @@ def _extract_reasoning_from_openai_message(message: Any) -> Tuple[str, List[Dict
         if isinstance(rc, str):
             _append_reasoning(rc)
 
+    # Capture raw reasoning_details for multi-turn pass-back (e.g., OpenRouter)
+    reasoning_details = msg_dict.get("reasoning_details")
+
     final_text = "".join(text_segments)
-    return final_text, reasoning_entries
+    return final_text, reasoning_entries, reasoning_details
 
 
 def _extract_reasoning_from_delta(delta: Any) -> List[str]:
@@ -271,12 +380,58 @@ def _extract_reasoning_from_delta(delta: Any) -> List[str]:
     elif isinstance(raw_reasoning, str):
         reasoning_chunks.append(raw_reasoning)
 
-    # Check "reasoning_content" field (used by o-series models)
+    # Check "reasoning_content" field (used by o-series models, NIM)
     reasoning_content = delta_dict.get("reasoning_content")
     if isinstance(reasoning_content, str) and reasoning_content:
         reasoning_chunks.append(reasoning_content)
 
+    # Check "reasoning_details" field (used by OpenRouter)
+    # Extract text for display; raw objects are collected separately for passback
+    raw_rd = delta_dict.get("reasoning_details")
+    if isinstance(raw_rd, list) and not reasoning_chunks:
+        # Only extract text if no other reasoning source was found (avoid duplicates)
+        for item in raw_rd:
+            item_dict = obj_to_dict(item) or item if isinstance(item, dict) else {}
+            text = item_dict.get("text") or item_dict.get("summary") or ""
+            if text:
+                reasoning_chunks.append(text)
+
     return reasoning_chunks
+
+
+def _extract_raw_reasoning_details_from_delta(delta: Any) -> List[Dict[str, Any]]:
+    """Extract raw reasoning_details objects from a streaming delta for multi-turn passback."""
+    delta_dict = obj_to_dict(delta)
+    if not isinstance(delta_dict, dict):
+        return []
+    raw_rd = delta_dict.get("reasoning_details")
+    if not isinstance(raw_rd, list):
+        return []
+    result: List[Dict[str, Any]] = []
+    for item in raw_rd:
+        d = obj_to_dict(item) if not isinstance(item, dict) else item
+        if isinstance(d, dict):
+            result.append(d)
+    return result
+
+
+def _merge_streaming_reasoning_details(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Merge incremental reasoning_details chunks from streaming into consolidated entries.
+
+    Groups by 'index' field and concatenates 'text'/'summary' values.
+    """
+    by_index: Dict[int, Dict[str, Any]] = {}
+    for item in items:
+        idx = item.get("index", 0)
+        if idx not in by_index:
+            by_index[idx] = dict(item)
+        else:
+            existing = by_index[idx]
+            for text_key in ("text", "summary"):
+                chunk_text = item.get(text_key, "")
+                if chunk_text:
+                    existing[text_key] = existing.get(text_key, "") + chunk_text
+    return [by_index[k] for k in sorted(by_index.keys())]
 
 
 def _process_openai_stream_content(content: Any) -> Tuple[str, List[str]]:
@@ -315,6 +470,8 @@ class OpenAIClient(LLMClient):
         max_image_bytes: Optional[int] = None,
         convert_system_to_user: bool = False,
         structured_output_backend: Optional[str] = None,
+        structured_output_mode: Optional[str] = None,
+        reasoning_passback_field: Optional[str] = None,
     ) -> None:
         super().__init__(supports_images=supports_images)
         key_env = api_key_env or "OPENAI_API_KEY"
@@ -335,6 +492,8 @@ class OpenAIClient(LLMClient):
         self.max_image_bytes = max_image_bytes
         self.convert_system_to_user = convert_system_to_user
         self.structured_output_backend = structured_output_backend
+        self.structured_output_mode = structured_output_mode or "native"
+        self.reasoning_passback_field = reasoning_passback_field
 
     def _create_completion(self, **kwargs: Any):
         return self.client.chat.completions.create(**kwargs)
@@ -375,6 +534,26 @@ class OpenAIClient(LLMClient):
                 return node
 
         return _process(schema)
+
+    @staticmethod
+    def _inject_schema_prompt(
+        messages: List[Dict[str, Any]],
+        response_schema: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """Inject response schema into messages as a system instruction.
+
+        Used when structured_output_mode is 'json_object': the server only
+        guarantees valid JSON, so we describe the expected schema in the
+        prompt so the model knows which fields and types to produce.
+        """
+        schema_text = json.dumps(response_schema, ensure_ascii=False, indent=2)
+        instruction = (
+            "You must respond with a JSON object that conforms to the following JSON schema.\n"
+            "Output ONLY the JSON object with no additional text.\n\n"
+            f"```json\n{schema_text}\n```"
+        )
+        # Prepend as a system message so it takes priority
+        return [{"role": "system", "content": instruction}] + list(messages)
 
     def generate(
         self,
@@ -418,24 +597,36 @@ class OpenAIClient(LLMClient):
             if temperature is not None:
                 req["temperature"] = temperature
             if response_schema:
-                schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
-                openai_schema = self._add_additional_properties(response_schema)
-                json_schema_config: Dict[str, Any] = {
-                    "name": schema_name or "saiverse_structured_output",
-                    "schema": openai_schema,
-                    "strict": True,
-                }
-                response_format_config: Dict[str, Any] = {
-                    "type": "json_schema",
-                    "json_schema": json_schema_config,
-                }
-                if self.structured_output_backend:
-                    json_schema_config["backend"] = self.structured_output_backend
-                    response_format_config["backend"] = self.structured_output_backend
-                    logging.info("Applying structured_output_backend='%s' to request (both locations)", self.structured_output_backend)
-                req["response_format"] = response_format_config
-                logging.debug("response_format: %s", req["response_format"])
+                if self.structured_output_mode == "json_object":
+                    # json_object mode: only guarantee valid JSON output;
+                    # schema adherence is handled by prompt injection
+                    req["response_format"] = {"type": "json_object"}
+                    logging.debug("[openai] Using json_object mode with prompt-based schema")
+                else:
+                    # native mode: strict json_schema enforcement
+                    schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
+                    openai_schema = self._add_additional_properties(response_schema)
+                    json_schema_config: Dict[str, Any] = {
+                        "name": schema_name or "saiverse_structured_output",
+                        "schema": openai_schema,
+                        "strict": True,
+                    }
+                    response_format_config: Dict[str, Any] = {
+                        "type": "json_schema",
+                        "json_schema": json_schema_config,
+                    }
+                    if self.structured_output_backend:
+                        json_schema_config["backend"] = self.structured_output_backend
+                        response_format_config["backend"] = self.structured_output_backend
+                        logging.info("Applying structured_output_backend='%s' to request (both locations)", self.structured_output_backend)
+                    req["response_format"] = response_format_config
+                    logging.debug("response_format: %s", req["response_format"])
             return req
+
+        # If json_object mode, inject schema into messages as a system instruction
+        effective_messages = messages
+        if response_schema and self.structured_output_mode == "json_object":
+            effective_messages = self._inject_schema_prompt(messages, response_schema)
 
         # Non-tool mode: return str or dict (if response_schema)
         if not use_tools:
@@ -446,7 +637,7 @@ class OpenAIClient(LLMClient):
                 try:
                     resp = self._create_completion(
                         model=self.model,
-                        messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
+                        messages=_prepare_openai_messages(effective_messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user, self.reasoning_passback_field),
                         n=1,
                         **_build_request_kwargs(),
                     )
@@ -484,11 +675,24 @@ class OpenAIClient(LLMClient):
                 )
 
             choice = resp.choices[0]
-            text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
+
+            # Check for content filter (output-level block)
+            if choice.finish_reason == "content_filter":
+                logging.warning(
+                    "[openai] Output blocked by content filter. finish_reason=%s",
+                    choice.finish_reason,
+                )
+                raise SafetyFilterError(
+                    "OpenAI output blocked by content filter",
+                    user_message="生成された内容がOpenAIのコンテンツフィルターによりブロックされました。入力内容を変更してお試しください。",
+                )
+
+            text_body, reasoning_entries, reasoning_details = _extract_reasoning_from_openai_message(choice.message)
             if not text_body:
                 text_body = choice.message.content or ""
             self._store_reasoning(reasoning_entries)
-            
+            self._store_reasoning_details(reasoning_details)
+
             if response_schema:
                 try:
                     parsed = json.loads(text_body)
@@ -527,7 +731,7 @@ class OpenAIClient(LLMClient):
             try:
                 resp = self._create_completion(
                     model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
+                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user, self.reasoning_passback_field),
                     tools=tools_spec,
                     tool_choice="auto",
                     n=1,
@@ -567,11 +771,24 @@ class OpenAIClient(LLMClient):
             )
 
         choice = resp.choices[0]
+
+        # Check for content filter (output-level block)
+        if choice.finish_reason == "content_filter":
+            logging.warning(
+                "[openai] Output blocked by content filter (tool mode). finish_reason=%s",
+                choice.finish_reason,
+            )
+            raise SafetyFilterError(
+                "OpenAI output blocked by content filter",
+                user_message="生成された内容がOpenAIのコンテンツフィルターによりブロックされました。入力内容を変更してお試しください。",
+            )
+
         tool_calls = getattr(choice.message, "tool_calls", [])
 
         # Extract reasoning if present
-        text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
+        text_body, reasoning_entries, reasoning_details = _extract_reasoning_from_openai_message(choice.message)
         self._store_reasoning(reasoning_entries)
+        self._store_reasoning_details(reasoning_details)
 
         if tool_calls and len(tool_calls) > 0:
             tc = tool_calls[0]
@@ -620,6 +837,11 @@ class OpenAIClient(LLMClient):
         self._store_reasoning([])
         reasoning_chunks: List[str] = []
 
+        # If json_object mode, inject schema into messages as a system instruction
+        effective_messages = messages
+        if response_schema and self.structured_output_mode == "json_object":
+            effective_messages = self._inject_schema_prompt(messages, response_schema)
+
         if not use_tools:
             resp = None
             last_stream_error: Optional[Exception] = None
@@ -630,28 +852,32 @@ class OpenAIClient(LLMClient):
                     if temperature is not None:
                         req_kwargs["temperature"] = temperature
                     if response_schema:
-                        schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
-                        openai_schema = self._add_additional_properties(response_schema)
-                        json_schema_config: Dict[str, Any] = {
-                            "name": schema_name or "saiverse_structured_output",
-                            "schema": openai_schema,
-                            "strict": True,
-                        }
-                        response_format_config: Dict[str, Any] = {
-                            "type": "json_schema",
-                            "json_schema": json_schema_config,
-                        }
-                        if self.structured_output_backend:
-                            json_schema_config["backend"] = self.structured_output_backend
-                            response_format_config["backend"] = self.structured_output_backend
-                            logging.info("Applying structured_output_backend='%s' to request (stream)", self.structured_output_backend)
-                        req_kwargs["response_format"] = response_format_config
+                        if self.structured_output_mode == "json_object":
+                            req_kwargs["response_format"] = {"type": "json_object"}
+                            logging.debug("[openai] Using json_object mode with prompt-based schema (stream)")
+                        else:
+                            schema_name = response_schema.get("title") if isinstance(response_schema, dict) else None
+                            openai_schema = self._add_additional_properties(response_schema)
+                            json_schema_config: Dict[str, Any] = {
+                                "name": schema_name or "saiverse_structured_output",
+                                "schema": openai_schema,
+                                "strict": True,
+                            }
+                            response_format_config: Dict[str, Any] = {
+                                "type": "json_schema",
+                                "json_schema": json_schema_config,
+                            }
+                            if self.structured_output_backend:
+                                json_schema_config["backend"] = self.structured_output_backend
+                                response_format_config["backend"] = self.structured_output_backend
+                                logging.info("Applying structured_output_backend='%s' to request (stream)", self.structured_output_backend)
+                            req_kwargs["response_format"] = response_format_config
                     else:
                         req_kwargs["stream"] = True
                         req_kwargs["stream_options"] = {"include_usage": True}
                     resp = self._create_completion(
                         model=self.model,
-                        messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
+                        messages=_prepare_openai_messages(effective_messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user, self.reasoning_passback_field),
                         n=1,
                         **req_kwargs,
                     )
@@ -681,8 +907,14 @@ class OpenAIClient(LLMClient):
                 if prefix:
                     yield prefix + "\n"
                 last_chunk = None
+                last_finish_reason = None
+                reasoning_details_raw: List[Dict[str, Any]] = []
                 for chunk in resp:
                     last_chunk = chunk
+                    if chunk.choices and chunk.choices[0]:
+                        fr = chunk.choices[0].finish_reason
+                        if fr is not None:
+                            last_finish_reason = fr
                     if chunk.choices and chunk.choices[0].delta:
                         delta = chunk.choices[0].delta
 
@@ -691,6 +923,9 @@ class OpenAIClient(LLMClient):
                         for r in extra_reasoning:
                             reasoning_chunks.append(r)
                             yield {"type": "thinking", "content": r}
+
+                        # Collect raw reasoning_details objects for multi-turn passback
+                        reasoning_details_raw.extend(_extract_raw_reasoning_details_from_delta(delta))
 
                         content = delta.content
                         if content:
@@ -701,6 +936,17 @@ class OpenAIClient(LLMClient):
                                 yield {"type": "thinking", "content": r}
                             if text_fragment:
                                 yield text_fragment
+                # Check for content filter in streaming
+                if last_finish_reason == "content_filter":
+                    logging.warning(
+                        "[openai] Stream output blocked by content filter. finish_reason=%s",
+                        last_finish_reason,
+                    )
+                    raise SafetyFilterError(
+                        "OpenAI streaming output blocked by content filter",
+                        user_message="生成された内容がOpenAIのコンテンツフィルターによりブロックされました。入力内容を変更してお試しください。",
+                    )
+
                 # Store usage from last chunk (when stream_options.include_usage=True)
                 if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
                     # Check for cached tokens (OpenAI Prompt Caching)
@@ -714,13 +960,17 @@ class OpenAIClient(LLMClient):
                     )
                 # Store reasoning collected during streaming
                 self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
+                # Store reasoning_details for multi-turn pass-back (structured objects only)
+                if reasoning_details_raw:
+                    self._store_reasoning_details(_merge_streaming_reasoning_details(reasoning_details_raw))
             else:
                 # Non-streaming mode (response_schema case)
                 choice = resp.choices[0]
-                text_body, reasoning_entries = _extract_reasoning_from_openai_message(choice.message)
+                text_body, reasoning_entries, reasoning_details = _extract_reasoning_from_openai_message(choice.message)
                 if not text_body:
                     text_body = choice.message.content or ""
                 self._store_reasoning(reasoning_entries)
+                self._store_reasoning_details(reasoning_details)
                 prefix = "\n".join(history_snippets) + ("\n" if history_snippets and text_body else "")
                 if prefix:
                     yield prefix
@@ -729,17 +979,22 @@ class OpenAIClient(LLMClient):
             return
 
         if force_tool_choice is None:
-            user_msg = next((m["content"] for m in reversed(messages)
-                             if m.get("role") == "user"), "")
-            decision = route(user_msg, tools_spec)
-            logging.info("Router decision:\n%s", json.dumps(decision, indent=2, ensure_ascii=False))
-            if decision["call"] == "yes" and decision["tool"]:
-                force_tool_choice = {
-                    "type": "function",
-                    "function": {"name": decision["tool"]}
-                }
-            else:
+            if tools is not None:
+                # Explicit tools from runtime — let LLM decide natively
                 force_tool_choice = "auto"
+            else:
+                # Legacy mode (tools=None → OPENAI_TOOLS_SPEC) — use router
+                user_msg = next((m["content"] for m in reversed(messages)
+                                 if m.get("role") == "user"), "")
+                decision = route(user_msg, tools_spec)
+                logging.info("Router decision:\n%s", json.dumps(decision, indent=2, ensure_ascii=False))
+                if decision["call"] == "yes" and decision["tool"]:
+                    force_tool_choice = {
+                        "type": "function",
+                        "function": {"name": decision["tool"]}
+                    }
+                else:
+                    force_tool_choice = "auto"
 
         resp = None
         last_tool_stream_error: Optional[Exception] = None
@@ -750,7 +1005,7 @@ class OpenAIClient(LLMClient):
                 stream_req_kwargs["stream_options"] = {"include_usage": True}
                 resp = self._create_completion(
                     model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user),
+                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user, self.reasoning_passback_field),
                     tools=tools_spec,
                     tool_choice=force_tool_choice,
                     stream=True,
@@ -778,6 +1033,7 @@ class OpenAIClient(LLMClient):
         call_buffer: dict[str, dict] = {}
         state = "TEXT"
         prefix_yielded = False
+        reasoning_details_raw: List[Dict[str, Any]] = []
 
         try:
             current_call_id = None
@@ -833,6 +1089,9 @@ class OpenAIClient(LLMClient):
                     reasoning_chunks.append(r)
                     yield {"type": "thinking", "content": r}
 
+                # Collect raw reasoning_details objects for multi-turn passback
+                reasoning_details_raw.extend(_extract_raw_reasoning_details_from_delta(delta))
+
             # Store usage from last chunk (when stream_options.include_usage=True)
             if last_chunk and hasattr(last_chunk, "usage") and last_chunk.usage:
                 # Check for cached tokens (OpenAI Prompt Caching)
@@ -847,6 +1106,9 @@ class OpenAIClient(LLMClient):
 
             # Store reasoning
             self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
+            # Store reasoning_details for multi-turn pass-back (structured objects only)
+            if reasoning_details_raw:
+                self._store_reasoning_details(_merge_streaming_reasoning_details(reasoning_details_raw))
 
             # Store tool detection result if tool calls were detected
             if call_buffer:

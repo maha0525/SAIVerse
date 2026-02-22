@@ -4,12 +4,15 @@ from api.deps import get_manager
 from .models import (
     ArasujiStatsResponse, ArasujiListResponse, ArasujiEntryItem, SourceMessageItem,
     GenerateArasujiRequest, GenerationJobStatus, ChronicleCostEstimate,
+    MessagesByIdsRequest, UpdateArasujiEntryRequest,
 )
 import sqlite3
 import logging
 import uuid
 import time
 import threading
+
+from llm_clients.exceptions import LLMError
 
 LOGGER = logging.getLogger(__name__)
 router = APIRouter()
@@ -33,6 +36,9 @@ def _create_job(persona_id: str) -> str:
             "message": "Initializing...",
             "entries_created": 0,
             "error": None,
+            "error_code": None,
+            "error_detail": None,
+            "error_meta": None,
             "created_at": time.time(),
         }
     return job_id
@@ -81,12 +87,21 @@ def _get_message_number_map(conn: sqlite3.Connection) -> dict:
     return msg_num_map
 
 @router.get("/{persona_id}/arasuji/cost-estimate", response_model=ChronicleCostEstimate)
-def estimate_chronicle_cost(persona_id: str, manager=Depends(get_manager)):
+def estimate_chronicle_cost(
+    persona_id: str,
+    batch_size: Optional[int] = None,
+    consolidation_size: Optional[int] = None,
+    manager=Depends(get_manager),
+):
     """Estimate the cost of generating Chronicle for unprocessed messages."""
     import math
     import os
     from sai_memory.memory.storage import count_messages
-    from sai_memory.arasuji.storage import get_total_message_count
+    from sai_memory.arasuji.storage import (
+        get_total_message_count,
+        count_entries_by_level,
+        get_max_level,
+    )
     from saiverse.model_configs import get_model_pricing
 
     conn = _get_arasuji_db(persona_id)
@@ -98,8 +113,9 @@ def estimate_chronicle_cost(persona_id: str, manager=Depends(get_manager)):
         processed_messages = get_total_message_count(conn)
         unprocessed = max(0, total_messages - processed_messages)
 
-        batch_size = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", "20"))
-        consolidation_size = int(os.getenv("MEMORY_WEAVE_CONSOLIDATION_SIZE", "10"))
+        # Use query params if provided, otherwise fall back to env vars
+        batch_size = batch_size or int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", "20"))
+        consolidation_size = consolidation_size or int(os.getenv("MEMORY_WEAVE_CONSOLIDATION_SIZE", "10"))
         model_name = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
 
         # Estimate LLM calls
@@ -114,7 +130,69 @@ def estimate_chronicle_cost(persona_id: str, manager=Depends(get_manager)):
 
         total_calls = level1_calls + consolidation_calls
 
-        # Estimate cost
+        # --- Estimate episode context tokens ---
+        # The reverse level promotion algorithm selects context entries from existing
+        # Chronicles. Theoretical entry count:
+        #   entries_at_max_level + (max_level - 1) * consolidation_size
+        # Capped by max_entries (20 for Level 1, 10 for consolidation).
+        current_max_level = get_max_level(conn)
+        entries_by_level = count_entries_by_level(conn)
+        existing_total = sum(entries_by_level.values())
+
+        if current_max_level > 0:
+            entries_at_max = entries_by_level.get(current_max_level, 0)
+            theoretical_existing = entries_at_max + (current_max_level - 1) * consolidation_size
+        else:
+            theoretical_existing = 0
+
+        # Project post-generation state: recalculate max_level from total Level 1 count
+        existing_lv1 = entries_by_level.get(1, 0)
+        total_lv1_after = existing_lv1 + level1_calls
+        if total_lv1_after > 0:
+            final_max_level = 1
+            temp_count = total_lv1_after
+            while temp_count >= consolidation_size:
+                final_max_level += 1
+                temp_count = math.ceil(temp_count / consolidation_size)
+            theoretical_after = temp_count + max(0, final_max_level - 1) * consolidation_size
+        else:
+            theoretical_after = 0
+
+        # Average context entries per call (start..end average, capped by max_entries)
+        MAX_ENTRIES_LV1 = 20   # generator.py:167
+        MAX_ENTRIES_CONS = 10  # generator.py:326
+        ctx_start_lv1 = min(theoretical_existing, MAX_ENTRIES_LV1)
+        ctx_end_lv1 = min(theoretical_after, MAX_ENTRIES_LV1)
+        avg_context_lv1 = (ctx_start_lv1 + ctx_end_lv1) / 2
+
+        ctx_start_cons = min(theoretical_existing + consolidation_size, MAX_ENTRIES_CONS)
+        ctx_end_cons = min(theoretical_after, MAX_ENTRIES_CONS)
+        avg_context_cons = (ctx_start_cons + ctx_end_cons) / 2
+
+        # Average tokens per context entry (from existing Chronicle content)
+        row = conn.execute("SELECT AVG(LENGTH(content)) FROM arasuji_entries").fetchone()
+        avg_content_chars = row[0] if row and row[0] else None
+        if avg_content_chars and existing_total > 0:
+            avg_entry_tokens = avg_content_chars / 3.5  # Conservative CJK/English estimate
+        else:
+            avg_entry_tokens = 50  # Default for first-time generation (~3-5 sentences)
+
+        context_tokens_lv1 = avg_context_lv1 * avg_entry_tokens
+        context_tokens_cons = avg_context_cons * avg_entry_tokens
+
+        # --- Estimate Memopedia context tokens (Level 1 only) ---
+        memopedia_tokens = 0
+        try:
+            from sai_memory.memopedia import Memopedia, init_memopedia_tables
+            init_memopedia_tables(conn)
+            memopedia = Memopedia(conn)
+            text = memopedia.get_tree_markdown(include_keywords=False, show_markers=False)
+            if text and text != "(まだページはありません)":
+                memopedia_tokens = len(text) / 3.5
+        except Exception:
+            pass  # Memopedia not initialized → 0
+
+        # --- Estimate cost ---
         pricing = get_model_pricing(model_name)
         is_free_tier = pricing is None
         estimated_cost = 0.0
@@ -122,11 +200,23 @@ def estimate_chronicle_cost(persona_id: str, manager=Depends(get_manager)):
         if pricing and total_calls > 0:
             input_rate = pricing.get("input_per_1m_tokens", 0)
             output_rate = pricing.get("output_per_1m_tokens", 0)
-            # Heuristic: ~200 tokens/message input (mixed CJK/English) + 500 tokens prompt overhead
-            avg_input_per_call = batch_size * 200 + 500
+
+            # Level 1: messages + prompt + episode context + Memopedia
+            avg_input_lv1 = (
+                batch_size * 200  # ~200 tokens/message (mixed CJK/English)
+                + 500             # prompt instructions overhead
+                + context_tokens_lv1
+                + memopedia_tokens
+            )
+            # Level 2+: arasuji text + prompt + episode context (no Memopedia)
+            avg_input_cons = (
+                consolidation_size * avg_entry_tokens  # arasuji entries as input
+                + 500                                   # prompt instructions overhead
+                + context_tokens_cons
+            )
             avg_output_per_call = 400  # ~3-5 sentence summary
 
-            total_input = total_calls * avg_input_per_call
+            total_input = level1_calls * avg_input_lv1 + consolidation_calls * avg_input_cons
             total_output = total_calls * avg_output_per_call
             estimated_cost = (
                 (total_input / 1_000_000) * input_rate
@@ -298,32 +388,14 @@ def get_arasuji_entry(
 @router.delete("/{persona_id}/arasuji/{entry_id}")
 def delete_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_manager)):
     """Delete a Chronicle entry and unmark child entries as consolidated."""
-    from sai_memory.arasuji.storage import delete_entry, get_entry
+    from sai_memory.arasuji.storage import delete_entry
 
     conn = _get_arasuji_db(persona_id)
     if not conn:
         raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
 
     try:
-        # Get entry first to find child entries
-        entry = get_entry(conn, entry_id)
-        if not entry:
-            raise HTTPException(status_code=404, detail=f"Chronicle entry {entry_id} not found")
-
-        # If this is a consolidated entry (level 2+), unmark children as consolidated
-        if entry.level >= 2 and entry.source_ids:
-            placeholders = ",".join("?" for _ in entry.source_ids)
-            conn.execute(
-                f"""
-                UPDATE arasuji_entries
-                SET is_consolidated = 0, parent_id = NULL
-                WHERE id IN ({placeholders})
-                """,
-                entry.source_ids
-            )
-            conn.commit()
-
-        # Now delete the entry
+        # delete_entry handles child reset (is_consolidated=0, parent_id=NULL)
         success = delete_entry(conn, entry_id)
         if not success:
             raise HTTPException(status_code=404, detail=f"Chronicle entry {entry_id} not found")
@@ -331,7 +403,6 @@ def delete_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_m
         return {
             "success": True,
             "message": f"Deleted Chronicle entry {entry_id}",
-            "children_unmarked": len(entry.source_ids) if entry.level >= 2 else 0
         }
     except HTTPException:
         raise
@@ -339,6 +410,55 @@ def delete_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_m
         raise HTTPException(status_code=500, detail=f"Failed to delete Chronicle entry: {e}")
     finally:
         conn.close()
+
+@router.patch("/{persona_id}/arasuji/{entry_id}", tags=["Chronicle"])
+def update_arasuji_entry(
+    persona_id: str,
+    entry_id: str,
+    request: UpdateArasujiEntryRequest,
+    manager=Depends(get_manager),
+):
+    """Update a Chronicle entry's content."""
+    from sai_memory.arasuji.storage import update_entry_content
+
+    conn = _get_arasuji_db(persona_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+
+    try:
+        success = update_entry_content(conn, entry_id, request.content)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Chronicle entry {entry_id} not found")
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update Chronicle entry: {e}")
+    finally:
+        conn.close()
+
+
+@router.delete("/{persona_id}/arasuji", tags=["Chronicle"])
+def delete_all_arasuji_entries(persona_id: str, manager=Depends(get_manager)):
+    """Delete ALL Chronicle entries and reset progress."""
+    from sai_memory.arasuji.storage import clear_all_entries
+
+    conn = _get_arasuji_db(persona_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+
+    try:
+        deleted_count = clear_all_entries(conn)
+        return {
+            "success": True,
+            "deleted_count": deleted_count,
+            "message": f"Deleted {deleted_count} Chronicle entries",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete Chronicle entries: {e}")
+    finally:
+        conn.close()
+
 
 @router.get("/{persona_id}/arasuji/{entry_id}/messages", response_model=List[SourceMessageItem], tags=["Chronicle"])
 def get_arasuji_messages(
@@ -384,6 +504,41 @@ def get_arasuji_messages(
         raise HTTPException(status_code=500, detail=f"Failed to get source messages: {e}")
     finally:
         conn.close()
+
+@router.post("/{persona_id}/arasuji/messages-by-ids", response_model=List[SourceMessageItem], tags=["Chronicle"])
+def get_messages_by_ids(
+    persona_id: str,
+    request: MessagesByIdsRequest,
+    manager = Depends(get_manager),
+):
+    """Get messages by their IDs (for error investigation)."""
+    from sai_memory.memory.storage import get_message
+
+    if not request.ids:
+        return []
+
+    conn = _get_arasuji_db(persona_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+
+    try:
+        messages = []
+        for msg_id in request.ids:
+            msg = get_message(conn, msg_id)
+            if msg:
+                messages.append(SourceMessageItem(
+                    id=msg.id,
+                    role=msg.role,
+                    content=msg.content or "",
+                    created_at=msg.created_at,
+                ))
+        messages.sort(key=lambda m: m.created_at)
+        return messages
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get messages: {e}")
+    finally:
+        conn.close()
+
 
 @router.post("/{persona_id}/arasuji/{entry_id}/regenerate", tags=["Chronicle"])
 async def regenerate_arasuji_entry(
@@ -445,11 +600,11 @@ def _run_chronicle_generation(
     with_memopedia: bool,
 ):
     """Background worker for Chronicle generation."""
+    import json
     import os
     from pathlib import Path
     from sai_memory.memory.storage import init_db, Message
     from sai_memory.arasuji import init_arasuji_tables
-    from sai_memory.arasuji.storage import get_progress, update_progress
     from sai_memory.arasuji.generator import ArasujiGenerator
     from saiverse.model_configs import find_model_config
     from llm_clients.factory import get_llm_client
@@ -466,41 +621,25 @@ def _run_chronicle_generation(
         conn = init_db(str(db_path), check_same_thread=False)
         init_arasuji_tables(conn)
 
-        # Fetch unprocessed messages (not in any existing Chronicle's source_ids)
-        _update_job(job_id, message="Fetching unprocessed messages...")
-        
-        # Get all message IDs already included in level-1 Chronicles
-        # Using json_each to extract source_ids_json array elements
-        cur = conn.execute("""
-            SELECT DISTINCT json_each.value 
-            FROM arasuji_entries, json_each(source_ids_json)
-            WHERE level = 1
-        """)
-        processed_ids = {row[0] for row in cur.fetchall()}
-        LOGGER.info(f"[Chronicle Gen] Found {len(processed_ids)} already-processed message IDs")
-        
-        # Fetch messages NOT in processed_ids, ordered by time (oldest first)
+        # Fetch all messages ordered by time (oldest first)
+        _update_job(job_id, message="Fetching messages...")
+
         cur = conn.execute("""
             SELECT id, thread_id, role, content, resource_id, created_at, metadata
             FROM messages
             ORDER BY created_at ASC
         """)
-        
-        import json
-        all_rows = cur.fetchall()
-        messages = []
-        for row in all_rows:
+
+        all_messages = []
+        for row in cur.fetchall():
             msg_id, tid, role, content, resource_id, created_at, metadata_raw = row
-            # Skip messages already in existing Chronicles
-            if msg_id in processed_ids:
-                continue
             metadata = {}
             if metadata_raw:
                 try:
                     metadata = json.loads(metadata_raw)
                 except Exception:
                     LOGGER.warning("Failed to parse metadata JSON for message %s", msg_id, exc_info=True)
-            messages.append(Message(
+            all_messages.append(Message(
                 id=msg_id,
                 thread_id=tid,
                 role=role,
@@ -509,34 +648,20 @@ def _run_chronicle_generation(
                 created_at=created_at,
                 metadata=metadata,
             ))
-            # Stop once we have enough messages
-            if len(messages) >= max_messages:
-                break
 
-        total_messages = len(messages)
-        
-        # Batch minimum threshold check
-        if total_messages < batch_size:
-            _update_job(
-                job_id, 
-                status="completed",
-                progress=0,
-                total=total_messages,
-                entries_created=0,
-                message=f"Not enough unprocessed messages ({total_messages} < batch_size {batch_size}). Skipping."
-            )
+        if not all_messages:
+            _update_job(job_id, status="completed", progress=0, total=0, entries_created=0, message="No messages found")
             conn.close()
             return
 
-        LOGGER.info(f"[Chronicle Gen] Found {total_messages} messages to process")
-        _update_job(job_id, total=total_messages, message=f"Found {total_messages} messages to process")
+        LOGGER.info(f"[Chronicle Gen] Loaded {len(all_messages)} messages")
 
         # Initialize LLM client
         _update_job(job_id, message="Initializing LLM client...")
-        
+
         env_model = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
         model_to_use = model_name or env_model
-        
+
         resolved_model_id, model_config = find_model_config(model_to_use)
         if not resolved_model_id:
             _update_job(job_id, status="failed", error=f"Model '{model_to_use}' not found")
@@ -546,7 +671,7 @@ def _run_chronicle_generation(
         actual_model_id = model_config.get("model", resolved_model_id)
         context_length = model_config.get("context_length", 128000)
         provider = model_config.get("provider", "gemini")
-        
+
         client = get_llm_client(resolved_model_id, provider, context_length, config=model_config)
         LOGGER.info(f"[Chronicle Gen] LLM client initialized: {actual_model_id} / {provider} (config_key={resolved_model_id})")
 
@@ -575,16 +700,16 @@ def _run_chronicle_generation(
 
         # Progress callback
         def progress_callback(processed: int, total: int):
-            _update_job(job_id, progress=processed, message=f"Processing... {processed}/{total}")
+            _update_job(job_id, progress=processed, total=total, message=f"Processing... {processed}/{total}")
 
         # Memopedia batch callback if enabled
         batch_callback = None
         memopedia_pages_total = 0
-        
+
         if with_memopedia:
             try:
                 from scripts.build_memopedia import extract_knowledge
-                
+
                 def memopedia_batch_callback(batch_messages):
                     nonlocal memopedia_pages_total
                     if not batch_messages:
@@ -606,38 +731,65 @@ def _run_chronicle_generation(
                         )
                     except Exception as e:
                         LOGGER.error(f"Memopedia extraction failed: {e}")
-                
+
                 batch_callback = memopedia_batch_callback
             except ImportError as e:
                 LOGGER.warning(f"Memopedia modules not available: {e}")
 
-        # Generate
+        # Generate using unified method (filters processed, groups into runs, generates)
         _update_job(job_id, message="Generating Chronicle entries...")
-        LOGGER.info(f"[Chronicle Gen] Starting generation for {len(messages)} messages with batch_size={batch_size}")
-        
-        level1_entries, consolidated_entries = generator.generate_from_messages(
-            messages,
-            dry_run=False,
+
+        def cancel_check():
+            job = _get_job(job_id)
+            return job is not None and job.get("status") == "cancelling"
+
+        level1_entries, consolidated_entries = generator.generate_unprocessed(
+            all_messages,
+            max_messages=max_messages,
             progress_callback=progress_callback,
             batch_callback=batch_callback,
+            cancel_check=cancel_check,
         )
 
         total_entries = len(level1_entries) + len(consolidated_entries)
 
         conn.close()
 
+        # Check if cancelled
+        if cancel_check():
+            _update_job(
+                job_id,
+                status="cancelled",
+                entries_created=total_entries,
+                message=f"ユーザーにより中止されました（{total_entries}件生成済み）",
+            )
+            return
+
         _update_job(
             job_id,
             status="completed",
-            progress=total_messages,
             entries_created=total_entries,
             message=f"Completed. Created {len(level1_entries)} level-1 + {len(consolidated_entries)} consolidated entries."
             + (f" Memopedia pages: {memopedia_pages_total}" if with_memopedia else "")
         )
 
+    except LLMError as e:
+        LOGGER.exception(f"Chronicle generation failed (LLM error): {e}")
+        _update_job(
+            job_id, status="failed",
+            error=e.user_message,
+            error_code=e.error_code,
+            error_detail=str(e),
+            error_meta=getattr(e, "batch_meta", None),
+        )
     except Exception as e:
         LOGGER.exception(f"Chronicle generation failed: {e}")
-        _update_job(job_id, status="failed", error=str(e))
+        _update_job(
+            job_id, status="failed",
+            error=str(e),
+            error_code="unknown",
+            error_detail=str(e),
+        )
 
 
 @router.post("/{persona_id}/arasuji/generate", tags=["Chronicle"])
@@ -675,6 +827,26 @@ async def start_arasuji_generation(
     return {"job_id": job_id, "status": "started"}
 
 
+@router.post("/{persona_id}/arasuji/generate/{job_id}/cancel", tags=["Chronicle"])
+async def cancel_arasuji_generation(
+    persona_id: str,
+    job_id: str,
+):
+    """Cancel a running Chronicle generation job."""
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+    if job.get("persona_id") != persona_id:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found for persona {persona_id}")
+
+    if job.get("status") not in ("pending", "running", "started"):
+        return {"cancelled": False, "reason": "Job is not running"}
+
+    _update_job(job_id, status="cancelling")
+    return {"cancelled": True}
+
+
 @router.get("/{persona_id}/arasuji/generate/{job_id}", response_model=GenerationJobStatus, tags=["Chronicle"])
 async def get_arasuji_generation_status(
     persona_id: str,
@@ -697,4 +869,7 @@ async def get_arasuji_generation_status(
         message=job.get("message"),
         entries_created=job.get("entries_created"),
         error=job.get("error"),
+        error_code=job.get("error_code"),
+        error_detail=job.get("error_detail"),
+        error_meta=job.get("error_meta"),
     )

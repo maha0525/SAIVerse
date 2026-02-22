@@ -12,6 +12,7 @@ from .ollama import OllamaClient
 from .openai import OpenAIClient
 from .nvidia_nim import NvidiaNIMClient
 from .llama_cpp import LlamaCppClient
+from .xai import XAIClient
 from .base import LLMClient
 
 
@@ -74,6 +75,17 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
                 extra_kwargs["structured_output_backend"] = structured_output_backend
                 logging.info("Using structured_output_backend='%s' for model '%s'", structured_output_backend, api_model)
 
+            # Structured output mode: "native" (default) or "json_object" (prompt-based schema)
+            structured_output_mode = config.get("structured_output_mode")
+            if isinstance(structured_output_mode, str) and structured_output_mode.strip():
+                extra_kwargs["structured_output_mode"] = structured_output_mode.strip()
+                logging.info("Using structured_output_mode='%s' for model '%s'", structured_output_mode, api_model)
+
+            # Multi-turn reasoning pass-back field (e.g., "reasoning_details" for OpenRouter)
+            reasoning_passback = config.get("reasoning_passback_field")
+            if isinstance(reasoning_passback, str) and reasoning_passback.strip():
+                extra_kwargs["reasoning_passback_field"] = reasoning_passback.strip()
+
         logging.debug("Creating OpenAI client for model '%s' with kwargs: %s", api_model, extra_kwargs)
         client = OpenAIClient(api_model, supports_images=supports_images, **extra_kwargs)
     elif provider == "nvidia_nim":
@@ -94,6 +106,10 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
             convert_system = config.get("convert_system_to_user")
             if isinstance(convert_system, bool):
                 extra_kwargs["convert_system_to_user"] = convert_system
+
+            reasoning_passback = config.get("reasoning_passback_field")
+            if isinstance(reasoning_passback, str) and reasoning_passback.strip():
+                extra_kwargs["reasoning_passback_field"] = reasoning_passback.strip()
 
         logging.debug("Creating Nvidia NIM client for model '%s' with kwargs: %s", api_model, extra_kwargs)
         client = NvidiaNIMClient(api_model, supports_images=supports_images, **extra_kwargs)
@@ -120,6 +136,19 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
 
         logging.debug("Creating llama.cpp client for model path '%s' with kwargs: %s", model_path, extra_kwargs)
         client = LlamaCppClient(model_path, context_length, supports_images=supports_images, **extra_kwargs)
+    elif provider == "xai":
+        extra_kwargs: Dict[str, object] = {}
+        if isinstance(config, dict):
+            api_key_env = config.get("api_key_env")
+            if isinstance(api_key_env, str) and api_key_env.strip():
+                extra_kwargs["api_key_env"] = api_key_env.strip()
+
+            reasoning_effort = config.get("reasoning_effort")
+            if isinstance(reasoning_effort, str) and reasoning_effort.strip():
+                extra_kwargs["reasoning_effort"] = reasoning_effort.strip()
+
+        logging.debug("Creating xAI client for model '%s' with kwargs: %s", api_model, extra_kwargs)
+        client = XAIClient(api_model, supports_images=supports_images, **extra_kwargs)
     elif provider == "ollama":
         extra_kwargs: Dict[str, object] = {}
         if isinstance(config, dict):
@@ -136,7 +165,7 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
     else:
         raise ValueError(
             f"Unknown provider '{provider}' for model '{model}'. "
-            f"Valid providers: openai, nvidia_nim, anthropic, gemini, llama_cpp, ollama"
+            f"Valid providers: openai, nvidia_nim, anthropic, gemini, xai, llama_cpp, ollama"
         )
 
     # Set config_key for pricing lookup (model param is the config key/filename)

@@ -32,6 +32,7 @@ class NvidiaNIMClient(OpenAIClient):
         request_kwargs: Optional[Dict[str, Any]] = None,
         max_image_bytes: Optional[int] = None,
         convert_system_to_user: bool = False,
+        reasoning_passback_field: Optional[str] = None,
     ) -> None:
         # Nvidia NIM doesn't need structured_output_backend parameter
         super().__init__(
@@ -44,6 +45,7 @@ class NvidiaNIMClient(OpenAIClient):
             max_image_bytes=max_image_bytes,
             convert_system_to_user=convert_system_to_user,
             structured_output_backend=None,  # Not used for NIM
+            reasoning_passback_field=reasoning_passback_field,
         )
         self._nim_base_url = base_url or "https://integrate.api.nvidia.com/v1"
         self._nim_api_key = api_key
@@ -234,7 +236,7 @@ class NvidiaNIMClient(OpenAIClient):
         if not use_tools and response_schema:
             try:
                 prepared_messages = _prepare_openai_messages(
-                    messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user
+                    messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user, self.reasoning_passback_field
                 )
                 # Use forced function calling to get structured output
                 text_body = self._create_nim_structured_output_via_tool(

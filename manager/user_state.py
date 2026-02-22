@@ -48,6 +48,27 @@ class UserStateMixin:
         self.host_avatar = data or self.default_avatar
         self.state.host_avatar = self.host_avatar
 
+    @staticmethod
+    def _resolve_avatar_to_path(avatar_value: str) -> Optional[Path]:
+        """Resolve an avatar value (file path or API URL) to a filesystem Path.
+
+        Handles both legacy file paths and API URL formats stored in DB.
+        """
+        if avatar_value.startswith("/api/media/images/"):
+            from saiverse.media_utils import _ensure_image_dir
+            filename = avatar_value.rsplit("/", 1)[-1]
+            return _ensure_image_dir() / filename
+        if avatar_value.startswith("/api/static/user_icons/"):
+            from saiverse.data_paths import get_user_icons_dir
+            filename = avatar_value.rsplit("/", 1)[-1]
+            return get_user_icons_dir() / filename
+        if avatar_value.startswith(("/api/", "http://", "https://")):
+            LOGGER.warning(
+                "Cannot resolve avatar URL to file path: %s", avatar_value
+            )
+            return None
+        return Path(avatar_value)
+
     def _load_user_state_from_db(self) -> None:
         """Load user state from the database."""
         if getattr(self, "runtime", None) is not None:
@@ -72,7 +93,11 @@ class UserStateMixin:
                     )
                     avatar_data = None
                     if getattr(user, "AVATAR_IMAGE", None):
-                        avatar_data = self._load_avatar_data(Path(user.AVATAR_IMAGE))
+                        avatar_path = self._resolve_avatar_to_path(
+                            user.AVATAR_IMAGE
+                        )
+                        if avatar_path:
+                            avatar_data = self._load_avatar_data(avatar_path)
                     self.state.user_avatar_data = avatar_data or self.default_avatar
                     self.id_to_name_map[str(self.state.user_id)] = (
                         self.state.user_display_name

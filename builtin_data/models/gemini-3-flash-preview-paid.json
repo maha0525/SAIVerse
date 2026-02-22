@@ -1,7 +1,7 @@
 {
   "model": "gemini-3-flash-preview",
   "system_prompt": "",
-  "display_name": "Gemini 3 Flash (有料Tier)",
+  "display_name": "Gemini 3 Flash(有料Tier)",
   "provider": "gemini",
   "context_length": 1000000,
   "default_max_history_messages": 80,

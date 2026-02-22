@@ -17,6 +17,15 @@ if not exist ".venv\Scripts\activate.bat" (
 REM Add portable Node.js to PATH if exists
 if exist ".node\node.exe" set "PATH=%CD%\.node;%PATH%"
 
+REM Start SearXNG if installed
+if exist "scripts\.searxng-venv\Scripts\python.exe" (
+    echo [INFO] Starting SearXNG server...
+    start "SearXNG" cmd /k "title SearXNG && powershell -ExecutionPolicy Bypass -File scripts\run_searxng_server.ps1"
+    timeout /t 3 /nobreak >nul
+) else (
+    echo [INFO] SearXNG not installed, skipping. Run setup.bat to install.
+)
+
 REM Start Backend
 echo [INFO] Starting backend...
 start "SAIVerse Backend" cmd /k "title SAIVerse Backend && call .venv\Scripts\activate.bat && python main.py city_a"
@@ -43,7 +52,8 @@ echo ========================================
 echo.
 echo   Web UI: http://localhost:3000
 echo.
-echo   Two additional windows should be open:
+echo   Additional windows should be open:
+echo     [SearXNG]           - Web search server (if installed)
 echo     [SAIVerse Backend]  - Python server
 echo     [SAIVerse Frontend] - Next.js dev server
 echo   Do NOT close them while SAIVerse is running.

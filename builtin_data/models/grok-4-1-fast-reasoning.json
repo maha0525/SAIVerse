@@ -2,14 +2,12 @@
   "model": "grok-4-1-fast-reasoning",
   "system_prompt": "",
   "display_name": "Grok 4.1 Fast Reasoning",
-  "provider": "openai",
+  "provider": "xai",
   "context_length": 128000,
   "default_max_history_messages": 60,
   "metabolism_keep_messages": 40,
-  "base_url": "https://api.x.ai/v1",
   "api_key_env": "XAI_API_KEY",
   "supports_structured_output": true,
-  "convert_system_to_user": false,
   "supports_images": true,
   "parameters": {
     "temperature": {

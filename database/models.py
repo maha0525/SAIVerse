@@ -152,6 +152,24 @@ class Playbook(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
+
+class PlaybookPermission(Base):
+    """City-scoped playbook execution permission levels.
+
+    Stored separately from Playbook table so force-updating playbooks
+    (via import_all_playbooks.py --force) does not overwrite user preferences.
+    """
+    __tablename__ = "playbook_permission"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    CITYID = Column(Integer, ForeignKey("city.CITYID"), nullable=False)
+    playbook_name = Column(String(255), nullable=False)
+    permission_level = Column(String(32), nullable=False, default="ask_every_time")
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    __table_args__ = (
+        UniqueConstraint("CITYID", "playbook_name", name="uq_city_playbook_perm"),
+    )
+
+
 class Blueprint(Base):
     __tablename__ = "blueprint"
     BLUEPRINT_ID = Column(Integer, primary_key=True, autoincrement=True)

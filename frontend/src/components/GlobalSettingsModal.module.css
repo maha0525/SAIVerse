@@ -908,6 +908,104 @@
     }
 }
 
+/* ── Playbook Permissions Tab ── */
+.pbSubtitle {
+    font-size: 0.8rem;
+    color: #94a3b8;
+    margin: 0.25rem 0 0;
+}
+
+.pbEmpty {
+    text-align: center;
+    padding: 2rem;
+    color: #94a3b8;
+}
+
+.pbList {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.pbItem {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    gap: 1rem;
+}
+
+.pbItemInfo {
+    flex: 1;
+    min-width: 0;
+}
+
+.pbItemName {
+    font-size: 0.875rem;
+    color: #f1f5f9;
+    font-weight: 500;
+}
+
+.pbItemDesc {
+    font-size: 0.75rem;
+    color: #94a3b8;
+    margin-top: 0.125rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pbSelect {
+    flex-shrink: 0;
+    background: #1e293b;
+    color: #d1d5db;
+    border: 1px solid #475569;
+    border-radius: 6px;
+    padding: 0.375rem 0.5rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+
+.pbSelect:focus {
+    outline: none;
+    border-color: #3b82f6;
+}
+
+/* ── Light Mode: Playbook Permissions ── */
+:global([data-theme="light"]) .pbSubtitle {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .pbEmpty {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .pbItem {
+    background: #f8fafc;
+    border-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .pbItemName {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .pbItemDesc {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .pbSelect {
+    background: #ffffff;
+    color: #374151;
+    border-color: #cbd5e1;
+}
+
+:global([data-theme="light"]) .pbSelect:focus {
+    border-color: #3b82f6;
+}
+
 /* ── About Tab ── */
 .aboutContainer {
     max-width: 600px;

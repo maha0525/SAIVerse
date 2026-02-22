@@ -122,7 +122,12 @@ class RuntimeService(
                 )
                 avatar_data = None
                 if getattr(user, "AVATAR_IMAGE", None):
-                    avatar_data = self.manager._load_avatar_data(Path(user.AVATAR_IMAGE))
+                    from manager.user_state import UserStateMixin
+                    avatar_path = UserStateMixin._resolve_avatar_to_path(
+                        user.AVATAR_IMAGE
+                    )
+                    if avatar_path:
+                        avatar_data = self.manager._load_avatar_data(avatar_path)
                 self.state.user_avatar_data = avatar_data or self.manager.default_avatar
                 self.id_to_name_map[str(self.state.user_id)] = (
                     self.state.user_display_name
@@ -430,6 +435,10 @@ class RuntimeService(
         # SEAモード: タイムアウト回避のためのスレッド実行とKeep-Alive
         response_queue = queue.Queue()
 
+        # Stop event for user-initiated cancellation
+        stop_event = threading.Event()
+        self.manager._active_stop_events[building_id] = stop_event
+
         def _enrich_event(event):
             """Enrich streaming events with resolved persona name and avatar URL."""
             if isinstance(event, dict) and event.get("persona_id"):
@@ -448,6 +457,10 @@ class RuntimeService(
         def backend_worker():
             try:
                 for persona in responding_personas:
+                    if stop_event.is_set():
+                        logging.info("[runtime] Stop event detected; breaking persona loop for building %s", building_id)
+                        response_queue.put({"type": "cancelled", "content": "生成を中止しました。"})
+                        break
                     # SEA実行。イベントはコールバック経由でキューに送る
                     self.manager.run_sea_user(
                         persona, building_id, message,
@@ -456,33 +469,56 @@ class RuntimeService(
                         playbook_params=playbook_params,
                         event_callback=_enrich_event
                     )
+                    # Check stop event after each persona completes
+                    if stop_event.is_set():
+                        logging.info("[runtime] Stop event detected after persona %s; breaking loop", persona.persona_id)
+                        response_queue.put({"type": "cancelled", "content": "生成を中止しました。"})
+                        break
             except LLMError as e:
                 logging.error("SEA worker LLM error: %s", e, exc_info=True)
-                response_queue.put(e.to_dict())
+                if stop_event.is_set():
+                    response_queue.put({"type": "cancelled", "content": "生成を中止しました。"})
+                else:
+                    response_queue.put(e.to_dict())
             except Exception as e:
                 logging.error("SEA worker error", exc_info=True)
-                response_queue.put({
-                    "type": "error",
-                    "error_code": "unknown",
-                    "content": "予期せぬエラーが発生しました。",
-                    "technical_detail": str(e),
-                })
+                if stop_event.is_set():
+                    response_queue.put({"type": "cancelled", "content": "生成を中止しました。"})
+                else:
+                    response_queue.put({
+                        "type": "error",
+                        "error_code": "unknown",
+                        "content": "予期せぬエラーが発生しました。",
+                        "technical_detail": str(e),
+                    })
             finally:
                 response_queue.put(None)  # 番兵
 
         threading.Thread(target=backend_worker, daemon=True).start()
 
         # メインスレッド: キューを監視してクライアントに送信
-        while True:
-            try:
-                # 2.0秒待機 (Keep-Aliveのため)
-                item = response_queue.get(timeout=2.0)
-                if item is None:
-                    break
-                yield json.dumps(item, ensure_ascii=False) + "\n"
-            except queue.Empty:
-                # プロキシ等のタイムアウトを防ぐためのPing
-                yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
+        try:
+            while True:
+                try:
+                    # 2.0秒待機 (Keep-Aliveのため)
+                    item = response_queue.get(timeout=2.0)
+                    if item is None:
+                        break
+                    yield json.dumps(item, ensure_ascii=False) + "\n"
+                    # cancelled イベント送信後はストリーム終了
+                    if isinstance(item, dict) and item.get("type") == "cancelled":
+                        # Drain remaining items until sentinel
+                        while True:
+                            remaining = response_queue.get(timeout=5.0)
+                            if remaining is None:
+                                break
+                        break
+                except queue.Empty:
+                    # プロキシ等のタイムアウトを防ぐためのPing
+                    yield json.dumps({"type": "ping"}, ensure_ascii=False) + "\n"
+        finally:
+            # Clean up stop event
+            self.manager._active_stop_events.pop(building_id, None)
 
         bh_sizes = {bid: len(h) for bid, h in self.building_histories.items() if h}
         logging.debug("[runtime] pre-save building_histories sizes: %s", bh_sizes)

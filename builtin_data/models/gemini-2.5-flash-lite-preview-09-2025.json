@@ -1,7 +1,7 @@
 {
   "model": "gemini-2.5-flash-lite-preview-09-2025",
   "system_prompt": "",
-  "display_name": "Gemini V2.5 Flash Lite Preview 09 2025(無料枠)",
+  "display_name": "Gemini 2.5 Flash Lite Preview 09 2025(無料枠)",
   "provider": "gemini",
   "context_length": 250000,
   "default_max_history_messages": 80,

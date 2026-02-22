@@ -1,21 +1,21 @@
 {
-  "model": "qwen/qwen3-next-80b-a3b-thinking",
+  "model": "qwen/qwen3.5-plus-02-15",
   "system_prompt": "",
-  "display_name": "Qwen 3 Next 80B A3B thinking(NIM)",
-  "provider": "nvidia_nim",
+  "display_name": "Qwen3.5 Plus 2026-02-15 (Open Router)",
+  "provider": "openai",
   "supports_structured_output": true,
-  "context_length": 262144,
-  "default_max_history_messages": 60,
-  "metabolism_keep_messages": 40,
-  "base_url": "https://integrate.api.nvidia.com/v1",
-  "api_key_env": "NVIDIA_API_KEY",
+  "context_length": 256000,
+  "default_max_history_messages": 80,
+  "metabolism_keep_messages": 60,
+  "base_url": "https://openrouter.ai/api/v1",
+  "api_key_env": "OPENROUTER_API_KEY",
   "convert_system_to_user": true,
-  "supports_images": false,
+  "supports_images": true,
+  "reasoning_passback_field": "reasoning_details",
   "request_kwargs": {
     "extra_body": {
-      "chat_template_kwargs": {
-        "enable_thinking": true,
-        "clear_thinking": false
+      "reasoning": {
+        "enabled": true
       }
     }
   },
@@ -24,8 +24,8 @@
       "type": "float",
       "min": 0,
       "max": 2,
-      "step": 0.1,
-      "default": 0.6,
+      "step": 0.01,
+      "default": 0.7,
       "label": "Temperature",
       "description": "Controls randomness."
     },
@@ -34,18 +34,23 @@
       "min": 0,
       "max": 1,
       "step": 0.05,
-      "default": 0.7,
+      "default": 0.8,
       "label": "Top P",
       "description": "Nucleus sampling cutoff."
     },
     "max_tokens": {
       "type": "int",
       "min": 32,
-      "max": 8192,
+      "max": 260000,
       "step": 1,
-      "default": 4096,
+      "default": 8000,
       "label": "Max tokens",
       "description": "Upper bound on generated tokens."
     }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 0.40,
+    "output_per_1m_tokens": 2.40,
+    "currency": "USD"
   }
 }

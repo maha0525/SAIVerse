@@ -8,7 +8,8 @@
             "description": "ユーザーの要求"
         }
     ],
-    "router_callable": true,
+    "router_callable": false,
+    "user_selectable": true,
     "dev_only": true,
     "nodes": [
         {
@@ -26,6 +27,12 @@
             "id": "agent_think",
             "type": "llm",
             "context_profile": "conversation",
+            "speak": true,
+            "memorize": {
+                "tags": [
+                    "conversation"
+                ]
+            },
             "available_tools": [
                 "memory_search_brief",
                 "searxng_search",
@@ -45,7 +52,7 @@
                 "schedule_add",
                 "send_email_to_user"
             ],
-            "action": "必要な情報が不足している場合はツールコールを使い調査を行ってください。これ以上ツールを利用する必要がない時はそのまま通常発話してください。\n\nこれまでのツール呼び出し結果:\n{tool_history}\n\nツールを呼ぶ場合は1回に1つだけ選んでください。",
+            "action": "",
             "output_keys": [
                 {
                     "text": "response_text"
@@ -64,7 +71,7 @@
                 "operator": "eq",
                 "cases": {
                     "True": "exec_tool",
-                    "default": "record"
+                    "default": null
                 }
             }
         },
@@ -100,26 +107,14 @@
             "id": "force_respond",
             "type": "llm",
             "context_profile": "conversation",
-            "action": "ツール呼び出しの上限に達しました。これまでに収集した情報を基に回答を生成してください。\n\n収集情報:\n{tool_history}",
-            "output_key": "response_text",
+            "speak": true,
             "memorize": {
                 "tags": [
-                    "internal",
-                    "agentic_chat"
+                    "conversation"
                 ]
             },
-            "next": "record"
-        },
-        {
-            "id": "record",
-            "type": "memorize",
-            "action": "{response_text}",
-            "role": "assistant",
-            "tags": [
-                "internal",
-                "agentic_chat",
-                "playbook_result"
-            ],
+            "action": "ツール呼び出しの上限に達しました。これまでに収集した情報を基に回答を生成してください。\n\n収集情報:\n{tool_history}",
+            "output_key": "response_text",
             "next": null
         }
     ],

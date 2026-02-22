@@ -11,6 +11,14 @@
   "api_key_env": "NVIDIA_API_KEY",
   "convert_system_to_user": true,
   "supports_images": true,
+  "request_kwargs": {
+    "extra_body": {
+      "chat_template_kwargs": {
+        "enable_thinking": true,
+        "clear_thinking": false
+      }
+    }
+  },
   "parameters": {
     "temperature": {
       "type": "float",

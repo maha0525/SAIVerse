@@ -43,7 +43,14 @@ interface ModelInfo {
     supports_structured_output?: boolean;
 }
 
-type TabId = 'env' | 'world' | 'db' | 'models' | 'about';
+interface PlaybookPermEntry {
+    playbook_name: string;
+    display_name: string;
+    description: string;
+    permission_level: string;
+}
+
+type TabId = 'env' | 'world' | 'db' | 'models' | 'playbooks' | 'about';
 
 export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsModalProps) {
     const [activeTab, setActiveTab] = useState<TabId>('env');
@@ -77,6 +84,10 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const [expandedModelRole, setExpandedModelRole] = useState<string | null>(null);
     const [modelRolesLoading, setModelRolesLoading] = useState(false);
 
+    // Playbook Permissions
+    const [playbookPerms, setPlaybookPerms] = useState<PlaybookPermEntry[]>([]);
+    const [playbookPermsLoading, setPlaybookPermsLoading] = useState(false);
+
     useEffect(() => {
         if (isOpen && activeTab === 'env') {
             loadEnvVars();
@@ -95,7 +106,46 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         if (isOpen && activeTab === 'about') {
             loadVersionInfo();
         }
+        if (isOpen && activeTab === 'playbooks') {
+            loadPlaybookPerms();
+        }
     }, [isOpen, activeTab]);
+
+    const loadPlaybookPerms = async () => {
+        setPlaybookPermsLoading(true);
+        try {
+            const res = await fetch('/api/config/playbook-permissions');
+            if (res.ok) {
+                const data = await res.json();
+                setPlaybookPerms(data);
+            }
+        } catch (e) {
+            console.error('Failed to load playbook permissions', e);
+        } finally {
+            setPlaybookPermsLoading(false);
+        }
+    };
+
+    const updatePlaybookPerm = async (playbookName: string, level: string) => {
+        // Optimistic update
+        setPlaybookPerms(prev =>
+            prev.map(p => p.playbook_name === playbookName ? { ...p, permission_level: level } : p)
+        );
+        try {
+            const res = await fetch('/api/config/playbook-permissions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ playbook_name: playbookName, permission_level: level }),
+            });
+            if (!res.ok) {
+                // Revert on failure
+                loadPlaybookPerms();
+            }
+        } catch (e) {
+            console.error('Failed to update playbook permission', e);
+            loadPlaybookPerms();
+        }
+    };
 
     const changeTheme = (newTheme: 'system' | 'light' | 'dark') => {
         setTheme(newTheme);
@@ -356,6 +406,12 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                             <Cpu size={18} /> モデルロール
                         </div>
                         <div
+                            className={`${styles.navItem} ${activeTab === 'playbooks' ? styles.active : ''}`}
+                            onClick={() => setActiveTab('playbooks')}
+                        >
+                            <Layers size={18} /> Playbook権限
+                        </div>
+                        <div
                             className={`${styles.navItem} ${activeTab === 'about' ? styles.active : ''}`}
                             onClick={() => setActiveTab('about')}
                         >
@@ -606,6 +662,58 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                             ))}
                                         </div>
                                     </>
+                                )}
+                            </div>
+                        )}
+
+                        {activeTab === 'playbooks' && (
+                            <div className={styles.envContainer}>
+                                <div className={styles.sectionHeader}>
+                                    <div>
+                                        <h3>Playbook実行権限</h3>
+                                        <p className={styles.pbSubtitle}>
+                                            ペルソナが各Playbookを自動実行する際の権限レベルを設定します
+                                        </p>
+                                    </div>
+                                </div>
+
+                                {playbookPermsLoading ? (
+                                    <div className={styles.pbEmpty}>
+                                        <RefreshCw size={20} style={{ animation: 'spin 1s linear infinite' }} /> 読み込み中...
+                                    </div>
+                                ) : playbookPerms.length === 0 ? (
+                                    <p className={styles.pbEmpty}>
+                                        Router呼び出し可能なPlaybookがありません
+                                    </p>
+                                ) : (
+                                    <div className={styles.pbList}>
+                                        {playbookPerms.map(p => (
+                                            <div key={p.playbook_name} className={styles.pbItem}>
+                                                <div className={styles.pbItemInfo}>
+                                                    <div className={styles.pbItemName}>
+                                                        {p.display_name}
+                                                    </div>
+                                                    {p.description && (
+                                                        <div className={styles.pbItemDesc}>
+                                                            {p.description}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <select
+                                                    className={styles.pbSelect}
+                                                    value={p.permission_level}
+                                                    onChange={e => updatePlaybookPerm(p.playbook_name, e.target.value)}
+                                                >
+                                                    <option value="auto_allow">自動実行OK</option>
+                                                    <option value="ask_every_time">毎回許可が必要</option>
+                                                    <option value="user_only">ユーザー指定時のみ</option>
+                                                    {p.permission_level === 'blocked' && (
+                                                        <option value="blocked" disabled>使用禁止</option>
+                                                    )}
+                                                </select>
+                                            </div>
+                                        ))}
+                                    </div>
                                 )}
                             </div>
                         )}

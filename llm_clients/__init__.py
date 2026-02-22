@@ -20,6 +20,7 @@ from .gemini import (
 from .gemini_utils import build_gemini_clients
 from .ollama import OllamaClient
 from .openai import OpenAI, OpenAIClient
+from .xai import XAIClient
 from tools import OPENAI_TOOLS_SPEC
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "OllamaClient",
     "OpenAIClient",
     "OpenAI",
+    "XAIClient",
     "build_gemini_clients",
     "OPENAI_TOOLS_SPEC",
     "log_llm_request",

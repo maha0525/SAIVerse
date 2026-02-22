@@ -1,0 +1,31 @@
+{
+  "model": "claude-sonnet-4-6",
+  "system_prompt": "現在の使用モデルはClaude Sonnet 4.6です。\n\n[Model info]\n- 2025 May-Aug knowledge cutoff",
+  "display_name": "Claude Sonnet 4.6",
+  "provider": "anthropic",
+  "context_length": 200000,
+  "default_max_history_messages": 100,
+  "metabolism_keep_messages": 40,
+  "thinking_type": "adaptive",
+  "thinking_effort": "high",
+  "supports_images": true,
+  "pricing": {
+    "input_per_1m_tokens": 3,
+    "output_per_1m_tokens": 15,
+    "cached_input_per_1m_tokens": 0.3,
+    "cache_write_per_1m_tokens": 3.75,
+    "cache_write_1h_per_1m_tokens": 6,
+    "currency": "USD"
+  },
+  "cache": {
+    "supported": true,
+    "default_enabled": true,
+    "default_ttl": "5m",
+    "ttl_options": [
+      "5m",
+      "1h"
+    ],
+    "type": "explicit",
+    "min_tokens": 1024
+  }
+}

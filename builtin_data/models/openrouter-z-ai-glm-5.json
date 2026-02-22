@@ -11,6 +11,14 @@
   "api_key_env": "OPENROUTER_API_KEY",
   "supports_images": false,
   "convert_system_to_user": true,
+  "reasoning_passback_field": "reasoning_details",
+  "request_kwargs": {
+    "extra_body": {
+      "reasoning": {
+        "enabled": true
+      }
+    }
+  },
   "parameters": {
     "temperature": {
       "type": "float",

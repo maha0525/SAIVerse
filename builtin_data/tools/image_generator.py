@@ -30,7 +30,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Type definitions
-ModelType = Literal["nano_banana", "nano_banana_pro", "gpt_image_1_5"]
+ModelType = Literal["nano_banana", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"]
 AspectRatioType = Literal["1:1", "16:9", "9:16", "4:3", "3:4"]
 QualityType = Literal["low", "medium", "high", "auto"]
 
@@ -114,7 +114,10 @@ def _generate_with_nano_banana(
             response_modalities=["TEXT", "IMAGE"],
             image_config=types.ImageConfig(
                 aspect_ratio=aspect_ratio
-            )
+            ),
+            http_options=types.HttpOptions(
+                retry_options=types.HttpRetryOptions(attempts=1),
+            ),
         )
     )
 
@@ -165,7 +168,10 @@ def _generate_with_nano_banana_pro(
             image_config=types.ImageConfig(
                 aspect_ratio=aspect_ratio,
                 image_size=resolution
-            )
+            ),
+            http_options=types.HttpOptions(
+                retry_options=types.HttpRetryOptions(attempts=1),
+            ),
         )
     )
 
@@ -245,6 +251,74 @@ def _generate_with_gpt_image(
     return image_bytes, "image/png"
 
 
+def _generate_with_grok_imagine(
+    prompt: str,
+    aspect_ratio: str = "1:1",
+    quality: str = "high",
+    input_image_paths: Optional[List[Path]] = None,
+) -> Tuple[bytes, str]:
+    """Generate image using xAI Grok Imagine Image Pro."""
+    import xai_sdk
+
+    api_key = os.getenv("XAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("XAI_API_KEY environment variable is not set.")
+
+    client = xai_sdk.Client(api_key=api_key)
+
+    # Map quality to resolution
+    resolution = "2k" if quality in ("high", "auto") else "1k"
+
+    kwargs: dict = {
+        "prompt": prompt,
+        "model": "grok-imagine-image-pro",
+        "aspect_ratio": aspect_ratio,
+        "resolution": resolution,
+        "image_format": "base64",
+    }
+
+    # Input images for editing mode
+    if input_image_paths:
+        image_urls = []
+        for img_path in input_image_paths:
+            img_bytes, img_mime = _load_image_bytes(img_path)
+            b64 = base64.b64encode(img_bytes).decode("ascii")
+            image_urls.append(f"data:{img_mime};base64,{b64}")
+            logger.info(f"[grok_imagine] Added input image: {img_path.name}")
+        kwargs["image_urls"] = image_urls
+
+    logger.info(
+        f"[grok_imagine] Generating with aspect_ratio={aspect_ratio}, "
+        f"resolution={resolution}"
+    )
+
+    response = client.image.sample(**kwargs)
+
+    # Extract base64 image data from response
+    image_data = getattr(response, "data", None)
+    if image_data is None:
+        # Try alternative attribute names
+        image_data = getattr(response, "b64_json", None)
+    if image_data is None:
+        # Response might contain image bytes directly
+        if hasattr(response, "image") and response.image:
+            return response.image, "image/png"
+        raise RuntimeError(
+            f"No image data in xAI response. Response attributes: "
+            f"{[a for a in dir(response) if not a.startswith('_')]}"
+        )
+
+    if isinstance(image_data, str):
+        # base64-encoded string
+        image_bytes = base64.b64decode(image_data)
+    elif isinstance(image_data, bytes):
+        image_bytes = image_data
+    else:
+        raise RuntimeError(f"Unexpected image data type: {type(image_data)}")
+
+    return image_bytes, "image/png"
+
+
 def _log_gemini_response(resp) -> None:
     """Log Gemini response details for debugging."""
     candidates_count = len(resp.candidates) if resp.candidates else 0
@@ -276,6 +350,38 @@ def _log_gemini_response(resp) -> None:
                     )
 
 
+def _get_model_api_key_env(model: str) -> Optional[str]:
+    """Return the environment variable name required for a given image model.
+
+    Returns None if the model is unknown.
+    """
+    mapping = {
+        "nano_banana": "GEMINI_API_KEY",
+        "nano_banana_pro": "GEMINI_API_KEY",
+        "gpt_image_1_5": "OPENAI_API_KEY",
+        "grok_imagine": "XAI_API_KEY",
+    }
+    return mapping.get(model)
+
+
+def _is_image_model_available(model: str) -> bool:
+    """Check if the required API key for an image model is configured."""
+    env_var = _get_model_api_key_env(model)
+    if env_var is None:
+        return False
+    return bool(os.getenv(env_var))
+
+
+def get_available_image_models() -> List[str]:
+    """Return list of image model names whose API keys are configured."""
+    all_models = ["nano_banana", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"]
+    return [m for m in all_models if _is_image_model_available(m)]
+
+
+# Fallback priority order (most commonly available first)
+_FALLBACK_ORDER = ["nano_banana_pro", "nano_banana", "gpt_image_1_5", "grok_imagine"]
+
+
 def generate_image(
     prompt: str,
     model: ModelType = "nano_banana_pro",
@@ -292,6 +398,7 @@ def generate_image(
             - nano_banana: Fast with aspect ratio control (Gemini 2.5 Flash)
             - nano_banana_pro: High quality with aspect ratio + resolution control (Gemini 3 Pro)
             - gpt_image_1_5: State of the art quality (OpenAI GPT Image 1.5)
+            - grok_imagine: High quality image generation (xAI Grok Imagine Pro)
         aspect_ratio: Image aspect ratio ("1:1", "16:9", "9:16", "4:3", "3:4")
         quality: Image quality level ("low", "medium", "high", "auto")
         title: Optional title for the generated image item
@@ -317,6 +424,36 @@ def generate_image(
     if not model:
         model = "nano_banana_pro"
 
+    # Check model availability and fallback if needed
+    fallback_note = ""
+    original_model = model
+    if not _is_image_model_available(model):
+        available = get_available_image_models()
+        if not available:
+            error_text = (
+                "画像生成に失敗しました。\n\n"
+                "利用可能な画像生成モデルがありません。"
+                "GEMINI_API_KEY、OPENAI_API_KEY、XAI_API_KEY のいずれかを設定してください。"
+            )
+            return error_text, ToolResult(None), None, None
+
+        # Pick the best available model from fallback order
+        fallback_model = next(
+            (m for m in _FALLBACK_ORDER if m in available),
+            available[0],
+        )
+        logger.warning(
+            "[image_generator] Model %s unavailable (missing %s), "
+            "falling back to %s",
+            model, _get_model_api_key_env(model), fallback_model,
+        )
+        model = fallback_model
+        fallback_note = (
+            f"\n\n※ 指定されたモデル「{original_model}」のAPIキー"
+            f"（{_get_model_api_key_env(original_model)}）が未設定のため、"
+            f"「{model}」で生成しました。"
+        )
+
     # Get context for resolving URIs
     persona_id = get_active_persona_id()
     manager = get_active_manager()
@@ -329,35 +466,69 @@ def generate_image(
     # Resolve input image URIs
     input_image_paths = _resolve_input_images(input_images, persona_id, building_id)
 
-    logger.info(
-        f"[image_generator] Starting generation: model={model}, "
-        f"aspect_ratio={aspect_ratio}, quality={quality}, "
-        f"input_images={len(input_image_paths)}"
-    )
+    # Build fallback chain: requested model first, then others in priority order
+    fallback_chain = [model]
+    for m in _FALLBACK_ORDER:
+        if m != model and _is_image_model_available(m):
+            fallback_chain.append(m)
 
-    try:
-        if model == "nano_banana":
-            image_data, mime = _generate_with_nano_banana(
-                prompt, aspect_ratio, input_image_paths
-            )
-        elif model == "nano_banana_pro":
-            image_data, mime = _generate_with_nano_banana_pro(
-                prompt, aspect_ratio, quality, input_image_paths
-            )
-        elif model == "gpt_image_1_5":
-            image_data, mime = _generate_with_gpt_image(
-                prompt, aspect_ratio, quality, input_image_paths
-            )
-        else:
-            raise ValueError(f"Unknown model: {model}")
+    image_data: bytes | None = None
+    mime: str = "image/png"
+    last_error: Exception | None = None
 
-    except Exception as exc:
-        logger.exception(f"[image_generator] Generation failed: {exc}")
+    for attempt_model in fallback_chain:
+        logger.info(
+            f"[image_generator] Trying model={attempt_model}, "
+            f"aspect_ratio={aspect_ratio}, quality={quality}, "
+            f"input_images={len(input_image_paths)}"
+        )
+        try:
+            if attempt_model == "nano_banana":
+                image_data, mime = _generate_with_nano_banana(
+                    prompt, aspect_ratio, input_image_paths
+                )
+            elif attempt_model == "nano_banana_pro":
+                image_data, mime = _generate_with_nano_banana_pro(
+                    prompt, aspect_ratio, quality, input_image_paths
+                )
+            elif attempt_model == "gpt_image_1_5":
+                image_data, mime = _generate_with_gpt_image(
+                    prompt, aspect_ratio, quality, input_image_paths
+                )
+            elif attempt_model == "grok_imagine":
+                image_data, mime = _generate_with_grok_imagine(
+                    prompt, aspect_ratio, quality, input_image_paths
+                )
+            else:
+                logger.warning(f"[image_generator] Unknown model: {attempt_model}, skipping")
+                continue
+
+            # Success — record if we fell back
+            if attempt_model != model:
+                fallback_note = (
+                    f"\n\n※ モデル「{model}」でサーバーエラーが発生したため、"
+                    f"「{attempt_model}」で生成しました。"
+                )
+            model = attempt_model
+            break
+
+        except Exception as exc:
+            last_error = exc
+            remaining = [m for m in fallback_chain if m != attempt_model and fallback_chain.index(m) > fallback_chain.index(attempt_model)]
+            if remaining:
+                logger.warning(
+                    f"[image_generator] Model {attempt_model} failed: {exc}. "
+                    f"Falling back to next model: {remaining[0]}"
+                )
+            else:
+                logger.exception(f"[image_generator] Generation failed on all models. Last error: {exc}")
+
+    if image_data is None:
         error_text = (
             f"画像生成に失敗しました。\n\n"
-            f"モデル: {model}\n"
+            f"試行したモデル: {', '.join(fallback_chain)}\n"
             f"プロンプト:\n{prompt}\n\n"
-            f"エラー: {exc}"
+            f"エラー: {last_error}"
         )
         return error_text, ToolResult(None), None, None
 
@@ -396,6 +567,7 @@ def generate_image(
         f"モデル: {model}\n"
         f"プロンプト:\n{prompt}"
         f"{item_text}"
+        f"{fallback_note}"
     )
 
     return text, ToolResult(snippet), stored_path.as_posix(), metadata
@@ -409,7 +581,8 @@ def schema() -> ToolSchema:
             "Supports multiple AI models:\n"
             "- nano_banana: Fast generation with aspect ratio control (Gemini 2.5 Flash)\n"
             "- nano_banana_pro: High quality with aspect ratio and resolution control (Gemini 3 Pro)\n"
-            "- gpt_image_1_5: State of the art photorealistic quality (OpenAI)\n\n"
+            "- gpt_image_1_5: State of the art photorealistic quality (OpenAI)\n"
+            "- grok_imagine: High quality image generation (xAI Grok Imagine Pro)\n\n"
             "Prompt tips:\n"
             "- Be specific and detailed about what you want\n"
             "- Include art style, lighting, mood, and composition\n"
@@ -430,11 +603,11 @@ def schema() -> ToolSchema:
                 },
                 "model": {
                     "type": "string",
-                    "enum": ["nano_banana", "nano_banana_pro", "gpt_image_1_5"],
+                    "enum": ["nano_banana", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"],
                     "description": (
                         "Image generation model: "
                         "nano_banana (fast, aspect ratio), nano_banana_pro (high quality, aspect ratio + resolution), "
-                        "gpt_image_1_5 (state of the art)"
+                        "gpt_image_1_5 (state of the art), grok_imagine (xAI Grok Imagine Pro)"
                     ),
                     "default": "nano_banana_pro"
                 },

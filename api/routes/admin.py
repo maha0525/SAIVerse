@@ -140,6 +140,12 @@ def write_env_updates(updates: Dict[str, str]) -> None:
         except Exception as e:
             LOGGER.warning("Failed to invalidate persona LLM clients: %s", e)
 
+        try:
+            from saiverse.media_summary import invalidate_summary_client
+            invalidate_summary_client()
+        except Exception as e:
+            LOGGER.warning("Failed to invalidate media summary client: %s", e)
+
 
 @router.post("/env")
 def update_env_vars(req: EnvUpdateRequest):

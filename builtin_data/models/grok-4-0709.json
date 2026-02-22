@@ -2,14 +2,12 @@
   "model": "grok-4-0709",
   "system_prompt": "",
   "display_name": "Grok 4 0709",
-  "provider": "openai",
+  "provider": "xai",
   "context_length": 32768,
   "default_max_history_messages": 40,
   "metabolism_keep_messages": 20,
-  "base_url": "https://api.x.ai/v1",
   "api_key_env": "XAI_API_KEY",
   "supports_structured_output": true,
-  "convert_system_to_user": false,
   "supports_images": true,
   "parameters": {
     "temperature": {

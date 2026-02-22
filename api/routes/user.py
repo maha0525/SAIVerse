@@ -109,7 +109,22 @@ def update_user_profile(req: UpdateProfileRequest, manager = Depends(get_manager
 
         user.USERNAME = req.display_name
         if not isinstance(req.avatar, _Unset):
-            user.AVATAR_IMAGE = req.avatar
+            avatar_value = req.avatar
+            # If avatar is a media URL, resolve to actual file and process as avatar
+            if avatar_value and avatar_value.startswith("/api/media/images/"):
+                from pathlib import Path
+                from saiverse.media_utils import _ensure_image_dir
+                filename = avatar_value.rsplit("/", 1)[-1]
+                source_path = _ensure_image_dir() / filename
+                if source_path.exists():
+                    avatar_value = manager._process_avatar_upload(
+                        f"user_{user.USERID}", source_path
+                    )
+                else:
+                    _log.warning(
+                        "Avatar media file not found: %s", source_path
+                    )
+            user.AVATAR_IMAGE = avatar_value
         if not isinstance(req.email, _Unset):
             user.MAILADDRESS = req.email
 
@@ -134,7 +149,18 @@ def update_user_profile(req: UpdateProfileRequest, manager = Depends(get_manager
         # Update Runtime Manager State so UI reflects it immediately via status polling
         manager.state.user_display_name = req.display_name
         if not isinstance(req.avatar, _Unset):
-            manager.state.user_avatar_data = req.avatar
+            if user.AVATAR_IMAGE:
+                from pathlib import Path
+                from manager.user_state import UserStateMixin
+                avatar_path = UserStateMixin._resolve_avatar_to_path(
+                    user.AVATAR_IMAGE
+                )
+                avatar_data = None
+                if avatar_path:
+                    avatar_data = manager._load_avatar_data(avatar_path)
+                manager.state.user_avatar_data = avatar_data or manager.default_avatar
+            else:
+                manager.state.user_avatar_data = manager.default_avatar
 
         # Update in-memory Building objects for user_rooms
         for building in manager.buildings:

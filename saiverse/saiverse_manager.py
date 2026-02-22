@@ -139,6 +139,10 @@ class SAIVerseManager(
         self.state.world_items = self.world_items
         self.state.persona_pending_events = self.persona_pending_events
 
+        # --- Playbook permission request synchronisation (transient, in-memory) ---
+        self._pending_permission_requests: dict[str, threading.Event] = {}
+        self._permission_responses: dict[str, str] = {}
+
         self.personas = self.state.personas
         self.visiting_personas = self.state.visiting_personas
         self.avatar_map = self.state.avatar_map
@@ -244,6 +248,9 @@ class SAIVerseManager(
         
         # Pulse controller for managing concurrent playbook executions
         self.pulse_controller: PulseController = PulseController(self.sea_runtime)
+
+        # Stop event registry for user-initiated generation cancellation
+        self._active_stop_events: Dict[str, threading.Event] = {}
 
         self.runtime = RuntimeService(self, self.state)
         self.admin = AdminService(self, self.runtime, self.state)
@@ -458,6 +465,18 @@ class SAIVerseManager(
         """Get all items in a building that have is_open = True."""
         return self.item_service.get_open_items_in_building(building_id)
 
+    def get_open_items_for_persona(self, persona_id: str) -> list:
+        """Get all items in a persona's inventory that have is_open = True."""
+        return self.item_service.get_open_items_for_persona(persona_id)
+
+    def get_all_items_in_building(self, building_id: str) -> list:
+        """Get all items in a building (regardless of open state)."""
+        return self.item_service.get_all_items_in_building(building_id)
+
+    def get_all_items_for_persona(self, persona_id: str) -> list:
+        """Get all items in a persona's inventory (regardless of open state)."""
+        return self.item_service.get_all_items_for_persona(persona_id)
+
     def create_document_item(self, persona_id: str, name: str, description: str, content: str, source_context: Optional[str] = None) -> str:
         """Create a new document item and place it in the current building."""
         return self.item_service.create_document_item(persona_id, name, description, content, source_context=source_context)
@@ -612,6 +631,40 @@ class SAIVerseManager(
             message, metadata=metadata, meta_playbook=meta_playbook,
             playbook_params=playbook_params, building_id=building_id,
         )
+
+    def cancel_active_generation(self) -> bool:
+        """Cancel the active LLM generation for personas in the user's current building.
+
+        Sends cancellation signal via CancellationToken (stops SEA playbook execution
+        and closes LLM streaming connections) and sets the stop_event (breaks the
+        per-persona loop in backend_worker).
+        """
+        building_id = self.state.user_current_building_id
+        if not building_id:
+            logging.warning("[cancel] No user_current_building_id; cannot cancel.")
+            return False
+
+        persona_ids = self.occupants.get(building_id, [])
+        cancelled = False
+
+        for pid in persona_ids:
+            req = self.pulse_controller._current.get(pid)
+            if req:
+                logging.info("[cancel] Cancelling active request for persona %s (pulse_id=%s)", pid, req.pulse_id)
+                req.cancellation_token.cancel(interrupted_by="user_stop")
+                cancelled = True
+
+        # Also set the stop_event so backend_worker breaks its persona loop
+        stop_event = self._active_stop_events.get(building_id)
+        if stop_event:
+            logging.info("[cancel] Setting stop_event for building %s", building_id)
+            stop_event.set()
+            cancelled = True
+
+        if not cancelled:
+            logging.info("[cancel] No active generation found for building %s", building_id)
+
+        return cancelled
 
     def preview_context(
         self, message: str, building_id: Optional[str] = None,

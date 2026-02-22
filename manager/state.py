@@ -1,11 +1,16 @@
 from dataclasses import dataclass, field
 from datetime import datetime
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
 from saiverse.buildings import Building
+
+
+def _default_developer_mode() -> bool:
+    return os.environ.get("SAIVERSE_DEVELOPER_MODE", "").lower() in ("1", "true", "yes")
 
 
 @dataclass
@@ -60,7 +65,7 @@ class CoreState:
     api_port: int = 0
     autonomous_conversation_running: bool = False
     global_auto_enabled: bool = False  # Global ON/OFF for ConversationManager
-    developer_mode: bool = False  # Developer mode: shows Task, Phenomena, dev_only playbooks
+    developer_mode: bool = field(default_factory=_default_developer_mode)  # Developer mode: shows Task, Phenomena, dev_only playbooks
     current_playbook: Optional[str] = None  # Selected playbook override for Chat Options
     playbook_params: Dict[str, Any] = field(default_factory=dict)  # Parameters for the selected playbook
 

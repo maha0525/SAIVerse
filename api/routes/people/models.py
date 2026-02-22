@@ -428,4 +428,17 @@ class GenerationJobStatus(BaseModel):
     total: Optional[int] = None  # 総処理対象メッセージ数
     message: Optional[str] = None  # ステータスメッセージ
     entries_created: Optional[int] = None  # 作成されたエントリ数
-    error: Optional[str] = None  # エラーメッセージ
+    error: Optional[str] = None  # エラーメッセージ（ユーザー向け）
+    error_code: Optional[str] = None  # エラーコード (payment, authentication, rate_limit, etc.)
+    error_detail: Optional[str] = None  # 技術的詳細（開発者向け）
+    error_meta: Optional[dict] = None  # エラー発生バッチのメタデータ (message_ids, start_time, end_time)
+
+
+class UpdateArasujiEntryRequest(BaseModel):
+    """Chronicleエントリ更新リクエスト"""
+    content: str
+
+
+class MessagesByIdsRequest(BaseModel):
+    """メッセージID指定取得リクエスト"""
+    ids: List[str]

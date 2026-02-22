@@ -1,13 +1,16 @@
 {
-  "model": "chatgpt-4o-latest",
+  "model": "openai/gpt-4o-2024-11-20",
   "system_prompt": "",
-  "display_name": "ChatGPT-4o-Latest",
+  "display_name": "GPT-4o 2024-11-20 (Open Router)",
   "provider": "openai",
+  "supports_structured_output": true,
   "context_length": 128000,
   "default_max_history_messages": 40,
   "metabolism_keep_messages": 20,
+  "base_url": "https://openrouter.ai/api/v1",
+  "api_key_env": "OPENROUTER_API_KEY",
   "supports_images": true,
-  "supports_structured_output": false,
+  "convert_system_to_user": true,
   "parameters": {
     "temperature": {
       "type": "float",
@@ -23,23 +26,24 @@
       "min": 0,
       "max": 1,
       "step": 0.05,
-      "default": 1.0,
+      "default": 0.95,
       "label": "Top P",
       "description": "Nucleus sampling cutoff."
     },
-    "max_completion_tokens": {
+    "max_tokens": {
       "type": "int",
       "min": 32,
-      "max": 4096,
+      "max": 120000,
       "step": 1,
-      "default": 4096,
-      "label": "Max completion tokens",
-      "description": "Upper bound on reply length."
+      "default": 8000,
+      "label": "Max tokens",
+      "description": "Upper bound on generated tokens."
     }
   },
   "pricing": {
-    "input_per_1m_tokens": 5.0,
-    "output_per_1m_tokens": 15.0,
+    "input_per_1m_tokens": 2.50,
+    "cached_input_per_1m_tokens": 1.25,
+    "output_per_1m_tokens": 10,
     "currency": "USD"
   }
 }

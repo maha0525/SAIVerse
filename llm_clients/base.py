@@ -35,6 +35,7 @@ class LLMClient:
 
     def __init__(self, supports_images: bool = False) -> None:
         self._latest_reasoning: List[Dict[str, str]] = []
+        self._latest_reasoning_details: Any = None
         self._latest_attachments: List[Dict[str, Any]] = []
         self._latest_tool_detection: Dict[str, Any] | None = None
         self._latest_usage: Optional[UsageInfo] = None
@@ -87,6 +88,14 @@ class LLMClient:
         entries = self._latest_reasoning
         self._latest_reasoning = []
         return entries
+
+    def _store_reasoning_details(self, details: Any) -> None:
+        self._latest_reasoning_details = details
+
+    def consume_reasoning_details(self) -> Any:
+        details = self._latest_reasoning_details
+        self._latest_reasoning_details = None
+        return details
 
     def _store_tool_detection(self, result: Dict[str, Any] | None) -> None:
         """Store tool detection result for later retrieval."""

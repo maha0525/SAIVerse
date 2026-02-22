@@ -1,7 +1,7 @@
 {
     "name": "generate_image",
     "display_name": "画像生成",
-    "description": "Generate an image using AI image generation models (Gemini or GPT Image)",
+    "description": "Generate an image using AI image generation models (Gemini, GPT Image, or Grok Imagine)",
     "input_schema": [
         {
             "name": "input",
@@ -33,9 +33,10 @@
                         "enum": [
                             "nano_banana",
                             "nano_banana_pro",
-                            "gpt_image_1_5"
+                            "gpt_image_1_5",
+                            "grok_imagine"
                         ],
-                        "description": "使用するモデル。nano_banana(高速), nano_banana_pro(高品質), gpt_image_1_5(最高品質)。デフォルトはnano_banana_pro"
+                        "description": "使用するモデル。nano_banana(高速), nano_banana_pro(高品質), gpt_image_1_5(最高品質), grok_imagine(xAI Grok Imagine Pro)。デフォルトはnano_banana_pro"
                     },
                     "quality": {
                         "type": "string",
