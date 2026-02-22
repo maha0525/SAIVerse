@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -6,6 +7,7 @@ import pytest
 from llm_clients.exceptions import LLMError
 from sea.cancellation import CancellationToken
 from sea.runtime import SEARuntime
+from sea.runtime_runner import run_playbook
 
 
 def _runtime_and_persona() -> tuple[SEARuntime, SimpleNamespace]:
@@ -265,3 +267,92 @@ def test_emit_say_payload_compatibility() -> None:
     history_manager.add_to_building_only.assert_called_once()
     payload = history_manager.add_to_building_only.call_args.args[1]
     assert payload["metadata"] == {"tags": ["pulse:p-1", "media"], "image": "x.png", "with": ["npc-2", "user"]}
+
+
+def test_lg_tool_call_node_reflects_result_in_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime, persona = _runtime_and_persona()
+    playbook = SimpleNamespace(name="pb", display_name="PB")
+    node_def = SimpleNamespace(id="tool", call_source="fc", output_key="tool_result")
+
+    monkeypatch.setattr("tools.TOOL_REGISTRY", {"echo": lambda **kwargs: {"ok": kwargs.get("v")}})
+
+    class _Ctx:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr("tools.context.persona_context", lambda *args, **kwargs: _Ctx())
+
+    state = {"fc": {"name": "echo", "args": {"v": "x"}}}
+    result = asyncio.run(runtime._lg_tool_call_node(node_def, persona, playbook)(state))
+
+    assert result["last"] == "{'ok': 'x'}"
+    assert result["tool_result"] == {"ok": "x"}
+
+
+def test_lg_stelis_nodes_manage_thread_state() -> None:
+    runtime, persona = _runtime_and_persona()
+    playbook = SimpleNamespace(name="pb")
+
+    active_calls: list[str] = []
+    memory = SimpleNamespace(
+        can_start_stelis=lambda max_depth: True,
+        get_current_thread=lambda: "parent-thread",
+        _thread_id=lambda _: "fallback-thread",
+        start_stelis_thread=lambda **kwargs: SimpleNamespace(thread_id="child-thread", depth=1),
+        append_persona_message=lambda *args, **kwargs: None,
+        set_active_thread=lambda tid: active_calls.append(tid),
+        get_stelis_info=lambda _: SimpleNamespace(chronicle_prompt=None),
+        end_stelis_thread=lambda **kwargs: True,
+    )
+    persona.sai_memory = memory
+    runtime._generate_stelis_chronicle = Mock(return_value="summary")
+
+    state = asyncio.run(runtime._lg_stelis_start_node(SimpleNamespace(id="start", label="x", stelis_config={}), persona, playbook)({}))
+    assert state["stelis_thread_id"] == "child-thread"
+    assert state["stelis_parent_thread_id"] == "parent-thread"
+
+    state = asyncio.run(runtime._lg_stelis_end_node(SimpleNamespace(id="end", generate_chronicle=True), persona, playbook)(state))
+    assert state["stelis_thread_id"] is None
+    assert state["stelis_parent_thread_id"] is None
+    assert state["stelis_chronicle"] == "summary"
+    assert active_calls == ["child-thread", "parent-thread"]
+
+
+def test_run_playbook_propagates_context_warning_callback() -> None:
+    runtime, persona = _runtime_and_persona()
+    playbook = SimpleNamespace(name="meta_user/exec", start_node="exec", context_requirements=SimpleNamespace(history_depth="full"))
+    events: list[dict] = []
+
+    def _prepare(*args, **kwargs):
+        kwargs["warnings"].append({"type": "warning", "warning_code": "context_auto_trimmed", "content": "trimmed"})
+        return []
+
+    runtime._prepare_context = Mock(side_effect=_prepare)
+    runtime._compile_with_langgraph = Mock(return_value=[])
+
+    run_playbook(runtime, playbook, persona, "b1", "hello", auto_mode=False, event_callback=events.append)
+
+    assert events == [{"type": "warning", "warning_code": "context_auto_trimmed", "content": "trimmed"}]
+
+
+def test_maybe_run_metabolism_watermark_judgement() -> None:
+    runtime, persona = _runtime_and_persona()
+    persona.history_manager = SimpleNamespace(
+        metabolism_anchor_message_id="anchor",
+        get_history_from_anchor=Mock(return_value=[{"id": f"m{i}"} for i in range(31)]),
+    )
+    runtime.manager.metabolism_enabled = True
+    runtime._get_high_watermark = Mock(return_value=30)
+    runtime._get_low_watermark = Mock(return_value=20)
+    runtime._run_metabolism = Mock()
+
+    runtime._maybe_run_metabolism(persona, "b1")
+    runtime._run_metabolism.assert_not_called()
+
+    runtime._get_low_watermark = Mock(return_value=10)
+    runtime._maybe_run_metabolism(persona, "b1")
+    runtime._run_metabolism.assert_called_once()
+
