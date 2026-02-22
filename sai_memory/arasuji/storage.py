@@ -352,10 +352,28 @@ def get_max_level(conn: sqlite3.Connection) -> int:
 
 
 def delete_entry(conn: sqlite3.Connection, entry_id: str) -> bool:
-    """Delete an arasuji entry."""
-    cur = conn.execute("DELETE FROM arasuji_entries WHERE id = ?", (entry_id,))
+    """Delete an arasuji entry.
+
+    If the entry is level 2+, its child entries (referenced by source_ids)
+    are automatically reset: ``is_consolidated`` → 0, ``parent_id`` → NULL.
+    This ensures children become eligible for re-consolidation.
+    """
+    entry = get_entry(conn, entry_id)
+    if not entry:
+        return False
+
+    # Reset children when deleting a consolidated parent
+    if entry.level >= 2 and entry.source_ids:
+        placeholders = ",".join("?" for _ in entry.source_ids)
+        conn.execute(
+            f"UPDATE arasuji_entries SET is_consolidated = 0, parent_id = NULL "
+            f"WHERE id IN ({placeholders})",
+            entry.source_ids,
+        )
+
+    conn.execute("DELETE FROM arasuji_entries WHERE id = ?", (entry_id,))
     conn.commit()
-    return cur.rowcount > 0
+    return True
 
 
 def delete_entry_and_update_parent(

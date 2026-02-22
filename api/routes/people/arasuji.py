@@ -388,32 +388,14 @@ def get_arasuji_entry(
 @router.delete("/{persona_id}/arasuji/{entry_id}")
 def delete_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_manager)):
     """Delete a Chronicle entry and unmark child entries as consolidated."""
-    from sai_memory.arasuji.storage import delete_entry, get_entry
+    from sai_memory.arasuji.storage import delete_entry
 
     conn = _get_arasuji_db(persona_id)
     if not conn:
         raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
 
     try:
-        # Get entry first to find child entries
-        entry = get_entry(conn, entry_id)
-        if not entry:
-            raise HTTPException(status_code=404, detail=f"Chronicle entry {entry_id} not found")
-
-        # If this is a consolidated entry (level 2+), unmark children as consolidated
-        if entry.level >= 2 and entry.source_ids:
-            placeholders = ",".join("?" for _ in entry.source_ids)
-            conn.execute(
-                f"""
-                UPDATE arasuji_entries
-                SET is_consolidated = 0, parent_id = NULL
-                WHERE id IN ({placeholders})
-                """,
-                entry.source_ids
-            )
-            conn.commit()
-
-        # Now delete the entry
+        # delete_entry handles child reset (is_consolidated=0, parent_id=NULL)
         success = delete_entry(conn, entry_id)
         if not success:
             raise HTTPException(status_code=404, detail=f"Chronicle entry {entry_id} not found")
@@ -421,7 +403,6 @@ def delete_arasuji_entry(persona_id: str, entry_id: str, manager = Depends(get_m
         return {
             "success": True,
             "message": f"Deleted Chronicle entry {entry_id}",
-            "children_unmarked": len(entry.source_ids) if entry.level >= 2 else 0
         }
     except HTTPException:
         raise
