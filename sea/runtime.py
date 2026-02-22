@@ -30,41 +30,6 @@ def _get_default_lightweight_model() -> str:
     return os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gemini-2.5-flash-lite")
 
 
-def _is_llm_streaming_enabled() -> bool:
-    """Check if LLM streaming is enabled (default: True)."""
-    val = os.getenv("SAIVERSE_LLM_STREAMING", "true")
-    result = val.lower() not in ("false", "0", "off", "no")
-    logging.info("[DEBUG] _is_llm_streaming_enabled: raw_val=%r, result=%s", val, result)
-    return result
-
-
-def _format(template: str, variables: Dict[str, Any]) -> str:
-    """Format template with variables, supporting dot notation keys.
-
-    Uses regex-based replacement to safely handle templates where variable values
-    may contain curly braces (e.g., LLM-generated text with {}).
-    """
-    result = template
-
-    # Build a lookup dict with all keys (including nested access via dot notation)
-    lookup: Dict[str, str] = {}
-    for key, value in variables.items():
-        lookup[str(key)] = str(value) if value is not None else ""
-
-    # Replace {key} patterns with corresponding values
-    # Only replace if the key exists in our lookup
-    def replacer(match: re.Match) -> str:
-        key = match.group(1)
-        if key in lookup:
-            return lookup[key]
-        # Key not found, leave placeholder as-is
-        return match.group(0)
-
-    # Pattern: {word_chars_and_dots} but not empty
-    result = re.sub(r"\{([\w.]+)\}", replacer, result)
-
-    return result
-
 
 class SEARuntime:
     """Lightweight executor for meta playbooks until full LangGraph port."""
