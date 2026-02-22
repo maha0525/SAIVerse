@@ -23,8 +23,9 @@ import logging
 import os
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -37,8 +38,13 @@ os.environ["SAIVERSE_SKIP_TOOL_IMPORTS"] = "1"
 
 from sai_memory.memory.storage import init_db
 from sai_memory.memopedia import Memopedia
-from sai_memory.memopedia.storage import get_children, update_page as storage_update_page
 from saiverse.model_configs import find_model_config
+from scripts.memopedia.maintenance_store import (
+    count_target_pages,
+    fetch_children,
+    reparent_page,
+    select_target_page_ids,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOGGER = logging.getLogger(__name__)
@@ -80,7 +86,7 @@ def get_persona_db_path(persona_id: str) -> Path:
 def get_all_descendant_ids(memopedia: Memopedia, page_id: str) -> set:
     """Get all descendant page IDs (children, grandchildren, etc.) of a page."""
     descendants = set()
-    children = get_children(memopedia.conn, page_id)
+    children = fetch_children(memopedia.conn, page_id)
     for child in children:
         descendants.add(child.id)
         descendants.update(get_all_descendant_ids(memopedia, child.id))
@@ -147,7 +153,11 @@ def fix_markdown_content(content: str) -> Tuple[str, bool]:
     return content, content != original
 
 
-def run_fix_markdown(memopedia: Memopedia, dry_run: bool = False) -> List[str]:
+def run_fix_markdown(
+    memopedia: Memopedia,
+    dry_run: bool = False,
+    target_page_ids: Optional[Set[str]] = None,
+) -> List[str]:
     """Fix markdown formatting issues in all pages.
     
     Returns:
@@ -166,7 +176,9 @@ def run_fix_markdown(memopedia: Memopedia, dry_run: bool = False) -> List[str]:
             full_page = memopedia.get_page(page["id"])
             if not full_page:
                 continue
-            
+            if target_page_ids and full_page.id not in target_page_ids:
+                continue
+
             fixed_content, was_modified = fix_markdown_content(full_page.content)
             
             if was_modified:
@@ -190,6 +202,14 @@ def run_fix_markdown(memopedia: Memopedia, dry_run: bool = False) -> List[str]:
     return fixed_pages
 
 
+@dataclass
+class MaintenanceSummary:
+    target_pages: int = 0
+    updated_count: int = 0
+    deleted_count: int = 0
+    warning_count: int = 0
+
+
 # =============================================================================
 # Split Large Pages
 # =============================================================================
@@ -199,6 +219,8 @@ def run_split_large(
     client,
     dry_run: bool = False,
     threshold: int = SPLIT_THRESHOLD,
+    target_page_ids: Optional[Set[str]] = None,
+    summary: Optional[MaintenanceSummary] = None,
 ) -> List[str]:
     """Split pages that exceed the character threshold.
     
@@ -241,7 +263,9 @@ def run_split_large(
             full_page = memopedia.get_page(page["id"])
             if not full_page:
                 continue
-            
+            if target_page_ids and full_page.id not in target_page_ids:
+                continue
+
             content_len = len(full_page.content or "")
             if content_len > threshold:
                 LOGGER.info(f"Page '{full_page.title}' has {content_len} chars, analyzing for split...")
@@ -309,6 +333,8 @@ def run_split_large(
                                 edit_source="auto_maintenance",
                             )
                             LOGGER.info(f"Created child page: {sec['title']}")
+                            if summary:
+                                summary.updated_count += 1
                         
                         # Update parent with remaining content
                         if remaining:
@@ -317,11 +343,15 @@ def run_split_large(
                                 content=remaining,
                                 edit_source="auto_maintenance",
                             )
-                        
+                            if summary:
+                                summary.updated_count += 1
+
                         LOGGER.info(f"Split completed: {full_page.title}")
                 
                 except Exception as e:
                     LOGGER.error(f"Error splitting page {full_page.title}: {e}")
+                    if summary:
+                        summary.warning_count += 1
             
             for child in page.get("children", []):
                 _process_pages([child])
@@ -340,6 +370,8 @@ def run_merge_similar(
     memopedia: Memopedia,
     client,
     dry_run: bool = False,
+    target_page_ids: Optional[Set[str]] = None,
+    summary: Optional[MaintenanceSummary] = None,
 ) -> List[Tuple[str, str]]:
     """Find and merge similar/redundant pages.
     
@@ -454,11 +486,18 @@ def run_merge_similar(
         }
         
         for pair in merge_pairs:
+            if target_page_ids and (
+                pair["page_id_1"] not in target_page_ids or pair["page_id_2"] not in target_page_ids
+            ):
+                continue
+
             page1 = memopedia.get_page(pair["page_id_1"])
             page2 = memopedia.get_page(pair["page_id_2"])
             
             if not page1 or not page2:
                 LOGGER.warning(f"Could not find pages: {pair['page_id_1']}, {pair['page_id_2']}")
+                if summary:
+                    summary.warning_count += 1
                 continue
             
             # Skip if one is a descendant of the other
@@ -467,9 +506,13 @@ def run_merge_similar(
             
             if page2.id in page1_descendants:
                 LOGGER.warning(f"Skipping merge: '{page2.title}' is a descendant of '{page1.title}'")
+                if summary:
+                    summary.warning_count += 1
                 continue
             if page1.id in page2_descendants:
                 LOGGER.warning(f"Skipping merge: '{page1.title}' is a descendant of '{page2.title}'")
+                if summary:
+                    summary.warning_count += 1
                 continue
             
             LOGGER.info(f"Merging: '{page1.title}' + '{page2.title}' - {pair.get('reason', '')}")
@@ -530,31 +573,36 @@ def run_merge_similar(
                 )
                 
                 # Transfer children of page2 to page1 before deleting
-                page2_children = get_children(memopedia.conn, page2.id)
+                page2_children = fetch_children(memopedia.conn, page2.id)
                 if page2_children:
                     LOGGER.info(f"Transferring {len(page2_children)} children from '{page2.title}' to '{page1.title}'")
                     for child in page2_children:
-                        storage_update_page(
-                            memopedia.conn,
-                            child.id,
-                            parent_id=page1.id,
-                        )
+                        reparent_page(memopedia.conn, child.id, page1.id)
                         LOGGER.info(f"  - Transferred child: {child.title}")
+                        if summary:
+                            summary.updated_count += 1
                 
                 # Delete page2 (now without children, so they won't be deleted)
                 memopedia.delete_page(
                     page2.id,
                     edit_source="auto_maintenance",
                 )
+                if summary:
+                    summary.updated_count += 1
+                    summary.deleted_count += 1
                 
                 merged_pairs.append((page1.title, page2.title))
                 LOGGER.info(f"Merged into: {merged_data['merged_title']}")
                 
             except Exception as e:
                 LOGGER.error(f"Error merging pages: {e}")
+                if summary:
+                    summary.warning_count += 1
         
     except Exception as e:
         LOGGER.error(f"Error finding merge candidates: {e}")
+        if summary:
+            summary.warning_count += 1
     
     return merged_pairs
 
@@ -607,6 +655,8 @@ def run_group_shallow(
     client,
     dry_run: bool = False,
     threshold: int = GROUP_SHALLOW_THRESHOLD,
+    target_page_ids: Optional[Set[str]] = None,
+    summary: Optional[MaintenanceSummary] = None,
 ) -> List[Dict]:
     """Group shallow (depth-1) pages into new parent pages.
     
@@ -645,6 +695,8 @@ def run_group_shallow(
     }
     
     for category, pages in depth1_by_category.items():
+        if target_page_ids:
+            pages = [p for p in pages if p["id"] in target_page_ids]
         if len(pages) < threshold:
             LOGGER.info(f"Category '{category}' has {len(pages)} pages (< {threshold}), skipping grouping")
             continue
@@ -726,6 +778,8 @@ def run_group_shallow(
                 
                 if len(valid_ids) < 2:
                     LOGGER.warning(f"Group '{parent_title}' has fewer than 2 valid pages after filtering, skipping")
+                    if summary:
+                        summary.warning_count += 1
                     continue
                 
                 # Get titles for logging
@@ -755,12 +809,10 @@ def run_group_shallow(
                     
                     # Move pages under the new parent
                     for page_id in valid_ids:
-                        storage_update_page(
-                            memopedia.conn,
-                            page_id,
-                            parent_id=new_parent.id,
-                        )
-                    
+                        reparent_page(memopedia.conn, page_id, new_parent.id)
+                        if summary:
+                            summary.updated_count += 1
+
                     LOGGER.info(f"Moved {len(valid_ids)} pages under '{parent_title}'")
                     
                     grouped.append({
@@ -771,8 +823,8 @@ def run_group_shallow(
         
         except Exception as e:
             LOGGER.error(f"Error grouping pages in category '{category}': {e}")
-            import traceback
-            traceback.print_exc()
+            if summary:
+                summary.warning_count += 1
     
     return grouped
 
@@ -801,6 +853,12 @@ def main():
 """,
     )
     parser.add_argument("persona_id", help="Persona ID to process")
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=["rebuild-index", "dedupe", "repair-links"],
+        help="Subcommand: rebuild-index / dedupe / repair-links",
+    )
     parser.add_argument("--auto", action="store_true", help="Run all maintenance tasks")
     parser.add_argument("--merge-similar", action="store_true", help="Find and merge similar/redundant pages")
     parser.add_argument("--split-large", action="store_true", help=f"Split pages exceeding {SPLIT_THRESHOLD} characters")
@@ -809,8 +867,18 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Preview changes without applying")
     parser.add_argument("--model", default="gemini-2.5-flash-lite-preview-09-2025", help="Model for LLM operations")
     parser.add_argument("--provider", help="Override provider detection")
+    parser.add_argument("--since", type=int, help="Only process pages with updated_at >= this unix timestamp")
+    parser.add_argument("--page-id", help="Only process a specific page id")
 
     args = parser.parse_args()
+
+    if args.command == "rebuild-index":
+        args.split_large = True
+        args.group_shallow = True
+    elif args.command == "dedupe":
+        args.merge_similar = True
+    elif args.command == "repair-links":
+        args.fix_markdown = True
 
     # Check if any operation is specified
     if not any([args.auto, args.merge_similar, args.split_large, args.group_shallow, args.fix_markdown]):
@@ -825,9 +893,13 @@ def main():
     # Initialize Memopedia
     conn = init_db(str(db_path), check_same_thread=False)
     memopedia = Memopedia(conn)
+    target_ids = select_target_page_ids(conn, since=args.since, page_id=args.page_id)
+    target_id_set = set(target_ids)
+    summary = MaintenanceSummary(target_pages=count_target_pages(conn, target_ids))
 
     LOGGER.info(f"Maintaining Memopedia for persona: {args.persona_id}")
     LOGGER.info(f"Dry run: {args.dry_run}")
+    LOGGER.info(f"Target page count: {summary.target_pages}")
 
     # Initialize LLM client if needed
     client = None
@@ -860,19 +932,42 @@ def main():
     # Note: markdown is fixed LAST because merge/split may break markdown formatting
     if args.auto or args.merge_similar:
         LOGGER.info("=== Merge Similar Pages ===")
-        results["pages_merged"] = run_merge_similar(memopedia, client, dry_run=args.dry_run)
+        results["pages_merged"] = run_merge_similar(
+            memopedia,
+            client,
+            dry_run=args.dry_run,
+            target_page_ids=target_id_set,
+            summary=summary,
+        )
 
     if args.auto or args.split_large:
         LOGGER.info("=== Split Large Pages ===")
-        results["pages_split"] = run_split_large(memopedia, client, dry_run=args.dry_run)
+        results["pages_split"] = run_split_large(
+            memopedia,
+            client,
+            dry_run=args.dry_run,
+            target_page_ids=target_id_set,
+            summary=summary,
+        )
 
     if args.auto or args.group_shallow:
         LOGGER.info("=== Group Shallow Pages ===")
-        results["pages_grouped"] = run_group_shallow(memopedia, client, dry_run=args.dry_run)
+        results["pages_grouped"] = run_group_shallow(
+            memopedia,
+            client,
+            dry_run=args.dry_run,
+            target_page_ids=target_id_set,
+            summary=summary,
+        )
 
     if args.auto or args.fix_markdown:
         LOGGER.info("=== Fix Markdown ===")
-        results["markdown_fixed"] = run_fix_markdown(memopedia, dry_run=args.dry_run)
+        results["markdown_fixed"] = run_fix_markdown(
+            memopedia,
+            dry_run=args.dry_run,
+            target_page_ids=target_id_set,
+        )
+        summary.updated_count += len(results["markdown_fixed"])
 
     # Summary
     LOGGER.info("\n" + "=" * 60)
@@ -906,6 +1001,12 @@ def main():
             LOGGER.info(f"  - {g['parent_title']} ({len(g['children'])} children)")
     else:
         LOGGER.info("Pages grouped: 0")
+
+    LOGGER.info("-" * 60)
+    LOGGER.info(f"対象ページ数: {summary.target_pages}")
+    LOGGER.info(f"更新件数: {summary.updated_count}")
+    LOGGER.info(f"削除件数: {summary.deleted_count}")
+    LOGGER.info(f"警告件数: {summary.warning_count}")
 
     conn.close()
     LOGGER.info("Done!")
