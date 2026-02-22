@@ -37,6 +37,7 @@ from sea.runtime_state import (
 )
 
 from . import runtime_llm as runtime_llm_module
+from .runtime_emitters import RuntimeEmitters
 from .runtime_utils import _format, _is_llm_streaming_enabled
 LOGGER = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ class SEARuntime:
         self.playbooks_dir = Path(__file__).parent / "playbooks"
         self._playbook_cache: Dict[str, PlaybookSchema] = {}
         self._trace = bool(os.getenv("SAIVERSE_SEA_TRACE"))
+        self._emitters = RuntimeEmitters(runtime=self)
         self._runtime_engine = RuntimeEngine(
             runtime=self,
             manager_ref=manager_ref,
@@ -1438,107 +1440,16 @@ class SEARuntime:
         return fallback
 
     def _emit_speak(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, record_history: bool = True) -> None:
-        msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
-        # Build metadata with tags and conversation partners
-        metadata: Dict[str, Any] = {"tags": ["conversation"]}
-        if pulse_id:
-            metadata["tags"].append(f"pulse:{pulse_id}")
-        # Add conversation partners to "with" field
-        partners = []
-        occupants = self.manager.occupants.get(building_id, [])
-        for oid in occupants:
-            if oid != persona.persona_id:
-                partners.append(oid)
-        # Add user if online/away
-        presence = getattr(self.manager, "user_presence_status", "offline")
-        if presence in ("online", "away"):
-            partners.append("user")
-        if partners:
-            metadata["with"] = partners
-        msg["metadata"] = metadata
-        if record_history:
-            try:
-                persona.history_manager.add_message(msg, building_id, heard_by=None)
-                self.manager.gateway_handle_ai_replies(building_id, persona, [text])
-            except Exception:
-                LOGGER.exception("Failed to emit speak message")
-        # Notify Unity Gateway
-        self._notify_unity_speak(persona, text)
+        self._emitters.emit_speak(persona, building_id, text, pulse_id=pulse_id, record_history=record_history)
 
     def _emit_say(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> None:
-        msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
-        # Build metadata dict
-        msg_metadata: Dict[str, Any] = {}
-        if pulse_id:
-            msg_metadata["tags"] = [f"pulse:{pulse_id}"]
-        # Merge additional metadata (e.g., media attachments)
-        if isinstance(metadata, dict):
-            for key, value in metadata.items():
-                if key == "tags":
-                    # Merge tags
-                    extra_tags = [str(t) for t in value if t] if isinstance(value, list) else []
-                    msg_metadata.setdefault("tags", []).extend(extra_tags)
-                else:
-                    msg_metadata[key] = value
-        # Add conversation partners to "with" field
-        partners = []
-        occupants = self.manager.occupants.get(building_id, [])
-        for oid in occupants:
-            if oid != persona.persona_id:
-                partners.append(oid)
-        presence = getattr(self.manager, "user_presence_status", "offline")
-        if presence in ("online", "away"):
-            partners.append("user")
-        if partners:
-            msg_metadata["with"] = partners
-        if msg_metadata:
-            msg["metadata"] = msg_metadata
-        try:
-            persona.history_manager.add_to_building_only(building_id, msg)
-            self.manager.gateway_handle_ai_replies(building_id, persona, [text])
-        except Exception:
-            LOGGER.exception("Failed to emit say message")
-        # Notify Unity Gateway
-        self._notify_unity_speak(persona, text)
+        self._emitters.emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=metadata)
 
     def _emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True) -> None:
-        if not record_history:
-            return
-        adapter = getattr(persona, "sai_memory", None)
-        try:
-            if adapter and adapter.is_ready():
-                adapter.append_persona_message(
-                    {
-                        "role": "assistant",
-                        "content": text,
-                        "metadata": {"tags": ["internal", f"pulse:{pulse_id}"]},
-                        "persona_id": persona.persona_id,
-                    }
-                )
-        except Exception:
-            LOGGER.warning("think message not stored", exc_info=True)
+        self._emitters.emit_think(persona, pulse_id, text, record_history=record_history)
 
     def _notify_unity_speak(self, persona: Any, text: str) -> None:
-        """Send persona speak event to Unity Gateway if connected."""
-        if not text:
-            return
-        unity_gateway = getattr(self.manager, "unity_gateway", None)
-        if not unity_gateway:
-            return
-        try:
-            import asyncio
-            persona_id = getattr(persona, "persona_id", "unknown")
-            # Run async send_speak in a new event loop if not in async context
-            try:
-                loop = asyncio.get_running_loop()
-                asyncio.create_task(unity_gateway.send_speak(persona_id, text))
-            except RuntimeError:
-                # No running event loop
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(unity_gateway.send_speak(persona_id, text))
-                loop.close()
-        except Exception as exc:
-            LOGGER.debug("Failed to notify Unity Gateway: %s", exc)
+        self._emitters.notify_unity_speak(persona, text)
 
     # ---------------- history metabolism -----------------
 
