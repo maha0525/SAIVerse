@@ -7,7 +7,6 @@ import pytest
 from llm_clients.exceptions import LLMError
 from sea.cancellation import CancellationToken
 from sea.runtime import SEARuntime
-from sea.runtime_runner import run_playbook
 
 
 def _runtime_and_persona() -> tuple[SEARuntime, SimpleNamespace]:

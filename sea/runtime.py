@@ -18,7 +18,9 @@ from saiverse.usage_tracker import get_usage_tracker
 from sea.cancellation import CancellationToken, ExecutionCancelledException
 from sea.langgraph_runner import compile_playbook
 from sea.playbook_models import NodeType, PlaybookSchema, PlaybookValidationError, validate_playbook_graph
+from sea.runtime_context import prepare_context as prepare_context_impl
 from sea.runtime_engine import RuntimeEngine
+from sea.runtime_context import preview_context as preview_context_impl
 from sea.runtime_graph import compile_with_langgraph as compile_with_langgraph_impl
 from sea.runtime_llm import lg_llm_node as lg_llm_node_impl
 from sea.runtime_runner import run_playbook
@@ -1141,7 +1143,35 @@ class SEARuntime:
         building_id: str,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
-        return maybe_run_metabolism_impl(self, persona, building_id, event_callback)
+        """Check if metabolism is needed after response and run if so."""
+        if not getattr(self.manager, "metabolism_enabled", False):
+            return
+
+        history_mgr = getattr(persona, "history_manager", None)
+        anchor = getattr(history_mgr, "metabolism_anchor_message_id", None)
+        if not history_mgr or not anchor:
+            return
+
+        high_wm = self._get_high_watermark(persona)
+        if high_wm is None:
+            return
+
+        # Get current message count from anchor
+        current_messages = history_mgr.get_history_from_anchor(
+            anchor, required_tags=["conversation"],
+        )
+        if len(current_messages) <= high_wm:
+            return  # Haven't reached high watermark yet
+
+        low_wm = self._get_low_watermark(persona)
+        if low_wm is None or high_wm - low_wm < 20:
+            return  # Gap too small for a Chronicle batch
+
+        LOGGER.info(
+            "[metabolism] Triggering metabolism for %s: %d messages > high_wm=%d, will keep %d",
+            getattr(persona, "persona_id", "?"), len(current_messages), high_wm, low_wm,
+        )
+        self._run_metabolism(persona, building_id, current_messages, low_wm, event_callback)
 
     def _run_metabolism(
         self,
@@ -1151,7 +1181,43 @@ class SEARuntime:
         keep_count: int,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> None:
-        return run_metabolism_impl(self, persona, building_id, current_messages, keep_count, event_callback)
+        """Execute history metabolism: Chronicle generation + anchor update."""
+        evict_count = len(current_messages) - keep_count
+
+        # 1. Notify start
+        if event_callback:
+            event_callback({
+                "type": "metabolism",
+                "status": "started",
+                "content": f"記憶を整理しています（{len(current_messages)}件 → {keep_count}件）...",
+            })
+
+        # 2. Chronicle generation (only if Memory Weave is enabled AND per-persona toggle is on)
+        memory_weave_enabled = os.getenv("ENABLE_MEMORY_WEAVE_CONTEXT", "").lower() in ("true", "1")
+        if memory_weave_enabled and self._is_chronicle_enabled_for_persona(persona):
+            try:
+                self._generate_chronicle(persona, event_callback)
+            except Exception as exc:
+                LOGGER.warning("[metabolism] Chronicle generation failed: %s", exc)
+
+        # 3. Update anchor to new window start
+        new_anchor_id = current_messages[evict_count].get("id")
+        if new_anchor_id:
+            persona.history_manager.metabolism_anchor_message_id = new_anchor_id
+            persona_model = getattr(persona, "model", None)
+            if persona_model:
+                self._update_anchor_for_model(persona, persona_model, new_anchor_id)
+            LOGGER.info("[metabolism] Updated anchor to %s (evicted %d, kept %d)", new_anchor_id, evict_count, keep_count)
+
+        # 4. Notify completion
+        if event_callback:
+            event_callback({
+                "type": "metabolism",
+                "status": "completed",
+                "content": f"記憶の整理が完了しました（{evict_count}件の会話をChronicleに圧縮）",
+                "evicted": evict_count,
+                "kept": keep_count,
+            })
 
     def _is_chronicle_enabled_for_persona(self, persona) -> bool:
         """Check per-persona Chronicle auto-generation toggle from DB."""
@@ -1309,7 +1375,92 @@ class SEARuntime:
         building_id: str,
         history_messages: List[Dict[str, Any]],
     ) -> Optional[Dict[str, Any]]:
-        return build_realtime_context_impl(self, persona, building_id, history_messages)
+        """Build realtime context message with time-sensitive information.
+
+        This message is placed near the end of context (before the current prompt)
+        to improve LLM context caching efficiency. Time-sensitive info here doesn't
+        invalidate the cached prefix (system prompt, persona info, building info, etc.).
+
+        Contents:
+        - Current timestamp (year/month/day, weekday, hour:minute)
+        - Previous AI response timestamp (for time passage awareness)
+        - Spatial info from Unity gateway (if connected)
+        - (Future) Auto-recalled memory content
+
+        Returns:
+            Message dict with role="user" and <system> wrapper, or None if no content.
+        """
+        from datetime import datetime
+
+        sections: List[str] = []
+
+        # 1. Current timestamp
+        now = datetime.now(persona.timezone)
+        weekday_names = ["月", "火", "水", "木", "金", "土", "日"]
+        current_time_str = now.strftime(f"%Y年%m月%d日({weekday_names[now.weekday()]}) %H:%M")
+        sections.append(f"現在時刻: {current_time_str}")
+
+        # 2. Previous AI response timestamp
+        # Find the last assistant/persona message in history with a timestamp
+        prev_ai_timestamp = None
+        persona_id = getattr(persona, "persona_id", None)
+        persona_name = getattr(persona, "persona_name", None)
+        for msg in reversed(history_messages):
+            role = msg.get("role", "")
+            # Check if this is an assistant message or a message from this persona
+            if role == "assistant" or (persona_name and msg.get("sender") == persona_name):
+                # Try 'created_at' first (SAIMemory format), then 'timestamp' (fallback)
+                ts_str = msg.get("created_at") or msg.get("timestamp")
+                if ts_str:
+                    try:
+                        # Handle both ISO format and datetime objects
+                        if isinstance(ts_str, datetime):
+                            prev_ai_timestamp = ts_str
+                        else:
+                            prev_ai_timestamp = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+                        break
+                    except (ValueError, TypeError):
+                        pass
+
+        if prev_ai_timestamp:
+            # Convert to persona's timezone for display
+            if prev_ai_timestamp.tzinfo is not None:
+                prev_ai_timestamp = prev_ai_timestamp.astimezone(persona.timezone)
+            prev_time_str = prev_ai_timestamp.strftime(f"%Y年%m月%d日({weekday_names[prev_ai_timestamp.weekday()]}) %H:%M")
+            sections.append(f"あなたの前回発言: {prev_time_str}")
+
+        # 3. Spatial context (Unity gateway)
+        try:
+            unity_gateway = getattr(self.manager, "unity_gateway", None)
+            if unity_gateway and getattr(unity_gateway, "is_running", False):
+                spatial_state = unity_gateway.spatial_state.get(persona_id) if persona_id else None
+                if spatial_state:
+                    distance = getattr(spatial_state, "distance_to_player", None)
+                    is_visible = getattr(spatial_state, "is_visible", None)
+
+                    spatial_lines = []
+                    if distance is not None:
+                        spatial_lines.append(f"プレイヤーとの距離: {distance:.1f}m")
+                    if is_visible is not None:
+                        visibility_text = "見える" if is_visible else "見えない"
+                        spatial_lines.append(f"プレイヤーの視認: {visibility_text}")
+
+                    if spatial_lines:
+                        sections.append("空間情報: " + " / ".join(spatial_lines))
+                        LOGGER.debug("[sea][realtime-context] Added spatial info: distance=%.1f, visible=%s", distance, is_visible)
+        except Exception as exc:
+            LOGGER.debug("[sea][realtime-context] Failed to get spatial context: %s", exc)
+
+        if not sections:
+            return None
+
+        # Format as user message with <system> wrapper (compatible with all LLM providers)
+        content = "<system>\n## リアルタイム情報\n" + "\n".join(f"- {s}" for s in sections) + "\n</system>"
+        return {
+            "role": "user",
+            "content": content,
+            "metadata": {"__realtime_context__": True},  # Mark for identification
+        }
 
     def _choose_playbook(self, kind: str, persona: Any, building_id: str) -> PlaybookSchema:
         """Resolve playbook by kind with DB→disk→fallback."""
