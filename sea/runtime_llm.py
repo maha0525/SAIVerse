@@ -2,17 +2,15 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 from typing import Any, Callable, Dict, Optional
-
 from llm_clients.exceptions import LLMError
 from saiverse.logging_config import log_sea_trace
 from sea.playbook_models import PlaybookSchema
-from sea.runtime_utils import _format, _is_llm_streaming_enabled
 from saiverse.usage_tracker import get_usage_tracker
 
 LOGGER = logging.getLogger(__name__)
-
-
 
 def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
     async def node(state: dict):
