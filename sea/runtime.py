@@ -19,6 +19,7 @@ from sea.cancellation import CancellationToken, ExecutionCancelledException
 from sea.langgraph_runner import compile_playbook
 from sea.playbook_models import NodeType, PlaybookSchema, PlaybookValidationError, validate_playbook_graph
 from sea.runtime_context import prepare_context as prepare_context_impl
+from sea.runtime_engine import RuntimeEngine
 from sea.runtime_context import preview_context as preview_context_impl
 from sea.runtime_graph import compile_with_langgraph as compile_with_langgraph_impl
 from sea.runtime_llm import lg_llm_node as lg_llm_node_impl
@@ -54,6 +55,12 @@ class SEARuntime:
         self.playbooks_dir = Path(__file__).parent / "playbooks"
         self._playbook_cache: Dict[str, PlaybookSchema] = {}
         self._trace = bool(os.getenv("SAIVERSE_SEA_TRACE"))
+        self._runtime_engine = RuntimeEngine(
+            runtime=self,
+            manager_ref=manager_ref,
+            llm_selector=self._select_llm_client,
+            emitters={"speak": self._emit_speak, "say": self._emit_say, "think": self._emit_think},
+        )
 
     # ---------------- meta entrypoints -----------------
     def run_meta_user(
@@ -572,105 +579,7 @@ class SEARuntime:
         update_router_selection(state, text, parsed)
 
     def _lg_tool_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
-        from tools import TOOL_REGISTRY
-        from tools.context import persona_context
-
-        tool_name = node_def.action
-        args_input = getattr(node_def, "args_input", None)
-        output_key = getattr(node_def, "output_key", None)
-        output_keys = getattr(node_def, "output_keys", None)
-
-        async def node(state: dict):
-            # Check for cancellation at start of node
-            cancellation_token = state.get("_cancellation_token")
-            if cancellation_token:
-                cancellation_token.raise_if_cancelled()
-            
-            # Send status event for node execution
-            node_id = getattr(node_def, "id", "tool")
-            if event_callback:
-                event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
-            tool_func = TOOL_REGISTRY.get(tool_name)
-            persona_obj = state.get("persona_obj") or persona
-            persona_id = getattr(persona_obj, "persona_id", "unknown")
-            
-            try:
-                persona_dir = getattr(persona_obj, "persona_log_path", None)
-                persona_dir = persona_dir.parent if persona_dir else Path.cwd()
-                manager_ref = getattr(persona_obj, "manager_ref", None)
-
-                # Build kwargs from args_input (None or {} = no args)
-                # Supports nested keys via dot notation (e.g., "tool_call.args.playbook_name")
-                kwargs = {}
-                if args_input:
-                    for arg_name, source in args_input.items():
-                        if isinstance(source, str):
-                            value = self._resolve_state_value(state, source)
-                            LOGGER.debug("[sea][tool] Mapping arg '%s' <- state['%s'] = %s", arg_name, source, value)
-                        else:
-                            value = source
-                            LOGGER.debug("[sea][tool] Using literal arg '%s' = %s", arg_name, value)
-                        kwargs[arg_name] = value
-
-                # ===== Tool execution logging (centralized) =====
-                LOGGER.info("[sea][tool] CALL %s (persona=%s) args=%s", tool_name, persona_id, kwargs)
-                
-                if tool_func is None:
-                    LOGGER.error("[sea][tool] CRITICAL: Tool function '%s' not found in registry! TOOL_REGISTRY keys: %s", tool_name, list(TOOL_REGISTRY.keys()))
-                else:
-                    LOGGER.info("[sea][tool] Tool function found: %s", tool_func)
-
-                # Execute tool with persona context
-                if persona_id and persona_dir:
-                    with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name):
-                        result = tool_func(**kwargs) if callable(tool_func) else None
-                else:
-                    result = tool_func(**kwargs) if callable(tool_func) else None
-                
-                # Log tool result
-                result_str = str(result)
-                result_preview = result_str[:200] + "..." if len(result_str) > 200 else result_str
-                LOGGER.info("[sea][tool] RESULT %s -> %s", tool_name, result_preview)
-                log_sea_trace(playbook.name, node_id, "TOOL", f"action={tool_name} → {result_str}")
-
-                # Activity trace: record tool execution (skip infrastructure playbooks)
-                if not playbook.name.startswith(("meta_", "sub_")):
-                    pb_display = playbook.display_name or playbook.name
-                    _at = state.get("_activity_trace")
-                    if isinstance(_at, list):
-                        _at.append({"action": "tool", "name": tool_name, "playbook": pb_display})
-                    if event_callback:
-                        event_callback({
-                            "type": "activity", "action": "tool", "name": tool_name,
-                            "playbook": pb_display, "status": "completed",
-                            "persona_id": getattr(persona, "persona_id", None),
-                            "persona_name": getattr(persona, "persona_name", None),
-                        })
-
-                # Handle tuple results with output_keys (for multi-value returns)
-                if output_keys and isinstance(result, tuple):
-                    # Expand tuple to multiple state variables
-                    for i, key in enumerate(output_keys):
-                        if i < len(result):
-                            state[key] = result[i]
-                            LOGGER.debug("[sea][LangGraph] Stored tuple[%d] in state[%s]: %s", i, key, str(result[i]))
-                    # Set last to first element (primary result)
-                    state["last"] = str(result[0]) if result else ""
-                elif isinstance(result, tuple):
-                    # Legacy: extract first element
-                    state["last"] = str(result[0]) if result else ""
-                else:
-                    state["last"] = str(result)
-
-                # Store result in state if output_key is specified (legacy single-value)
-                if output_key and not output_keys:
-                    state[output_key] = result
-            except Exception as exc:
-                state["last"] = f"Tool error: {exc}"
-                LOGGER.exception("SEA LangGraph tool %s failed", tool_name)
-            return state
-
-        return node
+        return self._runtime_engine.lg_tool_node(node_def, persona, playbook, event_callback)
 
     def _lg_tool_call_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         """Execute a tool dynamically based on an LLM node's tool call decision.
@@ -785,206 +694,15 @@ class SEARuntime:
         outputs: Optional[List[str]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
-        # Get source variable names from node definition (with defaults for backward compatibility)
-        playbook_source = getattr(node_def, "playbook_source", "selected_playbook") or "selected_playbook"
-        args_source = getattr(node_def, "args_source", "selected_args") or "selected_args"
-
-        async def node(state: dict):
-            # Check for cancellation at start of node
-            cancellation_token = state.get("_cancellation_token")
-            if cancellation_token:
-                cancellation_token.raise_if_cancelled()
-            
-            # Send status event for node execution
-            node_id = getattr(node_def, "id", "exec")
-            if event_callback:
-                event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
-            sub_name = state.get(playbook_source) or state.get("last") or "basic_chat"
-            sub_pb = self._load_playbook_for(str(sub_name).strip(), persona, building_id) or self._basic_chat_playbook()
-            sub_input = None
-            args = state.get(args_source) or {}
-            if isinstance(args, dict):
-                sub_input = args.get("input") or args.get("query")
-            if not sub_input:
-                sub_input = state.get("inputs", {}).get("input")
-
-            eff_bid = self._effective_building_id(persona, building_id)
-
-            # Determine execution mode
-            execution = getattr(node_def, "execution", "inline") or "inline"
-            subagent_thread_id = None
-            subagent_parent_id = None
-
-            if execution == "subagent":
-                label = f"Subagent: {sub_name}"
-                subagent_thread_id, subagent_parent_id = self._start_subagent_thread(persona, label=label)
-                if not subagent_thread_id:
-                    LOGGER.warning("[sea][exec] Failed to start subagent thread for '%s', falling back to inline", sub_name)
-                    execution = "inline"  # Fallback
-                else:
-                    log_sea_trace(playbook.name, node_id, "EXEC", f"→ {sub_name} [subagent thread={subagent_thread_id}] (input=\"{str(sub_input)}\")")
-
-            if execution == "inline":
-                log_sea_trace(playbook.name, node_id, "EXEC", f"→ {sub_name} (input=\"{str(sub_input)}\")")
-
-            try:
-                sub_outputs = await asyncio.to_thread(
-                    self._run_playbook, sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback
-                )
-            except Exception as exc:
-                LOGGER.exception("SEA LangGraph exec sub-playbook failed")
-                # End subagent thread on error (no chronicle)
-                if execution == "subagent" and subagent_thread_id:
-                    self._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=False)
-                error_msg = f"Sub-playbook error: {type(exc).__name__}: {exc}"
-                state["last"] = error_msg
-                state["_exec_error"] = True
-                state["_exec_error_detail"] = error_msg
-                log_sea_trace(playbook.name, node_id, "EXEC", f"→ {error_msg}")
-                if event_callback:
-                    event_callback({
-                        "type": "error",
-                        "content": f"[{sub_name}] {type(exc).__name__}: {exc}",
-                        "playbook": playbook.name,
-                        "node": node_id,
-                    })
-                # Record error to SAIMemory so the persona (and subsequent LLM calls) can see it
-                if not self._store_memory(
-                    persona, error_msg,
-                    role="system",
-                    tags=["error", "exec", str(sub_name).strip()],
-                    pulse_id=state.get("pulse_id"),
-                ):
-                    LOGGER.warning("Failed to store exec error to SAIMemory for node %s", node_id)
-                    if event_callback:
-                        event_callback({
-                            "type": "warning",
-                            "content": "記憶の保存に失敗しました。会話内容が記録されていない可能性があります。",
-                            "warning_code": "memorize_failed",
-                            "display": "toast",
-                        })
-                if outputs is not None:
-                    outputs.append(error_msg)
-                return state
-
-            # End subagent thread on success
-            if execution == "subagent" and subagent_thread_id:
-                gen_chronicle = getattr(node_def, "subagent_chronicle", True)
-                chronicle = self._end_subagent_thread(persona, subagent_thread_id, subagent_parent_id, generate_chronicle=gen_chronicle)
-                state["_subagent_chronicle"] = chronicle or ""
-                log_sea_trace(playbook.name, node_id, "EXEC", f"← {sub_name} [subagent ended, chronicle={'yes' if chronicle else 'no'}]")
-
-            # Success path: clear error flag
-            state["_exec_error"] = False
-            state.pop("_exec_error_detail", None)
-
-            # Track executed playbook in executed_playbooks list
-            executed_list = state.get("executed_playbooks")
-            if isinstance(executed_list, list):
-                executed_list.append(str(sub_name).strip())
-                LOGGER.debug("[sea][exec] Added '%s' to executed_playbooks: %s", sub_name, executed_list)
-
-            # Append tool result message to close the router function call pair
-            joined = ""
-            if sub_outputs:
-                joined = "\n".join(str(item).strip() for item in sub_outputs if str(item).strip())
-            self._append_tool_result_message(state, str(sub_name).strip(), joined or "(completed)")
-            if sub_outputs:
-                state["last"] = sub_outputs[-1]
-            return state
-
-        return node
-
+        return self._runtime_engine.lg_exec_node(
+            node_def, playbook, persona, building_id, auto_mode, outputs, event_callback
+        )
 
     def _lg_memorize_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
-        async def node(state: dict):
-            # Send status event for node execution
-            node_id = getattr(node_def, "id", "memorize")
-            if event_callback:
-                event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
-            # Include all state variables for template expansion (e.g., structured output like document_data.*)
-            variables = dict(state)
-            # Flatten nested dicts/lists for dot notation access (e.g., finalize_output.content)
-            for key, value in list(state.items()):
-                if isinstance(value, dict):
-                    flat = self._flatten_dict(value)
-                    for path, val in flat.items():
-                        variables[f"{key}.{path}"] = val
-            variables.update({
-                "input": state.get("inputs", {}).get("input", ""),
-                "last": state.get("last", ""),
-                "persona_id": getattr(persona, "persona_id", None),
-                "persona_name": getattr(persona, "persona_name", None),
-            })
-            action_template = getattr(node_def, "action", None) or "{last}"
-            LOGGER.debug("[memorize] action_template=%s", action_template)
-            LOGGER.debug("[memorize] available variables containing 'finalize': %s", 
-                        {k: v for k, v in variables.items() if 'finalize' in str(k).lower()})
-            from .runtime_utils import _format as runtime_format
-            memo_text = runtime_format(action_template, variables)
-            LOGGER.debug("[memorize] memo_text=%s", memo_text)
-            role = getattr(node_def, "role", "assistant") or "assistant"
-            tags = getattr(node_def, "tags", None)
-            pulse_id = state.get("pulse_id")
-            metadata_key = getattr(node_def, "metadata_key", None)
-            metadata = state.get(metadata_key) if metadata_key else None
-            if not self._store_memory(persona, memo_text, role=role, tags=tags, pulse_id=pulse_id, metadata=metadata):
-                LOGGER.warning("Failed to store memory in MEMORIZE node %s", node_id)
-                if event_callback:
-                    event_callback({
-                        "type": "warning",
-                        "content": "記憶の保存に失敗しました。会話内容が記録されていない可能性があります。",
-                        "warning_code": "memorize_failed",
-                        "display": "toast",
-                    })
-            log_sea_trace(playbook.name, node_id, "MEMORIZE", f"role={role} tags={tags} text=\"{memo_text}\"")
-            state["last"] = memo_text
-            if outputs is not None:
-                outputs.append(memo_text)
-
-            # Activity trace: record memorize execution
-            if not playbook.name.startswith(("meta_", "sub_")):
-                pb_display = playbook.display_name or playbook.name
-                node_label = getattr(node_def, "label", None) or node_id
-                _at = state.get("_activity_trace")
-                if isinstance(_at, list):
-                    _at.append({"action": "memorize", "name": node_label, "playbook": pb_display})
-                if event_callback:
-                    event_callback({
-                        "type": "activity", "action": "memorize", "name": node_label,
-                        "playbook": pb_display, "status": "completed",
-                        "persona_id": getattr(persona, "persona_id", None),
-                        "persona_name": getattr(persona, "persona_name", None),
-                    })
-
-            # Debug: log speak_content at end of memorize node
-            speak_content = state.get("speak_content", "")
-            LOGGER.info("[DEBUG] memorize node end: state['speak_content'] = '%s'", speak_content)
-            
-            return state
-
-        return node
+        return self._runtime_engine.lg_memorize_node(node_def, persona, playbook, outputs, event_callback)
 
     def _lg_speak_node(self, state: dict, persona: Any, building_id: str, playbook: PlaybookSchema, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
-        # Send status event for node execution
-        if event_callback:
-            event_callback({"type": "status", "content": f"{playbook.name} / speak", "playbook": playbook.name, "node": "speak"})
-        text = state.get("last") or ""
-        reasoning_text = state.pop("_reasoning_text", "")
-        activity_trace = state.get("_activity_trace")
-        pulse_id = state.get("pulse_id")
-        eff_bid = self._effective_building_id(persona, building_id)
-        self._emit_speak(persona, eff_bid, text, pulse_id=pulse_id)
-        if outputs is not None:
-            outputs.append(text)
-        if event_callback:
-            say_event: Dict[str, Any] = {"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None)}
-            if reasoning_text:
-                say_event["reasoning"] = reasoning_text
-            if activity_trace:
-                say_event["activity_trace"] = list(activity_trace)
-            event_callback(say_event)
-        return state
+        return self._runtime_engine.lg_speak_node(state, persona, building_id, playbook, outputs, event_callback)
 
     def _lg_say_node(self, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         async def node(state: dict):
