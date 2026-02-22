@@ -1690,7 +1690,11 @@ export default function Home() {
                             </div>
                         </div>
                     ))}
-                    {loadingStatus && <div className={styles.loading}>{loadingStatus}</div>}
+                    {loadingStatus && (
+                        <div className={styles.loading} role="status" aria-label={loadingStatus}>
+                            <span className={styles.loadingSpinner} aria-hidden="true" />
+                        </div>
+                    )}
                     <div ref={messagesEndRef} />
                 </div>
 
