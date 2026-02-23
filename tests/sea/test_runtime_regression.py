@@ -73,9 +73,9 @@ def test_preview_context_delegates_to_preview_context_impl(monkeypatch: pytest.M
 
     monkeypatch.setattr("sea.runtime.preview_context_impl", _fake_preview)
 
-    result = runtime.preview_context(persona, "b1", "hello", playbook_name="meta_user")
+    result = runtime.preview_context(persona, "b1", "hello", meta_playbook="meta_user")
 
-    assert result == {"ok": True, "kwargs": {"playbook_name": "meta_user"}}
+    assert result == {"ok": True, "kwargs": {"meta_playbook": "meta_user", "image_count": 0, "document_count": 0}}
 
 
 def test_select_llm_client_raises_llmerror_when_client_unset() -> None:

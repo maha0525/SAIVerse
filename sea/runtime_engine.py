@@ -216,8 +216,10 @@ class RuntimeEngine:
                 log_sea_trace(playbook.name, node_id, "EXEC", f"→ {sub_name} (input=\"{str(sub_input)}\")")
 
             try:
+                cancellation_token = state.get("_cancellation_token")
                 sub_outputs = await asyncio.to_thread(
-                    self.runtime._run_playbook, sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback
+                    self.runtime._run_playbook, sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback,
+                    cancellation_token=cancellation_token,
                 )
             except Exception as exc:
                 LOGGER.exception("SEA LangGraph exec sub-playbook failed")
