@@ -16,6 +16,7 @@ from sai_memory.arasuji.storage import (
     ArasujiEntry,
     add_to_parent_source_ids,
     create_entry,
+    dismantle_entry,
     find_covering_entry,
     get_entry,
     get_unconsolidated_entries,
@@ -395,7 +396,18 @@ def generate_consolidated_arasuji(
         LOGGER.error(f"LLM call failed for level-{target_level} arasuji: {e}")
         from llm_clients.exceptions import LLMError
         if isinstance(e, LLMError):
-            raise  # Propagate all LLM errors (empty, safety, timeout, etc.)
+            # Attach consolidation context so frontend can show which entries were involved
+            e.user_message = (
+                f"レベル{target_level}統合の処理中: {e.user_message}"
+            )
+            e.batch_meta = {
+                "source_entry_ids": [e_src.id for e_src in entries],
+                "source_level": expected_level,
+                "target_level": target_level,
+                "start_time": start_time,
+                "end_time": end_time,
+            }
+            raise
         return None
 
     if not response or not response.strip():
@@ -958,22 +970,59 @@ class ArasujiGenerator:
                 )
                 covering = None
 
+            # Decide between gap-fill and dismantle.
+            # True gap = a few missed messages from a previous run's
+            # incomplete batch.  If many more unprocessed messages remain
+            # in the covering L2's time range, the L2's summary is no
+            # longer representative — dismantle it and let normal
+            # consolidation rebuild from scratch.
             if covering:
-                # Gap-fill: integrate into existing hierarchy
-                LOGGER.info(
-                    "Gap-fill detected: integrating entry %s "
-                    "(time %s-%s) into level-2 %s (time %s-%s)",
-                    entry.id[:8], entry.start_time, entry.end_time,
-                    covering.id[:8], covering.start_time, covering.end_time,
+                remaining_in_range = sum(
+                    1 for m in messages[i + self.batch_size:]
+                    if (covering.start_time is not None
+                        and covering.end_time is not None
+                        and covering.start_time <= m.created_at <= covering.end_time)
                 )
-                regenerated = integrate_gap_fill(
-                    self.client,
-                    self.conn,
-                    entry,
-                    include_timestamp=self.include_timestamp,
-                    persona_id=self.persona_id,
-                )
-                consolidated_entries.extend(regenerated)
+
+                if remaining_in_range >= self.batch_size:
+                    # Large gap — dismantle L2 and rebuild via consolidation
+                    LOGGER.info(
+                        "Dismantling level-2 %s: %d remaining messages in "
+                        "time range [%s, %s] (>= batch_size %d).  "
+                        "L2 summary is no longer representative.",
+                        covering.id[:8], remaining_in_range,
+                        covering.start_time, covering.end_time,
+                        self.batch_size,
+                    )
+                    success, freed_ids = dismantle_entry(self.conn, covering.id)
+                    if success:
+                        LOGGER.info(
+                            "Dismantled level-2 %s, freed %d source L1 entries",
+                            covering.id[:8], len(freed_ids),
+                        )
+                    else:
+                        LOGGER.warning(
+                            "Failed to dismantle level-2 %s", covering.id[:8],
+                        )
+                    covering = None  # fall through to maybe_consolidate
+                else:
+                    # Small gap — proceed with traditional gap-fill
+                    LOGGER.info(
+                        "Gap-fill detected: integrating entry %s "
+                        "(time %s-%s) into level-2 %s (time %s-%s), "
+                        "%d remaining messages in range",
+                        entry.id[:8], entry.start_time, entry.end_time,
+                        covering.id[:8], covering.start_time, covering.end_time,
+                        remaining_in_range,
+                    )
+                    regenerated = integrate_gap_fill(
+                        self.client,
+                        self.conn,
+                        entry,
+                        include_timestamp=self.include_timestamp,
+                        persona_id=self.persona_id,
+                    )
+                    consolidated_entries.extend(regenerated)
             else:
                 # Normal: try regular consolidation
                 consolidated = maybe_consolidate(
