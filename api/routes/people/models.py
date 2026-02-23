@@ -395,6 +395,7 @@ class GenerateArasujiRequest(BaseModel):
     consolidation_size: int = 10  # 統合サイズ
     model: Optional[str] = None  # デフォルトはMEMORY_WEAVE_MODEL
     with_memopedia: bool = False  # Memopedia同時生成
+    include_timestamp: bool = True  # 日時情報をLLMに渡すか（インポートログ等で日時が不正確な場合はFalse）
 
 
 class GenerateMemopediaRequest(BaseModel):

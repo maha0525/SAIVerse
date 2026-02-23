@@ -64,6 +64,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
         batchSize: 20,
         consolidationSize: 10,
         withMemopedia: false,
+        includeTimestamp: true,
     });
     const [generationJob, setGenerationJob] = useState<{
         jobId: string;
@@ -330,6 +331,7 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                     batch_size: generateSettings.batchSize,
                     consolidation_size: generateSettings.consolidationSize,
                     with_memopedia: generateSettings.withMemopedia,
+                    include_timestamp: generateSettings.includeTimestamp,
                 }),
             });
             if (res.ok) {
@@ -986,6 +988,17 @@ export default function ArasujiViewer({ personaId }: ArasujiViewerProps) {
                                 placeholder="10"
                             />
                             <span className={styles.hint}>上位レベルにまとめるエントリ数</span>
+                        </div>
+                        <div className={styles.formGroup}>
+                            <label className={styles.checkboxLabel}>
+                                <input
+                                    type="checkbox"
+                                    checked={generateSettings.includeTimestamp}
+                                    onChange={(e) => setGenerateSettings(s => ({ ...s, includeTimestamp: e.target.checked }))}
+                                />
+                                日時情報を含める
+                            </label>
+                            <span className={styles.hint}>インポートしたログ等でタイムスタンプが不正確な場合はOFFにすると、日時に基づく誤った記述を防げます</span>
                         </div>
                         {developerMode && (
                             <div className={styles.formGroup}>

@@ -444,6 +444,82 @@ def add_to_parent_source_ids(
     return True
 
 
+def dismantle_entry(
+    conn: sqlite3.Connection,
+    entry_id: str,
+) -> Tuple[bool, List[str]]:
+    """Dismantle a consolidated entry, freeing its sources for re-consolidation.
+
+    When a large gap is detected (many unprocessed messages fall within an
+    existing higher-level entry's time range), the entry's summary is no
+    longer representative.  This function tears it down so that its source
+    entries — together with the newly generated ones — can be re-consolidated
+    from scratch via the normal ``maybe_consolidate`` path.
+
+    Steps:
+        1. Reset all source children to unconsolidated
+           (``is_consolidated=0, parent_id=NULL``).
+        2. Remove this entry from its parent's ``source_ids`` (if any).
+           If the parent has no remaining sources, recursively dismantle it.
+        3. Delete this entry.
+
+    Args:
+        conn: Database connection
+        entry_id: ID of the entry to dismantle
+
+    Returns:
+        ``(success, freed_entry_ids)`` — IDs of direct source entries that
+        were freed (made unconsolidated).
+    """
+    import logging
+    _logger = logging.getLogger(__name__)
+
+    entry = get_entry(conn, entry_id)
+    if not entry:
+        return False, []
+
+    freed_ids = list(entry.source_ids)
+
+    # 1. Reset source children to unconsolidated
+    if entry.source_ids:
+        placeholders = ",".join("?" for _ in entry.source_ids)
+        conn.execute(
+            f"UPDATE arasuji_entries SET is_consolidated = 0, parent_id = NULL "
+            f"WHERE id IN ({placeholders})",
+            entry.source_ids,
+        )
+
+    # 2. Remove from parent's source_ids
+    if entry.parent_id:
+        parent = get_entry(conn, entry.parent_id)
+        if parent:
+            new_source_ids = [sid for sid in parent.source_ids if sid != entry_id]
+            if not new_source_ids:
+                # Parent has no remaining sources — dismantle it too
+                _logger.info(
+                    "Parent %s has no remaining sources after removing %s, "
+                    "dismantling recursively",
+                    entry.parent_id[:8], entry_id[:8],
+                )
+                dismantle_entry(conn, entry.parent_id)
+            else:
+                conn.execute(
+                    "UPDATE arasuji_entries SET source_ids_json = ?, source_count = ? "
+                    "WHERE id = ?",
+                    (json.dumps(new_source_ids), len(new_source_ids), entry.parent_id),
+                )
+
+    # 3. Delete this entry
+    conn.execute("DELETE FROM arasuji_entries WHERE id = ?", (entry_id,))
+    conn.commit()
+
+    _logger.info(
+        "Dismantled level-%d entry %s: freed %d source entries",
+        entry.level, entry_id[:8], len(freed_ids),
+    )
+    return True, freed_ids
+
+
 def clear_all_entries(conn: sqlite3.Connection) -> int:
     """Delete all arasuji entries. Returns count of deleted entries."""
     cur = conn.execute("DELETE FROM arasuji_entries")

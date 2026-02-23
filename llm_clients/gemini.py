@@ -1113,6 +1113,10 @@ class GeminiClient(LLMClient):
             except EmptyResponseError as e:
                 logging.warning("Gemini empty response (attempt %d/%d): %s", attempt + 1, max_retries, e)
                 continue
+            except LLMError:
+                # LLMError subclasses (SafetyFilterError, etc.) already have
+                # correct error_code and user_message — propagate as-is.
+                raise
             except Exception as exc:
                 if self._is_timeout_error(exc):
                     logging.warning(
