@@ -162,7 +162,7 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
         if execution == "inline":
             log_sea_trace(playbook.name, node_id, "SUBPLAY", f"→ {sub_name} (input=\"{str(sub_input)}\")")
         try:
-            sub_outputs = runtime._run_playbook(sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback)
+            sub_outputs = runtime._run_playbook(sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback, cancellation_token=cancellation_token)
         except LLMError:
             LOGGER.exception("[sea][subplay] LLM error in subplaybook '%s'", sub_name)
             if execution == "subagent" and subagent_thread_id:

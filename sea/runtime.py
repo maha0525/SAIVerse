@@ -44,7 +44,6 @@ from sea.runtime_state import (
     update_router_selection,
 )
 
-from . import runtime_llm as runtime_llm_module
 from .runtime_emitters import RuntimeEmitters
 from .runtime_utils import _format, _is_llm_streaming_enabled
 LOGGER = logging.getLogger(__name__)
@@ -1585,9 +1584,16 @@ class SEARuntime:
         persona: Any,
         building_id: str,
         user_input: str,
-        playbook_name: Optional[str] = None,
+        meta_playbook: Optional[str] = None,
+        image_count: int = 0,
+        document_count: int = 0,
     ) -> Dict[str, Any]:
-        return preview_context_impl(self, persona, building_id, user_input, playbook_name=playbook_name)
+        return preview_context_impl(
+            self, persona, building_id, user_input,
+            meta_playbook=meta_playbook,
+            image_count=image_count,
+            document_count=document_count,
+        )
 
     def _enrich_history_with_attachments(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Enrich history messages with attachment context.
