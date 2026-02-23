@@ -3,6 +3,7 @@ import { X, Save, Loader2, Settings } from 'lucide-react';
 import styles from './SettingsModal.module.css';
 import ImageUpload from './common/ImageUpload';
 import ModalOverlay from './common/ModalOverlay';
+import XConnectionSection from './XConnectionSection';
 
 interface SettingsModalProps {
     isOpen: boolean;
@@ -417,6 +418,13 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     行動、性格、能力を定義するコアな指示。
                                 </div>
                             </div>
+
+                            <XConnectionSection
+                                personaId={personaId}
+                                fieldGroupClass={styles.fieldGroup}
+                                labelClass={styles.label}
+                                descriptionClass={styles.description}
+                            />
                         </>
                     )}
                 </div>

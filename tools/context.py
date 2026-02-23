@@ -10,6 +10,7 @@ _PERSONA_PATH: ContextVar[Optional[str]] = ContextVar("saiverse_persona_path", d
 _MANAGER: ContextVar[Optional[Any]] = ContextVar("saiverse_manager_ref", default=None)
 _PLAYBOOK_NAME: ContextVar[Optional[str]] = ContextVar("saiverse_playbook_name", default=None)
 _AUTO_MODE: ContextVar[bool] = ContextVar("saiverse_auto_mode", default=False)
+_EVENT_CALLBACK: ContextVar[Optional[Any]] = ContextVar("saiverse_event_callback", default=None)
 
 
 def get_active_persona_id() -> Optional[str]:
@@ -33,6 +34,10 @@ def get_auto_mode() -> bool:
     return _AUTO_MODE.get()
 
 
+def get_event_callback() -> Optional[Any]:
+    return _EVENT_CALLBACK.get()
+
+
 @contextmanager
 def persona_context(
     persona_id: str,
@@ -40,6 +45,7 @@ def persona_context(
     manager: Optional[Any] = None,
     playbook_name: Optional[str] = None,
     auto_mode: bool = False,
+    event_callback: Optional[Any] = None,
 ) -> Iterator[None]:
     """Temporarily set the active persona identity for tool execution."""
     token_id = _PERSONA_ID.set(persona_id)
@@ -47,6 +53,7 @@ def persona_context(
     token_manager = _MANAGER.set(manager)
     token_playbook = _PLAYBOOK_NAME.set(playbook_name)
     token_auto = _AUTO_MODE.set(auto_mode)
+    token_event_cb = _EVENT_CALLBACK.set(event_callback)
     try:
         yield
     finally:
@@ -55,3 +62,4 @@ def persona_context(
         _MANAGER.reset(token_manager)
         _PLAYBOOK_NAME.reset(token_playbook)
         _AUTO_MODE.reset(token_auto)
+        _EVENT_CALLBACK.reset(token_event_cb)

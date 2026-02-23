@@ -72,7 +72,7 @@ class RuntimeEngine:
 
                 # Execute tool with persona context
                 if persona_id and persona_dir:
-                    with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode):
+                    with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback):
                         result = tool_func(**kwargs) if callable(tool_func) else None
                 else:
                     result = tool_func(**kwargs) if callable(tool_func) else None

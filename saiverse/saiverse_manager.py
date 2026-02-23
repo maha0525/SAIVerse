@@ -143,6 +143,10 @@ class SAIVerseManager(
         self._pending_permission_requests: dict[str, threading.Event] = {}
         self._permission_responses: dict[str, str] = {}
 
+        # --- Tweet confirmation synchronisation (transient, in-memory) ---
+        self._pending_tweet_confirmations: dict[str, threading.Event] = {}
+        self._tweet_confirmation_responses: dict[str, str] = {}
+
         self.personas = self.state.personas
         self.visiting_personas = self.state.visiting_personas
         self.avatar_map = self.state.avatar_map
