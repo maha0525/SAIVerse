@@ -532,6 +532,10 @@
     background: #f3f4f6;
 }
 
+:global([data-theme="light"]) .cardBody pre code {
+    background: none;
+}
+
 :global([data-theme="light"]) .cardBody blockquote {
     border-left-color: rgba(0, 0, 0, 0.2);
 }
