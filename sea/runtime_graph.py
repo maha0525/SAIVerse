@@ -61,29 +61,30 @@ def compile_with_langgraph(
             user_message=f"プレイブック '{playbook.name}' のグラフ構築に失敗しました。",
         )
 
-    # Process input_schema to inherit variables from parent_state
+    # Process input_schema to inherit variables from parent_state.
+    # source_key (from param.source) is the primary resolution mechanism.
+    # param_name in parent is a fallback for when source_key yields nothing.
     inherited_vars = {}
     for param in playbook.input_schema:
         param_name = param.name
         source_key = param.source if param.source else "input"
 
-        # If this param already exists in parent (e.g., from initial_params/playbook_params),
-        # use that value instead of resolving from source
-        if param_name in parent and parent[param_name] is not None:
-            value = parent[param_name]
-            LOGGER.debug("[sea][LangGraph] Using existing value for %s from parent: %s", param_name, str(value) if value else "(empty)")
-        # Resolve value from parent_state or fallback
+        # Primary: resolve based on source_key
+        if source_key == "input":
+            value = user_input or ""
         elif source_key.startswith("parent."):
             actual_key = source_key[7:]  # strip "parent."
-            # Use _resolve_state_value for dot-notation support (e.g., "current_task.objective")
             value = runtime._resolve_state_value(parent, actual_key)
             if value is None:
                 value = ""
-            LOGGER.debug("[sea][LangGraph] Resolved %s from parent.%s: %s", param_name, actual_key, str(value) if value else "(empty)")
-        elif source_key == "input":
-            value = user_input or ""
+            LOGGER.debug("[sea][LangGraph] Resolved %s from parent.%s: %s", param_name, actual_key, str(value)[:120] if value else "(empty)")
         else:
             value = parent.get(source_key, "")
+
+        # Fallback: if source_key resolution yielded nothing, check parent by param name
+        if not value and param_name in parent and parent[param_name] is not None:
+            value = parent[param_name]
+            LOGGER.debug("[sea][LangGraph] Fallback: using parent value for %s: %s", param_name, str(value)[:120] if value else "(empty)")
 
         inherited_vars[param_name] = value
 
