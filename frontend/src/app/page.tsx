@@ -1839,7 +1839,7 @@ export default function Home() {
                         <button
                             className={styles.optionsBtn}
                             onClick={() => setIsOptionsOpen(true)}
-                            title="Chat Options"
+                            title="チャット設定"
                         >
                             <SlidersHorizontal size={16} />
                             {selectedModelDisplayName ? (
@@ -1887,7 +1887,7 @@ export default function Home() {
                                     borderRadius: '4px',
                                     cursor: 'pointer',
                                     color: '#666'
-                                }}>Clear All</button>
+                                }}>すべて削除</button>
                             )}
                         </div>
                     )}
@@ -1895,14 +1895,14 @@ export default function Home() {
                         {/* Drag & drop indicator */}
                         {isDragOver && (
                             <div className={styles.dropIndicator}>
-                                Drop files here to attach
+                                ここにファイルをドロップして添付
                             </div>
                         )}
                         <div className={styles.plusMenuContainer} ref={plusMenuRef}>
                             <button
                                 className={`${styles.attachBtn} ${showPlusMenu ? styles.plusBtnActive : ''}`}
                                 onClick={() => setShowPlusMenu(prev => !prev)}
-                                title="More actions"
+                                title="その他の操作"
                             >
                                 <Plus size={20} />
                             </button>
@@ -1916,14 +1916,14 @@ export default function Home() {
                                         }}
                                     >
                                         <Paperclip size={16} />
-                                        <span>Attach File</span>
+                                        <span>ファイルを添付</span>
                                     </button>
                                     <button
                                         className={styles.plusMenuItem}
                                         onClick={handleContextPreview}
                                     >
                                         <Eye size={16} />
-                                        <span>Context Preview</span>
+                                        <span>コンテキストプレビュー</span>
                                     </button>
                                 </div>
                             )}
@@ -1941,14 +1941,14 @@ export default function Home() {
                             value={inputValue}
                             onChange={(e) => setInputValue(e.target.value)}
                             onKeyDown={handleKeyDown}
-                            placeholder="Type a message..."
+                            placeholder="メッセージを入力..."
                             rows={1}
                         />
                         {loadingStatus ? (
                             <button
                                 className={styles.stopBtn}
                                 onClick={handleStopGeneration}
-                                title="Stop generation"
+                                title="生成を停止"
                             >
                                 <Square size={16} />
                             </button>
