@@ -13,7 +13,7 @@ generate_image = _mod.generate_image
 
 class TestImageGenerator(unittest.TestCase):
     @patch.object(_mod, 'store_image_bytes')
-    @patch.object(_mod, '_generate_with_nano_banana_pro')
+    @patch.object(_mod, '_generate_with_nano_banana_2')
     def test_generate_image(self, mock_gen, mock_store):
         # Mock generation backend to return image bytes
         mock_gen.return_value = (b'imgdata', 'image/png')
@@ -39,11 +39,12 @@ class TestImageGenerator(unittest.TestCase):
         mock_gen.assert_called_once()
         temp_path.unlink(missing_ok=True)
 
-    @patch.object(_mod, '_generate_with_nano_banana_pro')
-    def test_generate_image_error_returns_error_text(self, mock_gen):
-        # When generation fails, should return error text without raising
-        mock_gen.side_effect = RuntimeError("No candidates")
-
+    @patch.object(_mod, '_generate_with_grok_imagine', side_effect=RuntimeError("No key"))
+    @patch.object(_mod, '_generate_with_gpt_image', side_effect=RuntimeError("No key"))
+    @patch.object(_mod, '_generate_with_nano_banana_pro', side_effect=RuntimeError("No candidates"))
+    @patch.object(_mod, '_generate_with_nano_banana_2', side_effect=RuntimeError("No candidates"))
+    def test_generate_image_error_returns_error_text(self, mock_nb2, mock_nbp, mock_gpt, mock_grok):
+        # When all backends fail, should return error text without raising
         with patch('tools.context.get_active_persona_id', return_value=None), \
              patch('tools.context.get_active_manager', return_value=None):
             text, info, path, metadata = generate_image('nothing')
