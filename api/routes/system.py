@@ -225,6 +225,16 @@ async def trigger_update():
     # even if the event loop is blocked by long-running synchronous tasks.
     def _force_exit():
         LOGGER.info("Shutting down for update...")
+        # Run manager shutdown to save building histories, session metadata, etc.
+        # os._exit() bypasses all Python cleanup, so we must do this explicitly.
+        try:
+            from saiverse.app_state import manager
+            if manager is not None:
+                LOGGER.info("Running manager shutdown before update exit...")
+                manager.shutdown()
+        except Exception as e:
+            LOGGER.error("Failed to run shutdown before update exit: %s", e, exc_info=True)
+
         # Kill child processes (e.g., api_server) that os._exit won't clean up.
         for proc in app_state.child_processes:
             try:

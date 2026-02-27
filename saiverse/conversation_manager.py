@@ -124,9 +124,13 @@ class ConversationManager:
                 self._current_speaker_index = (self._current_speaker_index + 1) % len(ai_occupants)
                 return
 
-            # SEA経由で自律パルスを実行（履歴保存はSEA内部で行われる）
+            # SEA経由で自律パルスを実行
             logging.info(f"[ConvManager] Triggering SEA auto for '{speaker_persona.persona_name}' (mode={mode}, proxy={getattr(speaker_persona,'is_proxy',False)}) in '{self.building_id}'.")
             self.saiverse_manager.run_sea_auto(speaker_persona, self.building_id, all_occupants)
+
+            # Building履歴をディスクに保存（in-memory → log.json）
+            self.saiverse_manager._save_building_histories()
+            speaker_persona._save_session_metadata()
 
             # 次の発話者のためにインデックスを進める
             self._current_speaker_index = (self._current_speaker_index + 1) % len(ai_occupants)
