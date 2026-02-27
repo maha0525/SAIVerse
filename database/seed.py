@@ -133,10 +133,12 @@ def _create_cities(db, cities_json_path: Path, seed_data: dict) -> dict:
         city_seed = seed_data.get("cities", {}).get(city_name, {})
         online_mode = city_seed.get("start_in_online_mode", False)
 
+        city_description = city_seed.get("description", city_name)
+
         new_city = City(
             USERID=1,
             CITYNAME=city_name,
-            DESCRIPTION=f"{city_name}の街です。",
+            DESCRIPTION=city_description,
             UI_PORT=config["ui_port"],
             API_PORT=config["api_port"],
             START_IN_ONLINE_MODE=online_mode,

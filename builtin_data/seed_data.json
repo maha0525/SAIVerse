@@ -7,6 +7,7 @@
   "initial_city": "city_a",
   "cities": {
     "city_a": {
+      "description": "シティA",
       "start_in_online_mode": false,
       "personas": [],
       "buildings": [

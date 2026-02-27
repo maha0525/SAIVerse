@@ -307,6 +307,11 @@ class ScheduleManager:
             )
             LOGGER.info("[ScheduleManager] Schedule submitted to PulseController")
 
+            # Building履歴をディスクに保存（in-memory → log.json）
+            self.manager._save_building_histories()
+            persona._save_session_metadata()
+            LOGGER.debug("[ScheduleManager] Building histories and session metadata saved after schedule execution")
+
             # 実行後の状態更新
             self._update_schedule_after_execution(schedule, session)
 

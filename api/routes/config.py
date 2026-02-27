@@ -500,6 +500,25 @@ def set_playbook(req: PlaybookOverrideRequest, manager = Depends(get_manager)):
     elif req.playbook is None:
         # Reset params when playbook is cleared
         manager.state.playbook_params = {}
+
+    # Persist to DB so it survives server restart
+    from database.session import SessionLocal
+    from database.models import UserSettings
+    db = SessionLocal()
+    try:
+        settings = db.query(UserSettings).filter(UserSettings.USERID == 1).first()
+        if settings:
+            settings.SELECTED_META_PLAYBOOK = manager.state.current_playbook
+        else:
+            settings = UserSettings(USERID=1, SELECTED_META_PLAYBOOK=manager.state.current_playbook)
+            db.add(settings)
+        db.commit()
+    except Exception:
+        _log.warning("Failed to persist playbook preference", exc_info=True)
+        db.rollback()
+    finally:
+        db.close()
+
     return {
         "success": True,
         "playbook": manager.state.current_playbook,

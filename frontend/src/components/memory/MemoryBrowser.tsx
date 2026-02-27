@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag, Plus, Download, ChevronDown, ChevronUp } from 'lucide-react';
+import { Loader2, ChevronLeft, ChevronRight, MessageSquare, Trash2, AlertTriangle, ChevronsLeft, ChevronsRight, Edit2, Save, X, CheckSquare, Square, Trash, Tag, Plus, Upload, ChevronDown, ChevronUp } from 'lucide-react';
 import styles from './MemoryBrowser.module.css';
 
 interface ThreadSummary {
@@ -575,7 +575,7 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
                                     title="スレッドをエクスポート (Native JSON)"
                                     disabled={!selectedThreadId}
                                 >
-                                    <Download size={16} />
+                                    <Upload size={16} />
                                 </button>
                                 <button
                                     className={styles.addMsgBtn}

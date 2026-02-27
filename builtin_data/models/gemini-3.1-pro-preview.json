@@ -1,0 +1,82 @@
+{
+  "model": "gemini-3.1-pro-preview",
+  "system_prompt": "",
+  "display_name": "Gemini 3.1 Pro Preview(有料Tier, <200k)",
+  "provider": "gemini",
+  "context_length": 200000,
+  "default_max_history_messages": 80,
+  "metabolism_keep_messages": 60,
+  "supports_images": true,
+  "prefer_paid": true,
+  "pricing": {
+    "input_per_1m_tokens": 2,
+    "cached_input_per_1m_tokens": 0.2,
+    "output_per_1m_tokens": 12.0,
+    "currency": "USD"
+  },
+  "parameters": {
+    "temperature": {
+      "type": "slider",
+      "min": 0,
+      "max": 2,
+      "step": 0.1,
+      "default": 1.0,
+      "label": "Temperature",
+      "description": "出力のランダム性。0で決定的、高いほど多様。"
+    },
+    "thinking_level": {
+      "type": "dropdown",
+      "options": [
+        "low",
+        "high"
+      ],
+      "default": "low",
+      "label": "Thinking Level",
+      "description": "思考の深さ。highで深い推論。"
+    },
+    "safety_harassment": {
+      "type": "dropdown",
+      "options": [
+        "BLOCK_NONE",
+        "BLOCK_ONLY_HIGH",
+        "BLOCK_MEDIUM_AND_ABOVE",
+        "BLOCK_LOW_AND_ABOVE"
+      ],
+      "default": "BLOCK_NONE",
+      "label": "Safety: Harassment"
+    },
+    "safety_hate_speech": {
+      "type": "dropdown",
+      "options": [
+        "BLOCK_NONE",
+        "BLOCK_ONLY_HIGH",
+        "BLOCK_MEDIUM_AND_ABOVE",
+        "BLOCK_LOW_AND_ABOVE"
+      ],
+      "default": "BLOCK_ONLY_HIGH",
+      "label": "Safety: Hate Speech"
+    },
+    "safety_sexually_explicit": {
+      "type": "dropdown",
+      "options": [
+        "BLOCK_NONE",
+        "BLOCK_ONLY_HIGH",
+        "BLOCK_MEDIUM_AND_ABOVE",
+        "BLOCK_LOW_AND_ABOVE"
+      ],
+      "default": "BLOCK_NONE",
+      "label": "Safety: Sexually Explicit"
+    },
+    "safety_dangerous_content": {
+      "type": "dropdown",
+      "options": [
+        "BLOCK_NONE",
+        "BLOCK_ONLY_HIGH",
+        "BLOCK_MEDIUM_AND_ABOVE",
+        "BLOCK_LOW_AND_ABOVE"
+      ],
+      "default": "BLOCK_ONLY_HIGH",
+      "label": "Safety: Dangerous Content"
+    }
+  }
+}

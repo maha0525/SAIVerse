@@ -962,11 +962,3 @@
 :global([data-theme="light"]) .pageVividBuried {
     color: #cbd5e1;
 }
-.searchInput {
-  width: 100%;
-  padding: 8px;
-  border-radius: 8px;
-  border: 1px solid #444;
-  background: #1f1f1f;
-  color: #fff;
-}

@@ -16,7 +16,7 @@
             "type": "set",
             "assignments": {
                 "loop_count": 0,
-                "max_loops": 5,
+                "max_loops": 10,
                 "meta_playbook_name": "meta_agentic",
                 "meta_playbook_description": "Multi-step agent loop: router -> exec -> loop back (max iterations enforced)",
                 "executed_playbooks_init": true

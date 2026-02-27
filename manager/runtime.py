@@ -537,11 +537,15 @@ class RuntimeService(
             # Clean up stop event
             self.manager._active_stop_events.pop(building_id, None)
 
-        bh_sizes = {bid: len(h) for bid, h in self.building_histories.items() if h}
-        logging.debug("[runtime] pre-save building_histories sizes: %s", bh_sizes)
-        self._save_building_histories()
-        for persona in self.personas.values():
-            persona._save_session_metadata()
+            # Persist building histories and session metadata.
+            # MUST be inside finally: this generator can be closed via
+            # GeneratorExit (e.g. HTTP disconnect after streaming completes),
+            # and code after try/finally would never execute in that case.
+            bh_sizes = {bid: len(h) for bid, h in self.building_histories.items() if h}
+            logging.debug("[runtime] pre-save building_histories sizes: %s", bh_sizes)
+            self._save_building_histories()
+            for persona in self.personas.values():
+                persona._save_session_metadata()
 
     def preview_context(
         self, message: str, building_id: Optional[str] = None,

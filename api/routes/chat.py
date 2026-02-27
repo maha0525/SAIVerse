@@ -47,7 +47,7 @@ class ChatMessage(BaseModel):
 
 class ChatHistoryResponse(BaseModel):
     history: List[ChatMessage]
-    has_more: bool = True  # Whether there are older messages available
+    has_more: bool = False  # Whether there are older messages available
 
 @router.get("/persona/{persona_id}/avatar")
 def get_persona_avatar(persona_id: str, manager = Depends(get_manager)):
@@ -83,14 +83,17 @@ def get_chat_history(
     
     if not current_bid:
         logging.warning("get_chat_history: No user_current_building_id")
-        return {"history": []}
-        
+        return {"history": [], "has_more": False}
+
     raw_history = manager.building_histories.get(current_bid, [])
     
-    # Filter out note-box messages before pagination to ensure consistent counts
-    raw_history = [msg for msg in raw_history if '<div class="note-box">' not in str(msg.get("content", ""))]
-    
-    logging.debug("[CHAT_HISTORY] Found history items (after note-box filter): %d", len(raw_history))
+    # Filter out non-displayable messages before pagination to ensure consistent counts
+    raw_history = [
+        msg for msg in raw_history
+        if msg.get("content") and '<div class="note-box">' not in str(msg.get("content", ""))
+    ]
+
+    logging.debug("[CHAT_HISTORY] Found history items (after filter): %d", len(raw_history))
     if len(raw_history) == 0:
         logging.debug("[CHAT_HISTORY] Available building keys: %s", list(manager.building_histories.keys()))
     
@@ -138,9 +141,9 @@ def get_chat_history(
             # ID not found - ID mismatch due to history changes
             # Return empty; client interprets <20 results as "no more history"
             logging.warning("get_chat_history: 'before' ID %s not found in history for %s", before, current_bid)
-            logging.debug("[CHAT_HISTORY] WARN: 'before' ID %s NOT FOUND (ID mismatch). IDs available (first 5): %s", 
+            logging.debug("[CHAT_HISTORY] WARN: 'before' ID %s NOT FOUND (ID mismatch). IDs available (first 5): %s",
                          before, [x['virtual_id'] for x in enriched_history_objects[:5]])
-            return {"history": []}
+            return {"history": [], "has_more": False}
 
     if after:
         # Find the index of the message with ID 'after' and return messages after it
@@ -159,7 +162,7 @@ def get_chat_history(
             # Return empty for safety (client will need to refresh)
             logging.warning("get_chat_history: 'after' ID %s not found in history for %s", after, current_bid)
             logging.debug("[CHAT_HISTORY] WARN: 'after' ID %s NOT FOUND. Returning empty for polling.", after)
-            return {"history": []}
+            return {"history": [], "has_more": False}
 
     # Slice
     start_index = max(0, end_index - limit) if not after else start_index
@@ -178,11 +181,6 @@ def get_chat_history(
     for msg in slice_history:
         role = msg.get("role")
         content = msg.get("content")
-        
-        # note-box messages already filtered out above
-        if not content:
-            continue
-            
         timestamp = msg.get("timestamp", "")
         message_id = msg["virtual_id"] # Use the robust ID
         

@@ -21,15 +21,16 @@ export default function ImageUpload({
     circle = false
 }: ImageUploadProps) {
     const [isUploading, setIsUploading] = useState(false);
+    const [isDragOver, setIsDragOver] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const dragCounter = useRef(0);
 
     const handleClick = () => {
         fileInputRef.current?.click();
     };
 
-    const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (!file) return;
+    const uploadFile = async (file: File) => {
+        if (!file.type.startsWith('image/')) return;
 
         setIsUploading(true);
         const formData = new FormData();
@@ -57,6 +58,31 @@ export default function ImageUpload({
         }
     };
 
+    const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (file) await uploadFile(file);
+    };
+
+    const handleDragEnter = (e: React.DragEvent) => {
+        e.preventDefault(); e.stopPropagation();
+        dragCounter.current++;
+        if (dragCounter.current === 1) setIsDragOver(true);
+    };
+    const handleDragOver = (e: React.DragEvent) => {
+        e.preventDefault(); e.stopPropagation();
+    };
+    const handleDragLeave = (e: React.DragEvent) => {
+        e.preventDefault(); e.stopPropagation();
+        dragCounter.current--;
+        if (dragCounter.current === 0) setIsDragOver(false);
+    };
+    const handleDrop = async (e: React.DragEvent) => {
+        e.preventDefault(); e.stopPropagation();
+        dragCounter.current = 0; setIsDragOver(false);
+        const file = e.dataTransfer.files[0];
+        if (file) await uploadFile(file);
+    };
+
     const isDark = typeof document !== 'undefined' && document.documentElement.dataset.theme === 'dark';
     const bgColor = isDark ? '#1f2937' : '#f1f5f9';
     const borderColor = isDark ? '#4b5563' : '#cbd5e1';
@@ -72,7 +98,7 @@ export default function ImageUpload({
                 cursor: 'pointer',
                 borderRadius: circle ? '50%' : '8px',
                 overflow: 'hidden',
-                border: `2px dashed ${borderColor}`,
+                border: `2px dashed ${isDragOver ? '#06b6d4' : borderColor}`,
                 backgroundColor: bgColor,
                 display: 'flex',
                 alignItems: 'center',
@@ -80,8 +106,12 @@ export default function ImageUpload({
                 transition: 'all 0.2s',
             }}
             onClick={handleClick}
-            onMouseEnter={e => { e.currentTarget.style.borderColor = '#06b6d4'; }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor = borderColor; }}
+            onMouseEnter={e => { if (!isDragOver) e.currentTarget.style.borderColor = '#06b6d4'; }}
+            onMouseLeave={e => { if (!isDragOver) e.currentTarget.style.borderColor = borderColor; }}
+            onDragEnter={handleDragEnter}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
         >
             <input
                 type="file"

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, MessageSquare, Upload, Book, Bug, Layers } from 'lucide-react';
+import { X, MessageSquare, Download, Book, Bug, Layers } from 'lucide-react';
 import styles from './MemoryModal.module.css';
 import MemoryBrowser from './memory/MemoryBrowser';
 import MemoryImport from './memory/MemoryImport';
@@ -58,7 +58,7 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
                         className={`${styles.tab} ${activeTab === 'import' ? styles.activeTab : ''}`}
                         onClick={() => setActiveTab('import')}
                     >
-                        <Upload size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
+                        <Download size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
                         インポート
                     </button>
                     <button

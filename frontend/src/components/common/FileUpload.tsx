@@ -21,9 +21,11 @@ export default function FileUpload({
     className = "",
 }: FileUploadProps) {
     const [isUploading, setIsUploading] = useState(false);
+    const [isDragOver, setIsDragOver] = useState(false);
     const [uploadedType, setUploadedType] = useState<'image' | 'document' | null>(null);
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const dragCounter = useRef(0);
 
     // Build accept string
     const acceptTypes: string[] = [];
@@ -35,10 +37,7 @@ export default function FileUpload({
         fileInputRef.current?.click();
     };
 
-    const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (!file) return;
-
+    const uploadFile = async (file: File) => {
         setIsUploading(true);
         const formData = new FormData();
         formData.append('file', file);
@@ -53,7 +52,6 @@ export default function FileUpload({
                 const fileType = data.type as 'image' | 'document';
                 setUploadedType(fileType);
 
-                // Set preview for images
                 if (fileType === 'image') {
                     setPreviewUrl(data.url);
                 } else {
@@ -72,6 +70,31 @@ export default function FileUpload({
             setIsUploading(false);
             if (fileInputRef.current) fileInputRef.current.value = "";
         }
+    };
+
+    const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (file) await uploadFile(file);
+    };
+
+    const handleDragEnter = (e: React.DragEvent) => {
+        e.preventDefault(); e.stopPropagation();
+        dragCounter.current++;
+        if (dragCounter.current === 1) setIsDragOver(true);
+    };
+    const handleDragOver = (e: React.DragEvent) => {
+        e.preventDefault(); e.stopPropagation();
+    };
+    const handleDragLeave = (e: React.DragEvent) => {
+        e.preventDefault(); e.stopPropagation();
+        dragCounter.current--;
+        if (dragCounter.current === 0) setIsDragOver(false);
+    };
+    const handleDrop = async (e: React.DragEvent) => {
+        e.preventDefault(); e.stopPropagation();
+        dragCounter.current = 0; setIsDragOver(false);
+        const file = e.dataTransfer.files[0];
+        if (file) await uploadFile(file);
     };
 
     const handleClear = (e: React.MouseEvent) => {
@@ -95,7 +118,7 @@ export default function FileUpload({
                 cursor: 'pointer',
                 borderRadius: '8px',
                 overflow: 'hidden',
-                border: '2px dashed #4b5563',
+                border: `2px dashed ${isDragOver ? '#06b6d4' : '#4b5563'}`,
                 backgroundColor: '#1f2937',
                 display: 'flex',
                 alignItems: 'center',
@@ -105,8 +128,12 @@ export default function FileUpload({
                 transition: 'all 0.2s',
             }}
             onClick={handleClick}
-            onMouseEnter={e => { e.currentTarget.style.borderColor = '#06b6d4'; }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor = '#4b5563'; }}
+            onMouseEnter={e => { if (!isDragOver) e.currentTarget.style.borderColor = '#06b6d4'; }}
+            onMouseLeave={e => { if (!isDragOver) e.currentTarget.style.borderColor = '#4b5563'; }}
+            onDragEnter={handleDragEnter}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
         >
             <input
                 type="file"

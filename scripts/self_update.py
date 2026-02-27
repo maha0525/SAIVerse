@@ -175,24 +175,77 @@ def wait_for_port_free(port: int, timeout: int = 60) -> bool:
 # --- Code update ---
 
 def update_via_git(project_dir: str) -> bool:
-    """Update code using git pull."""
+    """Update code using git pull.
+
+    If a simple pull fails (local modifications or untracked file conflicts),
+    stash local changes and retry.  After a successful pull the stash is
+    popped to restore any intentional local edits.  If pop fails (conflicts),
+    the changes remain safely in the stash for manual recovery.
+    """
     logging.info("Updating code via git pull...")
-    try:
-        result = subprocess.run(
-            ["git", "pull"],
+
+    def _git(*args, timeout=120):
+        return subprocess.run(
+            ["git", *args],
             cwd=project_dir,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout,
         )
-        logging.info("git pull stdout: %s", result.stdout)
-        if result.returncode != 0:
-            logging.error("git pull failed: %s", result.stderr)
+
+    stashed = False
+    try:
+        # Fast path: plain pull (works when the working tree is clean)
+        result = _git("pull")
+        logging.info("git pull stdout: %s", result.stdout.strip())
+
+        if result.returncode == 0:
+            return True
+
+        # Pull failed — likely due to local changes or untracked file conflicts
+        logging.warning("git pull failed, attempting stash and retry: %s",
+                        result.stderr.strip()[:500])
+
+        # Stash local changes including untracked files
+        # (untracked conflicts happen when users previously updated via ZIP)
+        stash_result = _git("stash", "push", "--include-untracked", "-m",
+                            "SAIVerse self-update auto-stash")
+        logging.info("git stash: %s", stash_result.stdout.strip())
+        if stash_result.returncode != 0:
+            logging.error("git stash failed: %s", stash_result.stderr.strip()[:500])
             return False
+        stashed = "No local changes" not in stash_result.stdout
+
+        # Retry pull
+        result = _git("pull")
+        logging.info("git pull (after stash) stdout: %s", result.stdout.strip())
+        if result.returncode != 0:
+            logging.error("git pull failed even after stash: %s",
+                          result.stderr.strip()[:500])
+            return False
+
         return True
+
     except (subprocess.SubprocessError, FileNotFoundError) as e:
-        logging.error("git pull error: %s", e)
+        logging.error("git update error: %s", e)
         return False
+
+    finally:
+        # Try to restore stashed changes (best-effort)
+        if stashed:
+            try:
+                pop_result = _git("stash", "pop")
+                if pop_result.returncode == 0:
+                    logging.info("Stashed changes restored successfully")
+                else:
+                    # Conflicts — leave stash intact so user can recover manually
+                    logging.warning(
+                        "Could not restore stashed changes (conflicts likely). "
+                        "Your local changes are saved in git stash. "
+                        "Run 'git stash pop' manually to recover them. "
+                        "Detail: %s", pop_result.stderr.strip()[:500])
+            except (subprocess.SubprocessError, FileNotFoundError):
+                logging.warning("Failed to pop stash. Run 'git stash pop' manually.")
 
 
 def update_via_zip(project_dir: str) -> bool:

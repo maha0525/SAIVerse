@@ -24,14 +24,13 @@
     "user_selectable": true,
     "nodes": [
         {
-            "id": "get_context",
-            "type": "tool",
-            "action": "get_since_last_user_conversation",
-            "args_input": {
-                "include_raw_log": true,
-                "max_raw_messages": 10
+            "id": "init",
+            "type": "set",
+            "assignments": {
+                "meta_playbook_name": "meta_user_manual",
+                "meta_playbook_description": "User selects playbook manually, falls back to auto-routing if unselected",
+                "executed_playbooks_init": true
             },
-            "output_key": "autonomous_context",
             "next": "check_selection"
         },
         {
@@ -60,14 +59,27 @@
             "playbook": "sub_router_user",
             "input_template": "{input}",
             "propagate_output": false,
-            "next": "exec"
+            "next": "check_early_exit"
+        },
+        {
+            "id": "check_early_exit",
+            "type": "pass",
+            "conditional_next": {
+                "field": "selected_playbook",
+                "operator": "eq",
+                "cases": {
+                    "basic_chat": "finalize",
+                    "default": "exec"
+                }
+            }
         },
         {
             "id": "exec",
             "type": "exec",
             "playbook_source": "selected_playbook",
             "args_source": "selected_args",
-            "next": "finalize"
+            "next": "finalize",
+            "error_next": "finalize"
         },
         {
             "id": "finalize",
@@ -78,5 +90,5 @@
             "next": null
         }
     ],
-    "start_node": "get_context"
+    "start_node": "init"
 }

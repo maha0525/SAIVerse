@@ -59,6 +59,11 @@
     background-color: rgba(77, 171, 247, 0.05);
 }
 
+.uploadAreaDragOver {
+    border-color: #06b6d4;
+    background-color: rgba(6, 182, 212, 0.1);
+}
+
 .uploadIcon {
     color: #4dabf7;
     margin-bottom: 1rem;
@@ -572,6 +577,11 @@
 :global([data-theme="light"]) .uploadArea:hover {
     border-color: #2563eb;
     background-color: rgba(37, 99, 235, 0.03);
+}
+
+:global([data-theme="light"]) .uploadAreaDragOver {
+    border-color: #06b6d4;
+    background-color: rgba(6, 182, 212, 0.08);
 }
 
 :global([data-theme="light"]) .uploadText {

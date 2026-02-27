@@ -126,9 +126,11 @@ def fetch_messages(
         return all_messages[offset:offset + limit]
 
     # All threads: fetch globally sorted by created_at
+    # Exclude Stelis threads — sub-agent work logs are not the persona's own experiences
     cur = conn.execute("""
         SELECT id, thread_id, role, content, resource_id, created_at, metadata
         FROM messages
+        WHERE thread_id NOT IN (SELECT thread_id FROM stelis_threads)
         ORDER BY created_at ASC
         LIMIT ? OFFSET ?
     """, (limit, offset))

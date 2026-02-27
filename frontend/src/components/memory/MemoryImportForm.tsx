@@ -1,5 +1,5 @@
-import { AlertCircle, CheckSquare, Download, Loader2, MessageSquare, Square, Upload } from 'lucide-react';
-import React from 'react';
+import { AlertCircle, CheckSquare, Download, Loader2, MessageSquare, Square } from 'lucide-react';
+import React, { useState, useRef, useCallback } from 'react';
 
 import styles from './MemoryImport.module.css';
 import { ImportSubTab, MemoryImportStep, NativePreviewData, PreviewData, ThreadSummary } from './types';
@@ -32,6 +32,28 @@ interface Props {
 
 export function MemoryImportForm(props: Props) {
   const allSelected = props.previewData && props.selectedIds.size === props.previewData.conversations.length;
+  const [isDragOver, setIsDragOver] = useState(false);
+  const dragCounter = useRef(0);
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault(); e.stopPropagation();
+    dragCounter.current++;
+    if (dragCounter.current === 1) setIsDragOver(true);
+  }, []);
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault(); e.stopPropagation();
+  }, []);
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault(); e.stopPropagation();
+    dragCounter.current--;
+    if (dragCounter.current === 0) setIsDragOver(false);
+  }, []);
+  const makeDropHandler = useCallback((onFile: (file: File) => void) => (e: React.DragEvent) => {
+    e.preventDefault(); e.stopPropagation();
+    dragCounter.current = 0; setIsDragOver(false);
+    const file = e.dataTransfer.files[0];
+    if (file) onFile(file);
+  }, []);
 
   const mainContent = () => {
     if (props.step === 'thread-select') {
@@ -51,7 +73,7 @@ export function MemoryImportForm(props: Props) {
           <div className={styles.actions}><button className={styles.cancelButton} onClick={props.onReset}>キャンセル</button><button className={styles.importButton} onClick={props.onOpenNativeImport}>インポート</button></div>
         </div>;
       }
-      return <div className={styles.uploadArea} onClick={() => props.nativeFileInputRef.current?.click()}><Download className={styles.uploadIcon} size={48} /><div className={styles.uploadText}>クリックしてSAIVerse Native JSONをアップロード</div><input type="file" ref={props.nativeFileInputRef} className={styles.fileInput} onChange={(e) => e.target.files?.[0] && props.onNativeFileChange(e.target.files[0])} accept=".json" disabled={props.isLoading} /></div>;
+      return <div className={`${styles.uploadArea} ${isDragOver ? styles.uploadAreaDragOver : ''}`} onClick={() => props.nativeFileInputRef.current?.click()} onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={makeDropHandler(props.onNativeFileChange)}><Download className={styles.uploadIcon} size={48} /><div className={styles.uploadText}>{isDragOver ? 'ドロップしてアップロード' : 'クリックまたはドラッグ&ドロップでアップロード'}</div><input type="file" ref={props.nativeFileInputRef} className={styles.fileInput} onChange={(e) => e.target.files?.[0] && props.onNativeFileChange(e.target.files[0])} accept=".json" disabled={props.isLoading} /></div>;
     }
     if (props.activeSubTab === 'official' && props.step === 'select' && props.previewData) {
       return <div className={styles.selectionContainer}><div className={styles.selectionHeader}><h3>インポートする会話を選択</h3><span className={styles.selectionCount}>{props.previewData.total_count}件中 {props.selectedIds.size}件選択</span></div>
@@ -59,7 +81,7 @@ export function MemoryImportForm(props: Props) {
         <div className={styles.actions}><button className={styles.cancelButton} onClick={props.onReset}>キャンセル</button><button className={styles.importButton} onClick={props.onConfirmOfficial} disabled={props.selectedIds.size === 0 || props.isLoading}>{props.selectedIds.size}件をインポート</button></div>
       </div>;
     }
-    return <div className={styles.uploadArea} onClick={() => props.fileInputRef.current?.click()}>{props.isLoading ? <Loader2 className={`${styles.uploadIcon} ${styles.loader}`} size={48} /> : <Upload className={styles.uploadIcon} size={48} />}<div className={styles.uploadText}>クリックしてファイルをアップロード</div><input type="file" ref={props.fileInputRef} className={styles.fileInput} onChange={(e) => e.target.files?.[0] && props.onFileChange(e.target.files[0])} accept={props.activeSubTab === 'official' ? '.json,.zip' : '.json,.md,.txt'} disabled={props.isLoading} /></div>;
+    return <div className={`${styles.uploadArea} ${isDragOver ? styles.uploadAreaDragOver : ''}`} onClick={() => props.fileInputRef.current?.click()} onDragEnter={handleDragEnter} onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={makeDropHandler(props.onFileChange)}>{props.isLoading ? <Loader2 className={`${styles.uploadIcon} ${styles.loader}`} size={48} /> : <Download className={styles.uploadIcon} size={48} />}<div className={styles.uploadText}>{isDragOver ? 'ドロップしてアップロード' : 'クリックまたはドラッグ&ドロップでアップロード'}</div><input type="file" ref={props.fileInputRef} className={styles.fileInput} onChange={(e) => e.target.files?.[0] && props.onFileChange(e.target.files[0])} accept={props.activeSubTab === 'official' ? '.json,.zip' : '.json,.md,.txt'} disabled={props.isLoading} /></div>;
   };
 
   return (

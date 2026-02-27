@@ -1,10 +1,11 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
-import { X, Loader2, CheckCircle, ArrowRight, ArrowLeft, MessageSquare, Settings } from 'lucide-react';
+import { X, Loader2, CheckCircle, ArrowRight, ArrowLeft, MessageSquare, Settings, SlidersHorizontal } from 'lucide-react';
 import styles from './PersonaWizard.module.css';
 import MemoryImport from './memory/MemoryImport';
 import ModalOverlay from './common/ModalOverlay';
+import SettingsModal from './SettingsModal';
 
 interface PersonaWizardProps {
     isOpen: boolean;
@@ -38,6 +39,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
     // Created persona info
     const [createdPersonaId, setCreatedPersonaId] = useState<string | null>(null);
     const [createdRoomId, setCreatedRoomId] = useState<string | null>(null);
+    const [showSettings, setShowSettings] = useState(false);
 
     // Reset on open
     useEffect(() => {
@@ -49,6 +51,7 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
             setError(null);
             setCreatedPersonaId(null);
             setCreatedRoomId(null);
+            setShowSettings(false);
             loadCities();
         }
     }, [isOpen]);
@@ -265,10 +268,18 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
                         チャットを始める
                     </button>
                 )}
-                <button className={embedded ? styles.primaryButton : styles.secondaryButton} onClick={handleComplete}>
-                    {embedded ? <ArrowRight size={18} /> : <Settings size={18} />}
-                    {embedded ? 'セットアップに戻る' : '後で設定する'}
-                </button>
+                {!embedded && (
+                    <button className={styles.secondaryButton} onClick={() => setShowSettings(true)}>
+                        <SlidersHorizontal size={18} />
+                        もっと設定する
+                    </button>
+                )}
+                {embedded && (
+                    <button className={styles.primaryButton} onClick={handleComplete}>
+                        <ArrowRight size={18} />
+                        セットアップに戻る
+                    </button>
+                )}
             </div>
             {error && <p className={styles.error}>{error}</p>}
         </div>
@@ -324,36 +335,49 @@ export default function PersonaWizard({ isOpen, onClose, onComplete, embedded }:
     };
 
     return (
-        <ModalOverlay onClose={onClose} className={styles.overlay}>
-            <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
-                <div className={styles.header}>
-                    <h2 className={styles.title}>ペルソナを作成</h2>
-                    <button className={styles.closeButton} onClick={onClose}>
-                        <X size={20} />
-                    </button>
-                </div>
-
-                <div className={styles.stepper}>
-                    <div className={`${styles.step} ${step >= 1 ? styles.active : ''} ${step > 1 ? styles.completed : ''}`}>
-                        <span className={styles.stepNumber}>{step > 1 ? '✓' : '1'}</span>
-                        <span>基本情報</span>
+        <>
+            <ModalOverlay onClose={onClose} className={styles.overlay}>
+                <div className={styles.modal} onClick={(e) => e.stopPropagation()}>
+                    <div className={styles.header}>
+                        <h2 className={styles.title}>ペルソナを作成</h2>
+                        <button className={styles.closeButton} onClick={onClose}>
+                            <X size={20} />
+                        </button>
                     </div>
-                    <div className={`${styles.step} ${step >= 2 ? styles.active : ''} ${step > 2 ? styles.completed : ''}`}>
-                        <span className={styles.stepNumber}>{step > 2 ? '✓' : '2'}</span>
-                        <span>ログインポート</span>
-                    </div>
-                    <div className={`${styles.step} ${step >= 3 ? styles.active : ''}`}>
-                        <span className={styles.stepNumber}>3</span>
-                        <span>完了</span>
-                    </div>
-                </div>
 
-                <div className={styles.content}>
-                    {renderContent()}
-                </div>
+                    <div className={styles.stepper}>
+                        <div className={`${styles.step} ${step >= 1 ? styles.active : ''} ${step > 1 ? styles.completed : ''}`}>
+                            <span className={styles.stepNumber}>{step > 1 ? '✓' : '1'}</span>
+                            <span>基本情報</span>
+                        </div>
+                        <div className={`${styles.step} ${step >= 2 ? styles.active : ''} ${step > 2 ? styles.completed : ''}`}>
+                            <span className={styles.stepNumber}>{step > 2 ? '✓' : '2'}</span>
+                            <span>ログインポート</span>
+                        </div>
+                        <div className={`${styles.step} ${step >= 3 ? styles.active : ''}`}>
+                            <span className={styles.stepNumber}>3</span>
+                            <span>完了</span>
+                        </div>
+                    </div>
 
-                {renderActions()}
-            </div>
-        </ModalOverlay>
+                    <div className={styles.content}>
+                        {renderContent()}
+                    </div>
+
+                    {renderActions()}
+                </div>
+            </ModalOverlay>
+
+            {showSettings && createdPersonaId && (
+                <SettingsModal
+                    isOpen={showSettings}
+                    onClose={() => {
+                        setShowSettings(false);
+                        handleComplete();
+                    }}
+                    personaId={createdPersonaId}
+                />
+            )}
+        </>
     );
 }

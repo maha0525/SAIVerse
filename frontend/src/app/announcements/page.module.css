@@ -1,0 +1,145 @@
+.container {
+    height: 100dvh;
+    background-color: #1a1a1a;
+    color: #fff;
+    padding: 1rem;
+    overflow-y: auto;
+    box-sizing: border-box;
+}
+
+.header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid #333;
+}
+
+.backButton {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: transparent;
+    border: 1px solid #444;
+    color: #ccc;
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.backButton:hover {
+    background: #333;
+    color: #fff;
+}
+
+.title {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin: 0;
+}
+
+.loading {
+    text-align: center;
+    color: #888;
+    padding: 3rem;
+}
+
+.empty {
+    text-align: center;
+    color: #888;
+    padding: 3rem;
+    font-size: 0.95rem;
+}
+
+.list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+.card {
+    background: #242424;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+    transition: border-color 0.2s;
+}
+
+.card:hover {
+    border-color: #555;
+}
+
+.cardHeader {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.severityIcon {
+    flex-shrink: 0;
+}
+
+.severityInfo {
+    color: #60a5fa;
+}
+
+.severityWarning {
+    color: #fbbf24;
+}
+
+.severityCritical {
+    color: #f87171;
+}
+
+.cardTitle {
+    font-size: 1rem;
+    font-weight: 600;
+    margin: 0;
+    flex: 1;
+}
+
+.cardDate {
+    font-size: 0.8rem;
+    color: #888;
+    flex-shrink: 0;
+}
+
+.cardContent {
+    font-size: 0.9rem;
+    color: #ccc;
+    line-height: 1.6;
+    margin: 0;
+    white-space: pre-wrap;
+}
+
+.cardLink {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-top: 0.5rem;
+    color: #60a5fa;
+    font-size: 0.85rem;
+    text-decoration: none;
+}
+
+.cardLink:hover {
+    text-decoration: underline;
+}
+
+/* Severity-based left border accent */
+.cardInfo {
+    border-left: 3px solid #3b82f6;
+}
+
+.cardWarning {
+    border-left: 3px solid #f59e0b;
+}
+
+.cardCritical {
+    border-left: 3px solid #ef4444;
+}

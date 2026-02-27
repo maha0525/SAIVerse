@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import styles from './WorldEditor.module.css';
-import { Layers, MapPin, Cpu, Box, FileText, Wrench, ArrowRight, BookOpen } from 'lucide-react';
+import { Layers, MapPin, Cpu, Box, FileText, Wrench, ArrowRight, BookOpen, Upload } from 'lucide-react';
 import ImageUpload from '../common/ImageUpload';
 import FileUpload from '../common/FileUpload';
 
@@ -141,6 +141,53 @@ export default function WorldEditor() {
 
     // Form & Action State
     const [formData, setFormData] = useState<any>({});
+
+    // Playbook import D&D
+    const [isPlaybookDragOver, setIsPlaybookDragOver] = useState(false);
+    const playbookDragCounter = useRef(0);
+    const playbookFileInputRef = useRef<HTMLInputElement>(null);
+
+    const handlePlaybookImport = useCallback(async (file: File) => {
+        try {
+            const text = await file.text();
+            const res = await fetch('/api/world/playbooks/import', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ playbook_json: text })
+            });
+            const data = await res.json();
+            if (res.ok) {
+                const actionText = data.action === 'created' ? '新規作成' : '更新';
+                alert(`${actionText}しました: ${data.name}`);
+                loadPlaybooks();
+            } else {
+                alert(`エラー: ${data.detail || 'インポートに失敗しました'}`);
+            }
+        } catch (err) {
+            alert(`エラー: ${err}`);
+        }
+        if (playbookFileInputRef.current) playbookFileInputRef.current.value = '';
+    }, []);
+
+    const handlePlaybookDragEnter = useCallback((e: React.DragEvent) => {
+        e.preventDefault(); e.stopPropagation();
+        playbookDragCounter.current++;
+        if (playbookDragCounter.current === 1) setIsPlaybookDragOver(true);
+    }, []);
+    const handlePlaybookDragOver = useCallback((e: React.DragEvent) => {
+        e.preventDefault(); e.stopPropagation();
+    }, []);
+    const handlePlaybookDragLeave = useCallback((e: React.DragEvent) => {
+        e.preventDefault(); e.stopPropagation();
+        playbookDragCounter.current--;
+        if (playbookDragCounter.current === 0) setIsPlaybookDragOver(false);
+    }, []);
+    const handlePlaybookDrop = useCallback((e: React.DragEvent) => {
+        e.preventDefault(); e.stopPropagation();
+        playbookDragCounter.current = 0; setIsPlaybookDragOver(false);
+        const file = e.dataTransfer.files[0];
+        if (file) handlePlaybookImport(file);
+    }, [handlePlaybookImport]);
 
     // Load Data
     useEffect(() => {
@@ -335,8 +382,8 @@ export default function WorldEditor() {
                         </div>
                         <div className={styles.form}>
                             <h3>{selectedCity ? `City を編集` : '新しい City'}</h3>
-                            <Field label="名前（英数字・アンダースコアのみ）"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value.replace(/[^a-zA-Z0-9_]/g, '') })} /></Field>
-                            <Field label="説明"><TextArea value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
+                            <Field label="ID（英数字・アンダースコアのみ）"><Input value={formData.name || ''} onChange={(e: any) => setFormData({ ...formData, name: e.target.value.replace(/[^a-zA-Z0-9_]/g, '') })} /></Field>
+                            <Field label="名前"><Input value={formData.description || ''} onChange={(e: any) => setFormData({ ...formData, description: e.target.value })} /></Field>
                             <div className={styles.row}>
                                 <Field label="UI ポート"><NumInput value={formData.ui_port || ''} onChange={(e: any) => setFormData({ ...formData, ui_port: parseInt(e.target.value) })} /></Field>
                                 <Field label="API ポート"><NumInput value={formData.api_port || ''} onChange={(e: any) => setFormData({ ...formData, api_port: parseInt(e.target.value) })} /></Field>
@@ -607,36 +654,48 @@ export default function WorldEditor() {
                             <h3>Playbook 一覧</h3>
                             {playbooks.map(pb => <div key={pb.id} className={`${styles.item} ${selectedPlaybook?.id === pb.id ? styles.selected : ''}`} onClick={() => handlePlaybookSelect(pb)}>{pb.name}</div>)}
                             <button className={styles.newBtn} onClick={() => { setSelectedPlaybook(null); setFormData({ scope: 'public', router_callable: false, user_selectable: false, nodes_json: '[]', schema_json: '{"input_schema": [], "start_node": "start"}' }); }}>+ 新規作成</button>
-                            <div style={{ marginTop: '1rem', borderTop: '1px solid #eee', paddingTop: '1rem' }}>
+                            <div
+                                style={{
+                                    marginTop: '1rem',
+                                    borderTop: '1px solid #eee',
+                                    paddingTop: '1rem',
+                                }}
+                            >
                                 <h4 style={{ marginBottom: '0.5rem', fontSize: '0.9rem' }}>JSONからインポート</h4>
-                                <input
-                                    type="file"
-                                    accept=".json"
-                                    style={{ fontSize: '0.8rem', marginBottom: '0.5rem', width: '100%' }}
-                                    onChange={async (e) => {
-                                        const file = e.target.files?.[0];
-                                        if (!file) return;
-                                        try {
-                                            const text = await file.text();
-                                            const res = await fetch('/api/world/playbooks/import', {
-                                                method: 'POST',
-                                                headers: { 'Content-Type': 'application/json' },
-                                                body: JSON.stringify({ playbook_json: text })
-                                            });
-                                            const data = await res.json();
-                                            if (res.ok) {
-                                                const actionText = data.action === 'created' ? '新規作成' : '更新';
-                                                alert(`${actionText}しました: ${data.name}`);
-                                                loadPlaybooks();
-                                            } else {
-                                                alert(`エラー: ${data.detail || 'インポートに失敗しました'}`);
-                                            }
-                                        } catch (err) {
-                                            alert(`エラー: ${err}`);
-                                        }
-                                        e.target.value = '';  // Reset file input
+                                <div
+                                    style={{
+                                        border: `2px dashed ${isPlaybookDragOver ? '#06b6d4' : '#4b5563'}`,
+                                        borderRadius: '8px',
+                                        padding: '1rem',
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        alignItems: 'center',
+                                        gap: '0.25rem',
+                                        cursor: 'pointer',
+                                        transition: 'all 0.2s',
+                                        backgroundColor: isPlaybookDragOver ? 'rgba(6, 182, 212, 0.1)' : 'transparent',
                                     }}
-                                />
+                                    onClick={() => playbookFileInputRef.current?.click()}
+                                    onDragEnter={handlePlaybookDragEnter}
+                                    onDragOver={handlePlaybookDragOver}
+                                    onDragLeave={handlePlaybookDragLeave}
+                                    onDrop={handlePlaybookDrop}
+                                >
+                                    <Upload size={20} style={{ opacity: 0.6 }} />
+                                    <span style={{ fontSize: '0.8rem', opacity: 0.7 }}>
+                                        {isPlaybookDragOver ? 'ドロップしてインポート' : 'クリックまたはドロップ'}
+                                    </span>
+                                    <input
+                                        type="file"
+                                        ref={playbookFileInputRef}
+                                        accept=".json"
+                                        style={{ display: 'none' }}
+                                        onChange={(e) => {
+                                            const file = e.target.files?.[0];
+                                            if (file) handlePlaybookImport(file);
+                                        }}
+                                    />
+                                </div>
                             </div>
                         </div>
                         <div className={styles.form}>

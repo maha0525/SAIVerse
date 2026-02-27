@@ -210,6 +210,23 @@
     background: rgba(0, 0, 0, 0.05);
 }
 
+.bellWrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.bellDot {
+    position: absolute;
+    top: -1px;
+    right: -1px;
+    width: 8px;
+    height: 8px;
+    background: #ef4444;
+    border-radius: 50%;
+}
+
 .chatArea {
     flex: 1;
     overflow-y: auto;
@@ -530,6 +547,10 @@
 
 :global([data-theme="light"]) .cardBody pre {
     background: #f3f4f6;
+}
+
+:global([data-theme="light"]) .cardBody pre code {
+    background: none;
 }
 
 :global([data-theme="light"]) .cardBody blockquote {
@@ -911,6 +932,7 @@
 .optionsBar {
     display: flex;
     align-items: center;
+    gap: 0.4rem;
     margin-bottom: 0.25rem;
     pointer-events: auto; /* Restore click events for options bar */
 }

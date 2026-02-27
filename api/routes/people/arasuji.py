@@ -650,11 +650,13 @@ def _run_chronicle_generation(
         init_arasuji_tables(conn)
 
         # Fetch all messages ordered by time (oldest first)
+        # Exclude Stelis threads — sub-agent work logs are not the persona's own experiences
         _update_job(job_id, message="Fetching messages...")
 
         cur = conn.execute("""
             SELECT id, thread_id, role, content, resource_id, created_at, metadata
             FROM messages
+            WHERE thread_id NOT IN (SELECT thread_id FROM stelis_threads)
             ORDER BY created_at ASC
         """)
 
@@ -682,7 +684,10 @@ def _run_chronicle_generation(
             conn.close()
             return
 
-        LOGGER.info(f"[Chronicle Gen] Loaded {len(all_messages)} messages")
+        # Log how many Stelis messages were excluded
+        stelis_count_row = conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id IN (SELECT thread_id FROM stelis_threads)").fetchone()
+        stelis_excluded = stelis_count_row[0] if stelis_count_row else 0
+        LOGGER.info("[Chronicle Gen] Loaded %d messages (%d Stelis messages excluded)", len(all_messages), stelis_excluded)
 
         # Initialize LLM client
         _update_job(job_id, message="Initializing LLM client...")

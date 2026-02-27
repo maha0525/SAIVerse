@@ -162,7 +162,20 @@ def restart_server(background_tasks: BackgroundTasks):
     """Restart the server process."""
     def _restart():
         import time
-        time.sleep(1) # Give time for response to be sent
+        time.sleep(1)  # Give time for response to be sent
+
+        # os.execv() replaces the process immediately without running
+        # any Python cleanup (atexit, finally, shutdown hooks).
+        # We must explicitly run shutdown() to save building histories,
+        # stop background threads, persist session metadata, etc.
+        try:
+            from saiverse.app_state import manager
+            if manager is not None:
+                LOGGER.info("Running manager shutdown before restart...")
+                manager.shutdown()
+        except Exception as e:
+            LOGGER.error("Failed to run shutdown before restart: %s", e, exc_info=True)
+
         LOGGER.warning("Restarting server via API request...")
         python = sys.executable
         os.execv(python, [python] + sys.argv)

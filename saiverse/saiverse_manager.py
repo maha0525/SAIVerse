@@ -177,6 +177,23 @@ class SAIVerseManager(
         # メモリ上のオブジェクトに反映させます。
         self._load_personas_from_db()
         self._load_user_state_from_db()
+
+        # Load saved meta playbook preference from DB
+        try:
+            db = self.SessionLocal()
+            try:
+                from database.models import UserSettings
+                settings = db.query(UserSettings).filter(
+                    UserSettings.USERID == self.state.user_id
+                ).first()
+                if settings and settings.SELECTED_META_PLAYBOOK:
+                    self.state.current_playbook = settings.SELECTED_META_PLAYBOOK
+                    logging.info("Loaded saved meta playbook: %s", settings.SELECTED_META_PLAYBOOK)
+            finally:
+                db.close()
+        except Exception:
+            logging.warning("Failed to load playbook preference from DB", exc_info=True)
+
         self.state.persona_map.clear()
         self.state.persona_map.update({p.persona_name: p.persona_id for p in self.personas.values()})
         self.persona_map = self.state.persona_map

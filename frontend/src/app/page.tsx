@@ -9,6 +9,7 @@ import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import styles from './page.module.css';
 import Sidebar from '@/components/Sidebar';
 import ChatOptions from '@/components/ChatOptions';
+import ToolModeSelector from '@/components/ToolModeSelector';
 import RightSidebar from '@/components/RightSidebar';
 import PeopleModal from '@/components/PeopleModal';
 import TutorialWizard from '@/components/tutorial/TutorialWizard';
@@ -19,7 +20,7 @@ import PlaybookPermissionDialog, { PermissionRequestData } from '@/components/Pl
 import TweetConfirmDialog, { TweetConfirmData } from '@/components/TweetConfirmDialog';
 import ChronicleConfirmDialog, { ChronicleConfirmData } from '@/components/ChronicleConfirmDialog';
 import ModalOverlay from '@/components/common/ModalOverlay';
-import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square } from 'lucide-react';
+import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
 
 // Allow className on HTML elements used by thinking blocks (<details>, <div>, <summary>)
@@ -308,6 +309,9 @@ export default function Home() {
         return false;
     });
     const updatingTargetVersion = useRef<string>('');
+
+    // Announcements unread badge
+    const [hasUnreadAnnouncements, setHasUnreadAnnouncements] = useState(false);
 
     // Toast notifications
     const [toasts, setToasts] = useState<{id: string; content: string}[]>([]);
@@ -688,6 +692,38 @@ export default function Home() {
                 }
             })
             .catch(() => { /* ignore - backend may not support this endpoint yet */ });
+
+        // Check for unread announcements (and poll every 30 minutes)
+        const checkAnnouncements = () => {
+            fetch('/api/system/announcements')
+                .then(res => res.ok ? res.json() : null)
+                .then(data => {
+                    if (data?.announcements?.length > 0) {
+                        const raw = JSON.stringify(data.announcements);
+                        let hash = 5381;
+                        for (let i = 0; i < raw.length; i++) {
+                            hash = ((hash << 5) + hash + raw.charCodeAt(i)) | 0;
+                        }
+                        const currentHash = (hash >>> 0).toString(16);
+                        const savedHash = localStorage.getItem('saiverse_announcements_hash');
+                        setHasUnreadAnnouncements(currentHash !== savedHash);
+                    }
+                })
+                .catch(() => { /* ignore */ });
+        };
+        checkAnnouncements();
+        const announcementInterval = setInterval(checkAnnouncements, 30 * 60 * 1000);
+
+        // Also check when the tab becomes visible again
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible') checkAnnouncements();
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+
+        return () => {
+            clearInterval(announcementInterval);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
     }, []);
 
     // Handle building deletion from WorldEditor — switch to another building
@@ -1566,6 +1602,18 @@ export default function Home() {
                         <h1>{currentBuildingName}</h1>
                     </div>
                     <div className={styles.headerRight}>
+                        {hasUnreadAnnouncements && (
+                            <button
+                                className={styles.iconBtn}
+                                onClick={() => { window.location.href = '/announcements'; }}
+                                title="お知らせ（未読あり）"
+                            >
+                                <span className={styles.bellWrapper}>
+                                    <Bell size={20} />
+                                    <span className={styles.bellDot} />
+                                </span>
+                            </button>
+                        )}
                         <button
                             className={styles.iconBtn}
                             onClick={() => setIsPeopleModalOpen(true)}
@@ -1855,12 +1903,12 @@ export default function Home() {
                     onDragLeave={handleDragLeave}
                     onDrop={handleDrop}
                 >
-                    {/* Options bar: Model display + settings button */}
+                    {/* Options bar: Model display + settings button + tool mode */}
                     <div className={styles.optionsBar}>
                         <button
                             className={styles.optionsBtn}
                             onClick={() => setIsOptionsOpen(true)}
-                            title="Chat Options"
+                            title="チャット設定"
                         >
                             <SlidersHorizontal size={16} />
                             {selectedModelDisplayName ? (
@@ -1868,6 +1916,12 @@ export default function Home() {
                             ) : null}
                             <ChevronDown size={14} className={styles.chevron} />
                         </button>
+                        <ToolModeSelector
+                            selectedPlaybook={selectedPlaybook}
+                            onPlaybookChange={setSelectedPlaybook}
+                            playbookParams={playbookParams}
+                            onPlaybookParamsChange={setPlaybookParams}
+                        />
                     </div>
 
                     {attachments.length > 0 && (
@@ -1902,7 +1956,7 @@ export default function Home() {
                                     borderRadius: '4px',
                                     cursor: 'pointer',
                                     color: '#666'
-                                }}>Clear All</button>
+                                }}>すべて削除</button>
                             )}
                         </div>
                     )}
@@ -1910,14 +1964,14 @@ export default function Home() {
                         {/* Drag & drop indicator */}
                         {isDragOver && (
                             <div className={styles.dropIndicator}>
-                                Drop files here to attach
+                                ここにファイルをドロップして添付
                             </div>
                         )}
                         <div className={styles.plusMenuContainer} ref={plusMenuRef}>
                             <button
                                 className={`${styles.attachBtn} ${showPlusMenu ? styles.plusBtnActive : ''}`}
                                 onClick={() => setShowPlusMenu(prev => !prev)}
-                                title="More actions"
+                                title="その他の操作"
                             >
                                 <Plus size={20} />
                             </button>
@@ -1931,14 +1985,14 @@ export default function Home() {
                                         }}
                                     >
                                         <Paperclip size={16} />
-                                        <span>Attach File</span>
+                                        <span>ファイルを添付</span>
                                     </button>
                                     <button
                                         className={styles.plusMenuItem}
                                         onClick={handleContextPreview}
                                     >
                                         <Eye size={16} />
-                                        <span>Context Preview</span>
+                                        <span>コンテキストプレビュー</span>
                                     </button>
                                 </div>
                             )}
@@ -1956,14 +2010,14 @@ export default function Home() {
                             value={inputValue}
                             onChange={(e) => setInputValue(e.target.value)}
                             onKeyDown={handleKeyDown}
-                            placeholder={selectedPlaybook ? `Message (Playbook: ${selectedPlaybook})...` : "Type a message..."}
+                            placeholder="メッセージを入力..."
                             rows={1}
                         />
                         {loadingStatus ? (
                             <button
                                 className={styles.stopBtn}
                                 onClick={handleStopGeneration}
-                                title="Stop generation"
+                                title="生成を停止"
                             >
                                 <Square size={16} />
                             </button>
@@ -1989,10 +2043,6 @@ export default function Home() {
             <ChatOptions
                 isOpen={isOptionsOpen}
                 onClose={() => setIsOptionsOpen(false)}
-                currentPlaybook={selectedPlaybook}
-                onPlaybookChange={setSelectedPlaybook}
-                playbookParams={playbookParams}
-                onPlaybookParamsChange={setPlaybookParams}
                 currentModel={selectedModel}
                 onModelChange={(id, displayName) => {
                     setSelectedModel(id);

@@ -801,7 +801,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                 <div className={styles.aboutCard}>
                                     <div className={styles.aboutCardTitle}>リンク</div>
                                     <div className={styles.aboutLinks}>
-                                        <a href="https://discord.gg/sqDKjtZV" target="_blank" rel="noopener noreferrer" className={styles.aboutLinkItem}>
+                                        <a href="https://discord.gg/qMcgEk83Ag" target="_blank" rel="noopener noreferrer" className={styles.aboutLinkItem}>
                                             <span className={styles.aboutLinkIcon}>💬</span>
                                             <div>
                                                 <div className={styles.aboutLinkName}>Discord コミュニティ</div>
@@ -835,10 +835,11 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                         SAIVerseはフリーソフトウェアとして開発を続けています。
                                     </div>
                                     <div className={styles.aboutSupportItems}>
-                                        <div className={styles.aboutSupportItem}>
-                                            <span className={styles.aboutSupportBadge}>準備中</span>
+                                        <a href="https://github.com/sponsors/maha0525" target="_blank" rel="noopener noreferrer" className={styles.aboutSupportItem} style={{ cursor: 'pointer' }}>
+                                            <span className={`${styles.aboutSupportBadge} ${styles.active}`}>受付中</span>
                                             GitHub Sponsors
-                                        </div>
+                                            <ExternalLink size={14} className={styles.aboutLinkArrow} />
+                                        </a>
                                         <a href="https://note.com/maha0525/n/n5a63f572be8f" target="_blank" rel="noopener noreferrer" className={styles.aboutSupportItem} style={{ cursor: 'pointer' }}>
                                             <span className={`${styles.aboutSupportBadge} ${styles.active}`}>受付中</span>
                                             Noteからチップを送る

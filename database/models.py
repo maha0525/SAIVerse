@@ -317,4 +317,5 @@ class UserSettings(Base):
     TUTORIAL_COMPLETED = Column(Boolean, default=False, nullable=False)
     TUTORIAL_COMPLETED_AT = Column(DateTime, nullable=True)
     LAST_TUTORIAL_VERSION = Column(Integer, default=1, nullable=False)
+    SELECTED_META_PLAYBOOK = Column(String(255), nullable=True)  # User's preferred meta playbook
 

@@ -362,10 +362,28 @@ class PersonaMixin:
             )
             self.building_histories[new_building_id] = []
 
+            # Auto-link user if there is exactly one user
+            user_count = db.query(User).count()
+            if user_count == 1:
+                sole_user = db.query(User).first()
+                db.add(UserAiLink(USERID=sole_user.USERID, AIID=new_ai_id))
+                logging.info(
+                    "Auto-linked user '%s' to new persona '%s'.",
+                    sole_user.USERNAME, new_ai_id,
+                )
+
             # Commit DB records before creating PersonaCore so that
             # load_session_data (which opens a separate DB session) can
             # find the AI record.
             db.commit()
+
+            # Determine linked user name for PersonaCore
+            linked_user_name = "the user"
+            link = db.query(UserAiLink).filter(UserAiLink.AIID == new_ai_id).first()
+            if link:
+                linked_user = db.query(User).filter(User.USERID == link.USERID).first()
+                if linked_user:
+                    linked_user_name = linked_user.USERNAME
 
             new_persona_model = self.model or self._base_model
             new_persona_provider = get_model_provider(new_persona_model)  # Get provider for model
@@ -404,6 +422,7 @@ class PersonaMixin:
                 persona_event_fetcher=self.get_persona_pending_events,
                 persona_event_ack=self.archive_persona_events,
                 manager_ref=self,
+                linked_user_name=linked_user_name,
             )
             new_persona_core.private_room_id = new_building_id
             self.personas[new_ai_id] = new_persona_core

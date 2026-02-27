@@ -4,7 +4,7 @@
 </p>
 
 <p align="center">
-  <a href="https://discord.gg/sqDKjtZV"><img src="https://img.shields.io/badge/Discord-%E3%82%B3%E3%83%9F%E3%83%A5%E3%83%8B%E3%83%86%E3%82%A3-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
+  <a href="https://discord.gg/qMcgEk83Ag"><img src="https://img.shields.io/badge/Discord-%E3%82%B3%E3%83%9F%E3%83%A5%E3%83%8B%E3%83%86%E3%82%A3-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://github.com/maha0525/SAIVerse/releases/latest"><img src="https://img.shields.io/github/v/release/maha0525/SAIVerse?label=%E6%9C%80%E6%96%B0%E3%83%90%E3%83%BC%E3%82%B8%E3%83%A7%E3%83%B3" alt="Latest Release"></a>
   <a href="https://github.com/maha0525/SAIVerse/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License"></a>
 </p>
@@ -351,12 +351,12 @@ python test_fixtures/test_api.py --quick   # クイックテスト（LLM除く�
 
 ## コミュニティ・サポート
 
-- [Discord コミュニティ](https://discord.gg/sqDKjtZV) - 質問・雑談・バグ報告などお気軽にどうぞ
+- [Discord コミュニティ](https://discord.gg/qMcgEk83Ag) - 質問・雑談・バグ報告などお気軽にどうぞ
 - [GitHub Issues](https://github.com/maha0525/SAIVerse/issues) - バグ報告・機能リクエスト
 
 ### 支援について
 SAIVerseはフリーソフトウェアとして開発を続けています。応援していただける方は以下からサポート頂けますと幸いです。
-- **GitHub Sponsors**: 準備中です
+- **GitHub Sponsors**: [スポンサーページ](https://github.com/sponsors/maha0525)
 - **Note**: [開発記録ページ](https://note.com/maha0525/n/n5a63f572be8f)末尾などからチップ（サポート）を送ることができます
 
 ## コントリビューション

@@ -308,7 +308,7 @@ MODEL_ROLE_DESCRIPTIONS = {
     },
     "image_summary_model": {
         "label": "画像要約モデル",
-        "description": "画像・ドキュメント要約生成用モデル（Gemini専用）",
+        "description": "画像・ドキュメント要約生成用モデル（Vision対応モデル推奨）",
     },
     "task_creation_model": {
         "label": "タスク生成モデル",
