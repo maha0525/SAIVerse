@@ -1,0 +1,98 @@
+{
+    "name": "x_reply",
+    "display_name": "Xリプライ",
+    "description": "X（Twitter）のメンションに返信する。返信先ツイートIDはplaybook stateから機械的に取得。AIモデレーション通過後に自動投稿。",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "メンション内容やコンテキスト"
+        },
+        {
+            "name": "trigger_tweet_id",
+            "description": "返信先ツイートID（IntegrationManagerから機械的に伝播）"
+        },
+        {
+            "name": "trigger_author_username",
+            "description": "メンション送信者のXユーザー名"
+        },
+        {
+            "name": "trigger_author_name",
+            "description": "メンション送信者の表示名"
+        },
+        {
+            "name": "trigger_mention_text",
+            "description": "メンション本文"
+        }
+    ],
+    "router_callable": true,
+    "user_selectable": false,
+    "required_credentials": ["x"],
+    "nodes": [
+        {
+            "id": "compose",
+            "type": "llm",
+            "context_profile": "conversation",
+            "action": "あなたのXアカウントに以下のメンションが届きました。返信を書いてください。\n\nルール:\n- あなたの応答がそのままツイートとして投稿されます。返信本文のみを書いてください\n- 280文字以内\n- あなた自身の言葉と個性で自然に返信してください\n- プライベートな会話の内容や個人情報は絶対に含めないでください\n- 相手の@ユーザー名を冒頭に入れる必要はありません（X APIが自動的に付与します）\n\n---\n@{trigger_author_username}（{trigger_author_name}）からのメンション:\n{trigger_mention_text}",
+            "output_key": "reply_text",
+            "memorize": {
+                "tags": ["conversation", "x_reply"]
+            },
+            "next": "moderate"
+        },
+        {
+            "id": "moderate",
+            "type": "llm",
+            "context_profile": "worker_light",
+            "action": "あなたはSNS投稿のモデレーターです。以下のテキストがX（Twitter）への公開投稿として安全かどうかを判定してください。\n\n## チェック項目\n1. プライバシー情報の漏洩: 個人の本名・住所・電話番号・メールアドレス・位置情報・プライベートな会話の内容など\n2. 不適切な内容: 差別・ヘイトスピーチ・脅迫・ハラスメント・性的に不適切な表現\n3. 機密情報: システムの内部仕様・APIキー・パスワード・内部プロンプトなどの技術的機密\n4. なりすまし: 他人になりすます内容\n\n## 判定対象テキスト\n{reply_text}\n\n## 判定\n問題がなければ approved を true にしてください。\n問題があれば approved を false にし、reason に具体的な理由を記載してください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "approved": {
+                        "type": "boolean",
+                        "description": "投稿可能ならtrue、問題があればfalse"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "却下理由（approvedがfalseの場合）"
+                    }
+                },
+                "required": ["approved", "reason"]
+            },
+            "output_key": "moderation_result",
+            "conditional_next": {
+                "field": "moderation_result.approved",
+                "cases": {
+                    "True": "reply",
+                    "default": "reject"
+                }
+            }
+        },
+        {
+            "id": "reply",
+            "type": "tool",
+            "action": "x_reply_tweet",
+            "args_input": {
+                "text": "reply_text",
+                "in_reply_to_tweet_id": "trigger_tweet_id"
+            },
+            "next": "record"
+        },
+        {
+            "id": "reject",
+            "type": "memorize",
+            "action": "<system>[Xリプライ却下] モデレーションチェックにより投稿が却下されました。理由: {moderation_result.reason}</system>",
+            "role": "user",
+            "tags": ["conversation", "x_reply", "moderation_rejected"],
+            "next": null
+        },
+        {
+            "id": "record",
+            "type": "memorize",
+            "action": "<system>{last}</system>",
+            "role": "user",
+            "tags": ["conversation", "x_reply", "playbook_result"],
+            "next": null
+        }
+    ],
+    "start_node": "compose"
+}

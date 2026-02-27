@@ -116,6 +116,28 @@ def compile_with_langgraph(
     # Inherit cancellation token from parent state if not explicitly provided
     effective_cancellation_token = cancellation_token or parent.get("_cancellation_token")
 
+    # Forward initial_params into the LangGraph state so that exec nodes
+    # can pass them to sub-playbooks.  This enables meta playbooks (e.g.
+    # meta_user_manual) to relay trigger-specific params (trigger_tweet_id,
+    # etc.) without declaring each one in their own input_schema.
+    forwarded_params = {}
+    _ip = parent.get("_initial_params")
+    if _ip and isinstance(_ip, dict):
+        reserved = {
+            "messages", "inputs", "context", "last", "outputs",
+            "persona_obj", "pulse_id", "pulse_type",
+            "_cancellation_token", "pulse_usage_accumulator",
+            "_activity_trace", "_intermediate_msgs",
+        }
+        for k, v in _ip.items():
+            if k not in reserved and k not in inherited_vars:
+                forwarded_params[k] = v
+        if forwarded_params:
+            LOGGER.debug(
+                "[sea][LangGraph] Forwarding initial_params to state: %s",
+                list(forwarded_params.keys()),
+            )
+
     initial_state = {
         "messages": list(base_messages),
         "inputs": {"input": user_input or ""},
@@ -129,7 +151,8 @@ def compile_with_langgraph(
         "pulse_usage_accumulator": usage_accumulator,  # Inherit from parent or create new
         "_activity_trace": activity_trace,  # Shared trace of exec/tool activities
         "_intermediate_msgs": [],  # Track intermediate node outputs for profile-based context
-        **inherited_vars,  # Add inherited variables from input_schema
+        **forwarded_params,  # Forward initial_params (trigger data etc.)
+        **inherited_vars,  # Add inherited variables from input_schema (takes precedence)
     }
 
     # Execute compiled playbook

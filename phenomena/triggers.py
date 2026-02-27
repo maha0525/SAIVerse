@@ -21,6 +21,9 @@ class TriggerType(str, Enum):
     USER_LOGIN = "user_login"           # ユーザーログイン時
     USER_LOGOUT = "user_logout"         # ユーザーログアウト時
     SCHEDULE_FIRED = "schedule_fired"   # スケジュール発火時
+    # 外部イベントトリガー
+    X_MENTION_RECEIVED = "x_mention_received"  # Xメンション受信時
+    EXTERNAL_WEBHOOK = "external_webhook"      # 汎用Webhook受信時
 
 
 # 各トリガータイプのデータスキーマ定義
@@ -58,6 +61,18 @@ TRIGGER_SCHEMAS: Dict[TriggerType, Dict[str, str]] = {
     TriggerType.SCHEDULE_FIRED: {
         "schedule_id": "発火したスケジュールID",
         "persona_id": "対象のペルソナID",
+    },
+    TriggerType.X_MENTION_RECEIVED: {
+        "persona_id": "対象のペルソナID",
+        "tweet_id": "メンション元のツイートID",
+        "author_username": "メンション送信者のユーザー名",
+        "author_name": "メンション送信者の表示名",
+        "mention_text": "メンション本文",
+        "playbook_params_json": "Playbook実行パラメータ（JSON文字列）",
+    },
+    TriggerType.EXTERNAL_WEBHOOK: {
+        "source": "Webhookの送信元",
+        "payload": "Webhookのペイロード（JSON文字列）",
     },
 }
 

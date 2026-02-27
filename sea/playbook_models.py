@@ -503,6 +503,11 @@ class PlaybookSchema(BaseModel):
         default=False,
         description="If true, this playbook can be called from the router in meta playbooks."
     )
+    required_credentials: Optional[List[str]] = Field(
+        default=None,
+        description="List of credential types required for this playbook (e.g., ['x'], ['email']). "
+                    "When set, the playbook is only available for personas that have all listed credentials configured."
+    )
     user_selectable: bool = Field(
         default=False,
         description="If true, this meta playbook can be selected by user in the UI."

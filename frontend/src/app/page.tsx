@@ -17,6 +17,7 @@ import SaiverseLink from '@/components/SaiverseLink';
 import ItemModal from '@/components/ItemModal';
 import ContextPreviewModal, { ContextPreviewData } from '@/components/ContextPreviewModal';
 import PlaybookPermissionDialog, { PermissionRequestData } from '@/components/PlaybookPermissionDialog';
+import TweetConfirmDialog, { TweetConfirmData } from '@/components/TweetConfirmDialog';
 import ChronicleConfirmDialog, { ChronicleConfirmData } from '@/components/ChronicleConfirmDialog';
 import ModalOverlay from '@/components/common/ModalOverlay';
 import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell } from 'lucide-react';
@@ -127,6 +128,7 @@ export default function Home() {
     const [inputValue, setInputValue] = useState('');
     const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
     const [permissionRequest, setPermissionRequest] = useState<PermissionRequestData | null>(null);
+    const [tweetConfirm, setTweetConfirm] = useState<TweetConfirmData | null>(null);
     const [chronicleConfirm, setChronicleConfirm] = useState<ChronicleConfirmData | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const chatAreaRef = useRef<HTMLDivElement>(null); // Ref for the scrollable area
@@ -985,6 +987,19 @@ export default function Home() {
         }
     }, []);
 
+    const handleTweetConfirmResponse = useCallback(async (requestId: string, decision: string, editedText?: string) => {
+        setTweetConfirm(null);
+        try {
+            await fetch('/api/chat/tweet-confirmation-response', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ request_id: requestId, decision, edited_text: editedText }),
+            });
+        } catch (e) {
+            console.error('Failed to send tweet confirmation response', e);
+        }
+    }, []);
+
     const handleChronicleConfirmResponse = useCallback(async (requestId: string, decision: string) => {
         setChronicleConfirm(null);
         try {
@@ -1301,6 +1316,13 @@ export default function Home() {
                                 playbookDisplayName: event.playbook_display_name || event.playbook_name,
                                 playbookDescription: event.playbook_description || '',
                                 personaName: event.persona_name || '',
+                            });
+                        } else if (event.type === 'tweet_confirmation') {
+                            setTweetConfirm({
+                                requestId: event.request_id,
+                                tweetText: event.tweet_text,
+                                personaId: event.persona_id || '',
+                                xUsername: event.x_username || '',
                             });
                         } else if (event.type === 'chronicle_confirm') {
                             setChronicleConfirm({
@@ -2050,6 +2072,13 @@ export default function Home() {
                 <PlaybookPermissionDialog
                     request={permissionRequest}
                     onRespond={handlePermissionResponse}
+                />
+            )}
+
+            {tweetConfirm && (
+                <TweetConfirmDialog
+                    request={tweetConfirm}
+                    onRespond={handleTweetConfirmResponse}
                 />
             )}
 

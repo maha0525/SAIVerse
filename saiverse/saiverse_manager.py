@@ -25,6 +25,7 @@ from .model_configs import get_model_provider, get_context_length
 from .occupancy_manager import OccupancyManager
 from .conversation_manager import ConversationManager
 from .schedule_manager import ScheduleManager
+from .integration_manager import IntegrationManager
 from phenomena.manager import PhenomenonManager
 from phenomena.triggers import TriggerEvent, TriggerType
 from sqlalchemy.orm import sessionmaker
@@ -143,6 +144,10 @@ class SAIVerseManager(
         self._pending_permission_requests: dict[str, threading.Event] = {}
         self._permission_responses: dict[str, str] = {}
 
+        # --- Tweet confirmation synchronisation (transient, in-memory) ---
+        self._pending_tweet_confirmations: dict[str, threading.Event] = {}
+        self._tweet_confirmation_responses: dict[str, str] = {}
+
         self.personas = self.state.personas
         self.visiting_personas = self.state.visiting_personas
         self.avatar_map = self.state.avatar_map
@@ -219,9 +224,16 @@ class SAIVerseManager(
         self.phenomenon_manager = PhenomenonManager(
             session_factory=self.SessionLocal,
             async_execution=True,
+            saiverse_manager=self,
         )
         self.phenomenon_manager.start()
         logging.info("Initialized and started PhenomenonManager.")
+
+        # --- Initialize IntegrationManager ---
+        self.integration_manager = IntegrationManager(self, tick_interval=30)
+        self._register_integrations()
+        self.integration_manager.start()
+        logging.info("Initialized and started IntegrationManager.")
 
         # --- Step 7: Register with SDS and start background tasks ---
         self.sds_url = sds_url
@@ -314,6 +326,18 @@ class SAIVerseManager(
             return None
 
     # Phenomenon trigger helpers -----------------------------------------------
+    def _register_integrations(self) -> None:
+        """Register external integrations with IntegrationManager.
+
+        Auto-detects available integrations (e.g. X mentions) based on
+        whether credentials are configured for any persona.
+        """
+        try:
+            from saiverse.integrations.x_mentions import XMentionIntegration
+            self.integration_manager.register(XMentionIntegration())
+        except Exception:
+            logging.debug("XMentionIntegration not available", exc_info=True)
+
     def _emit_trigger(self, trigger_type: TriggerType, data: Dict[str, Any]) -> None:
         """Emit a trigger event to the PhenomenonManager."""
         if not hasattr(self, "phenomenon_manager") or not self.phenomenon_manager:
@@ -613,6 +637,11 @@ class SAIVerseManager(
         # Stop all conversation managers
         for manager in self.conversation_managers.values():
             manager.stop()
+
+        # Stop integration manager
+        if hasattr(self, "integration_manager"):
+            self.integration_manager.stop()
+            logging.info("IntegrationManager stopped.")
 
         # Stop schedule manager
         if hasattr(self, "schedule_manager"):

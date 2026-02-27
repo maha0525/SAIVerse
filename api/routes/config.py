@@ -458,6 +458,24 @@ def set_developer_mode(req: DeveloperModeRequest, manager=Depends(get_manager)):
     return {"success": True, "enabled": req.enabled}
 
 
+class XPollingRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/x-polling")
+def get_x_polling(manager=Depends(get_manager)):
+    """Get X mention polling status."""
+    return {"enabled": manager.state.x_polling_enabled}
+
+
+@router.post("/x-polling")
+def set_x_polling(req: XPollingRequest, manager=Depends(get_manager)):
+    """Toggle X mention polling on/off."""
+    manager.state.x_polling_enabled = req.enabled
+    _log.info("X polling set to %s", req.enabled)
+    return {"success": True, "enabled": req.enabled}
+
+
 class PlaybookOverrideRequest(BaseModel):
     playbook: Optional[str] = None
     playbook_params: Optional[Dict[str, Any]] = None

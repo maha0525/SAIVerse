@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Dict, List, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     pass
@@ -18,7 +18,7 @@ class PersonaEventMixin:
     def _load_persona_event_logs(self) -> None:
         """Load pending persona events from the database."""
         from database.models import PersonaEventLog, AI as AIModel
-        
+
         db = self.SessionLocal()
         try:
             rows = (
@@ -42,17 +42,38 @@ class PersonaEventMixin:
                 {
                     "event_id": row.EVENT_ID,
                     "content": row.CONTENT,
+                    "event_type": getattr(row, "EVENT_TYPE", None),
+                    "payload": getattr(row, "PAYLOAD", None),
                     "created_at": row.CREATED_AT,
                 }
             )
 
-    def record_persona_event(self, persona_id: str, content: str) -> None:
-        """Add a new pending event for the specified persona."""
+    def record_persona_event(
+        self,
+        persona_id: str,
+        content: str,
+        event_type: Optional[str] = None,
+        payload: Optional[str] = None,
+    ) -> None:
+        """Add a new pending event for the specified persona.
+
+        Args:
+            persona_id: Target persona ID.
+            content: Human-readable event description.
+            event_type: Optional event type tag (e.g. "x_mention").
+            payload: Optional JSON-encoded structured data.
+        """
         from database.models import PersonaEventLog
-        
+
         db = self.SessionLocal()
         try:
-            entry = PersonaEventLog(PERSONA_ID=persona_id, CONTENT=content, STATUS="pending")
+            entry = PersonaEventLog(
+                PERSONA_ID=persona_id,
+                CONTENT=content,
+                STATUS="pending",
+                EVENT_TYPE=event_type,
+                PAYLOAD=payload,
+            )
             db.add(entry)
             db.commit()
             db.refresh(entry)
@@ -68,6 +89,8 @@ class PersonaEventMixin:
             {
                 "event_id": event_id,
                 "content": content,
+                "event_type": event_type,
+                "payload": payload,
                 "created_at": created_at,
             }
         )

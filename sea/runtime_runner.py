@@ -31,6 +31,12 @@ def run_playbook(
     if initial_params:
         LOGGER.debug("[sea] _run_playbook merging initial_params: %s", list(initial_params.keys()))
         parent.update(initial_params)
+        # Preserve the original initial_params so compile_with_langgraph can
+        # forward them into the LangGraph state even when the playbook's
+        # input_schema doesn't explicitly declare them.  This allows meta
+        # playbooks (e.g. meta_user_manual) to pass trigger params through
+        # to sub-playbooks without needing to know every possible key.
+        parent["_initial_params"] = dict(initial_params)
     LOGGER.debug("[sea] _run_playbook called for %s, parent_state keys: %s", playbook.name, list(parent.keys()) if parent else "(none)")
     if "pulse_id" in parent:
         pulse_id = str(parent["pulse_id"])

@@ -72,7 +72,7 @@ class RuntimeEngine:
 
                 # Execute tool with persona context
                 if persona_id and persona_dir:
-                    with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode):
+                    with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback):
                         result = tool_func(**kwargs) if callable(tool_func) else None
                 else:
                     result = tool_func(**kwargs) if callable(tool_func) else None
@@ -176,9 +176,13 @@ class RuntimeEngine:
                             self.runtime._notify_persona_permission_result(state, persona, clean_name, denial_msg, event_callback)
                             return state
 
-                        # Schedule-triggered executions: user pre-approved by creating the schedule
-                        if state.get("pulse_type") == "schedule":
-                            log_sea_trace(playbook.name, node_id, "PERM", f"{clean_name}: auto-allowed (schedule)")
+                        # Schedule pulses (external events, timed schedules) have no
+                        # frontend connection for interactive dialogs.  The user's
+                        # act of configuring the automation serves as pre-approval.
+                        pulse_type = state.get("pulse_type")
+                        if pulse_type == "schedule":
+                            log_sea_trace(playbook.name, node_id, "PERM", f"{clean_name}: auto-allow for schedule pulse")
+                            # Fall through to execution
                         else:
                             response = self.runtime._request_playbook_permission(clean_name, persona, event_callback)
 
