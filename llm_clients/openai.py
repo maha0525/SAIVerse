@@ -13,7 +13,6 @@ from openai import OpenAI
 
 from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 from tools import OPENAI_TOOLS_SPEC
-from saiverse.llm_router import route
 
 from . import openai_errors
 from . import openai_runtime
@@ -823,23 +822,12 @@ class OpenAIClient(LLMClient):
                     yield text_body
             return
 
-        if force_tool_choice is None:
-            if tools is not None:
-                # Explicit tools from runtime — let LLM decide natively
-                force_tool_choice = "auto"
-            else:
-                # Legacy mode (tools=None → OPENAI_TOOLS_SPEC) — use router
-                user_msg = next((m["content"] for m in reversed(messages)
-                                 if m.get("role") == "user"), "")
-                decision = route(user_msg, tools_spec)
-                logging.info("Router decision:\n%s", json.dumps(decision, indent=2, ensure_ascii=False))
-                if decision["call"] == "yes" and decision["tool"]:
-                    force_tool_choice = {
-                        "type": "function",
-                        "function": {"name": decision["tool"]}
-                    }
-                else:
-                    force_tool_choice = "auto"
+        force_tool_choice = openai_runtime.resolve_tool_choice(
+            messages,
+            tools_spec,
+            force_tool_choice,
+            tools_arg_was_none=tools is None,
+        )
 
         stream_req_kwargs = dict(self._request_kwargs)
         stream_req_kwargs["stream_options"] = {"include_usage": True}

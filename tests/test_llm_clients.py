@@ -274,6 +274,31 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(result, "ok")
         self.assertEqual(calls["count"], 2)
 
+    @patch("llm_clients.openai_runtime.route")
+    def test_openai_runtime_resolve_tool_choice_native_auto_when_tools_arg_exists(self, mock_route):
+        tool_choice = openai_runtime.resolve_tool_choice(
+            [{"role": "user", "content": "hello"}],
+            [{"type": "function", "function": {"name": "x"}}],
+            force_tool_choice=None,
+            tools_arg_was_none=False,
+        )
+
+        self.assertEqual(tool_choice, "auto")
+        mock_route.assert_not_called()
+
+    @patch("llm_clients.openai_runtime.route")
+    def test_openai_runtime_resolve_tool_choice_legacy_router_when_tools_arg_is_none(self, mock_route):
+        mock_route.return_value = {"call": "yes", "tool": "x"}
+        tool_choice = openai_runtime.resolve_tool_choice(
+            [{"role": "user", "content": "hello"}],
+            [{"type": "function", "function": {"name": "x"}}],
+            force_tool_choice=None,
+            tools_arg_was_none=True,
+        )
+
+        self.assertEqual(tool_choice, {"type": "function", "function": {"name": "x"}})
+        mock_route.assert_called_once()
+
 
     def test_openai_error_helpers_should_retry(self):
         self.assertTrue(openai_errors.should_retry(Exception("429 rate limit")))
