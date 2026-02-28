@@ -93,6 +93,52 @@ class TestLLMClients(unittest.TestCase):
             base_url='https://integrate.api.nvidia.com/v1'
         )
 
+    @patch('llm_clients.factory.OpenAIClient')
+    def test_get_llm_client_forwards_openai_extra_kwargs(self, mock_openai_client):
+        config = {
+            "model": "gpt-4.1",
+            "provider": "openai",
+            "structured_output_mode": " json_object ",
+            "reasoning_passback_field": " reasoning_details ",
+        }
+
+        get_llm_client("gpt-4.1", "openai", 8192, config=config)
+
+        _, kwargs = mock_openai_client.call_args
+        self.assertEqual(kwargs["structured_output_mode"], "json_object")
+        self.assertEqual(kwargs["reasoning_passback_field"], "reasoning_details")
+
+    @patch('llm_clients.openai.OpenAI')
+    @patch('llm_clients.openai._prepare_openai_messages')
+    def test_nvidia_nim_generate_uses_openai_message_preparer_contract(self, mock_prepare, mock_openai):
+        mock_prepare.return_value = [{"role": "user", "content": "prepared"}]
+        mock_openai.return_value = MagicMock()
+
+        from llm_clients.nvidia_nim import NvidiaNIMClient
+
+        client = NvidiaNIMClient(
+            "nvidia/model",
+            supports_images=True,
+            max_image_bytes=2048,
+            convert_system_to_user=True,
+            reasoning_passback_field="reasoning_details",
+        )
+        client._create_nim_structured_output_via_tool = MagicMock(return_value='{"ok": true}')
+
+        messages = [{"role": "user", "content": "hello"}]
+        schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+
+        result = client.generate(messages=messages, tools=[], response_schema=schema)
+
+        self.assertEqual(result, '{"ok": true}')
+        mock_prepare.assert_called_once_with(
+            messages,
+            True,
+            2048,
+            True,
+            "reasoning_details",
+        )
+
     @patch('llm_clients.openai.OpenAI')
     def test_openai_client_generate(self, mock_openai):
         mock_client_instance = MagicMock()
