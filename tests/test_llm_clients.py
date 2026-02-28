@@ -109,7 +109,7 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(kwargs["reasoning_passback_field"], "reasoning_details")
 
     @patch('llm_clients.openai.OpenAI')
-    @patch('llm_clients.openai._prepare_openai_messages')
+    @patch('llm_clients.openai_message_preparer.prepare_openai_messages')
     def test_nvidia_nim_generate_uses_openai_message_preparer_contract(self, mock_prepare, mock_openai):
         mock_prepare.return_value = [{"role": "user", "content": "prepared"}]
         mock_openai.return_value = MagicMock()

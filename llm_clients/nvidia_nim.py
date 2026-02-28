@@ -128,7 +128,6 @@ class NvidiaNIMClient(OpenAIClient):
         logging.debug("NIM structured output schema: %s", dummy_tool["function"]["parameters"])
 
         # Retry logic for transient errors (timeouts, connection errors, 5xx)
-        last_exception: Optional[Exception] = None
         for attempt in range(max_retries + 1):
             try:
                 with httpx.Client(timeout=120.0) as client:
@@ -137,7 +136,6 @@ class NvidiaNIMClient(OpenAIClient):
                     resp_json = response.json()
                 break  # Success, exit retry loop
             except (httpx.TimeoutException, httpx.ConnectError) as e:
-                last_exception = e
                 if attempt < max_retries:
                     wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s
                     logging.warning(
@@ -152,7 +150,6 @@ class NvidiaNIMClient(OpenAIClient):
                     )
                     raise
             except httpx.HTTPStatusError as e:
-                last_exception = e
                 logging.error(
                     "NIM structured output HTTP %d response body: %s",
                     e.response.status_code, e.response.text
@@ -214,7 +211,7 @@ class NvidiaNIMClient(OpenAIClient):
         """
         from tools import OPENAI_TOOLS_SPEC, TOOL_REGISTRY
         from tools.core import parse_tool_result
-        from .openai import _prepare_openai_messages
+        from .openai_message_preparer import prepare_openai_messages
 
         default_tools = OPENAI_TOOLS_SPEC if tools is None else tools
         if response_schema is not None and tools is None:
@@ -235,7 +232,7 @@ class NvidiaNIMClient(OpenAIClient):
         # to get structured output (workaround for Mistral models on Nvidia NIM)
         if not use_tools and response_schema:
             try:
-                prepared_messages = _prepare_openai_messages(
+                prepared_messages = prepare_openai_messages(
                     messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user, self.reasoning_passback_field
                 )
                 # Use forced function calling to get structured output
