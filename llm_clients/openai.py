@@ -16,6 +16,7 @@ from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 from tools import OPENAI_TOOLS_SPEC
 from saiverse.llm_router import route
 
+from . import openai_errors
 from .base import LLMClient, get_llm_logger
 from .exceptions import (
     AuthenticationError,
@@ -45,94 +46,42 @@ INITIAL_BACKOFF = 1.0  # seconds
 
 def _is_rate_limit_error(err: Exception) -> bool:
     """Check if the error is a rate limit that should be retried."""
-    if isinstance(err, openai.RateLimitError):
-        return True
-    msg = str(err).lower()
-    return (
-        "rate" in msg
-        or "429" in msg
-        or "quota" in msg
-        or "overload" in msg
-    )
+    return openai_errors.is_rate_limit_error(err)
 
 
 def _is_server_error(err: Exception) -> bool:
     """Check if the error is a server error (5xx) that should be retried."""
-    if isinstance(err, openai.APIStatusError):
-        return err.status_code >= 500
-    msg = str(err).lower()
-    return "503" in msg or "502" in msg or "504" in msg or "unavailable" in msg
+    return openai_errors.is_server_error(err)
 
 
 def _is_timeout_error(err: Exception) -> bool:
     """Check if the error is a timeout that should be retried."""
-    if isinstance(err, openai.APITimeoutError):
-        return True
-    if isinstance(err, openai.APIConnectionError):
-        return True
-    msg = str(err).lower()
-    return "timeout" in msg or "timed out" in msg
+    return openai_errors.is_timeout_error(err)
 
 
 def _should_retry(err: Exception) -> bool:
     """Check if the error should trigger a retry."""
-    if _is_payment_error(err) or _is_authentication_error(err):
-        return False
-    return _is_rate_limit_error(err) or _is_server_error(err) or _is_timeout_error(err)
+    return openai_errors.should_retry(err)
 
 
 def _is_authentication_error(err: Exception) -> bool:
     """Check if the error is an authentication error."""
-    if isinstance(err, openai.AuthenticationError):
-        return True
-    msg = str(err).lower()
-    return "401" in msg or "403" in msg or "authentication" in msg or "invalid api key" in msg
+    return openai_errors.is_authentication_error(err)
 
 
 def _is_payment_error(err: Exception) -> bool:
     """Check if the error is a payment/billing error (402) or quota exhaustion."""
-    msg = str(err).lower()
-    return (
-        "402" in msg
-        or "payment required" in msg
-        or "spend limit" in msg
-        or "billing" in msg
-        or "insufficient_quota" in msg
-    )
+    return openai_errors.is_payment_error(err)
 
 
 def _is_content_policy_error(err: Exception) -> bool:
     """Check if the error is a content policy violation (prompt-level block)."""
-    if isinstance(err, openai.BadRequestError):
-        # OpenAI returns error.code="content_policy_violation" for blocked prompts
-        body = getattr(err, "body", None)
-        if isinstance(body, dict):
-            code = body.get("error", {}).get("code", "") or ""
-            if "content_policy" in code or "content_filter" in code:
-                return True
-    msg = str(err).lower()
-    return "content_policy" in msg or "content_filter" in msg and "safety" in msg
+    return openai_errors.is_content_policy_error(err)
 
 
 def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError:
     """Convert a generic exception to an appropriate LLMError subclass."""
-    if _is_payment_error(err):
-        return PaymentError(f"OpenAI {context} failed: payment required", err)
-    elif _is_rate_limit_error(err):
-        return RateLimitError(f"OpenAI {context} failed: rate limit exceeded", err)
-    elif _is_timeout_error(err):
-        return LLMTimeoutError(f"OpenAI {context} failed: timeout", err)
-    elif _is_server_error(err):
-        return ServerError(f"OpenAI {context} failed: server error", err)
-    elif _is_authentication_error(err):
-        return AuthenticationError(f"OpenAI {context} failed: authentication error", err)
-    elif _is_content_policy_error(err):
-        return SafetyFilterError(
-            f"OpenAI {context} failed: content policy violation", err,
-            user_message="入力内容がOpenAIのコンテンツポリシーによりブロックされました。入力内容を変更してお試しください。",
-        )
-    else:
-        return LLMError(f"OpenAI {context} failed: {err}", err)
+    return openai_errors.convert_to_llm_error(err, context)
 
 
 def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_image_bytes: Optional[int] = None, convert_system_to_user: bool = False, reasoning_passback_field: Optional[str] = None) -> List[Any]:

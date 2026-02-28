@@ -9,6 +9,7 @@ os.environ.setdefault('SAIVERSE_SKIP_TOOL_IMPORTS', '1')
 
 # テスト対象のモジュールをインポート
 import llm_clients
+from llm_clients import openai_errors
 import tools as saiverse_tools
 from llm_clients import (
     LLMClient,
@@ -235,6 +236,19 @@ class TestLLMClients(unittest.TestCase):
         response_generator = client.generate_stream(messages, tools=[])
 
         self.assertEqual(list(response_generator), ["Stream ", "test"])
+
+
+    def test_openai_error_helpers_should_retry(self):
+        self.assertTrue(openai_errors.should_retry(Exception("429 rate limit")))
+        self.assertTrue(openai_errors.should_retry(Exception("503 unavailable")))
+        self.assertFalse(openai_errors.should_retry(Exception("402 payment required")))
+
+    def test_openai_error_helpers_convert_to_llm_error(self):
+        err = openai_errors.convert_to_llm_error(Exception("insufficient_quota"), "streaming")
+        self.assertEqual(err.error_code, "payment")
+
+        err = openai_errors.convert_to_llm_error(Exception("content_policy blocked"), "streaming")
+        self.assertEqual(err.error_code, "safety_filter")
 
     @patch('llm_clients.gemini.genai')
     def test_gemini_client_generate(self, mock_genai):
