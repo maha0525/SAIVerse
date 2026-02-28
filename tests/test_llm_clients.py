@@ -750,6 +750,39 @@ class TestLLMClients(unittest.TestCase):
 
         self.assertEqual(result, "not-json")
 
+    @patch('llm_clients.anthropic.Anthropic')
+    def test_anthropic_parse_structured_response_legacy_tool_choice_compatibility(self, mock_anthropic):
+        mock_anthropic.return_value = MagicMock()
+        client = AnthropicClient("claude-sonnet-4-5")
+
+        mock_tool_response = MagicMock()
+        mock_tool_block = MagicMock()
+        mock_tool_block.type = "tool_use"
+        mock_tool_block.id = "tool_1"
+        mock_tool_block.name = "Decision"
+        mock_tool_block.input = {"answer": "ok"}
+        mock_tool_response.content = [mock_tool_block]
+
+        tool_result = client.parse_structured_response(
+            mock_tool_response,
+            use_native_structured_output=False,
+        )
+
+        self.assertEqual(tool_result, {"answer": "ok"})
+
+        mock_text_response = MagicMock()
+        mock_text_block = MagicMock()
+        mock_text_block.type = "text"
+        mock_text_block.text = "plain text fallback"
+        mock_text_response.content = [mock_text_block]
+
+        text_result = client.parse_structured_response(
+            mock_text_response,
+            use_native_structured_output=False,
+        )
+
+        self.assertEqual(text_result, "plain text fallback")
+
     @patch('llm_clients.gemini.genai')
     def test_gemini_client_free_key_fallback(self, mock_genai):
         mock_free = MagicMock()
