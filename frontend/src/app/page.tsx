@@ -527,6 +527,7 @@ export default function Home() {
                             id: entry.msg.id,
                             avatar: entry.msg.avatar || local.avatar,
                             sender: entry.msg.sender || local.sender,
+                            images: entry.msg.images || local.images,
                             llm_usage: entry.msg.llm_usage || local.llm_usage,
                             llm_usage_total: entry.msg.llm_usage_total || local.llm_usage_total,
                             timestamp: entry.msg.timestamp || local.timestamp,
@@ -1024,6 +1025,9 @@ export default function Home() {
             id: tempId, role: 'user', content: inputValue,
             sender: userDisplayNameRef.current || undefined,
             avatar: userAvatarRef.current || undefined,
+            images: attachments
+                .filter(a => a.type === 'image')
+                .map(a => ({ url: `data:${a.mimeType};base64,${a.base64}`, mime_type: a.mimeType })),
         };
         setMessages(prev => [...prev, userMsg]);
         setInputValue('');
