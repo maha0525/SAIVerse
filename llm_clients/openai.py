@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional
 
 import openai
 from openai import OpenAI
@@ -32,10 +32,14 @@ from .openai_message_preparer import (
     normalize_message_role,
     scan_message_metadata,
 )
-from .utils import (
-    merge_reasoning_strings,
-    obj_to_dict,
+from .openai_reasoning import (
+    extract_raw_reasoning_details_from_delta,
+    extract_reasoning_from_delta,
+    extract_reasoning_from_message,
+    merge_streaming_reasoning_details,
+    process_openai_stream_content,
 )
+from .utils import merge_reasoning_strings
 
 
 # Retry configuration
@@ -174,145 +178,6 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
         )
         prepared.append(clean_msg)
     return prepared
-
-
-def _extract_reasoning_from_openai_message(message: Any) -> Tuple[str, List[Dict[str, str]], Any]:
-    """Extract text, reasoning entries, and raw reasoning_details from an OpenAI message.
-
-    Returns:
-        (final_text, reasoning_entries, reasoning_details)
-        reasoning_details is the raw provider data for multi-turn pass-back (or None).
-    """
-    msg_dict = obj_to_dict(message) or {}
-    content = msg_dict.get("content")
-    reasoning_entries: List[Dict[str, str]] = []
-    text_segments: List[str] = []
-
-    def _append_reasoning(text: str, title: Optional[str] = None) -> None:
-        text = (text or "").strip()
-        if text:
-            reasoning_entries.append({"title": title or "", "text": text})
-
-    if isinstance(content, list):
-        for part in content:
-            part_dict = obj_to_dict(part) or {}
-            ptype = part_dict.get("type")
-            text = part_dict.get("text") or part_dict.get("content") or ""
-            if not text:
-                continue
-            if ptype in {"reasoning", "thinking", "analysis"}:
-                _append_reasoning(text, part_dict.get("title"))
-            elif ptype in {"output_text", "text", None}:
-                text_segments.append(text)
-    elif isinstance(content, str):
-        text_segments.append(content)
-
-    reasoning_content = msg_dict.get("reasoning_content")
-    if isinstance(reasoning_content, str):
-        _append_reasoning(reasoning_content)
-
-    if msg_dict.get("reasoning") and isinstance(msg_dict["reasoning"], dict):
-        rc = msg_dict["reasoning"].get("content")
-        if isinstance(rc, str):
-            _append_reasoning(rc)
-
-    # Capture raw reasoning_details for multi-turn pass-back (e.g., OpenRouter)
-    reasoning_details = msg_dict.get("reasoning_details")
-
-    final_text = "".join(text_segments)
-    return final_text, reasoning_entries, reasoning_details
-
-
-def _extract_reasoning_from_delta(delta: Any) -> List[str]:
-    reasoning_chunks: List[str] = []
-    delta_dict = obj_to_dict(delta)
-    if not isinstance(delta_dict, dict):
-        return reasoning_chunks
-
-    # Check "reasoning" field (list of items or string)
-    raw_reasoning = delta_dict.get("reasoning")
-    if isinstance(raw_reasoning, list):
-        for item in raw_reasoning:
-            item_dict = obj_to_dict(item) or {}
-            text = item_dict.get("text") or item_dict.get("content") or ""
-            if text:
-                reasoning_chunks.append(text)
-    elif isinstance(raw_reasoning, str):
-        reasoning_chunks.append(raw_reasoning)
-
-    # Check "reasoning_content" field (used by o-series models, NIM)
-    reasoning_content = delta_dict.get("reasoning_content")
-    if isinstance(reasoning_content, str) and reasoning_content:
-        reasoning_chunks.append(reasoning_content)
-
-    # Check "reasoning_details" field (used by OpenRouter)
-    # Extract text for display; raw objects are collected separately for passback
-    raw_rd = delta_dict.get("reasoning_details")
-    if isinstance(raw_rd, list) and not reasoning_chunks:
-        # Only extract text if no other reasoning source was found (avoid duplicates)
-        for item in raw_rd:
-            item_dict = obj_to_dict(item) or item if isinstance(item, dict) else {}
-            text = item_dict.get("text") or item_dict.get("summary") or ""
-            if text:
-                reasoning_chunks.append(text)
-
-    return reasoning_chunks
-
-
-def _extract_raw_reasoning_details_from_delta(delta: Any) -> List[Dict[str, Any]]:
-    """Extract raw reasoning_details objects from a streaming delta for multi-turn passback."""
-    delta_dict = obj_to_dict(delta)
-    if not isinstance(delta_dict, dict):
-        return []
-    raw_rd = delta_dict.get("reasoning_details")
-    if not isinstance(raw_rd, list):
-        return []
-    result: List[Dict[str, Any]] = []
-    for item in raw_rd:
-        d = obj_to_dict(item) if not isinstance(item, dict) else item
-        if isinstance(d, dict):
-            result.append(d)
-    return result
-
-
-def _merge_streaming_reasoning_details(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Merge incremental reasoning_details chunks from streaming into consolidated entries.
-
-    Groups by 'index' field and concatenates 'text'/'summary' values.
-    """
-    by_index: Dict[int, Dict[str, Any]] = {}
-    for item in items:
-        idx = item.get("index", 0)
-        if idx not in by_index:
-            by_index[idx] = dict(item)
-        else:
-            existing = by_index[idx]
-            for text_key in ("text", "summary"):
-                chunk_text = item.get(text_key, "")
-                if chunk_text:
-                    existing[text_key] = existing.get(text_key, "") + chunk_text
-    return [by_index[k] for k in sorted(by_index.keys())]
-
-
-def _process_openai_stream_content(content: Any) -> Tuple[str, List[str]]:
-    reasoning_chunks: List[str] = []
-    text_fragments: List[str] = []
-
-    if isinstance(content, list):
-        for part in content:
-            part_dict = obj_to_dict(part) or {}
-            ptype = part_dict.get("type")
-            text = part_dict.get("text") or part_dict.get("content") or ""
-            if not text:
-                continue
-            if ptype in {"reasoning", "thinking", "analysis"}:
-                reasoning_chunks.append(text)
-            else:
-                text_fragments.append(text)
-    elif isinstance(content, str):
-        text_fragments.append(content)
-
-    return "".join(text_fragments), reasoning_chunks
 
 
 class OpenAIClient(LLMClient):
@@ -509,7 +374,7 @@ class OpenAIClient(LLMClient):
                 logging.warning("[openai] Output blocked by content filter. finish_reason=%s", choice.finish_reason)
                 openai_runtime.raise_content_filter_error(context="output")
 
-            text_body, reasoning_entries, reasoning_details = _extract_reasoning_from_openai_message(choice.message)
+            text_body, reasoning_entries, reasoning_details = extract_reasoning_from_message(choice.message)
             if not text_body:
                 text_body = choice.message.content or ""
             self._store_reasoning(reasoning_entries)
@@ -582,7 +447,7 @@ class OpenAIClient(LLMClient):
         tool_calls = getattr(choice.message, "tool_calls", [])
 
         # Extract reasoning if present
-        text_body, reasoning_entries, reasoning_details = _extract_reasoning_from_openai_message(choice.message)
+        text_body, reasoning_entries, reasoning_details = extract_reasoning_from_message(choice.message)
         self._store_reasoning(reasoning_entries)
         self._store_reasoning_details(reasoning_details)
 
@@ -689,18 +554,18 @@ class OpenAIClient(LLMClient):
                         delta = chunk.choices[0].delta
 
                         # Extract reasoning from delta attributes
-                        extra_reasoning = _extract_reasoning_from_delta(delta)
+                        extra_reasoning = extract_reasoning_from_delta(delta)
                         for r in extra_reasoning:
                             reasoning_chunks.append(r)
                             yield {"type": "thinking", "content": r}
 
                         # Collect raw reasoning_details objects for multi-turn passback
-                        reasoning_details_raw.extend(_extract_raw_reasoning_details_from_delta(delta))
+                        reasoning_details_raw.extend(extract_raw_reasoning_details_from_delta(delta))
 
                         content = delta.content
                         if content:
                             # Check for reasoning in structured content (list with type="reasoning")
-                            text_fragment, reasoning_piece = _process_openai_stream_content(content)
+                            text_fragment, reasoning_piece = process_openai_stream_content(content)
                             for r in reasoning_piece:
                                 reasoning_chunks.append(r)
                                 yield {"type": "thinking", "content": r}
@@ -719,11 +584,11 @@ class OpenAIClient(LLMClient):
                 self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
                 # Store reasoning_details for multi-turn pass-back (structured objects only)
                 if reasoning_details_raw:
-                    self._store_reasoning_details(_merge_streaming_reasoning_details(reasoning_details_raw))
+                    self._store_reasoning_details(merge_streaming_reasoning_details(reasoning_details_raw))
             else:
                 # Non-streaming mode (response_schema case)
                 choice = resp.choices[0]
-                text_body, reasoning_entries, reasoning_details = _extract_reasoning_from_openai_message(choice.message)
+                text_body, reasoning_entries, reasoning_details = extract_reasoning_from_message(choice.message)
                 if not text_body:
                     text_body = choice.message.content or ""
                 self._store_reasoning(reasoning_entries)
@@ -812,11 +677,11 @@ class OpenAIClient(LLMClient):
                     continue
 
                 if state == "TEXT" and delta.content:
-                    text_fragment, reasoning_piece = _process_openai_stream_content(delta.content)
+                    text_fragment, reasoning_piece = process_openai_stream_content(delta.content)
                     for r in reasoning_piece:
                         reasoning_chunks.append(r)
                         yield {"type": "thinking", "content": r}
-                    extra_reasoning = _extract_reasoning_from_delta(delta)
+                    extra_reasoning = extract_reasoning_from_delta(delta)
                     for r in extra_reasoning:
                         reasoning_chunks.append(r)
                         yield {"type": "thinking", "content": r}
@@ -828,13 +693,13 @@ class OpenAIClient(LLMClient):
                     yield text_fragment
                     continue
 
-                additional_reasoning = _extract_reasoning_from_delta(delta)
+                additional_reasoning = extract_reasoning_from_delta(delta)
                 for r in additional_reasoning:
                     reasoning_chunks.append(r)
                     yield {"type": "thinking", "content": r}
 
                 # Collect raw reasoning_details objects for multi-turn passback
-                reasoning_details_raw.extend(_extract_raw_reasoning_details_from_delta(delta))
+                reasoning_details_raw.extend(extract_raw_reasoning_details_from_delta(delta))
 
             openai_runtime.store_usage_from_last_chunk(
                 last_chunk,
@@ -845,7 +710,7 @@ class OpenAIClient(LLMClient):
             self._store_reasoning(merge_reasoning_strings(reasoning_chunks))
             # Store reasoning_details for multi-turn pass-back (structured objects only)
             if reasoning_details_raw:
-                self._store_reasoning_details(_merge_streaming_reasoning_details(reasoning_details_raw))
+                self._store_reasoning_details(merge_streaming_reasoning_details(reasoning_details_raw))
 
             # Store tool detection result if tool calls were detected
             if call_buffer:
