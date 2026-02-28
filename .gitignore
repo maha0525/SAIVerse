@@ -42,6 +42,10 @@ temp/
 %temp%/
 nul
 
+# PyPI build artifacts
+dist/
+*.egg-info/
+
 # Local Claude Code preferences
 CLAUDE.local.md
 
