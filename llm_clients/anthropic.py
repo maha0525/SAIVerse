@@ -742,6 +742,64 @@ class AnthropicClient(LLMClient):
             raise _convert_to_llm_error(last_error, f"{context} after {MAX_RETRIES} retries")
         raise LLMEmptyResponseError(f"Anthropic {context} failed after {MAX_RETRIES} retries with no response")
 
+    def parse_structured_response(
+        self,
+        response: Message,
+        use_native_structured_output: bool,
+    ) -> str | Dict[str, Any]:
+        """Parse structured output response while preserving legacy return compatibility."""
+        if use_native_structured_output:
+            text = _extract_text_from_response(response)
+            try:
+                return json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                logging.warning("[anthropic] Failed to parse native structured output as JSON, returning raw text")
+                return text
+
+        tool_use = _extract_tool_use_from_response(response)
+        if tool_use:
+            return tool_use["arguments"]
+        return _extract_text_from_response(response)
+
+    def parse_tool_response(self, response: Message) -> Dict[str, Any]:
+        """Parse tool mode response and store tool detection."""
+        tool_use = _extract_tool_use_from_response(response)
+        if tool_use:
+            tool_call = {
+                "type": "tool_call",
+                "tool_name": tool_use["name"],
+                "tool_args": tool_use["arguments"],
+            }
+            self._store_tool_detection(tool_call)
+            return tool_call
+
+        text = _extract_text_from_response(response)
+        if not text.strip():
+            logging.error(
+                "[anthropic] Empty text response without tool call. "
+                "Model returned empty content. stop_reason=%s",
+                getattr(response, "stop_reason", None)
+            )
+            raise LLMEmptyResponseError("Anthropic returned empty response without tool call")
+        text_response = {
+            "type": "text",
+            "content": text,
+        }
+        self._store_tool_detection(text_response)
+        return text_response
+
+    def parse_text_response(self, response: Message) -> str:
+        """Parse normal text response and validate non-empty text."""
+        text = _extract_text_from_response(response)
+        if not text.strip():
+            logging.error(
+                "[anthropic] Empty text response. "
+                "Model returned empty content. stop_reason=%s",
+                getattr(response, "stop_reason", None)
+            )
+            raise LLMEmptyResponseError("Anthropic returned empty response")
+        return text
+
     def generate(
         self,
         messages: List[Dict[str, Any]],
@@ -809,68 +867,14 @@ class AnthropicClient(LLMClient):
         # Extract and store thinking content
         self._store_reasoning(_extract_thinking_from_response(response))
 
-        # Handle structured output response
         if response_schema and not use_tools:
-            if use_native_structured_output:
-                # Native structured output: response is JSON text in content[0].text
-                text = _extract_text_from_response(response)
-                try:
-                    return json.loads(text)
-                except (json.JSONDecodeError, TypeError):
-                    logging.warning("[anthropic] Failed to parse native structured output as JSON, returning raw text")
-                    return text
-            else:
-                # Tool-choice pattern: extract from tool_use block
-                tool_use = _extract_tool_use_from_response(response)
-                if tool_use:
-                    return tool_use["arguments"]
-                # Fallback to text if no tool use
-                return _extract_text_from_response(response)
+            return self.parse_structured_response(response, use_native_structured_output)
 
         # Handle tool mode
         if use_tools:
-            tool_use = _extract_tool_use_from_response(response)
-            if tool_use:
-                self._store_tool_detection({
-                    "type": "tool_call",
-                    "tool_name": tool_use["name"],
-                    "tool_args": tool_use["arguments"],
-                })
-                return {
-                    "type": "tool_call",
-                    "tool_name": tool_use["name"],
-                    "tool_args": tool_use["arguments"],
-                }
-            else:
-                text = _extract_text_from_response(response)
-                # Check for empty text response without tool call
-                if not text.strip():
-                    logging.error(
-                        "[anthropic] Empty text response without tool call. "
-                        "Model returned empty content. stop_reason=%s",
-                        getattr(response, "stop_reason", None)
-                    )
-                    raise LLMEmptyResponseError("Anthropic returned empty response without tool call")
-                self._store_tool_detection({
-                    "type": "text",
-                    "content": text,
-                })
-                return {
-                    "type": "text",
-                    "content": text,
-                }
+            return self.parse_tool_response(response)
 
-        # Normal text response
-        text = _extract_text_from_response(response)
-        # Check for empty response
-        if not text.strip():
-            logging.error(
-                "[anthropic] Empty text response. "
-                "Model returned empty content. stop_reason=%s",
-                getattr(response, "stop_reason", None)
-            )
-            raise LLMEmptyResponseError("Anthropic returned empty response")
-        return text
+        return self.parse_text_response(response)
 
     def generate_stream(
         self,

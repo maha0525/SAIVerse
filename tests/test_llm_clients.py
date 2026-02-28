@@ -624,6 +624,50 @@ class TestLLMClients(unittest.TestCase):
         self.assertTrue(build_result["use_tools"])
         self.assertFalse(build_result["use_native_structured_output"])
 
+    @patch('llm_clients.anthropic.Anthropic')
+    def test_anthropic_generate_tool_mode_empty_response_raises(self, mock_anthropic):
+        mock_anthropic.return_value = MagicMock()
+        client = AnthropicClient("claude-sonnet-4-5")
+
+        mock_response = MagicMock()
+        mock_response.usage = None
+        mock_text_block = MagicMock()
+        mock_text_block.type = "text"
+        mock_text_block.text = ""
+        mock_response.content = [mock_text_block]
+        mock_response.model_dump_json.return_value = '{}'
+        client._execute_with_retry = MagicMock(return_value=mock_response)
+
+        messages = [{"role": "user", "content": "hello"}]
+        tools = [{
+            "type": "function",
+            "function": {"name": "test_tool", "parameters": {"type": "object", "properties": {}}},
+        }]
+
+        with self.assertRaises(anthropic_module.LLMEmptyResponseError):
+            client.generate(messages, tools=tools)
+
+    @patch('llm_clients.anthropic.Anthropic')
+    def test_anthropic_generate_native_schema_parse_failure_returns_raw_text(self, mock_anthropic):
+        mock_anthropic.return_value = MagicMock()
+        client = AnthropicClient("claude-opus-4-6", config={"thinking_type": "adaptive"})
+
+        mock_response = MagicMock()
+        mock_response.usage = None
+        mock_text_block = MagicMock()
+        mock_text_block.type = "text"
+        mock_text_block.text = "not-json"
+        mock_response.content = [mock_text_block]
+        mock_response.model_dump_json.return_value = '{}'
+        client._execute_with_retry = MagicMock(return_value=mock_response)
+
+        messages = [{"role": "user", "content": "hello"}]
+        schema = {"title": "Decision", "type": "object", "properties": {"answer": {"type": "string"}}}
+
+        result = client.generate(messages, tools=[], response_schema=schema)
+
+        self.assertEqual(result, "not-json")
+
     @patch('llm_clients.gemini.genai')
     def test_gemini_client_free_key_fallback(self, mock_genai):
         mock_free = MagicMock()
