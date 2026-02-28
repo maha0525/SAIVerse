@@ -521,8 +521,9 @@ class TestLLMClients(unittest.TestCase):
 
         self.assertEqual(mock_sleep.call_count, anthropic_module.MAX_RETRIES - 1)
 
+    @patch('llm_clients.anthropic.time.sleep')
     @patch('llm_clients.anthropic.Anthropic')
-    def test_anthropic_execute_with_retry_bad_request_content_policy_maps_to_safety_filter(self, mock_anthropic):
+    def test_anthropic_execute_with_retry_bad_request_content_policy_maps_to_safety_filter(self, mock_anthropic, mock_sleep):
         mock_client_instance = MagicMock()
         mock_anthropic.return_value = mock_client_instance
         client = AnthropicClient("claude-sonnet-4-5")
@@ -536,8 +537,11 @@ class TestLLMClients(unittest.TestCase):
         with self.assertRaises(anthropic_module.SafetyFilterError):
             client._execute_with_retry(lambda: (_ for _ in ()).throw(error), "API call")
 
+        mock_sleep.assert_not_called()
+
+    @patch('llm_clients.anthropic.time.sleep')
     @patch('llm_clients.anthropic.Anthropic')
-    def test_anthropic_execute_with_retry_bad_request_non_policy_maps_to_invalid_request(self, mock_anthropic):
+    def test_anthropic_execute_with_retry_bad_request_non_policy_maps_to_invalid_request(self, mock_anthropic, mock_sleep):
         mock_client_instance = MagicMock()
         mock_anthropic.return_value = mock_client_instance
         client = AnthropicClient("claude-sonnet-4-5")
@@ -550,6 +554,8 @@ class TestLLMClients(unittest.TestCase):
 
         with self.assertRaises(anthropic_module.InvalidRequestError):
             client._execute_with_retry(lambda: (_ for _ in ()).throw(error), "API call")
+
+        mock_sleep.assert_not_called()
 
     @patch('llm_clients.anthropic.Anthropic')
     def test_anthropic_build_request_params_consistent_between_generate_and_stream(self, mock_anthropic):
