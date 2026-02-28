@@ -699,6 +699,49 @@ class AnthropicClient(LLMClient):
             cache_ttl=cache_ttl,
         )
 
+    def _execute_with_retry(
+        self,
+        callable: Any,
+        context: str,
+        is_stream: bool = False,
+    ) -> Any:
+        """Execute an Anthropic API operation with unified retry and error handling."""
+        last_error: Optional[Exception] = None
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                return callable()
+            except anthropic.BadRequestError as e:
+                logging.error("[anthropic] Bad request: %s", e)
+                if _is_content_policy_error(e):
+                    raise SafetyFilterError(
+                        f"Anthropic {context} content policy violation: {e}",
+                        e,
+                        user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。入力内容を変更してお試しください。",
+                    )
+                raise InvalidRequestError(f"Anthropic {context} error: {e}", e)
+            except Exception as e:
+                last_error = e
+                if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                    backoff = INITIAL_BACKOFF * (2 ** attempt)
+                    label = "streaming " if is_stream else ""
+                    logging.warning(
+                        "[anthropic] Retryable %serror (attempt %d/%d): %s. Retrying in %.1fs...",
+                        label,
+                        attempt + 1,
+                        MAX_RETRIES,
+                        type(e).__name__,
+                        backoff,
+                    )
+                    time.sleep(backoff)
+                    continue
+                logging.exception("[anthropic] %s failed", context[:1].upper() + context[1:])
+                raise _convert_to_llm_error(e, context)
+
+        if last_error:
+            raise _convert_to_llm_error(last_error, f"{context} after {MAX_RETRIES} retries")
+        raise LLMEmptyResponseError(f"Anthropic {context} failed after {MAX_RETRIES} retries with no response")
+
     def generate(
         self,
         messages: List[Dict[str, Any]],
@@ -749,40 +792,16 @@ class AnthropicClient(LLMClient):
             logging.warning("[anthropic] No valid messages to send")
             return ""
 
-        response = None
-        last_error: Optional[Exception] = None
+        def _call() -> Any:
+            get_llm_logger().debug(
+                "[anthropic] Request: %s",
+                json.dumps(request_params, indent=2, ensure_ascii=False, default=str),
+            )
+            result = self.client.messages.create(**request_params)
+            get_llm_logger().debug("[anthropic] Response: %s", result.model_dump_json(indent=2))
+            return result
 
-        for attempt in range(MAX_RETRIES):
-            try:
-                get_llm_logger().debug("[anthropic] Request (attempt %d/%d): %s", attempt + 1, MAX_RETRIES, json.dumps(request_params, indent=2, ensure_ascii=False, default=str))
-                response = self.client.messages.create(**request_params)
-                get_llm_logger().debug("[anthropic] Response: %s", response.model_dump_json(indent=2))
-                break  # Success, exit retry loop
-            except anthropic.BadRequestError as e:
-                logging.error("[anthropic] Bad request: %s", e)
-                if _is_content_policy_error(e):
-                    raise SafetyFilterError(
-                        f"Anthropic API content policy violation: {e}", e,
-                        user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。入力内容を変更してお試しください。",
-                    )
-                raise InvalidRequestError(f"Anthropic API error: {e}", e)
-            except Exception as e:
-                last_error = e
-                if _should_retry(e) and attempt < MAX_RETRIES - 1:
-                    backoff = INITIAL_BACKOFF * (2 ** attempt)
-                    logging.warning(
-                        "[anthropic] Retryable error (attempt %d/%d): %s. Retrying in %.1fs...",
-                        attempt + 1, MAX_RETRIES, type(e).__name__, backoff
-                    )
-                    time.sleep(backoff)
-                    continue
-                logging.exception("[anthropic] API call failed")
-                raise _convert_to_llm_error(e, "API call")
-
-        if response is None:
-            if last_error:
-                raise _convert_to_llm_error(last_error, f"API call after {MAX_RETRIES} retries")
-            raise LLMEmptyResponseError(f"Anthropic API call failed after {MAX_RETRIES} retries with no response")
+        response = self._execute_with_retry(_call, "API call")
 
         # Store usage
         self._store_usage_from_response(response.usage, cache_ttl=cache_ttl)
@@ -913,75 +932,44 @@ class AnthropicClient(LLMClient):
             logging.warning("[anthropic] No valid messages to send")
             return
 
-        last_error: Optional[Exception] = None
-        stream_success = False
+        def _stream_call() -> List[Any]:
+            get_llm_logger().debug(
+                "[anthropic] Stream request: %s",
+                json.dumps(request_params, indent=2, ensure_ascii=False, default=str),
+            )
+            output_chunks: List[Any] = []
+            with self.client.messages.stream(**request_params) as stream:
+                final_message = None
 
-        for attempt in range(MAX_RETRIES):
-            try:
-                get_llm_logger().debug("[anthropic] Stream request (attempt %d/%d): %s", attempt + 1, MAX_RETRIES, json.dumps(request_params, indent=2, ensure_ascii=False, default=str))
+                for event in stream:
+                    if hasattr(event, "type"):
+                        if event.type == "content_block_delta":
+                            delta = getattr(event, "delta", None)
+                            if delta:
+                                if hasattr(delta, "thinking"):
+                                    output_chunks.append({"type": "thinking", "content": delta.thinking})
+                                elif hasattr(delta, "text"):
+                                    output_chunks.append(delta.text)
+                        elif event.type == "message_stop":
+                            final_message = stream.get_final_message()
 
-                with self.client.messages.stream(**request_params) as stream:
-                    final_message = None
+                if final_message:
+                    if final_message.usage:
+                        self._store_usage_from_response(final_message.usage, cache_ttl=cache_ttl)
+                    self._store_reasoning(_extract_thinking_from_response(final_message))
 
-                    for event in stream:
-                        # Handle text and thinking deltas
-                        if hasattr(event, "type"):
-                            if event.type == "content_block_delta":
-                                delta = getattr(event, "delta", None)
-                                if delta:
-                                    if hasattr(delta, "thinking"):
-                                        yield {"type": "thinking", "content": delta.thinking}
-                                    elif hasattr(delta, "text"):
-                                        yield delta.text
-                            elif event.type == "message_stop":
-                                final_message = stream.get_final_message()
+                if use_tools and final_message:
+                    tool_use = _extract_tool_use_from_response(final_message)
+                    if tool_use:
+                        self._store_tool_detection({
+                            "type": "tool_call",
+                            "tool_name": tool_use["name"],
+                            "tool_args": tool_use["arguments"],
+                        })
+            return output_chunks
 
-                    # Store usage and thinking from final message
-                    if final_message:
-                        if final_message.usage:
-                            self._store_usage_from_response(final_message.usage, cache_ttl=cache_ttl)
-                        self._store_reasoning(
-                            _extract_thinking_from_response(final_message)
-                        )
-
-                    # Handle tool calls in streaming mode
-                    if use_tools and final_message:
-                        tool_use = _extract_tool_use_from_response(final_message)
-                        if tool_use:
-                            self._store_tool_detection({
-                                "type": "tool_call",
-                                "tool_name": tool_use["name"],
-                                "tool_args": tool_use["arguments"],
-                            })
-
-                stream_success = True
-                break  # Success, exit retry loop
-
-            except anthropic.BadRequestError as e:
-                logging.error("[anthropic] Bad request: %s", e)
-                if _is_content_policy_error(e):
-                    raise SafetyFilterError(
-                        f"Anthropic streaming content policy violation: {e}", e,
-                        user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。入力内容を変更してお試しください。",
-                    )
-                raise InvalidRequestError(f"Anthropic streaming API error: {e}", e)
-            except Exception as e:
-                last_error = e
-                if _should_retry(e) and attempt < MAX_RETRIES - 1:
-                    backoff = INITIAL_BACKOFF * (2 ** attempt)
-                    logging.warning(
-                        "[anthropic] Retryable streaming error (attempt %d/%d): %s. Retrying in %.1fs...",
-                        attempt + 1, MAX_RETRIES, type(e).__name__, backoff
-                    )
-                    time.sleep(backoff)
-                    continue
-                logging.exception("[anthropic] Streaming API call failed")
-                raise _convert_to_llm_error(e, "streaming API call")
-
-        if not stream_success:
-            if last_error:
-                raise _convert_to_llm_error(last_error, f"streaming API call after {MAX_RETRIES} retries")
-            raise LLMEmptyResponseError(f"Anthropic streaming API call failed after {MAX_RETRIES} retries with no response")
+        for chunk in self._execute_with_retry(_stream_call, "streaming API call", is_stream=True):
+            yield chunk
 
     def generate_with_tool_detection(
         self,

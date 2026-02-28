@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 import os
 import json
+import httpx
 from typing import List, Dict, Iterator
 from google.genai import types as genai_types
 
@@ -414,6 +415,96 @@ class TestLLMClients(unittest.TestCase):
         # Invalid effort should be ignored
         client.configure_parameters({"thinking_effort": "invalid"})
         self.assertIsNone(client._thinking_effort)
+
+
+    @patch('llm_clients.anthropic.time.sleep')
+    @patch('llm_clients.anthropic.Anthropic')
+    def test_anthropic_execute_with_retry_retries_rate_limit(self, mock_anthropic, mock_sleep):
+        mock_client_instance = MagicMock()
+        mock_anthropic.return_value = mock_client_instance
+        client = AnthropicClient("claude-sonnet-4-5")
+
+        request = httpx.Request("POST", "https://api.anthropic.test/v1/messages")
+        response = httpx.Response(429, request=request)
+        rate_limit_error = anthropic_module.anthropic.RateLimitError(
+            "rate limit", response=response, body=None
+        )
+        calls = {"count": 0}
+
+        def flaky_call():
+            calls["count"] += 1
+            if calls["count"] < 3:
+                raise rate_limit_error
+            return "ok"
+
+        result = client._execute_with_retry(flaky_call, "API call")
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(calls["count"], 3)
+        self.assertEqual(mock_sleep.call_count, 2)
+
+    @patch('llm_clients.anthropic.time.sleep')
+    @patch('llm_clients.anthropic.Anthropic')
+    def test_anthropic_execute_with_retry_raises_server_error_after_max_retries(self, mock_anthropic, mock_sleep):
+        mock_client_instance = MagicMock()
+        mock_anthropic.return_value = mock_client_instance
+        client = AnthropicClient("claude-sonnet-4-5")
+
+        request = httpx.Request("POST", "https://api.anthropic.test/v1/messages")
+        response = httpx.Response(503, request=request)
+        server_error = anthropic_module.anthropic.APIStatusError(
+            "server unavailable", response=response, body=None
+        )
+
+        with self.assertRaises(anthropic_module.ServerError):
+            client._execute_with_retry(lambda: (_ for _ in ()).throw(server_error), "API call")
+
+        self.assertEqual(mock_sleep.call_count, anthropic_module.MAX_RETRIES - 1)
+
+    @patch('llm_clients.anthropic.time.sleep')
+    @patch('llm_clients.anthropic.Anthropic')
+    def test_anthropic_execute_with_retry_raises_timeout_after_max_retries(self, mock_anthropic, mock_sleep):
+        mock_client_instance = MagicMock()
+        mock_anthropic.return_value = mock_client_instance
+        client = AnthropicClient("claude-sonnet-4-5")
+
+        request = httpx.Request("POST", "https://api.anthropic.test/v1/messages")
+        timeout_error = anthropic_module.anthropic.APITimeoutError(request)
+
+        with self.assertRaises(anthropic_module.LLMTimeoutError):
+            client._execute_with_retry(lambda: (_ for _ in ()).throw(timeout_error), "API call")
+
+        self.assertEqual(mock_sleep.call_count, anthropic_module.MAX_RETRIES - 1)
+
+    @patch('llm_clients.anthropic.Anthropic')
+    def test_anthropic_execute_with_retry_bad_request_content_policy_maps_to_safety_filter(self, mock_anthropic):
+        mock_client_instance = MagicMock()
+        mock_anthropic.return_value = mock_client_instance
+        client = AnthropicClient("claude-sonnet-4-5")
+
+        request = httpx.Request("POST", "https://api.anthropic.test/v1/messages")
+        response = httpx.Response(400, request=request)
+        error = anthropic_module.anthropic.BadRequestError(
+            "content policy violation", response=response, body=None
+        )
+
+        with self.assertRaises(anthropic_module.SafetyFilterError):
+            client._execute_with_retry(lambda: (_ for _ in ()).throw(error), "API call")
+
+    @patch('llm_clients.anthropic.Anthropic')
+    def test_anthropic_execute_with_retry_bad_request_non_policy_maps_to_invalid_request(self, mock_anthropic):
+        mock_client_instance = MagicMock()
+        mock_anthropic.return_value = mock_client_instance
+        client = AnthropicClient("claude-sonnet-4-5")
+
+        request = httpx.Request("POST", "https://api.anthropic.test/v1/messages")
+        response = httpx.Response(400, request=request)
+        error = anthropic_module.anthropic.BadRequestError(
+            "invalid request payload", response=response, body=None
+        )
+
+        with self.assertRaises(anthropic_module.InvalidRequestError):
+            client._execute_with_retry(lambda: (_ for _ in ()).throw(error), "API call")
 
     @patch('llm_clients.anthropic.Anthropic')
     def test_anthropic_build_request_params_consistent_between_generate_and_stream(self, mock_anthropic):
