@@ -10,6 +10,7 @@ os.environ.setdefault('SAIVERSE_SKIP_TOOL_IMPORTS', '1')
 # テスト対象のモジュールをインポート
 import llm_clients
 from llm_clients import openai_errors
+from llm_clients.openai import _prepare_openai_messages
 from llm_clients import anthropic as anthropic_module
 from llm_clients import openai_runtime
 import tools as saiverse_tools
@@ -238,6 +239,50 @@ class TestLLMClients(unittest.TestCase):
         response_generator = client.generate_stream(messages, tools=[])
 
         self.assertEqual(list(response_generator), ["Stream ", "test"])
+
+    def test_prepare_openai_messages_regression_host_and_empty_and_reasoning(self):
+        messages = [
+            {"role": "host", "content": "Host instruction"},
+            {"role": "user", "content": ""},
+            {
+                "role": "assistant",
+                "content": "ok",
+                "metadata": {"reasoning_details": [{"type": "reasoning.text", "text": "r"}]},
+            },
+            {"role": "assistant", "content": "", "tool_calls": []},
+        ]
+
+        prepared = _prepare_openai_messages(
+            messages,
+            supports_images=False,
+            reasoning_passback_field="reasoning_details",
+        )
+
+        self.assertEqual(prepared[0]["role"], "system")
+        self.assertEqual(len(prepared), 2)
+        self.assertEqual(prepared[1]["reasoning_details"], [{"type": "reasoning.text", "text": "r"}])
+
+    @patch("llm_clients.openai_message_preparer.image_summary_note", return_value="[image summary]")
+    @patch("llm_clients.openai_message_preparer.load_image_bytes_for_llm", return_value=(b"img-bytes", "image/png"))
+    @patch(
+        "llm_clients.openai_message_preparer.iter_image_media",
+        return_value=[{"path": "dummy.png", "mime_type": "image/png", "uri": "saiverse://image/dummy.png"}],
+    )
+    def test_prepare_openai_messages_regression_supports_images_toggle(
+        self,
+        _mock_iter_image_media,
+        _mock_load_image,
+        _mock_summary,
+    ):
+        messages = [{"role": "user", "content": "hello", "metadata": {"media": [{"uri": "dummy"}]}}]
+
+        prepared_with_images = _prepare_openai_messages(messages, supports_images=True)
+        self.assertIsInstance(prepared_with_images[0]["content"], list)
+        self.assertEqual(prepared_with_images[0]["content"][0]["type"], "text")
+        self.assertEqual(prepared_with_images[0]["content"][1]["type"], "image_url")
+
+        prepared_without_images = _prepare_openai_messages(messages, supports_images=False)
+        self.assertEqual(prepared_without_images[0]["content"], "hello\n[image summary]")
 
     @patch('llm_clients.openai.OpenAI')
     def test_openai_content_filter_message_is_unified(self, mock_openai):

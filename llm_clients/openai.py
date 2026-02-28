@@ -1,17 +1,14 @@
 """OpenAI (and compatible) chat completion client."""
 from __future__ import annotations
 
-import base64
 import json
 import logging
-import mimetypes
 import os
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import openai
 from openai import OpenAI
 
-from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
 from tools import OPENAI_TOOLS_SPEC
 from saiverse.llm_router import route
 
@@ -28,13 +25,16 @@ from .exceptions import (
     RateLimitError,
     ServerError,
 )
+from .openai_message_preparer import (
+    ALLOWED_FIELDS,
+    build_message_content_with_attachments,
+    is_empty_message,
+    normalize_message_role,
+    scan_message_metadata,
+)
 from .utils import (
-    compute_allowed_attachment_keys,
-    content_to_text,
-    image_summary_note,
     merge_reasoning_strings,
     obj_to_dict,
-    parse_attachment_limit,
 )
 
 
@@ -95,55 +95,7 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
         convert_system_to_user: If True, converts system messages (except the first one)
                                 to user messages wrapped in <system></system> tags
     """
-    # OpenAI API standard fields
-    ALLOWED_FIELDS = {"role", "content", "name", "tool_calls", "tool_call_id"}
-
-    def _is_empty_message(msg: Dict[str, Any]) -> bool:
-        """Check if a message is empty (no content and no tool_calls)."""
-        role = msg.get("role")
-        content = msg.get("content")
-        tool_calls = msg.get("tool_calls")
-
-        # System and user messages with empty content are invalid
-        if role in ("assistant", "system", "user"):
-            # Content is empty if it's None, empty string, or empty list
-            content_empty = not content or (isinstance(content, (list, str)) and len(content) == 0)
-            # Assistant messages must have content OR tool_calls
-            if role == "assistant":
-                return content_empty and not tool_calls
-            # System/user messages must have content
-            return content_empty
-        return False
-
-    # ------------------------------------------------------------------
-    # Pre-scan: build attachment cache and metadata flags
-    # ------------------------------------------------------------------
-    max_image_embeds = parse_attachment_limit("OPENAI")
-    attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
-    skip_summary_indices: set = set()
-    exempt_indices: set = set()
-
-    for idx, msg in enumerate(messages):
-        if not isinstance(msg, dict):
-            continue
-        metadata = msg.get("metadata")
-        if isinstance(metadata, dict):
-            if metadata.get("__skip_image_summary__"):
-                skip_summary_indices.add(idx)
-            if metadata.get("__visual_context__"):
-                exempt_indices.add(idx)
-        media_items = iter_image_media(metadata)
-        if media_items:
-            attachment_cache[idx] = media_items
-
-    allowed_attachment_keys = compute_allowed_attachment_keys(
-        attachment_cache, max_image_embeds, exempt_indices,
-    )
-    logging.debug(
-        "[openai] attachment limit=%s, cached=%d msgs with images",
-        "∞" if max_image_embeds is None else max_image_embeds,
-        len(attachment_cache),
-    )
+    attachment_cache, skip_summary_indices, _, allowed_attachment_keys = scan_message_metadata(messages)
 
     # ------------------------------------------------------------------
     # Main loop
@@ -156,14 +108,19 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
             prepared.append(msg)
             continue
 
-        role = msg.get("role")
-        if isinstance(role, str) and role.lower() == "host":
-            role = "system"
-
         # Skip empty messages early
-        if _is_empty_message(msg):
-            logging.debug("Skipping empty message with role=%s", role)
+        if is_empty_message(msg):
+            logging.debug("Skipping empty message with role=%s", msg.get("role"))
             continue
+
+        normalized = normalize_message_role(
+            msg.get("role"),
+            convert_system_to_user,
+            seen_non_system,
+            msg.get("content"),
+        )
+        role = normalized[0] if normalized else None
+        converted_content = normalized[1] if normalized else None
 
         metadata = msg.get("metadata")
         attachments = attachment_cache.get(idx, [])
@@ -188,16 +145,12 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
                 clean_msg[reasoning_passback_field] = rd
 
         # Skip if the cleaned message is also empty
-        if _is_empty_message(clean_msg):
+        if is_empty_message(clean_msg):
             logging.debug("Skipping empty cleaned message with role=%s", role)
             continue
 
-        # Convert system messages to user messages with <system> tags if needed
-        # Only convert system messages that appear after non-system messages
-        if convert_system_to_user and role == "system" and seen_non_system:
-            content = content_to_text(msg.get("content", ""))
-            clean_msg["role"] = "user"
-            clean_msg["content"] = f"<system>\n{content}\n</system>"
+        if converted_content is not None:
+            clean_msg["content"] = converted_content
             prepared.append(clean_msg)
             continue
 
@@ -209,58 +162,17 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
             prepared.append(clean_msg)
             continue
 
-        text = content_to_text(msg.get("content"))
-        if supports_images and role == "user":
-            parts: List[Dict[str, Any]] = []
-            if text:
-                parts.append({"type": "text", "text": text})
-            for att_idx, att in enumerate(attachments):
-                # Determine whether to embed this attachment as binary
-                should_embed = (
-                    allowed_attachment_keys is None
-                    or (idx, att_idx) in allowed_attachment_keys
-                )
-                if should_embed:
-                    data, effective_mime = load_image_bytes_for_llm(
-                        att["path"], att["mime_type"], max_bytes=max_image_bytes,
-                    )
-                    if data and effective_mime:
-                        b64 = base64.b64encode(data).decode("ascii")
-                        parts.append(
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:{effective_mime};base64,{b64}"},
-                            }
-                        )
-                        continue
-                    else:
-                        logging.warning(
-                            "Image file not found or unreadable, skipping attachment: %s",
-                            att.get("uri") or att.get("path"),
-                        )
-                # Not embedding — produce a text summary instead
-                note = image_summary_note(
-                    att["path"], att["mime_type"],
-                    att.get("uri", att.get("path", "unknown")),
-                    skip_summary=skip_summary,
-                )
-                parts.append({"type": "text", "text": note})
-            clean_msg["content"] = parts if parts else text
-            prepared.append(clean_msg)
-        else:
-            # Model doesn't support images or non-user role — use text summaries
-            note_lines: List[str] = []
-            if text:
-                note_lines.append(text)
-            for att in attachments:
-                note = image_summary_note(
-                    att["path"], att["mime_type"],
-                    att.get("uri", att.get("path", "unknown")),
-                    skip_summary=skip_summary,
-                )
-                note_lines.append(note)
-            clean_msg["content"] = "\n".join(note_lines)
-            prepared.append(clean_msg)
+        clean_msg["content"] = build_message_content_with_attachments(
+            role=role,
+            original_content=msg.get("content"),
+            attachments=attachments,
+            supports_images=supports_images,
+            max_image_bytes=max_image_bytes,
+            skip_summary=skip_summary,
+            allowed_attachment_keys=allowed_attachment_keys,
+            message_index=idx,
+        )
+        prepared.append(clean_msg)
     return prepared
 
 
