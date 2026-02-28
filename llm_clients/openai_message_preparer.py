@@ -147,3 +147,82 @@ def build_message_content_with_attachments(
         )
         note_lines.append(note)
     return "\n".join(note_lines)
+
+
+def prepare_openai_messages(
+    messages: List[Any],
+    supports_images: bool,
+    max_image_bytes: Optional[int] = None,
+    convert_system_to_user: bool = False,
+    reasoning_passback_field: Optional[str] = None,
+) -> List[Any]:
+    """Prepare messages for OpenAI-compatible APIs by removing internal-only fields."""
+    attachment_cache, skip_summary_indices, _, allowed_attachment_keys = scan_message_metadata(messages)
+
+    prepared: List[Any] = []
+    seen_non_system = False
+
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            prepared.append(msg)
+            continue
+
+        if is_empty_message(msg):
+            logging.debug("Skipping empty message with role=%s", msg.get("role"))
+            continue
+
+        normalized = normalize_message_role(
+            msg.get("role"),
+            convert_system_to_user,
+            seen_non_system,
+            msg.get("content"),
+        )
+        role = normalized[0] if normalized else None
+        converted_content = normalized[1] if normalized else None
+
+        metadata = msg.get("metadata")
+        attachments = attachment_cache.get(idx, [])
+        skip_summary = idx in skip_summary_indices
+
+        clean_msg: Dict[str, Any] = {}
+        for field in ALLOWED_FIELDS:
+            if field in msg:
+                clean_msg[field] = msg[field]
+
+        if role:
+            clean_msg["role"] = role
+
+        if reasoning_passback_field and role == "assistant":
+            rd = (metadata or {}).get("reasoning_details") if isinstance(metadata, dict) else None
+            if isinstance(rd, list):
+                clean_msg[reasoning_passback_field] = rd
+
+        if is_empty_message(clean_msg):
+            logging.debug("Skipping empty cleaned message with role=%s", role)
+            continue
+
+        if converted_content is not None:
+            clean_msg["content"] = converted_content
+            prepared.append(clean_msg)
+            continue
+
+        if role != "system":
+            seen_non_system = True
+
+        if not attachments:
+            prepared.append(clean_msg)
+            continue
+
+        clean_msg["content"] = build_message_content_with_attachments(
+            role=role,
+            original_content=msg.get("content"),
+            attachments=attachments,
+            supports_images=supports_images,
+            max_image_bytes=max_image_bytes,
+            skip_summary=skip_summary,
+            allowed_attachment_keys=allowed_attachment_keys,
+            message_index=idx,
+        )
+        prepared.append(clean_msg)
+
+    return prepared
