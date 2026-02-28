@@ -5,6 +5,8 @@ import logging
 import time
 from typing import Any, Callable, Dict, Optional
 
+from saiverse.llm_router import route
+
 from .exceptions import LLMError, SafetyFilterError
 
 
@@ -52,6 +54,28 @@ def build_request_kwargs(
             req["stream_options"] = {"include_usage": True}
     return req
 
+
+
+
+def resolve_tool_choice(
+    messages: list[dict[str, Any]],
+    tools_spec: list[Any],
+    force_tool_choice: dict[str, Any] | str | None,
+    tools_arg_was_none: bool,
+) -> dict[str, Any] | str:
+    """Resolve OpenAI tool_choice while keeping legacy routing compatibility."""
+    if force_tool_choice is not None:
+        return force_tool_choice
+
+    if not tools_arg_was_none:
+        return "auto"
+
+    user_msg = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
+    decision = route(user_msg, tools_spec)
+    logging.debug("[openai] legacy_router_path=true decision=%s", decision)
+    if decision.get("call") == "yes" and decision.get("tool"):
+        return {"type": "function", "function": {"name": decision["tool"]}}
+    return "auto"
 
 def call_with_retry(
     create_completion: Callable[[], Any],
