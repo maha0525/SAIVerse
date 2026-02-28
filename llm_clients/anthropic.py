@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
 import anthropic
 from anthropic import Anthropic
@@ -222,29 +222,9 @@ def _prepare_anthropic_messages(
         cache_ttl: Cache TTL ("5m" or "1h")
     """
     # ------------------------------------------------------------------
-    # Pre-scan: build attachment cache and metadata flags
+    # Stage 1: attachment index collection
     # ------------------------------------------------------------------
-    max_image_embeds = parse_attachment_limit("ANTHROPIC")
-    attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
-    skip_summary_indices: set = set()
-    exempt_indices: set = set()
-
-    for idx, msg in enumerate(messages):
-        if not isinstance(msg, dict):
-            continue
-        metadata = msg.get("metadata")
-        if isinstance(metadata, dict):
-            if metadata.get("__skip_image_summary__"):
-                skip_summary_indices.add(idx)
-            if metadata.get("__visual_context__"):
-                exempt_indices.add(idx)
-        media_items = iter_image_media(metadata) if metadata else []
-        if media_items:
-            attachment_cache[idx] = list(media_items)
-
-    allowed_attachment_keys = compute_allowed_attachment_keys(
-        attachment_cache, max_image_embeds, exempt_indices,
-    )
+    attachment_cache, skip_summary_indices, max_image_embeds, allowed_attachment_keys = _collect_attachment_state(messages)
     logging.debug(
         "[anthropic] attachment limit=%s, cached=%d msgs with images",
         "∞" if max_image_embeds is None else max_image_embeds,
@@ -252,10 +232,9 @@ def _prepare_anthropic_messages(
     )
 
     # ------------------------------------------------------------------
-    # Main loop
+    # Stage 2: per-message content block generation
     # ------------------------------------------------------------------
     prepared: List[Dict[str, Any]] = []
-    # Track index of first dynamic content (realtime context, etc.)
     first_dynamic_index: Optional[int] = None
 
     for i, msg in enumerate(messages):
@@ -269,83 +248,21 @@ def _prepare_anthropic_messages(
         if role == "host":
             role = "user"
 
-        content = msg.get("content", "")
         metadata = msg.get("metadata")
-
-        # Detect realtime context (dynamic content that changes each request)
-        is_dynamic = False
-        if isinstance(metadata, dict):
-            if metadata.get("__realtime_context__"):
-                is_dynamic = True
-
         attachments = attachment_cache.get(i, [])
-        skip_summary = i in skip_summary_indices
-
-        # Skip empty messages
-        if not content and not attachments:
+        content_blocks, is_dynamic = _build_anthropic_content_blocks(
+            role=role,
+            content=msg.get("content", ""),
+            metadata=metadata,
+            attachments=attachments,
+            skip_summary=(i in skip_summary_indices),
+            supports_images=supports_images,
+            max_image_bytes=max_image_bytes,
+            allowed_attachment_keys=allowed_attachment_keys,
+            message_index=i,
+        )
+        if not content_blocks:
             continue
-
-        # Convert content to content blocks
-        content_blocks: List[Dict[str, Any]] = []
-
-        # Handle text content
-        text = content_to_text(content)
-        if text:
-            content_blocks.append({
-                "type": "text",
-                "text": text,
-            })
-
-        # Handle images for user messages
-        if supports_images and role == "user" and attachments:
-            for att_idx, att in enumerate(attachments):
-                # Determine whether to embed this attachment as binary
-                should_embed = (
-                    allowed_attachment_keys is None
-                    or (i, att_idx) in allowed_attachment_keys
-                )
-                if should_embed:
-                    data, effective_mime = load_image_bytes_for_llm(
-                        att["path"], att["mime_type"], max_bytes=max_image_bytes
-                    )
-                    if data and effective_mime:
-                        b64 = base64.b64encode(data).decode("ascii")
-                        content_blocks.append({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": effective_mime,
-                                "data": b64,
-                            },
-                        })
-                        continue
-                    else:
-                        logging.warning(
-                            "Image file not found or unreadable: %s",
-                            att.get("uri") or att.get("path"),
-                        )
-                # Not embedding — produce a text summary instead
-                note = image_summary_note(
-                    att["path"], att["mime_type"],
-                    att.get("uri", att.get("path", "unknown")),
-                    skip_summary=skip_summary,
-                )
-                content_blocks.append({
-                    "type": "text",
-                    "text": note,
-                })
-        elif attachments:
-            # Non-image-supporting case or non-user role: use text summaries
-            for att in attachments:
-                note = image_summary_note(
-                    att["path"], att["mime_type"],
-                    att.get("uri", att.get("path", "unknown")),
-                    skip_summary=skip_summary,
-                )
-                content_blocks.append({
-                    "type": "text",
-                    "text": note,
-                })
 
         if content_blocks:
             prepared_index = len(prepared)
@@ -357,28 +274,101 @@ def _prepare_anthropic_messages(
             if is_dynamic and first_dynamic_index is None:
                 first_dynamic_index = prepared_index
 
-    # Add cache_control BEFORE dynamic content (realtime context).
-    # Note: Anthropic has no read-only cache mode. Placing breakpoints enables
-    # both reads and writes. Removing them disables both entirely.
-    if enable_cache and prepared:
-        if first_dynamic_index is not None and first_dynamic_index > 0:
-            # Place breakpoint on the message BEFORE dynamic content
-            cache_target_index = first_dynamic_index - 1
-            logging.debug(
-                "[anthropic] Placing cache breakpoint before dynamic content at index %d",
-                cache_target_index
-            )
-        else:
-            # No dynamic content found, use second-to-last message if available
-            # (last message is typically the new user input)
-            cache_target_index = len(prepared) - 2 if len(prepared) >= 2 else len(prepared) - 1
-
-        if cache_target_index >= 0:
-            target_msg = prepared[cache_target_index]
-            if target_msg.get("content") and isinstance(target_msg["content"], list):
-                target_msg["content"][-1]["cache_control"] = _make_cache_control(cache_ttl)
+    # ------------------------------------------------------------------
+    # Stage 3: cache breakpoint assignment
+    # ------------------------------------------------------------------
+    _apply_anthropic_cache_breakpoint(prepared, first_dynamic_index, enable_cache, cache_ttl)
 
     return prepared
+
+
+def _collect_attachment_state(
+    messages: List[Dict[str, Any]],
+) -> Tuple[Dict[int, List[Dict[str, Any]]], Set[int], Optional[int], Optional[Set[Tuple[int, int]]]]:
+    max_image_embeds = parse_attachment_limit("ANTHROPIC")
+    attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
+    skip_summary_indices: Set[int] = set()
+    exempt_indices: Set[int] = set()
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        metadata = msg.get("metadata")
+        if isinstance(metadata, dict):
+            if metadata.get("__skip_image_summary__"):
+                skip_summary_indices.add(idx)
+            if metadata.get("__visual_context__"):
+                exempt_indices.add(idx)
+        media_items = iter_image_media(metadata) if metadata else []
+        if media_items:
+            attachment_cache[idx] = list(media_items)
+    allowed_attachment_keys = compute_allowed_attachment_keys(
+        attachment_cache, max_image_embeds, exempt_indices,
+    )
+    return attachment_cache, skip_summary_indices, max_image_embeds, allowed_attachment_keys
+
+
+def _build_anthropic_content_blocks(
+    role: str,
+    content: Any,
+    metadata: Any,
+    attachments: List[Dict[str, Any]],
+    skip_summary: bool,
+    supports_images: bool,
+    max_image_bytes: Optional[int],
+    allowed_attachment_keys: Optional[Set[Tuple[int, int]]],
+    message_index: int,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    content_blocks: List[Dict[str, Any]] = []
+    text = content_to_text(content)
+    if text:
+        content_blocks.append({"type": "text", "text": text})
+    is_dynamic = isinstance(metadata, dict) and bool(metadata.get("__realtime_context__"))
+    for att_idx, att in enumerate(attachments):
+        should_embed = supports_images and role == "user" and (
+            allowed_attachment_keys is None or (message_index, att_idx) in allowed_attachment_keys
+        )
+        if should_embed:
+            data, effective_mime = load_image_bytes_for_llm(
+                att["path"], att["mime_type"], max_bytes=max_image_bytes,
+            )
+            if data and effective_mime:
+                b64 = base64.b64encode(data).decode("ascii")
+                content_blocks.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": effective_mime,
+                        "data": b64,
+                    },
+                })
+                continue
+            logging.warning("Image file not found or unreadable: %s", att.get("uri") or att.get("path"))
+        note = image_summary_note(
+            att["path"], att["mime_type"],
+            att.get("uri", att.get("path", "unknown")),
+            skip_summary=skip_summary,
+        )
+        content_blocks.append({"type": "text", "text": note})
+    return content_blocks, is_dynamic
+
+
+def _apply_anthropic_cache_breakpoint(
+    prepared: List[Dict[str, Any]],
+    first_dynamic_index: Optional[int],
+    enable_cache: bool,
+    cache_ttl: str,
+) -> None:
+    if not enable_cache or not prepared:
+        return
+    if first_dynamic_index is not None and first_dynamic_index > 0:
+        cache_target_index = first_dynamic_index - 1
+        logging.debug("[anthropic] Placing cache breakpoint before dynamic content at index %d", cache_target_index)
+    else:
+        cache_target_index = len(prepared) - 2 if len(prepared) >= 2 else len(prepared) - 1
+    if cache_target_index >= 0:
+        target_msg = prepared[cache_target_index]
+        if target_msg.get("content") and isinstance(target_msg["content"], list):
+            target_msg["content"][-1]["cache_control"] = _make_cache_control(cache_ttl)
 
 
 def _prepare_anthropic_tools(
