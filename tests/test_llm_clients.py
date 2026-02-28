@@ -24,6 +24,7 @@ from llm_clients import (
     get_llm_client,
     OPENAI_TOOLS_SPEC,
 )
+from llm_clients.exceptions import InvalidRequestError
 
 if not saiverse_tools.OPENAI_TOOLS_SPEC:
     saiverse_tools._autodiscover_tools()
@@ -153,6 +154,70 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(rf["json_schema"]["name"], "Decision")
         self.assertTrue(rf["json_schema"]["strict"])
         self.assertIsNone(kwargs.get("temperature"))
+
+    @patch('llm_clients.openai.OpenAI')
+    def test_openai_client_generate_with_schema_invalid_json_raises(self, mock_openai):
+        mock_client_instance = MagicMock()
+        mock_openai.return_value = mock_client_instance
+
+        mock_resp = MagicMock()
+        mock_resp.usage = None
+        mock_resp.model_dump_json.return_value = '{}'
+        mock_choice = MagicMock()
+        mock_choice.message.content = 'not-json'
+        mock_choice.finish_reason = "stop"
+        mock_resp.choices = [mock_choice]
+        mock_client_instance.chat.completions.create.return_value = mock_resp
+
+        client = OpenAIClient("gpt-4.1-nano")
+        schema = {"title": "Decision", "type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
+
+        with self.assertRaises(InvalidRequestError):
+            client.generate([{"role": "user", "content": "Hello"}], tools=[], response_schema=schema)
+
+    @patch('llm_clients.openai.OpenAI')
+    def test_openai_client_generate_tool_detection_with_and_without_tool_call(self, mock_openai):
+        mock_client_instance = MagicMock()
+        mock_openai.return_value = mock_client_instance
+
+        tool_call_resp = MagicMock()
+        tool_call_resp.usage = None
+        tool_call_resp.model_dump_json.return_value = '{}'
+        tool_call_choice = MagicMock()
+        tool_call_choice.finish_reason = "tool_calls"
+        tool_call_choice.message.content = None
+        tool_call = MagicMock()
+        tool_call.function.name = "search"
+        tool_call.function.arguments = '{"query":"x"}'
+        tool_call_choice.message.tool_calls = [tool_call]
+        tool_call_resp.choices = [tool_call_choice]
+
+        text_resp = MagicMock()
+        text_resp.usage = None
+        text_resp.model_dump_json.return_value = '{}'
+        text_choice = MagicMock()
+        text_choice.finish_reason = "stop"
+        text_choice.message.content = "no tool"
+        text_choice.message.tool_calls = []
+        text_resp.choices = [text_choice]
+
+        mock_client_instance.chat.completions.create.side_effect = [tool_call_resp, text_resp]
+        client = OpenAIClient("gpt-4.1-nano")
+        schema = {"title": "Ignored", "type": "object", "properties": {}}
+        tools = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object", "properties": {}}}}]
+
+        tool_result = client.generate([{"role": "user", "content": "Hello"}], tools=tools, response_schema=schema)
+        text_result = client.generate([{"role": "user", "content": "Hello"}], tools=tools, response_schema=schema)
+
+        self.assertEqual(tool_result["type"], "tool_call")
+        self.assertEqual(tool_result["tool_name"], "search")
+        self.assertEqual(tool_result["tool_args"], {"query": "x"})
+        self.assertEqual(text_result, {"type": "text", "content": "no tool"})
+
+        for call in mock_client_instance.chat.completions.create.call_args_list:
+            kwargs = call.kwargs
+            self.assertIn("tools", kwargs)
+            self.assertNotIn("response_format", kwargs)
 
     @patch('llm_clients.openai.OpenAI')
     def test_openai_client_host_role_is_system(self, mock_openai):
@@ -300,6 +365,23 @@ class TestLLMClients(unittest.TestCase):
         client = OpenAIClient("gpt-4.1-nano")
         with self.assertRaisesRegex(Exception, "OpenAI output blocked by content filter"):
             client.generate([{"role": "user", "content": "Hello"}], tools=[])
+
+    @patch('llm_clients.openai.OpenAI')
+    def test_openai_tool_mode_content_filter_message_is_unified(self, mock_openai):
+        mock_client_instance = MagicMock()
+        mock_openai.return_value = mock_client_instance
+        mock_resp = MagicMock()
+        mock_resp.usage = None
+        mock_resp.model_dump_json.return_value = '{}'
+        mock_choice = MagicMock()
+        mock_choice.finish_reason = "content_filter"
+        mock_resp.choices = [mock_choice]
+        mock_client_instance.chat.completions.create.return_value = mock_resp
+
+        client = OpenAIClient("gpt-4.1-nano")
+        tools = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object", "properties": {}}}}]
+        with self.assertRaisesRegex(Exception, "OpenAI output blocked by content filter"):
+            client.generate([{"role": "user", "content": "Hello"}], tools=tools)
 
     def test_openai_runtime_call_with_retry_returns_on_retry(self):
         calls = {"count": 0}
