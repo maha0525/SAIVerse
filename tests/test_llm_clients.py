@@ -404,6 +404,27 @@ class TestLLMClients(unittest.TestCase):
             client.generate([{"role": "user", "content": "Hello"}], tools=[], response_schema=schema)
 
     @patch('llm_clients.openai.OpenAI')
+    def test_openai_client_generate_with_schema_uses_parsed_payload_when_content_empty(self, mock_openai):
+        mock_client_instance = MagicMock()
+        mock_openai.return_value = mock_client_instance
+
+        mock_resp = MagicMock()
+        mock_resp.usage = None
+        mock_resp.model_dump_json.return_value = '{}'
+        mock_choice = MagicMock()
+        mock_choice.message.content = ""
+        mock_choice.message.parsed = {"answer": "ok"}
+        mock_choice.finish_reason = "stop"
+        mock_resp.choices = [mock_choice]
+        mock_client_instance.chat.completions.create.return_value = mock_resp
+
+        client = OpenAIClient("gpt-5-nano")
+        schema = {"title": "Decision", "type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
+
+        result = client.generate([{"role": "user", "content": "Hello"}], tools=[], response_schema=schema)
+        self.assertEqual(result, {"answer": "ok"})
+
+    @patch('llm_clients.openai.OpenAI')
     def test_openai_client_generate_stream(self, mock_openai):
         mock_client_instance = MagicMock()
         mock_openai.return_value = mock_client_instance
