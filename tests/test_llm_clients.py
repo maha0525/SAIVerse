@@ -364,6 +364,46 @@ class TestLLMClients(unittest.TestCase):
         self.assertNotIn("temperature", client._request_kwargs)
 
     @patch('llm_clients.openai.OpenAI')
+    def test_openai_client_gpt5_nano_drops_non_default_temperature(self, mock_openai):
+        mock_client_instance = MagicMock()
+        mock_openai.return_value = mock_client_instance
+        mock_resp = MagicMock()
+        mock_resp.usage = None
+        mock_resp.model_dump_json.return_value = '{}'
+        mock_choice = MagicMock()
+        mock_choice.message.content = "ok"
+        mock_choice.finish_reason = "stop"
+        mock_resp.choices = [mock_choice]
+        mock_client_instance.chat.completions.create.return_value = mock_resp
+
+        client = OpenAIClient("gpt-5-nano")
+        client.configure_parameters({"temperature": 0.2})
+        client.generate([{"role": "user", "content": "hi"}], tools=[], temperature=0.3)
+
+        _, kwargs = mock_client_instance.chat.completions.create.call_args
+        self.assertNotIn("temperature", kwargs)
+
+    @patch('llm_clients.openai.OpenAI')
+    def test_openai_client_generate_with_schema_empty_candidate_raises(self, mock_openai):
+        mock_client_instance = MagicMock()
+        mock_openai.return_value = mock_client_instance
+
+        mock_resp = MagicMock()
+        mock_resp.usage = None
+        mock_resp.model_dump_json.return_value = '{}'
+        mock_choice = MagicMock()
+        mock_choice.message.content = ""
+        mock_choice.finish_reason = "stop"
+        mock_resp.choices = [mock_choice]
+        mock_client_instance.chat.completions.create.return_value = mock_resp
+
+        client = OpenAIClient("gpt-4.1-nano")
+        schema = {"title": "Decision", "type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
+
+        with self.assertRaises(InvalidRequestError):
+            client.generate([{"role": "user", "content": "Hello"}], tools=[], response_schema=schema)
+
+    @patch('llm_clients.openai.OpenAI')
     def test_openai_client_generate_stream(self, mock_openai):
         mock_client_instance = MagicMock()
         mock_openai.return_value = mock_client_instance

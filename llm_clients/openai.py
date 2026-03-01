@@ -41,6 +41,7 @@ from .utils import merge_reasoning_strings
 # Retry configuration
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 1.0  # seconds
+_TEMPERATURE_FIXED_MODELS = {"gpt-5-nano"}
 
 
 def _is_rate_limit_error(err: Exception) -> bool:
@@ -264,6 +265,10 @@ class OpenAIClient(LLMClient):
         temperature: float | None,
         stream: bool = False,
     ) -> Dict[str, Any]:
+        force_drop_temperature = self.model in _TEMPERATURE_FIXED_MODELS
+        if force_drop_temperature and temperature is not None and temperature != 1:
+            logging.info("[openai] Ignoring non-default temperature for model=%s", self.model)
+            temperature = None
         req = openai_runtime.build_request_kwargs(
             self._request_kwargs,
             temperature=temperature,
@@ -274,6 +279,8 @@ class OpenAIClient(LLMClient):
             stream=stream,
             include_stream_usage=True,
         )
+        if force_drop_temperature:
+            req.pop("temperature", None)
         if response_schema and self.structured_output_mode == "json_object":
             logging.debug("[openai] Using json_object mode with prompt-based schema")
         if response_schema and self.structured_output_mode != "json_object":
@@ -348,6 +355,9 @@ class OpenAIClient(LLMClient):
             except json.JSONDecodeError as e:
                 preview = candidate.replace("\n", "\\n")[:300]
                 logging.warning("[openai] Failed to parse structured output: %s (candidate=%r)", e, preview)
+                if not candidate:
+                    message_dict = choice.message.model_dump() if hasattr(choice.message, "model_dump") else {}
+                    logging.warning("[openai] Structured output empty candidate. message=%s", message_dict)
                 raise InvalidRequestError(
                     "Failed to parse JSON response from structured output",
                     e,
