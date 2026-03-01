@@ -147,7 +147,19 @@ class RuntimeEngine:
             if event_callback:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             sub_name = state.get(playbook_source) or state.get("last") or "basic_chat"
-            sub_pb = self.runtime._load_playbook_for(str(sub_name).strip(), persona, building_id) or self.runtime._basic_chat_playbook()
+            clean_name = str(sub_name).strip()
+            sub_pb = self.runtime._load_playbook_for(clean_name, persona, building_id)
+            if sub_pb is None:
+                if clean_name == "basic_chat":
+                    sub_pb = self.runtime._basic_chat_playbook()
+                else:
+                    error_msg = f"Sub-playbook not found: {clean_name}"
+                    state["last"] = error_msg
+                    state["_exec_error"] = True
+                    state["_exec_error_detail"] = error_msg
+                    if outputs is not None:
+                        outputs.append(error_msg)
+                    return state
             sub_input = None
             args = state.get(args_source) or {}
             if isinstance(args, dict):
@@ -158,7 +170,6 @@ class RuntimeEngine:
             eff_bid = self.runtime._effective_building_id(persona, building_id)
 
             # ── Playbook permission check ──
-            clean_name = str(sub_name).strip()
             if clean_name != "basic_chat":
                 city_id = getattr(self.manager, "city_id", None)
                 if city_id is not None:
