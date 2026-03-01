@@ -109,8 +109,14 @@ class SEARuntime:
         if meta_playbook:
             playbook = self._load_playbook_for(meta_playbook, persona, building_id)
             if playbook is None:
-                LOGGER.warning("Meta playbook '%s' not found, falling back to automatic selection", meta_playbook)
-                playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
+                LOGGER.warning("Meta playbook '%s' not found; aborting execution", meta_playbook)
+                if event_callback:
+                    event_callback({
+                        "type": "error",
+                        "code": "playbook_not_found",
+                        "meta_playbook": meta_playbook,
+                    })
+                return [f"指定されたプレイブック '{meta_playbook}' が見つかりません。プレイブックIDを確認してください。"]
         else:
             playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
         result = self._run_playbook(
