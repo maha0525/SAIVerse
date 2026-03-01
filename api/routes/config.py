@@ -476,6 +476,32 @@ def set_x_polling(req: XPollingRequest, manager=Depends(get_manager)):
     return {"success": True, "enabled": req.enabled}
 
 
+
+def _validate_playbook_override(req: "PlaybookOverrideRequest", manager: Any) -> None:
+    if req.playbook != "meta_user_manual":
+        return
+
+    selected_playbook = (req.args or {}).get("selected_playbook")
+    if not selected_playbook:
+        return
+
+    from database.session import SessionLocal
+    from database.models import Playbook
+
+    db = SessionLocal()
+    try:
+        query = db.query(Playbook).filter(Playbook.router_callable == True)
+        if not getattr(manager.state, "developer_mode", False):
+            query = query.filter(Playbook.dev_only == False)
+        allowed = {pb.name for pb in query.all() if getattr(pb, "name", None)}
+    finally:
+        db.close()
+
+    if selected_playbook not in allowed:
+        raise HTTPException(status_code=400, detail=f"Invalid selected_playbook: {selected_playbook}")
+
+
+
 class PlaybookOverrideRequest(BaseModel):
     playbook: Optional[str] = None
     args: Optional[Dict[str, Any]] = None
@@ -493,6 +519,35 @@ def get_current_playbook(manager = Depends(get_manager)):
 @router.post("/playbook")
 def set_playbook(req: PlaybookOverrideRequest, manager = Depends(get_manager)):
     """Set playbook override and args."""
+    if req.playbook == "meta_user_manual" and req.args and "selected_playbook" in req.args:
+        selected_playbook = req.args.get("selected_playbook")
+        if selected_playbook:
+            from database.session import SessionLocal
+            from database.models import Playbook
+
+            db = SessionLocal()
+            try:
+                playbook_exists = (
+                    db.query(Playbook)
+                    .filter(Playbook.name == selected_playbook)
+                    .first()
+                    is not None
+                )
+            finally:
+                db.close()
+
+            if not playbook_exists:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "selected_playbook が不正です。表示ラベルではなく "
+                        "Playbook ID（例: deep_research）を指定してください。"
+                    ),
+                )
+
+    _validate_playbook_override(req, manager)
+
+
     manager.state.current_playbook = req.playbook if req.playbook else None
     # Update playbook_args if provided, reset if playbook changed to None
     if req.args is not None:
@@ -524,7 +579,6 @@ def set_playbook(req: PlaybookOverrideRequest, manager = Depends(get_manager)):
         "playbook": manager.state.current_playbook,
         "args": manager.state.playbook_args,
     }
-
 
 class CacheConfigResponse(BaseModel):
     """Cache configuration response."""

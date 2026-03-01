@@ -146,8 +146,44 @@ class RuntimeEngine:
             node_id = getattr(node_def, "id", "exec")
             if event_callback:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
-            sub_name = state.get(playbook_source) or state.get("last") or "basic_chat"
-            sub_pb = self.runtime._load_playbook_for(str(sub_name).strip(), persona, building_id) or self.runtime._basic_chat_playbook()
+            selected_playbook = state.get(playbook_source)
+            sub_name = selected_playbook or state.get("last") or "basic_chat"
+            clean_name = str(sub_name).strip()
+            selected_playbook_missing = (
+                playbook.name == "meta_user_manual"
+                and playbook_source == "selected_playbook"
+                and bool(selected_playbook)
+            )
+
+            sub_pb = self.runtime._load_playbook_for(clean_name, persona, building_id)
+            if sub_pb is None:
+                if selected_playbook_missing:
+                    error_msg = f"指定されたツールID '{clean_name}' は存在しません。"
+                    state["last"] = error_msg
+                    state["_exec_error"] = True
+                    state["_exec_error_detail"] = f"Selected playbook not found: {clean_name}"
+                    log_sea_trace(playbook.name, node_id, "EXEC", f"→ {state['_exec_error_detail']}")
+                    if event_callback:
+                        event_callback({
+                            "type": "warning",
+                            "content": error_msg,
+                            "playbook": playbook.name,
+                            "node": node_id,
+                        })
+                    if outputs is not None:
+                        outputs.append(error_msg)
+                    return state
+
+                if clean_name == "basic_chat":
+                    sub_pb = self.runtime._basic_chat_playbook()
+                else:
+                    error_msg = f"Sub-playbook not found: {clean_name}"
+                    state["last"] = error_msg
+                    state["_exec_error"] = True
+                    state["_exec_error_detail"] = error_msg
+                    if outputs is not None:
+                        outputs.append(error_msg)
+                    return state
 
             # Build child args: static args (template) + dynamic args_source (overrides)
             child_args = {}
@@ -176,7 +212,6 @@ class RuntimeEngine:
             eff_bid = self.runtime._effective_building_id(persona, building_id)
 
             # ── Playbook permission check ──
-            clean_name = str(sub_name).strip()
             if clean_name != "basic_chat":
                 city_id = getattr(self.manager, "city_id", None)
                 if city_id is not None:

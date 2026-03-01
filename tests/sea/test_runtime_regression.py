@@ -88,19 +88,21 @@ def test_select_llm_client_raises_llmerror_when_client_unset() -> None:
     assert "LLM client is not initialized" in str(exc_info.value)
 
 
-def test_run_meta_user_falls_back_when_meta_playbook_unresolved() -> None:
+def test_run_meta_user_returns_error_when_meta_playbook_unresolved() -> None:
     runtime, persona = _runtime_and_persona()
-    selected = SimpleNamespace(name="meta_user/exec", start_node="exec", context_requirements=None)
+    events: list[dict] = []
 
     runtime._load_playbook_for = Mock(return_value=None)
-    runtime._choose_playbook = Mock(return_value=selected)
-    runtime._run_playbook = Mock(return_value=["ok"])
+    runtime._choose_playbook = Mock()
+    runtime._run_playbook = Mock()
     runtime._maybe_run_metabolism = Mock()
 
-    result = runtime.run_meta_user(persona, "hello", "b1", meta_playbook="not_found")
+    result = runtime.run_meta_user(persona, "hello", "b1", meta_playbook="not_found", event_callback=events.append)
 
-    assert result == ["ok"]
-    runtime._choose_playbook.assert_called_once_with(kind="user", persona=persona, building_id="b1")
+    assert result == ["指定されたプレイブック 'not_found' が見つかりません。プレイブックIDを確認してください。"]
+    assert events == [{"type": "error", "code": "playbook_not_found", "meta_playbook": "not_found"}]
+    runtime._choose_playbook.assert_not_called()
+    runtime._run_playbook.assert_not_called()
 
 
 def test_run_meta_user_propagates_runtime_identifiers_and_callback_payload() -> None:
@@ -318,5 +320,4 @@ def test_lg_stelis_nodes_manage_thread_state() -> None:
     assert state["stelis_parent_thread_id"] is None
     assert state["stelis_chronicle"] == "summary"
     assert active_calls == ["child-thread", "parent-thread"]
-
 
