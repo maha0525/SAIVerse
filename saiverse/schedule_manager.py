@@ -256,21 +256,21 @@ class ScheduleManager:
         persona_id = schedule.PERSONA_ID
         meta_playbook = schedule.META_PLAYBOOK
 
-        # Parse playbook_params from JSON
-        playbook_params = None
+        # Parse args from DB column PLAYBOOK_PARAMS
+        schedule_args = None
         if schedule.PLAYBOOK_PARAMS:
             try:
-                playbook_params = json.loads(schedule.PLAYBOOK_PARAMS)
+                schedule_args = json.loads(schedule.PLAYBOOK_PARAMS)
             except Exception as e:
                 LOGGER.warning("[ScheduleManager] Failed to parse PLAYBOOK_PARAMS for schedule %d: %s", schedule.SCHEDULE_ID, e)
 
         LOGGER.info(
-            "[ScheduleManager] Executing schedule %d for persona %s (type=%s, playbook=%s, params=%s)",
+            "[ScheduleManager] Executing schedule %d for persona %s (type=%s, playbook=%s, args=%s)",
             schedule.SCHEDULE_ID,
             persona_id,
             schedule.SCHEDULE_TYPE,
             meta_playbook,
-            playbook_params,
+            schedule_args,
         )
 
         # ペルソナを取得
@@ -291,11 +291,11 @@ class ScheduleManager:
         # メタプレイブックを実行（PulseController経由）
         try:
             LOGGER.info(
-                "[ScheduleManager] Submitting schedule via PulseController: playbook=%s, building=%s, prompt_length=%d, params=%s",
+                "[ScheduleManager] Submitting schedule via PulseController: playbook=%s, building=%s, prompt_length=%d, args=%s",
                 meta_playbook,
                 building_id,
                 len(user_input),
-                playbook_params,
+                schedule_args,
             )
             self.manager.pulse_controller.submit_schedule(
                 persona_id=persona_id,
@@ -303,7 +303,7 @@ class ScheduleManager:
                 user_input=user_input,
                 metadata={"schedule_id": schedule.SCHEDULE_ID, "schedule_type": schedule.SCHEDULE_TYPE},
                 meta_playbook=meta_playbook,
-                playbook_params=playbook_params,
+                args=schedule_args,
             )
             LOGGER.info("[ScheduleManager] Schedule submitted to PulseController")
 

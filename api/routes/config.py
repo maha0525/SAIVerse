@@ -478,28 +478,28 @@ def set_x_polling(req: XPollingRequest, manager=Depends(get_manager)):
 
 class PlaybookOverrideRequest(BaseModel):
     playbook: Optional[str] = None
-    playbook_params: Optional[Dict[str, Any]] = None
+    args: Optional[Dict[str, Any]] = None
 
 
 @router.get("/playbook")
 def get_current_playbook(manager = Depends(get_manager)):
-    """Get current playbook override and parameters."""
+    """Get current playbook override and args."""
     return {
         "playbook": manager.state.current_playbook,
-        "playbook_params": manager.state.playbook_params,
+        "args": manager.state.playbook_args,
     }
 
 
 @router.post("/playbook")
 def set_playbook(req: PlaybookOverrideRequest, manager = Depends(get_manager)):
-    """Set playbook override and parameters."""
+    """Set playbook override and args."""
     manager.state.current_playbook = req.playbook if req.playbook else None
-    # Update playbook_params if provided, reset if playbook changed to None
-    if req.playbook_params is not None:
-        manager.state.playbook_params = req.playbook_params
+    # Update playbook_args if provided, reset if playbook changed to None
+    if req.args is not None:
+        manager.state.playbook_args = req.args
     elif req.playbook is None:
-        # Reset params when playbook is cleared
-        manager.state.playbook_params = {}
+        # Reset args when playbook is cleared
+        manager.state.playbook_args = {}
 
     # Persist to DB so it survives server restart
     from database.session import SessionLocal
@@ -522,7 +522,7 @@ def set_playbook(req: PlaybookOverrideRequest, manager = Depends(get_manager)):
     return {
         "success": True,
         "playbook": manager.state.current_playbook,
-        "playbook_params": manager.state.playbook_params,
+        "args": manager.state.playbook_args,
     }
 
 

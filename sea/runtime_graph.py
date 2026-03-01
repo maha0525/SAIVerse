@@ -61,45 +61,24 @@ def compile_with_langgraph(
             user_message=f"プレイブック '{playbook.name}' のグラフ構築に失敗しました。",
         )
 
-    # Process input_schema to inherit variables from parent_state.
-    # source_key (from param.source) is the primary resolution mechanism.
-    # param_name in parent is a fallback for when source_key yields nothing.
+    # Resolve input_schema parameters from _args (function call model).
+    # _args is set by the caller (run_playbook, or exec/subplay node args).
+    args_dict = parent.get("_args") or {}
     inherited_vars = {}
     for param in playbook.input_schema:
         param_name = param.name
-        source_key = param.source if param.source else "input"
 
-        # Primary: resolve based on source_key
-        if source_key == "input":
-            value = user_input or ""
-        elif source_key.startswith("parent."):
-            actual_key = source_key[7:]  # strip "parent."
-            value = runtime._resolve_state_value(parent, actual_key)
-            if value is None:
-                value = ""
-            LOGGER.debug("[sea][LangGraph] Resolved %s from parent.%s: %s", param_name, actual_key, str(value)[:120] if value else "(empty)")
+        if param_name in args_dict:
+            value = args_dict[param_name]
+            LOGGER.debug("[sea][LangGraph] Resolved %s from args: %s", param_name, str(value)[:120] if value else "(empty)")
         else:
-            value = parent.get(source_key, "")
-
-        # Fallback: if source_key resolution yielded nothing, check parent by param name
-        if not value and param_name in parent and parent[param_name] is not None:
-            value = parent[param_name]
-            LOGGER.debug("[sea][LangGraph] Fallback: using parent value for %s: %s", param_name, str(value)[:120] if value else "(empty)")
-
-        # Override: explicitly passed initial_params (e.g. from schedule playbook_params)
-        # take precedence over default source resolution.  This ensures that
-        # scheduled execution with selected_playbook="send_email_to_user" is not
-        # overwritten by the generic "input" source fallback.
-        _ip = parent.get("_initial_params")
-        if isinstance(_ip, dict) and param_name in _ip and _ip[param_name] is not None:
-            value = _ip[param_name]
-            LOGGER.debug("[sea][LangGraph] Override from _initial_params for %s: %s", param_name, str(value)[:120])
+            value = param.default if param.default is not None else ""
 
         inherited_vars[param_name] = value
 
-    # Inherit pulse_usage_accumulator from parent_state if it exists (for sub-playbook calls)
+    # Inherit _pulse_usage_accumulator from parent_state if it exists (for sub-playbook calls)
     # This ensures usage is accumulated across all LLM calls in the entire pulse chain
-    parent_accumulator = parent.get("pulse_usage_accumulator")
+    parent_accumulator = parent.get("_pulse_usage_accumulator")
     if parent_accumulator:
         # Use the same accumulator (reference) to accumulate across sub-playbooks
         usage_accumulator = parent_accumulator
@@ -125,43 +104,22 @@ def compile_with_langgraph(
     # Inherit cancellation token from parent state if not explicitly provided
     effective_cancellation_token = cancellation_token or parent.get("_cancellation_token")
 
-    # Forward initial_params into the LangGraph state so that exec nodes
-    # can pass them to sub-playbooks.  This enables meta playbooks (e.g.
-    # meta_user_manual) to relay trigger-specific params (trigger_tweet_id,
-    # etc.) without declaring each one in their own input_schema.
-    forwarded_params = {}
-    _ip = parent.get("_initial_params")
-    if _ip and isinstance(_ip, dict):
-        reserved = {
-            "messages", "inputs", "context", "last", "outputs",
-            "persona_obj", "pulse_id", "pulse_type",
-            "_cancellation_token", "pulse_usage_accumulator",
-            "_activity_trace", "_intermediate_msgs",
-        }
-        for k, v in _ip.items():
-            if k not in reserved and k not in inherited_vars:
-                forwarded_params[k] = v
-        if forwarded_params:
-            LOGGER.debug(
-                "[sea][LangGraph] Forwarding initial_params to state: %s",
-                list(forwarded_params.keys()),
-            )
-
     initial_state = {
-        "messages": list(base_messages),
-        "inputs": {"input": user_input or ""},
-        "context": {},
-        "last": user_input or "",
-        "outputs": _lg_outputs,
-        "persona_obj": persona,
-        "pulse_id": pulse_id,
-        "pulse_type": pulse_type,  # user/schedule/auto
+        # System variables (_ prefix, auto-inherited, nodes don't touch)
+        "_messages": list(base_messages),
+        "_context": {},
+        "_outputs": _lg_outputs,
+        "_persona_obj": persona,
+        "_pulse_id": pulse_id,
+        "_pulse_type": pulse_type,  # user/schedule/auto
         "_cancellation_token": effective_cancellation_token,  # For node-level cancellation checks
-        "pulse_usage_accumulator": usage_accumulator,  # Inherit from parent or create new
+        "_pulse_usage_accumulator": usage_accumulator,  # Inherit from parent or create new
         "_activity_trace": activity_trace,  # Shared trace of exec/tool activities
         "_intermediate_msgs": [],  # Track intermediate node outputs for profile-based context
-        **forwarded_params,  # Forward initial_params (trigger data etc.)
-        **inherited_vars,  # Add inherited variables from input_schema (takes precedence)
+        # Playbook variables (no prefix)
+        "last": user_input or "",
+        "input": user_input or "",
+        **inherited_vars,  # Add resolved parameters from args/input_schema
     }
 
     # Execute compiled playbook

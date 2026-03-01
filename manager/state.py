@@ -72,7 +72,7 @@ class CoreState:
     developer_mode: bool = field(default_factory=_default_developer_mode)  # Developer mode: shows Task, Phenomena, dev_only playbooks
     x_polling_enabled: bool = field(default_factory=_default_x_polling_enabled)  # X mention polling (default OFF)
     current_playbook: Optional[str] = None  # Selected playbook override for Chat Options
-    playbook_params: Dict[str, Any] = field(default_factory=dict)  # Parameters for the selected playbook
+    playbook_args: Dict[str, Any] = field(default_factory=dict)  # Arguments for the selected playbook
 
     # Cache settings for Anthropic prompt caching
     cache_enabled: bool = True  # Whether prompt caching is enabled

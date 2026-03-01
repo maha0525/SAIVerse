@@ -228,7 +228,11 @@ class SubPlayNodeDef(BaseModel):
     id: str
     type: Literal[NodeType.SUBPLAY]
     playbook: str = Field(description="Name of the sub-playbook to execute")
-    input_template: Optional[str] = Field(default="{input}", description="Template for the input passed to the sub-playbook")
+    args: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Args to pass to the sub-playbook. Values are template strings "
+                    "resolved against current state (e.g., '{objective}')."
+    )
     propagate_output: bool = Field(default=False, description="If true, append sub-playbook outputs to parent outputs")
     execution: Optional[str] = Field(
         default="inline",
@@ -270,6 +274,12 @@ class ExecNodeDef(BaseModel):
     playbook_source: str = Field(
         default="selected_playbook",
         description="State variable name containing the playbook name to execute."
+    )
+    args: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Static args to pass to the sub-playbook. Values are template strings "
+                    "resolved against current state (e.g., '{objective}'). "
+                    "These are merged with dynamic args from args_source (args_source takes precedence)."
     )
     args_source: Optional[str] = Field(
         default="selected_args",
@@ -360,10 +370,6 @@ NodeDef = Union[
 class InputParam(BaseModel):
     name: str
     description: str
-    source: Optional[str] = Field(
-        default=None,
-        description="Optional parent state key (e.g., 'parent.input', 'router.query'). If not specified, defaults to 'input'."
-    )
 
     # Type and validation
     param_type: str = Field(

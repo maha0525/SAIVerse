@@ -41,7 +41,7 @@ class RuntimeEngine:
             if event_callback:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             tool_func = TOOL_REGISTRY.get(tool_name)
-            persona_obj = state.get("persona_obj") or persona
+            persona_obj = state.get("_persona_obj") or persona
             persona_id = getattr(persona_obj, "persona_id", "unknown")
 
             try:
@@ -148,12 +148,30 @@ class RuntimeEngine:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             sub_name = state.get(playbook_source) or state.get("last") or "basic_chat"
             sub_pb = self.runtime._load_playbook_for(str(sub_name).strip(), persona, building_id) or self.runtime._basic_chat_playbook()
-            sub_input = None
-            args = state.get(args_source) or {}
-            if isinstance(args, dict):
-                sub_input = args.get("input") or args.get("query")
+
+            # Build child args: static args (template) + dynamic args_source (overrides)
+            child_args = {}
+            # 1. Resolve static args from node_def (template strings like "{objective}")
+            static_args = getattr(node_def, "args", None)
+            if static_args and isinstance(static_args, dict):
+                state_vars = {k: v for k, v in state.items() if not k.startswith("_")}
+                for key, tmpl in static_args.items():
+                    if isinstance(tmpl, str):
+                        child_args[key] = _format(tmpl, state_vars)
+                    else:
+                        child_args[key] = tmpl
+            # 2. Merge dynamic args from args_source (takes precedence)
+            dynamic_args = state.get(args_source) or {}
+            if isinstance(dynamic_args, dict):
+                child_args.update(dynamic_args)
+
+            # Determine sub_input for context preparation
+            sub_input = child_args.get("input") or child_args.get("query")
             if not sub_input:
-                sub_input = state.get("inputs", {}).get("input")
+                sub_input = state.get("input")
+
+            # Set _args on parent state so compile_with_langgraph can resolve them
+            state["_args"] = child_args if child_args else None
 
             eff_bid = self.runtime._effective_building_id(persona, building_id)
 
@@ -179,7 +197,7 @@ class RuntimeEngine:
                         # Schedule pulses (external events, timed schedules) have no
                         # frontend connection for interactive dialogs.  The user's
                         # act of configuring the automation serves as pre-approval.
-                        pulse_type = state.get("pulse_type")
+                        pulse_type = state.get("_pulse_type")
                         if pulse_type == "schedule":
                             log_sea_trace(playbook.name, node_id, "PERM", f"{clean_name}: auto-allow for schedule pulse")
                             # Fall through to execution
@@ -251,7 +269,7 @@ class RuntimeEngine:
                     persona, error_msg,
                     role="system",
                     tags=["error", "exec", str(sub_name).strip()],
-                    pulse_id=state.get("pulse_id"),
+                    pulse_id=state.get("_pulse_id"),
                 ):
                     LOGGER.warning("Failed to store exec error to SAIMemory for node %s", node_id)
                     if event_callback:
@@ -308,7 +326,7 @@ class RuntimeEngine:
                     for path, val in flat.items():
                         variables[f"{key}.{path}"] = val
             variables.update({
-                "input": state.get("inputs", {}).get("input", ""),
+                "input": state.get("input", ""),
                 "last": state.get("last", ""),
                 "persona_id": getattr(persona, "persona_id", None),
                 "persona_name": getattr(persona, "persona_name", None),
@@ -321,7 +339,7 @@ class RuntimeEngine:
             LOGGER.debug("[memorize] memo_text=%s", memo_text)
             role = getattr(node_def, "role", "assistant") or "assistant"
             tags = getattr(node_def, "tags", None)
-            pulse_id = state.get("pulse_id")
+            pulse_id = state.get("_pulse_id")
             metadata_key = getattr(node_def, "metadata_key", None)
             metadata = state.get(metadata_key) if metadata_key else None
             if not self.runtime._store_memory(persona, memo_text, role=role, tags=tags, pulse_id=pulse_id, metadata=metadata):
@@ -369,7 +387,7 @@ class RuntimeEngine:
         reasoning_text = state.pop("_reasoning_text", "")
         reasoning_details_val = state.pop("_reasoning_details", None)
         activity_trace = state.get("_activity_trace")
-        pulse_id = state.get("pulse_id")
+        pulse_id = state.get("_pulse_id")
         eff_bid = self.runtime._effective_building_id(persona, building_id)
         # Build extra metadata with reasoning for SAIMemory storage
         speak_metadata: Dict[str, Any] = {}

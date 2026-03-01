@@ -4,13 +4,11 @@
     "input_schema": [
         {
             "name": "selected_playbook",
-            "description": "Name of the playbook to execute",
-            "source": "parent.selected_playbook"
+            "description": "Name of the playbook to execute"
         },
         {
             "name": "selected_args",
-            "description": "Arguments for the playbook",
-            "source": "parent.selected_args"
+            "description": "Arguments for the playbook"
         }
     ],
     "output_schema": null,
@@ -28,7 +26,7 @@
             "id": "finalize",
             "type": "subplay",
             "playbook": "sub_speak",
-            "input_template": "{input}",
+            "args": {"input": "{input}"},
             "propagate_output": true,
             "next": null
         }

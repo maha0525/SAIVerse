@@ -4,8 +4,7 @@
     "input_schema": [
         {
             "name": "task_summary",
-            "description": "現在のタスク情報",
-            "source": "parent.task_summary"
+            "description": "現在のタスク情報"
         }
     ],
     "router_callable": false,

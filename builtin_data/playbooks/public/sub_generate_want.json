@@ -4,8 +4,7 @@
     "input_schema": [
         {
             "name": "input",
-            "description": "コンテキスト情報",
-            "source": "parent.situation"
+            "description": "コンテキスト情報"
         }
     ],
     "router_callable": false,

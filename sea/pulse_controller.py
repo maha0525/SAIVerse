@@ -73,7 +73,7 @@ class ExecutionRequest:
     user_input: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
     meta_playbook: Optional[str] = None
-    playbook_params: Optional[Dict[str, Any]] = None  # Parameters for meta playbook
+    args: Optional[Dict[str, Any]] = None  # Arguments for meta playbook
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None
     pulse_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     cancellation_token: CancellationToken = field(default_factory=CancellationToken)
@@ -307,7 +307,7 @@ class PulseController:
                 building_id=request.building_id,
                 metadata=request.metadata,
                 meta_playbook=request.meta_playbook,
-                playbook_params=request.playbook_params,
+                args=request.args,
                 event_callback=request.event_callback,
                 cancellation_token=request.cancellation_token,
                 pulse_type=request.type,
@@ -399,7 +399,7 @@ class PulseController:
         user_input: str,
         metadata: Optional[Dict[str, Any]] = None,
         meta_playbook: Optional[str] = None,
-        playbook_params: Optional[Dict[str, Any]] = None,
+        args: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Optional[List[str]]:
         """Submit a user input request."""
@@ -410,7 +410,7 @@ class PulseController:
             user_input=user_input,
             metadata=metadata,
             meta_playbook=meta_playbook,
-            playbook_params=playbook_params,
+            args=args,
             event_callback=event_callback,
         )
         return self.submit(request)
@@ -422,7 +422,7 @@ class PulseController:
         user_input: str,
         metadata: Optional[Dict[str, Any]] = None,
         meta_playbook: Optional[str] = None,
-        playbook_params: Optional[Dict[str, Any]] = None,
+        args: Optional[Dict[str, Any]] = None,
     ) -> Optional[List[str]]:
         """Submit a scheduled execution request."""
         request = ExecutionRequest(
@@ -432,7 +432,7 @@ class PulseController:
             user_input=user_input,
             metadata=metadata,
             meta_playbook=meta_playbook,
-            playbook_params=playbook_params,
+            args=args,
         )
         return self.submit(request)
     

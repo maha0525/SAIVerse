@@ -24,7 +24,7 @@ def test_lg_tool_node_delegates_to_engine() -> None:
     node = runtime._lg_tool_node(node_def, persona, playbook)
     result = asyncio.run(node({}))
 
-    runtime._runtime_engine.lg_tool_node.assert_called_once_with(node_def, persona, playbook, None)
+    runtime._runtime_engine.lg_tool_node.assert_called_once_with(node_def, persona, playbook, None, auto_mode=False)
     assert result == expected
 
 

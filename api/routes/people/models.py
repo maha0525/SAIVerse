@@ -268,7 +268,7 @@ class ScheduleItem(BaseModel):
     interval_seconds: Optional[int] = None
     last_executed_at: Optional[datetime] = None
     completed: bool
-    playbook_params: Optional[dict] = None  # Playbook parameters (e.g., {"selected_playbook": "xxx"})
+    args: Optional[dict] = None  # Playbook arguments (e.g., {"selected_playbook": "xxx"})
 
 class CreateScheduleRequest(BaseModel):
     schedule_type: str # periodic, oneshot, interval
@@ -283,8 +283,8 @@ class CreateScheduleRequest(BaseModel):
     scheduled_datetime: Optional[str] = None # "YYYY-MM-DD HH:MM" (in persona TZ)
     # interval
     interval_seconds: Optional[int] = None
-    # playbook params
-    playbook_params: Optional[dict] = None  # Playbook parameters (e.g., {"selected_playbook": "xxx"})
+    # playbook args
+    args: Optional[dict] = None  # Playbook arguments (e.g., {"selected_playbook": "xxx"})
 
 class UpdateScheduleRequest(BaseModel):
     schedule_type: Optional[str] = None
@@ -296,7 +296,7 @@ class UpdateScheduleRequest(BaseModel):
     time_of_day: Optional[str] = None
     scheduled_datetime: Optional[str] = None  # "YYYY-MM-DD HH:MM" (in persona TZ)
     interval_seconds: Optional[int] = None
-    playbook_params: Optional[dict] = None  # Playbook parameters (e.g., {"selected_playbook": "xxx"})
+    args: Optional[dict] = None  # Playbook arguments (e.g., {"selected_playbook": "xxx"})
 
 
 # -----------------------------------------------------------------------------

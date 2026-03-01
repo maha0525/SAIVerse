@@ -75,7 +75,9 @@
             "id": "generate_interior_image",
             "type": "subplay",
             "playbook": "generate_image",
-            "input_template": "Building interior image: {building_plan.interior_prompt}\n\nGenerate an interior scene image for a building. The image should capture the atmosphere and visual style of the space. Use 16:9 aspect ratio for a wide interior view.",
+            "args": {
+                "input": "Building interior image: {building_plan.interior_prompt}\n\nGenerate an interior scene image for a building. The image should capture the atmosphere and visual style of the space. Use 16:9 aspect ratio for a wide interior view."
+            },
             "propagate_output": false,
             "next": "create_with_image"
         },

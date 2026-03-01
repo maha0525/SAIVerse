@@ -71,7 +71,9 @@
             "id": "exec_search",
             "type": "subplay",
             "playbook": "web_search_step",
-            "input_template": "## 調査トピック\n{research_topic}\n\n## 調査指示\n{research_plan.directives}\n\n## 検索のヒント\n{research_plan.search_hints}\n\n## 参考資料\n{reference_content}",
+            "args": {
+                "input": "## 調査トピック\n{research_topic}\n\n## 調査指示\n{research_plan.directives}\n\n## 検索のヒント\n{research_plan.search_hints}\n\n## 参考資料\n{reference_content}"
+            },
             "propagate_output": true,
             "execution": "subagent",
             "subagent_chronicle": true,

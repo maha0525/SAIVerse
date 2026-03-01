@@ -372,7 +372,7 @@ class SAIVerseManager(
         except Exception as exc:
             logging.exception("SEA auto run failed: %s", exc)
 
-    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, playbook_params: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[str]:
+    def run_sea_user(self, persona, building_id: str, user_input: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None, args: Optional[Dict[str, Any]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> List[str]:
         """Run user input via PulseController."""
         try:
             result = self.pulse_controller.submit_user(
@@ -381,7 +381,7 @@ class SAIVerseManager(
                 user_input=user_input,
                 metadata=metadata,
                 meta_playbook=meta_playbook,
-                playbook_params=playbook_params,
+                args=args,
                 event_callback=event_callback,
             )
             return result if result else []
@@ -671,11 +671,11 @@ class SAIVerseManager(
 
     def handle_user_input_stream(
         self, message: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None,
-        playbook_params: Optional[Dict[str, Any]] = None, building_id: Optional[str] = None,
+        args: Optional[Dict[str, Any]] = None, building_id: Optional[str] = None,
     ) -> Iterator[str]:
         yield from self.runtime.handle_user_input_stream(
             message, metadata=metadata, meta_playbook=meta_playbook,
-            playbook_params=playbook_params, building_id=building_id,
+            args=args, building_id=building_id,
         )
 
     def cancel_active_generation(self) -> bool:

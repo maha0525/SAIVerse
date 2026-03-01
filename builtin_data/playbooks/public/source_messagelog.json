@@ -5,25 +5,21 @@
         {
             "name": "objective",
             "param_type": "string",
-            "source": "parent.objective",
             "description": "What to find"
         },
         {
             "name": "context_text",
             "param_type": "string",
-            "source": "parent.context_text",
             "description": "Pre-resolved context from URIs"
         },
         {
             "name": "depth",
             "param_type": "string",
-            "source": "parent.depth",
             "description": "shallow/normal/deep"
         },
         {
             "name": "max_iterations",
             "param_type": "number",
-            "source": "parent.max_iterations",
             "description": "Max search iterations"
         }
     ],

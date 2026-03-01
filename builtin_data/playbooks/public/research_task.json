@@ -5,25 +5,21 @@
         {
             "name": "objective",
             "param_type": "string",
-            "source": "parent.objective",
             "description": "調査目的"
         },
         {
             "name": "context_refs",
             "param_type": "string",
-            "source": "parent.context_refs",
             "description": "コンマ区切りのSAIVerse URI群（手がかり情報）"
         },
         {
             "name": "depth",
             "param_type": "string",
-            "source": "parent.depth",
             "description": "調査深度: shallow/normal/deep"
         },
         {
             "name": "task_index",
             "param_type": "number",
-            "source": "parent.task_index",
             "description": "タスク番号"
         }
     ],
@@ -125,6 +121,12 @@
             "id": "exec_source",
             "type": "exec",
             "playbook_source": "selected_playbook",
+            "args": {
+                "objective": "{objective}",
+                "context_text": "{context_text}",
+                "depth": "{depth}",
+                "max_iterations": "{max_iterations}"
+            },
             "next": "check_result"
         },
         {

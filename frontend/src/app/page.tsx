@@ -237,7 +237,7 @@ export default function Home() {
     }, [inputValue, adjustTextareaHeight]);
     const [isPeopleModalOpen, setIsPeopleModalOpen] = useState(false);
     const [selectedPlaybook, setSelectedPlaybook] = useState<string | null>('meta_user');
-    const [playbookParams, setPlaybookParams] = useState<Record<string, any>>({});
+    const [playbookArgs, setPlaybookArgs] = useState<Record<string, any>>({});
     const [selectedModel, setSelectedModel] = useState<string>(''); // Model ID selected in Chat Options
     const [selectedModelDisplayName, setSelectedModelDisplayName] = useState<string>(''); // Model display name
     const [isDragOver, setIsDragOver] = useState(false); // Drag & drop state
@@ -620,8 +620,8 @@ export default function Home() {
                     if (data.playbook) {
                         setSelectedPlaybook(data.playbook);
                     }
-                    if (data.playbook_params && Object.keys(data.playbook_params).length > 0) {
-                        setPlaybookParams(data.playbook_params);
+                    if (data.args && Object.keys(data.args).length > 0) {
+                        setPlaybookArgs(data.args);
                     }
                 }
             })
@@ -1035,11 +1035,11 @@ export default function Home() {
 
         const currentAttachments = attachments;
         const currentPlaybook = selectedPlaybook;
-        const currentPlaybookParams = playbookParams;
+        const currentPlaybookArgs = playbookArgs;
 
         setAttachments([]);
-        // Reset playbook params after sending
-        setPlaybookParams({});
+        // Reset playbook args after sending
+        setPlaybookArgs({});
 
         try {
             const res = await fetch('/api/chat/send', {
@@ -1055,7 +1055,7 @@ export default function Home() {
                         mime_type: a.mimeType
                     })) : undefined,
                     meta_playbook: currentPlaybook,
-                    playbook_params: Object.keys(currentPlaybookParams).length > 0 ? currentPlaybookParams : undefined
+                    args: Object.keys(currentPlaybookArgs).length > 0 ? currentPlaybookArgs : undefined
                 })
             });
 
@@ -1923,8 +1923,8 @@ export default function Home() {
                         <ToolModeSelector
                             selectedPlaybook={selectedPlaybook}
                             onPlaybookChange={setSelectedPlaybook}
-                            playbookParams={playbookParams}
-                            onPlaybookParamsChange={setPlaybookParams}
+                            playbookArgs={playbookArgs}
+                            onPlaybookArgsChange={setPlaybookArgs}
                         />
                     </div>
 

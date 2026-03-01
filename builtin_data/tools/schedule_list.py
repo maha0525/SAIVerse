@@ -106,7 +106,7 @@ def schedule_list() -> str:
                     last_exec_local = last_exec_utc.astimezone(persona_tz)
                     detail += f" (最終実行: {last_exec_local.strftime('%Y-%m-%d %H:%M')})"
 
-            # Parse playbook_params
+            # Parse args from DB column PLAYBOOK_PARAMS
             params_str = "(なし)"
             if s.PLAYBOOK_PARAMS:
                 try:

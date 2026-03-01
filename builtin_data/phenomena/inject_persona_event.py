@@ -23,7 +23,7 @@ def inject_persona_event(
     persona_id: str,
     event_description: str,
     meta_playbook: Optional[str] = None,
-    playbook_params_json: Optional[str] = None,
+    args_json: Optional[str] = None,
     event_type: Optional[str] = None,
     _manager: Any = None,
     **_kwargs: Any,
@@ -38,7 +38,7 @@ def inject_persona_event(
         persona_id: Target persona ID.
         event_description: Human-readable description (becomes user_input).
         meta_playbook: Meta playbook to use (default: "meta_user").
-        playbook_params_json: JSON string of playbook params (incl. selected_playbook).
+        args_json: JSON string of playbook args (incl. selected_playbook).
         event_type: Event type tag for persona_event_log.
         _manager: SAIVerseManager reference (injected by PhenomenonManager).
     """
@@ -55,7 +55,7 @@ def inject_persona_event(
             persona_id=persona_id,
             content=event_description,
             event_type=event_type,
-            payload=playbook_params_json,
+            payload=args_json,
         )
         LOGGER.info(
             "[inject_persona_event] Recorded event for %s (type=%s)",
@@ -90,24 +90,24 @@ def inject_persona_event(
         )
         return f"error: persona {persona_id} has no building"
 
-    # Parse playbook params
-    playbook_params = None
-    if playbook_params_json:
+    # Parse playbook args
+    playbook_args = None
+    if args_json:
         try:
-            playbook_params = json.loads(playbook_params_json)
+            playbook_args = json.loads(args_json)
         except (json.JSONDecodeError, TypeError):
             LOGGER.warning(
-                "[inject_persona_event] Failed to parse playbook_params_json: %s",
-                playbook_params_json,
+                "[inject_persona_event] Failed to parse args_json: %s",
+                args_json,
             )
 
     # Build enriched user input with <system> tag
-    # Extract author info from playbook_params for richer context
+    # Extract author info from playbook_args for richer context
     extra_lines = []
-    if playbook_params:
-        author_username = playbook_params.get("trigger_author_username")
-        author_name = playbook_params.get("trigger_author_name")
-        mention_text = playbook_params.get("trigger_mention_text")
+    if playbook_args:
+        author_username = playbook_args.get("trigger_author_username")
+        author_name = playbook_args.get("trigger_author_name")
+        mention_text = playbook_args.get("trigger_mention_text")
         if author_username or author_name:
             who = author_name or author_username
             if author_username:
@@ -128,15 +128,15 @@ def inject_persona_event(
 {event_description}
 </system>"""
 
-    # When playbook_params has selected_playbook, use meta_user_manual
+    # When playbook_args has selected_playbook, use meta_user_manual
     # which skips the LLM router and goes directly to exec(selected_playbook).
-    # The trigger params (trigger_tweet_id, etc.) are forwarded to the sub-playbook
-    # via the _initial_params mechanism in the runtime.
-    if playbook_params and "selected_playbook" in playbook_params:
+    # The trigger args (trigger_tweet_id, etc.) are forwarded to the sub-playbook
+    # via the _args mechanism in the runtime.
+    if playbook_args and "selected_playbook" in playbook_args:
         effective_playbook = "meta_user_manual"
         LOGGER.info(
             "[inject_persona_event] Using meta_user_manual with selected_playbook='%s'",
-            playbook_params["selected_playbook"],
+            playbook_args["selected_playbook"],
         )
     else:
         effective_playbook = meta_playbook or "meta_user"
@@ -148,11 +148,11 @@ def inject_persona_event(
             user_input=user_input,
             metadata={"source": "external_event", "event_type": event_type},
             meta_playbook=effective_playbook,
-            playbook_params=playbook_params,
+            args=playbook_args,
         )
         LOGGER.info(
-            "[inject_persona_event] Submitted to PulseController: persona=%s, playbook=%s, params=%s",
-            persona_id, effective_playbook, playbook_params,
+            "[inject_persona_event] Submitted to PulseController: persona=%s, playbook=%s, args=%s",
+            persona_id, effective_playbook, playbook_args,
         )
         return "ok"
     except Exception:
@@ -183,9 +183,9 @@ def schema() -> PhenomenonSchema:
                     "type": "string",
                     "description": "使用するメタPlaybook名（デフォルト: meta_user）",
                 },
-                "playbook_params_json": {
+                "args_json": {
                     "type": "string",
-                    "description": "Playbook実行パラメータ（JSON文字列）",
+                    "description": "Playbook実行引数（JSON文字列）",
                 },
                 "event_type": {
                     "type": "string",

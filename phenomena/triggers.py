@@ -68,7 +68,7 @@ TRIGGER_SCHEMAS: Dict[TriggerType, Dict[str, str]] = {
         "author_username": "メンション送信者のユーザー名",
         "author_name": "メンション送信者の表示名",
         "mention_text": "メンション本文",
-        "playbook_params_json": "Playbook実行パラメータ（JSON文字列）",
+        "args_json": "Playbook実行引数（JSON文字列）",
     },
     TriggerType.EXTERNAL_WEBHOOK: {
         "source": "Webhookの送信元",

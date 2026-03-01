@@ -15,7 +15,7 @@
             "id": "speak",
             "type": "subplay",
             "playbook": "sub_speak",
-            "input_template": "{input}",
+            "args": {"input": "{input}", "metadata": "{metadata}"},
             "propagate_output": true,
             "next": null
         }

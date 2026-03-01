@@ -320,7 +320,12 @@
             "id": "exec_research",
             "type": "subplay",
             "playbook": "research_task",
-            "input_template": "{current_task.objective}",
+            "args": {
+                "objective": "{current_task.objective}",
+                "context_refs": "{current_task.context_refs}",
+                "depth": "{current_task.depth}",
+                "task_index": "{task_index}"
+            },
             "propagate_output": false,
             "execution": "subagent",
             "subagent_chronicle": true,

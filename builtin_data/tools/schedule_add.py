@@ -30,8 +30,8 @@ def schedule_add(
     scheduled_datetime: Optional[str] = None,
     # interval用
     interval_seconds: Optional[int] = None,
-    # playbook params
-    playbook_params: Optional[Dict[str, Any]] = None,
+    # playbook args
+    args: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     新しいスケジュールを追加する。
@@ -46,7 +46,7 @@ def schedule_add(
         time_of_day: 実行時刻 (periodic用、"HH:MM"形式、例: "09:00")
         scheduled_datetime: 実行日時 (oneshot用、"YYYY-MM-DD HH:MM"形式、ペルソナのタイムゾーンで指定)
         interval_seconds: 実行間隔（秒）(interval用)
-        playbook_params: Playbookパラメータ（例: {"selected_playbook": "send_email_to_user"}）
+        args: Playbook引数（例: {"selected_playbook": "send_email_to_user"}）
 
     Returns:
         str: 実行結果メッセージ
@@ -94,7 +94,7 @@ def schedule_add(
             DESCRIPTION=description,
             PRIORITY=priority,
             ENABLED=enabled,
-            PLAYBOOK_PARAMS=json.dumps(playbook_params) if playbook_params else None,
+            PLAYBOOK_PARAMS=json.dumps(args) if args else None,
         )
 
         # スケジュールタイプごとの設定
@@ -206,9 +206,9 @@ def schema() -> ToolSchema:
                     "type": "integer",
                     "description": "実行間隔（interval用、秒単位）。例: 600で10分ごと",
                 },
-                "playbook_params": {
+                "args": {
                     "type": "object",
-                    "description": "Playbookパラメータ。meta_playbookがmeta_user_manualの場合、selected_playbookで実行するサブPlaybookを指定できる。例: {\"selected_playbook\": \"send_email_to_user\"}",
+                    "description": "Playbook引数。meta_playbookがmeta_user_manualの場合、selected_playbookで実行するサブPlaybookを指定できる。例: {\"selected_playbook\": \"send_email_to_user\"}",
                 },
             },
             "required": ["schedule_type", "meta_playbook"],

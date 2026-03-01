@@ -303,7 +303,7 @@ class SendMessageRequest(BaseModel):
     attachment: Optional[str] = None  # Base64 encoded file (legacy, single attachment)
     attachments: Optional[List[AttachmentData]] = None  # New: multiple attachments
     meta_playbook: Optional[str] = None
-    playbook_params: Optional[Dict[str, Any]] = None  # Parameters for meta playbook
+    args: Optional[Dict[str, Any]] = None  # Arguments for meta playbook
     metadata: Optional[Dict[str, Any]] = None
 
 def _store_uploaded_attachment(base64_data: str) -> Optional[Dict[str, str]]:
@@ -560,7 +560,7 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
                 req.message,
                 metadata=metadata,
                 meta_playbook=req.meta_playbook,
-                playbook_params=req.playbook_params,
+                args=req.args,
                 building_id=building_id,
             )
             

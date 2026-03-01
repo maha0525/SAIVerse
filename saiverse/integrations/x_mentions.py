@@ -127,8 +127,8 @@ class XMentionIntegration(BaseIntegration):
             if max_id is None or tweet_id > max_id:
                 max_id = tweet_id
 
-            # Build playbook params for mechanical propagation
-            playbook_params = {
+            # Build playbook args for mechanical propagation
+            playbook_args = {
                 "selected_playbook": "x_reply",
                 "trigger_tweet_id": tweet_id,
                 "trigger_author_username": mention.get("author_username", ""),
@@ -144,8 +144,8 @@ class XMentionIntegration(BaseIntegration):
                     "author_username": mention.get("author_username", ""),
                     "author_name": mention.get("author_name", ""),
                     "mention_text": mention.get("text", ""),
-                    "playbook_params_json": json.dumps(
-                        playbook_params, ensure_ascii=False
+                    "args_json": json.dumps(
+                        playbook_args, ensure_ascii=False
                     ),
                 },
             )

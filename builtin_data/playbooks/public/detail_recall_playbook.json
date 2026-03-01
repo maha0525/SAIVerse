@@ -5,13 +5,11 @@
     "input_schema": [
         {
             "name": "summary_uuid",
-            "description": "UUID from a previous summary to recall details from",
-            "source": null
+            "description": "UUID from a previous summary to recall details from"
         },
         {
             "name": "recall_request",
-            "description": "User's request for what to recall (e.g., 'show me more before that')",
-            "source": null
+            "description": "User's request for what to recall (e.g., 'show me more before that')"
         }
     ],
     "output_schema": [

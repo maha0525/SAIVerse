@@ -4,8 +4,7 @@
     "input_schema": [
         {
             "name": "input",
-            "description": "Trigger input (usually empty)",
-            "source": null
+            "description": "Trigger input (usually empty)"
         }
     ],
     "output_schema": [
