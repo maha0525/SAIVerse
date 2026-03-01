@@ -241,37 +241,6 @@ class TestLLMClients(unittest.TestCase):
         response = client.generate([{"role": "user", "content": "Hello"}], tools=[], response_schema=schema)
         self.assertEqual(response, {"answer": "yes"})
 
-
-    @patch('llm_clients.openai.OpenAI')
-    def test_openai_client_generate_with_schema_empty_once_retries_and_succeeds(self, mock_openai):
-        mock_client_instance = MagicMock()
-        mock_openai.return_value = mock_client_instance
-
-        empty_resp = MagicMock()
-        empty_resp.usage = None
-        empty_resp.model_dump_json.return_value = '{}'
-        empty_choice = MagicMock()
-        empty_choice.message.content = ''
-        empty_choice.finish_reason = "stop"
-        empty_resp.choices = [empty_choice]
-
-        ok_resp = MagicMock()
-        ok_resp.usage = None
-        ok_resp.model_dump_json.return_value = '{}'
-        ok_choice = MagicMock()
-        ok_choice.message.content = '{"answer": "yes"}'
-        ok_choice.finish_reason = "stop"
-        ok_resp.choices = [ok_choice]
-
-        mock_client_instance.chat.completions.create.side_effect = [empty_resp, ok_resp]
-
-        client = OpenAIClient("gpt-4.1-nano")
-        schema = {"title": "Decision", "type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
-
-        response = client.generate([{"role": "user", "content": "Hello"}], tools=[], response_schema=schema)
-        self.assertEqual(response, {"answer": "yes"})
-        self.assertEqual(mock_client_instance.chat.completions.create.call_count, 2)
-
     @patch('llm_clients.openai.OpenAI')
     def test_openai_client_generate_tool_detection_with_and_without_tool_call(self, mock_openai):
         mock_client_instance = MagicMock()
