@@ -94,6 +94,44 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
     )
 
 
+def _extract_json_object_candidate(text: str) -> str:
+    """Extract first valid JSON object candidate from a model response."""
+    candidate = (text or "").strip()
+    if not candidate:
+        return ""
+
+    if candidate.startswith("```"):
+        for segment in candidate.split("```"):
+            segment = segment.strip()
+            if segment.startswith("json"):
+                segment = segment[4:].strip()
+            if segment.startswith("{") and segment.endswith("}"):
+                return segment
+
+    if candidate.startswith("{") and candidate.endswith("}"):
+        return candidate
+
+    starts = [i for i, ch in enumerate(candidate) if ch == "{"]
+    decoder = json.JSONDecoder()
+    for start in starts:
+        try:
+            parsed, end = decoder.raw_decode(candidate[start:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return candidate[start : start + end]
+    return candidate
+
+
+def _safe_candidate_preview(candidate: str, limit: int = 240) -> str:
+    escaped = candidate.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    if len(escaped) <= limit:
+        return escaped
+    head = escaped[:120]
+    tail = escaped[-120:]
+    return f"{head}...<{len(escaped) - 240} chars omitted>...{tail}"
+
+
 class OpenAIClient(LLMClient):
     """Client for OpenAI-compatible chat completions API."""
 
@@ -274,27 +312,28 @@ class OpenAIClient(LLMClient):
         self._store_reasoning_details(reasoning_details)
 
         if response_schema:
-            candidate = text_body.strip()
-            if candidate.startswith("```"):
-                for segment in candidate.split("```"):
-                    segment = segment.strip()
-                    if segment.startswith("json"):
-                        segment = segment[4:].strip()
-                    if segment.startswith("{") and segment.endswith("}"):
-                        candidate = segment
-                        break
+            candidate = _extract_json_object_candidate(text_body)
 
             try:
                 parsed = json.loads(candidate)
                 if isinstance(parsed, dict):
-                    return parsed
+                    required = response_schema.get("required") if isinstance(response_schema, dict) else None
+                    required_keys = [k for k in required if isinstance(k, str)] if isinstance(required, list) else []
+                    if all(k in parsed for k in required_keys):
+                        return parsed
+                    logging.warning("[openai] Structured output missing required keys")
             except json.JSONDecodeError as e:
-                logging.warning("[openai] Failed to parse structured output: %s", e)
+                preview = _safe_candidate_preview(candidate)
+                logging.warning("[openai] Failed to parse structured output: %s (candidate=%r)", e, preview)
                 raise InvalidRequestError(
                     "Failed to parse JSON response from structured output",
                     e,
                     user_message="LLMからの応答を解析できませんでした。再度お試しください。",
                 ) from e
+            raise InvalidRequestError(
+                "Failed schema validation for structured output",
+                user_message="LLM応答が期待スキーマを満たしませんでした。再度お試しください。",
+            )
 
         if not text_body.strip():
             logging.error(
