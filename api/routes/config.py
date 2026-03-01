@@ -499,6 +499,32 @@ def get_current_playbook(manager = Depends(get_manager)):
 @router.post("/playbook")
 def set_playbook(req: PlaybookOverrideRequest, manager = Depends(get_manager)):
     """Set playbook override and parameters."""
+    if req.playbook == "meta_user_manual" and req.playbook_params and "selected_playbook" in req.playbook_params:
+        selected_playbook = req.playbook_params.get("selected_playbook")
+        if selected_playbook:
+            from database.session import SessionLocal
+            from database.models import Playbook
+
+            db = SessionLocal()
+            try:
+                playbook_exists = (
+                    db.query(Playbook)
+                    .filter(Playbook.name == selected_playbook)
+                    .first()
+                    is not None
+                )
+            finally:
+                db.close()
+
+            if not playbook_exists:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "selected_playbook が不正です。表示ラベルではなく "
+                        "Playbook ID（例: deep_research）を指定してください。"
+                    ),
+                )
+
     _validate_playbook_override(req, manager)
 
     manager.state.current_playbook = req.playbook if req.playbook else None
@@ -532,7 +558,6 @@ def set_playbook(req: PlaybookOverrideRequest, manager = Depends(get_manager)):
         "playbook": manager.state.current_playbook,
         "playbook_params": manager.state.playbook_params,
     }
-
 
 class CacheConfigResponse(BaseModel):
     """Cache configuration response."""
