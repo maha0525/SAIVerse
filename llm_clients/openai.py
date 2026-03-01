@@ -94,6 +94,30 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
     )
 
 
+def _extract_json_object_candidate(text: str) -> str:
+    """Extract first JSON object candidate from a model response."""
+    candidate = (text or "").strip()
+    if not candidate:
+        return ""
+
+    if candidate.startswith("```"):
+        for segment in candidate.split("```"):
+            segment = segment.strip()
+            if segment.startswith("json"):
+                segment = segment[4:].strip()
+            if segment.startswith("{") and segment.endswith("}"):
+                return segment
+
+    if candidate.startswith("{") and candidate.endswith("}"):
+        return candidate
+
+    start = candidate.find("{")
+    end = candidate.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return candidate[start : end + 1]
+    return candidate
+
+
 class OpenAIClient(LLMClient):
     """Client for OpenAI-compatible chat completions API."""
 
@@ -274,22 +298,15 @@ class OpenAIClient(LLMClient):
         self._store_reasoning_details(reasoning_details)
 
         if response_schema:
-            candidate = text_body.strip()
-            if candidate.startswith("```"):
-                for segment in candidate.split("```"):
-                    segment = segment.strip()
-                    if segment.startswith("json"):
-                        segment = segment[4:].strip()
-                    if segment.startswith("{") and segment.endswith("}"):
-                        candidate = segment
-                        break
+            candidate = _extract_json_object_candidate(text_body)
 
             try:
                 parsed = json.loads(candidate)
                 if isinstance(parsed, dict):
                     return parsed
             except json.JSONDecodeError as e:
-                logging.warning("[openai] Failed to parse structured output: %s", e)
+                preview = candidate.replace("\n", "\\n")[:300]
+                logging.warning("[openai] Failed to parse structured output: %s (candidate=%r)", e, preview)
                 raise InvalidRequestError(
                     "Failed to parse JSON response from structured output",
                     e,

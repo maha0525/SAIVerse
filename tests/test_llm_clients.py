@@ -242,6 +242,26 @@ class TestLLMClients(unittest.TestCase):
         self.assertEqual(response, {"answer": "yes"})
 
     @patch('llm_clients.openai.OpenAI')
+    def test_openai_client_generate_with_schema_preface_text_is_parsed(self, mock_openai):
+        mock_client_instance = MagicMock()
+        mock_openai.return_value = mock_client_instance
+
+        mock_resp = MagicMock()
+        mock_resp.usage = None
+        mock_resp.model_dump_json.return_value = '{}'
+        mock_choice = MagicMock()
+        mock_choice.message.content = '了解です。\n{"answer": "yes"}\n以上です。'
+        mock_choice.finish_reason = "stop"
+        mock_resp.choices = [mock_choice]
+        mock_client_instance.chat.completions.create.return_value = mock_resp
+
+        client = OpenAIClient("gpt-4.1-nano")
+        schema = {"title": "Decision", "type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
+
+        response = client.generate([{"role": "user", "content": "Hello"}], tools=[], response_schema=schema)
+        self.assertEqual(response, {"answer": "yes"})
+
+    @patch('llm_clients.openai.OpenAI')
     def test_openai_client_generate_tool_detection_with_and_without_tool_call(self, mock_openai):
         mock_client_instance = MagicMock()
         mock_openai.return_value = mock_client_instance
