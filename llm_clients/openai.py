@@ -194,37 +194,6 @@ class OpenAIClient(LLMClient):
         # Prepend as a system message so it takes priority
         return [{"role": "system", "content": instruction}] + list(messages)
 
-
-    @staticmethod
-    def _parse_structured_json_text(text: str) -> Optional[Dict[str, Any]]:
-        candidate = (text or "").strip()
-        if not candidate:
-            return None
-
-        if candidate.startswith("```"):
-            for segment in candidate.split("```"):
-                seg = segment.strip()
-                if not seg:
-                    continue
-                lowered = seg.lower()
-                if lowered.startswith("json"):
-                    seg = seg[4:].strip()
-                if seg.startswith("{") and seg.endswith("}"):
-                    candidate = seg
-                    break
-
-        if not candidate.startswith("{"):
-            import re
-            match = re.search(r"\{.*\}", candidate, re.DOTALL)
-            if match:
-                candidate = match.group(0)
-
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError:
-            return None
-        return parsed if isinstance(parsed, dict) else None
-
     def _build_request_kwargs(
         self,
         *,
@@ -319,11 +288,13 @@ class OpenAIClient(LLMClient):
                 parsed = json.loads(candidate)
                 if isinstance(parsed, dict):
                     return parsed
-
-            raise InvalidRequestError(
-                "Failed to parse JSON response from structured output",
-                user_message="LLMからの応答を解析できませんでした。再度お試しください。",
-            )
+            except json.JSONDecodeError as e:
+                logging.warning("[openai] Failed to parse structured output: %s", e)
+                raise InvalidRequestError(
+                    "Failed to parse JSON response from structured output",
+                    e,
+                    user_message="LLMからの応答を解析できませんでした。再度お試しください。",
+                ) from e
 
         if not text_body.strip():
             logging.error(
