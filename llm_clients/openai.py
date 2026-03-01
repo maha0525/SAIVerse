@@ -274,8 +274,18 @@ class OpenAIClient(LLMClient):
         self._store_reasoning_details(reasoning_details)
 
         if response_schema:
+            candidate = text_body.strip()
+            if candidate.startswith("```"):
+                for segment in candidate.split("```"):
+                    segment = segment.strip()
+                    if segment.startswith("json"):
+                        segment = segment[4:].strip()
+                    if segment.startswith("{") and segment.endswith("}"):
+                        candidate = segment
+                        break
+
             try:
-                parsed = json.loads(text_body)
+                parsed = json.loads(candidate)
                 if isinstance(parsed, dict):
                     return parsed
             except json.JSONDecodeError as e:
