@@ -344,6 +344,12 @@ class OpenAIClient(LLMClient):
         self._store_reasoning_details(reasoning_details)
 
         if response_schema:
+            parsed_payload = getattr(choice.message, "parsed", None)
+            if isinstance(parsed_payload, dict):
+                if _validate_required_schema_keys(parsed_payload, response_schema):
+                    return parsed_payload
+                logging.warning("[openai] Structured output(parsed) missing required keys")
+
             candidate = _extract_json_object_candidate(text_body)
 
             try:
