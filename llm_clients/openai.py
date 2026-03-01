@@ -95,7 +95,7 @@ def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_ima
 
 
 def _extract_json_object_candidate(text: str) -> str:
-    """Extract first valid JSON object candidate from a model response."""
+    """Extract first JSON object candidate from a model response."""
     candidate = (text or "").strip()
     if not candidate:
         return ""
@@ -111,25 +111,11 @@ def _extract_json_object_candidate(text: str) -> str:
     if candidate.startswith("{") and candidate.endswith("}"):
         return candidate
 
-    starts = [i for i, ch in enumerate(candidate) if ch == "{"]
-    decoder = json.JSONDecoder()
-    for start in starts:
-        try:
-            parsed, end = decoder.raw_decode(candidate[start:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            return candidate[start : start + end]
+    start = candidate.find("{")
+    end = candidate.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return candidate[start : end + 1]
     return candidate
-
-
-def _safe_candidate_preview(candidate: str, limit: int = 240) -> str:
-    escaped = candidate.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
-    if len(escaped) <= limit:
-        return escaped
-    head = escaped[:120]
-    tail = escaped[-120:]
-    return f"{head}...<{len(escaped) - 240} chars omitted>...{tail}"
 
 
 class OpenAIClient(LLMClient):
@@ -317,13 +303,11 @@ class OpenAIClient(LLMClient):
             try:
                 parsed = json.loads(candidate)
                 if isinstance(parsed, dict):
-                    required = response_schema.get("required") if isinstance(response_schema, dict) else None
-                    required_keys = [k for k in required if isinstance(k, str)] if isinstance(required, list) else []
-                    if all(k in parsed for k in required_keys):
+                    if _validate_required_schema_keys(parsed, response_schema):
                         return parsed
                     logging.warning("[openai] Structured output missing required keys")
             except json.JSONDecodeError as e:
-                preview = _safe_candidate_preview(candidate)
+                preview = candidate.replace("\n", "\\n")[:300]
                 logging.warning("[openai] Failed to parse structured output: %s (candidate=%r)", e, preview)
                 raise InvalidRequestError(
                     "Failed to parse JSON response from structured output",
