@@ -100,6 +100,42 @@ def test_lg_exec_node_invalid_selected_playbook_does_not_fallback_to_basic_chat(
     runtime._run_playbook.assert_not_called()
 
 
+def test_lg_exec_node_meta_user_manual_invalid_selected_playbook_emits_warning_for_user() -> None:
+    runtime, persona, playbook = _make_runtime()
+    playbook.name = "meta_user_manual"
+    node_def = SimpleNamespace(id="exec", playbook_source="selected_playbook", args_source="selected_args")
+    runtime._load_playbook_for = Mock(return_value=None)
+    runtime._run_playbook = Mock()
+    runtime._effective_building_id = Mock(return_value="b1")
+    events: list[dict[str, str]] = []
+
+    node = runtime._runtime_engine.lg_exec_node(node_def, playbook, persona, "b1", False, event_callback=events.append)
+    state = asyncio.run(node({"selected_playbook": "invalid_tool_id", "selected_args": {"input": "hi"}}))
+
+    assert state["_exec_error"] is True
+    assert state["last"] == "指定されたツールID 'invalid_tool_id' は存在しません。"
+    assert any(e.get("type") == "warning" for e in events)
+    runtime._run_playbook.assert_not_called()
+
+
+def test_lg_exec_node_last_route_keeps_existing_not_found_behavior() -> None:
+    runtime, persona, playbook = _make_runtime()
+    playbook.name = "meta_user_manual"
+    node_def = SimpleNamespace(id="exec", playbook_source="selected_playbook", args_source="selected_args")
+    runtime._load_playbook_for = Mock(return_value=None)
+    runtime._run_playbook = Mock()
+    runtime._effective_building_id = Mock(return_value="b1")
+    events: list[dict[str, str]] = []
+
+    node = runtime._runtime_engine.lg_exec_node(node_def, playbook, persona, "b1", False, event_callback=events.append)
+    state = asyncio.run(node({"last": "invalid_by_last", "selected_args": {"input": "hi"}}))
+
+    assert state["_exec_error"] is True
+    assert state["last"] == "Sub-playbook not found: invalid_by_last"
+    assert not any(e.get("type") == "warning" for e in events)
+    runtime._run_playbook.assert_not_called()
+
+
 def test_lg_exec_node_uses_router_result_when_selected_playbook_unspecified() -> None:
     runtime, persona, playbook = _make_runtime()
     node_def = SimpleNamespace(id="exec", playbook_source="selected_playbook", args_source="selected_args")
