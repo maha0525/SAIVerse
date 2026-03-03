@@ -132,6 +132,27 @@ def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
         """
     )
 
+    # Pulse logs table for unified memory architecture
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pulse_logs (
+            id TEXT PRIMARY KEY,
+            pulse_id TEXT NOT NULL,
+            thread_id TEXT,
+            role TEXT NOT NULL,
+            content TEXT,
+            node_id TEXT,
+            playbook_name TEXT,
+            important INTEGER NOT NULL DEFAULT 0,
+            tool_calls TEXT,
+            tool_call_id TEXT,
+            tool_name TEXT,
+            created_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pulse_logs_pulse_id ON pulse_logs(pulse_id)")
+
     conn.commit()
     return conn
 
@@ -929,4 +950,64 @@ def set_embed_metadata(conn: sqlite3.Connection, key: str, value: str) -> None:
         (key, value, now),
     )
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Pulse Logs
+# ---------------------------------------------------------------------------
+
+def add_pulse_log(
+    conn: sqlite3.Connection,
+    pulse_id: str,
+    thread_id: Optional[str],
+    role: str,
+    content: Optional[str],
+    node_id: Optional[str] = None,
+    playbook_name: Optional[str] = None,
+    important: bool = False,
+    tool_calls: Optional[str] = None,
+    tool_call_id: Optional[str] = None,
+    tool_name: Optional[str] = None,
+    created_at: Optional[int] = None,
+) -> str:
+    """Insert a single pulse log entry and return its ID."""
+    log_id = str(uuid.uuid4())
+    ts = int(time.time()) if created_at is None else int(created_at)
+    conn.execute(
+        """
+        INSERT INTO pulse_logs
+        (id, pulse_id, thread_id, role, content, node_id, playbook_name,
+         important, tool_calls, tool_call_id, tool_name, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (log_id, pulse_id, thread_id, role, content, node_id, playbook_name,
+         1 if important else 0, tool_calls, tool_call_id, tool_name, ts),
+    )
+    conn.commit()
+    return log_id
+
+
+def get_pulse_logs_by_pulse(conn: sqlite3.Connection, pulse_id: str) -> List[Tuple[Any, ...]]:
+    """Fetch all pulse logs for a given pulse_id, ordered by created_at."""
+    cur = conn.execute(
+        """
+        SELECT id, pulse_id, thread_id, role, content, node_id, playbook_name,
+               important, tool_calls, tool_call_id, tool_name, created_at
+        FROM pulse_logs
+        WHERE pulse_id = ?
+        ORDER BY created_at ASC
+        """,
+        (pulse_id,),
+    )
+    return cur.fetchall()
+
+
+def delete_pulse_logs_before(conn: sqlite3.Connection, before_timestamp: int) -> int:
+    """Delete pulse logs older than the given timestamp. Returns number of deleted rows."""
+    cur = conn.execute(
+        "DELETE FROM pulse_logs WHERE created_at < ?",
+        (before_timestamp,),
+    )
+    conn.commit()
+    return cur.rowcount
 

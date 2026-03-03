@@ -38,6 +38,10 @@ from sai_memory.memory.storage import (
     get_stelis_ancestor_chain,
     calculate_stelis_window_tokens,
     delete_stelis_thread,
+    # Pulse logs
+    add_pulse_log,
+    get_pulse_logs_by_pulse,
+    delete_pulse_logs_before,
 )
 from sai_memory.backup import BackupError, run_backup_auto
 
@@ -1075,6 +1079,83 @@ class SAIMemoryAdapter:
         if suffix:
             return f"{self.persona_id}:{suffix}"
         return None
+
+    # ------------------------------------------------------------------
+    # Pulse Logs
+    # ------------------------------------------------------------------
+
+    def append_pulse_log(
+        self,
+        pulse_id: str,
+        thread_id: Optional[str],
+        role: str,
+        content: Optional[str],
+        *,
+        node_id: Optional[str] = None,
+        playbook_name: Optional[str] = None,
+        important: bool = False,
+        tool_calls: Optional[str] = None,
+        tool_call_id: Optional[str] = None,
+        tool_name: Optional[str] = None,
+        created_at: Optional[int] = None,
+    ) -> Optional[str]:
+        """Append a single pulse log entry.
+
+        Args:
+            pulse_id: The pulse ID this log belongs to.
+            thread_id: The thread context at the time of logging.
+            role: Message role (user, assistant, tool, system).
+            content: Message content.
+
+        Returns:
+            The log entry ID, or None if adapter is not ready.
+        """
+        if not self._ready:
+            return None
+        try:
+            with self._db_lock:
+                return add_pulse_log(
+                    self.conn, pulse_id, thread_id, role, content,
+                    node_id=node_id, playbook_name=playbook_name,
+                    important=important, tool_calls=tool_calls,
+                    tool_call_id=tool_call_id, tool_name=tool_name,
+                    created_at=created_at,
+                )
+        except Exception as exc:
+            LOGGER.warning("Failed to append pulse_log for pulse=%s: %s", pulse_id, exc)
+            return None
+
+    def get_pulse_logs(self, pulse_id: str) -> List[Dict[str, Any]]:
+        """Fetch all pulse logs for a given pulse_id.
+
+        Returns:
+            List of dicts with pulse log fields, ordered by created_at ASC.
+        """
+        if not self._ready:
+            return []
+        try:
+            with self._db_lock:
+                rows = get_pulse_logs_by_pulse(self.conn, pulse_id)
+        except Exception as exc:
+            LOGGER.warning("Failed to get pulse_logs for pulse=%s: %s", pulse_id, exc)
+            return []
+        result = []
+        for row in rows:
+            result.append({
+                "id": row[0],
+                "pulse_id": row[1],
+                "thread_id": row[2],
+                "role": row[3],
+                "content": row[4],
+                "node_id": row[5],
+                "playbook_name": row[6],
+                "important": bool(row[7]),
+                "tool_calls": row[8],
+                "tool_call_id": row[9],
+                "tool_name": row[10],
+                "created_at": row[11],
+            })
+        return result
 
     # ------------------------------------------------------------------
     # Stelis Thread Management

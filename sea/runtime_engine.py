@@ -115,9 +115,27 @@ class RuntimeEngine:
                 # Store result in state if output_key is specified (legacy single-value)
                 if output_key and not output_keys:
                     state[output_key] = result
+
+                # Append to PulseContext
+                _pulse_ctx = state.get("_pulse_context")
+                if _pulse_ctx:
+                    from sea.pulse_context import PulseLogEntry
+                    _pulse_ctx.append(PulseLogEntry(
+                        role="tool", content=result_str,
+                        node_id=node_id, playbook_name=playbook.name,
+                        tool_name=tool_name,
+                        important=getattr(node_def, "important", False) or False))
             except Exception as exc:
                 state["last"] = f"Tool error: {exc}"
                 LOGGER.exception("SEA LangGraph tool %s failed", tool_name)
+                # Append error to PulseContext
+                _pulse_ctx = state.get("_pulse_context")
+                if _pulse_ctx:
+                    from sea.pulse_context import PulseLogEntry
+                    _pulse_ctx.append(PulseLogEntry(
+                        role="tool", content=f"Tool error: {exc}",
+                        node_id=node_id, playbook_name=playbook.name,
+                        tool_name=tool_name))
             return state
 
         return node
@@ -281,6 +299,7 @@ class RuntimeEngine:
                 sub_outputs = await asyncio.to_thread(
                     self.runtime._run_playbook, sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback,
                     cancellation_token=cancellation_token,
+                    isolate_pulse_context=(execution == "subagent"),
                 )
             except Exception as exc:
                 LOGGER.exception("SEA LangGraph exec sub-playbook failed")
@@ -314,6 +333,13 @@ class RuntimeEngine:
                             "warning_code": "memorize_failed",
                             "display": "toast",
                         })
+                # Append error to PulseContext
+                _pulse_ctx = state.get("_pulse_context")
+                if _pulse_ctx:
+                    from sea.pulse_context import PulseLogEntry
+                    _pulse_ctx.append(PulseLogEntry(
+                        role="system", content=error_msg,
+                        node_id=node_id, playbook_name=playbook.name))
                 if outputs is not None:
                     outputs.append(error_msg)
                 return state
@@ -410,6 +436,15 @@ class RuntimeEngine:
             speak_content = state.get("speak_content", "")
             LOGGER.info("[DEBUG] memorize node end: state['speak_content'] = '%s'", speak_content)
 
+            # Append to PulseContext
+            _pulse_ctx = state.get("_pulse_context")
+            if _pulse_ctx:
+                from sea.pulse_context import PulseLogEntry
+                _pulse_ctx.append(PulseLogEntry(
+                    role=role, content=memo_text,
+                    node_id=node_id, playbook_name=playbook.name,
+                    important=getattr(node_def, "important", False) or False))
+
             return state
 
         return node
@@ -442,4 +477,14 @@ class RuntimeEngine:
             if activity_trace:
                 say_event["activity_trace"] = list(activity_trace)
             event_callback(say_event)
+
+        # Append to PulseContext (speak is important by default)
+        _pulse_ctx = state.get("_pulse_context")
+        if _pulse_ctx:
+            from sea.pulse_context import PulseLogEntry
+            _pulse_ctx.append(PulseLogEntry(
+                role="assistant", content=text,
+                node_id="speak", playbook_name=playbook.name,
+                important=True))
+
         return state

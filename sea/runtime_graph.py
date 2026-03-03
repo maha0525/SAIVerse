@@ -24,6 +24,7 @@ def compile_with_langgraph(
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     cancellation_token: Optional[CancellationToken] = None,
     pulse_type: Optional[str] = None,
+    isolate_pulse_context: bool = False,
 ) -> Optional[List[str]]:
     _lg_outputs: List[str] = []
     temperature = runtime._default_temperature(persona)
@@ -104,6 +105,18 @@ def compile_with_langgraph(
     # Inherit cancellation token from parent state if not explicitly provided
     effective_cancellation_token = cancellation_token or parent.get("_cancellation_token")
 
+    # Inherit PulseContext from parent_state (shared reference, same pattern as accumulator).
+    # Subagent executions set isolate_pulse_context=True to get their own PulseContext,
+    # preventing intermediate messages from leaking into the parent's protocol chain.
+    parent_pulse_ctx = parent.get("_pulse_context") if not isolate_pulse_context else None
+    if parent_pulse_ctx is not None:
+        pulse_ctx = parent_pulse_ctx  # Share reference across sub-playbooks
+    else:
+        # Create new PulseContext for this pulse (or isolated subagent)
+        _adapter = getattr(persona, "sai_memory", None)
+        _thread_id = _adapter.get_current_thread() if _adapter else None
+        pulse_ctx = runtime._get_or_create_pulse_context(pulse_id, _thread_id or "")
+
     initial_state = {
         # System variables (_ prefix, auto-inherited, nodes don't touch)
         "_messages": list(base_messages),
@@ -115,7 +128,7 @@ def compile_with_langgraph(
         "_cancellation_token": effective_cancellation_token,  # For node-level cancellation checks
         "_pulse_usage_accumulator": usage_accumulator,  # Inherit from parent or create new
         "_activity_trace": activity_trace,  # Shared trace of exec/tool activities
-        "_intermediate_msgs": [],  # Track intermediate node outputs for profile-based context
+        "_pulse_context": pulse_ctx,  # Pulse-level log context (replaces _intermediate_msgs)
         # Playbook variables (no prefix)
         "last": user_input or "",
         "input": user_input or "",
@@ -190,6 +203,14 @@ def compile_with_langgraph(
         persona.execution_state["playbook"] = None
         persona.execution_state["node"] = None
         persona.execution_state["status"] = "idle"
+
+    # Flush PulseContext to DB if this is the top-level playbook (not a sub-playbook)
+    if parent.get("_pulse_context") is None:
+        # This was a new PulseContext created for this pulse — flush and clean up
+        if isinstance(final_state, dict):
+            _final_pulse_ctx = final_state.get("_pulse_context")
+            if _final_pulse_ctx:
+                runtime._flush_pulse_logs(persona, _final_pulse_ctx)
 
     # speak/think nodes already emitted; return collected texts for UI consistency
     return list(_lg_outputs)
