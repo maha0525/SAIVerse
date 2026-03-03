@@ -53,6 +53,8 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
     const [metabolismEnabled, setMetabolismEnabled] = useState<boolean>(true);
     const [metabolismKeepMessages, setMetabolismKeepMessages] = useState<number | null>(null);
     const [metabolismKeepMessagesDefault, setMetabolismKeepMessagesDefault] = useState<number | null>(null);
+    const [maxImageEmbeds, setMaxImageEmbeds] = useState<number | null>(null);
+    const [maxImageEmbedsDefault, setMaxImageEmbedsDefault] = useState<number | null>(null);
     const [historySettingsOpen, setHistorySettingsOpen] = useState(false);
     const [modelParamsOpen, setModelParamsOpen] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -108,6 +110,8 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                     setMetabolismEnabled(config.metabolism_enabled ?? true);
                     setMetabolismKeepMessages(config.metabolism_keep_messages ?? null);
                     setMetabolismKeepMessagesDefault(config.metabolism_keep_messages_model_default ?? null);
+                    setMaxImageEmbeds(config.max_image_embeds ?? null);
+                    setMaxImageEmbedsDefault(config.max_image_embeds_model_default ?? null);
                 } catch (e) { console.error("Failed to parse config response", e); failures.push('config'); }
             } else {
                 const reason = results[1].status === 'rejected' ? results[1].reason : `HTTP ${results[1].value.status}`;
@@ -165,6 +169,8 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 setMetabolismEnabled(data.metabolism_enabled ?? true);
                 setMetabolismKeepMessages(data.metabolism_keep_messages ?? null);
                 setMetabolismKeepMessagesDefault(data.metabolism_keep_messages_model_default ?? null);
+                setMaxImageEmbeds(data.max_image_embeds ?? null);
+                setMaxImageEmbedsDefault(data.max_image_embeds_model_default ?? null);
             }
 
             // Refetch cache config since it depends on selected model
@@ -244,6 +250,24 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
             });
         } catch (e) {
             console.error("Failed to update metabolism keep_messages", e);
+        }
+    };
+
+    const handleMaxImageEmbedsInput = (value: string) => {
+        const numValue = value === '' ? null : parseInt(value, 10);
+        if (numValue !== null && (isNaN(numValue) || numValue < 0)) return;
+        setMaxImageEmbeds(numValue);
+    };
+
+    const handleMaxImageEmbedsCommit = async () => {
+        try {
+            await fetch('/api/config/max-image-embeds', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ value: maxImageEmbeds })
+            });
+        } catch (e) {
+            console.error("Failed to update max image embeds", e);
         }
     };
 
@@ -411,6 +435,27 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                                 </span>
                                             </div>
                                         )}
+                                        <div className={styles.formGroup}>
+                                            <label>
+                                                画像埋め込み上限
+                                                {maxImageEmbedsDefault != null && (
+                                                    <span className={styles.hint}> （モデルデフォルト: {maxImageEmbedsDefault}）</span>
+                                                )}
+                                            </label>
+                                            <input
+                                                type="number"
+                                                className={styles.input}
+                                                min={0}
+                                                max={50}
+                                                value={maxImageEmbeds ?? ''}
+                                                placeholder={maxImageEmbedsDefault ? `（自動: ${maxImageEmbedsDefault}）` : '（無制限）'}
+                                                onChange={(e) => handleMaxImageEmbedsInput(e.target.value)}
+                                                onBlur={() => handleMaxImageEmbedsCommit()}
+                                            />
+                                            <span className={styles.hint}>
+                                                LLMに送信する画像の最大枚数。超過分はテキスト要約に置換されます。0で全画像をテキスト化。空欄で無制限。
+                                            </span>
+                                        </div>
                                         {cacheConfig.supported && (
                                             <>
                                                 <div className={styles.formGroup}>

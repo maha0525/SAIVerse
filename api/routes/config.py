@@ -75,6 +75,8 @@ class ModelConfigResponse(BaseModel):
     metabolism_enabled: bool = True
     metabolism_keep_messages: Optional[int] = None
     metabolism_keep_messages_model_default: Optional[int] = None
+    max_image_embeds: Optional[int] = None
+    max_image_embeds_model_default: Optional[int] = None
 
 @router.get("/models", response_model=List[ModelInfo])
 def get_models():
@@ -258,6 +260,8 @@ def get_current_config(manager = Depends(get_manager)):
             "metabolism_enabled": getattr(manager, "metabolism_enabled", True),
             "metabolism_keep_messages": getattr(manager, "metabolism_keep_messages_override", None),
             "metabolism_keep_messages_model_default": None,
+            "max_image_embeds": getattr(manager, "max_image_embeds_override", None),
+            "max_image_embeds_model_default": None,
         }
 
     # Get param specs
@@ -297,13 +301,17 @@ def get_current_config(manager = Depends(get_manager)):
         current_values.update(manager.model_parameter_overrides)
 
     # Max history messages
-    from saiverse.model_configs import get_default_max_history_messages, get_metabolism_keep_messages
+    from saiverse.model_configs import get_default_max_history_messages, get_metabolism_keep_messages, get_max_image_embeds
     override = getattr(manager, "max_history_messages_override", None)
     model_default = get_default_max_history_messages(current_model)
 
     # Metabolism settings
     metab_override = getattr(manager, "metabolism_keep_messages_override", None)
     metab_model_default = get_metabolism_keep_messages(current_model)
+
+    # Image embeds
+    img_embeds_override = getattr(manager, "max_image_embeds_override", None)
+    img_embeds_model_default = get_max_image_embeds(current_model)
 
     return {
         "current_model": current_model,
@@ -314,6 +322,8 @@ def get_current_config(manager = Depends(get_manager)):
         "metabolism_enabled": getattr(manager, "metabolism_enabled", True),
         "metabolism_keep_messages": metab_override if metab_override is not None else metab_model_default,
         "metabolism_keep_messages_model_default": metab_model_default,
+        "max_image_embeds": img_embeds_override if img_embeds_override is not None else img_embeds_model_default,
+        "max_image_embeds_model_default": img_embeds_model_default,
     }
 
 @router.post("/model")
@@ -369,13 +379,17 @@ def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
         current_values.update(manager.model_parameter_overrides)
 
     # Max history messages (reset override on model change)
-    from saiverse.model_configs import get_default_max_history_messages, get_metabolism_keep_messages
+    from saiverse.model_configs import get_default_max_history_messages, get_metabolism_keep_messages, get_max_image_embeds
     manager.max_history_messages_override = None
     model_default = get_default_max_history_messages(current_model)
 
     # Metabolism (reset override on model change)
     manager.metabolism_keep_messages_override = None
     metab_model_default = get_metabolism_keep_messages(current_model)
+
+    # Image embeds (reset override on model change)
+    manager.max_image_embeds_override = None
+    img_embeds_model_default = get_max_image_embeds(current_model)
 
     return {
         "success": True,
@@ -388,6 +402,8 @@ def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
         "metabolism_enabled": getattr(manager, "metabolism_enabled", True),
         "metabolism_keep_messages": metab_model_default,
         "metabolism_keep_messages_model_default": metab_model_default,
+        "max_image_embeds": img_embeds_model_default,
+        "max_image_embeds_model_default": img_embeds_model_default,
     }
 
 @router.post("/parameters")
@@ -737,6 +753,58 @@ def set_metabolism_settings(req: MetabolismConfigRequest, manager=Depends(get_ma
         "enabled": getattr(manager, "metabolism_enabled", True),
         "keep_messages": getattr(manager, "metabolism_keep_messages_override", None),
     }
+
+
+class MaxImageEmbedsRequest(BaseModel):
+    value: Optional[int] = None
+
+
+@router.get("/max-image-embeds")
+def get_max_image_embeds_setting(manager=Depends(get_manager)):
+    """Get current max image embeds setting."""
+    from saiverse.model_configs import get_max_image_embeds
+
+    override = getattr(manager, "max_image_embeds_override", None)
+    current_model = manager.model or None
+    model_default = get_max_image_embeds(current_model) if current_model else None
+
+    return {
+        "value": override if override is not None else model_default,
+        "override": override,
+        "model_default": model_default,
+    }
+
+
+@router.post("/max-image-embeds")
+def set_max_image_embeds(req: MaxImageEmbedsRequest, manager=Depends(get_manager)):
+    """Set session override for max image embeds.
+
+    Send {"value": null} to clear the override and use the model default.
+    Send {"value": 0} to disable image embedding entirely.
+    """
+    if req.value is not None and req.value < 0:
+        raise HTTPException(status_code=400, detail="value must be >= 0 or null")
+    manager.max_image_embeds_override = req.value
+
+    # Determine effective value (override or model default)
+    effective = req.value
+    if effective is None:
+        from saiverse.model_configs import get_max_image_embeds
+        current_model = manager.model or None
+        if current_model:
+            effective = get_max_image_embeds(current_model)
+
+    # Apply to all active persona LLM clients
+    for persona in manager.personas.values():
+        client = getattr(persona, "_llm_client", None)
+        if client is not None and hasattr(client, "max_image_embeds"):
+            client.max_image_embeds = effective
+            _log.info(
+                "Updated max_image_embeds=%s on LLM client for persona '%s'",
+                effective, getattr(persona, "persona_id", "?"),
+            )
+
+    return {"success": True, "value": req.value}
 
 
 @router.get("/startup-warnings")

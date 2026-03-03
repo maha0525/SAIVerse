@@ -33,9 +33,10 @@ def is_empty_message(msg: Dict[str, Any]) -> bool:
 
 def scan_message_metadata(
     messages: List[Any],
+    max_image_embeds_override: Optional[int] = None,
 ) -> Tuple[Dict[int, List[Dict[str, Any]]], Set[int], Set[int], Optional[Set[Tuple[int, int]]]]:
     """Build metadata-derived caches for attachment and summary handling."""
-    max_image_embeds = parse_attachment_limit("OPENAI")
+    max_image_embeds = max_image_embeds_override if max_image_embeds_override is not None else parse_attachment_limit("OPENAI")
     attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
     skip_summary_indices: Set[int] = set()
     exempt_indices: Set[int] = set()
@@ -115,6 +116,17 @@ def build_message_content_with_attachments(
                 )
                 if data and effective_mime:
                     b64 = base64.b64encode(data).decode("ascii")
+                    magic = data[:8].hex()
+                    logging.debug(
+                        "[openai_prep] image att=%s orig_mime=%s effective_mime=%s "
+                        "raw_bytes=%d b64_len=%d magic=%s",
+                        att.get("uri") or att.get("path"),
+                        att.get("mime_type"),
+                        effective_mime,
+                        len(data),
+                        len(b64),
+                        magic,
+                    )
                     parts.append(
                         {
                             "type": "image_url",
@@ -153,11 +165,14 @@ def prepare_openai_messages(
     messages: List[Any],
     supports_images: bool,
     max_image_bytes: Optional[int] = None,
+    max_image_embeds: Optional[int] = None,
     convert_system_to_user: bool = False,
     reasoning_passback_field: Optional[str] = None,
 ) -> List[Any]:
     """Prepare messages for OpenAI-compatible APIs by removing internal-only fields."""
-    attachment_cache, skip_summary_indices, _, allowed_attachment_keys = scan_message_metadata(messages)
+    attachment_cache, skip_summary_indices, _, allowed_attachment_keys = scan_message_metadata(
+        messages, max_image_embeds_override=max_image_embeds,
+    )
 
     prepared: List[Any] = []
     seen_non_system = False
