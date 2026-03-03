@@ -257,6 +257,9 @@ class GeminiClient(LLMClient):
         self.free_client, self.paid_client, self.client = build_gemini_clients(prefer_paid=prefer_paid)
         self.model = model
 
+        # Image size limit (raw bytes, before base64 encoding)
+        self.max_image_bytes: Optional[int] = cfg.get("max_image_bytes")
+
         # Request parameters (temperature, top_p, etc.)
         self._request_params: Dict[str, Any] = {}
 
@@ -662,13 +665,23 @@ class GeminiClient(LLMClient):
                     parts.append(types.Part(text=text_content))
                 for attachment in selected_attachments:
                     data, effective_mime = load_image_bytes_for_llm(
-                        attachment["path"], attachment["mime_type"]
+                        attachment["path"], attachment["mime_type"],
+                        max_bytes=self.max_image_bytes,
                     )
                     if not data or not effective_mime:
                         logging.warning(
                             "Failed to load image for Gemini payload: %s", attachment["uri"]
                         )
                         continue
+                    logging.debug(
+                        "[gemini] image att=%s orig_mime=%s effective_mime=%s "
+                        "raw_bytes=%d magic=%s",
+                        attachment.get("uri"),
+                        attachment.get("mime_type"),
+                        effective_mime,
+                        len(data),
+                        data[:8].hex(),
+                    )
                     parts.append(types.Part.from_bytes(data=data, mime_type=effective_mime))
                 if not parts:
                     parts.append(types.Part(text=""))

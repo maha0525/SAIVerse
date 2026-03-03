@@ -10,6 +10,8 @@
   "base_url": "https://openrouter.ai/api/v1",
   "api_key_env": "OPENROUTER_API_KEY",
   "supports_images": true,
+  "max_image_bytes": 7500000,
+  "max_image_embeds": 4,
   "convert_system_to_user": true,
   "parameters": {
     "temperature": {

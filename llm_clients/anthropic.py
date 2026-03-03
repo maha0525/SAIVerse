@@ -61,10 +61,10 @@ class AnthropicClient(LLMClient):
         self.client = Anthropic(api_key=api_key)
         self.model = model
 
-        # Anthropic has a 5MB limit for images
-        self.max_image_bytes = 5 * 1024 * 1024
-
         cfg = config or {}
+
+        # Anthropic has a 5MB limit for images (configurable via model config)
+        self.max_image_bytes = cfg.get("max_image_bytes", 5 * 1024 * 1024)
 
         # Extended thinking configuration
         self._thinking_config: Optional[Dict[str, Any]] = None

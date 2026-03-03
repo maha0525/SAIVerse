@@ -84,12 +84,13 @@ def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError
     return openai_errors.convert_to_llm_error(err, context)
 
 
-def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_image_bytes: Optional[int] = None, convert_system_to_user: bool = False, reasoning_passback_field: Optional[str] = None) -> List[Any]:
+def _prepare_openai_messages(messages: List[Any], supports_images: bool, max_image_bytes: Optional[int] = None, max_image_embeds: Optional[int] = None, convert_system_to_user: bool = False, reasoning_passback_field: Optional[str] = None) -> List[Any]:
     """Backward-compatible wrapper for OpenAI message preparation."""
     return prepare_openai_messages(
         messages=messages,
         supports_images=supports_images,
         max_image_bytes=max_image_bytes,
+        max_image_embeds=max_image_embeds,
         convert_system_to_user=convert_system_to_user,
         reasoning_passback_field=reasoning_passback_field,
     )
@@ -171,6 +172,7 @@ class OpenAIClient(LLMClient):
         api_key_env: Optional[str] = None,
         request_kwargs: Optional[Dict[str, Any]] = None,
         max_image_bytes: Optional[int] = None,
+        max_image_embeds: Optional[int] = None,
         convert_system_to_user: bool = False,
         structured_output_backend: Optional[str] = None,
         structured_output_mode: Optional[str] = None,
@@ -193,6 +195,7 @@ class OpenAIClient(LLMClient):
         self.model = model
         self._request_kwargs: Dict[str, Any] = dict(request_kwargs or {})
         self.max_image_bytes = max_image_bytes
+        self.max_image_embeds = max_image_embeds
         self.convert_system_to_user = convert_system_to_user
         self.structured_output_backend = structured_output_backend
         self.structured_output_mode = structured_output_mode or "native"
@@ -311,6 +314,7 @@ class OpenAIClient(LLMClient):
                         effective_messages,
                         self.supports_images,
                         self.max_image_bytes,
+                        self.max_image_embeds,
                         self.convert_system_to_user,
                         self.reasoning_passback_field,
                     ),
@@ -401,6 +405,7 @@ class OpenAIClient(LLMClient):
                         messages,
                         self.supports_images,
                         self.max_image_bytes,
+                        self.max_image_embeds,
                         self.convert_system_to_user,
                         self.reasoning_passback_field,
                     ),
@@ -751,7 +756,7 @@ class OpenAIClient(LLMClient):
                 resp = openai_runtime.call_with_retry(
                     lambda: self._create_completion(
                         model=self.model,
-                        messages=_prepare_openai_messages(effective_messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user, self.reasoning_passback_field),
+                        messages=_prepare_openai_messages(effective_messages, self.supports_images, self.max_image_bytes, self.max_image_embeds, self.convert_system_to_user, self.reasoning_passback_field),
                         n=1,
                         **req_kwargs,
                     ),
@@ -786,7 +791,7 @@ class OpenAIClient(LLMClient):
             resp = openai_runtime.call_with_retry(
                 lambda: self._create_completion(
                     model=self.model,
-                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.convert_system_to_user, self.reasoning_passback_field),
+                    messages=_prepare_openai_messages(messages, self.supports_images, self.max_image_bytes, self.max_image_embeds, self.convert_system_to_user, self.reasoning_passback_field),
                     tools=tools_spec,
                     tool_choice=force_tool_choice,
                     stream=True,

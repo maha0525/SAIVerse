@@ -182,6 +182,7 @@ class InitializationMixin:
         self.max_history_messages_override: Optional[int] = None
         self.metabolism_enabled: bool = True
         self.metabolism_keep_messages_override: Optional[int] = None
+        self.max_image_embeds_override: Optional[int] = None
         self.startup_warnings: List[Dict[str, str]] = []
 
     def _update_timezone_cache(self, tz_name: Optional[str]) -> None:

@@ -121,6 +121,18 @@ def get_metabolism_keep_messages(model: str) -> int | None:
     return None
 
 
+def get_max_image_embeds(model: str) -> int | None:
+    """Get the maximum number of image embeds for a model.
+
+    Returns None if not configured (no limit on image embeds).
+    """
+    config = MODEL_CONFIGS.get(model, {})
+    val = config.get("max_image_embeds")
+    if val is not None:
+        return int(val)
+    return None
+
+
 def get_model_display_name(model: str) -> str:
     """Get display name for a model, falling back to model ID if not set."""
     config = MODEL_CONFIGS.get(model, {})
