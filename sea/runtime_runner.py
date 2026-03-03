@@ -22,6 +22,7 @@ def run_playbook(
     cancellation_token: Optional[Any] = None,
     pulse_type: Optional[str] = None,
     initial_params: Optional[Dict[str, Any]] = None,
+    isolate_pulse_context: bool = False,
 ) -> List[str]:
     if cancellation_token:
         cancellation_token.raise_if_cancelled()
@@ -98,6 +99,7 @@ def run_playbook(
         event_callback=wrapped_event_callback,
         cancellation_token=cancellation_token,
         pulse_type=pulse_type,
+        isolate_pulse_context=isolate_pulse_context,
     )
     if compiled_ok is None:
         LOGGER.error(

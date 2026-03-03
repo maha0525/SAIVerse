@@ -82,16 +82,14 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
             # Append tool result to conversation messages (function calling protocol)
             runtime._append_tool_result_message(state, tool_name, result_str)
 
-            # Also update _intermediate_msgs for context_profile-based nodes
-            if "_intermediate_msgs" in state and _tc_id_for_im:
-                _im = list(state.get("_intermediate_msgs", []))
-                _im.append({
-                    "role": "tool",
-                    "tool_call_id": _tc_id_for_im,
-                    "name": tool_name,
-                    "content": result_str,
-                })
-                state["_intermediate_msgs"] = _im
+            # Append tool result to PulseContext (replaces _intermediate_msgs)
+            _pulse_ctx = state.get("_pulse_context")
+            if _pulse_ctx and _tc_id_for_im:
+                from sea.pulse_context import PulseLogEntry
+                _pulse_ctx.append(PulseLogEntry(
+                    role="tool", content=result_str,
+                    node_id=node_id, playbook_name=playbook.name,
+                    tool_call_id=_tc_id_for_im, tool_name=tool_name))
 
         except Exception as exc:
             error_msg = f"Tool error ({tool_name}): {exc}"
@@ -106,16 +104,14 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
             # Append error as tool result so LLM knows the tool failed
             runtime._append_tool_result_message(state, tool_name, error_msg)
 
-            # Also update _intermediate_msgs
-            if "_intermediate_msgs" in state and _tc_id_for_err:
-                _im = list(state.get("_intermediate_msgs", []))
-                _im.append({
-                    "role": "tool",
-                    "tool_call_id": _tc_id_for_err,
-                    "name": tool_name,
-                    "content": error_msg,
-                })
-                state["_intermediate_msgs"] = _im
+            # Append tool error to PulseContext (replaces _intermediate_msgs)
+            _pulse_ctx = state.get("_pulse_context")
+            if _pulse_ctx and _tc_id_for_err:
+                from sea.pulse_context import PulseLogEntry
+                _pulse_ctx.append(PulseLogEntry(
+                    role="tool", content=error_msg,
+                    node_id=node_id, playbook_name=playbook.name,
+                    tool_call_id=_tc_id_for_err, tool_name=tool_name))
 
         return state
 
@@ -175,7 +171,11 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
         if execution == "inline":
             log_sea_trace(playbook.name, node_id, "SUBPLAY", f"→ {sub_name} (input=\"{str(sub_input)}\")")
         try:
-            sub_outputs = runtime._run_playbook(sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback, cancellation_token=cancellation_token)
+            sub_outputs = runtime._run_playbook(
+                sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback,
+                cancellation_token=cancellation_token,
+                isolate_pulse_context=(execution == "subagent"),
+            )
         except LLMError:
             LOGGER.exception("[sea][subplay] LLM error in subplaybook '%s'", sub_name)
             if execution == "subagent" and subagent_thread_id:

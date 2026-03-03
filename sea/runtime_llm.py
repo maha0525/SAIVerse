@@ -74,7 +74,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         LOGGER.info("[sea] Prepared context for profile '%s' (node=%s, %d messages)",
                                     _profile_name, node_id, len(state[_cache_key]))
                     _profile_base = state[_cache_key]
-                    _intermediate = state.get("_intermediate_msgs", [])
+                    _pulse_ctx = state.get("_pulse_context")
+                    _intermediate = _pulse_ctx.get_protocol_messages() if _pulse_ctx else []
                     base_msgs = list(_profile_base) + list(_intermediate)
                 else:
                     LOGGER.warning("[sea] Unknown context_profile '%s' on node '%s', falling back to state messages", _profile_name, node_id)
@@ -846,15 +847,19 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         else:
             state["_messages"] = messages + [{"role": "assistant", "content": _msg_content}]
 
-        # Track intermediate messages for profile-based nodes in the same playbook
-        if "_intermediate_msgs" in state:
-            _im = list(state.get("_intermediate_msgs", []))
+        # Append LLM interaction to PulseContext (replaces _intermediate_msgs)
+        _pulse_ctx = state.get("_pulse_context")
+        if _pulse_ctx:
+            from sea.pulse_context import PulseLogEntry
+            # Record the prompt (user message)
             if prompt:
-                _im.append({"role": "user", "content": prompt})
-            # When tool called, include tool_calls in intermediate msgs so
-            # context_profile-based nodes see the function calling protocol
+                _pulse_ctx.append(PulseLogEntry(
+                    role="user", content=prompt,
+                    node_id=node_id, playbook_name=playbook.name))
+            # Record the assistant response (with optional tool_calls)
+            _tc_list = None
             if state.get("tool_called") and state.get("_last_tool_call_id"):
-                _im_tc: Dict[str, Any] = {
+                _tc_entry_pc: Dict[str, Any] = {
                     "id": state["_last_tool_call_id"],
                     "type": "function",
                     "function": {
@@ -862,17 +867,16 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         "arguments": state.get("_last_tool_args_json", "{}"),
                     },
                 }
-                _im_ts = state.get("_last_thought_signature")
-                if _im_ts:
-                    _im_tc["thought_signature"] = _im_ts
-                _im.append({
-                    "role": "assistant",
-                    "content": _msg_content if state.get("has_speak_content") else "",
-                    "tool_calls": [_im_tc],
-                })
-            else:
-                _im.append({"role": "assistant", "content": _msg_content})
-            state["_intermediate_msgs"] = _im
+                _ts_pc = state.get("_last_thought_signature")
+                if _ts_pc:
+                    _tc_entry_pc["thought_signature"] = _ts_pc
+                _tc_list = [_tc_entry_pc]
+            _pulse_ctx.append(PulseLogEntry(
+                role="assistant",
+                content=_msg_content if state.get("has_speak_content") else "",
+                node_id=node_id, playbook_name=playbook.name,
+                tool_calls=_tc_list,
+                important=getattr(node_def, "important", False) or False))
 
         # Trace: log prompt→response (truncation handled by log_sea_trace)
         _prompt_str = prompt or "(no prompt)"
@@ -910,6 +914,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     role="user",
                     tags=list(memorize_tags),
                     pulse_id=pulse_id,
+                    playbook_name=playbook.name,
                 ):
                     _memorize_ok = False
                 else:
@@ -939,6 +944,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     tags=list(memorize_tags),
                     pulse_id=pulse_id,
                     metadata=_memorize_metadata if _memorize_metadata else None,
+                    playbook_name=playbook.name,
                 ):
                     _memorize_ok = False
                 else:
@@ -961,6 +967,22 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         "persona_id": getattr(persona, "persona_id", None),
                         "persona_name": getattr(persona, "persona_name", None),
                     })
+
+        # Important flag: dual-write to messages (long-term memory) if not already memorized
+        _is_important = getattr(node_def, "important", False)
+        if _is_important and not memorize_config and text and text != "(error in llm node)":
+            pulse_id = state.get("_pulse_id")
+            content_to_save = text
+            if schema_consumed and isinstance(text, dict):
+                content_to_save = json.dumps(text, ensure_ascii=False, indent=2)
+            if not runtime._store_memory(
+                persona, content_to_save,
+                role="assistant",
+                tags=["conversation"],
+                pulse_id=pulse_id,
+                playbook_name=playbook.name,
+            ):
+                LOGGER.warning("[sea][llm] Important dual-write failed for node %s", node_id)
 
         # Debug: log speak_content at end of LLM node
         speak_content = state.get("speak_content", "")

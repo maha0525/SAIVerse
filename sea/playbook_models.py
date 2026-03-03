@@ -97,6 +97,11 @@ class LLMNodeDef(BaseModel):
         description="State key containing metadata dict to attach to the speak message "
                     "(e.g., media attachments from tool execution). Only used when speak=true."
     )
+    important: Optional[bool] = Field(
+        default=None,
+        description="If True, this node's output is considered important and will be "
+                    "dual-written to both pulse_logs and messages (long-term memory)."
+    )
 
 
 class ToolNodeDef(BaseModel):
@@ -119,6 +124,11 @@ class ToolNodeDef(BaseModel):
     conditional_next: Optional[ConditionalNext] = Field(
         default=None,
         description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
+    important: Optional[bool] = Field(
+        default=None,
+        description="If True, this node's output is considered important and will be "
+                    "dual-written to both pulse_logs and messages (long-term memory)."
     )
 
 
@@ -148,6 +158,11 @@ class ToolCallNodeDef(BaseModel):
         default=None,
         description="Conditional routing based on state field. If specified, overrides 'next'."
     )
+    important: Optional[bool] = Field(
+        default=None,
+        description="If True, this node's output is considered important and will be "
+                    "dual-written to both pulse_logs and messages (long-term memory)."
+    )
 
 
 class SpeakNodeDef(BaseModel):
@@ -161,6 +176,12 @@ class SpeakNodeDef(BaseModel):
         default=None,
         description="Conditional routing based on state field. If specified, overrides 'next'."
     )
+    important: Optional[bool] = Field(
+        default=True,
+        description="If True, this node's output is considered important and will be "
+                    "dual-written to both pulse_logs and messages (long-term memory). "
+                    "Defaults to True for speak nodes as they produce final user-facing output."
+    )
 
 
 class ThinkNodeDef(BaseModel):
@@ -171,6 +192,11 @@ class ThinkNodeDef(BaseModel):
     conditional_next: Optional[ConditionalNext] = Field(
         default=None,
         description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
+    important: Optional[bool] = Field(
+        default=None,
+        description="If True, this node's output is considered important and will be "
+                    "dual-written to both pulse_logs and messages (long-term memory)."
     )
 
 
@@ -218,6 +244,11 @@ class MemorizeNodeDef(BaseModel):
     conditional_next: Optional[ConditionalNext] = Field(
         default=None,
         description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
+    important: Optional[bool] = Field(
+        default=None,
+        description="If True, this node's output is considered important and will be "
+                    "dual-written to both pulse_logs and messages (long-term memory)."
     )
 
 
