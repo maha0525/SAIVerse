@@ -56,21 +56,36 @@ if (Test-Path $SRC_DIR) {
 }
 
 if ($shouldClone) {
-    Write-Host "[INFO] Cloning SearXNG source into $SRC_DIR (ref=$BRANCH_OR_TAG) with sparse-checkout"
-
-    git clone --filter=blob:none --no-checkout --depth 1 --branch "$BRANCH_OR_TAG" https://github.com/searxng/searxng.git "$SRC_DIR"
-    if ($LASTEXITCODE -ne 0) { throw "Git clone failed" }
-
-    Push-Location "$SRC_DIR"
+    $gitAvailable = $false
     try {
-        git sparse-checkout init --cone
-        # Allow Git to process index entries with invalid Windows characters (like colons)
-        git config core.protectNTFS false
-        git sparse-checkout set searx requirements.txt
-        git checkout "$BRANCH_OR_TAG"
-        if ($LASTEXITCODE -ne 0) { throw "Git checkout failed" }
-    } finally {
-        Pop-Location
+        $null = & git --version 2>&1
+        if ($LASTEXITCODE -eq 0) { $gitAvailable = $true }
+    } catch {
+        $gitAvailable = $false
+    }
+
+    if ($gitAvailable) {
+        Write-Host "[INFO] Cloning SearXNG source into $SRC_DIR (ref=$BRANCH_OR_TAG) with sparse-checkout"
+
+        git clone --filter=blob:none --no-checkout --depth 1 --branch "$BRANCH_OR_TAG" https://github.com/searxng/searxng.git "$SRC_DIR"
+        if ($LASTEXITCODE -ne 0) { throw "Git clone failed" }
+
+        Push-Location "$SRC_DIR"
+        try {
+            git sparse-checkout init --cone
+            # Allow Git to process index entries with invalid Windows characters (like colons)
+            git config core.protectNTFS false
+            git sparse-checkout set searx requirements.txt
+            git checkout "$BRANCH_OR_TAG"
+            if ($LASTEXITCODE -ne 0) { throw "Git checkout failed" }
+        } finally {
+            Pop-Location
+        }
+    } else {
+        Write-Host "[INFO] git not found. Downloading SearXNG source archive..."
+        $downloadScript = Join-Path $ScriptRoot "download_searxng_source.py"
+        python $downloadScript "$SRC_DIR" --ref "$BRANCH_OR_TAG" --selective
+        if ($LASTEXITCODE -ne 0) { throw "SearXNG source download failed" }
     }
 }
 
