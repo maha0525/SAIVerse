@@ -1,7 +1,7 @@
 {
   "model": "qwen/qwen3.5-397b-a17b",
   "system_prompt": "",
-  "display_name": "Qwen3.5 397B A17B (Open Router)",
+  "display_name": "Qwen3.5 397B A17B Non-thinking(Open Router)",
   "provider": "openai",
   "supports_structured_output": true,
   "context_length": 256000,
@@ -17,9 +17,14 @@
   "request_kwargs": {
     "extra_body": {
       "reasoning": {
-        "enabled": true
+        "enabled": false
       }
     }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 0.60,
+    "output_per_1m_tokens": 3.60,
+    "currency": "USD"
   },
   "parameters": {
     "temperature": {
@@ -48,11 +53,24 @@
       "default": 8000,
       "label": "Max tokens",
       "description": "Upper bound on generated tokens."
+    },
+    "presence_penalty": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.01,
+      "default": 1.5,
+      "label": "Presence penalty",
+      "description": "Penalty for using the same token twice."
+    },
+    "repetition_penalty": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.01,
+      "default": 1,
+      "label": "Repetition penalty",
+      "description": "Repetition penalty."
     }
-  },
-  "pricing": {
-    "input_per_1m_tokens": 0.60,
-    "output_per_1m_tokens": 3.60,
-    "currency": "USD"
   }
 }

@@ -1,7 +1,7 @@
 {
   "model": "gpt-5.2",
-  "system_prompt": "現在の使用モデルはGPT-5.2です。\n\n[Model info]\n- Aug 31, 2025 knowledge cutoff",
-  "display_name": "GPT-5.2",
+  "system_prompt": "",
+  "display_name": "GPT-5.2 Thinking",
   "provider": "openai",
   "context_length": 400000,
   "default_max_history_messages": 60,
@@ -16,7 +16,7 @@
         "medium",
         "high"
       ],
-      "default": "medium",
+      "default": "high",
       "label": "Reasoning Effort",
       "description": "Controls how much thinking time the model spends."
     },
@@ -39,7 +39,7 @@
       "min": 32,
       "max": 8192,
       "step": 1,
-      "default": 4096,
+      "default": 8192,
       "label": "Max completion tokens",
       "description": "Upper bound on how many tokens the reply can use."
     }
@@ -47,7 +47,7 @@
   "pricing": {
     "input_per_1m_tokens": 1.75,
     "cached_input_per_1m_tokens": 0.175,
-    "output_per_1m_tokens": 14.0,
+    "output_per_1m_tokens": 14,
     "currency": "USD"
   }
 }
