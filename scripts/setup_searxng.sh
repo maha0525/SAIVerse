@@ -29,8 +29,14 @@ setup_source() {
   if [[ -d "${SRC_DIR}" ]]; then
     return
   fi
-  echo "[INFO] Cloning SearXNG source into ${SRC_DIR} (ref=${BRANCH_OR_TAG})" >&2
-  git clone --depth 1 --branch "${BRANCH_OR_TAG}" https://github.com/searxng/searxng.git "${SRC_DIR}"
+
+  if command -v git &>/dev/null; then
+    echo "[INFO] Cloning SearXNG source into ${SRC_DIR} (ref=${BRANCH_OR_TAG})" >&2
+    git clone --depth 1 --branch "${BRANCH_OR_TAG}" https://github.com/searxng/searxng.git "${SRC_DIR}"
+  else
+    echo "[INFO] git not found. Downloading SearXNG source archive..." >&2
+    python "${SCRIPT_DIR}/download_searxng_source.py" "${SRC_DIR}" --ref "${BRANCH_OR_TAG}"
+  fi
 }
 
 setup_venv() {
