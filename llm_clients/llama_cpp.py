@@ -308,10 +308,40 @@ class LlamaCppClient(LLMClient):
                     stream=True,
                 )
 
+                # ── Streaming timing instrumentation ──
+                stream_start = time.monotonic()
+                first_text_chunk_time: float | None = None
+                last_text_chunk_time: float | None = None
+                chunk_count = 0
+                text_chunk_count = 0
+
                 for chunk in stream:
+                    chunk_count += 1
                     delta = chunk["choices"][0]["delta"]
+                    finish_reason = chunk["choices"][0].get("finish_reason")
+                    if finish_reason and chunk_count > 1:
+                        logger.info(
+                            "[llama_cpp_stream] finish_reason='%s' at +%.2fs (chunk #%d)",
+                            finish_reason, time.monotonic() - stream_start, chunk_count,
+                        )
                     if "content" in delta:
+                        text_chunk_count += 1
+                        now = time.monotonic()
+                        if first_text_chunk_time is None:
+                            first_text_chunk_time = now
+                            logger.debug("[llama_cpp_stream] First text chunk at +%.2fs", now - stream_start)
+                        last_text_chunk_time = now
                         yield delta["content"]
+
+                # ── Stream completed: log timing summary ──
+                stream_end = time.monotonic()
+                logger.info(
+                    "[llama_cpp_stream] Stream completed: total=%.2fs, chunks=%d, text_chunks=%d, "
+                    "first_text=+%.2fs, last_text=+%.2fs",
+                    stream_end - stream_start, chunk_count, text_chunk_count,
+                    (first_text_chunk_time - stream_start) if first_text_chunk_time else -1,
+                    (last_text_chunk_time - stream_start) if last_text_chunk_time else -1,
+                )
                 return  # Stream completed successfully
 
             except Exception as exc:

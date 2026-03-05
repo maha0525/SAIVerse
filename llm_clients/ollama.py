@@ -524,20 +524,53 @@ class OllamaClient(LLMClient):
                     stream=True,
                 )
                 response.raise_for_status()
+
+                # ── Streaming timing instrumentation ──
+                stream_start = time.monotonic()
+                first_text_chunk_time: float | None = None
+                last_text_chunk_time: float | None = None
+                done_time: float | None = None
+                chunk_count = 0
+                text_chunk_count = 0
+
                 for line in response.iter_lines():
                     if not line:
                         continue
                     chunk = line.decode("utf-8")
+                    chunk_count += 1
                     if chunk.startswith("data: "):
                         chunk = chunk[len("data: ") :]
                     if chunk.strip() == "[DONE]":
+                        done_time = time.monotonic()
+                        logging.info(
+                            "[ollama_stream] [DONE] received at +%.2fs (chunk #%d)",
+                            done_time - stream_start, chunk_count,
+                        )
                         break
                     try:
                         data = json.loads(chunk)
                         delta = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                        if delta:
+                            text_chunk_count += 1
+                            now = time.monotonic()
+                            if first_text_chunk_time is None:
+                                first_text_chunk_time = now
+                                logging.debug("[ollama_stream] First text chunk at +%.2fs", now - stream_start)
+                            last_text_chunk_time = now
                         yield delta
                     except json.JSONDecodeError:
                         logging.warning("Failed to parse stream chunk: %s", chunk)
+
+                # ── Stream completed: log timing summary ──
+                stream_end = time.monotonic()
+                logging.info(
+                    "[ollama_stream] Stream completed: total=%.2fs, chunks=%d, text_chunks=%d, "
+                    "first_text=+%.2fs, last_text=+%.2fs, done_signal at +%.2fs",
+                    stream_end - stream_start, chunk_count, text_chunk_count,
+                    (first_text_chunk_time - stream_start) if first_text_chunk_time else -1,
+                    (last_text_chunk_time - stream_start) if last_text_chunk_time else -1,
+                    (done_time - stream_start) if done_time else -1,
+                )
                 return  # Stream completed successfully
             except Exception as e:
                 last_stream_error = e

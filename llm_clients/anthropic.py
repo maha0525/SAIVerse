@@ -428,10 +428,23 @@ class AnthropicClient(LLMClient):
                 json.dumps(request_params, indent=2, ensure_ascii=False, default=str),
             )
             output_chunks: List[Any] = []
+
+            # ── Streaming timing instrumentation ──
+            stream_start = time.monotonic()
+            first_text_chunk_time: float | None = None
+            last_text_chunk_time: float | None = None
+            message_stop_time: float | None = None
+            event_count = 0
+            text_chunk_count = 0
+            post_stop_event_count = 0
+
             with self.client.messages.stream(**request_params) as stream:
                 final_message = None
 
                 for event in stream:
+                    event_count += 1
+                    if message_stop_time is not None:
+                        post_stop_event_count += 1
                     if hasattr(event, "type"):
                         if event.type == "content_block_delta":
                             delta = getattr(event, "delta", None)
@@ -439,8 +452,19 @@ class AnthropicClient(LLMClient):
                                 if hasattr(delta, "thinking"):
                                     output_chunks.append({"type": "thinking", "content": delta.thinking})
                                 elif hasattr(delta, "text"):
+                                    text_chunk_count += 1
+                                    now = time.monotonic()
+                                    if first_text_chunk_time is None:
+                                        first_text_chunk_time = now
+                                        logging.debug("[anthropic_stream] First text chunk at +%.2fs", now - stream_start)
+                                    last_text_chunk_time = now
                                     output_chunks.append(delta.text)
                         elif event.type == "message_stop":
+                            message_stop_time = time.monotonic()
+                            logging.info(
+                                "[anthropic_stream] message_stop received at +%.2fs (event #%d)",
+                                message_stop_time - stream_start, event_count,
+                            )
                             final_message = stream.get_final_message()
 
                 if final_message:
@@ -456,6 +480,21 @@ class AnthropicClient(LLMClient):
                             "tool_name": tool_use["name"],
                             "tool_args": tool_use["arguments"],
                         })
+
+            # ── Stream completed: log timing summary ──
+            stream_end = time.monotonic()
+            elapsed = stream_end - stream_start
+            post_stop_wait = (stream_end - message_stop_time) if message_stop_time else 0
+            logging.info(
+                "[anthropic_stream] Stream completed: total=%.2fs, events=%d, text_chunks=%d, "
+                "first_text=+%.2fs, last_text=+%.2fs, message_stop at +%.2fs, "
+                "post_stop_events=%d, post_stop_wait=%.2fs",
+                elapsed, event_count, text_chunk_count,
+                (first_text_chunk_time - stream_start) if first_text_chunk_time else -1,
+                (last_text_chunk_time - stream_start) if last_text_chunk_time else -1,
+                (message_stop_time - stream_start) if message_stop_time else -1,
+                post_stop_event_count, post_stop_wait,
+            )
             return output_chunks
 
         for chunk in self._execute_with_retry(_stream_call, "streaming API call", is_stream=True):
