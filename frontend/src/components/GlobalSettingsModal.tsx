@@ -561,21 +561,23 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                     />
                                 </div>
 
-                                {/* X Mention Polling Toggle */}
-                                <div className={styles.toggleContainer}>
-                                    <div>
-                                        <div className={styles.toggleLabel}>
-                                            Xメンション監視
+                                {/* X Mention Polling Toggle (developer mode only) */}
+                                {developerMode && (
+                                    <div className={styles.toggleContainer}>
+                                        <div>
+                                            <div className={styles.toggleLabel}>
+                                                Xメンション監視
+                                            </div>
+                                            <div className={styles.toggleDescription}>
+                                                ONにするとX連携済みペルソナのメンションを5分間隔で自動監視します
+                                            </div>
                                         </div>
-                                        <div className={styles.toggleDescription}>
-                                            ONにするとX連携済みペルソナのメンションを5分間隔で自動監視します
-                                        </div>
+                                        <div
+                                            className={`${styles.toggle} ${xPollingEnabled ? styles.active : ''}`}
+                                            onClick={toggleXPolling}
+                                        />
                                     </div>
-                                    <div
-                                        className={`${styles.toggle} ${xPollingEnabled ? styles.active : ''}`}
-                                        onClick={toggleXPolling}
-                                    />
-                                </div>
+                                )}
                             </div>
                         )}
 
