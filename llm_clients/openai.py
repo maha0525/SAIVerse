@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, Iterator, List, Optional
 
 import openai
@@ -580,12 +581,29 @@ class OpenAIClient(LLMClient):
             reasoning_details_raw: List[Dict[str, Any]] = []
             prefix_yielded = False
 
+            # ── Streaming timing instrumentation ──
+            stream_start = time.monotonic()
+            first_text_chunk_time: float | None = None
+            last_text_chunk_time: float | None = None
+            finish_reason_time: float | None = None
+            chunk_count = 0
+            text_chunk_count = 0
+            post_finish_chunk_count = 0
+
             for chunk in resp:
+                chunk_count += 1
                 last_chunk = chunk
                 if chunk.choices and chunk.choices[0]:
                     fr = chunk.choices[0].finish_reason
-                    if fr is not None:
+                    if fr is not None and last_finish_reason is None:
                         last_finish_reason = fr
+                        finish_reason_time = time.monotonic()
+                        logging.info(
+                            "[openai_stream] finish_reason='%s' received at +%.2fs (chunk #%d)",
+                            fr, finish_reason_time - stream_start, chunk_count,
+                        )
+                if finish_reason_time is not None:
+                    post_finish_chunk_count += 1
                 if not chunk.choices or not chunk.choices[0].delta:
                     continue
 
@@ -606,10 +624,34 @@ class OpenAIClient(LLMClient):
                     yield {"type": "thinking", "content": r}
                 if not text_fragment:
                     continue
+
+                text_chunk_count += 1
+                now = time.monotonic()
+                if first_text_chunk_time is None:
+                    first_text_chunk_time = now
+                    logging.debug("[openai_stream] First text chunk at +%.2fs", now - stream_start)
+                last_text_chunk_time = now
+
                 if not prefix_yielded and history_snippets:
                     yield "\n".join(history_snippets) + "\n"
                     prefix_yielded = True
                 yield text_fragment
+
+            # ── Stream completed: log timing summary ──
+            stream_end = time.monotonic()
+            elapsed = stream_end - stream_start
+            post_finish_wait = (stream_end - finish_reason_time) if finish_reason_time else 0
+            logging.info(
+                "[openai_stream] Text stream completed: total=%.2fs, chunks=%d, text_chunks=%d, "
+                "first_text=+%.2fs, last_text=+%.2fs, finish_reason='%s' at +%.2fs, "
+                "post_finish_chunks=%d, post_finish_wait=%.2fs",
+                elapsed, chunk_count, text_chunk_count,
+                (first_text_chunk_time - stream_start) if first_text_chunk_time else -1,
+                (last_text_chunk_time - stream_start) if last_text_chunk_time else -1,
+                last_finish_reason,
+                (finish_reason_time - stream_start) if finish_reason_time else -1,
+                post_finish_chunk_count, post_finish_wait,
+            )
 
             if last_finish_reason == "content_filter":
                 logging.warning("[openai] Stream output blocked by content filter. finish_reason=%s", last_finish_reason)
@@ -654,8 +696,30 @@ class OpenAIClient(LLMClient):
         current_call_id: Optional[str] = None
         last_chunk = None
 
+        # ── Streaming timing instrumentation ──
+        stream_start = time.monotonic()
+        first_text_chunk_time: float | None = None
+        last_text_chunk_time: float | None = None
+        finish_reason_time: float | None = None
+        last_finish_reason: str | None = None
+        chunk_count = 0
+        text_chunk_count = 0
+        post_finish_chunk_count = 0
+
         for chunk in resp:
+            chunk_count += 1
             last_chunk = chunk
+            if chunk.choices and chunk.choices[0]:
+                fr = chunk.choices[0].finish_reason
+                if fr is not None and last_finish_reason is None:
+                    last_finish_reason = fr
+                    finish_reason_time = time.monotonic()
+                    logging.info(
+                        "[openai_stream] finish_reason='%s' received at +%.2fs (chunk #%d, tool_mode)",
+                        fr, finish_reason_time - stream_start, chunk_count,
+                    )
+            if finish_reason_time is not None:
+                post_finish_chunk_count += 1
             delta = chunk.choices[0].delta
 
             if delta.tool_calls:
@@ -690,6 +754,14 @@ class OpenAIClient(LLMClient):
                     yield {"type": "thinking", "content": r}
                 if not text_fragment:
                     continue
+
+                text_chunk_count += 1
+                now = time.monotonic()
+                if first_text_chunk_time is None:
+                    first_text_chunk_time = now
+                    logging.debug("[openai_stream] First text chunk at +%.2fs (tool_mode)", now - stream_start)
+                last_text_chunk_time = now
+
                 if not prefix_yielded and history_snippets:
                     yield "\n".join(history_snippets) + "\n"
                     prefix_yielded = True
@@ -701,6 +773,22 @@ class OpenAIClient(LLMClient):
                 reasoning_chunks.append(r)
                 yield {"type": "thinking", "content": r}
             reasoning_details_raw.extend(extract_raw_reasoning_details_from_delta(delta))
+
+        # ── Stream completed: log timing summary ──
+        stream_end = time.monotonic()
+        elapsed = stream_end - stream_start
+        post_finish_wait = (stream_end - finish_reason_time) if finish_reason_time else 0
+        logging.info(
+            "[openai_stream] Tool stream completed: total=%.2fs, chunks=%d, text_chunks=%d, "
+            "first_text=+%.2fs, last_text=+%.2fs, finish_reason='%s' at +%.2fs, "
+            "post_finish_chunks=%d, post_finish_wait=%.2fs",
+            elapsed, chunk_count, text_chunk_count,
+            (first_text_chunk_time - stream_start) if first_text_chunk_time else -1,
+            (last_text_chunk_time - stream_start) if last_text_chunk_time else -1,
+            last_finish_reason,
+            (finish_reason_time - stream_start) if finish_reason_time else -1,
+            post_finish_chunk_count, post_finish_wait,
+        )
 
         openai_runtime.store_usage_from_last_chunk(
             last_chunk,

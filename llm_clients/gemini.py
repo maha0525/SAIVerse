@@ -1282,10 +1282,23 @@ class GeminiClient(LLMClient):
         stream_completed = False
         last_chunk = None
 
+        # ── Streaming timing instrumentation ──
+        stream_start = time.monotonic()
+        first_text_chunk_time: float | None = None
+        last_text_chunk_time: float | None = None
+        finish_reason_time: float | None = None
+        finish_reason_value: str | None = None
+        chunk_count = 0
+        text_chunk_count = 0
+        post_finish_chunk_count = 0
+
         try:
             for chunk in stream:
+                chunk_count += 1
                 last_chunk = chunk
                 get_llm_logger().debug("Gemini stream chunk:\n%s", chunk)
+                if finish_reason_time is not None:
+                    post_finish_chunk_count += 1
                 if not chunk.candidates:
                     continue
                 candidate = chunk.candidates[0]
@@ -1295,6 +1308,13 @@ class GeminiClient(LLMClient):
                 # Check for safety filter block in streaming
                 finish_reason = getattr(candidate, "finish_reason", None)
                 if finish_reason is not None:
+                    if finish_reason_time is None:
+                        finish_reason_value = str(finish_reason)
+                        finish_reason_time = time.monotonic()
+                        logging.info(
+                            "[gemini_stream] finish_reason='%s' received at +%.2fs (chunk #%d)",
+                            finish_reason_value, finish_reason_time - stream_start, chunk_count,
+                        )
                     finish_reason_str = str(finish_reason).upper()
                     if "SAFETY" in finish_reason_str:
                         safety_ratings = getattr(candidate, "safety_ratings", [])
@@ -1352,6 +1372,14 @@ class GeminiClient(LLMClient):
                 )
                 if not new_text:
                     continue
+
+                text_chunk_count += 1
+                now = time.monotonic()
+                if first_text_chunk_time is None:
+                    first_text_chunk_time = now
+                    logging.debug("[gemini_stream] First text chunk at +%.2fs", now - stream_start)
+                last_text_chunk_time = now
+
                 get_llm_logger().debug("Gemini text delta: %s", new_text)
                 if not prefix_yielded and history_snippets:
                     yield "\n".join(history_snippets) + "\n"
@@ -1366,6 +1394,22 @@ class GeminiClient(LLMClient):
         except Exception as exc:
             logging.exception("Gemini stream iteration failed")
             raise self._convert_to_llm_error(exc, "streaming") from exc
+
+        # ── Stream completed: log timing summary ──
+        stream_end = time.monotonic()
+        elapsed = stream_end - stream_start
+        post_finish_wait = (stream_end - finish_reason_time) if finish_reason_time else 0
+        logging.info(
+            "[gemini_stream] Stream completed: total=%.2fs, chunks=%d, text_chunks=%d, "
+            "first_text=+%.2fs, last_text=+%.2fs, finish_reason='%s' at +%.2fs, "
+            "post_finish_chunks=%d, post_finish_wait=%.2fs",
+            elapsed, chunk_count, text_chunk_count,
+            (first_text_chunk_time - stream_start) if first_text_chunk_time else -1,
+            (last_text_chunk_time - stream_start) if last_text_chunk_time else -1,
+            finish_reason_value,
+            (finish_reason_time - stream_start) if finish_reason_time else -1,
+            post_finish_chunk_count, post_finish_wait,
+        )
 
         if fcall is None and saw_chunks and not stream_completed:
             # Log as warning but continue with received content
