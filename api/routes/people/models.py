@@ -443,3 +443,39 @@ class UpdateArasujiEntryRequest(BaseModel):
 class MessagesByIdsRequest(BaseModel):
     """メッセージID指定取得リクエスト"""
     ids: List[str]
+
+
+# -----------------------------------------------------------------------------
+# Pulse Logs Models
+# -----------------------------------------------------------------------------
+
+class PulseSummaryItem(BaseModel):
+    pulse_id: str
+    entry_count: int
+    latest_created_at: int
+    playbook_name: Optional[str] = None
+
+class PulseListResponse(BaseModel):
+    items: List[PulseSummaryItem]
+    total: int
+    page: int
+    page_size: int
+
+class PulseLogEntry(BaseModel):
+    id: str
+    pulse_id: str
+    thread_id: Optional[str] = None
+    role: str
+    content: Optional[str] = None
+    node_id: Optional[str] = None
+    playbook_name: Optional[str] = None
+    important: bool = False
+    tool_calls: Optional[str] = None
+    tool_call_id: Optional[str] = None
+    tool_name: Optional[str] = None
+    created_at: int
+
+class PulseLogsResponse(BaseModel):
+    items: List[PulseLogEntry]
+    pulse_id: str
+    total: int

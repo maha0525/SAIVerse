@@ -956,6 +956,41 @@ def set_embed_metadata(conn: sqlite3.Connection, key: str, value: str) -> None:
 # Pulse Logs
 # ---------------------------------------------------------------------------
 
+def list_pulse_ids(
+    conn: sqlite3.Connection,
+    limit: int = 100,
+    offset: int = 0,
+) -> List[Tuple[Any, ...]]:
+    """Fetch distinct pulse_ids with metadata, ordered by latest created_at DESC.
+
+    Returns:
+        List of tuples: (pulse_id, entry_count, latest_created_at, first_playbook_name)
+    """
+    cur = conn.execute(
+        """
+        SELECT pulse_id,
+               COUNT(*) AS entry_count,
+               MAX(created_at) AS latest_created_at,
+               (SELECT playbook_name FROM pulse_logs p2
+                WHERE p2.pulse_id = p1.pulse_id AND p2.playbook_name IS NOT NULL
+                ORDER BY p2.created_at ASC LIMIT 1) AS first_playbook_name
+        FROM pulse_logs p1
+        GROUP BY pulse_id
+        ORDER BY latest_created_at DESC
+        LIMIT ? OFFSET ?
+        """,
+        (limit, offset),
+    )
+    return cur.fetchall()
+
+
+def count_pulse_ids(conn: sqlite3.Connection) -> int:
+    """Count distinct pulse_ids in pulse_logs."""
+    cur = conn.execute("SELECT COUNT(DISTINCT pulse_id) FROM pulse_logs")
+    row = cur.fetchone()
+    return row[0] if row else 0
+
+
 def add_pulse_log(
     conn: sqlite3.Connection,
     pulse_id: str,
