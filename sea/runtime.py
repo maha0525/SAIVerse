@@ -79,7 +79,7 @@ class SEARuntime:
         building_id: str,
         metadata: Optional[Dict[str, Any]] = None,
         meta_playbook: Optional[str] = None,
-        playbook_params: Optional[Dict[str, Any]] = None,
+        args: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         cancellation_token: Optional[CancellationToken] = None,
         pulse_type: str = "user",
@@ -88,10 +88,10 @@ class SEARuntime:
         # Check for cancellation before starting
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
-        
+
         # Store pulse_type in persona for tools to access
         persona._current_pulse_type = pulse_type
-        
+
         # Record user input to history before processing
         if user_input:
             try:
@@ -109,15 +109,25 @@ class SEARuntime:
         if meta_playbook:
             playbook = self._load_playbook_for(meta_playbook, persona, building_id)
             if playbook is None:
-                LOGGER.warning("Meta playbook '%s' not found, falling back to automatic selection", meta_playbook)
-                playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
+                LOGGER.warning("Meta playbook '%s' not found; aborting execution", meta_playbook)
+                if event_callback:
+                    event_callback({
+                        "type": "error",
+                        "code": "playbook_not_found",
+                        "meta_playbook": meta_playbook,
+                    })
+                return [f"指定されたプレイブック '{meta_playbook}' が見つかりません。プレイブックIDを確認してください。"]
         else:
             playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
+        # Build effective args: auto-include user_input as "input" if not explicitly set
+        effective_args = dict(args or {})
+        if user_input and "input" not in effective_args:
+            effective_args["input"] = user_input
         result = self._run_playbook(
             playbook, persona, building_id, user_input,
             auto_mode=False, record_history=True, event_callback=event_callback,
             cancellation_token=cancellation_token, pulse_type=pulse_type,
-            initial_params=playbook_params,
+            initial_params=effective_args if effective_args else None,
         )
 
         # Post-response metabolism check
@@ -266,7 +276,7 @@ class SEARuntime:
             cached_tokens: Number of tokens served from cache
             cache_write_tokens: Number of tokens written to cache
         """
-        accumulator = state.get("pulse_usage_accumulator")
+        accumulator = state.get("_pulse_usage_accumulator")
         if accumulator is None:
             return
         accumulator["total_input_tokens"] += input_tokens
@@ -671,7 +681,7 @@ class SEARuntime:
             persona, message,
             role="system",
             tags=["permission", "denied", playbook_name],
-            pulse_id=state.get("pulse_id"),
+            pulse_id=state.get("_pulse_id"),
         ):
             LOGGER.warning("[sea][perm] Failed to store permission result to SAIMemory")
 
@@ -702,7 +712,7 @@ class SEARuntime:
             text = state.get("last") or ""
             reasoning_text = state.pop("_reasoning_text", "")
             reasoning_details_val = state.pop("_reasoning_details", None)
-            pulse_id = state.get("pulse_id")
+            pulse_id = state.get("_pulse_id")
             metadata_key = getattr(node_def, "metadata_key", None)
             base_metadata = state.get(metadata_key) if metadata_key else None
 
@@ -719,7 +729,7 @@ class SEARuntime:
                 msg_metadata["reasoning_details"] = reasoning_details_val
 
             # Include pulse usage accumulator total for UI display
-            accumulator = state.get("pulse_usage_accumulator")
+            accumulator = state.get("_pulse_usage_accumulator")
             if accumulator and accumulator.get("call_count", 0) > 0:
                 msg_metadata["llm_usage_total"] = dict(accumulator)
 
@@ -752,7 +762,7 @@ class SEARuntime:
         if event_callback:
             event_callback({"type": "status", "content": f"{playbook.name} / think", "playbook": playbook.name, "node": "think"})
         text = state.get("last") or ""
-        pulse_id = state.get("pulse_id") or str(uuid.uuid4())
+        pulse_id = state.get("_pulse_id") or str(uuid.uuid4())
         self._emit_think(persona, pulse_id, text)
         if outputs is not None:
             outputs.append(text)
@@ -994,7 +1004,7 @@ class SEARuntime:
             args_text = json.dumps(payload, ensure_ascii=False)
         except Exception:
             args_text = json.dumps({"raw": str(raw_text)}, ensure_ascii=False)
-        conv = state.get("messages")
+        conv = state.get("_messages")
         if not isinstance(conv, list):
             conv = []
         call_id = f"router_call_{uuid.uuid4().hex}"
@@ -1016,7 +1026,7 @@ class SEARuntime:
             conv[-1] = call_msg
         else:
             conv.append(call_msg)
-        state["messages"] = conv
+        state["_messages"] = conv
         state["_last_tool_call_id"] = call_id
         state["_last_tool_name"] = payload.get("playbook") or "sub_playbook"
 
@@ -1089,7 +1099,7 @@ class SEARuntime:
         call_id = state.get("_last_tool_call_id")
         if not call_id:
             return
-        conv = state.get("messages")
+        conv = state.get("_messages")
         if not isinstance(conv, list):
             conv = []
         message = {
@@ -1099,7 +1109,7 @@ class SEARuntime:
             "content": payload,
         }
         conv.append(message)
-        state["messages"] = conv
+        state["_messages"] = conv
         state["_last_tool_call_id"] = None
 
     # ---------------- helpers -----------------

@@ -35,12 +35,13 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                          len(str(state.get('available_playbooks'))) if state.get('available_playbooks') is not None else None)
 
         # Build variables for template formatting
+        # System variables (_ prefix) are excluded — only playbook variables are exposed to templates
         variables = {
-            "input": state.get("inputs", {}).get("input", ""),
+            "input": state.get("input", ""),
             "last": state.get("last", ""),
             "persona_id": getattr(persona, "persona_id", None),
             "persona_name": getattr(persona, "persona_name", None),
-            **{k: v for k, v in state.items() if k not in ["messages", "inputs", "outputs", "persona_obj", "_cancellation_token"]},  # Include all other state variables
+            **{k: v for k, v in state.items() if not k.startswith("_")},
         }
 
         # Debug: log template variables for novel_writing playbook
@@ -55,7 +56,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         schema_consumed = False
         prompt = None  # Will store the expanded prompt for memorize
         try:
-            # Determine base messages: use context_profile if set, otherwise legacy state["messages"]
+            # Determine base messages: use context_profile if set, otherwise state["_messages"]
             _profile_name = getattr(node_def, "context_profile", None)
             if _profile_name:
                 from sea.playbook_models import CONTEXT_PROFILES
@@ -65,9 +66,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     if _cache_key not in state:
                         state[_cache_key] = runtime._prepare_context(
                             persona, building_id,
-                            state.get("inputs", {}).get("input") or None,
+                            state.get("input") or None,
                             _profile["requirements"],
-                            pulse_id=state.get("pulse_id"),
+                            pulse_id=state.get("_pulse_id"),
                             event_callback=event_callback,
                         )
                         LOGGER.info("[sea] Prepared context for profile '%s' (node=%s, %d messages)",
@@ -77,9 +78,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     base_msgs = list(_profile_base) + list(_intermediate)
                 else:
                     LOGGER.warning("[sea] Unknown context_profile '%s' on node '%s', falling back to state messages", _profile_name, node_id)
-                    base_msgs = state.get("messages", [])
+                    base_msgs = state.get("_messages", [])
             else:
-                base_msgs = state.get("messages", [])
+                base_msgs = state.get("_messages", [])
             action_template = getattr(node_def, "action", None)
             if action_template:
                 prompt = _format(action_template, variables)
@@ -272,7 +273,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             event_callback(completion_event)
 
                             # Record to Building history
-                            pulse_id = state.get("pulse_id")
+                            pulse_id = state.get("_pulse_id")
                             msg_metadata: Dict[str, Any] = {}
                             if _speak_base_metadata and isinstance(_speak_base_metadata, dict):
                                 msg_metadata.update(_speak_base_metadata)
@@ -316,7 +317,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         event_callback(completion_event)
 
                         # Record to Building history
-                        pulse_id = state.get("pulse_id")
+                        pulse_id = state.get("_pulse_id")
                         msg_metadata: Dict[str, Any] = {}
                         if _speak_base_metadata and isinstance(_speak_base_metadata, dict):
                             msg_metadata.update(_speak_base_metadata)
@@ -329,7 +330,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         _at_stream = state.get("_activity_trace")
                         if _at_stream:
                             msg_metadata["activity_trace"] = list(_at_stream)
-                        accumulator = state.get("pulse_usage_accumulator")
+                        accumulator = state.get("_pulse_usage_accumulator")
                         if accumulator:
                             msg_metadata["llm_usage_total"] = dict(accumulator)
                         eff_bid = runtime._effective_building_id(persona, building_id)
@@ -655,7 +656,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     event_callback(completion_event)
 
                     # Record to Building history with usage metadata (include pulse total)
-                    pulse_id = state.get("pulse_id")
+                    pulse_id = state.get("_pulse_id")
                     msg_metadata: Dict[str, Any] = {}
                     # Merge base metadata first (e.g., media from tool execution)
                     if _speak_base_metadata and isinstance(_speak_base_metadata, dict):
@@ -669,7 +670,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     _at_stream = state.get("_activity_trace")
                     if _at_stream:
                         msg_metadata["activity_trace"] = list(_at_stream)
-                    accumulator = state.get("pulse_usage_accumulator")
+                    accumulator = state.get("_pulse_usage_accumulator")
                     if accumulator:
                         msg_metadata["llm_usage_total"] = dict(accumulator)
                     eff_bid = runtime._effective_building_id(persona, building_id)
@@ -733,7 +734,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     LOGGER.info("[DEBUG] speak_flag=%s, event_callback=%s, text_len=%d",
                                speak_flag, event_callback is not None, len(text) if text else 0)
                     if speak_flag is True:
-                        pulse_id = state.get("pulse_id")
+                        pulse_id = state.get("_pulse_id")
                         # Resolve metadata_key for speak (e.g., media attachments from tool execution)
                         _speak_metadata_key2 = getattr(node_def, "metadata_key", None)
                         _speak_base_metadata2 = state.get(_speak_metadata_key2) if _speak_metadata_key2 else None
@@ -750,7 +751,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         _at_speak = state.get("_activity_trace")
                         if _at_speak:
                             msg_metadata["activity_trace"] = list(_at_speak)
-                        accumulator = state.get("pulse_usage_accumulator")
+                        accumulator = state.get("_pulse_usage_accumulator")
                         if accumulator:
                             msg_metadata["llm_usage_total"] = dict(accumulator)
                         eff_bid = runtime._effective_building_id(persona, building_id)
@@ -839,11 +840,11 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 "content": _tc_speak,
                 "tool_calls": [_tc_entry],
             }
-            state["messages"] = messages + [_assistant_msg]
+            state["_messages"] = messages + [_assistant_msg]
             LOGGER.info("[sea][llm] Appended assistant message with tool_calls (id=%s, tool=%s)",
                        state["_last_tool_call_id"], state.get("_last_tool_name"))
         else:
-            state["messages"] = messages + [{"role": "assistant", "content": _msg_content}]
+            state["_messages"] = messages + [{"role": "assistant", "content": _msg_content}]
 
         # Track intermediate messages for profile-based nodes in the same playbook
         if "_intermediate_msgs" in state:
@@ -893,7 +894,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         LOGGER.debug("[_lg_llm_node] node=%s memorize_config=%s type=%s schema_consumed=%s",
                    getattr(node_def, "id", "?"), memorize_config, type(memorize_config), schema_consumed)
         if memorize_config:
-            pulse_id = state.get("pulse_id")
+            pulse_id = state.get("_pulse_id")
             # Parse memorize config - can be True or {"tags": [...]}
             if isinstance(memorize_config, dict):
                 memorize_tags = memorize_config.get("tags", [])

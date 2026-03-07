@@ -8,6 +8,7 @@ SAIVerseの公式ドキュメントへようこそ。
 - [インストール](./getting-started/installation.md) - 環境構築手順
 - [クイックスタート](./getting-started/quickstart.md) - 10分で動かす
 - [設定](./getting-started/configuration.md) - 環境変数・オプション設定
+- [Tailscale Runbook](./getting-started/tailscale-runbook.md) - スマホアクセス設定手順
 
 ### 基本概念
 - [アーキテクチャ](./concepts/architecture.md) - システム全体像
@@ -26,8 +27,9 @@ SAIVerseの公式ドキュメントへようこそ。
 - [都市間連携](./features/inter-city.md) - マルチシティ構成
 - [ツールシステム](./features/tools-system.md) - AIが使えるツール
 - [Playbook/SEA](./features/playbooks.md) - 行動パターン定義
+- [Tailscale PWA](./features/tailscale-pwa.md) - スマホアクセスとPWA ⭐NEW
 - [Discord連携](./features/discord-gateway.md) - Discordとの接続
-- [Unity Gateway](./features/unity-gateway.md) - 3D/VR空間連携 ⭐NEW
+- [Unity Gateway](./features/unity-gateway.md) - 3D/VR空間連携
 
 ### 開発者ガイド
 - [コントリビューション](./developer-guide/contributing.md) - 貢献の方法

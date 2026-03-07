@@ -1,20 +1,28 @@
 """Native Anthropic Claude client with prompt caching support."""
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import os
 import time
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional
 
 import anthropic
 from anthropic import Anthropic
-from anthropic.types import Message, TextBlock, ToolUseBlock
-
-from saiverse.media_utils import iter_image_media, load_image_bytes_for_llm
+from anthropic.types import Message
 
 from .base import EmptyResponseError, LLMClient, get_llm_logger
+from .anthropic_request_builder import build_request_params
+from .anthropic_response_parser import (
+    _extract_text_from_response,
+    _extract_thinking_from_response,
+    _extract_tool_use_from_response,
+)
+from .anthropic_retry_policy import (
+    _convert_to_llm_error,
+    _is_content_policy_error,
+    _should_retry,
+)
 from .exceptions import (
     AuthenticationError,
     EmptyResponseError as LLMEmptyResponseError,
@@ -26,445 +34,11 @@ from .exceptions import (
     SafetyFilterError,
     ServerError,
 )
-from .utils import (
-    compute_allowed_attachment_keys,
-    content_to_text,
-    image_summary_note,
-    parse_attachment_limit,
-)
 
 
 # Retry configuration
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 1.0  # seconds
-
-
-def _is_rate_limit_error(err: Exception) -> bool:
-    """Check if the error is a rate limit that should be retried."""
-    if isinstance(err, anthropic.RateLimitError):
-        return True
-    msg = str(err).lower()
-    return (
-        "rate" in msg
-        or "429" in msg
-        or "quota" in msg
-        or "overload" in msg
-    )
-
-
-def _is_server_error(err: Exception) -> bool:
-    """Check if the error is a server error (5xx) that should be retried."""
-    if isinstance(err, anthropic.APIStatusError):
-        return err.status_code >= 500
-    msg = str(err).lower()
-    return "503" in msg or "502" in msg or "504" in msg or "unavailable" in msg
-
-
-def _is_timeout_error(err: Exception) -> bool:
-    """Check if the error is a timeout that should be retried."""
-    if isinstance(err, anthropic.APITimeoutError):
-        return True
-    if isinstance(err, anthropic.APIConnectionError):
-        return True
-    msg = str(err).lower()
-    return "timeout" in msg or "timed out" in msg
-
-
-def _should_retry(err: Exception) -> bool:
-    """Check if the error should trigger a retry."""
-    if _is_payment_error(err) or _is_authentication_error(err):
-        return False
-    return _is_rate_limit_error(err) or _is_server_error(err) or _is_timeout_error(err)
-
-
-def _is_authentication_error(err: Exception) -> bool:
-    """Check if the error is an authentication error."""
-    if isinstance(err, anthropic.AuthenticationError):
-        return True
-    msg = str(err).lower()
-    return "401" in msg or "403" in msg or "authentication" in msg or "invalid api key" in msg
-
-
-def _is_payment_error(err: Exception) -> bool:
-    """Check if the error is a payment/billing error (402) or quota exhaustion."""
-    msg = str(err).lower()
-    return (
-        "402" in msg
-        or "payment required" in msg
-        or "spend limit" in msg
-        or "billing" in msg
-        or "insufficient_quota" in msg
-    )
-
-
-def _is_content_policy_error(err: Exception) -> bool:
-    """Check if the error is a content policy violation.
-
-    Anthropic returns 400 invalid_request_error when content violates policies.
-    The error message typically contains keywords like 'harmful', 'unsafe',
-    'content policy', or 'violates'.
-    """
-    msg = str(err).lower()
-    return any(kw in msg for kw in (
-        "content policy", "harmful", "unsafe content", "violates",
-        "not allowed", "blocked",
-    ))
-
-
-def _convert_to_llm_error(err: Exception, context: str = "API call") -> LLMError:
-    """Convert a generic exception to an appropriate LLMError subclass."""
-    if _is_payment_error(err):
-        return PaymentError(f"Anthropic {context} failed: payment required", err)
-    elif _is_rate_limit_error(err):
-        return RateLimitError(f"Anthropic {context} failed: rate limit exceeded", err)
-    elif _is_timeout_error(err):
-        return LLMTimeoutError(f"Anthropic {context} failed: timeout", err)
-    elif _is_server_error(err):
-        return ServerError(f"Anthropic {context} failed: server error", err)
-    elif _is_authentication_error(err):
-        return AuthenticationError(f"Anthropic {context} failed: authentication error", err)
-    else:
-        return LLMError(f"Anthropic {context} failed: {err}", err)
-
-
-def _make_cache_control(cache_ttl: str = "5m") -> Dict[str, Any]:
-    """Create cache_control dict with TTL."""
-    return {"type": "ephemeral", "ttl": cache_ttl}
-
-
-def _prepare_schema_for_native_output(schema: Dict[str, Any]) -> Dict[str, Any]:
-    """Prepare a JSON schema for Anthropic native structured output.
-
-    Native structured output requires additionalProperties: false on all object types.
-    This function deep-copies the schema and adds the constraint where missing.
-    """
-    import copy
-    schema = copy.deepcopy(schema)
-
-    def _fix_object(obj: Dict[str, Any]) -> None:
-        if not isinstance(obj, dict):
-            return
-        if obj.get("type") == "object":
-            obj.setdefault("additionalProperties", False)
-            for prop in (obj.get("properties") or {}).values():
-                _fix_object(prop)
-        elif obj.get("type") == "array" and isinstance(obj.get("items"), dict):
-            _fix_object(obj["items"])
-        # Handle anyOf / allOf
-        for key in ("anyOf", "allOf"):
-            if key in obj:
-                for item in obj[key]:
-                    _fix_object(item)
-
-    _fix_object(schema)
-    return schema
-
-
-def _prepare_anthropic_system(
-    messages: List[Dict[str, Any]],
-    enable_cache: bool = True,
-    cache_ttl: str = "5m",
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Extract system messages and prepare them for Anthropic API format.
-
-    Returns:
-        Tuple of (system_blocks, remaining_messages)
-        system_blocks: List of content blocks for system parameter
-        remaining_messages: Messages without system messages
-    """
-    system_blocks: List[Dict[str, Any]] = []
-    remaining: List[Dict[str, Any]] = []
-
-    for msg in messages:
-        if not isinstance(msg, dict):
-            remaining.append(msg)
-            continue
-
-        role = msg.get("role", "")
-        if isinstance(role, str) and role.lower() == "host":
-            role = "system"
-
-        if role == "system":
-            content = content_to_text(msg.get("content", ""))
-            if content:
-                system_blocks.append({
-                    "type": "text",
-                    "text": content,
-                })
-        else:
-            remaining.append(msg)
-
-    # Add cache_control to the last system block for efficient caching.
-    # Note: Anthropic has no read-only cache mode. Placing breakpoints enables
-    # both reads and writes. Removing them disables both entirely.
-    if enable_cache and system_blocks:
-        system_blocks[-1]["cache_control"] = _make_cache_control(cache_ttl)
-
-    return system_blocks, remaining
-
-
-def _prepare_anthropic_messages(
-    messages: List[Dict[str, Any]],
-    supports_images: bool = False,
-    max_image_bytes: Optional[int] = None,
-    enable_cache: bool = True,
-    cache_ttl: str = "5m",
-) -> List[Dict[str, Any]]:
-    """
-    Prepare messages for Anthropic API format.
-
-    Args:
-        messages: Raw message list (should not contain system messages)
-        supports_images: Whether the model supports images
-        max_image_bytes: Optional max bytes for images
-        enable_cache: Whether to add cache_control markers
-        cache_ttl: Cache TTL ("5m" or "1h")
-    """
-    # ------------------------------------------------------------------
-    # Pre-scan: build attachment cache and metadata flags
-    # ------------------------------------------------------------------
-    max_image_embeds = parse_attachment_limit("ANTHROPIC")
-    attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
-    skip_summary_indices: set = set()
-    exempt_indices: set = set()
-
-    for idx, msg in enumerate(messages):
-        if not isinstance(msg, dict):
-            continue
-        metadata = msg.get("metadata")
-        if isinstance(metadata, dict):
-            if metadata.get("__skip_image_summary__"):
-                skip_summary_indices.add(idx)
-            if metadata.get("__visual_context__"):
-                exempt_indices.add(idx)
-        media_items = iter_image_media(metadata) if metadata else []
-        if media_items:
-            attachment_cache[idx] = list(media_items)
-
-    allowed_attachment_keys = compute_allowed_attachment_keys(
-        attachment_cache, max_image_embeds, exempt_indices,
-    )
-    logging.debug(
-        "[anthropic] attachment limit=%s, cached=%d msgs with images",
-        "∞" if max_image_embeds is None else max_image_embeds,
-        len(attachment_cache),
-    )
-
-    # ------------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------------
-    prepared: List[Dict[str, Any]] = []
-    # Track index of first dynamic content (realtime context, etc.)
-    first_dynamic_index: Optional[int] = None
-
-    for i, msg in enumerate(messages):
-        if not isinstance(msg, dict):
-            continue
-
-        role = msg.get("role", "")
-        if role == "system":
-            # System messages should be extracted separately
-            continue
-        if role == "host":
-            role = "user"
-
-        content = msg.get("content", "")
-        metadata = msg.get("metadata")
-
-        # Detect realtime context (dynamic content that changes each request)
-        is_dynamic = False
-        if isinstance(metadata, dict):
-            if metadata.get("__realtime_context__"):
-                is_dynamic = True
-
-        attachments = attachment_cache.get(i, [])
-        skip_summary = i in skip_summary_indices
-
-        # Skip empty messages
-        if not content and not attachments:
-            continue
-
-        # Convert content to content blocks
-        content_blocks: List[Dict[str, Any]] = []
-
-        # Handle text content
-        text = content_to_text(content)
-        if text:
-            content_blocks.append({
-                "type": "text",
-                "text": text,
-            })
-
-        # Handle images for user messages
-        if supports_images and role == "user" and attachments:
-            for att_idx, att in enumerate(attachments):
-                # Determine whether to embed this attachment as binary
-                should_embed = (
-                    allowed_attachment_keys is None
-                    or (i, att_idx) in allowed_attachment_keys
-                )
-                if should_embed:
-                    data, effective_mime = load_image_bytes_for_llm(
-                        att["path"], att["mime_type"], max_bytes=max_image_bytes
-                    )
-                    if data and effective_mime:
-                        b64 = base64.b64encode(data).decode("ascii")
-                        content_blocks.append({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": effective_mime,
-                                "data": b64,
-                            },
-                        })
-                        continue
-                    else:
-                        logging.warning(
-                            "Image file not found or unreadable: %s",
-                            att.get("uri") or att.get("path"),
-                        )
-                # Not embedding — produce a text summary instead
-                note = image_summary_note(
-                    att["path"], att["mime_type"],
-                    att.get("uri", att.get("path", "unknown")),
-                    skip_summary=skip_summary,
-                )
-                content_blocks.append({
-                    "type": "text",
-                    "text": note,
-                })
-        elif attachments:
-            # Non-image-supporting case or non-user role: use text summaries
-            for att in attachments:
-                note = image_summary_note(
-                    att["path"], att["mime_type"],
-                    att.get("uri", att.get("path", "unknown")),
-                    skip_summary=skip_summary,
-                )
-                content_blocks.append({
-                    "type": "text",
-                    "text": note,
-                })
-
-        if content_blocks:
-            prepared_index = len(prepared)
-            prepared.append({
-                "role": role,
-                "content": content_blocks,
-            })
-            # Track first dynamic content index
-            if is_dynamic and first_dynamic_index is None:
-                first_dynamic_index = prepared_index
-
-    # Add cache_control BEFORE dynamic content (realtime context).
-    # Note: Anthropic has no read-only cache mode. Placing breakpoints enables
-    # both reads and writes. Removing them disables both entirely.
-    if enable_cache and prepared:
-        if first_dynamic_index is not None and first_dynamic_index > 0:
-            # Place breakpoint on the message BEFORE dynamic content
-            cache_target_index = first_dynamic_index - 1
-            logging.debug(
-                "[anthropic] Placing cache breakpoint before dynamic content at index %d",
-                cache_target_index
-            )
-        else:
-            # No dynamic content found, use second-to-last message if available
-            # (last message is typically the new user input)
-            cache_target_index = len(prepared) - 2 if len(prepared) >= 2 else len(prepared) - 1
-
-        if cache_target_index >= 0:
-            target_msg = prepared[cache_target_index]
-            if target_msg.get("content") and isinstance(target_msg["content"], list):
-                target_msg["content"][-1]["cache_control"] = _make_cache_control(cache_ttl)
-
-    return prepared
-
-
-def _prepare_anthropic_tools(
-    tools: List[Dict[str, Any]],
-    enable_cache: bool = True,
-    cache_ttl: str = "5m",
-) -> List[Dict[str, Any]]:
-    """
-    Prepare tools for Anthropic API format.
-
-    Anthropic uses:
-    - name: Tool name
-    - description: Tool description
-    - input_schema: JSON schema for parameters
-    """
-    anthropic_tools: List[Dict[str, Any]] = []
-
-    for tool in tools:
-        if tool.get("type") == "function":
-            func = tool.get("function", {})
-            anthropic_tool = {
-                "name": func.get("name", ""),
-                "description": func.get("description", ""),
-                "input_schema": func.get("parameters", {}),
-            }
-            anthropic_tools.append(anthropic_tool)
-        else:
-            # Already in Anthropic format or simple format
-            anthropic_tools.append(tool)
-
-    # Add cache_control to the last tool for caching.
-    # Note: Anthropic has no read-only cache mode.
-    if enable_cache and anthropic_tools:
-        anthropic_tools[-1]["cache_control"] = _make_cache_control(cache_ttl)
-
-    return anthropic_tools
-
-
-def _extract_text_from_response(message: Message) -> str:
-    """Extract text content from Anthropic response."""
-    texts: List[str] = []
-    for block in message.content:
-        if isinstance(block, TextBlock):
-            texts.append(block.text)
-        elif hasattr(block, "text"):
-            texts.append(block.text)
-    return "".join(texts)
-
-
-def _extract_thinking_from_response(message: Message) -> List[Dict[str, str]]:
-    """Extract thinking content from Anthropic response.
-
-    Anthropic's extended thinking returns content blocks with type='thinking'
-    and a 'thinking' attribute containing the thought text.
-    """
-    reasoning_entries: List[Dict[str, str]] = []
-    thinking_idx = 0
-    for block in message.content:
-        if getattr(block, "type", None) == "thinking":
-            thinking_text = getattr(block, "thinking", "")
-            if thinking_text and thinking_text.strip():
-                thinking_idx += 1
-                reasoning_entries.append({
-                    "title": f"Thought {thinking_idx}",
-                    "text": thinking_text.strip(),
-                })
-    return reasoning_entries
-
-
-def _extract_tool_use_from_response(message: Message) -> Optional[Dict[str, Any]]:
-    """Extract tool use from Anthropic response."""
-    for block in message.content:
-        if isinstance(block, ToolUseBlock):
-            return {
-                "id": block.id,
-                "name": block.name,
-                "arguments": block.input,
-            }
-        elif hasattr(block, "type") and getattr(block, "type", None) == "tool_use":
-            return {
-                "id": getattr(block, "id", ""),
-                "name": getattr(block, "name", ""),
-                "arguments": getattr(block, "input", {}),
-            }
-    return None
-
 
 class AnthropicClient(LLMClient):
     """Native Anthropic Claude client with prompt caching support."""
@@ -611,6 +185,107 @@ class AnthropicClient(LLMClient):
             cache_ttl=cache_ttl,
         )
 
+    def _execute_with_retry(
+        self,
+        callable: Any,
+        context: str,
+        is_stream: bool = False,
+    ) -> Any:
+        """Execute an Anthropic API operation with unified retry and error handling."""
+        last_error: Optional[Exception] = None
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                return callable()
+            except anthropic.BadRequestError as e:
+                logging.error("[anthropic] Bad request: %s", e)
+                if _is_content_policy_error(e):
+                    raise SafetyFilterError(
+                        f"Anthropic {context} content policy violation: {e}",
+                        e,
+                        user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。入力内容を変更してお試しください。",
+                    )
+                raise InvalidRequestError(f"Anthropic {context} error: {e}", e)
+            except Exception as e:
+                last_error = e
+                if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                    backoff = INITIAL_BACKOFF * (2 ** attempt)
+                    label = "streaming " if is_stream else ""
+                    logging.warning(
+                        "[anthropic] Retryable %serror (attempt %d/%d): %s. Retrying in %.1fs...",
+                        label,
+                        attempt + 1,
+                        MAX_RETRIES,
+                        type(e).__name__,
+                        backoff,
+                    )
+                    time.sleep(backoff)
+                    continue
+                logging.exception("[anthropic] %s failed", context[:1].upper() + context[1:])
+                raise _convert_to_llm_error(e, context)
+
+        if last_error:
+            raise _convert_to_llm_error(last_error, f"{context} after {MAX_RETRIES} retries")
+        raise LLMEmptyResponseError(f"Anthropic {context} failed after {MAX_RETRIES} retries with no response")
+
+    def parse_structured_response(
+        self,
+        response: Message,
+        use_native_structured_output: bool,
+    ) -> str | Dict[str, Any]:
+        """Parse structured output response while preserving legacy return compatibility."""
+        if use_native_structured_output:
+            text = _extract_text_from_response(response)
+            try:
+                return json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                logging.warning("[anthropic] Failed to parse native structured output as JSON, returning raw text")
+                return text
+
+        tool_use = _extract_tool_use_from_response(response)
+        if tool_use:
+            return tool_use["arguments"]
+        return _extract_text_from_response(response)
+
+    def parse_tool_response(self, response: Message) -> Dict[str, Any]:
+        """Parse tool mode response and store tool detection."""
+        tool_use = _extract_tool_use_from_response(response)
+        if tool_use:
+            tool_call = {
+                "type": "tool_call",
+                "tool_name": tool_use["name"],
+                "tool_args": tool_use["arguments"],
+            }
+            self._store_tool_detection(tool_call)
+            return tool_call
+
+        text = _extract_text_from_response(response)
+        if not text.strip():
+            logging.error(
+                "[anthropic] Empty text response without tool call. "
+                "Model returned empty content. stop_reason=%s",
+                getattr(response, "stop_reason", None)
+            )
+            raise LLMEmptyResponseError("Anthropic returned empty response without tool call")
+        text_response = {
+            "type": "text",
+            "content": text,
+        }
+        self._store_tool_detection(text_response)
+        return text_response
+
+    def parse_text_response(self, response: Message) -> str:
+        """Parse normal text response and validate non-empty text."""
+        text = _extract_text_from_response(response)
+        if not text.strip():
+            logging.error(
+                "[anthropic] Empty text response. "
+                "Model returned empty content. stop_reason=%s",
+                getattr(response, "stop_reason", None)
+            )
+            raise LLMEmptyResponseError("Anthropic returned empty response")
+        return text
+
     def generate(
         self,
         messages: List[Dict[str, Any]],
@@ -638,120 +313,39 @@ class AnthropicClient(LLMClient):
         """
         self._store_reasoning([])
 
-        # Extract system messages
-        system_blocks, remaining_messages = _prepare_anthropic_system(
-            messages, enable_cache=enable_cache, cache_ttl=cache_ttl
-        )
-
-        # Prepare messages
-        prepared_messages = _prepare_anthropic_messages(
-            remaining_messages,
-            supports_images=self.supports_images,
-            max_image_bytes=self.max_image_bytes,
+        build_result = build_request_params(
+            messages=messages,
+            tools=tools,
+            response_schema=response_schema,
+            temperature=temperature,
             enable_cache=enable_cache,
             cache_ttl=cache_ttl,
+            model=self.model,
+            max_tokens=self._max_tokens,
+            extra_params=self._extra_params,
+            thinking_config=self._thinking_config,
+            thinking_effort=self._thinking_effort,
+            supports_images=self.supports_images,
+            max_image_bytes=self.max_image_bytes,
         )
+        request_params = build_result["request_params"]
+        use_tools = bool(build_result["use_tools"])
+        use_native_structured_output = bool(build_result["use_native_structured_output"])
 
-        if not prepared_messages:
+        if not request_params.get("messages"):
             logging.warning("[anthropic] No valid messages to send")
             return ""
 
-        # Build request parameters
-        request_params: Dict[str, Any] = {
-            "model": self.model,
-            "max_tokens": self._max_tokens,
-            "messages": prepared_messages,
-        }
-
-        if system_blocks:
-            request_params["system"] = system_blocks
-
-        if temperature is not None:
-            request_params["temperature"] = temperature
-        elif "temperature" in self._extra_params:
-            request_params["temperature"] = self._extra_params["temperature"]
-
-        # Apply other extra params (top_p, top_k)
-        for param in ("top_p", "top_k"):
-            if param in self._extra_params:
-                request_params[param] = self._extra_params[param]
-
-        # Add thinking configuration if set
-        if self._thinking_config:
-            request_params["thinking"] = self._thinking_config
-
-        # Handle tools
-        use_tools = bool(tools)
-        if use_tools:
-            request_params["tools"] = _prepare_anthropic_tools(
-                tools, enable_cache=enable_cache, cache_ttl=cache_ttl
+        def _call() -> Any:
+            get_llm_logger().debug(
+                "[anthropic] Request: %s",
+                json.dumps(request_params, indent=2, ensure_ascii=False, default=str),
             )
+            result = self.client.messages.create(**request_params)
+            get_llm_logger().debug("[anthropic] Response: %s", result.model_dump_json(indent=2))
+            return result
 
-        # Build output_config (may contain effort and/or structured output format)
-        output_config: Dict[str, Any] = {}
-        if self._thinking_effort:
-            output_config["effort"] = self._thinking_effort
-
-        # Handle structured output
-        use_native_structured_output = False
-        if response_schema and not use_tools:
-            if self._thinking_config:
-                # Thinking enabled: use native output_config (compatible with thinking)
-                # Native structured output requires additionalProperties: false on all objects
-                prepared_schema = _prepare_schema_for_native_output(response_schema)
-                output_config["format"] = {
-                    "type": "json_schema",
-                    "schema": prepared_schema,
-                }
-                use_native_structured_output = True
-            else:
-                # No thinking: use tool_choice pattern (legacy, works on all models)
-                schema_name = response_schema.get("title", "structured_output")
-                request_params["tools"] = [{
-                    "name": schema_name,
-                    "description": "Generate structured output according to the schema",
-                    "input_schema": response_schema,
-                }]
-                request_params["tool_choice"] = {"type": "tool", "name": schema_name}
-
-        # Apply output_config if any fields were set (effort and/or format)
-        if output_config:
-            request_params["output_config"] = output_config
-
-        response = None
-        last_error: Optional[Exception] = None
-
-        for attempt in range(MAX_RETRIES):
-            try:
-                get_llm_logger().debug("[anthropic] Request (attempt %d/%d): %s", attempt + 1, MAX_RETRIES, json.dumps(request_params, indent=2, ensure_ascii=False, default=str))
-                response = self.client.messages.create(**request_params)
-                get_llm_logger().debug("[anthropic] Response: %s", response.model_dump_json(indent=2))
-                break  # Success, exit retry loop
-            except anthropic.BadRequestError as e:
-                logging.error("[anthropic] Bad request: %s", e)
-                if _is_content_policy_error(e):
-                    raise SafetyFilterError(
-                        f"Anthropic API content policy violation: {e}", e,
-                        user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。入力内容を変更してお試しください。",
-                    )
-                raise InvalidRequestError(f"Anthropic API error: {e}", e)
-            except Exception as e:
-                last_error = e
-                if _should_retry(e) and attempt < MAX_RETRIES - 1:
-                    backoff = INITIAL_BACKOFF * (2 ** attempt)
-                    logging.warning(
-                        "[anthropic] Retryable error (attempt %d/%d): %s. Retrying in %.1fs...",
-                        attempt + 1, MAX_RETRIES, type(e).__name__, backoff
-                    )
-                    time.sleep(backoff)
-                    continue
-                logging.exception("[anthropic] API call failed")
-                raise _convert_to_llm_error(e, "API call")
-
-        if response is None:
-            if last_error:
-                raise _convert_to_llm_error(last_error, f"API call after {MAX_RETRIES} retries")
-            raise LLMEmptyResponseError(f"Anthropic API call failed after {MAX_RETRIES} retries with no response")
+        response = self._execute_with_retry(_call, "API call")
 
         # Store usage
         self._store_usage_from_response(response.usage, cache_ttl=cache_ttl)
@@ -759,68 +353,14 @@ class AnthropicClient(LLMClient):
         # Extract and store thinking content
         self._store_reasoning(_extract_thinking_from_response(response))
 
-        # Handle structured output response
         if response_schema and not use_tools:
-            if use_native_structured_output:
-                # Native structured output: response is JSON text in content[0].text
-                text = _extract_text_from_response(response)
-                try:
-                    return json.loads(text)
-                except (json.JSONDecodeError, TypeError):
-                    logging.warning("[anthropic] Failed to parse native structured output as JSON, returning raw text")
-                    return text
-            else:
-                # Tool-choice pattern: extract from tool_use block
-                tool_use = _extract_tool_use_from_response(response)
-                if tool_use:
-                    return tool_use["arguments"]
-                # Fallback to text if no tool use
-                return _extract_text_from_response(response)
+            return self.parse_structured_response(response, use_native_structured_output)
 
         # Handle tool mode
         if use_tools:
-            tool_use = _extract_tool_use_from_response(response)
-            if tool_use:
-                self._store_tool_detection({
-                    "type": "tool_call",
-                    "tool_name": tool_use["name"],
-                    "tool_args": tool_use["arguments"],
-                })
-                return {
-                    "type": "tool_call",
-                    "tool_name": tool_use["name"],
-                    "tool_args": tool_use["arguments"],
-                }
-            else:
-                text = _extract_text_from_response(response)
-                # Check for empty text response without tool call
-                if not text.strip():
-                    logging.error(
-                        "[anthropic] Empty text response without tool call. "
-                        "Model returned empty content. stop_reason=%s",
-                        getattr(response, "stop_reason", None)
-                    )
-                    raise LLMEmptyResponseError("Anthropic returned empty response without tool call")
-                self._store_tool_detection({
-                    "type": "text",
-                    "content": text,
-                })
-                return {
-                    "type": "text",
-                    "content": text,
-                }
+            return self.parse_tool_response(response)
 
-        # Normal text response
-        text = _extract_text_from_response(response)
-        # Check for empty response
-        if not text.strip():
-            logging.error(
-                "[anthropic] Empty text response. "
-                "Model returned empty content. stop_reason=%s",
-                getattr(response, "stop_reason", None)
-            )
-            raise LLMEmptyResponseError("Anthropic returned empty response")
-        return text
+        return self.parse_text_response(response)
 
     def generate_stream(
         self,
@@ -860,128 +400,66 @@ class AnthropicClient(LLMClient):
                 yield str(result)
             return
 
-        # Extract system messages
-        system_blocks, remaining_messages = _prepare_anthropic_system(
-            messages, enable_cache=enable_cache, cache_ttl=cache_ttl
-        )
-
-        # Prepare messages
-        prepared_messages = _prepare_anthropic_messages(
-            remaining_messages,
-            supports_images=self.supports_images,
-            max_image_bytes=self.max_image_bytes,
+        build_result = build_request_params(
+            messages=messages,
+            tools=tools,
+            response_schema=None,
+            temperature=temperature,
             enable_cache=enable_cache,
             cache_ttl=cache_ttl,
+            model=self.model,
+            max_tokens=self._max_tokens,
+            extra_params=self._extra_params,
+            thinking_config=self._thinking_config,
+            thinking_effort=self._thinking_effort,
+            supports_images=self.supports_images,
+            max_image_bytes=self.max_image_bytes,
         )
+        request_params = build_result["request_params"]
+        use_tools = bool(build_result["use_tools"])
 
-        if not prepared_messages:
+        if not request_params.get("messages"):
             logging.warning("[anthropic] No valid messages to send")
             return
 
-        # Build request parameters
-        request_params: Dict[str, Any] = {
-            "model": self.model,
-            "max_tokens": self._max_tokens,
-            "messages": prepared_messages,
-        }
-
-        if system_blocks:
-            request_params["system"] = system_blocks
-
-        if temperature is not None:
-            request_params["temperature"] = temperature
-        elif "temperature" in self._extra_params:
-            request_params["temperature"] = self._extra_params["temperature"]
-
-        # Apply other extra params (top_p, top_k)
-        for param in ("top_p", "top_k"):
-            if param in self._extra_params:
-                request_params[param] = self._extra_params[param]
-
-        # Add thinking configuration if set
-        if self._thinking_config:
-            request_params["thinking"] = self._thinking_config
-
-        # Add effort parameter via output_config if configured
-        if self._thinking_effort:
-            request_params["output_config"] = {"effort": self._thinking_effort}
-
-        # Handle tools
-        use_tools = bool(tools)
-        if use_tools:
-            request_params["tools"] = _prepare_anthropic_tools(
-                tools, enable_cache=enable_cache, cache_ttl=cache_ttl
+        def _stream_call() -> List[Any]:
+            get_llm_logger().debug(
+                "[anthropic] Stream request: %s",
+                json.dumps(request_params, indent=2, ensure_ascii=False, default=str),
             )
+            output_chunks: List[Any] = []
+            with self.client.messages.stream(**request_params) as stream:
+                final_message = None
 
-        last_error: Optional[Exception] = None
-        stream_success = False
+                for event in stream:
+                    if hasattr(event, "type"):
+                        if event.type == "content_block_delta":
+                            delta = getattr(event, "delta", None)
+                            if delta:
+                                if hasattr(delta, "thinking"):
+                                    output_chunks.append({"type": "thinking", "content": delta.thinking})
+                                elif hasattr(delta, "text"):
+                                    output_chunks.append(delta.text)
+                        elif event.type == "message_stop":
+                            final_message = stream.get_final_message()
 
-        for attempt in range(MAX_RETRIES):
-            try:
-                get_llm_logger().debug("[anthropic] Stream request (attempt %d/%d): %s", attempt + 1, MAX_RETRIES, json.dumps(request_params, indent=2, ensure_ascii=False, default=str))
+                if final_message:
+                    if final_message.usage:
+                        self._store_usage_from_response(final_message.usage, cache_ttl=cache_ttl)
+                    self._store_reasoning(_extract_thinking_from_response(final_message))
 
-                with self.client.messages.stream(**request_params) as stream:
-                    final_message = None
+                if use_tools and final_message:
+                    tool_use = _extract_tool_use_from_response(final_message)
+                    if tool_use:
+                        self._store_tool_detection({
+                            "type": "tool_call",
+                            "tool_name": tool_use["name"],
+                            "tool_args": tool_use["arguments"],
+                        })
+            return output_chunks
 
-                    for event in stream:
-                        # Handle text and thinking deltas
-                        if hasattr(event, "type"):
-                            if event.type == "content_block_delta":
-                                delta = getattr(event, "delta", None)
-                                if delta:
-                                    if hasattr(delta, "thinking"):
-                                        yield {"type": "thinking", "content": delta.thinking}
-                                    elif hasattr(delta, "text"):
-                                        yield delta.text
-                            elif event.type == "message_stop":
-                                final_message = stream.get_final_message()
-
-                    # Store usage and thinking from final message
-                    if final_message:
-                        if final_message.usage:
-                            self._store_usage_from_response(final_message.usage, cache_ttl=cache_ttl)
-                        self._store_reasoning(
-                            _extract_thinking_from_response(final_message)
-                        )
-
-                    # Handle tool calls in streaming mode
-                    if use_tools and final_message:
-                        tool_use = _extract_tool_use_from_response(final_message)
-                        if tool_use:
-                            self._store_tool_detection({
-                                "type": "tool_call",
-                                "tool_name": tool_use["name"],
-                                "tool_args": tool_use["arguments"],
-                            })
-
-                stream_success = True
-                break  # Success, exit retry loop
-
-            except anthropic.BadRequestError as e:
-                logging.error("[anthropic] Bad request: %s", e)
-                if _is_content_policy_error(e):
-                    raise SafetyFilterError(
-                        f"Anthropic streaming content policy violation: {e}", e,
-                        user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。入力内容を変更してお試しください。",
-                    )
-                raise InvalidRequestError(f"Anthropic streaming API error: {e}", e)
-            except Exception as e:
-                last_error = e
-                if _should_retry(e) and attempt < MAX_RETRIES - 1:
-                    backoff = INITIAL_BACKOFF * (2 ** attempt)
-                    logging.warning(
-                        "[anthropic] Retryable streaming error (attempt %d/%d): %s. Retrying in %.1fs...",
-                        attempt + 1, MAX_RETRIES, type(e).__name__, backoff
-                    )
-                    time.sleep(backoff)
-                    continue
-                logging.exception("[anthropic] Streaming API call failed")
-                raise _convert_to_llm_error(e, "streaming API call")
-
-        if not stream_success:
-            if last_error:
-                raise _convert_to_llm_error(last_error, f"streaming API call after {MAX_RETRIES} retries")
-            raise LLMEmptyResponseError(f"Anthropic streaming API call failed after {MAX_RETRIES} retries with no response")
+        for chunk in self._execute_with_retry(_stream_call, "streaming API call", is_stream=True):
+            yield chunk
 
     def generate_with_tool_detection(
         self,

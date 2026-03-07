@@ -5,8 +5,7 @@
     "input_schema": [
         {
             "name": "theme",
-            "description": "小説のテーマやお題（例：「雨の日の出会い」「猫と魔法使い」）",
-            "source": "input"
+            "description": "小説のテーマやお題（例：「雨の日の出会い」「猫と魔法使い」）"
         }
     ],
     "output_schema": [

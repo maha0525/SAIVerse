@@ -210,6 +210,23 @@
     background: rgba(0, 0, 0, 0.05);
 }
 
+.bellWrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.bellDot {
+    position: absolute;
+    top: -1px;
+    right: -1px;
+    width: 8px;
+    height: 8px;
+    background: #ef4444;
+    border-radius: 50%;
+}
+
 .chatArea {
     flex: 1;
     overflow-y: auto;

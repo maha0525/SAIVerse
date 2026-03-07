@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from 'react';
 import styles from './Sidebar.module.css';
-import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, Navigation } from 'lucide-react';
+import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, Navigation, Bell } from 'lucide-react';
 import GlobalSettingsModal from './GlobalSettingsModal';
 import UserProfileModal from './UserProfileModal';
 import PersonaWizard from './PersonaWizard';
@@ -312,6 +312,17 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                             </span>
                         </div>
                     )}
+                    <div
+                        className={styles.buildingItem}
+                        onClick={() => {
+                            window.location.href = '/announcements';
+                            if (onClose) onClose();
+                        }}
+                    >
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <Bell size={16} /> お知らせ
+                        </span>
+                    </div>
                     <div
                         className={styles.buildingItem}
                         onClick={() => {

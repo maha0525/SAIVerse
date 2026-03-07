@@ -1,0 +1,54 @@
+{
+    "name": "x_post",
+    "display_name": "Xにツイート",
+    "description": "X（Twitter）にツイートを投稿する。投稿前にユーザーの確認を求める。",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "ツイートしたい内容やトピック"
+        }
+    ],
+    "router_callable": true,
+    "required_credentials": ["x"],
+    "nodes": [
+        {
+            "id": "compose",
+            "type": "llm",
+            "context_profile": "conversation",
+            "action": "以下の指示やトピックに基づいてツイートを作成してください。\n\nルール:\n- 280文字以内\n- あなた自身の言葉と個性を反映した文章にしてください\n- ハッシュタグは必要に応じて1-2個まで\n- プライベートな会話の内容や個人情報は絶対に含めないでください\n- 自然で人間的な表現を心がけてください",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "tweet_text": {
+                        "type": "string",
+                        "description": "ツイート本文（280文字以内）"
+                    }
+                },
+                "required": ["tweet_text"]
+            },
+            "output_key": "tweet_params",
+            "memorize": {
+                "tags": ["conversation", "x_post"]
+            },
+            "next": "post"
+        },
+        {
+            "id": "post",
+            "type": "tool",
+            "action": "x_post_tweet",
+            "args_input": {
+                "text": "tweet_params.tweet_text"
+            },
+            "next": "record"
+        },
+        {
+            "id": "record",
+            "type": "memorize",
+            "action": "<system>{last}</system>",
+            "role": "user",
+            "tags": ["conversation", "x_post", "playbook_result"],
+            "next": null
+        }
+    ],
+    "start_node": "compose"
+}

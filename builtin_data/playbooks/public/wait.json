@@ -5,8 +5,7 @@
     "input_schema": [
         {
             "name": "input",
-            "description": "Reason for waiting (optional)",
-            "source": null
+            "description": "Reason for waiting (optional)"
         }
     ],
     "output_schema": [],

@@ -29,11 +29,12 @@ def run_playbook(
     parent = parent_state or {}
 
     if initial_params:
-        LOGGER.debug("[sea] _run_playbook merging initial_params: %s", list(initial_params.keys()))
-        parent.update(initial_params)
+        LOGGER.debug("[sea] _run_playbook received args: %s", list(initial_params.keys()))
+        # Store args for compile_with_langgraph to resolve via input_schema
+        parent["_args"] = dict(initial_params)
     LOGGER.debug("[sea] _run_playbook called for %s, parent_state keys: %s", playbook.name, list(parent.keys()) if parent else "(none)")
-    if "pulse_id" in parent:
-        pulse_id = str(parent["pulse_id"])
+    if "_pulse_id" in parent:
+        pulse_id = str(parent["_pulse_id"])
     else:
         pulse_id = str(uuid.uuid4())
 

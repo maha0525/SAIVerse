@@ -4,8 +4,7 @@
     "input_schema": [
         {
             "name": "input",
-            "description": "これまでの処理結果",
-            "source": "parent.last"
+            "description": "これまでの処理結果"
         }
     ],
     "router_callable": false,

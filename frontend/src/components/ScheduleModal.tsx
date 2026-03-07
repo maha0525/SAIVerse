@@ -33,7 +33,7 @@ interface ScheduleItem {
     scheduled_datetime: string | null;
     interval_seconds: number | null;
     completed: boolean;
-    playbook_params: Record<string, any> | null;
+    args: Record<string, any> | null;
 }
 
 interface ScheduleModalProps {
@@ -68,7 +68,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
     const [formInterval, setFormInterval] = useState(600);
 
     // Playbook Parameters
-    const [formPlaybookParams, setFormPlaybookParams] = useState<Record<string, any>>({});
+    const [formPlaybookArgs, setFormPlaybookArgs] = useState<Record<string, any>>({});
     const [playbookParamSpecs, setPlaybookParamSpecs] = useState<PlaybookParam[]>([]);
 
     useEffect(() => {
@@ -84,7 +84,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
             fetchPlaybookParams(formPlaybook);
         } else {
             setPlaybookParamSpecs([]);
-            setFormPlaybookParams({});
+            setFormPlaybookArgs({});
         }
     }, [formPlaybook]);
 
@@ -141,7 +141,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
         setFormTime('09:00');
         setFormDateTime('');
         setFormInterval(600);
-        setFormPlaybookParams({});
+        setFormPlaybookArgs({});
         setPlaybookParamSpecs([]);
     };
 
@@ -155,7 +155,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
         setFormDays(s.days_of_week || []);
         setFormTime(s.time_of_day || '09:00');
         setFormInterval(s.interval_seconds || 600);
-        setFormPlaybookParams(s.playbook_params || {});
+        setFormPlaybookArgs(s.args || {});
 
         // Convert UTC datetime to local format for oneshot
         if (s.scheduled_datetime) {
@@ -179,7 +179,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
     };
 
     const handlePlaybookParamChange = (paramName: string, value: any) => {
-        setFormPlaybookParams(prev => ({ ...prev, [paramName]: value }));
+        setFormPlaybookArgs(prev => ({ ...prev, [paramName]: value }));
     };
 
     const handleSave = async () => {
@@ -189,7 +189,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
             description: formDesc,
             priority: formPriority,
             enabled: formEnabled,
-            playbook_params: Object.keys(formPlaybookParams).length > 0 ? formPlaybookParams : null
+            args: Object.keys(formPlaybookArgs).length > 0 ? formPlaybookArgs : null
         };
 
         if (formType === 'periodic') {
@@ -255,7 +255,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
         return '?';
     };
 
-    const formatPlaybookParams = (params: Record<string, any> | null) => {
+    const formatPlaybookArgs = (params: Record<string, any> | null) => {
         if (!params || Object.keys(params).length === 0) return '-';
         return Object.entries(params)
             .map(([k, v]) => `${k}: ${v}`)
@@ -303,7 +303,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                                                 <td>{s.description}</td>
                                                 <td>{formatDetail(s)}</td>
                                                 <td style={{ fontSize: '0.85em', maxWidth: '150px', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                                    {formatPlaybookParams(s.playbook_params)}
+                                                    {formatPlaybookArgs(s.args)}
                                                 </td>
                                                 <td>
                                                     <span className={s.enabled ? styles.enabled : styles.disabled}>
@@ -365,7 +365,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                                     value={formPlaybook}
                                     onChange={e => {
                                         setFormPlaybook(e.target.value);
-                                        setFormPlaybookParams({}); // Reset params when playbook changes
+                                        setFormPlaybookArgs({}); // Reset params when playbook changes
                                     }}
                                 >
                                     {playbooks.length === 0 && (
@@ -400,7 +400,7 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                                                 {param.resolved_options && param.resolved_options.length > 0 ? (
                                                     <select
                                                         className={styles.select}
-                                                        value={formPlaybookParams[param.name] ?? param.default ?? ''}
+                                                        value={formPlaybookArgs[param.name] ?? param.default ?? ''}
                                                         onChange={e => handlePlaybookParamChange(param.name, e.target.value || null)}
                                                     >
                                                         <option value="">{param.required ? '（選択...）' : '（自動）'}</option>
@@ -411,21 +411,21 @@ export default function ScheduleModal({ isOpen, onClose, personaId }: ScheduleMo
                                                 ) : param.param_type === 'boolean' ? (
                                                     <input
                                                         type="checkbox"
-                                                        checked={formPlaybookParams[param.name] ?? param.default ?? false}
+                                                        checked={formPlaybookArgs[param.name] ?? param.default ?? false}
                                                         onChange={e => handlePlaybookParamChange(param.name, e.target.checked)}
                                                     />
                                                 ) : param.param_type === 'number' ? (
                                                     <input
                                                         type="number"
                                                         className={styles.input}
-                                                        value={formPlaybookParams[param.name] ?? param.default ?? ''}
+                                                        value={formPlaybookArgs[param.name] ?? param.default ?? ''}
                                                         onChange={e => handlePlaybookParamChange(param.name, parseFloat(e.target.value))}
                                                     />
                                                 ) : (
                                                     <input
                                                         type="text"
                                                         className={styles.input}
-                                                        value={formPlaybookParams[param.name] ?? param.default ?? ''}
+                                                        value={formPlaybookArgs[param.name] ?? param.default ?? ''}
                                                         onChange={e => handlePlaybookParamChange(param.name, e.target.value)}
                                                         placeholder={param.description}
                                                     />

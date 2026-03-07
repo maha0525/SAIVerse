@@ -1,0 +1,33 @@
+{
+    "name": "x_read_timeline",
+    "display_name": "Xタイムライン閲覧",
+    "description": "X（Twitter）のホームタイムラインを取得し、記憶に保存する。",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "タイムラインを確認する理由や関心"
+        }
+    ],
+    "router_callable": true,
+    "required_credentials": ["x"],
+    "nodes": [
+        {
+            "id": "fetch",
+            "type": "tool",
+            "action": "x_read_timeline",
+            "args_input": {
+                "max_results": 10
+            },
+            "next": "record"
+        },
+        {
+            "id": "record",
+            "type": "memorize",
+            "action": "Xタイムライン取得結果:\n{last}",
+            "role": "user",
+            "tags": ["conversation", "x_timeline", "playbook_result"],
+            "next": null
+        }
+    ],
+    "start_node": "fetch"
+}

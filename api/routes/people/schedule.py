@@ -48,11 +48,11 @@ def list_schedules(persona_id: str, manager = Depends(get_manager)):
                 except Exception:
                     _log.warning("Failed to parse DAYS_OF_WEEK for schedule %d", s.SCHEDULE_ID, exc_info=True)
             
-            # Parse playbook_params JSON
-            playbook_params = None
+            # Parse args from DB column PLAYBOOK_PARAMS
+            parsed_args = None
             if s.PLAYBOOK_PARAMS:
                 try:
-                    playbook_params = json.loads(s.PLAYBOOK_PARAMS)
+                    parsed_args = json.loads(s.PLAYBOOK_PARAMS)
                 except Exception:
                     _log.warning("Failed to parse PLAYBOOK_PARAMS for schedule %d", s.SCHEDULE_ID, exc_info=True)
 
@@ -69,7 +69,7 @@ def list_schedules(persona_id: str, manager = Depends(get_manager)):
                 interval_seconds=s.INTERVAL_SECONDS,
                 last_executed_at=s.LAST_EXECUTED_AT,
                 completed=s.COMPLETED,
-                playbook_params=playbook_params
+                args=parsed_args
             ))
         return results
     finally:
@@ -91,7 +91,7 @@ def create_schedule(
             DESCRIPTION=req.description,
             PRIORITY=req.priority,
             ENABLED=req.enabled,
-            PLAYBOOK_PARAMS=json.dumps(req.playbook_params) if req.playbook_params else None,
+            PLAYBOOK_PARAMS=json.dumps(req.args) if req.args else None,
         )
 
         if req.schedule_type == "periodic":
@@ -172,8 +172,8 @@ def update_schedule(
             schedule.PRIORITY = req.priority
         if req.enabled is not None:
             schedule.ENABLED = req.enabled
-        if req.playbook_params is not None:
-            schedule.PLAYBOOK_PARAMS = json.dumps(req.playbook_params) if req.playbook_params else None
+        if req.args is not None:
+            schedule.PLAYBOOK_PARAMS = json.dumps(req.args) if req.args else None
 
         # Update type-specific fields based on schedule type
         schedule_type = req.schedule_type if req.schedule_type is not None else schedule.SCHEDULE_TYPE

@@ -28,14 +28,21 @@ class PhenomenonManager:
     フェノメノンは非同期実行キューで処理され、メインの処理をブロックしない。
     """
 
-    def __init__(self, session_factory: Callable[[], "Session"], async_execution: bool = True):
+    def __init__(
+        self,
+        session_factory: Callable[[], "Session"],
+        async_execution: bool = True,
+        saiverse_manager: Optional[Any] = None,
+    ):
         """
         Args:
             session_factory: データベースセッションを生成するファクトリ関数
             async_execution: Trueの場合、フェノメノンを非同期で実行する
+            saiverse_manager: SAIVerseManager参照（フェノメノンからPulseController等にアクセス用）
         """
         self.SessionLocal = session_factory
         self.async_execution = async_execution
+        self.saiverse_manager = saiverse_manager
         self._execution_queue: queue.Queue = queue.Queue()
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
@@ -167,6 +174,10 @@ class PhenomenonManager:
             return None
 
         try:
+            # Inject _manager reference so phenomena can access PulseController etc.
+            if self.saiverse_manager is not None:
+                args["_manager"] = self.saiverse_manager
+
             LOGGER.info("[PhenomenonManager] Executing phenomenon '%s' with args: %s", phenomenon_name, args)
             result = impl(**args)
             LOGGER.info("[PhenomenonManager] Phenomenon '%s' completed successfully", phenomenon_name)
