@@ -970,6 +970,44 @@
     opacity: 0.5;
 }
 
+/* RPD (Requests Per Day) Badge */
+.rpdBadge {
+    font-size: 0.75rem;
+    font-weight: 500;
+    padding: 0.15rem 0.5rem;
+    border-radius: 0.75rem;
+    background: rgba(6, 182, 212, 0.12);
+    color: #0891b2;
+    white-space: nowrap;
+    cursor: default;
+    line-height: 1.3;
+}
+
+.rpdWarning {
+    background: rgba(245, 158, 11, 0.15);
+    color: #d97706;
+}
+
+.rpdExhausted {
+    background: rgba(239, 68, 68, 0.15);
+    color: #dc2626;
+}
+
+:global([data-theme="dark"]) .rpdBadge {
+    background: rgba(6, 182, 212, 0.2);
+    color: #22d3ee;
+}
+
+:global([data-theme="dark"]) .rpdWarning {
+    background: rgba(245, 158, 11, 0.2);
+    color: #fbbf24;
+}
+
+:global([data-theme="dark"]) .rpdExhausted {
+    background: rgba(239, 68, 68, 0.2);
+    color: #f87171;
+}
+
 /* Drag & Drop */
 .dropIndicator {
     position: absolute;

@@ -410,6 +410,22 @@ def is_local_model(model: str) -> bool:
     return config.get("provider") in ("ollama", "llama_cpp")
 
 
+def get_rate_limit_config(model: str) -> Dict[str, Any] | None:
+    """Get rate limit configuration for a model.
+
+    Returns:
+        Dict with keys:
+            - rpd: int (requests per day limit)
+            - reset_timezone: str (timezone for daily reset, e.g. "America/Los_Angeles")
+        Or None if no rate limit configured.
+    """
+    config = get_model_config(model)
+    rate_limit = config.get("rate_limit")
+    if isinstance(rate_limit, dict) and rate_limit.get("rpd"):
+        return rate_limit
+    return None
+
+
 def get_cache_config(model: str) -> Dict[str, Any]:
     """Get cache configuration for a model.
 

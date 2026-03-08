@@ -19,11 +19,16 @@ from saiverse.model_configs import (
 
 router = APIRouter()
 
+class RateLimitInfo(BaseModel):
+    rpd: Optional[int] = None
+    reset_timezone: str = "America/Los_Angeles"
+
 class ModelInfo(BaseModel):
     id: str
     name: str
     input_price: Optional[float] = None   # USD per 1M input tokens
     output_price: Optional[float] = None  # USD per 1M output tokens
+    rate_limit: Optional[RateLimitInfo] = None
 
 class PlaybookParamInfo(BaseModel):
     """Parameter info for playbook input_schema."""
@@ -90,12 +95,21 @@ def get_models():
     for mid, name in choices:
         if not is_model_available(mid):
             continue
-        pricing = get_model_config(mid).get("pricing", {})
+        cfg = get_model_config(mid)
+        pricing = cfg.get("pricing", {})
+        rate_limit_raw = cfg.get("rate_limit")
+        rate_limit = None
+        if isinstance(rate_limit_raw, dict) and rate_limit_raw.get("rpd"):
+            rate_limit = {
+                "rpd": int(rate_limit_raw["rpd"]),
+                "reset_timezone": rate_limit_raw.get("reset_timezone", "America/Los_Angeles"),
+            }
         result.append({
             "id": mid,
             "name": name,
             "input_price": pricing.get("input_per_1m_tokens"),
             "output_price": pricing.get("output_per_1m_tokens"),
+            "rate_limit": rate_limit,
         })
     return result
 
