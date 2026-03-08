@@ -149,6 +149,7 @@ class Playbook(Base):
     router_callable = Column(Boolean, nullable=False, default=False)  # Can be called from router
     user_selectable = Column(Boolean, nullable=False, default=False)  # Can be selected by user in UI
     dev_only = Column(Boolean, nullable=False, default=False)  # Only available when developer mode is enabled
+    required_credentials = Column(Text, nullable=True, default=None)  # JSON list of required credential types e.g. '["x"]'
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -215,6 +216,8 @@ class PersonaEventLog(Base):
     CREATED_AT = Column(DateTime, server_default=func.now(), nullable=False)
     CONTENT = Column(String, nullable=False)
     STATUS = Column(String(32), default="pending", nullable=False)  # pending / archived
+    EVENT_TYPE = Column(String(64), nullable=True)  # "x_mention", "switchbot_open", etc.
+    PAYLOAD = Column(Text, nullable=True)  # JSON structured data
 
 
 class PersonaSchedule(Base):
@@ -288,6 +291,20 @@ class LLMUsageLog(Base):
     NODE_TYPE = Column(String(64), nullable=True)  # llm, router, tool_detection, etc.
     PLAYBOOK_NAME = Column(String(255), nullable=True)
     CATEGORY = Column(String(64), nullable=True)  # persona_speak, memory_weave_generate, etc.
+
+
+class XReplyLog(Base):
+    """X (Twitter) リプライ送信ログ。
+
+    tweet_id の UNIQUE 制約で同一ツイートへの二重リプライをDB層で防止する。
+    ペルソナの SAIMemory とは独立しており、メモリリセットの影響を受けない。
+    """
+    __tablename__ = "x_reply_log"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tweet_id = Column(String(64), unique=True, nullable=False)  # 元ツイートID — 二重リプ防止
+    persona_id = Column(String(255), nullable=False)
+    reply_tweet_id = Column(String(64), nullable=True)  # 投稿した返信のツイートID
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
 class UserSettings(Base):

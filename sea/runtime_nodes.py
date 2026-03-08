@@ -49,7 +49,7 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
                 state[output_key] = error_msg
             return state
 
-        persona_obj = state.get("persona_obj") or persona
+        persona_obj = state.get("_persona_obj") or persona
         persona_id = getattr(persona_obj, "persona_id", "unknown")
         try:
             persona_dir = getattr(persona_obj, "persona_log_path", None)
@@ -57,7 +57,7 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
             manager_ref = getattr(persona_obj, "manager_ref", None)
             LOGGER.info("[sea][tool_call] CALL %s (persona=%s) args=%s", tool_name, persona_id, tool_args)
             if persona_id and persona_dir:
-                with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode):
+                with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback):
                     result = tool_func(**tool_args)
             else:
                 result = tool_func(**tool_args)
@@ -82,16 +82,14 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
             # Append tool result to conversation messages (function calling protocol)
             runtime._append_tool_result_message(state, tool_name, result_str)
 
-            # Also update _intermediate_msgs for context_profile-based nodes
-            if "_intermediate_msgs" in state and _tc_id_for_im:
-                _im = list(state.get("_intermediate_msgs", []))
-                _im.append({
-                    "role": "tool",
-                    "tool_call_id": _tc_id_for_im,
-                    "name": tool_name,
-                    "content": result_str,
-                })
-                state["_intermediate_msgs"] = _im
+            # Append tool result to PulseContext (replaces _intermediate_msgs)
+            _pulse_ctx = state.get("_pulse_context")
+            if _pulse_ctx and _tc_id_for_im:
+                from sea.pulse_context import PulseLogEntry
+                _pulse_ctx.append(PulseLogEntry(
+                    role="tool", content=result_str,
+                    node_id=node_id, playbook_name=playbook.name,
+                    tool_call_id=_tc_id_for_im, tool_name=tool_name))
 
         except Exception as exc:
             error_msg = f"Tool error ({tool_name}): {exc}"
@@ -106,16 +104,14 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
             # Append error as tool result so LLM knows the tool failed
             runtime._append_tool_result_message(state, tool_name, error_msg)
 
-            # Also update _intermediate_msgs
-            if "_intermediate_msgs" in state and _tc_id_for_err:
-                _im = list(state.get("_intermediate_msgs", []))
-                _im.append({
-                    "role": "tool",
-                    "tool_call_id": _tc_id_for_err,
-                    "name": tool_name,
-                    "content": error_msg,
-                })
-                state["_intermediate_msgs"] = _im
+            # Append tool error to PulseContext (replaces _intermediate_msgs)
+            _pulse_ctx = state.get("_pulse_context")
+            if _pulse_ctx and _tc_id_for_err:
+                from sea.pulse_context import PulseLogEntry
+                _pulse_ctx.append(PulseLogEntry(
+                    role="tool", content=error_msg,
+                    node_id=node_id, playbook_name=playbook.name,
+                    tool_call_id=_tc_id_for_err, tool_name=tool_name))
 
         return state
 
@@ -144,10 +140,23 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
             return state
         from .runtime_utils import _format as runtime_format
 
-        template = getattr(node_def, "input_template", "{input}") or "{input}"
-        variables = dict(state)
-        variables.update({"input": state.get("inputs", {}).get("input", ""), "last": state.get("last", "")})
-        sub_input = runtime_format(template, variables)
+        # Build child args from node_def.args, resolving template strings against current state
+        node_args = getattr(node_def, "args", None)
+        if node_args and isinstance(node_args, dict):
+            state_vars = {k: v for k, v in state.items() if not k.startswith("_")}
+            child_args = {}
+            for key, tmpl in node_args.items():
+                if isinstance(tmpl, str):
+                    child_args[key] = runtime_format(tmpl, state_vars)
+                else:
+                    child_args[key] = tmpl
+            sub_input = child_args.get("input") or child_args.get("query") or ""
+            state["_args"] = child_args
+        else:
+            # No args specified — pass input from state
+            sub_input = state.get("input", "") or state.get("last", "")
+            state["_args"] = {"input": sub_input} if sub_input else None
+
         eff_bid = runtime._effective_building_id(persona, building_id)
         execution = getattr(node_def, "execution", "inline") or "inline"
         subagent_thread_id = None
@@ -162,7 +171,11 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
         if execution == "inline":
             log_sea_trace(playbook.name, node_id, "SUBPLAY", f"→ {sub_name} (input=\"{str(sub_input)}\")")
         try:
-            sub_outputs = runtime._run_playbook(sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback, cancellation_token=cancellation_token)
+            sub_outputs = runtime._run_playbook(
+                sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback,
+                cancellation_token=cancellation_token,
+                isolate_pulse_context=(execution == "subagent"),
+            )
         except LLMError:
             LOGGER.exception("[sea][subplay] LLM error in subplaybook '%s'", sub_name)
             if execution == "subagent" and subagent_thread_id:

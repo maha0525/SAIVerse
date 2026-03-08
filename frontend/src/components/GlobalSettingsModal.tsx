@@ -71,6 +71,9 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     // Developer Mode
     const [developerMode, setDeveloperMode] = useState(false);
 
+    // X Polling
+    const [xPollingEnabled, setXPollingEnabled] = useState(false);
+
     // Theme
     const [theme, setTheme] = useState<'system' | 'light' | 'dark'>('system');
 
@@ -93,6 +96,7 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             loadEnvVars();
             loadGlobalAutoState();
             loadDeveloperModeState();
+            loadXPollingState();
             // Load theme from localStorage
             const saved = localStorage.getItem('saiverse-theme') as 'system' | 'light' | 'dark' | null;
             setTheme(saved || 'system');
@@ -194,6 +198,34 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             }
         } catch (e) {
             console.error("Failed to toggle developer mode", e);
+        }
+    };
+
+    const loadXPollingState = async () => {
+        try {
+            const res = await fetch('/api/config/x-polling');
+            if (res.ok) {
+                const data = await res.json();
+                setXPollingEnabled(data.enabled);
+            }
+        } catch (e) {
+            console.error("Failed to load X polling state", e);
+        }
+    };
+
+    const toggleXPolling = async () => {
+        const newState = !xPollingEnabled;
+        try {
+            const res = await fetch('/api/config/x-polling', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: newState })
+            });
+            if (res.ok) {
+                setXPollingEnabled(newState);
+            }
+        } catch (e) {
+            console.error("Failed to toggle X polling", e);
         }
     };
 
@@ -526,6 +558,22 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                     <div
                                         className={`${styles.toggle} ${developerMode ? styles.active : ''}`}
                                         onClick={toggleDeveloperMode}
+                                    />
+                                </div>
+
+                                {/* X Mention Polling Toggle */}
+                                <div className={styles.toggleContainer}>
+                                    <div>
+                                        <div className={styles.toggleLabel}>
+                                            Xメンション監視
+                                        </div>
+                                        <div className={styles.toggleDescription}>
+                                            ONにするとX連携済みペルソナのメンションを5分間隔で自動監視します
+                                        </div>
+                                    </div>
+                                    <div
+                                        className={`${styles.toggle} ${xPollingEnabled ? styles.active : ''}`}
+                                        onClick={toggleXPolling}
                                     />
                                 </div>
                             </div>

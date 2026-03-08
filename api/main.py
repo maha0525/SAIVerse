@@ -19,3 +19,6 @@ api_router.include_router(tutorial.router, prefix="/tutorial", tags=["tutorial"]
 api_router.include_router(uri.router, prefix="/uri", tags=["uri"])
 api_router.include_router(system.router, prefix="/system", tags=["system"])
 
+from api.routes.people.x_auth import callback_router as x_callback_router
+api_router.include_router(x_callback_router, prefix="/x", tags=["x"])
+

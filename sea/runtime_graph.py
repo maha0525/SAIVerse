@@ -24,6 +24,7 @@ def compile_with_langgraph(
     event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     cancellation_token: Optional[CancellationToken] = None,
     pulse_type: Optional[str] = None,
+    isolate_pulse_context: bool = False,
 ) -> Optional[List[str]]:
     _lg_outputs: List[str] = []
     temperature = runtime._default_temperature(persona)
@@ -61,36 +62,24 @@ def compile_with_langgraph(
             user_message=f"プレイブック '{playbook.name}' のグラフ構築に失敗しました。",
         )
 
-    # Process input_schema to inherit variables from parent_state.
-    # source_key (from param.source) is the primary resolution mechanism.
-    # param_name in parent is a fallback for when source_key yields nothing.
+    # Resolve input_schema parameters from _args (function call model).
+    # _args is set by the caller (run_playbook, or exec/subplay node args).
+    args_dict = parent.get("_args") or {}
     inherited_vars = {}
     for param in playbook.input_schema:
         param_name = param.name
-        source_key = param.source if param.source else "input"
 
-        # Primary: resolve based on source_key
-        if source_key == "input":
-            value = user_input or ""
-        elif source_key.startswith("parent."):
-            actual_key = source_key[7:]  # strip "parent."
-            value = runtime._resolve_state_value(parent, actual_key)
-            if value is None:
-                value = ""
-            LOGGER.debug("[sea][LangGraph] Resolved %s from parent.%s: %s", param_name, actual_key, str(value)[:120] if value else "(empty)")
+        if param_name in args_dict:
+            value = args_dict[param_name]
+            LOGGER.debug("[sea][LangGraph] Resolved %s from args: %s", param_name, str(value)[:120] if value else "(empty)")
         else:
-            value = parent.get(source_key, "")
-
-        # Fallback: if source_key resolution yielded nothing, check parent by param name
-        if not value and param_name in parent and parent[param_name] is not None:
-            value = parent[param_name]
-            LOGGER.debug("[sea][LangGraph] Fallback: using parent value for %s: %s", param_name, str(value)[:120] if value else "(empty)")
+            value = param.default if param.default is not None else ""
 
         inherited_vars[param_name] = value
 
-    # Inherit pulse_usage_accumulator from parent_state if it exists (for sub-playbook calls)
+    # Inherit _pulse_usage_accumulator from parent_state if it exists (for sub-playbook calls)
     # This ensures usage is accumulated across all LLM calls in the entire pulse chain
-    parent_accumulator = parent.get("pulse_usage_accumulator")
+    parent_accumulator = parent.get("_pulse_usage_accumulator")
     if parent_accumulator:
         # Use the same accumulator (reference) to accumulate across sub-playbooks
         usage_accumulator = parent_accumulator
@@ -116,20 +105,34 @@ def compile_with_langgraph(
     # Inherit cancellation token from parent state if not explicitly provided
     effective_cancellation_token = cancellation_token or parent.get("_cancellation_token")
 
+    # Inherit PulseContext from parent_state (shared reference, same pattern as accumulator).
+    # Subagent executions set isolate_pulse_context=True to get their own PulseContext,
+    # preventing intermediate messages from leaking into the parent's protocol chain.
+    parent_pulse_ctx = parent.get("_pulse_context") if not isolate_pulse_context else None
+    if parent_pulse_ctx is not None:
+        pulse_ctx = parent_pulse_ctx  # Share reference across sub-playbooks
+    else:
+        # Create new PulseContext for this pulse (or isolated subagent)
+        _adapter = getattr(persona, "sai_memory", None)
+        _thread_id = _adapter.get_current_thread() if _adapter else None
+        pulse_ctx = runtime._get_or_create_pulse_context(pulse_id, _thread_id or "")
+
     initial_state = {
-        "messages": list(base_messages),
-        "inputs": {"input": user_input or ""},
-        "context": {},
-        "last": user_input or "",
-        "outputs": _lg_outputs,
-        "persona_obj": persona,
-        "pulse_id": pulse_id,
-        "pulse_type": pulse_type,  # user/schedule/auto
+        # System variables (_ prefix, auto-inherited, nodes don't touch)
+        "_messages": list(base_messages),
+        "_context": {},
+        "_outputs": _lg_outputs,
+        "_persona_obj": persona,
+        "_pulse_id": pulse_id,
+        "_pulse_type": pulse_type,  # user/schedule/auto
         "_cancellation_token": effective_cancellation_token,  # For node-level cancellation checks
-        "pulse_usage_accumulator": usage_accumulator,  # Inherit from parent or create new
+        "_pulse_usage_accumulator": usage_accumulator,  # Inherit from parent or create new
         "_activity_trace": activity_trace,  # Shared trace of exec/tool activities
-        "_intermediate_msgs": [],  # Track intermediate node outputs for profile-based context
-        **inherited_vars,  # Add inherited variables from input_schema
+        "_pulse_context": pulse_ctx,  # Pulse-level log context (replaces _intermediate_msgs)
+        # Playbook variables (no prefix)
+        "last": user_input or "",
+        "input": user_input or "",
+        **inherited_vars,  # Add resolved parameters from args/input_schema
     }
 
     # Execute compiled playbook
@@ -200,6 +203,14 @@ def compile_with_langgraph(
         persona.execution_state["playbook"] = None
         persona.execution_state["node"] = None
         persona.execution_state["status"] = "idle"
+
+    # Flush PulseContext to DB if this is the top-level playbook (not a sub-playbook)
+    if parent.get("_pulse_context") is None:
+        # This was a new PulseContext created for this pulse — flush and clean up
+        if isinstance(final_state, dict):
+            _final_pulse_ctx = final_state.get("_pulse_context")
+            if _final_pulse_ctx:
+                runtime._flush_pulse_logs(persona, _final_pulse_ctx)
 
     # speak/think nodes already emitted; return collected texts for UI consistency
     return list(_lg_outputs)

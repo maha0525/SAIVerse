@@ -1,0 +1,59 @@
+{
+    "name": "x_search_tweets",
+    "display_name": "Xツイート検索",
+    "description": "X（Twitter）でツイートを検索し、記憶に保存する。",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "検索したい内容やキーワード"
+        }
+    ],
+    "router_callable": true,
+    "required_credentials": ["x"],
+    "nodes": [
+        {
+            "id": "generate_query",
+            "type": "llm",
+            "context_profile": "router",
+            "action": "ユーザーの意図に基づいて、X（Twitter）のツイート検索クエリを生成してください。\n\nルール:\n- X API v2の検索構文を使用可能（例: from:username, -is:retweet, lang:ja）\n- 直近7日間のツイートのみ検索可能\n- 簡潔で効果的なクエリを生成してください",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "X検索クエリ"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "取得件数（10-100）"
+                    }
+                },
+                "required": ["query"]
+            },
+            "output_key": "search_params",
+            "memorize": {
+                "tags": ["internal", "x_search"]
+            },
+            "next": "search"
+        },
+        {
+            "id": "search",
+            "type": "tool",
+            "action": "x_search_tweets",
+            "args_input": {
+                "query": "search_params.query",
+                "max_results": "search_params.max_results"
+            },
+            "next": "record"
+        },
+        {
+            "id": "record",
+            "type": "memorize",
+            "action": "Xツイート検索結果:\n{last}",
+            "role": "user",
+            "tags": ["conversation", "x_search", "playbook_result"],
+            "next": null
+        }
+    ],
+    "start_node": "generate_query"
+}

@@ -22,6 +22,7 @@ def run_playbook(
     cancellation_token: Optional[Any] = None,
     pulse_type: Optional[str] = None,
     initial_params: Optional[Dict[str, Any]] = None,
+    isolate_pulse_context: bool = False,
 ) -> List[str]:
     if cancellation_token:
         cancellation_token.raise_if_cancelled()
@@ -29,11 +30,12 @@ def run_playbook(
     parent = parent_state or {}
 
     if initial_params:
-        LOGGER.debug("[sea] _run_playbook merging initial_params: %s", list(initial_params.keys()))
-        parent.update(initial_params)
+        LOGGER.debug("[sea] _run_playbook received args: %s", list(initial_params.keys()))
+        # Store args for compile_with_langgraph to resolve via input_schema
+        parent["_args"] = dict(initial_params)
     LOGGER.debug("[sea] _run_playbook called for %s, parent_state keys: %s", playbook.name, list(parent.keys()) if parent else "(none)")
-    if "pulse_id" in parent:
-        pulse_id = str(parent["pulse_id"])
+    if "_pulse_id" in parent:
+        pulse_id = str(parent["_pulse_id"])
     else:
         pulse_id = str(uuid.uuid4())
 
@@ -97,6 +99,7 @@ def run_playbook(
         event_callback=wrapped_event_callback,
         cancellation_token=cancellation_token,
         pulse_type=pulse_type,
+        isolate_pulse_context=isolate_pulse_context,
     )
     if compiled_ok is None:
         LOGGER.error(

@@ -64,6 +64,14 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
             if isinstance(request_kwargs, dict):
                 extra_kwargs["request_kwargs"] = request_kwargs
 
+            max_image_bytes = config.get("max_image_bytes")
+            if isinstance(max_image_bytes, int) and max_image_bytes > 0:
+                extra_kwargs["max_image_bytes"] = max_image_bytes
+
+            max_image_embeds = config.get("max_image_embeds")
+            if isinstance(max_image_embeds, int) and max_image_embeds > 0:
+                extra_kwargs["max_image_embeds"] = max_image_embeds
+
             # Convert system messages to user messages if needed for compatibility
             convert_system = config.get("convert_system_to_user")
             if isinstance(convert_system, bool):
@@ -102,6 +110,14 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
             request_kwargs = config.get("request_kwargs")
             if isinstance(request_kwargs, dict):
                 extra_kwargs["request_kwargs"] = request_kwargs
+
+            max_image_bytes = config.get("max_image_bytes")
+            if isinstance(max_image_bytes, int) and max_image_bytes > 0:
+                extra_kwargs["max_image_bytes"] = max_image_bytes
+
+            max_image_embeds = config.get("max_image_embeds")
+            if isinstance(max_image_embeds, int) and max_image_embeds > 0:
+                extra_kwargs["max_image_embeds"] = max_image_embeds
 
             convert_system = config.get("convert_system_to_user")
             if isinstance(convert_system, bool):

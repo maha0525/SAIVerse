@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Optional
 
 _log = logging.getLogger(__name__)
@@ -11,8 +12,15 @@ from sqlalchemy.orm import sessionmaker
 
 from database.paths import default_db_path
 from database.models import Base, Playbook, PlaybookPermission
+from saiverse.data_paths import get_saiverse_home
 from tools.context import get_active_persona_id, get_active_manager, get_auto_mode
 from tools.core import ToolSchema
+
+# Credential type → file that must exist in persona directory
+_CREDENTIAL_FILES: dict[str, str] = {
+    "x": "x_credentials.json",
+    # "email": "email_config.json",  # future
+}
 
 
 def list_available_playbooks(persona_id: Optional[str] = None, building_id: Optional[str] = None) -> str:
@@ -85,6 +93,20 @@ def list_available_playbooks(persona_id: Optional[str] = None, building_id: Opti
                 include = (pb.building_id == building_id)
             else:
                 include = False
+
+            # Check required credentials
+            if include and pb.required_credentials:
+                try:
+                    req_creds = json.loads(pb.required_credentials)
+                    if req_creds and persona_id:
+                        persona_dir = get_saiverse_home() / "personas" / persona_id
+                        for cred_type in req_creds:
+                            cred_file = _CREDENTIAL_FILES.get(cred_type)
+                            if not cred_file or not (persona_dir / cred_file).exists():
+                                include = False
+                                break
+                except (json.JSONDecodeError, TypeError):
+                    _log.warning("Invalid required_credentials JSON for playbook %s", pb.name)
 
             # Check city-scoped permission
             if include:

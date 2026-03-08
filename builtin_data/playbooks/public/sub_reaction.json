@@ -4,8 +4,7 @@
     "input_schema": [
         {
             "name": "trigger",
-            "description": "リアクションのトリガー情報",
-            "source": "parent.react_decision.reaction_trigger"
+            "description": "リアクションのトリガー情報"
         }
     ],
     "router_callable": false,

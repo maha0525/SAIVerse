@@ -1,0 +1,115 @@
+.connected {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.statusRow {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.username {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: #1d9bf0;
+}
+
+.badge {
+    font-size: 0.7rem;
+    background: rgba(29, 155, 240, 0.15);
+    color: #1d9bf0;
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+    font-weight: 500;
+}
+
+.checkboxLabel {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    color: #9ca3af;
+    cursor: pointer;
+}
+
+.checkboxLabel input[type="checkbox"] {
+    width: 14px;
+    height: 14px;
+    cursor: pointer;
+}
+
+.disconnectBtn {
+    align-self: flex-start;
+    background: none;
+    border: 1px solid #4b5563;
+    color: #9ca3af;
+    padding: 0.35rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.disconnectBtn:hover {
+    border-color: #ef4444;
+    color: #ef4444;
+}
+
+.disconnected {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.connectBtn {
+    align-self: flex-start;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: #1d9bf0;
+    color: #fff;
+    border: none;
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.connectBtn:hover:not(:disabled) {
+    background: #1a8cd8;
+}
+
+.connectBtn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.error {
+    font-size: 0.8rem;
+    color: #ef4444;
+    margin-top: 0.25rem;
+}
+
+/* ── Light mode overrides ── */
+
+:global([data-theme="light"]) .username {
+    color: #1d9bf0;
+}
+
+:global([data-theme="light"]) .checkboxLabel {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .disconnectBtn {
+    border-color: #e2e8f0;
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .disconnectBtn:hover {
+    border-color: #ef4444;
+    color: #ef4444;
+}

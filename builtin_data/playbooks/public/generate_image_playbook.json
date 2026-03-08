@@ -31,12 +31,11 @@
                     "model": {
                         "type": "string",
                         "enum": [
-                            "nano_banana",
-                            "nano_banana_pro",
+                            "nano_banana_2",
                             "gpt_image_1_5",
                             "grok_imagine"
                         ],
-                        "description": "使用するモデル。nano_banana(高速), nano_banana_pro(高品質), gpt_image_1_5(最高品質), grok_imagine(xAI Grok Imagine Pro)。デフォルトはnano_banana_pro"
+                        "description": "使用するモデル。nano_banana_2(高速・高品質, Gemini 3.1 Flash), gpt_image_1_5(最高品質, OpenAI), grok_imagine(xAI Grok Imagine Pro)。デフォルトはnano_banana_2"
                     },
                     "quality": {
                         "type": "string",
@@ -54,7 +53,16 @@
                             "16:9",
                             "9:16",
                             "4:3",
-                            "3:4"
+                            "3:4",
+                            "2:3",
+                            "3:2",
+                            "4:5",
+                            "5:4",
+                            "1:4",
+                            "4:1",
+                            "1:8",
+                            "8:1",
+                            "21:9"
                         ],
                         "description": "アスペクト比。デフォルトは1:1"
                     },

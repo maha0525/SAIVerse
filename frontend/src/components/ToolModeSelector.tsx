@@ -48,15 +48,15 @@ interface SubPlaybookOption {
 interface ToolModeSelectorProps {
     selectedPlaybook: string | null;
     onPlaybookChange: (id: string | null) => void;
-    playbookParams: Record<string, any>;
-    onPlaybookParamsChange: (params: Record<string, any>) => void;
+    playbookArgs: Record<string, any>;
+    onPlaybookArgsChange: (params: Record<string, any>) => void;
 }
 
 export default function ToolModeSelector({
     selectedPlaybook,
     onPlaybookChange,
-    playbookParams,
-    onPlaybookParamsChange,
+    playbookArgs,
+    onPlaybookArgsChange,
 }: ToolModeSelectorProps) {
     const [isOpen, setIsOpen] = useState(false);
     const [isSubOpen, setIsSubOpen] = useState(false);
@@ -122,7 +122,7 @@ export default function ToolModeSelector({
             await fetch('/api/config/playbook', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ playbook: playbookId, playbook_params: params }),
+                body: JSON.stringify({ playbook: playbookId, args: params }),
             });
         } catch (e) {
             console.error("Failed to save tool mode", e);
@@ -132,7 +132,7 @@ export default function ToolModeSelector({
     const handleModeChange = (mode: ToolMode) => {
         onPlaybookChange(mode.id);
         const newParams: Record<string, any> = {};
-        onPlaybookParamsChange(newParams);
+        onPlaybookArgsChange(newParams);
         setIsOpen(false);
         // Reset sub-playbook cache when switching modes
         if (mode.id !== 'meta_user_manual') {
@@ -143,13 +143,13 @@ export default function ToolModeSelector({
     };
 
     const handleSubPlaybookChange = (value: string | null) => {
-        const newParams = { ...playbookParams, selected_playbook: value || '' };
-        onPlaybookParamsChange(newParams);
+        const newParams = { ...playbookArgs, selected_playbook: value || '' };
+        onPlaybookArgsChange(newParams);
         setIsSubOpen(false);
         syncToServer(selectedPlaybook, newParams);
     };
 
-    const selectedSubPlaybook = playbookParams?.selected_playbook || null;
+    const selectedSubPlaybook = playbookArgs?.selected_playbook || null;
     const selectedSubLabel = selectedSubPlaybook
         ? subPlaybooks.find(s => s.value === selectedSubPlaybook)?.label || selectedSubPlaybook
         : null;

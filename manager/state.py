@@ -13,6 +13,10 @@ def _default_developer_mode() -> bool:
     return os.environ.get("SAIVERSE_DEVELOPER_MODE", "").lower() in ("1", "true", "yes")
 
 
+def _default_x_polling_enabled() -> bool:
+    return os.environ.get("SAIVERSE_X_POLLING_ENABLED", "").lower() in ("1", "true", "yes")
+
+
 @dataclass
 class CoreState:
     """Shared mutable state for runtime/admin services."""
@@ -66,8 +70,9 @@ class CoreState:
     autonomous_conversation_running: bool = False
     global_auto_enabled: bool = False  # Global ON/OFF for ConversationManager
     developer_mode: bool = field(default_factory=_default_developer_mode)  # Developer mode: shows Task, Phenomena, dev_only playbooks
+    x_polling_enabled: bool = field(default_factory=_default_x_polling_enabled)  # X mention polling (default OFF)
     current_playbook: Optional[str] = None  # Selected playbook override for Chat Options
-    playbook_params: Dict[str, Any] = field(default_factory=dict)  # Parameters for the selected playbook
+    playbook_args: Dict[str, Any] = field(default_factory=dict)  # Arguments for the selected playbook
 
     # Cache settings for Anthropic prompt caching
     cache_enabled: bool = True  # Whether prompt caching is enabled

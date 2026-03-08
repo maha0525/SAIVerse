@@ -6,13 +6,13 @@ api.routes.usage ― LLM使用量モニタリングAPI
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 import logging
 
 from sqlalchemy import func
 from api.deps import get_manager
 from database.models import LLMUsageLog, AI
-from saiverse.model_configs import get_model_pricing, get_model_display_name, MODEL_CONFIGS
+from saiverse.model_configs import get_model_pricing, get_model_display_name, MODEL_CONFIGS, get_rate_limit_config
 
 router = APIRouter()
 LOGGER = logging.getLogger(__name__)
@@ -294,5 +294,84 @@ def get_usage_by_category(
             }
             for r in results
         ]
+    finally:
+        session.close()
+
+
+def _get_rpd_period_start(reset_timezone: str) -> datetime:
+    """Calculate the start of the current RPD period based on reset timezone.
+
+    For Gemini, RPD resets at midnight Pacific Time.
+    Returns a timezone-naive UTC datetime for DB comparison.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
+
+    tz = ZoneInfo(reset_timezone)
+    now_in_tz = datetime.now(tz)
+    # Midnight today in the reset timezone
+    midnight_local = now_in_tz.replace(hour=0, minute=0, second=0, microsecond=0)
+    # Convert to UTC (naive) for DB comparison
+    midnight_utc = midnight_local.astimezone(timezone.utc).replace(tzinfo=None)
+    return midnight_utc
+
+
+class RPDUsageItem(BaseModel):
+    """RPD使用状況（モデル単位）"""
+    model_id: str
+    display_name: str
+    used: int
+    limit: int
+    reset_timezone: str
+
+
+@router.get("/rpd", response_model=List[RPDUsageItem])
+def get_rpd_usage(
+    model_id: Optional[str] = Query(None, description="特定モデルのみ取得"),
+    manager=Depends(get_manager),
+):
+    """モデルごとのRPD（日次リクエスト数）使用状況を取得。
+
+    rate_limitが設定されたモデルのみ返す。
+    """
+    # Collect models that have RPD limits
+    models_with_rpd: list[tuple[str, int, str]] = []  # (config_key, rpd_limit, reset_tz)
+    for config_key, config in MODEL_CONFIGS.items():
+        rate_limit = config.get("rate_limit")
+        if not isinstance(rate_limit, dict) or not rate_limit.get("rpd"):
+            continue
+        if model_id and config_key != model_id:
+            continue
+        models_with_rpd.append((
+            config_key,
+            int(rate_limit["rpd"]),
+            rate_limit.get("reset_timezone", "America/Los_Angeles"),
+        ))
+
+    if not models_with_rpd:
+        return []
+
+    session = manager.SessionLocal()
+    try:
+        result = []
+        for config_key, rpd_limit, reset_tz in models_with_rpd:
+            period_start = _get_rpd_period_start(reset_tz)
+            count_row = session.query(
+                func.count(LLMUsageLog.ID).label("call_count"),
+            ).filter(
+                LLMUsageLog.MODEL_ID == config_key,
+                LLMUsageLog.TIMESTAMP >= period_start,
+            ).one()
+
+            result.append(RPDUsageItem(
+                model_id=config_key,
+                display_name=get_model_display_name(config_key),
+                used=int(count_row.call_count or 0),
+                limit=rpd_limit,
+                reset_timezone=reset_tz,
+            ))
+        return result
     finally:
         session.close()

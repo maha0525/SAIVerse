@@ -5,8 +5,7 @@
     "input_schema": [
         {
             "name": "input",
-            "description": "User input",
-            "source": null
+            "description": "User input"
         },
         {
             "name": "selected_playbook",
@@ -57,7 +56,13 @@
             "id": "router",
             "type": "subplay",
             "playbook": "sub_router_user",
-            "input_template": "{input}",
+            "args": {
+                "input": "{input}",
+                "available_playbooks": "{available_playbooks}",
+                "meta_playbook_name": "{meta_playbook_name}",
+                "meta_playbook_description": "{meta_playbook_description}",
+                "executed_playbooks": "{executed_playbooks}"
+            },
             "propagate_output": false,
             "next": "check_early_exit"
         },
@@ -85,7 +90,10 @@
             "id": "finalize",
             "type": "subplay",
             "playbook": "sub_speak",
-            "input_template": "{input}",
+            "args": {
+                "input": "{input}",
+                "metadata": "{metadata}"
+            },
             "propagate_output": true,
             "next": null
         }

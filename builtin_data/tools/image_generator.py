@@ -1,8 +1,8 @@
 """Unified image generation tool supporting multiple backends.
 
 Supported models:
-- nano_banana: Gemini 2.5 Flash Image (fast, aspect ratio control)
-- nano_banana_pro: Gemini 3 Pro Image (high quality, aspect ratio + resolution control)
+- nano_banana_2: Gemini 3.1 Flash Image (fast, high quality, aspect ratio + resolution control)
+- nano_banana_pro: Gemini 3 Pro Image (highest quality, aspect ratio + resolution control)
 - gpt_image_1_5: OpenAI GPT Image 1.5 (state of the art)
 
 Input image URI formats:
@@ -30,8 +30,8 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Type definitions
-ModelType = Literal["nano_banana", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"]
-AspectRatioType = Literal["1:1", "16:9", "9:16", "4:3", "3:4"]
+ModelType = Literal["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"]
+AspectRatioType = Literal["1:1", "16:9", "9:16", "4:3", "3:4", "2:3", "3:2", "4:5", "5:4", "1:4", "4:1", "1:8", "8:1", "21:9"]
 QualityType = Literal["low", "medium", "high", "auto"]
 
 
@@ -85,12 +85,24 @@ def _load_image_bytes(path: Path) -> Tuple[bytes, str]:
     return path.read_bytes(), mime_type
 
 
-def _generate_with_nano_banana(
+def _quality_to_nano_banana_2_resolution(quality: str) -> str:
+    """Convert quality to Gemini 3.1 Flash image_size format."""
+    mapping = {
+        "low": "1K",
+        "medium": "2K",
+        "high": "4K",
+        "auto": "2K",
+    }
+    return mapping.get(quality, "2K")
+
+
+def _generate_with_nano_banana_2(
     prompt: str,
     aspect_ratio: str = "1:1",
+    quality: str = "high",
     input_image_paths: Optional[List[Path]] = None,
 ) -> Tuple[bytes, str]:
-    """Generate image using Gemini 2.5 Flash Image (nano banana)."""
+    """Generate image using Gemini 3.1 Flash Image (nano banana 2)."""
     from llm_clients.gemini_utils import build_gemini_clients
     from google.genai import types
 
@@ -98,22 +110,25 @@ def _generate_with_nano_banana(
     if _paid_client is None:
         raise RuntimeError("GEMINI_API_KEY (paid tier) is required for image generation.")
 
+    resolution = _quality_to_nano_banana_2_resolution(quality)
+
     # Build contents with optional input images
     contents: List = []
     if input_image_paths:
         for img_path in input_image_paths:
             img_bytes, img_mime = _load_image_bytes(img_path)
             contents.append(types.Part.from_bytes(data=img_bytes, mime_type=img_mime))
-            logger.info(f"[nano_banana] Added input image: {img_path.name}")
+            logger.info(f"[nano_banana_2] Added input image: {img_path.name}")
     contents.append(prompt)
 
     resp = _paid_client.models.generate_content(
-        model="gemini-2.5-flash-image",
+        model="gemini-3.1-flash-image-preview",
         contents=contents,
         config=types.GenerateContentConfig(
             response_modalities=["TEXT", "IMAGE"],
             image_config=types.ImageConfig(
-                aspect_ratio=aspect_ratio
+                aspect_ratio=aspect_ratio,
+                image_size=resolution
             ),
             http_options=types.HttpOptions(
                 retry_options=types.HttpRetryOptions(attempts=1),
@@ -356,7 +371,7 @@ def _get_model_api_key_env(model: str) -> Optional[str]:
     Returns None if the model is unknown.
     """
     mapping = {
-        "nano_banana": "GEMINI_API_KEY",
+        "nano_banana_2": "GEMINI_API_KEY",
         "nano_banana_pro": "GEMINI_API_KEY",
         "gpt_image_1_5": "OPENAI_API_KEY",
         "grok_imagine": "XAI_API_KEY",
@@ -374,17 +389,17 @@ def _is_image_model_available(model: str) -> bool:
 
 def get_available_image_models() -> List[str]:
     """Return list of image model names whose API keys are configured."""
-    all_models = ["nano_banana", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"]
+    all_models = ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"]
     return [m for m in all_models if _is_image_model_available(m)]
 
 
 # Fallback priority order (most commonly available first)
-_FALLBACK_ORDER = ["nano_banana_pro", "nano_banana", "gpt_image_1_5", "grok_imagine"]
+_FALLBACK_ORDER = ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"]
 
 
 def generate_image(
     prompt: str,
-    model: ModelType = "nano_banana_pro",
+    model: ModelType = "nano_banana_2",
     aspect_ratio: AspectRatioType = "1:1",
     quality: QualityType = "high",
     title: Optional[str] = None,
@@ -395,8 +410,8 @@ def generate_image(
     Args:
         prompt: Image generation prompt describing what to create.
         model: Which image generation model to use:
-            - nano_banana: Fast with aspect ratio control (Gemini 2.5 Flash)
-            - nano_banana_pro: High quality with aspect ratio + resolution control (Gemini 3 Pro)
+            - nano_banana_2: Fast, high quality with aspect ratio + resolution control (Gemini 3.1 Flash)
+            - nano_banana_pro: Highest quality with aspect ratio + resolution control (Gemini 3 Pro)
             - gpt_image_1_5: State of the art quality (OpenAI GPT Image 1.5)
             - grok_imagine: High quality image generation (xAI Grok Imagine Pro)
         aspect_ratio: Image aspect ratio ("1:1", "16:9", "9:16", "4:3", "3:4")
@@ -422,7 +437,7 @@ def generate_image(
     if not quality:
         quality = "high"
     if not model:
-        model = "nano_banana_pro"
+        model = "nano_banana_2"
 
     # Check model availability and fallback if needed
     fallback_note = ""
@@ -483,9 +498,9 @@ def generate_image(
             f"input_images={len(input_image_paths)}"
         )
         try:
-            if attempt_model == "nano_banana":
-                image_data, mime = _generate_with_nano_banana(
-                    prompt, aspect_ratio, input_image_paths
+            if attempt_model == "nano_banana_2":
+                image_data, mime = _generate_with_nano_banana_2(
+                    prompt, aspect_ratio, quality, input_image_paths
                 )
             elif attempt_model == "nano_banana_pro":
                 image_data, mime = _generate_with_nano_banana_pro(
@@ -579,8 +594,8 @@ def schema() -> ToolSchema:
         description=(
             "Generate an image from a text prompt, optionally using reference images. "
             "Supports multiple AI models:\n"
-            "- nano_banana: Fast generation with aspect ratio control (Gemini 2.5 Flash)\n"
-            "- nano_banana_pro: High quality with aspect ratio and resolution control (Gemini 3 Pro)\n"
+            "- nano_banana_2: Fast, high quality generation with aspect ratio + resolution control (Gemini 3.1 Flash)\n"
+            "- nano_banana_pro: Highest quality with aspect ratio and resolution control (Gemini 3 Pro)\n"
             "- gpt_image_1_5: State of the art photorealistic quality (OpenAI)\n"
             "- grok_imagine: High quality image generation (xAI Grok Imagine Pro)\n\n"
             "Prompt tips:\n"
@@ -603,17 +618,18 @@ def schema() -> ToolSchema:
                 },
                 "model": {
                     "type": "string",
-                    "enum": ["nano_banana", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"],
+                    "enum": ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"],
                     "description": (
                         "Image generation model: "
-                        "nano_banana (fast, aspect ratio), nano_banana_pro (high quality, aspect ratio + resolution), "
+                        "nano_banana_2 (fast, high quality, Gemini 3.1 Flash), "
+                        "nano_banana_pro (highest quality, Gemini 3 Pro), "
                         "gpt_image_1_5 (state of the art), grok_imagine (xAI Grok Imagine Pro)"
                     ),
-                    "default": "nano_banana_pro"
+                    "default": "nano_banana_2"
                 },
                 "aspect_ratio": {
                     "type": "string",
-                    "enum": ["1:1", "16:9", "9:16", "4:3", "3:4"],
+                    "enum": ["1:1", "16:9", "9:16", "4:3", "3:4", "2:3", "3:2", "4:5", "5:4", "1:4", "4:1", "1:8", "8:1", "21:9"],
                     "description": "Image aspect ratio",
                     "default": "1:1"
                 },
