@@ -22,6 +22,8 @@ router = APIRouter()
 class ModelInfo(BaseModel):
     id: str
     name: str
+    provider: Optional[str] = None
+    group: Optional[str] = None  # UI grouping label (falls back to provider)
     input_price: Optional[float] = None   # USD per 1M input tokens
     output_price: Optional[float] = None  # USD per 1M output tokens
 
@@ -90,10 +92,13 @@ def get_models():
     for mid, name in choices:
         if not is_model_available(mid):
             continue
-        pricing = get_model_config(mid).get("pricing", {})
+        config = get_model_config(mid)
+        pricing = config.get("pricing", {})
         result.append({
             "id": mid,
             "name": name,
+            "provider": config.get("provider"),
+            "group": config.get("group") or config.get("provider"),
             "input_price": pricing.get("input_per_1m_tokens"),
             "output_price": pricing.get("output_per_1m_tokens"),
         })
@@ -914,5 +919,55 @@ def set_playbook_permission(req: SetPlaybookPermissionRequest, manager=Depends(g
             ))
         db.commit()
         return {"success": True, "playbook_name": req.playbook_name, "permission_level": req.permission_level}
+    finally:
+        db.close()
+
+
+# ── Favorite Models ──────────────────────────────────────────────
+
+class FavoriteModelsRequest(BaseModel):
+    models: List[str]
+
+
+@router.get("/favorite-models")
+def get_favorite_models():
+    """Get user's favorite model IDs."""
+    from database.session import SessionLocal
+    from database.models import UserSettings
+
+    db = SessionLocal()
+    try:
+        settings = db.query(UserSettings).filter(UserSettings.USERID == 1).first()
+        if not settings or not settings.FAVORITE_MODELS:
+            return {"models": []}
+        try:
+            return {"models": json.loads(settings.FAVORITE_MODELS)}
+        except (json.JSONDecodeError, TypeError):
+            return {"models": []}
+    finally:
+        db.close()
+
+
+@router.post("/favorite-models")
+def set_favorite_models(req: FavoriteModelsRequest):
+    """Set user's favorite model IDs."""
+    from database.session import SessionLocal
+    from database.models import UserSettings
+
+    db = SessionLocal()
+    try:
+        settings = db.query(UserSettings).filter(UserSettings.USERID == 1).first()
+        favorites_json = json.dumps(req.models)
+        if settings:
+            settings.FAVORITE_MODELS = favorites_json
+        else:
+            settings = UserSettings(USERID=1, FAVORITE_MODELS=favorites_json)
+            db.add(settings)
+        db.commit()
+        return {"success": True, "models": req.models}
+    except Exception:
+        _log.warning("Failed to save favorite models", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to save favorite models")
     finally:
         db.close()
