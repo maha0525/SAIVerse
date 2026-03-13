@@ -436,14 +436,9 @@ class RuntimeEngine:
             speak_content = state.get("speak_content", "")
             LOGGER.info("[DEBUG] memorize node end: state['speak_content'] = '%s'", speak_content)
 
-            # Append to PulseContext
-            _pulse_ctx = state.get("_pulse_context")
-            if _pulse_ctx:
-                from sea.pulse_context import PulseLogEntry
-                _pulse_ctx.append(PulseLogEntry(
-                    role=role, content=memo_text,
-                    node_id=node_id, playbook_name=playbook.name,
-                    important=getattr(node_def, "important", False) or False))
+            # MEMORIZE does NOT append to PulseContext.
+            # Its job is writing to SAIMemory (persistent storage).
+            # Runtime tracing is handled by TOOL and LLM nodes.
 
             return state
 
