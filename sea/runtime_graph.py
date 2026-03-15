@@ -111,8 +111,15 @@ def compile_with_langgraph(
     parent_pulse_ctx = parent.get("_pulse_context") if not isolate_pulse_context else None
     if parent_pulse_ctx is not None:
         pulse_ctx = parent_pulse_ctx  # Share reference across sub-playbooks
+    elif isolate_pulse_context:
+        # Create a fresh, empty PulseContext (bypasses the cache so prior entries
+        # such as router I/O are not visible to this sub-playbook).
+        from sea.pulse_context import PulseContext
+        _adapter = getattr(persona, "sai_memory", None)
+        _thread_id = _adapter.get_current_thread() if _adapter else None
+        pulse_ctx = PulseContext(pulse_id=pulse_id, thread_id=_thread_id or "")
     else:
-        # Create new PulseContext for this pulse (or isolated subagent)
+        # Create new PulseContext for this pulse (or get existing one from cache)
         _adapter = getattr(persona, "sai_memory", None)
         _thread_id = _adapter.get_current_thread() if _adapter else None
         pulse_ctx = runtime._get_or_create_pulse_context(pulse_id, _thread_id or "")

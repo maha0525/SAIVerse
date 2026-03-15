@@ -274,6 +274,11 @@ class SubPlayNodeDef(BaseModel):
         default=True,
         description="When execution='subagent', generate a chronicle summary on completion."
     )
+    isolate_pulse_context: bool = Field(
+        default=False,
+        description="If true, run sub-playbook with a fresh PulseContext instead of sharing the parent's. "
+                    "Useful when the sub-playbook should not see prior pulse log entries (e.g., router I/O)."
+    )
     next: Optional[str] = None
     conditional_next: Optional[ConditionalNext] = Field(
         default=None,
