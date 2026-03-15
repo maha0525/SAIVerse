@@ -422,83 +422,118 @@ class AnthropicClient(LLMClient):
             logging.warning("[anthropic] No valid messages to send")
             return
 
-        def _stream_call() -> List[Any]:
-            get_llm_logger().debug(
-                "[anthropic] Stream request: %s",
-                json.dumps(request_params, indent=2, ensure_ascii=False, default=str),
-            )
-            output_chunks: List[Any] = []
+        get_llm_logger().debug(
+            "[anthropic] Stream request: %s",
+            json.dumps(request_params, indent=2, ensure_ascii=False, default=str),
+        )
 
-            # ── Streaming timing instrumentation ──
-            stream_start = time.monotonic()
-            first_text_chunk_time: float | None = None
-            last_text_chunk_time: float | None = None
-            message_stop_time: float | None = None
-            event_count = 0
-            text_chunk_count = 0
-            post_stop_event_count = 0
+        last_error: Optional[Exception] = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                yield from self._iter_stream(request_params, use_tools, cache_ttl)
+                return
+            except anthropic.BadRequestError as e:
+                logging.error("[anthropic] Bad request: %s", e)
+                if _is_content_policy_error(e):
+                    raise SafetyFilterError(
+                        f"Anthropic streaming API call content policy violation: {e}",
+                        e,
+                        user_message="入力内容がAnthropicのコンテンツポリシーによりブロックされました。入力内容を変更してお試しください。",
+                    )
+                raise InvalidRequestError(f"Anthropic streaming API call error: {e}", e)
+            except Exception as e:
+                last_error = e
+                if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                    backoff = INITIAL_BACKOFF * (2 ** attempt)
+                    logging.warning(
+                        "[anthropic] Retryable streaming error (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1,
+                        MAX_RETRIES,
+                        type(e).__name__,
+                        backoff,
+                    )
+                    time.sleep(backoff)
+                    continue
+                logging.exception("[anthropic] Streaming API call failed")
+                raise _convert_to_llm_error(e, "streaming API call")
 
-            with self.client.messages.stream(**request_params) as stream:
-                final_message = None
+        if last_error:
+            raise _convert_to_llm_error(last_error, f"streaming API call after {MAX_RETRIES} retries")
+        raise LLMEmptyResponseError(f"Anthropic streaming API call failed after {MAX_RETRIES} retries with no response")
 
-                for event in stream:
-                    event_count += 1
-                    if message_stop_time is not None:
-                        post_stop_event_count += 1
-                    if hasattr(event, "type"):
-                        if event.type == "content_block_delta":
-                            delta = getattr(event, "delta", None)
-                            if delta:
-                                if hasattr(delta, "thinking"):
-                                    output_chunks.append({"type": "thinking", "content": delta.thinking})
-                                elif hasattr(delta, "text"):
-                                    text_chunk_count += 1
-                                    now = time.monotonic()
-                                    if first_text_chunk_time is None:
-                                        first_text_chunk_time = now
-                                        logging.debug("[anthropic_stream] First text chunk at +%.2fs", now - stream_start)
-                                    last_text_chunk_time = now
-                                    output_chunks.append(delta.text)
-                        elif event.type == "message_stop":
-                            message_stop_time = time.monotonic()
-                            logging.info(
-                                "[anthropic_stream] message_stop received at +%.2fs (event #%d)",
-                                message_stop_time - stream_start, event_count,
-                            )
-                            final_message = stream.get_final_message()
+    def _iter_stream(
+        self,
+        request_params: Dict[str, Any],
+        use_tools: bool,
+        cache_ttl: str,
+    ) -> Iterator[str]:
+        """Open an Anthropic streaming context and yield text chunks immediately."""
+        # ── Streaming timing instrumentation ──
+        stream_start = time.monotonic()
+        first_text_chunk_time: float | None = None
+        last_text_chunk_time: float | None = None
+        message_stop_time: float | None = None
+        event_count = 0
+        text_chunk_count = 0
+        post_stop_event_count = 0
 
-                if final_message:
-                    if final_message.usage:
-                        self._store_usage_from_response(final_message.usage, cache_ttl=cache_ttl)
-                    self._store_reasoning(_extract_thinking_from_response(final_message))
+        with self.client.messages.stream(**request_params) as stream:
+            final_message = None
 
-                if use_tools and final_message:
-                    tool_use = _extract_tool_use_from_response(final_message)
-                    if tool_use:
-                        self._store_tool_detection({
-                            "type": "tool_call",
-                            "tool_name": tool_use["name"],
-                            "tool_args": tool_use["arguments"],
-                        })
+            for event in stream:
+                event_count += 1
+                if message_stop_time is not None:
+                    post_stop_event_count += 1
+                if hasattr(event, "type"):
+                    if event.type == "content_block_delta":
+                        delta = getattr(event, "delta", None)
+                        if delta:
+                            if hasattr(delta, "thinking"):
+                                pass  # Thinking deltas are collected from final_message
+                            elif hasattr(delta, "text"):
+                                text_chunk_count += 1
+                                now = time.monotonic()
+                                if first_text_chunk_time is None:
+                                    first_text_chunk_time = now
+                                    logging.debug("[anthropic_stream] First text chunk at +%.2fs", now - stream_start)
+                                last_text_chunk_time = now
+                                yield delta.text
+                    elif event.type == "message_stop":
+                        message_stop_time = time.monotonic()
+                        logging.info(
+                            "[anthropic_stream] message_stop received at +%.2fs (event #%d)",
+                            message_stop_time - stream_start, event_count,
+                        )
+                        final_message = stream.get_final_message()
 
-            # ── Stream completed: log timing summary ──
-            stream_end = time.monotonic()
-            elapsed = stream_end - stream_start
-            post_stop_wait = (stream_end - message_stop_time) if message_stop_time else 0
-            logging.info(
-                "[anthropic_stream] Stream completed: total=%.2fs, events=%d, text_chunks=%d, "
-                "first_text=+%.2fs, last_text=+%.2fs, message_stop at +%.2fs, "
-                "post_stop_events=%d, post_stop_wait=%.2fs",
-                elapsed, event_count, text_chunk_count,
-                (first_text_chunk_time - stream_start) if first_text_chunk_time else -1,
-                (last_text_chunk_time - stream_start) if last_text_chunk_time else -1,
-                (message_stop_time - stream_start) if message_stop_time else -1,
-                post_stop_event_count, post_stop_wait,
-            )
-            return output_chunks
+            if final_message:
+                if final_message.usage:
+                    self._store_usage_from_response(final_message.usage, cache_ttl=cache_ttl)
+                self._store_reasoning(_extract_thinking_from_response(final_message))
 
-        for chunk in self._execute_with_retry(_stream_call, "streaming API call", is_stream=True):
-            yield chunk
+            if use_tools and final_message:
+                tool_use = _extract_tool_use_from_response(final_message)
+                if tool_use:
+                    self._store_tool_detection({
+                        "type": "tool_call",
+                        "tool_name": tool_use["name"],
+                        "tool_args": tool_use["arguments"],
+                    })
+
+        # ── Stream completed: log timing summary ──
+        stream_end = time.monotonic()
+        elapsed = stream_end - stream_start
+        post_stop_wait = (stream_end - message_stop_time) if message_stop_time else 0
+        logging.info(
+            "[anthropic_stream] Stream completed: total=%.2fs, events=%d, text_chunks=%d, "
+            "first_text=+%.2fs, last_text=+%.2fs, message_stop at +%.2fs, "
+            "post_stop_events=%d, post_stop_wait=%.2fs",
+            elapsed, event_count, text_chunk_count,
+            (first_text_chunk_time - stream_start) if first_text_chunk_time else -1,
+            (last_text_chunk_time - stream_start) if last_text_chunk_time else -1,
+            (message_stop_time - stream_start) if message_stop_time else -1,
+            post_stop_event_count, post_stop_wait,
+        )
 
     def generate_with_tool_detection(
         self,
