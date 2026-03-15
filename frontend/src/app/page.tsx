@@ -678,37 +678,48 @@ export default function Home() {
             })
             .catch(err => console.error('Failed to check reembed', err));
 
-        // Check for updates
-        fetch('/api/system/version')
+        // Check for updates (respects update-check toggle)
+        fetch('/api/config/update-check')
             .then(res => res.ok ? res.json() : null)
-            .then(data => {
-                if (data?.version) {
-                    setAppStateVersion(data.version);
-                }
-                if (data?.update_available) {
-                    setUpdateAvailable({
-                        version: data.latest_version,
-                        url: data.latest_release_url || '',
+            .then(cfg => {
+                if (cfg && !cfg.enabled) return;  // Skip if disabled
+                return fetch('/api/system/version')
+                    .then(res => res.ok ? res.json() : null)
+                    .then(data => {
+                        if (data?.version) {
+                            setAppStateVersion(data.version);
+                        }
+                        if (data?.update_available) {
+                            setUpdateAvailable({
+                                version: data.latest_version,
+                                url: data.latest_release_url || '',
+                            });
+                        }
                     });
-                }
             })
             .catch(() => { /* ignore - backend may not support this endpoint yet */ });
 
         // Check for unread announcements (and poll every 30 minutes)
         const checkAnnouncements = () => {
-            fetch('/api/system/announcements')
+            // Check if announcements monitoring is enabled before fetching
+            fetch('/api/config/announcements-monitor')
                 .then(res => res.ok ? res.json() : null)
-                .then(data => {
-                    if (data?.announcements?.length > 0) {
-                        const raw = JSON.stringify(data.announcements);
-                        let hash = 5381;
-                        for (let i = 0; i < raw.length; i++) {
-                            hash = ((hash << 5) + hash + raw.charCodeAt(i)) | 0;
-                        }
-                        const currentHash = (hash >>> 0).toString(16);
-                        const savedHash = localStorage.getItem('saiverse_announcements_hash');
-                        setHasUnreadAnnouncements(currentHash !== savedHash);
-                    }
+                .then(cfg => {
+                    if (cfg && !cfg.enabled) return;  // Skip if disabled
+                    return fetch('/api/system/announcements')
+                        .then(res => res.ok ? res.json() : null)
+                        .then(data => {
+                            if (data?.announcements?.length > 0) {
+                                const raw = JSON.stringify(data.announcements);
+                                let hash = 5381;
+                                for (let i = 0; i < raw.length; i++) {
+                                    hash = ((hash << 5) + hash + raw.charCodeAt(i)) | 0;
+                                }
+                                const currentHash = (hash >>> 0).toString(16);
+                                const savedHash = localStorage.getItem('saiverse_announcements_hash');
+                                setHasUnreadAnnouncements(currentHash !== savedHash);
+                            }
+                        });
                 })
                 .catch(() => { /* ignore */ });
         };

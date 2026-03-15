@@ -497,6 +497,37 @@ def set_x_polling(req: XPollingRequest, manager=Depends(get_manager)):
     return {"success": True, "enabled": req.enabled}
 
 
+class MonitoringToggleRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/update-check")
+def get_update_check(manager=Depends(get_manager)):
+    """Get update check monitoring status."""
+    return {"enabled": manager.state.update_check_enabled}
+
+
+@router.post("/update-check")
+def set_update_check(req: MonitoringToggleRequest, manager=Depends(get_manager)):
+    """Toggle update availability check on/off."""
+    manager.state.update_check_enabled = req.enabled
+    _log.info("Update check set to %s", req.enabled)
+    return {"success": True, "enabled": req.enabled}
+
+
+@router.get("/announcements-monitor")
+def get_announcements_monitor(manager=Depends(get_manager)):
+    """Get announcements monitoring status."""
+    return {"enabled": manager.state.announcements_enabled}
+
+
+@router.post("/announcements-monitor")
+def set_announcements_monitor(req: MonitoringToggleRequest, manager=Depends(get_manager)):
+    """Toggle announcements monitoring on/off."""
+    manager.state.announcements_enabled = req.enabled
+    _log.info("Announcements monitor set to %s", req.enabled)
+    return {"success": True, "enabled": req.enabled}
+
 
 def _validate_playbook_override(req: "PlaybookOverrideRequest", manager: Any) -> None:
     if req.playbook != "meta_user_manual":
