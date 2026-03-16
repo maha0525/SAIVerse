@@ -1,0 +1,77 @@
+{
+  "model": "qwen/qwen3.5-397b-a17b",
+  "system_prompt": "",
+  "display_name": "Qwen3.5 397B A17B Non-thinking(Open Router)",
+  "provider": "openai",
+  "group": "openrouter",
+  "supports_structured_output": true,
+  "context_length": 256000,
+  "default_max_history_messages": 80,
+  "metabolism_keep_messages": 60,
+  "base_url": "https://openrouter.ai/api/v1",
+  "api_key_env": "OPENROUTER_API_KEY",
+  "convert_system_to_user": true,
+  "supports_images": true,
+  "max_image_bytes": 7500000,
+  "max_image_embeds": 4,
+  "reasoning_passback_field": "reasoning_details",
+  "request_kwargs": {
+    "extra_body": {
+      "reasoning": {
+        "enabled": false
+      }
+    }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 0.60,
+    "output_per_1m_tokens": 3.60,
+    "currency": "USD"
+  },
+  "parameters": {
+    "temperature": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.01,
+      "default": 0.7,
+      "label": "Temperature",
+      "description": "Controls randomness."
+    },
+    "top_p": {
+      "type": "float",
+      "min": 0,
+      "max": 1,
+      "step": 0.05,
+      "default": 0.8,
+      "label": "Top P",
+      "description": "Nucleus sampling cutoff."
+    },
+    "max_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 260000,
+      "step": 1,
+      "default": 8000,
+      "label": "Max tokens",
+      "description": "Upper bound on generated tokens."
+    },
+    "presence_penalty": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.01,
+      "default": 1.5,
+      "label": "Presence penalty",
+      "description": "Penalty for using the same token twice."
+    },
+    "repetition_penalty": {
+      "type": "float",
+      "min": 0,
+      "max": 2,
+      "step": 0.01,
+      "default": 1,
+      "label": "Repetition penalty",
+      "description": "Repetition penalty."
+    }
+  }
+}

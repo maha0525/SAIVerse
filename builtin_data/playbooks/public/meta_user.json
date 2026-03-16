@@ -51,7 +51,7 @@
                 "field": "selected_playbook",
                 "operator": "eq",
                 "cases": {
-                    "basic_chat": "finalize",
+                    "basic_chat": "finalize_direct",
                     "default": "exec"
                 }
             }
@@ -63,6 +63,18 @@
             "args_source": "selected_args",
             "next": "finalize",
             "error_next": "finalize"
+        },
+        {
+            "id": "finalize_direct",
+            "type": "subplay",
+            "playbook": "sub_speak",
+            "isolate_pulse_context": true,
+            "args": {
+                "input": "{input}",
+                "metadata": "{metadata}"
+            },
+            "propagate_output": true,
+            "next": null
         },
         {
             "id": "finalize",

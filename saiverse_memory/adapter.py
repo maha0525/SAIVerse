@@ -42,6 +42,8 @@ from sai_memory.memory.storage import (
     add_pulse_log,
     get_pulse_logs_by_pulse,
     delete_pulse_logs_before,
+    list_pulse_ids,
+    count_pulse_ids,
 )
 from sai_memory.backup import BackupError, run_backup_auto
 
@@ -1156,6 +1158,43 @@ class SAIMemoryAdapter:
                 "created_at": row[11],
             })
         return result
+
+    def list_pulse_summaries(
+        self, limit: int = 100, offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Fetch pulse_id summaries (id, entry count, timestamp, playbook).
+
+        Returns:
+            List of dicts with keys: pulse_id, entry_count, latest_created_at, playbook_name
+        """
+        if not self._ready:
+            return []
+        try:
+            with self._db_lock:
+                rows = list_pulse_ids(self.conn, limit=limit, offset=offset)
+        except Exception as exc:
+            LOGGER.warning("Failed to list pulse_ids: %s", exc)
+            return []
+        return [
+            {
+                "pulse_id": row[0],
+                "entry_count": row[1],
+                "latest_created_at": row[2],
+                "playbook_name": row[3],
+            }
+            for row in rows
+        ]
+
+    def count_pulses(self) -> int:
+        """Count distinct pulses."""
+        if not self._ready:
+            return 0
+        try:
+            with self._db_lock:
+                return count_pulse_ids(self.conn)
+        except Exception as exc:
+            LOGGER.warning("Failed to count pulse_ids: %s", exc)
+            return 0
 
     # ------------------------------------------------------------------
     # Stelis Thread Management

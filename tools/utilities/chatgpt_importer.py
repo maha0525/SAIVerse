@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 import textwrap
 import zipfile
 from dataclasses import dataclass
@@ -9,8 +11,13 @@ from io import TextIOWrapper
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Sequence
 
+LOGGER = logging.getLogger(__name__)
+
 
 UTC = timezone.utc
+
+
+_CONVERSATIONS_RE = re.compile(r"conversations(?:-\d+)?\.json$")
 
 
 def _load_conversations_payload(source: Path) -> list[dict[str, Any]]:
@@ -19,15 +26,26 @@ def _load_conversations_payload(source: Path) -> list[dict[str, Any]]:
 
     if source.suffix.lower() == ".zip":
         with zipfile.ZipFile(source) as zf:
-            candidates = [name for name in zf.namelist() if name.endswith("conversations.json")]
+            # Match both "conversations.json" and "conversations-000.json" etc.
+            candidates = [name for name in zf.namelist() if _CONVERSATIONS_RE.search(name)]
             if not candidates:
                 raise FileNotFoundError("conversations.json not found inside export ZIP")
-            # Prefer top-level file if available, otherwise pick the shortest path.
-            candidates.sort(key=lambda name: (name.count("/"), len(name)))
-            target = candidates[0]
-            with zf.open(target) as raw:
-                with TextIOWrapper(raw, encoding="utf-8") as fh:
-                    data = json.load(fh)
+            # Sort: top-level first, then by name for numbered files
+            candidates.sort(key=lambda name: (name.count("/"), len(name), name))
+            LOGGER.info("Found %d conversation file(s) in ZIP: %s", len(candidates), candidates)
+            all_entries: list[dict[str, Any]] = []
+            for target in candidates:
+                with zf.open(target) as raw:
+                    with TextIOWrapper(raw, encoding="utf-8") as fh:
+                        data = json.load(fh)
+                if isinstance(data, list):
+                    all_entries.extend(entry for entry in data if isinstance(entry, dict))
+                    LOGGER.info("Loaded %d entries from %s", len(data), target)
+                else:
+                    LOGGER.warning("Skipping %s: expected list, got %s", target, type(data).__name__)
+            if not all_entries:
+                raise ValueError("No conversation entries found in ZIP")
+            return all_entries
     else:
         text = source.read_text(encoding="utf-8")
         data = json.loads(text)

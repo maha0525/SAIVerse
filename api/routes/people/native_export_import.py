@@ -8,6 +8,7 @@ import json
 import logging
 import tempfile
 import threading
+import urllib.parse
 from pathlib import Path
 from typing import Any, Dict
 
@@ -55,11 +56,15 @@ def export_thread_native(
     filename = f"{persona_id}_{safe_suffix}.json"
 
     content = json.dumps(data, ensure_ascii=False, indent=2)
+    # RFC 5987 encoding for non-ASCII filenames
+    encoded_filename = urllib.parse.quote(filename, safe='')
     return Response(
         content=content,
         media_type="application/json",
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": (
+                f"attachment; filename*=UTF-8''{encoded_filename}"
+            ),
         },
     )
 

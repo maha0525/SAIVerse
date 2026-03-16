@@ -1,12 +1,20 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import styles from './ChatOptions.module.css';
-import { X, ChevronDown } from 'lucide-react';
+import { X, ChevronDown, Star } from 'lucide-react';
+
+interface RateLimitInfo {
+    rpd: number;
+    reset_timezone: string;
+}
 
 interface ModelInfo {
     id: string;
     name: string;
+    provider?: string | null;
+    group?: string | null;  // UI grouping label (falls back to provider)
     input_price?: number | null;   // USD per 1M input tokens
     output_price?: number | null;  // USD per 1M output tokens
+    rate_limit?: RateLimitInfo | null;
 }
 
 interface ParamSpec {
@@ -32,7 +40,7 @@ interface ChatOptionsProps {
     isOpen: boolean;
     onClose: () => void;
     currentModel: string;
-    onModelChange: (model: string, displayName: string) => void;
+    onModelChange: (model: string, displayName: string, rateLimit?: RateLimitInfo | null) => void;
 }
 
 export default function ChatOptions({ isOpen, onClose, currentModel: propCurrentModel, onModelChange }: ChatOptionsProps) {
@@ -58,6 +66,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
     const [historySettingsOpen, setHistorySettingsOpen] = useState(false);
     const [modelParamsOpen, setModelParamsOpen] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [favoriteModels, setFavoriteModels] = useState<string[]>([]);
 
     useEffect(() => {
         if (isOpen) {
@@ -77,7 +86,8 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
             const results = await Promise.allSettled([
                 fetch('/api/config/models', { signal: controller.signal }),
                 fetch('/api/config/config', { signal: controller.signal }),
-                fetch('/api/config/cache', { signal: controller.signal })
+                fetch('/api/config/cache', { signal: controller.signal }),
+                fetch('/api/config/favorite-models', { signal: controller.signal })
             ]);
 
             const failures: string[] = [];
@@ -102,7 +112,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                     const modelId = config.current_model || '';
                     setCurrentModel(modelId);
                     const modelInfo = fetchedModels.find(m => m.id === modelId);
-                    onModelChange(modelId, modelInfo?.name || '');
+                    onModelChange(modelId, modelInfo?.name || '', modelInfo?.rate_limit);
                     setParamSpecs(config.parameters || {});
                     setParams(config.current_values || {});
                     setMaxHistoryMessages(config.max_history_messages ?? null);
@@ -129,6 +139,14 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                 failures.push('cache');
             }
 
+            // Favorites
+            if (results[3].status === 'fulfilled' && results[3].value.ok) {
+                try {
+                    const favData = await results[3].value.json();
+                    setFavoriteModels(favData.models || []);
+                } catch (e) { console.error("Failed to parse favorites response", e); }
+            }
+
             if (failures.length === 3) {
                 setError("バックエンドサーバーに接続できません。サーバーが起動しているか確認してください。");
             } else if (failures.length > 0) {
@@ -147,11 +165,66 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         }
     };
 
+    const GROUP_LABELS: Record<string, string> = {
+        anthropic: 'Anthropic',
+        openai: 'OpenAI',
+        gemini: 'Google Gemini',
+        openrouter: 'OpenRouter',
+        nvidia_nim: 'NVIDIA NIM',
+        xai: 'xAI',
+        ollama: 'Ollama',
+        llama_cpp: 'llama.cpp',
+    };
+
+    const groupLabel = (group: string): string => {
+        return GROUP_LABELS[group] || group;
+    };
+
+    const isFavorite = (modelId: string) => favoriteModels.includes(modelId);
+
+    const toggleFavorite = async (modelId: string) => {
+        const newFavorites = isFavorite(modelId)
+            ? favoriteModels.filter(id => id !== modelId)
+            : [...favoriteModels, modelId];
+        setFavoriteModels(newFavorites);
+        try {
+            await fetch('/api/config/favorite-models', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ models: newFavorites })
+            });
+        } catch (e) {
+            console.error("Failed to save favorite models", e);
+        }
+    };
+
+    // Group models by group field, with favorites at top
+    const groupedModels = useMemo(() => {
+        const favorites = models.filter(m => favoriteModels.includes(m.id));
+        const byGroup: Record<string, ModelInfo[]> = {};
+        for (const m of models) {
+            const group = m.group || m.provider || 'other';
+            if (!byGroup[group]) byGroup[group] = [];
+            byGroup[group].push(m);
+        }
+        // Sort groups: known providers first, then alphabetical
+        const groupOrder = ['anthropic', 'openai', 'gemini', 'openrouter', 'nvidia_nim', 'xai', 'ollama', 'llama_cpp'];
+        const sortedGroups = Object.keys(byGroup).sort((a, b) => {
+            const ai = groupOrder.indexOf(a);
+            const bi = groupOrder.indexOf(b);
+            if (ai !== -1 && bi !== -1) return ai - bi;
+            if (ai !== -1) return -1;
+            if (bi !== -1) return 1;
+            return a.localeCompare(b);
+        });
+        return { favorites, byGroup, sortedGroups };
+    }, [models, favoriteModels]);
+
     const handleModelChange = async (modelId: string) => {
         setCurrentModel(modelId);
         // Find display name from models list
         const modelInfo = models.find(m => m.id === modelId);
-        onModelChange(modelId, modelInfo?.name || ''); // Notify parent component
+        onModelChange(modelId, modelInfo?.name || '', modelInfo?.rate_limit); // Notify parent component
         // Save immediately
         try {
             const res = await fetch('/api/config/model', {
@@ -336,16 +409,38 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                             <div className={styles.section}>
                                 <div className={styles.formGroup}>
                                     <label>モデル</label>
-                                    <select
-                                        className={styles.select}
-                                        value={currentModel}
-                                        onChange={(e) => handleModelChange(e.target.value)}
-                                    >
-                                        <option value="">（デフォルト）</option>
-                                        {models.map(m => (
-                                            <option key={m.id} value={m.id}>{m.name}</option>
-                                        ))}
-                                    </select>
+                                    <div className={styles.modelSelectRow}>
+                                        <select
+                                            className={styles.select}
+                                            value={currentModel}
+                                            onChange={(e) => handleModelChange(e.target.value)}
+                                        >
+                                            <option value="">（デフォルト）</option>
+                                            {groupedModels.favorites.length > 0 && (
+                                                <optgroup label="★ お気に入り">
+                                                    {groupedModels.favorites.map(m => (
+                                                        <option key={`fav-${m.id}`} value={m.id}>{m.name}</option>
+                                                    ))}
+                                                </optgroup>
+                                            )}
+                                            {groupedModels.sortedGroups.map(group => (
+                                                <optgroup key={group} label={groupLabel(group)}>
+                                                    {groupedModels.byGroup[group].map(m => (
+                                                        <option key={m.id} value={m.id}>{m.name}</option>
+                                                    ))}
+                                                </optgroup>
+                                            ))}
+                                        </select>
+                                        {currentModel && (
+                                            <button
+                                                className={`${styles.favoriteBtn} ${isFavorite(currentModel) ? styles.favoriteBtnActive : ''}`}
+                                                onClick={() => toggleFavorite(currentModel)}
+                                                title={isFavorite(currentModel) ? 'お気に入りから削除' : 'お気に入りに追加'}
+                                            >
+                                                <Star size={18} fill={isFavorite(currentModel) ? 'currentColor' : 'none'} />
+                                            </button>
+                                        )}
+                                    </div>
                                     {(() => {
                                         const sel = models.find(m => m.id === currentModel);
                                         if (!sel || (sel.input_price == null && sel.output_price == null)) return null;

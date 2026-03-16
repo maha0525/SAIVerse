@@ -1,0 +1,52 @@
+{
+  "model": "gpt-5.4-pro",
+  "system_prompt": "",
+  "display_name": "GPT-5.4 Pro (< 272k)",
+  "provider": "openai",
+  "context_length": 272000,
+  "default_max_history_messages": 60,
+  "metabolism_keep_messages": 20,
+  "supports_images": true,
+  "parameters": {
+    "reasoning_effort": {
+      "type": "enum",
+      "options": [
+        "none",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": "high",
+      "label": "Reasoning Effort",
+      "description": "Controls how much thinking time the model spends."
+    },
+    "verbosity": {
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": "high",
+      "label": "Verbosity",
+      "description": "Controls how long or detailed responses should be.",
+      "client_support": [
+        "responses"
+      ]
+    },
+    "max_completion_tokens": {
+      "type": "int",
+      "min": 32,
+      "max": 8192,
+      "step": 1,
+      "default": 8192,
+      "label": "Max completion tokens",
+      "description": "Upper bound on how many tokens the reply can use."
+    }
+  },
+  "pricing": {
+    "input_per_1m_tokens": 30,
+    "output_per_1m_tokens": 180,
+    "currency": "USD"
+  }
+}

@@ -1,9 +1,9 @@
 {
-  "model": "gpt-5.1",
-  "system_prompt": "現在の使用モデルはGPT-5.1です。\n\n[Model info]\n- Sep 30, 2024 knowledge cutoff",
-  "display_name": "GPT-5.1",
+  "model": "gpt-5.4",
+  "system_prompt": "",
+  "display_name": "GPT-5.4 Instant (< 272k)",
   "provider": "openai",
-  "context_length": 400000,
+  "context_length": 272000,
   "default_max_history_messages": 60,
   "metabolism_keep_messages": 20,
   "supports_images": true,
@@ -16,7 +16,7 @@
         "medium",
         "high"
       ],
-      "default": "medium",
+      "default": "none",
       "label": "Reasoning Effort",
       "description": "Controls how much thinking time the model spends."
     },
@@ -27,7 +27,7 @@
         "medium",
         "high"
       ],
-      "default": "high",
+      "default": "medium",
       "label": "Verbosity",
       "description": "Controls how long or detailed responses should be.",
       "client_support": [
@@ -39,15 +39,15 @@
       "min": 32,
       "max": 8192,
       "step": 1,
-      "default": 4096,
+      "default": 8192,
       "label": "Max completion tokens",
       "description": "Upper bound on how many tokens the reply can use."
     }
   },
   "pricing": {
-    "input_per_1m_tokens": 1.25,
-    "cached_input_per_1m_tokens": 0.125,
-    "output_per_1m_tokens": 10.0,
+    "input_per_1m_tokens": 2.5,
+    "cached_input_per_1m_tokens": 0.25,
+    "output_per_1m_tokens": 15.0,
     "currency": "USD"
   }
 }

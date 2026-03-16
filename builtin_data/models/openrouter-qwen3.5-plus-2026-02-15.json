@@ -3,6 +3,7 @@
   "system_prompt": "",
   "display_name": "Qwen3.5 Plus 2026-02-15 (Open Router)",
   "provider": "openai",
+  "group": "openrouter",
   "supports_structured_output": true,
   "context_length": 256000,
   "default_max_history_messages": 80,

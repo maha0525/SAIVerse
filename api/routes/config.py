@@ -19,11 +19,18 @@ from saiverse.model_configs import (
 
 router = APIRouter()
 
+class RateLimitInfo(BaseModel):
+    rpd: Optional[int] = None
+    reset_timezone: str = "America/Los_Angeles"
+
 class ModelInfo(BaseModel):
     id: str
     name: str
+    provider: Optional[str] = None
+    group: Optional[str] = None  # UI grouping label (falls back to provider)
     input_price: Optional[float] = None   # USD per 1M input tokens
     output_price: Optional[float] = None  # USD per 1M output tokens
+    rate_limit: Optional[RateLimitInfo] = None
 
 class PlaybookParamInfo(BaseModel):
     """Parameter info for playbook input_schema."""
@@ -90,12 +97,23 @@ def get_models():
     for mid, name in choices:
         if not is_model_available(mid):
             continue
-        pricing = get_model_config(mid).get("pricing", {})
+        cfg = get_model_config(mid)
+        pricing = cfg.get("pricing", {})
+        rate_limit_raw = cfg.get("rate_limit")
+        rate_limit = None
+        if isinstance(rate_limit_raw, dict) and rate_limit_raw.get("rpd"):
+            rate_limit = {
+                "rpd": int(rate_limit_raw["rpd"]),
+                "reset_timezone": rate_limit_raw.get("reset_timezone", "America/Los_Angeles"),
+            }
         result.append({
             "id": mid,
             "name": name,
+            "provider": cfg.get("provider"),
+            "group": cfg.get("group") or cfg.get("provider"),
             "input_price": pricing.get("input_per_1m_tokens"),
             "output_price": pricing.get("output_per_1m_tokens"),
+            "rate_limit": rate_limit,
         })
     return result
 
@@ -491,6 +509,37 @@ def set_x_polling(req: XPollingRequest, manager=Depends(get_manager)):
     _log.info("X polling set to %s", req.enabled)
     return {"success": True, "enabled": req.enabled}
 
+
+class MonitoringToggleRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/update-check")
+def get_update_check(manager=Depends(get_manager)):
+    """Get update check monitoring status."""
+    return {"enabled": manager.state.update_check_enabled}
+
+
+@router.post("/update-check")
+def set_update_check(req: MonitoringToggleRequest, manager=Depends(get_manager)):
+    """Toggle update availability check on/off."""
+    manager.state.update_check_enabled = req.enabled
+    _log.info("Update check set to %s", req.enabled)
+    return {"success": True, "enabled": req.enabled}
+
+
+@router.get("/announcements-monitor")
+def get_announcements_monitor(manager=Depends(get_manager)):
+    """Get announcements monitoring status."""
+    return {"enabled": manager.state.announcements_enabled}
+
+
+@router.post("/announcements-monitor")
+def set_announcements_monitor(req: MonitoringToggleRequest, manager=Depends(get_manager)):
+    """Toggle announcements monitoring on/off."""
+    manager.state.announcements_enabled = req.enabled
+    _log.info("Announcements monitor set to %s", req.enabled)
+    return {"success": True, "enabled": req.enabled}
 
 
 def _validate_playbook_override(req: "PlaybookOverrideRequest", manager: Any) -> None:
@@ -914,5 +963,55 @@ def set_playbook_permission(req: SetPlaybookPermissionRequest, manager=Depends(g
             ))
         db.commit()
         return {"success": True, "playbook_name": req.playbook_name, "permission_level": req.permission_level}
+    finally:
+        db.close()
+
+
+# ── Favorite Models ──────────────────────────────────────────────
+
+class FavoriteModelsRequest(BaseModel):
+    models: List[str]
+
+
+@router.get("/favorite-models")
+def get_favorite_models():
+    """Get user's favorite model IDs."""
+    from database.session import SessionLocal
+    from database.models import UserSettings
+
+    db = SessionLocal()
+    try:
+        settings = db.query(UserSettings).filter(UserSettings.USERID == 1).first()
+        if not settings or not settings.FAVORITE_MODELS:
+            return {"models": []}
+        try:
+            return {"models": json.loads(settings.FAVORITE_MODELS)}
+        except (json.JSONDecodeError, TypeError):
+            return {"models": []}
+    finally:
+        db.close()
+
+
+@router.post("/favorite-models")
+def set_favorite_models(req: FavoriteModelsRequest):
+    """Set user's favorite model IDs."""
+    from database.session import SessionLocal
+    from database.models import UserSettings
+
+    db = SessionLocal()
+    try:
+        settings = db.query(UserSettings).filter(UserSettings.USERID == 1).first()
+        favorites_json = json.dumps(req.models)
+        if settings:
+            settings.FAVORITE_MODELS = favorites_json
+        else:
+            settings = UserSettings(USERID=1, FAVORITE_MODELS=favorites_json)
+            db.add(settings)
+        db.commit()
+        return {"success": True, "models": req.models}
+    except Exception:
+        _log.warning("Failed to save favorite models", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to save favorite models")
     finally:
         db.close()

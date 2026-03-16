@@ -74,6 +74,10 @@ class CoreState:
     current_playbook: Optional[str] = None  # Selected playbook override for Chat Options
     playbook_args: Dict[str, Any] = field(default_factory=dict)  # Arguments for the selected playbook
 
+    # Monitoring toggles
+    update_check_enabled: bool = True  # Periodic update availability check
+    announcements_enabled: bool = True  # Periodic announcements fetch
+
     # Cache settings for Anthropic prompt caching
     cache_enabled: bool = True  # Whether prompt caching is enabled
     cache_ttl: str = "5m"  # Cache TTL ("5m" or "1h" for Anthropic)

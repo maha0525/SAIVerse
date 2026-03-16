@@ -419,12 +419,14 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                 </div>
                             </div>
 
-                            <XConnectionSection
-                                personaId={personaId}
-                                fieldGroupClass={styles.fieldGroup}
-                                labelClass={styles.label}
-                                descriptionClass={styles.description}
-                            />
+                            {developerMode && (
+                                <XConnectionSection
+                                    personaId={personaId}
+                                    fieldGroupClass={styles.fieldGroup}
+                                    labelClass={styles.label}
+                                    descriptionClass={styles.description}
+                                />
+                            )}
                         </>
                     )}
                 </div>

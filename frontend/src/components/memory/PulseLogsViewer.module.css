@@ -1,0 +1,145 @@
+/* pulse_logs 固有メタデータバッジ群 */
+.metaBadges {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: 8px;
+    flex-wrap: wrap;
+}
+
+.nodeBadge {
+    font-size: 0.7rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background-color: rgba(77, 171, 247, 0.15);
+    color: #74c0fc;
+    font-family: monospace;
+    white-space: nowrap;
+}
+
+.playbookBadge {
+    font-size: 0.65rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background-color: rgba(151, 117, 250, 0.2);
+    color: #b197fc;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 4px;
+}
+
+.playbookTag {
+    font-size: 0.7rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background-color: rgba(151, 117, 250, 0.15);
+    color: #b197fc;
+    white-space: nowrap;
+}
+
+.toolBadge {
+    font-size: 0.7rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background-color: rgba(105, 219, 124, 0.15);
+    color: #69db7c;
+    font-family: monospace;
+    white-space: nowrap;
+}
+
+.importantBadge {
+    font-size: 0.65rem;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background-color: rgba(255, 107, 107, 0.2);
+    color: #ff8787;
+    font-weight: 600;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.importantEntry {
+    border-left: 3px solid #ff6b6b !important;
+    background-color: rgba(255, 107, 107, 0.05) !important;
+}
+
+/* Tool Calls 折りたたみブロック */
+.toolCallsBlock {
+    margin-bottom: 8px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(105, 219, 124, 0.08) 0%, rgba(81, 207, 102, 0.06) 100%);
+    border: 1px solid rgba(105, 219, 124, 0.2);
+    font-size: 0.85rem;
+    overflow: hidden;
+}
+
+.toolCallsSummary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    cursor: pointer;
+    user-select: none;
+    color: rgba(105, 219, 124, 0.8);
+    font-weight: 500;
+    font-size: 0.8rem;
+    list-style: none;
+}
+
+.toolCallsSummary::-webkit-details-marker {
+    display: none;
+}
+
+.toolCallsContent {
+    padding: 0 12px 10px;
+    color: rgba(180, 200, 180, 0.8);
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 400px;
+    overflow-y: auto;
+    font-family: monospace;
+    font-size: 0.8rem;
+    margin: 0;
+}
+
+/* ライトモード */
+:global([data-theme="light"]) .nodeBadge {
+    background-color: rgba(37, 99, 235, 0.1);
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .playbookBadge,
+:global([data-theme="light"]) .playbookTag {
+    background-color: rgba(124, 58, 237, 0.1);
+    color: #7c3aed;
+}
+
+:global([data-theme="light"]) .toolBadge {
+    background-color: rgba(22, 163, 74, 0.1);
+    color: #16a34a;
+}
+
+:global([data-theme="light"]) .importantBadge {
+    background-color: rgba(239, 68, 68, 0.1);
+    color: #ef4444;
+}
+
+:global([data-theme="light"]) .importantEntry {
+    border-left-color: #ef4444 !important;
+    background-color: rgba(239, 68, 68, 0.03) !important;
+}
+
+:global([data-theme="light"]) .toolCallsBlock {
+    background: linear-gradient(135deg, rgba(22, 163, 74, 0.06) 0%, rgba(16, 185, 129, 0.04) 100%);
+    border-color: rgba(22, 163, 74, 0.15);
+}
+
+:global([data-theme="light"]) .toolCallsSummary {
+    color: rgba(22, 163, 74, 0.8);
+}
+
+:global([data-theme="light"]) .toolCallsContent {
+    color: rgba(100, 120, 100, 0.85);
+}

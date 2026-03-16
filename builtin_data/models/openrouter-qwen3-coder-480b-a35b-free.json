@@ -3,6 +3,7 @@
   "system_prompt": "",
   "display_name": "Qwen 3 Coder (Open Router, Free)",
   "provider": "openai",
+  "group": "openrouter",
   "supports_structured_output": true,
   "context_length": 250000,
   "default_max_history_messages": 80,
