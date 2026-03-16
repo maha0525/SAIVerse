@@ -240,6 +240,8 @@ export default function Home() {
     const [playbookArgs, setPlaybookArgs] = useState<Record<string, any>>({});
     const [selectedModel, setSelectedModel] = useState<string>(''); // Model ID selected in Chat Options
     const [selectedModelDisplayName, setSelectedModelDisplayName] = useState<string>(''); // Model display name
+    const [selectedModelRateLimit, setSelectedModelRateLimit] = useState<{ rpd: number; reset_timezone: string } | null>(null); // Rate limit config for selected model
+    const [rpdUsage, setRpdUsage] = useState<{ used: number; limit: number } | null>(null); // Current RPD usage
     const [isDragOver, setIsDragOver] = useState(false); // Drag & drop state
     const [attachments, setAttachments] = useState<FileAttachment[]>([]); // Multiple attachments
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -634,9 +636,10 @@ export default function Home() {
         ]).then(([config, models]) => {
             if (config?.current_model && models) {
                 const modelId = config.current_model;
-                const modelInfo = models.find((m: { id: string; name: string }) => m.id === modelId);
+                const modelInfo = models.find((m: { id: string; name: string; rate_limit?: { rpd: number; reset_timezone: string } | null }) => m.id === modelId);
                 setSelectedModel(modelId);
                 setSelectedModelDisplayName(modelInfo?.name || '');
+                setSelectedModelRateLimit(modelInfo?.rate_limit || null);
             }
         }).catch(err => console.error('Failed to load model setting', err));
 
@@ -737,6 +740,31 @@ export default function Home() {
             document.removeEventListener('visibilitychange', onVisibilityChange);
         };
     }, []);
+
+    // RPD usage polling - fetch when model has rate_limit, poll every 60 seconds
+    useEffect(() => {
+        if (!selectedModel || !selectedModelRateLimit) {
+            setRpdUsage(null);
+            return;
+        }
+
+        const fetchRpd = () => {
+            fetch(`/api/usage/rpd?model_id=${encodeURIComponent(selectedModel)}`)
+                .then(res => res.ok ? res.json() : null)
+                .then((data: { model_id: string; used: number; limit: number }[] | null) => {
+                    if (data && data.length > 0) {
+                        setRpdUsage({ used: data[0].used, limit: data[0].limit });
+                    } else {
+                        setRpdUsage(null);
+                    }
+                })
+                .catch(() => setRpdUsage(null));
+        };
+
+        fetchRpd();
+        const interval = setInterval(fetchRpd, 60_000);
+        return () => clearInterval(interval);
+    }, [selectedModel, selectedModelRateLimit]);
 
     // Handle building deletion from WorldEditor — switch to another building
     // if the current building was the one deleted.
@@ -1416,6 +1444,15 @@ export default function Home() {
             });
             await syncAfterResponse(); // Merge server state (IDs, avatars) without replacing messages
             isProcessingRef.current = false; // Allow polling AFTER sync completes
+            // Refresh RPD usage after message sent
+            if (selectedModelRateLimit && selectedModel) {
+                fetch(`/api/usage/rpd?model_id=${encodeURIComponent(selectedModel)}`)
+                    .then(res => res.ok ? res.json() : null)
+                    .then((data: { used: number; limit: number }[] | null) => {
+                        if (data && data.length > 0) setRpdUsage({ used: data[0].used, limit: data[0].limit });
+                    })
+                    .catch(() => {});
+            }
         }
     };
 
@@ -1931,6 +1968,14 @@ export default function Home() {
                             ) : null}
                             <ChevronDown size={14} className={styles.chevron} />
                         </button>
+                        {rpdUsage && (
+                            <span
+                                className={`${styles.rpdBadge} ${rpdUsage.used >= rpdUsage.limit ? styles.rpdExhausted : rpdUsage.used >= rpdUsage.limit * 0.8 ? styles.rpdWarning : ''}`}
+                                title={`RPD: ${rpdUsage.used}/${rpdUsage.limit} (リセット: 太平洋時間 0:00)`}
+                            >
+                                {rpdUsage.used}/{rpdUsage.limit}
+                            </span>
+                        )}
                         <ToolModeSelector
                             selectedPlaybook={selectedPlaybook}
                             onPlaybookChange={setSelectedPlaybook}
@@ -2059,9 +2104,11 @@ export default function Home() {
                 isOpen={isOptionsOpen}
                 onClose={() => setIsOptionsOpen(false)}
                 currentModel={selectedModel}
-                onModelChange={(id, displayName) => {
+                onModelChange={(id, displayName, rateLimit) => {
                     setSelectedModel(id);
                     setSelectedModelDisplayName(displayName);
+                    setSelectedModelRateLimit(rateLimit || null);
+                    setRpdUsage(null); // Reset RPD on model change
                 }}
             />
 

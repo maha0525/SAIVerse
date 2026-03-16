@@ -2,6 +2,11 @@ import React, { useEffect, useState, useMemo } from 'react';
 import styles from './ChatOptions.module.css';
 import { X, ChevronDown, Star } from 'lucide-react';
 
+interface RateLimitInfo {
+    rpd: number;
+    reset_timezone: string;
+}
+
 interface ModelInfo {
     id: string;
     name: string;
@@ -9,6 +14,7 @@ interface ModelInfo {
     group?: string | null;  // UI grouping label (falls back to provider)
     input_price?: number | null;   // USD per 1M input tokens
     output_price?: number | null;  // USD per 1M output tokens
+    rate_limit?: RateLimitInfo | null;
 }
 
 interface ParamSpec {
@@ -34,7 +40,7 @@ interface ChatOptionsProps {
     isOpen: boolean;
     onClose: () => void;
     currentModel: string;
-    onModelChange: (model: string, displayName: string) => void;
+    onModelChange: (model: string, displayName: string, rateLimit?: RateLimitInfo | null) => void;
 }
 
 export default function ChatOptions({ isOpen, onClose, currentModel: propCurrentModel, onModelChange }: ChatOptionsProps) {
@@ -106,7 +112,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                     const modelId = config.current_model || '';
                     setCurrentModel(modelId);
                     const modelInfo = fetchedModels.find(m => m.id === modelId);
-                    onModelChange(modelId, modelInfo?.name || '');
+                    onModelChange(modelId, modelInfo?.name || '', modelInfo?.rate_limit);
                     setParamSpecs(config.parameters || {});
                     setParams(config.current_values || {});
                     setMaxHistoryMessages(config.max_history_messages ?? null);
@@ -218,7 +224,7 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
         setCurrentModel(modelId);
         // Find display name from models list
         const modelInfo = models.find(m => m.id === modelId);
-        onModelChange(modelId, modelInfo?.name || ''); // Notify parent component
+        onModelChange(modelId, modelInfo?.name || '', modelInfo?.rate_limit); // Notify parent component
         // Save immediately
         try {
             const res = await fetch('/api/config/model', {
