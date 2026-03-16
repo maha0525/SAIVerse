@@ -26,6 +26,7 @@
     ],
     "router_callable": true,
     "user_selectable": false,
+    "dev_only": true,
     "required_credentials": ["x"],
     "nodes": [
         {

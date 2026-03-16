@@ -9,6 +9,7 @@
         }
     ],
     "router_callable": true,
+    "dev_only": true,
     "required_credentials": ["x"],
     "nodes": [
         {
