@@ -932,6 +932,7 @@
 .optionsBar {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 0.4rem;
     margin-bottom: 0.25rem;
     pointer-events: auto; /* Restore click events for options bar */

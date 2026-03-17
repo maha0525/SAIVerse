@@ -865,7 +865,8 @@ def main():
     parser.add_argument("--group-shallow", action="store_true", help="Group shallow pages into parent pages by theme")
     parser.add_argument("--fix-markdown", action="store_true", help="Fix markdown formatting issues")
     parser.add_argument("--dry-run", action="store_true", help="Preview changes without applying")
-    parser.add_argument("--model", default="gemini-2.5-flash-lite-preview-09-2025", help="Model for LLM operations")
+    from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+    parser.add_argument("--model", default=BUILTIN_DEFAULT_LITE_MODEL, help="Model for LLM operations")
     parser.add_argument("--provider", help="Override provider detection")
     parser.add_argument("--since", type=int, help="Only process pages with updated_at >= this unix timestamp")
     parser.add_argument("--page-id", help="Only process a specific page id")

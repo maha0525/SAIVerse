@@ -19,7 +19,8 @@ def main() -> int:
     )
     parser.add_argument("persona_id", nargs="?", help="Persona ID to process")
     parser.add_argument("--limit", type=int, default=100)
-    parser.add_argument("--model", default="gemini-2.5-flash-lite-preview-09-2025")
+    from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+    parser.add_argument("--model", default=BUILTIN_DEFAULT_LITE_MODEL)
     parser.add_argument("--provider")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--batch-size", type=int, default=20)
