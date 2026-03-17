@@ -88,11 +88,21 @@ class PulseContext:
         msgs: List[Dict[str, Any]] = []
         for entry in self.logs:
             if entry.role == "tool" and entry.tool_call_id:
+                # LLM function-calling tool result (has matching assistant tool_calls)
                 msg: Dict[str, Any] = {
                     "role": "tool",
                     "tool_call_id": entry.tool_call_id,
                     "name": entry.tool_name or "",
                     "content": entry.content,
+                }
+            elif entry.role == "tool" and not entry.tool_call_id:
+                # Playbook-defined TOOL node result (no function-calling pair).
+                # Emit as user message so LLM APIs accept it (tool role requires
+                # tool_call_id).  Wrap in <system> tag for context.
+                tool_label = entry.tool_name or "tool"
+                msg = {
+                    "role": "user",
+                    "content": f"<system>[{tool_label}] {entry.content}</system>",
                 }
             elif entry.role == "assistant" and entry.tool_calls:
                 msg = {
