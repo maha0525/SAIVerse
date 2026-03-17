@@ -20,7 +20,9 @@ _generating_lock = threading.Lock()
 _generating_paths: Set[str] = set()
 
 # Model config key or API model name for summary generation (vision-capable model required for images)
-_IMAGE_SUMMARY_MODEL_RAW = os.getenv("SAIVERSE_IMAGE_SUMMARY_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
+from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+
+_IMAGE_SUMMARY_MODEL_RAW = os.getenv("SAIVERSE_IMAGE_SUMMARY_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
 
 # Cached client
 _summary_client: Any = None
@@ -45,13 +47,15 @@ def _get_summary_client() -> Any:
     if not config:
         LOGGER.warning(
             "Image summary model '%s' not found in model configs; "
-            "falling back to 'gemini-2.5-flash-lite-preview-09-2025'",
+            "falling back to '%s'",
             _IMAGE_SUMMARY_MODEL_RAW,
+            BUILTIN_DEFAULT_LITE_MODEL,
         )
-        config_key, config = find_model_config("gemini-2.5-flash-lite-preview-09-2025")
+        config_key, config = find_model_config(BUILTIN_DEFAULT_LITE_MODEL)
         if not config:
             LOGGER.error(
-                "Fallback model 'gemini-2.5-flash-lite-preview-09-2025' also not found in model configs"
+                "Fallback model '%s' also not found in model configs",
+                BUILTIN_DEFAULT_LITE_MODEL,
             )
             return None
 

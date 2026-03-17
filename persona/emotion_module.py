@@ -12,11 +12,14 @@ from google.genai import types
 class EmotionControlModule:
     """Lightweight module to adjust emotion parameters using Gemini."""
 
-    def __init__(self, prompt_path: Path = None, model: str = "gemini-2.5-flash-lite-preview-09-2025") -> None:
+    def __init__(self, prompt_path: Path = None, model: str | None = None) -> None:
         if prompt_path is None:
             from saiverse.data_paths import find_file, PROMPTS_DIR
             prompt_path = find_file(PROMPTS_DIR, "emotion_control.txt") or Path("system_prompts/emotion_control.txt")
         self.prompt_template = prompt_path.read_text(encoding="utf-8")
+        if model is None:
+            from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+            model = BUILTIN_DEFAULT_LITE_MODEL
         self.model = model
         self.free_client, self.paid_client, self.client = build_gemini_clients()
 

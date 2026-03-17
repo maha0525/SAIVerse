@@ -122,7 +122,7 @@ python test_fixtures/test_api.py --base-url http://127.0.0.1:18000
       "AIID": "test_persona_a",
       "AINAME": "Test Persona A",
       "DEFAULT_MODEL": "gemini-2.5-flash-preview-09-2025",
-      "LIGHTWEIGHT_MODEL": "gemini-2.5-flash-lite-preview-09-2025",
+      "LIGHTWEIGHT_MODEL": "gemini-3.1-flash-lite-preview",
       "start_building": "test_lobby",
       ...
     }

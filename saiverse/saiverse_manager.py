@@ -62,8 +62,9 @@ from database.models import (
 )
 
 
-#DEFAULT_MODEL = "gpt-4o"
-DEFAULT_MODEL = "gemini-2.5-flash-lite-preview-09-2025"
+from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+
+DEFAULT_MODEL = BUILTIN_DEFAULT_LITE_MODEL
 
 
 def _get_default_model() -> str:

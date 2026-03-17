@@ -51,7 +51,8 @@ LOGGER = logging.getLogger(__name__)
 
 def _get_default_lightweight_model() -> str:
     """Get the default lightweight model from environment or fallback."""
-    return os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
+    from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+    return os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
 
 
 
@@ -375,7 +376,8 @@ class SEARuntime:
                 # Guard: if the agentic model itself doesn't support structured output,
                 # fall back to the built-in default instead
                 if not supports_structured_output(agentic_model):
-                    builtin_default = "gemini-2.5-flash-lite-preview-09-2025"
+                    from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+                    builtin_default = BUILTIN_DEFAULT_LITE_MODEL
                     LOGGER.warning(
                         "[sea] Agentic model '%s' also doesn't support structured output, "
                         "falling back to built-in default: %s", agentic_model, builtin_default)
@@ -1496,7 +1498,8 @@ class SEARuntime:
         from saiverse.model_configs import find_model_config
 
         # Get LLM client using MEMORY_WEAVE_MODEL
-        model_name = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
+        from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+        model_name = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
         model_id, model_config = find_model_config(model_name)
         if not model_config:
             LOGGER.warning("[metabolism] Model '%s' not found for Chronicle generation", model_name)
