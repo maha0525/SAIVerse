@@ -346,11 +346,11 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
     },
     "openai": {
         "default_model": "gpt-4o-2024-11-20",
-        "lightweight_model": "gpt-5-nano",
-        "agentic_model": "gpt-5-mini",
-        "memory_weave_model": "gpt-5-mini",
-        "image_summary_model": "gpt-5-nano",
-        "task_creation_model": "gpt-5-mini",
+        "lightweight_model": "gpt-5.4-nano",
+        "agentic_model": "gpt-5.4-mini",
+        "memory_weave_model": "gpt-5.4-mini",
+        "image_summary_model": "gpt-5.4-nano",
+        "task_creation_model": "gpt-5.4-mini",
     },
     "grok": {
         "default_model": "grok-4-1-fast-reasoning",
