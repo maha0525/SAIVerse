@@ -257,6 +257,9 @@ class GeminiClient(LLMClient):
         self.free_client, self.paid_client, self.client = build_gemini_clients(prefer_paid=prefer_paid)
         self.model = model
 
+        # Image size limit (raw bytes, before base64 encoding)
+        self.max_image_bytes: Optional[int] = cfg.get("max_image_bytes")
+
         # Request parameters (temperature, top_p, etc.)
         self._request_params: Dict[str, Any] = {}
 
@@ -447,14 +450,7 @@ class GeminiClient(LLMClient):
     @staticmethod
     def _is_rate_limit_error(err: Exception) -> bool:
         msg = str(err).lower()
-        return (
-            "rate" in msg
-            or "429" in msg
-            or "quota" in msg
-            or "503" in msg
-            or "unavailable" in msg
-            or "overload" in msg
-        )
+        return "rate" in msg or "429" in msg or "quota" in msg
 
     @staticmethod
     def _is_timeout_error(err: Exception) -> bool:
@@ -465,7 +461,10 @@ class GeminiClient(LLMClient):
     def _is_server_error(err: Exception) -> bool:
         """Check if the error is a server error (5xx)."""
         msg = str(err).lower()
-        return "500" in msg or "502" in msg or "504" in msg or "internal" in msg
+        return (
+            "500" in msg or "502" in msg or "503" in msg or "504" in msg
+            or "internal" in msg or "unavailable" in msg or "overload" in msg
+        )
 
     @staticmethod
     def _is_authentication_error(err: Exception) -> bool:
@@ -666,13 +665,23 @@ class GeminiClient(LLMClient):
                     parts.append(types.Part(text=text_content))
                 for attachment in selected_attachments:
                     data, effective_mime = load_image_bytes_for_llm(
-                        attachment["path"], attachment["mime_type"]
+                        attachment["path"], attachment["mime_type"],
+                        max_bytes=self.max_image_bytes,
                     )
                     if not data or not effective_mime:
                         logging.warning(
                             "Failed to load image for Gemini payload: %s", attachment["uri"]
                         )
                         continue
+                    logging.debug(
+                        "[gemini] image att=%s orig_mime=%s effective_mime=%s "
+                        "raw_bytes=%d magic=%s",
+                        attachment.get("uri"),
+                        attachment.get("mime_type"),
+                        effective_mime,
+                        len(data),
+                        data[:8].hex(),
+                    )
                     parts.append(types.Part.from_bytes(data=data, mime_type=effective_mime))
                 if not parts:
                     parts.append(types.Part(text=""))
@@ -814,7 +823,8 @@ class GeminiClient(LLMClient):
 
         max_retries = 3
         model_id = self.model
-        
+        last_retry_exc: Optional[Exception] = None
+
         for attempt in range(max_retries):
             try:
                 if use_tools:
@@ -1153,17 +1163,21 @@ class GeminiClient(LLMClient):
                         active_client = self.paid_client
                     if attempt < max_retries - 1:
                         time.sleep(2 ** attempt)
+                    last_retry_exc = exc
                     continue
                 if self._is_payment_error(exc) or self._is_authentication_error(exc):
                     raise self._convert_to_llm_error(exc, "API call") from exc
                 if active_client is self.free_client and self.paid_client and self._is_rate_limit_error(exc):
                     logging.info("Retrying with paid Gemini API key due to rate limit")
                     active_client = self.paid_client
+                    last_retry_exc = exc
                     continue
                 logging.exception("Gemini call failed")
                 raise self._convert_to_llm_error(exc, "API call") from exc
 
         logging.error("Gemini API call failed after %d retries", max_retries)
+        if last_retry_exc is not None:
+            raise self._convert_to_llm_error(last_retry_exc, f"API call (after {max_retries} retries)") from last_retry_exc
         if use_tools:
             return {"type": "text", "content": ""}
         raise LLMEmptyResponseError(
@@ -1268,84 +1282,134 @@ class GeminiClient(LLMClient):
         stream_completed = False
         last_chunk = None
 
-        for chunk in stream:
-            last_chunk = chunk
-            get_llm_logger().debug("Gemini stream chunk:\n%s", chunk)
-            if not chunk.candidates:
-                continue
-            candidate = chunk.candidates[0]
-            get_llm_logger().debug("Gemini stream candidate:\n%s", candidate)
-            saw_chunks = True
+        # ── Streaming timing instrumentation ──
+        stream_start = time.monotonic()
+        first_text_chunk_time: float | None = None
+        last_text_chunk_time: float | None = None
+        finish_reason_time: float | None = None
+        finish_reason_value: str | None = None
+        chunk_count = 0
+        text_chunk_count = 0
+        post_finish_chunk_count = 0
 
-            # Check for safety filter block in streaming
-            finish_reason = getattr(candidate, "finish_reason", None)
-            if finish_reason is not None:
-                finish_reason_str = str(finish_reason).upper()
-                if "SAFETY" in finish_reason_str:
-                    safety_ratings = getattr(candidate, "safety_ratings", [])
-                    blocked_categories = [
-                        str(getattr(r, "category", "unknown"))
-                        for r in (safety_ratings or [])
-                        if str(getattr(r, "probability", "")).upper() in ("HIGH", "MEDIUM")
-                    ]
-                    detail = f"Blocked categories: {blocked_categories}" if blocked_categories else ""
-                    logging.warning("[gemini] Stream blocked by safety filter: %s", detail)
-                    raise SafetyFilterError(
-                        f"Content blocked by safety filter. {detail}",
-                        user_message="コンテンツが安全性フィルターによりブロックされました。入力内容を変更してお試しください。"
-                    )
+        try:
+            for chunk in stream:
+                chunk_count += 1
+                last_chunk = chunk
+                get_llm_logger().debug("Gemini stream chunk:\n%s", chunk)
+                if finish_reason_time is not None:
+                    post_finish_chunk_count += 1
+                if not chunk.candidates:
+                    continue
+                candidate = chunk.candidates[0]
+                get_llm_logger().debug("Gemini stream candidate:\n%s", candidate)
+                saw_chunks = True
 
-            if not candidate.content or not candidate.content.parts:
-                continue
-            candidate_index = getattr(candidate, "index", 0)
-            for part_idx, part in enumerate(candidate.content.parts):
-                if getattr(part, "function_call", None) and fcall is None:
-                    get_llm_logger().debug("Gemini function_call (part %s): %s", part_idx, part.function_call)
-                    fcall = part.function_call
-                    # Capture thought_signature for thinking-enabled models (required by Gemini API)
-                    _ts = getattr(part, "thought_signature", None)
-                    if _ts:
-                        fcall_thought_signature = _ts
-                elif is_truthy_flag(getattr(part, "thought", None)):
-                    text_val = getattr(part, "text", None) or ""
-                    if text_val:
-                        previous = thought_seen.get(candidate_index, "")
-                        if text_val.startswith(previous):
-                            delta = text_val[len(previous) :]
-                            if delta:
-                                reasoning_chunks.append(delta)
-                                thought_seen[candidate_index] = previous + delta
-                                yield {"type": "thinking", "content": delta}
-                        else:
-                            reasoning_chunks.append(text_val)
-                            thought_seen[candidate_index] = previous + text_val
-                            yield {"type": "thinking", "content": text_val}
+                # Check for safety filter block in streaming
+                finish_reason = getattr(candidate, "finish_reason", None)
+                if finish_reason is not None:
+                    if finish_reason_time is None:
+                        finish_reason_value = str(finish_reason)
+                        finish_reason_time = time.monotonic()
+                        logging.info(
+                            "[gemini_stream] finish_reason='%s' received at +%.2fs (chunk #%d)",
+                            finish_reason_value, finish_reason_time - stream_start, chunk_count,
+                        )
+                    finish_reason_str = str(finish_reason).upper()
+                    if "SAFETY" in finish_reason_str:
+                        safety_ratings = getattr(candidate, "safety_ratings", [])
+                        blocked_categories = [
+                            str(getattr(r, "category", "unknown"))
+                            for r in (safety_ratings or [])
+                            if str(getattr(r, "probability", "")).upper() in ("HIGH", "MEDIUM")
+                        ]
+                        detail = f"Blocked categories: {blocked_categories}" if blocked_categories else ""
+                        logging.warning("[gemini] Stream blocked by safety filter: %s", detail)
+                        raise SafetyFilterError(
+                            f"Content blocked by safety filter. {detail}",
+                            user_message="コンテンツが安全性フィルターによりブロックされました。入力内容を変更してお試しください。"
+                        )
 
-            combined_text = "".join(
-                getattr(part, "text", None) or ""
-                for part in candidate.content.parts
-                if getattr(part, "text", None) and not is_truthy_flag(getattr(part, "thought", None))
-            )
-            if not combined_text:
-                continue
+                if not candidate.content or not candidate.content.parts:
+                    continue
+                candidate_index = getattr(candidate, "index", 0)
+                for part_idx, part in enumerate(candidate.content.parts):
+                    if getattr(part, "function_call", None) and fcall is None:
+                        get_llm_logger().debug("Gemini function_call (part %s): %s", part_idx, part.function_call)
+                        fcall = part.function_call
+                        # Capture thought_signature for thinking-enabled models (required by Gemini API)
+                        _ts = getattr(part, "thought_signature", None)
+                        if _ts:
+                            fcall_thought_signature = _ts
+                    elif is_truthy_flag(getattr(part, "thought", None)):
+                        text_val = getattr(part, "text", None) or ""
+                        if text_val:
+                            previous = thought_seen.get(candidate_index, "")
+                            if text_val.startswith(previous):
+                                delta = text_val[len(previous) :]
+                                if delta:
+                                    reasoning_chunks.append(delta)
+                                    thought_seen[candidate_index] = previous + delta
+                                    yield {"type": "thinking", "content": delta}
+                            else:
+                                reasoning_chunks.append(text_val)
+                                thought_seen[candidate_index] = previous + text_val
+                                yield {"type": "thinking", "content": text_val}
 
-            previous_text = seen_stream_texts.get(candidate_index, "")
-            new_text = (
-                combined_text[len(previous_text) :]
-                if combined_text.startswith(previous_text)
-                else combined_text
-            )
-            if not new_text:
-                continue
-            get_llm_logger().debug("Gemini text delta: %s", new_text)
-            if not prefix_yielded and history_snippets:
-                yield "\n".join(history_snippets) + "\n"
-                prefix_yielded = True
-            yield new_text
-            seen_stream_texts[candidate_index] = previous_text + new_text
-            finish_reason = getattr(candidate, "finish_reason", None)
-            if finish_reason:
-                stream_completed = True
+                combined_text = "".join(
+                    getattr(part, "text", None) or ""
+                    for part in candidate.content.parts
+                    if getattr(part, "text", None) and not is_truthy_flag(getattr(part, "thought", None))
+                )
+                if not combined_text:
+                    continue
+
+                previous_text = seen_stream_texts.get(candidate_index, "")
+                new_text = (
+                    combined_text[len(previous_text) :]
+                    if combined_text.startswith(previous_text)
+                    else combined_text
+                )
+                if not new_text:
+                    continue
+
+                text_chunk_count += 1
+                now = time.monotonic()
+                if first_text_chunk_time is None:
+                    first_text_chunk_time = now
+                    logging.debug("[gemini_stream] First text chunk at +%.2fs", now - stream_start)
+                last_text_chunk_time = now
+
+                get_llm_logger().debug("Gemini text delta: %s", new_text)
+                if not prefix_yielded and history_snippets:
+                    yield "\n".join(history_snippets) + "\n"
+                    prefix_yielded = True
+                yield new_text
+                seen_stream_texts[candidate_index] = previous_text + new_text
+                finish_reason = getattr(candidate, "finish_reason", None)
+                if finish_reason:
+                    stream_completed = True
+        except LLMError:
+            raise
+        except Exception as exc:
+            logging.exception("Gemini stream iteration failed")
+            raise self._convert_to_llm_error(exc, "streaming") from exc
+
+        # ── Stream completed: log timing summary ──
+        stream_end = time.monotonic()
+        elapsed = stream_end - stream_start
+        post_finish_wait = (stream_end - finish_reason_time) if finish_reason_time else 0
+        logging.info(
+            "[gemini_stream] Stream completed: total=%.2fs, chunks=%d, text_chunks=%d, "
+            "first_text=+%.2fs, last_text=+%.2fs, finish_reason='%s' at +%.2fs, "
+            "post_finish_chunks=%d, post_finish_wait=%.2fs",
+            elapsed, chunk_count, text_chunk_count,
+            (first_text_chunk_time - stream_start) if first_text_chunk_time else -1,
+            (last_text_chunk_time - stream_start) if last_text_chunk_time else -1,
+            finish_reason_value,
+            (finish_reason_time - stream_start) if finish_reason_time else -1,
+            post_finish_chunk_count, post_finish_wait,
+        )
 
         if fcall is None and saw_chunks and not stream_completed:
             # Log as warning but continue with received content

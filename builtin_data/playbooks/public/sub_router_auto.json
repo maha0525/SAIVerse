@@ -4,43 +4,35 @@
     "input_schema": [
         {
             "name": "input",
-            "description": "Trigger input",
-            "source": null
+            "description": "Trigger input"
         },
         {
             "name": "messages",
-            "description": "Conversation context messages",
-            "source": "parent.messages"
+            "description": "Conversation context messages"
         },
         {
             "name": "situation_snapshot",
-            "description": "Current situation snapshot",
-            "source": "parent.situation_snapshot"
+            "description": "Current situation snapshot"
         },
         {
             "name": "task_summary",
-            "description": "Current task summary",
-            "source": "parent.task_summary"
+            "description": "Current task summary"
         },
         {
             "name": "available_playbooks",
-            "description": "JSON list of available playbooks",
-            "source": "parent.available_playbooks"
+            "description": "JSON list of available playbooks"
         },
         {
             "name": "meta_playbook_name",
-            "description": "Name of the current meta playbook",
-            "source": "parent.meta_playbook_name"
+            "description": "Name of the current meta playbook"
         },
         {
             "name": "meta_playbook_description",
-            "description": "Description of the current meta playbook",
-            "source": "parent.meta_playbook_description"
+            "description": "Description of the current meta playbook"
         },
         {
             "name": "executed_playbooks",
-            "description": "List of playbooks already executed in this run",
-            "source": "parent.executed_playbooks"
+            "description": "List of playbooks already executed in this run"
         }
     ],
     "output_schema": [

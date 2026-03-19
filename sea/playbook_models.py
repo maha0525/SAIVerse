@@ -97,6 +97,11 @@ class LLMNodeDef(BaseModel):
         description="State key containing metadata dict to attach to the speak message "
                     "(e.g., media attachments from tool execution). Only used when speak=true."
     )
+    important: Optional[bool] = Field(
+        default=None,
+        description="If True, this node's output is considered important and will be "
+                    "dual-written to both pulse_logs and messages (long-term memory)."
+    )
 
 
 class ToolNodeDef(BaseModel):
@@ -119,6 +124,11 @@ class ToolNodeDef(BaseModel):
     conditional_next: Optional[ConditionalNext] = Field(
         default=None,
         description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
+    important: Optional[bool] = Field(
+        default=None,
+        description="If True, this node's output is considered important and will be "
+                    "dual-written to both pulse_logs and messages (long-term memory)."
     )
 
 
@@ -148,6 +158,11 @@ class ToolCallNodeDef(BaseModel):
         default=None,
         description="Conditional routing based on state field. If specified, overrides 'next'."
     )
+    important: Optional[bool] = Field(
+        default=None,
+        description="If True, this node's output is considered important and will be "
+                    "dual-written to both pulse_logs and messages (long-term memory)."
+    )
 
 
 class SpeakNodeDef(BaseModel):
@@ -161,6 +176,12 @@ class SpeakNodeDef(BaseModel):
         default=None,
         description="Conditional routing based on state field. If specified, overrides 'next'."
     )
+    important: Optional[bool] = Field(
+        default=True,
+        description="If True, this node's output is considered important and will be "
+                    "dual-written to both pulse_logs and messages (long-term memory). "
+                    "Defaults to True for speak nodes as they produce final user-facing output."
+    )
 
 
 class ThinkNodeDef(BaseModel):
@@ -171,6 +192,11 @@ class ThinkNodeDef(BaseModel):
     conditional_next: Optional[ConditionalNext] = Field(
         default=None,
         description="Conditional routing based on state field. If specified, overrides 'next'."
+    )
+    important: Optional[bool] = Field(
+        default=None,
+        description="If True, this node's output is considered important and will be "
+                    "dual-written to both pulse_logs and messages (long-term memory)."
     )
 
 
@@ -219,6 +245,11 @@ class MemorizeNodeDef(BaseModel):
         default=None,
         description="Conditional routing based on state field. If specified, overrides 'next'."
     )
+    important: Optional[bool] = Field(
+        default=None,
+        description="If True, this node's output is considered important and will be "
+                    "dual-written to both pulse_logs and messages (long-term memory)."
+    )
 
 
 
@@ -228,7 +259,11 @@ class SubPlayNodeDef(BaseModel):
     id: str
     type: Literal[NodeType.SUBPLAY]
     playbook: str = Field(description="Name of the sub-playbook to execute")
-    input_template: Optional[str] = Field(default="{input}", description="Template for the input passed to the sub-playbook")
+    args: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Args to pass to the sub-playbook. Values are template strings "
+                    "resolved against current state (e.g., '{objective}')."
+    )
     propagate_output: bool = Field(default=False, description="If true, append sub-playbook outputs to parent outputs")
     execution: Optional[str] = Field(
         default="inline",
@@ -238,6 +273,11 @@ class SubPlayNodeDef(BaseModel):
     subagent_chronicle: bool = Field(
         default=True,
         description="When execution='subagent', generate a chronicle summary on completion."
+    )
+    isolate_pulse_context: bool = Field(
+        default=False,
+        description="If true, run sub-playbook with a fresh PulseContext instead of sharing the parent's. "
+                    "Useful when the sub-playbook should not see prior pulse log entries (e.g., router I/O)."
     )
     next: Optional[str] = None
     conditional_next: Optional[ConditionalNext] = Field(
@@ -270,6 +310,12 @@ class ExecNodeDef(BaseModel):
     playbook_source: str = Field(
         default="selected_playbook",
         description="State variable name containing the playbook name to execute."
+    )
+    args: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Static args to pass to the sub-playbook. Values are template strings "
+                    "resolved against current state (e.g., '{objective}'). "
+                    "These are merged with dynamic args from args_source (args_source takes precedence)."
     )
     args_source: Optional[str] = Field(
         default="selected_args",
@@ -360,10 +406,6 @@ NodeDef = Union[
 class InputParam(BaseModel):
     name: str
     description: str
-    source: Optional[str] = Field(
-        default=None,
-        description="Optional parent state key (e.g., 'parent.input', 'router.query'). If not specified, defaults to 'input'."
-    )
 
     # Type and validation
     param_type: str = Field(
@@ -502,6 +544,11 @@ class PlaybookSchema(BaseModel):
     router_callable: bool = Field(
         default=False,
         description="If true, this playbook can be called from the router in meta playbooks."
+    )
+    required_credentials: Optional[List[str]] = Field(
+        default=None,
+        description="List of credential types required for this playbook (e.g., ['x'], ['email']). "
+                    "When set, the playbook is only available for personas that have all listed credentials configured."
     )
     user_selectable: bool = Field(
         default=False,

@@ -388,7 +388,8 @@ def _run_memopedia_generation(
         # Initialize LLM client
         _update_memopedia_job(job_id, message="Initializing LLM client...")
         
-        env_model = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
+        from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+        env_model = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
         model_to_use = model_name or env_model
         
         resolved_model_id, model_config = find_model_config(model_to_use)

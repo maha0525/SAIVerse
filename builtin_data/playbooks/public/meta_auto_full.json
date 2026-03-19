@@ -4,8 +4,7 @@
     "input_schema": [
         {
             "name": "input",
-            "description": "Trigger input (usually empty)",
-            "source": null
+            "description": "Trigger input (usually empty)"
         }
     ],
     "output_schema": null,
@@ -58,7 +57,7 @@
             "id": "execute_phase",
             "type": "subplay",
             "playbook": "sub_execute_phase",
-            "input_template": "",
+            "args": {"task_summary": "{task_summary}"},
             "propagate_output": false,
             "next": "finalize"
         },
@@ -74,7 +73,7 @@
             "id": "detect_situation",
             "type": "subplay",
             "playbook": "sub_detect_situation_change",
-            "input_template": "",
+            "args": {},
             "propagate_output": false,
             "next": "react_check"
         },
@@ -117,7 +116,7 @@
             "id": "reaction",
             "type": "subplay",
             "playbook": "sub_reaction",
-            "input_template": "",
+            "args": {"trigger": "{react_decision.reaction_trigger}"},
             "propagate_output": false,
             "next": "finalize"
         },
@@ -125,7 +124,7 @@
             "id": "generate_want",
             "type": "subplay",
             "playbook": "sub_generate_want",
-            "input_template": "",
+            "args": {},
             "propagate_output": false,
             "next": "route_want"
         },
@@ -157,7 +156,7 @@
             "id": "finalize",
             "type": "subplay",
             "playbook": "sub_finalize_auto",
-            "input_template": "",
+            "args": {"input": "{last}"},
             "propagate_output": false,
             "next": null
         }

@@ -520,7 +520,8 @@ def preview_context(
         messages.append({"role": "user", "content": user_input})
 
     # Classify each message into a section
-    persona_model = getattr(persona, "model", None) or "gemini-2.5-flash-lite-preview-09-2025"
+    from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+    persona_model = getattr(persona, "model", None) or BUILTIN_DEFAULT_LITE_MODEL
     provider = get_model_provider(persona_model)
 
     section_order = [

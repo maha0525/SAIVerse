@@ -19,11 +19,18 @@ from saiverse.model_configs import (
 
 router = APIRouter()
 
+class RateLimitInfo(BaseModel):
+    rpd: Optional[int] = None
+    reset_timezone: str = "America/Los_Angeles"
+
 class ModelInfo(BaseModel):
     id: str
     name: str
+    provider: Optional[str] = None
+    group: Optional[str] = None  # UI grouping label (falls back to provider)
     input_price: Optional[float] = None   # USD per 1M input tokens
     output_price: Optional[float] = None  # USD per 1M output tokens
+    rate_limit: Optional[RateLimitInfo] = None
 
 class PlaybookParamInfo(BaseModel):
     """Parameter info for playbook input_schema."""
@@ -75,6 +82,8 @@ class ModelConfigResponse(BaseModel):
     metabolism_enabled: bool = True
     metabolism_keep_messages: Optional[int] = None
     metabolism_keep_messages_model_default: Optional[int] = None
+    max_image_embeds: Optional[int] = None
+    max_image_embeds_model_default: Optional[int] = None
 
 @router.get("/models", response_model=List[ModelInfo])
 def get_models():
@@ -88,12 +97,23 @@ def get_models():
     for mid, name in choices:
         if not is_model_available(mid):
             continue
-        pricing = get_model_config(mid).get("pricing", {})
+        cfg = get_model_config(mid)
+        pricing = cfg.get("pricing", {})
+        rate_limit_raw = cfg.get("rate_limit")
+        rate_limit = None
+        if isinstance(rate_limit_raw, dict) and rate_limit_raw.get("rpd"):
+            rate_limit = {
+                "rpd": int(rate_limit_raw["rpd"]),
+                "reset_timezone": rate_limit_raw.get("reset_timezone", "America/Los_Angeles"),
+            }
         result.append({
             "id": mid,
             "name": name,
+            "provider": cfg.get("provider"),
+            "group": cfg.get("group") or cfg.get("provider"),
             "input_price": pricing.get("input_per_1m_tokens"),
             "output_price": pricing.get("output_per_1m_tokens"),
+            "rate_limit": rate_limit,
         })
     return result
 
@@ -258,6 +278,8 @@ def get_current_config(manager = Depends(get_manager)):
             "metabolism_enabled": getattr(manager, "metabolism_enabled", True),
             "metabolism_keep_messages": getattr(manager, "metabolism_keep_messages_override", None),
             "metabolism_keep_messages_model_default": None,
+            "max_image_embeds": getattr(manager, "max_image_embeds_override", None),
+            "max_image_embeds_model_default": None,
         }
 
     # Get param specs
@@ -297,13 +319,17 @@ def get_current_config(manager = Depends(get_manager)):
         current_values.update(manager.model_parameter_overrides)
 
     # Max history messages
-    from saiverse.model_configs import get_default_max_history_messages, get_metabolism_keep_messages
+    from saiverse.model_configs import get_default_max_history_messages, get_metabolism_keep_messages, get_max_image_embeds
     override = getattr(manager, "max_history_messages_override", None)
     model_default = get_default_max_history_messages(current_model)
 
     # Metabolism settings
     metab_override = getattr(manager, "metabolism_keep_messages_override", None)
     metab_model_default = get_metabolism_keep_messages(current_model)
+
+    # Image embeds
+    img_embeds_override = getattr(manager, "max_image_embeds_override", None)
+    img_embeds_model_default = get_max_image_embeds(current_model)
 
     return {
         "current_model": current_model,
@@ -314,6 +340,8 @@ def get_current_config(manager = Depends(get_manager)):
         "metabolism_enabled": getattr(manager, "metabolism_enabled", True),
         "metabolism_keep_messages": metab_override if metab_override is not None else metab_model_default,
         "metabolism_keep_messages_model_default": metab_model_default,
+        "max_image_embeds": img_embeds_override if img_embeds_override is not None else img_embeds_model_default,
+        "max_image_embeds_model_default": img_embeds_model_default,
     }
 
 @router.post("/model")
@@ -369,13 +397,17 @@ def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
         current_values.update(manager.model_parameter_overrides)
 
     # Max history messages (reset override on model change)
-    from saiverse.model_configs import get_default_max_history_messages, get_metabolism_keep_messages
+    from saiverse.model_configs import get_default_max_history_messages, get_metabolism_keep_messages, get_max_image_embeds
     manager.max_history_messages_override = None
     model_default = get_default_max_history_messages(current_model)
 
     # Metabolism (reset override on model change)
     manager.metabolism_keep_messages_override = None
     metab_model_default = get_metabolism_keep_messages(current_model)
+
+    # Image embeds (reset override on model change)
+    manager.max_image_embeds_override = None
+    img_embeds_model_default = get_max_image_embeds(current_model)
 
     return {
         "success": True,
@@ -388,6 +420,8 @@ def set_model(req: UpdateModelRequest, manager = Depends(get_manager)):
         "metabolism_enabled": getattr(manager, "metabolism_enabled", True),
         "metabolism_keep_messages": metab_model_default,
         "metabolism_keep_messages_model_default": metab_model_default,
+        "max_image_embeds": img_embeds_model_default,
+        "max_image_embeds_model_default": img_embeds_model_default,
     }
 
 @router.post("/parameters")
@@ -458,30 +492,134 @@ def set_developer_mode(req: DeveloperModeRequest, manager=Depends(get_manager)):
     return {"success": True, "enabled": req.enabled}
 
 
+class XPollingRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/x-polling")
+def get_x_polling(manager=Depends(get_manager)):
+    """Get X mention polling status."""
+    return {"enabled": manager.state.x_polling_enabled}
+
+
+@router.post("/x-polling")
+def set_x_polling(req: XPollingRequest, manager=Depends(get_manager)):
+    """Toggle X mention polling on/off."""
+    manager.state.x_polling_enabled = req.enabled
+    _log.info("X polling set to %s", req.enabled)
+    return {"success": True, "enabled": req.enabled}
+
+
+class MonitoringToggleRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/update-check")
+def get_update_check(manager=Depends(get_manager)):
+    """Get update check monitoring status."""
+    return {"enabled": manager.state.update_check_enabled}
+
+
+@router.post("/update-check")
+def set_update_check(req: MonitoringToggleRequest, manager=Depends(get_manager)):
+    """Toggle update availability check on/off."""
+    manager.state.update_check_enabled = req.enabled
+    _log.info("Update check set to %s", req.enabled)
+    return {"success": True, "enabled": req.enabled}
+
+
+@router.get("/announcements-monitor")
+def get_announcements_monitor(manager=Depends(get_manager)):
+    """Get announcements monitoring status."""
+    return {"enabled": manager.state.announcements_enabled}
+
+
+@router.post("/announcements-monitor")
+def set_announcements_monitor(req: MonitoringToggleRequest, manager=Depends(get_manager)):
+    """Toggle announcements monitoring on/off."""
+    manager.state.announcements_enabled = req.enabled
+    _log.info("Announcements monitor set to %s", req.enabled)
+    return {"success": True, "enabled": req.enabled}
+
+
+def _validate_playbook_override(req: "PlaybookOverrideRequest", manager: Any) -> None:
+    if req.playbook != "meta_user_manual":
+        return
+
+    selected_playbook = (req.args or {}).get("selected_playbook")
+    if not selected_playbook:
+        return
+
+    from database.session import SessionLocal
+    from database.models import Playbook
+
+    db = SessionLocal()
+    try:
+        query = db.query(Playbook).filter(Playbook.router_callable == True)
+        if not getattr(manager.state, "developer_mode", False):
+            query = query.filter(Playbook.dev_only == False)
+        allowed = {pb.name for pb in query.all() if getattr(pb, "name", None)}
+    finally:
+        db.close()
+
+    if selected_playbook not in allowed:
+        raise HTTPException(status_code=400, detail=f"Invalid selected_playbook: {selected_playbook}")
+
+
+
 class PlaybookOverrideRequest(BaseModel):
     playbook: Optional[str] = None
-    playbook_params: Optional[Dict[str, Any]] = None
+    args: Optional[Dict[str, Any]] = None
 
 
 @router.get("/playbook")
 def get_current_playbook(manager = Depends(get_manager)):
-    """Get current playbook override and parameters."""
+    """Get current playbook override and args."""
     return {
         "playbook": manager.state.current_playbook,
-        "playbook_params": manager.state.playbook_params,
+        "args": manager.state.playbook_args,
     }
 
 
 @router.post("/playbook")
 def set_playbook(req: PlaybookOverrideRequest, manager = Depends(get_manager)):
-    """Set playbook override and parameters."""
+    """Set playbook override and args."""
+    if req.playbook == "meta_user_manual" and req.args and "selected_playbook" in req.args:
+        selected_playbook = req.args.get("selected_playbook")
+        if selected_playbook:
+            from database.session import SessionLocal
+            from database.models import Playbook
+
+            db = SessionLocal()
+            try:
+                playbook_exists = (
+                    db.query(Playbook)
+                    .filter(Playbook.name == selected_playbook)
+                    .first()
+                    is not None
+                )
+            finally:
+                db.close()
+
+            if not playbook_exists:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "selected_playbook が不正です。表示ラベルではなく "
+                        "Playbook ID（例: deep_research）を指定してください。"
+                    ),
+                )
+
+    _validate_playbook_override(req, manager)
+
+
     manager.state.current_playbook = req.playbook if req.playbook else None
-    # Update playbook_params if provided, reset if playbook changed to None
-    if req.playbook_params is not None:
-        manager.state.playbook_params = req.playbook_params
+    # Update playbook_args if provided, reset if playbook changed to None
+    if req.args is not None:
+        manager.state.playbook_args = req.args
     elif req.playbook is None:
-        # Reset params when playbook is cleared
-        manager.state.playbook_params = {}
+        # Reset args when playbook is cleared
+        manager.state.playbook_args = {}
 
     # Persist to DB so it survives server restart
     from database.session import SessionLocal
@@ -504,9 +642,8 @@ def set_playbook(req: PlaybookOverrideRequest, manager = Depends(get_manager)):
     return {
         "success": True,
         "playbook": manager.state.current_playbook,
-        "playbook_params": manager.state.playbook_params,
+        "args": manager.state.playbook_args,
     }
-
 
 class CacheConfigResponse(BaseModel):
     """Cache configuration response."""
@@ -667,6 +804,58 @@ def set_metabolism_settings(req: MetabolismConfigRequest, manager=Depends(get_ma
     }
 
 
+class MaxImageEmbedsRequest(BaseModel):
+    value: Optional[int] = None
+
+
+@router.get("/max-image-embeds")
+def get_max_image_embeds_setting(manager=Depends(get_manager)):
+    """Get current max image embeds setting."""
+    from saiverse.model_configs import get_max_image_embeds
+
+    override = getattr(manager, "max_image_embeds_override", None)
+    current_model = manager.model or None
+    model_default = get_max_image_embeds(current_model) if current_model else None
+
+    return {
+        "value": override if override is not None else model_default,
+        "override": override,
+        "model_default": model_default,
+    }
+
+
+@router.post("/max-image-embeds")
+def set_max_image_embeds(req: MaxImageEmbedsRequest, manager=Depends(get_manager)):
+    """Set session override for max image embeds.
+
+    Send {"value": null} to clear the override and use the model default.
+    Send {"value": 0} to disable image embedding entirely.
+    """
+    if req.value is not None and req.value < 0:
+        raise HTTPException(status_code=400, detail="value must be >= 0 or null")
+    manager.max_image_embeds_override = req.value
+
+    # Determine effective value (override or model default)
+    effective = req.value
+    if effective is None:
+        from saiverse.model_configs import get_max_image_embeds
+        current_model = manager.model or None
+        if current_model:
+            effective = get_max_image_embeds(current_model)
+
+    # Apply to all active persona LLM clients
+    for persona in manager.personas.values():
+        client = getattr(persona, "_llm_client", None)
+        if client is not None and hasattr(client, "max_image_embeds"):
+            client.max_image_embeds = effective
+            _log.info(
+                "Updated max_image_embeds=%s on LLM client for persona '%s'",
+                effective, getattr(persona, "persona_id", "?"),
+            )
+
+    return {"success": True, "value": req.value}
+
+
 @router.get("/startup-warnings")
 def get_startup_warnings(manager=Depends(get_manager)):
     """Return warnings collected during startup (e.g. failed persona loads)."""
@@ -774,5 +963,55 @@ def set_playbook_permission(req: SetPlaybookPermissionRequest, manager=Depends(g
             ))
         db.commit()
         return {"success": True, "playbook_name": req.playbook_name, "permission_level": req.permission_level}
+    finally:
+        db.close()
+
+
+# ── Favorite Models ──────────────────────────────────────────────
+
+class FavoriteModelsRequest(BaseModel):
+    models: List[str]
+
+
+@router.get("/favorite-models")
+def get_favorite_models():
+    """Get user's favorite model IDs."""
+    from database.session import SessionLocal
+    from database.models import UserSettings
+
+    db = SessionLocal()
+    try:
+        settings = db.query(UserSettings).filter(UserSettings.USERID == 1).first()
+        if not settings or not settings.FAVORITE_MODELS:
+            return {"models": []}
+        try:
+            return {"models": json.loads(settings.FAVORITE_MODELS)}
+        except (json.JSONDecodeError, TypeError):
+            return {"models": []}
+    finally:
+        db.close()
+
+
+@router.post("/favorite-models")
+def set_favorite_models(req: FavoriteModelsRequest):
+    """Set user's favorite model IDs."""
+    from database.session import SessionLocal
+    from database.models import UserSettings
+
+    db = SessionLocal()
+    try:
+        settings = db.query(UserSettings).filter(UserSettings.USERID == 1).first()
+        favorites_json = json.dumps(req.models)
+        if settings:
+            settings.FAVORITE_MODELS = favorites_json
+        else:
+            settings = UserSettings(USERID=1, FAVORITE_MODELS=favorites_json)
+            db.add(settings)
+        db.commit()
+        return {"success": True, "models": req.models}
+    except Exception:
+        _log.warning("Failed to save favorite models", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to save favorite models")
     finally:
         db.close()

@@ -414,13 +414,13 @@ class RuntimeService(
 
     def handle_user_input_stream(
         self, message: str, metadata: Optional[Dict[str, Any]] = None, meta_playbook: Optional[str] = None,
-        playbook_params: Optional[Dict[str, Any]] = None, building_id: Optional[str] = None,
+        args: Optional[Dict[str, Any]] = None, building_id: Optional[str] = None,
     ) -> Iterator[str]:
         logging.debug(
-            "[runtime] handle_user_input_stream called (metadata_present=%s, meta_playbook=%s, playbook_params=%s, building_id=%s)",
+            "[runtime] handle_user_input_stream called (metadata_present=%s, meta_playbook=%s, args=%s, building_id=%s)",
             bool(metadata),
             meta_playbook,
-            bool(playbook_params),
+            bool(args),
             building_id,
         )
         if not message or not str(message).strip():
@@ -483,7 +483,7 @@ class RuntimeService(
                         persona, building_id, message,
                         metadata=metadata,
                         meta_playbook=meta_playbook,
-                        playbook_params=playbook_params,
+                        args=args,
                         event_callback=_enrich_event
                     )
                     # Check stop event after each persona completes
@@ -537,11 +537,15 @@ class RuntimeService(
             # Clean up stop event
             self.manager._active_stop_events.pop(building_id, None)
 
-        bh_sizes = {bid: len(h) for bid, h in self.building_histories.items() if h}
-        logging.debug("[runtime] pre-save building_histories sizes: %s", bh_sizes)
-        self._save_building_histories()
-        for persona in self.personas.values():
-            persona._save_session_metadata()
+            # Persist building histories and session metadata.
+            # MUST be inside finally: this generator can be closed via
+            # GeneratorExit (e.g. HTTP disconnect after streaming completes),
+            # and code after try/finally would never execute in that case.
+            bh_sizes = {bid: len(h) for bid, h in self.building_histories.items() if h}
+            logging.debug("[runtime] pre-save building_histories sizes: %s", bh_sizes)
+            self._save_building_histories()
+            for persona in self.personas.values():
+                persona._save_session_metadata()
 
     def preview_context(
         self, message: str, building_id: Optional[str] = None,

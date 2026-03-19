@@ -1,0 +1,16 @@
+{
+  "model": "gpt-5.2-chat-latest",
+  "system_prompt": "",
+  "display_name": "GPT-5.2 Chat",
+  "provider": "openai",
+  "context_length": 128000,
+  "default_max_history_messages": 60,
+  "metabolism_keep_messages": 20,
+  "supports_images": true,
+  "pricing": {
+    "input_per_1m_tokens": 1.75,
+    "cached_input_per_1m_tokens": 0.175,
+    "output_per_1m_tokens": 14,
+    "currency": "USD"
+  }
+}

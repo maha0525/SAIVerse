@@ -41,7 +41,7 @@ class RuntimeEngine:
             if event_callback:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
             tool_func = TOOL_REGISTRY.get(tool_name)
-            persona_obj = state.get("persona_obj") or persona
+            persona_obj = state.get("_persona_obj") or persona
             persona_id = getattr(persona_obj, "persona_id", "unknown")
 
             try:
@@ -72,7 +72,7 @@ class RuntimeEngine:
 
                 # Execute tool with persona context
                 if persona_id and persona_dir:
-                    with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode):
+                    with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback):
                         result = tool_func(**kwargs) if callable(tool_func) else None
                 else:
                     result = tool_func(**kwargs) if callable(tool_func) else None
@@ -115,9 +115,27 @@ class RuntimeEngine:
                 # Store result in state if output_key is specified (legacy single-value)
                 if output_key and not output_keys:
                     state[output_key] = result
+
+                # Append to PulseContext
+                _pulse_ctx = state.get("_pulse_context")
+                if _pulse_ctx:
+                    from sea.pulse_context import PulseLogEntry
+                    _pulse_ctx.append(PulseLogEntry(
+                        role="tool", content=result_str,
+                        node_id=node_id, playbook_name=playbook.name,
+                        tool_name=tool_name,
+                        important=getattr(node_def, "important", False) or False))
             except Exception as exc:
                 state["last"] = f"Tool error: {exc}"
                 LOGGER.exception("SEA LangGraph tool %s failed", tool_name)
+                # Append error to PulseContext
+                _pulse_ctx = state.get("_pulse_context")
+                if _pulse_ctx:
+                    from sea.pulse_context import PulseLogEntry
+                    _pulse_ctx.append(PulseLogEntry(
+                        role="tool", content=f"Tool error: {exc}",
+                        node_id=node_id, playbook_name=playbook.name,
+                        tool_name=tool_name))
             return state
 
         return node
@@ -146,19 +164,72 @@ class RuntimeEngine:
             node_id = getattr(node_def, "id", "exec")
             if event_callback:
                 event_callback({"type": "status", "content": f"{playbook.name} / {node_id}", "playbook": playbook.name, "node": node_id})
-            sub_name = state.get(playbook_source) or state.get("last") or "basic_chat"
-            sub_pb = self.runtime._load_playbook_for(str(sub_name).strip(), persona, building_id) or self.runtime._basic_chat_playbook()
-            sub_input = None
-            args = state.get(args_source) or {}
-            if isinstance(args, dict):
-                sub_input = args.get("input") or args.get("query")
+            selected_playbook = state.get(playbook_source)
+            sub_name = selected_playbook or state.get("last") or "basic_chat"
+            clean_name = str(sub_name).strip()
+            selected_playbook_missing = (
+                playbook.name == "meta_user_manual"
+                and playbook_source == "selected_playbook"
+                and bool(selected_playbook)
+            )
+
+            sub_pb = self.runtime._load_playbook_for(clean_name, persona, building_id)
+            if sub_pb is None:
+                if selected_playbook_missing:
+                    error_msg = f"指定されたツールID '{clean_name}' は存在しません。"
+                    state["last"] = error_msg
+                    state["_exec_error"] = True
+                    state["_exec_error_detail"] = f"Selected playbook not found: {clean_name}"
+                    log_sea_trace(playbook.name, node_id, "EXEC", f"→ {state['_exec_error_detail']}")
+                    if event_callback:
+                        event_callback({
+                            "type": "warning",
+                            "content": error_msg,
+                            "playbook": playbook.name,
+                            "node": node_id,
+                        })
+                    if outputs is not None:
+                        outputs.append(error_msg)
+                    return state
+
+                if clean_name == "basic_chat":
+                    sub_pb = self.runtime._basic_chat_playbook()
+                else:
+                    error_msg = f"Sub-playbook not found: {clean_name}"
+                    state["last"] = error_msg
+                    state["_exec_error"] = True
+                    state["_exec_error_detail"] = error_msg
+                    if outputs is not None:
+                        outputs.append(error_msg)
+                    return state
+
+            # Build child args: static args (template) + dynamic args_source (overrides)
+            child_args = {}
+            # 1. Resolve static args from node_def (template strings like "{objective}")
+            static_args = getattr(node_def, "args", None)
+            if static_args and isinstance(static_args, dict):
+                state_vars = {k: v for k, v in state.items() if not k.startswith("_")}
+                for key, tmpl in static_args.items():
+                    if isinstance(tmpl, str):
+                        child_args[key] = _format(tmpl, state_vars)
+                    else:
+                        child_args[key] = tmpl
+            # 2. Merge dynamic args from args_source (takes precedence)
+            dynamic_args = state.get(args_source) or {}
+            if isinstance(dynamic_args, dict):
+                child_args.update(dynamic_args)
+
+            # Determine sub_input for context preparation
+            sub_input = child_args.get("input") or child_args.get("query")
             if not sub_input:
-                sub_input = state.get("inputs", {}).get("input")
+                sub_input = state.get("input")
+
+            # Set _args on parent state so compile_with_langgraph can resolve them
+            state["_args"] = child_args if child_args else None
 
             eff_bid = self.runtime._effective_building_id(persona, building_id)
 
             # ── Playbook permission check ──
-            clean_name = str(sub_name).strip()
             if clean_name != "basic_chat":
                 city_id = getattr(self.manager, "city_id", None)
                 if city_id is not None:
@@ -176,9 +247,13 @@ class RuntimeEngine:
                             self.runtime._notify_persona_permission_result(state, persona, clean_name, denial_msg, event_callback)
                             return state
 
-                        # Schedule-triggered executions: user pre-approved by creating the schedule
-                        if state.get("pulse_type") == "schedule":
-                            log_sea_trace(playbook.name, node_id, "PERM", f"{clean_name}: auto-allowed (schedule)")
+                        # Schedule pulses (external events, timed schedules) have no
+                        # frontend connection for interactive dialogs.  The user's
+                        # act of configuring the automation serves as pre-approval.
+                        pulse_type = state.get("_pulse_type")
+                        if pulse_type == "schedule":
+                            log_sea_trace(playbook.name, node_id, "PERM", f"{clean_name}: auto-allow for schedule pulse")
+                            # Fall through to execution
                         else:
                             response = self.runtime._request_playbook_permission(clean_name, persona, event_callback)
 
@@ -224,6 +299,7 @@ class RuntimeEngine:
                 sub_outputs = await asyncio.to_thread(
                     self.runtime._run_playbook, sub_pb, persona, eff_bid, sub_input, auto_mode, True, state, event_callback,
                     cancellation_token=cancellation_token,
+                    isolate_pulse_context=(execution == "subagent"),
                 )
             except Exception as exc:
                 LOGGER.exception("SEA LangGraph exec sub-playbook failed")
@@ -247,7 +323,7 @@ class RuntimeEngine:
                     persona, error_msg,
                     role="system",
                     tags=["error", "exec", str(sub_name).strip()],
-                    pulse_id=state.get("pulse_id"),
+                    pulse_id=state.get("_pulse_id"),
                 ):
                     LOGGER.warning("Failed to store exec error to SAIMemory for node %s", node_id)
                     if event_callback:
@@ -257,6 +333,13 @@ class RuntimeEngine:
                             "warning_code": "memorize_failed",
                             "display": "toast",
                         })
+                # Append error to PulseContext
+                _pulse_ctx = state.get("_pulse_context")
+                if _pulse_ctx:
+                    from sea.pulse_context import PulseLogEntry
+                    _pulse_ctx.append(PulseLogEntry(
+                        role="system", content=error_msg,
+                        node_id=node_id, playbook_name=playbook.name))
                 if outputs is not None:
                     outputs.append(error_msg)
                 return state
@@ -304,7 +387,7 @@ class RuntimeEngine:
                     for path, val in flat.items():
                         variables[f"{key}.{path}"] = val
             variables.update({
-                "input": state.get("inputs", {}).get("input", ""),
+                "input": state.get("input", ""),
                 "last": state.get("last", ""),
                 "persona_id": getattr(persona, "persona_id", None),
                 "persona_name": getattr(persona, "persona_name", None),
@@ -317,7 +400,7 @@ class RuntimeEngine:
             LOGGER.debug("[memorize] memo_text=%s", memo_text)
             role = getattr(node_def, "role", "assistant") or "assistant"
             tags = getattr(node_def, "tags", None)
-            pulse_id = state.get("pulse_id")
+            pulse_id = state.get("_pulse_id")
             metadata_key = getattr(node_def, "metadata_key", None)
             metadata = state.get(metadata_key) if metadata_key else None
             if not self.runtime._store_memory(persona, memo_text, role=role, tags=tags, pulse_id=pulse_id, metadata=metadata):
@@ -353,6 +436,10 @@ class RuntimeEngine:
             speak_content = state.get("speak_content", "")
             LOGGER.info("[DEBUG] memorize node end: state['speak_content'] = '%s'", speak_content)
 
+            # MEMORIZE does NOT append to PulseContext.
+            # Its job is writing to SAIMemory (persistent storage).
+            # Runtime tracing is handled by TOOL and LLM nodes.
+
             return state
 
         return node
@@ -365,7 +452,7 @@ class RuntimeEngine:
         reasoning_text = state.pop("_reasoning_text", "")
         reasoning_details_val = state.pop("_reasoning_details", None)
         activity_trace = state.get("_activity_trace")
-        pulse_id = state.get("pulse_id")
+        pulse_id = state.get("_pulse_id")
         eff_bid = self.runtime._effective_building_id(persona, building_id)
         # Build extra metadata with reasoning for SAIMemory storage
         speak_metadata: Dict[str, Any] = {}
@@ -385,4 +472,14 @@ class RuntimeEngine:
             if activity_trace:
                 say_event["activity_trace"] = list(activity_trace)
             event_callback(say_event)
+
+        # Append to PulseContext (speak is important by default)
+        _pulse_ctx = state.get("_pulse_context")
+        if _pulse_ctx:
+            from sea.pulse_context import PulseLogEntry
+            _pulse_ctx.append(PulseLogEntry(
+                role="assistant", content=text,
+                node_id="speak", playbook_name=playbook.name,
+                important=True))
+
         return state

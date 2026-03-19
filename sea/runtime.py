@@ -51,7 +51,8 @@ LOGGER = logging.getLogger(__name__)
 
 def _get_default_lightweight_model() -> str:
     """Get the default lightweight model from environment or fallback."""
-    return os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
+    from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+    return os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
 
 
 
@@ -70,6 +71,8 @@ class SEARuntime:
             llm_selector=self._select_llm_client,
             emitters={"speak": self._emit_speak, "say": self._emit_say, "think": self._emit_think},
         )
+        # Pulse-level log contexts (keyed by pulse_id)
+        self._pulse_contexts: Dict[str, Any] = {}  # Dict[str, PulseContext]
 
     # ---------------- meta entrypoints -----------------
     def run_meta_user(
@@ -79,7 +82,7 @@ class SEARuntime:
         building_id: str,
         metadata: Optional[Dict[str, Any]] = None,
         meta_playbook: Optional[str] = None,
-        playbook_params: Optional[Dict[str, Any]] = None,
+        args: Optional[Dict[str, Any]] = None,
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         cancellation_token: Optional[CancellationToken] = None,
         pulse_type: str = "user",
@@ -88,10 +91,10 @@ class SEARuntime:
         # Check for cancellation before starting
         if cancellation_token:
             cancellation_token.raise_if_cancelled()
-        
+
         # Store pulse_type in persona for tools to access
         persona._current_pulse_type = pulse_type
-        
+
         # Record user input to history before processing
         if user_input:
             try:
@@ -109,15 +112,25 @@ class SEARuntime:
         if meta_playbook:
             playbook = self._load_playbook_for(meta_playbook, persona, building_id)
             if playbook is None:
-                LOGGER.warning("Meta playbook '%s' not found, falling back to automatic selection", meta_playbook)
-                playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
+                LOGGER.warning("Meta playbook '%s' not found; aborting execution", meta_playbook)
+                if event_callback:
+                    event_callback({
+                        "type": "error",
+                        "code": "playbook_not_found",
+                        "meta_playbook": meta_playbook,
+                    })
+                return [f"指定されたプレイブック '{meta_playbook}' が見つかりません。プレイブックIDを確認してください。"]
         else:
             playbook = self._choose_playbook(kind="user", persona=persona, building_id=building_id)
+        # Build effective args: auto-include user_input as "input" if not explicitly set
+        effective_args = dict(args or {})
+        if user_input and "input" not in effective_args:
+            effective_args["input"] = user_input
         result = self._run_playbook(
             playbook, persona, building_id, user_input,
             auto_mode=False, record_history=True, event_callback=event_callback,
             cancellation_token=cancellation_token, pulse_type=pulse_type,
-            initial_params=playbook_params,
+            initial_params=effective_args if effective_args else None,
         )
 
         # Post-response metabolism check
@@ -180,6 +193,7 @@ class SEARuntime:
         cancellation_token: Optional[CancellationToken] = None,
         pulse_type: Optional[str] = None,
         initial_params: Optional[Dict[str, Any]] = None,
+        isolate_pulse_context: bool = False,
     ) -> List[str]:
         return run_playbook(
             self,
@@ -194,6 +208,7 @@ class SEARuntime:
             cancellation_token=cancellation_token,
             pulse_type=pulse_type,
             initial_params=initial_params,
+            isolate_pulse_context=isolate_pulse_context,
         )
 
     # LangGraph compile wrapper -----------------------------------------
@@ -210,6 +225,7 @@ class SEARuntime:
         event_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         cancellation_token: Optional[CancellationToken] = None,
         pulse_type: Optional[str] = None,
+        isolate_pulse_context: bool = False,
     ) -> Optional[List[str]]:
         return compile_with_langgraph_impl(
             self,
@@ -224,6 +240,7 @@ class SEARuntime:
             event_callback=event_callback,
             cancellation_token=cancellation_token,
             pulse_type=pulse_type,
+            isolate_pulse_context=isolate_pulse_context,
         )
 
     def _lg_llm_node(self, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
@@ -266,7 +283,7 @@ class SEARuntime:
             cached_tokens: Number of tokens served from cache
             cache_write_tokens: Number of tokens written to cache
         """
-        accumulator = state.get("pulse_usage_accumulator")
+        accumulator = state.get("_pulse_usage_accumulator")
         if accumulator is None:
             return
         accumulator["total_input_tokens"] += input_tokens
@@ -359,7 +376,8 @@ class SEARuntime:
                 # Guard: if the agentic model itself doesn't support structured output,
                 # fall back to the built-in default instead
                 if not supports_structured_output(agentic_model):
-                    builtin_default = "gemini-2.5-flash-lite-preview-09-2025"
+                    from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+                    builtin_default = BUILTIN_DEFAULT_LITE_MODEL
                     LOGGER.warning(
                         "[sea] Agentic model '%s' also doesn't support structured output, "
                         "falling back to built-in default: %s", agentic_model, builtin_default)
@@ -671,7 +689,7 @@ class SEARuntime:
             persona, message,
             role="system",
             tags=["permission", "denied", playbook_name],
-            pulse_id=state.get("pulse_id"),
+            pulse_id=state.get("_pulse_id"),
         ):
             LOGGER.warning("[sea][perm] Failed to store permission result to SAIMemory")
 
@@ -702,7 +720,7 @@ class SEARuntime:
             text = state.get("last") or ""
             reasoning_text = state.pop("_reasoning_text", "")
             reasoning_details_val = state.pop("_reasoning_details", None)
-            pulse_id = state.get("pulse_id")
+            pulse_id = state.get("_pulse_id")
             metadata_key = getattr(node_def, "metadata_key", None)
             base_metadata = state.get(metadata_key) if metadata_key else None
 
@@ -719,7 +737,7 @@ class SEARuntime:
                 msg_metadata["reasoning_details"] = reasoning_details_val
 
             # Include pulse usage accumulator total for UI display
-            accumulator = state.get("pulse_usage_accumulator")
+            accumulator = state.get("_pulse_usage_accumulator")
             if accumulator and accumulator.get("call_count", 0) > 0:
                 msg_metadata["llm_usage_total"] = dict(accumulator)
 
@@ -743,7 +761,16 @@ class SEARuntime:
             # Debug: log speak_content at end of say node
             speak_content = state.get("speak_content", "")
             LOGGER.info("[DEBUG] say node end: state['speak_content'] = '%s'", speak_content)
-            
+
+            # Append to PulseContext (say is not important — Building history only)
+            _pulse_ctx = state.get("_pulse_context")
+            if _pulse_ctx:
+                from sea.pulse_context import PulseLogEntry
+                _pulse_ctx.append(PulseLogEntry(
+                    role="assistant", content=text,
+                    node_id=node_id, playbook_name=playbook.name,
+                    important=False))
+
             return state
         return node
 
@@ -752,12 +779,22 @@ class SEARuntime:
         if event_callback:
             event_callback({"type": "status", "content": f"{playbook.name} / think", "playbook": playbook.name, "node": "think"})
         text = state.get("last") or ""
-        pulse_id = state.get("pulse_id") or str(uuid.uuid4())
+        pulse_id = state.get("_pulse_id") or str(uuid.uuid4())
         self._emit_think(persona, pulse_id, text)
         if outputs is not None:
             outputs.append(text)
         if event_callback:
             event_callback({"type": "think", "content": text, "persona_id": getattr(persona, "persona_id", None)})
+
+        # Append to PulseContext
+        _pulse_ctx = state.get("_pulse_context")
+        if _pulse_ctx:
+            from sea.pulse_context import PulseLogEntry
+            _pulse_ctx.append(PulseLogEntry(
+                role="system", content=text,
+                node_id="think", playbook_name=playbook.name,
+                important=False))
+
         return state
 
     def _lg_subplay_node(self, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, auto_mode: bool, outputs: Optional[List[str]] = None, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
@@ -994,7 +1031,7 @@ class SEARuntime:
             args_text = json.dumps(payload, ensure_ascii=False)
         except Exception:
             args_text = json.dumps({"raw": str(raw_text)}, ensure_ascii=False)
-        conv = state.get("messages")
+        conv = state.get("_messages")
         if not isinstance(conv, list):
             conv = []
         call_id = f"router_call_{uuid.uuid4().hex}"
@@ -1016,9 +1053,56 @@ class SEARuntime:
             conv[-1] = call_msg
         else:
             conv.append(call_msg)
-        state["messages"] = conv
+        state["_messages"] = conv
         state["_last_tool_call_id"] = call_id
         state["_last_tool_name"] = payload.get("playbook") or "sub_playbook"
+
+    # ------------------------------------------------------------------
+    # PulseContext management
+    # ------------------------------------------------------------------
+
+    def _get_or_create_pulse_context(self, pulse_id: str, thread_id: str) -> Any:
+        """Get an existing PulseContext or create a new one for this pulse_id."""
+        from sea.pulse_context import PulseContext
+        if pulse_id not in self._pulse_contexts:
+            ctx = PulseContext(pulse_id=pulse_id, thread_id=thread_id)
+            self._pulse_contexts[pulse_id] = ctx
+            LOGGER.debug("[sea] Created PulseContext for pulse_id=%s thread_id=%s", pulse_id, thread_id)
+        return self._pulse_contexts[pulse_id]
+
+    def _cleanup_pulse_context(self, pulse_id: str) -> None:
+        """Remove a PulseContext from the in-memory dict to free memory."""
+        removed = self._pulse_contexts.pop(pulse_id, None)
+        if removed:
+            LOGGER.debug("[sea] Cleaned up PulseContext for pulse_id=%s (%d entries)", pulse_id, len(removed.logs))
+
+    def _flush_pulse_logs(self, persona: Any, pulse_context: Any) -> None:
+        """Write all PulseLogEntry items from a PulseContext to the pulse_logs DB table."""
+        import json as _json
+        adapter = getattr(persona, "sai_memory", None)
+        if not adapter or not adapter.is_ready():
+            LOGGER.warning("[sea] Cannot flush pulse_logs: SAIMemory adapter unavailable for persona=%s",
+                           getattr(persona, "persona_id", None))
+            return
+        count = 0
+        for entry in pulse_context.logs:
+            tool_calls_json = _json.dumps(entry.tool_calls, ensure_ascii=False) if entry.tool_calls else None
+            adapter.append_pulse_log(
+                pulse_id=pulse_context.pulse_id,
+                thread_id=pulse_context.thread_id,
+                role=entry.role,
+                content=entry.content,
+                node_id=entry.node_id,
+                playbook_name=entry.playbook_name,
+                important=entry.important,
+                tool_calls=tool_calls_json,
+                tool_call_id=entry.tool_call_id,
+                tool_name=entry.tool_name,
+                created_at=entry.created_at,
+            )
+            count += 1
+        LOGGER.info("[sea] Flushed %d pulse_log entries for pulse_id=%s", count, pulse_context.pulse_id)
+        self._cleanup_pulse_context(pulse_context.pulse_id)
 
     def _store_memory(
         self,
@@ -1029,6 +1113,7 @@ class SEARuntime:
         tags: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        playbook_name: Optional[str] = None,
     ) -> bool:
         """Store a message to SAIMemory. Returns True on success, False on failure."""
         if not text:
@@ -1057,6 +1142,9 @@ class SEARuntime:
                 # Add pulse:uuid tag
                 if pulse_id:
                     clean_tags.append(f"pulse:{pulse_id}")
+                # Add playbook:name tag for automatic classification
+                if playbook_name:
+                    clean_tags.append(f"playbook:{playbook_name}")
                 # Build metadata dict
                 msg_metadata: Dict[str, Any] = {}
                 if clean_tags:
@@ -1089,7 +1177,7 @@ class SEARuntime:
         call_id = state.get("_last_tool_call_id")
         if not call_id:
             return
-        conv = state.get("messages")
+        conv = state.get("_messages")
         if not isinstance(conv, list):
             conv = []
         message = {
@@ -1099,7 +1187,7 @@ class SEARuntime:
             "content": payload,
         }
         conv.append(message)
-        state["messages"] = conv
+        state["_messages"] = conv
         state["_last_tool_call_id"] = None
 
     # ---------------- helpers -----------------
@@ -1410,7 +1498,8 @@ class SEARuntime:
         from saiverse.model_configs import find_model_config
 
         # Get LLM client using MEMORY_WEAVE_MODEL
-        model_name = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
+        from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+        model_name = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
         model_id, model_config = find_model_config(model_name)
         if not model_config:
             LOGGER.warning("[metabolism] Model '%s' not found for Chronicle generation", model_name)

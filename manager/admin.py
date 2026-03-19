@@ -862,8 +862,12 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 # Update default model and recreate LLM client if model changed
                 # If a global chat-option override is active, preserve it;
                 # only the DB value (ai.DEFAULT_MODEL) was updated above.
-                if self.model:
-                    new_model = self.model
+                # NOTE: Use self.state.model (live reference) rather than
+                # self.model (snapshot from __init__) so chat-option overrides
+                # set after AdminService construction are visible.
+                global_model_override = getattr(self.state, 'model', None)
+                if global_model_override:
+                    new_model = global_model_override
                 else:
                     new_model = default_model
                 if new_model and persona.model != new_model:

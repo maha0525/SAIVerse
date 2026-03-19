@@ -8,8 +8,7 @@
         },
         {
             "name": "metadata",
-            "description": "Optional metadata from tool execution (e.g., media attachments)",
-            "source": "parent.metadata"
+            "description": "Optional metadata from tool execution (e.g., media attachments)"
         }
     ],
     "router_callable": false,

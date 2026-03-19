@@ -17,9 +17,10 @@ import SaiverseLink from '@/components/SaiverseLink';
 import ItemModal from '@/components/ItemModal';
 import ContextPreviewModal, { ContextPreviewData } from '@/components/ContextPreviewModal';
 import PlaybookPermissionDialog, { PermissionRequestData } from '@/components/PlaybookPermissionDialog';
+import TweetConfirmDialog, { TweetConfirmData } from '@/components/TweetConfirmDialog';
 import ChronicleConfirmDialog, { ChronicleConfirmData } from '@/components/ChronicleConfirmDialog';
 import ModalOverlay from '@/components/common/ModalOverlay';
-import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square } from 'lucide-react';
+import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
 
 // Allow className on HTML elements used by thinking blocks (<details>, <div>, <summary>)
@@ -127,6 +128,7 @@ export default function Home() {
     const [inputValue, setInputValue] = useState('');
     const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
     const [permissionRequest, setPermissionRequest] = useState<PermissionRequestData | null>(null);
+    const [tweetConfirm, setTweetConfirm] = useState<TweetConfirmData | null>(null);
     const [chronicleConfirm, setChronicleConfirm] = useState<ChronicleConfirmData | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const chatAreaRef = useRef<HTMLDivElement>(null); // Ref for the scrollable area
@@ -235,9 +237,11 @@ export default function Home() {
     }, [inputValue, adjustTextareaHeight]);
     const [isPeopleModalOpen, setIsPeopleModalOpen] = useState(false);
     const [selectedPlaybook, setSelectedPlaybook] = useState<string | null>('meta_user');
-    const [playbookParams, setPlaybookParams] = useState<Record<string, any>>({});
+    const [playbookArgs, setPlaybookArgs] = useState<Record<string, any>>({});
     const [selectedModel, setSelectedModel] = useState<string>(''); // Model ID selected in Chat Options
     const [selectedModelDisplayName, setSelectedModelDisplayName] = useState<string>(''); // Model display name
+    const [selectedModelRateLimit, setSelectedModelRateLimit] = useState<{ rpd: number; reset_timezone: string } | null>(null); // Rate limit config for selected model
+    const [rpdUsage, setRpdUsage] = useState<{ used: number; limit: number } | null>(null); // Current RPD usage
     const [isDragOver, setIsDragOver] = useState(false); // Drag & drop state
     const [attachments, setAttachments] = useState<FileAttachment[]>([]); // Multiple attachments
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -307,6 +311,9 @@ export default function Home() {
         return false;
     });
     const updatingTargetVersion = useRef<string>('');
+
+    // Announcements unread badge
+    const [hasUnreadAnnouncements, setHasUnreadAnnouncements] = useState(false);
 
     // Toast notifications
     const [toasts, setToasts] = useState<{id: string; content: string}[]>([]);
@@ -522,6 +529,7 @@ export default function Home() {
                             id: entry.msg.id,
                             avatar: entry.msg.avatar || local.avatar,
                             sender: entry.msg.sender || local.sender,
+                            images: entry.msg.images || local.images,
                             llm_usage: entry.msg.llm_usage || local.llm_usage,
                             llm_usage_total: entry.msg.llm_usage_total || local.llm_usage_total,
                             timestamp: entry.msg.timestamp || local.timestamp,
@@ -614,8 +622,8 @@ export default function Home() {
                     if (data.playbook) {
                         setSelectedPlaybook(data.playbook);
                     }
-                    if (data.playbook_params && Object.keys(data.playbook_params).length > 0) {
-                        setPlaybookParams(data.playbook_params);
+                    if (data.args && Object.keys(data.args).length > 0) {
+                        setPlaybookArgs(data.args);
                     }
                 }
             })
@@ -628,9 +636,10 @@ export default function Home() {
         ]).then(([config, models]) => {
             if (config?.current_model && models) {
                 const modelId = config.current_model;
-                const modelInfo = models.find((m: { id: string; name: string }) => m.id === modelId);
+                const modelInfo = models.find((m: { id: string; name: string; rate_limit?: { rpd: number; reset_timezone: string } | null }) => m.id === modelId);
                 setSelectedModel(modelId);
                 setSelectedModelDisplayName(modelInfo?.name || '');
+                setSelectedModelRateLimit(modelInfo?.rate_limit || null);
             }
         }).catch(err => console.error('Failed to load model setting', err));
 
@@ -672,22 +681,90 @@ export default function Home() {
             })
             .catch(err => console.error('Failed to check reembed', err));
 
-        // Check for updates
-        fetch('/api/system/version')
+        // Check for updates (respects update-check toggle)
+        fetch('/api/config/update-check')
             .then(res => res.ok ? res.json() : null)
-            .then(data => {
-                if (data?.version) {
-                    setAppStateVersion(data.version);
-                }
-                if (data?.update_available) {
-                    setUpdateAvailable({
-                        version: data.latest_version,
-                        url: data.latest_release_url || '',
+            .then(cfg => {
+                if (cfg && !cfg.enabled) return;  // Skip if disabled
+                return fetch('/api/system/version')
+                    .then(res => res.ok ? res.json() : null)
+                    .then(data => {
+                        if (data?.version) {
+                            setAppStateVersion(data.version);
+                        }
+                        if (data?.update_available) {
+                            setUpdateAvailable({
+                                version: data.latest_version,
+                                url: data.latest_release_url || '',
+                            });
+                        }
                     });
-                }
             })
             .catch(() => { /* ignore - backend may not support this endpoint yet */ });
+
+        // Check for unread announcements (and poll every 30 minutes)
+        const checkAnnouncements = () => {
+            // Check if announcements monitoring is enabled before fetching
+            fetch('/api/config/announcements-monitor')
+                .then(res => res.ok ? res.json() : null)
+                .then(cfg => {
+                    if (cfg && !cfg.enabled) return;  // Skip if disabled
+                    return fetch('/api/system/announcements')
+                        .then(res => res.ok ? res.json() : null)
+                        .then(data => {
+                            if (data?.announcements?.length > 0) {
+                                const raw = JSON.stringify(data.announcements);
+                                let hash = 5381;
+                                for (let i = 0; i < raw.length; i++) {
+                                    hash = ((hash << 5) + hash + raw.charCodeAt(i)) | 0;
+                                }
+                                const currentHash = (hash >>> 0).toString(16);
+                                const savedHash = localStorage.getItem('saiverse_announcements_hash');
+                                setHasUnreadAnnouncements(currentHash !== savedHash);
+                            }
+                        });
+                })
+                .catch(() => { /* ignore */ });
+        };
+        checkAnnouncements();
+        const announcementInterval = setInterval(checkAnnouncements, 30 * 60 * 1000);
+
+        // Also check when the tab becomes visible again
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'visible') checkAnnouncements();
+        };
+        document.addEventListener('visibilitychange', onVisibilityChange);
+
+        return () => {
+            clearInterval(announcementInterval);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
     }, []);
+
+    // RPD usage polling - fetch when model has rate_limit, poll every 60 seconds
+    useEffect(() => {
+        if (!selectedModel || !selectedModelRateLimit) {
+            setRpdUsage(null);
+            return;
+        }
+
+        const fetchRpd = () => {
+            fetch(`/api/usage/rpd?model_id=${encodeURIComponent(selectedModel)}`)
+                .then(res => res.ok ? res.json() : null)
+                .then((data: { model_id: string; used: number; limit: number }[] | null) => {
+                    if (data && data.length > 0) {
+                        setRpdUsage({ used: data[0].used, limit: data[0].limit });
+                    } else {
+                        setRpdUsage(null);
+                    }
+                })
+                .catch(() => setRpdUsage(null));
+        };
+
+        fetchRpd();
+        const interval = setInterval(fetchRpd, 60_000);
+        return () => clearInterval(interval);
+    }, [selectedModel, selectedModelRateLimit]);
 
     // Handle building deletion from WorldEditor — switch to another building
     // if the current building was the one deleted.
@@ -950,6 +1027,19 @@ export default function Home() {
         }
     }, []);
 
+    const handleTweetConfirmResponse = useCallback(async (requestId: string, decision: string, editedText?: string) => {
+        setTweetConfirm(null);
+        try {
+            await fetch('/api/chat/tweet-confirmation-response', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ request_id: requestId, decision, edited_text: editedText }),
+            });
+        } catch (e) {
+            console.error('Failed to send tweet confirmation response', e);
+        }
+    }, []);
+
     const handleChronicleConfirmResponse = useCallback(async (requestId: string, decision: string) => {
         setChronicleConfirm(null);
         try {
@@ -974,6 +1064,9 @@ export default function Home() {
             id: tempId, role: 'user', content: inputValue,
             sender: userDisplayNameRef.current || undefined,
             avatar: userAvatarRef.current || undefined,
+            images: attachments
+                .filter(a => a.type === 'image')
+                .map(a => ({ url: `data:${a.mimeType};base64,${a.base64}`, mime_type: a.mimeType })),
         };
         setMessages(prev => [...prev, userMsg]);
         setInputValue('');
@@ -981,11 +1074,11 @@ export default function Home() {
 
         const currentAttachments = attachments;
         const currentPlaybook = selectedPlaybook;
-        const currentPlaybookParams = playbookParams;
+        const currentPlaybookArgs = playbookArgs;
 
         setAttachments([]);
-        // Reset playbook params after sending
-        setPlaybookParams({});
+        // Reset playbook args after sending
+        setPlaybookArgs({});
 
         try {
             const res = await fetch('/api/chat/send', {
@@ -1001,7 +1094,7 @@ export default function Home() {
                         mime_type: a.mimeType
                     })) : undefined,
                     meta_playbook: currentPlaybook,
-                    playbook_params: Object.keys(currentPlaybookParams).length > 0 ? currentPlaybookParams : undefined
+                    args: Object.keys(currentPlaybookArgs).length > 0 ? currentPlaybookArgs : undefined
                 })
             });
 
@@ -1267,6 +1360,13 @@ export default function Home() {
                                 playbookDescription: event.playbook_description || '',
                                 personaName: event.persona_name || '',
                             });
+                        } else if (event.type === 'tweet_confirmation') {
+                            setTweetConfirm({
+                                requestId: event.request_id,
+                                tweetText: event.tweet_text,
+                                personaId: event.persona_id || '',
+                                xUsername: event.x_username || '',
+                            });
                         } else if (event.type === 'chronicle_confirm') {
                             setChronicleConfirm({
                                 requestId: event.request_id,
@@ -1344,6 +1444,15 @@ export default function Home() {
             });
             await syncAfterResponse(); // Merge server state (IDs, avatars) without replacing messages
             isProcessingRef.current = false; // Allow polling AFTER sync completes
+            // Refresh RPD usage after message sent
+            if (selectedModelRateLimit && selectedModel) {
+                fetch(`/api/usage/rpd?model_id=${encodeURIComponent(selectedModel)}`)
+                    .then(res => res.ok ? res.json() : null)
+                    .then((data: { used: number; limit: number }[] | null) => {
+                        if (data && data.length > 0) setRpdUsage({ used: data[0].used, limit: data[0].limit });
+                    })
+                    .catch(() => {});
+            }
         }
     };
 
@@ -1545,6 +1654,18 @@ export default function Home() {
                         <h1>{currentBuildingName}</h1>
                     </div>
                     <div className={styles.headerRight}>
+                        {hasUnreadAnnouncements && (
+                            <button
+                                className={styles.iconBtn}
+                                onClick={() => { window.location.href = '/announcements'; }}
+                                title="お知らせ（未読あり）"
+                            >
+                                <span className={styles.bellWrapper}>
+                                    <Bell size={20} />
+                                    <span className={styles.bellDot} />
+                                </span>
+                            </button>
+                        )}
                         <button
                             className={styles.iconBtn}
                             onClick={() => setIsPeopleModalOpen(true)}
@@ -1847,11 +1968,19 @@ export default function Home() {
                             ) : null}
                             <ChevronDown size={14} className={styles.chevron} />
                         </button>
+                        {rpdUsage && (
+                            <span
+                                className={`${styles.rpdBadge} ${rpdUsage.used >= rpdUsage.limit ? styles.rpdExhausted : rpdUsage.used >= rpdUsage.limit * 0.8 ? styles.rpdWarning : ''}`}
+                                title={`RPD: ${rpdUsage.used}/${rpdUsage.limit} (リセット: 太平洋時間 0:00)`}
+                            >
+                                {rpdUsage.used}/{rpdUsage.limit}
+                            </span>
+                        )}
                         <ToolModeSelector
                             selectedPlaybook={selectedPlaybook}
                             onPlaybookChange={setSelectedPlaybook}
-                            playbookParams={playbookParams}
-                            onPlaybookParamsChange={setPlaybookParams}
+                            playbookArgs={playbookArgs}
+                            onPlaybookArgsChange={setPlaybookArgs}
                         />
                     </div>
 
@@ -1975,9 +2104,11 @@ export default function Home() {
                 isOpen={isOptionsOpen}
                 onClose={() => setIsOptionsOpen(false)}
                 currentModel={selectedModel}
-                onModelChange={(id, displayName) => {
+                onModelChange={(id, displayName, rateLimit) => {
                     setSelectedModel(id);
                     setSelectedModelDisplayName(displayName);
+                    setSelectedModelRateLimit(rateLimit || null);
+                    setRpdUsage(null); // Reset RPD on model change
                 }}
             />
 
@@ -2003,6 +2134,13 @@ export default function Home() {
                 <PlaybookPermissionDialog
                     request={permissionRequest}
                     onRespond={handlePermissionResponse}
+                />
+            )}
+
+            {tweetConfirm && (
+                <TweetConfirmDialog
+                    request={tweetConfirm}
+                    onRespond={handleTweetConfirmResponse}
                 />
             )}
 

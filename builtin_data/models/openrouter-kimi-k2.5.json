@@ -3,6 +3,7 @@
   "system_prompt": "",
   "display_name": "Kimi K2.5 (OpenRouter)",
   "provider": "openai",
+  "group": "openrouter",
   "context_length": 256000,
   "default_max_history_messages": 80,
   "metabolism_keep_messages": 60,
@@ -10,6 +11,8 @@
   "api_key_env": "OPENROUTER_API_KEY",
   "convert_system_to_user": true,
   "supports_images": true,
+  "max_image_bytes": 7500000,
+  "max_image_embeds": 4,
   "reasoning_passback_field": "reasoning_details",
   "request_kwargs": {
     "extra_body": {

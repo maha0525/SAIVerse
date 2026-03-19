@@ -171,7 +171,8 @@ class InitializationMixin:
         import os
 
         def _get_default_model() -> str:
-            return os.getenv("SAIVERSE_DEFAULT_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
+            from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+            return os.getenv("SAIVERSE_DEFAULT_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
 
         base_model = model or _get_default_model()
         self.model = None  # No global override by default
@@ -182,6 +183,7 @@ class InitializationMixin:
         self.max_history_messages_override: Optional[int] = None
         self.metabolism_enabled: bool = True
         self.metabolism_keep_messages_override: Optional[int] = None
+        self.max_image_embeds_override: Optional[int] = None
         self.startup_warnings: List[Dict[str, str]] = []
 
     def _update_timezone_cache(self, tz_name: Optional[str]) -> None:

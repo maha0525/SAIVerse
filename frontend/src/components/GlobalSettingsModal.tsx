@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Settings, Database, Globe, Layers, Save, RefreshCw, Power, Play, Pause, Monitor, Sun, Moon, Cpu, ChevronDown, Info, ExternalLink } from 'lucide-react';
+import { X, Settings, Database, Globe, Layers, Save, RefreshCw, Power, Play, Pause, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink } from 'lucide-react';
 import styles from './GlobalSettingsModal.module.css';
 import WorldEditor from './settings/WorldEditor';
 import ModalOverlay from './common/ModalOverlay';
@@ -71,6 +71,16 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     // Developer Mode
     const [developerMode, setDeveloperMode] = useState(false);
 
+    // X Polling
+    const [xPollingEnabled, setXPollingEnabled] = useState(false);
+
+    // Monitoring toggles
+    const [updateCheckEnabled, setUpdateCheckEnabled] = useState(true);
+    const [announcementsEnabled, setAnnouncementsEnabled] = useState(true);
+
+    // Collapsible sections
+    const [envSectionOpen, setEnvSectionOpen] = useState(false);
+
     // Theme
     const [theme, setTheme] = useState<'system' | 'light' | 'dark'>('system');
 
@@ -90,9 +100,11 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
 
     useEffect(() => {
         if (isOpen && activeTab === 'env') {
-            loadEnvVars();
             loadGlobalAutoState();
             loadDeveloperModeState();
+            loadXPollingState();
+            loadUpdateCheckState();
+            loadAnnouncementsState();
             // Load theme from localStorage
             const saved = localStorage.getItem('saiverse-theme') as 'system' | 'light' | 'dark' | null;
             setTheme(saved || 'system');
@@ -110,6 +122,13 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             loadPlaybookPerms();
         }
     }, [isOpen, activeTab]);
+
+    // Load env vars when section is expanded
+    useEffect(() => {
+        if (isOpen && activeTab === 'env' && envSectionOpen && envVars.length === 0) {
+            loadEnvVars();
+        }
+    }, [isOpen, activeTab, envSectionOpen]);
 
     const loadPlaybookPerms = async () => {
         setPlaybookPermsLoading(true);
@@ -194,6 +213,90 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
             }
         } catch (e) {
             console.error("Failed to toggle developer mode", e);
+        }
+    };
+
+    const loadXPollingState = async () => {
+        try {
+            const res = await fetch('/api/config/x-polling');
+            if (res.ok) {
+                const data = await res.json();
+                setXPollingEnabled(data.enabled);
+            }
+        } catch (e) {
+            console.error("Failed to load X polling state", e);
+        }
+    };
+
+    const toggleXPolling = async () => {
+        const newState = !xPollingEnabled;
+        try {
+            const res = await fetch('/api/config/x-polling', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: newState })
+            });
+            if (res.ok) {
+                setXPollingEnabled(newState);
+            }
+        } catch (e) {
+            console.error("Failed to toggle X polling", e);
+        }
+    };
+
+    const loadUpdateCheckState = async () => {
+        try {
+            const res = await fetch('/api/config/update-check');
+            if (res.ok) {
+                const data = await res.json();
+                setUpdateCheckEnabled(data.enabled);
+            }
+        } catch (e) {
+            console.error("Failed to load update check state", e);
+        }
+    };
+
+    const toggleUpdateCheck = async () => {
+        const newState = !updateCheckEnabled;
+        try {
+            const res = await fetch('/api/config/update-check', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: newState })
+            });
+            if (res.ok) {
+                setUpdateCheckEnabled(newState);
+            }
+        } catch (e) {
+            console.error("Failed to toggle update check", e);
+        }
+    };
+
+    const loadAnnouncementsState = async () => {
+        try {
+            const res = await fetch('/api/config/announcements-monitor');
+            if (res.ok) {
+                const data = await res.json();
+                setAnnouncementsEnabled(data.enabled);
+            }
+        } catch (e) {
+            console.error("Failed to load announcements state", e);
+        }
+    };
+
+    const toggleAnnouncements = async () => {
+        const newState = !announcementsEnabled;
+        try {
+            const res = await fetch('/api/config/announcements-monitor', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: newState })
+            });
+            if (res.ok) {
+                setAnnouncementsEnabled(newState);
+            }
+        } catch (e) {
+            console.error("Failed to toggle announcements", e);
         }
     };
 
@@ -475,14 +578,21 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                     </div>
                                 )}
 
-                                <div className={styles.sectionHeader}>
-                                    <h3>サーバー環境変数 (.env)</h3>
-                                    <button className={styles.restartBtn} onClick={restartServer}>
+                                <div
+                                    className={styles.sectionHeader}
+                                    style={{ cursor: 'pointer', userSelect: 'none' }}
+                                    onClick={() => setEnvSectionOpen(!envSectionOpen)}
+                                >
+                                    <h3>
+                                        {envSectionOpen ? <ChevronDown size={16} style={{ verticalAlign: 'middle', marginRight: 4 }} /> : <ChevronRight size={16} style={{ verticalAlign: 'middle', marginRight: 4 }} />}
+                                        サーバー環境変数 (.env)
+                                    </h3>
+                                    <button className={styles.restartBtn} onClick={(e) => { e.stopPropagation(); restartServer(); }}>
                                         <Power size={16} /> サーバー再起動
                                     </button>
                                 </div>
 
-                                {isLoading ? (
+                                {envSectionOpen && (isLoading ? (
                                     <div>読み込み中...</div>
                                 ) : (
                                     <>
@@ -510,10 +620,42 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                             </button>
                                         </div>
                                     </>
-                                )}
+                                ))}
+
+                                {/* Update Check Toggle */}
+                                <div className={styles.toggleContainer} style={{ marginTop: '1.5rem' }}>
+                                    <div>
+                                        <div className={styles.toggleLabel}>
+                                            アップデート通知
+                                        </div>
+                                        <div className={styles.toggleDescription}>
+                                            新しいバージョンの有無を定期的にチェックします
+                                        </div>
+                                    </div>
+                                    <div
+                                        className={`${styles.toggle} ${updateCheckEnabled ? styles.active : ''}`}
+                                        onClick={toggleUpdateCheck}
+                                    />
+                                </div>
+
+                                {/* Announcements Monitor Toggle */}
+                                <div className={styles.toggleContainer}>
+                                    <div>
+                                        <div className={styles.toggleLabel}>
+                                            お知らせ通知
+                                        </div>
+                                        <div className={styles.toggleDescription}>
+                                            開発者からのお知らせを定期的に取得します
+                                        </div>
+                                    </div>
+                                    <div
+                                        className={`${styles.toggle} ${announcementsEnabled ? styles.active : ''}`}
+                                        onClick={toggleAnnouncements}
+                                    />
+                                </div>
 
                                 {/* Developer Mode Toggle */}
-                                <div className={styles.toggleContainer} style={{ marginTop: '1.5rem' }}>
+                                <div className={styles.toggleContainer}>
                                     <div>
                                         <div className={styles.toggleLabel}>
                                             <Cpu size={18} />
@@ -528,6 +670,24 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                         onClick={toggleDeveloperMode}
                                     />
                                 </div>
+
+                                {/* X Mention Polling Toggle (developer mode only) */}
+                                {developerMode && (
+                                    <div className={styles.toggleContainer}>
+                                        <div>
+                                            <div className={styles.toggleLabel}>
+                                                Xメンション監視
+                                            </div>
+                                            <div className={styles.toggleDescription}>
+                                                ONにするとX連携済みペルソナのメンションを5分間隔で自動監視します
+                                            </div>
+                                        </div>
+                                        <div
+                                            className={`${styles.toggle} ${xPollingEnabled ? styles.active : ''}`}
+                                            onClick={toggleXPolling}
+                                        />
+                                    </div>
+                                )}
                             </div>
                         )}
 

@@ -551,11 +551,25 @@ class XAIClient(LLMClient):
                 if prefix:
                     yield prefix + "\n"
 
+                # ── Streaming timing instrumentation ──
+                stream_start = time.monotonic()
+                first_text_chunk_time: float | None = None
+                last_text_chunk_time: float | None = None
+                chunk_count = 0
+                text_chunk_count = 0
+
                 response = None
                 for resp, chunk in chat.stream():
+                    chunk_count += 1
                     response = resp
                     chunk_content = getattr(chunk, "content", None)
                     if chunk_content:
+                        text_chunk_count += 1
+                        now = time.monotonic()
+                        if first_text_chunk_time is None:
+                            first_text_chunk_time = now
+                            _log.debug("[xai_stream] First text chunk at +%.2fs", now - stream_start)
+                        last_text_chunk_time = now
                         yield chunk_content
 
                     # Check for reasoning content in chunk
@@ -563,6 +577,16 @@ class XAIClient(LLMClient):
                     if isinstance(reasoning_text, str) and reasoning_text:
                         reasoning_chunks.append(reasoning_text)
                         yield {"type": "thinking", "content": reasoning_text}
+
+                # ── Stream completed: log timing summary ──
+                stream_end = time.monotonic()
+                _log.info(
+                    "[xai_stream] Text stream completed: total=%.2fs, chunks=%d, text_chunks=%d, "
+                    "first_text=+%.2fs, last_text=+%.2fs",
+                    stream_end - stream_start, chunk_count, text_chunk_count,
+                    (first_text_chunk_time - stream_start) if first_text_chunk_time else -1,
+                    (last_text_chunk_time - stream_start) if last_text_chunk_time else -1,
+                )
 
                 if response:
                     self._store_usage_from_response(response)
@@ -591,7 +615,15 @@ class XAIClient(LLMClient):
             response = None
             text_fragments: List[str] = []
 
+            # ── Streaming timing instrumentation (tool mode) ──
+            stream_start_t = time.monotonic()
+            first_text_chunk_time_t: float | None = None
+            last_text_chunk_time_t: float | None = None
+            chunk_count_t = 0
+            text_chunk_count_t = 0
+
             for resp, chunk in chat.stream():
+                chunk_count_t += 1
                 response = resp
                 chunk_content = getattr(chunk, "content", None)
 
@@ -602,11 +634,28 @@ class XAIClient(LLMClient):
                     yield {"type": "thinking", "content": reasoning_text}
 
                 if chunk_content:
+                    text_chunk_count_t += 1
+                    now = time.monotonic()
+                    if first_text_chunk_time_t is None:
+                        first_text_chunk_time_t = now
+                        _log.debug("[xai_stream] First text chunk at +%.2fs (tool_mode)", now - stream_start_t)
+                    last_text_chunk_time_t = now
+
                     if not prefix_yielded and history_snippets:
                         yield "\n".join(history_snippets) + "\n"
                         prefix_yielded = True
                     text_fragments.append(chunk_content)
                     yield chunk_content
+
+            # ── Stream completed: log timing summary ──
+            stream_end_t = time.monotonic()
+            _log.info(
+                "[xai_stream] Tool stream completed: total=%.2fs, chunks=%d, text_chunks=%d, "
+                "first_text=+%.2fs, last_text=+%.2fs",
+                stream_end_t - stream_start_t, chunk_count_t, text_chunk_count_t,
+                (first_text_chunk_time_t - stream_start_t) if first_text_chunk_time_t else -1,
+                (last_text_chunk_time_t - stream_start_t) if last_text_chunk_time_t else -1,
+            )
 
             if response:
                 self._store_usage_from_response(response)

@@ -8,6 +8,10 @@
   "metabolism_keep_messages": 60,
   "supports_images": true,
   "prefer_paid": false,
+  "rate_limit": {
+    "rpd": 1000,
+    "reset_timezone": "America/Los_Angeles"
+  },
   "parameters": {
     "temperature": {
       "type": "slider",

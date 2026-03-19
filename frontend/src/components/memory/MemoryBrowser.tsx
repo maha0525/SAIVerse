@@ -425,8 +425,14 @@ export default function MemoryBrowser({ personaId }: MemoryBrowserProps) {
             const disposition = res.headers.get("Content-Disposition");
             let filename = "export.json";
             if (disposition) {
-                const match = disposition.match(/filename="?([^"]+)"?/);
-                if (match) filename = match[1];
+                // RFC 5987: filename*=UTF-8''encoded_name
+                const rfc5987 = disposition.match(/filename\*=UTF-8''(.+?)(?:;|$)/i);
+                if (rfc5987) {
+                    filename = decodeURIComponent(rfc5987[1]);
+                } else {
+                    const match = disposition.match(/filename="?([^"]+)"?/);
+                    if (match) filename = match[1];
+                }
             }
             a.href = url;
             a.download = filename;

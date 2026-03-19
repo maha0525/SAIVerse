@@ -158,7 +158,8 @@ def configure_logging(level_name: Optional[str] = None) -> Path:
     _configure_error_logger()
 
     # Suppress overly verbose HTTP library debug logging (base64 request bodies)
-    for noisy_logger in ("httpcore", "httpx", "anthropic._base_client"):
+    # Also suppress PIL.TiffImagePlugin which dumps EXIF tag details at DEBUG
+    for noisy_logger in ("httpcore", "httpx", "openai._base_client", "anthropic._base_client", "PIL.TiffImagePlugin"):
         logging.getLogger(noisy_logger).setLevel(max(level, logging.INFO))
 
     _initialized = True

@@ -322,18 +322,18 @@ MODEL_ROLE_DESCRIPTIONS = {
 PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
     "gemini_paid": {
         "default_model": "gemini-3-flash-preview-paid",
-        "lightweight_model": "gemini-2.5-flash-lite-preview-09-2025-paid",
-        "agentic_model": "gemini-2.5-flash-lite-preview-09-2025-paid",
-        "memory_weave_model": "gemini-2.5-flash-lite-preview-09-2025-paid",
-        "image_summary_model": "gemini-2.5-flash-lite-preview-09-2025-paid",
+        "lightweight_model": "gemini-3.1-flash-lite-preview-paid",
+        "agentic_model": "gemini-3.1-flash-lite-preview-paid",
+        "memory_weave_model": "gemini-3.1-flash-lite-preview-paid",
+        "image_summary_model": "gemini-3.1-flash-lite-preview-paid",
         "task_creation_model": "gemini-3-flash-preview-paid",
     },
     "gemini_free": {
         "default_model": "gemini-3-flash-preview",
-        "lightweight_model": "gemini-2.5-flash-lite-preview-09-2025",
-        "agentic_model": "gemini-2.5-flash-lite-preview-09-2025",
-        "memory_weave_model": "gemini-2.5-flash-lite-preview-09-2025",
-        "image_summary_model": "gemini-2.5-flash-lite-preview-09-2025",
+        "lightweight_model": "gemini-3.1-flash-lite-preview",
+        "agentic_model": "gemini-3.1-flash-lite-preview",
+        "memory_weave_model": "gemini-3.1-flash-lite-preview",
+        "image_summary_model": "gemini-3.1-flash-lite-preview",
         "task_creation_model": "gemini-3-flash-preview",
     },
     "anthropic": {
@@ -346,11 +346,11 @@ PROVIDER_PRESETS: Dict[str, Dict[str, Optional[str]]] = {
     },
     "openai": {
         "default_model": "gpt-4o-2024-11-20",
-        "lightweight_model": "gpt-5-nano",
-        "agentic_model": "gpt-5-mini",
-        "memory_weave_model": "gpt-5-mini",
-        "image_summary_model": "gpt-5-nano",
-        "task_creation_model": "gpt-5-mini",
+        "lightweight_model": "gpt-5.4-nano",
+        "agentic_model": "gpt-5.4-mini",
+        "memory_weave_model": "gpt-5.4-mini",
+        "image_summary_model": "gpt-5.4-nano",
+        "task_creation_model": "gpt-5.4-mini",
     },
     "grok": {
         "default_model": "grok-4-1-fast-reasoning",
@@ -427,7 +427,9 @@ PROVIDER_DISPLAY_NAMES = {
 }
 
 # Default Gemini image summary model (used as fallback for non-Gemini providers)
-_GEMINI_IMAGE_SUMMARY_DEFAULT = "gemini-2.5-flash-lite-preview-09-2025"
+from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+
+_GEMINI_IMAGE_SUMMARY_DEFAULT = BUILTIN_DEFAULT_LITE_MODEL
 
 
 def _detect_best_provider() -> str:

@@ -8,23 +8,19 @@
         },
         {
             "name": "available_playbooks",
-            "description": "JSON list of available playbooks",
-            "source": "parent.available_playbooks"
+            "description": "JSON list of available playbooks"
         },
         {
             "name": "meta_playbook_name",
-            "description": "Name of the current meta playbook being executed",
-            "source": "parent.meta_playbook_name"
+            "description": "Name of the current meta playbook being executed"
         },
         {
             "name": "meta_playbook_description",
-            "description": "Description of the current meta playbook",
-            "source": "parent.meta_playbook_description"
+            "description": "Description of the current meta playbook"
         },
         {
             "name": "executed_playbooks",
-            "description": "List of playbooks already executed in this meta playbook run",
-            "source": "parent.executed_playbooks"
+            "description": "List of playbooks already executed in this meta playbook run"
         }
     ],
     "output_schema": [

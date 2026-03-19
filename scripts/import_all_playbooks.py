@@ -91,6 +91,11 @@ def import_playbooks_from_directory(
                 router_callable = data.get("router_callable", False)
                 user_selectable = data.get("user_selectable", False)
                 dev_only = data.get("dev_only", False)
+                required_credentials = data.get("required_credentials")
+                required_credentials_json = (
+                    json.dumps(required_credentials, ensure_ascii=False)
+                    if required_credentials else None
+                )
 
                 # Check if already exists
                 existing = session.query(Playbook).filter(Playbook.name == name).first()
@@ -114,6 +119,7 @@ def import_playbooks_from_directory(
                             existing.router_callable = router_callable
                             existing.user_selectable = user_selectable
                             existing.dev_only = dev_only
+                            existing.required_credentials = required_credentials_json
                             updated_count += 1
                             logging.info(f"Updated playbook '{name}' (router_callable={router_callable})")
                     else:
@@ -146,6 +152,7 @@ def import_playbooks_from_directory(
                         router_callable=router_callable,
                         user_selectable=user_selectable,
                         dev_only=dev_only,
+                        required_credentials=required_credentials_json,
                     )
                     session.add(record)
                     imported_count += 1

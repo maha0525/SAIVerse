@@ -115,7 +115,8 @@ def estimate_chronicle_cost(
         # Use query params if provided, otherwise fall back to env vars
         batch_size = batch_size or int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", "20"))
         consolidation_size = consolidation_size or int(os.getenv("MEMORY_WEAVE_CONSOLIDATION_SIZE", "10"))
-        model_name = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
+        from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+        model_name = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
 
         # Calculate qualifying unprocessed messages using the same
         # contiguous-run logic as generate_unprocessed().  Messages in
@@ -692,7 +693,8 @@ def _run_chronicle_generation(
         # Initialize LLM client
         _update_job(job_id, message="Initializing LLM client...")
 
-        env_model = os.getenv("MEMORY_WEAVE_MODEL", "gemini-2.5-flash-lite-preview-09-2025")
+        from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+        env_model = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
         model_to_use = model_name or env_model
 
         resolved_model_id, model_config = find_model_config(model_to_use)
