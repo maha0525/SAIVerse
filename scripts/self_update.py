@@ -245,12 +245,12 @@ def update_via_git(project_dir: str) -> bool:
                     # git when pop fails, so the user can recover later.
                     logging.warning(
                         "stash pop caused conflicts — resetting working tree "
-                        "to remote state. Your local changes are still saved "
-                        "in git stash. Run 'git stash pop' manually to "
-                        "recover them. Detail: %s",
+                        "to remote state via git reset --hard HEAD. "
+                        "Your local changes are still saved in git stash. "
+                        "Run 'git stash pop' manually to recover them. "
+                        "Detail: %s",
                         pop_result.stderr.strip()[:500])
-                    _git("checkout", "--theirs", ".")
-                    _git("reset")
+                    _git("reset", "--hard", "HEAD")
             except (subprocess.SubprocessError, FileNotFoundError):
                 logging.warning("Failed to pop stash. Run 'git stash pop' manually.")
 
