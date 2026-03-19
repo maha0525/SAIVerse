@@ -1,7 +1,7 @@
 {
-  "model": "gemini-2.5-flash-lite-preview-09-2025",
+  "model": "gemini-2.5-flash",
   "system_prompt": "",
-  "display_name": "Gemini 2.5 Flash Lite Preview 09 2025(無料枠)",
+  "display_name": "Gemini 2.5 Flash(無料枠)",
   "provider": "gemini",
   "context_length": 250000,
   "default_max_history_messages": 80,
@@ -35,7 +35,7 @@
       ],
       "default": "24576",
       "label": "Thinking Budget",
-      "description": "思考トークン予算。defaultで思考なし(Liteのデフォルト)。数値で思考を有効化し予算を指定(512〜24576)。"
+      "description": "思考トークン予算。defaultで思考なし。数値で思考を有効化し予算を指定(512〜24576)。"
     },
     "safety_harassment": {
       "type": "dropdown",
