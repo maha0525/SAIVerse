@@ -9,7 +9,7 @@
   "supports_images": true,
   "prefer_paid": false,
   "rate_limit": {
-    "rpd": 250,
+    "rpd": 20,
     "reset_timezone": "America/Los_Angeles"
   },
   "parameters": {
