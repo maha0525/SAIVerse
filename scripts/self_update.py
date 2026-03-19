@@ -238,12 +238,19 @@ def update_via_git(project_dir: str) -> bool:
                 if pop_result.returncode == 0:
                     logging.info("Stashed changes restored successfully")
                 else:
-                    # Conflicts — leave stash intact so user can recover manually
+                    # stash pop with conflicts leaves merge markers in the
+                    # working tree — these WILL break the build.  Reset the
+                    # working tree to the clean remote state so the app can
+                    # start.  The stash entry is preserved automatically by
+                    # git when pop fails, so the user can recover later.
                     logging.warning(
-                        "Could not restore stashed changes (conflicts likely). "
-                        "Your local changes are saved in git stash. "
-                        "Run 'git stash pop' manually to recover them. "
-                        "Detail: %s", pop_result.stderr.strip()[:500])
+                        "stash pop caused conflicts — resetting working tree "
+                        "to remote state. Your local changes are still saved "
+                        "in git stash. Run 'git stash pop' manually to "
+                        "recover them. Detail: %s",
+                        pop_result.stderr.strip()[:500])
+                    _git("checkout", "--theirs", ".")
+                    _git("reset")
             except (subprocess.SubprocessError, FileNotFoundError):
                 logging.warning("Failed to pop stash. Run 'git stash pop' manually.")
 
