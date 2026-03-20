@@ -12,17 +12,6 @@
     "user_selectable": false,
     "nodes": [
         {
-            "id": "get_context",
-            "type": "tool",
-            "action": "get_since_last_user_conversation",
-            "args_input": {
-                "include_raw_log": false,
-                "max_raw_messages": 5
-            },
-            "output_key": "recent_context",
-            "next": "analyze"
-        },
-        {
             "id": "analyze",
             "type": "llm",
             "context_profile": "router",
@@ -537,5 +526,5 @@
             "next": null
         }
     ],
-    "start_node": "get_context"
+    "start_node": "analyze"
 }
