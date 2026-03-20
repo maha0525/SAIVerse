@@ -18,6 +18,14 @@ REM --- 2. Update code ---
 set CODE_UPDATED=0
 where git >nul 2>nul
 if %errorlevel% equ 0 (
+    if not exist ".git" (
+        echo [UPDATE] Git found but repository not initialized. Setting up git...
+        git init
+        git remote add origin https://github.com/maha0525/SAIVerse.git
+        git fetch origin
+        git reset origin/main
+        echo [OK] Git repository initialized
+    )
     if exist ".git" (
         echo [UPDATE] Fetching latest code with git pull...
         git pull

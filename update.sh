@@ -17,6 +17,14 @@ fi
 
 # --- 2. Update code ---
 CODE_UPDATED=0
+if command -v git &>/dev/null && [ ! -d ".git" ]; then
+    echo "[UPDATE] Git が見つかりましたがリポジトリが未初期化です。セットアップ中..."
+    git init
+    git remote add origin https://github.com/maha0525/SAIVerse.git
+    git fetch origin
+    git reset origin/main
+    echo "[OK] Git リポジトリを初期化しました"
+fi
 if command -v git &>/dev/null && [ -d ".git" ]; then
     echo "[UPDATE] git pull で最新コードを取得中..."
     if git pull; then

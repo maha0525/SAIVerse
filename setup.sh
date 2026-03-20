@@ -88,7 +88,22 @@ else
     echo "[OK] expansion_data は既に存在します"
 fi
 
-# --- 9. Create .env from example if not exists ---
+# --- 9. Initialize git repository if git is available ---
+if command -v git &>/dev/null; then
+    if [ ! -d ".git" ]; then
+        echo ""
+        echo "[SETUP] Git が見つかりました。自動更新のためリポジトリを初期化中..."
+        git init
+        git remote add origin https://github.com/maha0525/SAIVerse.git
+        git fetch origin
+        git reset origin/main
+        echo "[OK] Git リポジトリを初期化しました"
+    else
+        echo "[OK] Git リポジトリは既に存在します"
+    fi
+fi
+
+# --- 10. Create .env from example if not exists ---
 if [ ! -f ".env" ]; then
     echo ""
     echo "[SETUP] .env ファイルを作成中..."
@@ -99,7 +114,7 @@ else
     echo "[OK] .env は既に存在します"
 fi
 
-# --- 10. SearXNG setup ---
+# --- 11. SearXNG setup ---
 echo ""
 echo "[SETUP] SearXNG (Web検索エンジン) をセットアップ中..."
 if bash ./scripts/setup_searxng.sh; then
@@ -108,7 +123,7 @@ else
     echo "[WARN] SearXNG のセットアップに失敗しましたが、Web検索なしでも動作します。"
 fi
 
-# --- 11. Pre-download embedding model ---
+# --- 12. Pre-download embedding model ---
 echo ""
 echo "[SETUP] 埋め込みモデルをダウンロード中 (初回のみ、数分かかります)..."
 python -c "from huggingface_hub import snapshot_download; snapshot_download('intfloat/multilingual-e5-small', local_dir='sbert/multilingual-e5-small', ignore_patterns=['*.bin', '*.safetensors', '*.h5', 'openvino/*', '*.ot'])" || {
@@ -116,7 +131,7 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download('int
 }
 echo "[OK] 埋め込みモデルのダウンロード完了"
 
-# --- 12. Complete ---
+# --- 13. Complete ---
 echo ""
 echo "========================================"
 echo "  セットアップ完了!"
