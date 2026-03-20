@@ -474,7 +474,9 @@ def main():
                     (["git", "remote", "add", "origin",
                       "https://github.com/maha0525/SAIVerse.git"], "git remote add"),
                     (["git", "fetch", "origin"], "git fetch"),
+                    (["git", "branch", "-M", "main"], "git branch -M main"),
                     (["git", "reset", "origin/main"], "git reset"),
+                    (["git", "branch", "--set-upstream-to=origin/main"], "git branch --set-upstream-to"),
                 ]:
                     r = subprocess.run(cmd, cwd=project_dir, capture_output=True,
                                        text=True, timeout=120)
