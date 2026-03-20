@@ -51,7 +51,7 @@
 - 必要に応じて `requirements-dev.txt` または同等の開発依存定義
 - CI 設定ファイル
 
-## フェーズ 1
+## フェーズ 1 ✅ 完了 (2026-03-20)
 
 ### 目的
 
@@ -60,22 +60,28 @@
 
 ### 実施内容
 
-- `api/routes/system.py`
-  - `/update` にローカル限定ガード、確認トークン、または認証を追加する
-  - 破壊的 API を無条件で叩けないようにする
+- `api/security.py` (新規)
+  - `DestructiveActionGuard` クラスを実装
+  - `local_or_token_guard`: localhost またはトークン認証で保護
+  - `SAIVERSE_DESTRUCTIVE_TOKEN` 環境変数でトークン設定可能
 - `api/routes/world.py`
-  - world 系の変更 API に認可または最低限の保護を入れる
-  - ツール登録 API に入力制約を加える
+  - 全 CRUD エンドポイント (cities, buildings, ais, tools 等) に `_guard: Depends(local_or_token_guard)` を追加
+  - 外部からの無認証アクセスをブロック
 - `main.py`
-  - CORS を最小権限に見直す
-  - `allow_credentials=True` とワイルドカード併用を解消する
-  - ポート掃除時に無関係な PID を kill しない設計へ変更する
+  - CORS を localhost-only に変更 (環境変数 `SAIVERSE_CORS_ORIGINS` で拡張可能)
+  - `_is_saiverse_process()` で PID 判定を追加
+  - `SAIVERSE_FORCE_PORT_CLEANUP` 環境変数で動作制御
+
+### 追加テスト
+
+- `tests/test_security.py`: セキュリティガードの単体テスト (12件)
+- `tests/test_phase1_integration.py`: FastAPI エンドポイントの結合テスト (14件)
 
 ### 完了条件
 
-- 外部ページから無認証で更新・設定変更 API を叩けない
-- SAIVerse 起動時に別アプリの PID を自動 kill しない
-- CORS 設定が開発用と本番想定で整理されている
+- ✅ 外部ページから無認証で更新・設定変更 API を叩けない
+- ✅ SAIVerse 起動時に別アプリの PID を自動 kill しない
+- ✅ CORS 設定が開発用と本番想定で整理されている
 
 ### チェックリスト
 
@@ -84,8 +90,12 @@
 - [x] `main.py` の CORS 設定を見直した
 - [x] `main.py` のポート掃除ロジックを安全側へ変更した
 - [x] 変更内容をドキュメント化した
+- [x] 単体テスト・結合テストを追加した
+- [x] CI で全テストがパスすることを確認した
 
-## フェーズ 2
+## フェーズ 2 ⏸️ 保留中
+
+> **状態**: Phase 1 完了後、一旦待機中
 
 ### 目的
 
@@ -118,7 +128,9 @@
 - [ ] 既存 builtin tool が壊れていないことを確認した
 - [ ] エラーメッセージが利用者視点で分かる形になっている
 
-## フェーズ 3
+## フェーズ 3 ⏸️ 保留中
+
+> **状態**: Phase 2 完了後に検討
 
 ### 目的
 
@@ -153,7 +165,7 @@
 - [ ] デバッグログを整理した
 - [ ] UI の既存挙動が保たれていることを確認した
 
-## フェーズ 4
+## フェーズ 4 ✅ 完了 (2026-03-20)
 
 ### 目的
 
@@ -163,23 +175,20 @@
 ### 実施内容
 
 - Python 側
-  - `pytest` を明示的に導入する
-  - `ruff` の設定を 1 箇所へ統一する
-  - 開発依存を明文化する
+  - `requirements-dev.txt` を新規作成 (pytest, pytest-asyncio, ruff)
+  - `ruff.toml` で設定を統一
 - Frontend 側
-  - test script を追加する
-  - 必要なら `vitest` または `jest` を導入する
+  - `frontend/vitest.config.ts` を新規作成
+  - `package.json` に test スクリプトを追加
 - CI
-  - backend test
-  - backend lint
-  - frontend lint
-  - frontend test
-  を自動実行する
+  - `.github/workflows/ci.yml` を新規作成
+  - backend-lint, backend-test, frontend-lint, frontend-test の 4 ジョブを定義
+  - PR 作成・更新時に自動実行
 
 ### 完了条件
 
-- 新しい開発環境でテスト・lint を再現できる
-- CI が最低限の品質ゲートとして機能する
+- ✅ 新しい開発環境でテスト・lint を再現できる
+- ✅ CI が最低限の品質ゲートとして機能する
 
 ### チェックリスト
 
