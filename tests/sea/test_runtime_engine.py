@@ -195,10 +195,10 @@ def test_set_playbook_returns_400_for_invalid_selected_playbook(monkeypatch) -> 
     monkeypatch.setattr("database.models.Playbook", _PlaybookModel)
     monkeypatch.setattr("database.models.UserSettings", _UserSettingsModel)
 
-    manager = SimpleNamespace(state=SimpleNamespace(current_playbook=None, playbook_params={}, developer_mode=False))
+    manager = SimpleNamespace(state=SimpleNamespace(current_playbook=None, playbook_args={}, developer_mode=False))
     req = config_route.PlaybookOverrideRequest(
         playbook="meta_user_manual",
-        playbook_params={"selected_playbook": "もう一度試してみて"},
+        args={"selected_playbook": "もう一度試してみて"},
     )
 
     try:

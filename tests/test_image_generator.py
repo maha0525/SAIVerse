@@ -14,7 +14,12 @@ generate_image = _mod.generate_image
 class TestImageGenerator(unittest.TestCase):
     @patch.object(_mod, 'store_image_bytes')
     @patch.object(_mod, '_generate_with_nano_banana_2')
-    def test_generate_image(self, mock_gen, mock_store):
+    @patch.object(_mod, 'get_available_image_models')
+    @patch.object(_mod, '_is_image_model_available')
+    def test_generate_image(self, mock_is_available, mock_available, mock_gen, mock_store):
+        # Mock model availability check
+        mock_is_available.return_value = True
+        mock_available.return_value = ["nano_banana_2"]
         # Mock generation backend to return image bytes
         mock_gen.return_value = (b'imgdata', 'image/png')
 
@@ -43,7 +48,12 @@ class TestImageGenerator(unittest.TestCase):
     @patch.object(_mod, '_generate_with_gpt_image', side_effect=RuntimeError("No key"))
     @patch.object(_mod, '_generate_with_nano_banana_pro', side_effect=RuntimeError("No candidates"))
     @patch.object(_mod, '_generate_with_nano_banana_2', side_effect=RuntimeError("No candidates"))
-    def test_generate_image_error_returns_error_text(self, mock_nb2, mock_nbp, mock_gpt, mock_grok):
+    @patch.object(_mod, 'get_available_image_models')
+    @patch.object(_mod, '_is_image_model_available')
+    def test_generate_image_error_returns_error_text(self, mock_is_available, mock_available, mock_nb2, mock_nbp, mock_gpt, mock_grok):
+        # Mock model availability check
+        mock_is_available.return_value = True
+        mock_available.return_value = ["nano_banana_2"]
         # When all backends fail, should return error text without raising
         with patch('tools.context.get_active_persona_id', return_value=None), \
              patch('tools.context.get_active_manager', return_value=None):
