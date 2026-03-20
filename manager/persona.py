@@ -149,8 +149,25 @@ class PersonaMixin:
         self._set_persona_avatar(pid, db_ai.AVATAR_IMAGE)
 
         persona_model = db_ai.DEFAULT_MODEL or self.model or self._base_model
-        persona_context_length = get_context_length(persona_model)
-        persona_provider = get_model_provider(persona_model)
+        try:
+            persona_context_length = get_context_length(persona_model)
+            persona_provider = get_model_provider(persona_model)
+        except ValueError:
+            fallback = self._base_model
+            logging.warning(
+                "Persona '%s': model config '%s' not found. Falling back to '%s'.",
+                pid, persona_model, fallback,
+            )
+            self.startup_warnings.append({
+                "source": "model_config",
+                "message": (
+                    f"ペルソナ '{pid}' のモデル '{persona_model}' の設定ファイルが見つかりません。"
+                    f"デフォルトモデル '{fallback}' にフォールバックしました。"
+                ),
+            })
+            persona_model = fallback
+            persona_context_length = get_context_length(persona_model)
+            persona_provider = get_model_provider(persona_model)
         persona_lightweight_model = db_ai.LIGHTWEIGHT_MODEL
 
         from saiverse.data_paths import find_file, PROMPTS_DIR
