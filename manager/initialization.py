@@ -181,7 +181,8 @@ class InitializationMixin:
             self.context_length = get_context_length(base_model)
             self.provider = get_model_provider(base_model)
         except ValueError:
-            fallback = _get_default_model()
+            from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+            fallback = BUILTIN_DEFAULT_LITE_MODEL
             city = getattr(self, "city_name", "unknown")
             msg = (
                 f"City '{city}' のデフォルトモデル '{base_model}' の設定ファイルが見つかりません。"
