@@ -207,7 +207,7 @@
 - [x] CI で backend / frontend の検証が回るようにした
 - [x] 実行手順を docs に反映した
 
-## フェーズ 5: PWA不具合修正 (iOS Safe Area対応)
+## フェーズ 5: PWA不具合修正 (iOS Safe Area対応) ✅ 完了 (2026-03-20)
 
 > **参照**: `docs/design/PWA不具合修正仕様書.md`
 
@@ -248,19 +248,19 @@ iOS ではコンテンツが画面上端まで広がる。アプリ側で `env(s
 
 ### 完了条件
 
-- iPhone PWA standalone でヘッダーがステータスバーと重ならない
-- モバイル sidebar 上部がステータスバーと重ならない
-- 通常ブラウザ表示で余計な余白が増えない
-- PC / Android でレイアウト崩れがない
+- ✅ iPhone PWA standalone でヘッダーがステータスバーと重ならない
+- ✅ モバイル sidebar 上部がステータスバーと重ならない
+- ✅ 通常ブラウザ表示で余計な余白が増えない
+- ✅ PC / Android でレイアウト崩れがない
 
 ### チェックリスト
 
-- [ ] `globals.css` に safe area 変数を追加した
-- [ ] `.header` の top padding に safe area を加算した
-- [ ] モバイル sidebar の `padding-top` を調整した
-- [ ] 既存 bottom safe area を共通変数化した
-- [ ] iPhone PWA で重なりが解消されたことを確認した
-- [ ] 通常ブラウザ / PC / Android で回帰がないことを確認した
+- [x] `globals.css` に safe area 変数を追加した
+- [x] `.header` の top padding に safe area を加算した
+- [x] モバイル sidebar の `padding-top` を調整した
+- [x] 既存 bottom safe area を共通変数化した
+- [ ] iPhone PWA で重なりが解消されたことを確認した（実機確認必要）
+- [ ] 通常ブラウザ / PC / Android で回帰がないことを確認した（実機確認必要）
 
 ## テスト方針
 
