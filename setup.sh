@@ -41,8 +41,8 @@ source .venv/bin/activate
 # --- 5. pip install ---
 echo ""
 echo "[SETUP] Pythonパッケージをインストール中..."
-pip install --upgrade pip >/dev/null 2>&1
-pip install -r requirements.txt
+python -m pip install --upgrade pip >/dev/null 2>&1
+python -m pip install -r requirements.txt
 echo "[OK] Pythonパッケージのインストール完了"
 
 # --- 6. npm install ---
@@ -138,6 +138,9 @@ echo ""
 echo "========================================"
 echo "  セットアップ完了!"
 echo "========================================"
+if [ -f "VERSION" ]; then
+    echo "  Version: $(cat VERSION)"
+fi
 echo ""
 echo "起動方法:"
 echo "  ./start.sh"

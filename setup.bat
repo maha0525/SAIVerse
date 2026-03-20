@@ -259,6 +259,10 @@ echo.
 echo ========================================
 echo   Setup Complete!
 echo ========================================
+if exist "VERSION" (
+    set /p CURRENT_VER=<VERSION
+    echo   Version: !CURRENT_VER!
+)
 echo.
 echo To start SAIVerse:
 echo   Double-click start.bat
