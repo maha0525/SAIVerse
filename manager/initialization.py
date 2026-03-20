@@ -176,16 +176,25 @@ class InitializationMixin:
 
         base_model = model or _get_default_model()
         self.model = None  # No global override by default
+        self.startup_warnings: List[Dict[str, str]] = []
         try:
             self.context_length = get_context_length(base_model)
             self.provider = get_model_provider(base_model)
         except ValueError:
             fallback = _get_default_model()
+            msg = (
+                f"モデル '{base_model}' の設定ファイルが見つかりません。"
+                f"デフォルトモデル '{fallback}' にフォールバックしました。"
+            )
             LOGGER.warning(
                 "Model config '%s' not found. Falling back to '%s'. "
                 "Check that the model JSON file exists in builtin_data/models/ or user_data/models/.",
                 base_model, fallback,
             )
+            self.startup_warnings.append({
+                "source": "model_config",
+                "message": msg,
+            })
             base_model = fallback
             self.context_length = get_context_length(base_model)
             self.provider = get_model_provider(base_model)
@@ -195,7 +204,6 @@ class InitializationMixin:
         self.metabolism_enabled: bool = True
         self.metabolism_keep_messages_override: Optional[int] = None
         self.max_image_embeds_override: Optional[int] = None
-        self.startup_warnings: List[Dict[str, str]] = []
 
     def _update_timezone_cache(self, tz_name: Optional[str]) -> None:
         """Update cached timezone information for this manager.
