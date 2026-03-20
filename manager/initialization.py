@@ -182,8 +182,9 @@ class InitializationMixin:
             self.provider = get_model_provider(base_model)
         except ValueError:
             fallback = _get_default_model()
+            city = getattr(self, "city_name", "unknown")
             msg = (
-                f"モデル '{base_model}' の設定ファイルが見つかりません。"
+                f"City '{city}' のデフォルトモデル '{base_model}' の設定ファイルが見つかりません。"
                 f"デフォルトモデル '{fallback}' にフォールバックしました。"
             )
             LOGGER.warning(
