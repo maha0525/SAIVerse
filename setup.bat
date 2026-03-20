@@ -143,7 +143,7 @@ REM --- 5. pip install ---
 echo.
 echo [SETUP] Installing Python packages...
 python -m pip install --upgrade pip >nul 2>nul
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 if %errorlevel% neq 0 (
     echo [ERROR] pip install failed.
     pause
