@@ -146,6 +146,7 @@ def compile_with_langgraph(
     # Set recursion limit high enough for agentic loops (default is 25, too low for multi-step agents)
     langgraph_config = {"recursion_limit": 1000}
 
+    final_state = None
     try:
         # Check cancellation before starting execution
         if cancellation_token:
@@ -191,6 +192,17 @@ def compile_with_langgraph(
             original_error=exc,
             user_message=f"プレイブックの実行中にエラーが発生しました: {exc}",
         ) from exc
+    finally:
+        # Flush PulseContext to DB if this is the top-level playbook (not a sub-playbook).
+        # Using finally ensures logs are preserved even when LLM errors or other
+        # exceptions abort execution — otherwise all accumulated entries are lost.
+        if parent.get("_pulse_context") is None:
+            # Prefer final_state (has the most up-to-date context), fall back to
+            # initial_state (still has the same PulseContext reference from setup).
+            _source_state = final_state if isinstance(final_state, dict) else initial_state
+            _final_pulse_ctx = _source_state.get("_pulse_context")
+            if _final_pulse_ctx:
+                runtime._flush_pulse_logs(persona, _final_pulse_ctx)
 
     # Write back state variables to parent_state based on output_schema
     if parent_state is not None and isinstance(final_state, dict) and playbook.output_schema:
@@ -210,14 +222,6 @@ def compile_with_langgraph(
         persona.execution_state["playbook"] = None
         persona.execution_state["node"] = None
         persona.execution_state["status"] = "idle"
-
-    # Flush PulseContext to DB if this is the top-level playbook (not a sub-playbook)
-    if parent.get("_pulse_context") is None:
-        # This was a new PulseContext created for this pulse — flush and clean up
-        if isinstance(final_state, dict):
-            _final_pulse_ctx = final_state.get("_pulse_context")
-            if _final_pulse_ctx:
-                runtime._flush_pulse_logs(persona, _final_pulse_ctx)
 
     # speak/think nodes already emitted; return collected texts for UI consistency
     return list(_lg_outputs)
