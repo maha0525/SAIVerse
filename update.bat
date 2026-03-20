@@ -7,6 +7,13 @@ echo   SAIVerse Update
 echo ========================================
 echo.
 
+REM --- Phase tracking ---
+set RESULT_CODE=
+set RESULT_PIP=
+set RESULT_DB=
+set RESULT_PLAYBOOK=
+set RESULT_FRONTEND=
+
 REM --- 1. Check venv exists ---
 if not exist ".venv\Scripts\activate.bat" (
     echo [ERROR] .venv not found. Please run setup.bat first.
@@ -32,6 +39,7 @@ if %errorlevel% equ 0 (
         echo [UPDATE] Fetching latest code with git pull...
         git pull
         if !errorlevel! neq 0 (
+            set RESULT_CODE=WARN: git pull failed
             echo.
             echo [WARN] git pull failed.
             echo   If there are merge conflicts, please resolve them manually.
@@ -40,6 +48,12 @@ if %errorlevel% equ 0 (
         ) else (
             echo [OK] Code updated
             set CODE_UPDATED=1
+            set RESULT_CODE=OK
+        )
+        REM Show current version after pull
+        if exist "VERSION" (
+            set /p CURRENT_VER=<VERSION
+            echo [INFO] Current version: !CURRENT_VER!
         )
         goto :code_update_done
     )
@@ -58,6 +72,7 @@ if "!UPDATE_CHOICE!"=="1" (
     echo [UPDATE] Downloading from GitHub...
     powershell -ExecutionPolicy Bypass -File scripts\update_from_github.ps1
     if !errorlevel! neq 0 (
+        set RESULT_CODE=WARN: download failed
         echo [ERROR] Download failed.
         echo   Please download and extract manually:
         echo   https://github.com/maha0525/SAIVerse/archive/refs/heads/main.zip
@@ -66,9 +81,11 @@ if "!UPDATE_CHOICE!"=="1" (
         pause
     ) else (
         set CODE_UPDATED=1
+        set RESULT_CODE=OK
     )
 ) else (
     echo [INFO] Skipped code update.
+    set RESULT_CODE=Skipped
 )
 
 :code_update_done
@@ -82,11 +99,13 @@ echo [UPDATE] Updating Python packages...
 python -m pip install --upgrade pip >nul 2>nul
 python -m pip install -r requirements.txt
 if %errorlevel% neq 0 (
+    set RESULT_PIP=FAILED
     echo [ERROR] pip install failed.
     pause
     exit /b 1
 )
 echo [OK] Python packages updated
+set RESULT_PIP=OK
 
 REM --- 5. Database migration ---
 set SAIVERSE_DB=%USERPROFILE%\.saiverse\user_data\database\saiverse.db
@@ -95,8 +114,10 @@ if exist "%SAIVERSE_DB%" (
     echo [UPDATE] Updating database schema...
     python database\migrate.py --db "%SAIVERSE_DB%"
     if !errorlevel! neq 0 (
+        set RESULT_DB=WARN: failed
         echo [WARN] Database update failed. Check logs for details.
     ) else (
+        set RESULT_DB=OK
         echo [OK] Database schema updated
     )
 ) else (
@@ -112,8 +133,10 @@ echo.
 echo [UPDATE] Updating playbooks...
 python scripts\import_all_playbooks.py --force
 if %errorlevel% neq 0 (
+    set RESULT_PLAYBOOK=WARN: failed
     echo [WARN] Playbook update failed.
 ) else (
+    set RESULT_PLAYBOOK=OK
     echo [OK] Playbooks updated
 )
 
@@ -126,14 +149,17 @@ if %errorlevel% equ 0 (
     pushd frontend
     call npm install
     if !errorlevel! neq 0 (
+        set RESULT_FRONTEND=WARN: failed
         echo [WARN] npm install failed.
         popd
     ) else (
         popd
+        set RESULT_FRONTEND=OK
         echo [OK] Frontend packages updated
     )
 ) else (
     echo.
+    set RESULT_FRONTEND=Skipped (Node.js not found)
     echo [WARN] Node.js not found. Skipping frontend update.
     echo   Please install from https://nodejs.org/
 )
@@ -147,10 +173,20 @@ if exist ".env.example" (
     )
 )
 
-REM --- 9. Complete ---
+REM --- 9. Summary ---
 echo.
 echo ========================================
-echo   Update Complete!
+echo   Update Summary
+echo ========================================
+if exist "VERSION" (
+    set /p CURRENT_VER=<VERSION
+    echo   Version:    !CURRENT_VER!
+)
+echo   Code:       !RESULT_CODE!
+echo   Packages:   !RESULT_PIP!
+echo   Database:   !RESULT_DB!
+echo   Playbooks:  !RESULT_PLAYBOOK!
+echo   Frontend:   !RESULT_FRONTEND!
 echo ========================================
 echo.
 echo To start SAIVerse:
