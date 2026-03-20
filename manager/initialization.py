@@ -176,8 +176,19 @@ class InitializationMixin:
 
         base_model = model or _get_default_model()
         self.model = None  # No global override by default
-        self.context_length = get_context_length(base_model)
-        self.provider = get_model_provider(base_model)
+        try:
+            self.context_length = get_context_length(base_model)
+            self.provider = get_model_provider(base_model)
+        except ValueError:
+            fallback = _get_default_model()
+            LOGGER.warning(
+                "Model config '%s' not found. Falling back to '%s'. "
+                "Check that the model JSON file exists in builtin_data/models/ or user_data/models/.",
+                base_model, fallback,
+            )
+            base_model = fallback
+            self.context_length = get_context_length(base_model)
+            self.provider = get_model_provider(base_model)
         self._base_model = base_model
         self.model_parameter_overrides: Dict[str, Any] = {}
         self.max_history_messages_override: Optional[int] = None
