@@ -14,6 +14,13 @@ class _FakeQuery:
     def filter(self, *_args, **_kwargs):
         return self
 
+    def all(self):
+        """Return list of playbooks for router_callable query."""
+        model_name = getattr(self._model, "__name__", "")
+        if model_name == "Playbook":
+            return [SimpleNamespace(name="deep_research")] if self._playbook_exists else []
+        return []
+
     def first(self):
         model_name = getattr(self._model, "__name__", "")
         if model_name == "Playbook":
@@ -52,12 +59,21 @@ class _FakeManager:
 
 def _patch_session_local(monkeypatch: pytest.MonkeyPatch, *, playbook_exists: bool) -> None:
     import database.session
+    import database.models
 
     monkeypatch.setattr(
         database.session,
         "SessionLocal",
         lambda: _FakeSession(playbook_exists=playbook_exists),
     )
+
+    # Create a mock Playbook class with required attributes
+    class _FakePlaybookModel:
+        name = "playbook"
+        router_callable = True
+        dev_only = False
+
+    monkeypatch.setattr(database.models, "Playbook", _FakePlaybookModel)
 
 
 def test_set_playbook_meta_user_manual_rejects_unknown_selected_playbook(monkeypatch: pytest.MonkeyPatch):

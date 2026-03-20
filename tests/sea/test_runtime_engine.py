@@ -156,6 +156,7 @@ def test_set_playbook_returns_400_for_invalid_selected_playbook(monkeypatch) -> 
     class _PlaybookModel:
         router_callable = object()
         dev_only = object()
+        name = "playbook"  # Add name as class attribute for filter comparison
 
     class _UserSettingsModel:
         USERID = object()
