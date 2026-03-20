@@ -39,12 +39,26 @@ if %errorlevel% equ 0 (
         echo [UPDATE] Fetching latest code with git pull...
         git pull
         if !errorlevel! neq 0 (
-            set RESULT_CODE=WARN: git pull failed
-            echo.
-            echo [WARN] git pull failed.
-            echo   If there are merge conflicts, please resolve them manually.
-            echo   Press any key to continue, or Ctrl+C to abort.
-            pause
+            echo [UPDATE] git pull failed. Stashing local changes and retrying...
+            git stash push --include-untracked -m "SAIVerse update auto-stash"
+            if !errorlevel! neq 0 (
+                set RESULT_CODE=FAILED: git stash and pull failed
+                echo [ERROR] git stash failed. Please resolve manually.
+                pause
+                goto :code_update_done
+            )
+            git pull
+            if !errorlevel! neq 0 (
+                set RESULT_CODE=FAILED: git pull failed even after stash
+                echo [ERROR] git pull failed even after stash.
+                pause
+                goto :code_update_done
+            )
+            echo [OK] Code updated (local changes stashed)
+            echo [INFO] Your local changes are saved in git stash.
+            echo   Run 'git stash pop' to restore them.
+            set CODE_UPDATED=1
+            set RESULT_CODE=OK (stashed)
         ) else (
             echo [OK] Code updated
             set CODE_UPDATED=1

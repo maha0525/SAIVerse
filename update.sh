@@ -41,12 +41,25 @@ if command -v git &>/dev/null && [ -d ".git" ]; then
         CODE_UPDATED=1
         RESULT_CODE="OK"
     else
-        RESULT_CODE="WARN: git pull failed"
-        echo ""
-        echo "[WARN] git pull に失敗しました。"
-        echo "  マージコンフリクトがある場合は手動で解決してください。"
-        echo "  Enterキーで続行、Ctrl+C で中止します。"
-        read -r
+        echo "[UPDATE] git pull に失敗しました。ローカル変更を stash して再試行します..."
+        if git stash push --include-untracked -m "SAIVerse update auto-stash"; then
+            if git pull; then
+                echo "[OK] コード更新完了 (ローカル変更は stash に保存)"
+                echo "[INFO] ローカル変更は 'git stash pop' で復元できます。"
+                CODE_UPDATED=1
+                RESULT_CODE="OK (stashed)"
+            else
+                RESULT_CODE="FAILED: git pull failed even after stash"
+                echo "[ERROR] stash 後も git pull に失敗しました。"
+                echo "  Enterキーで続行、Ctrl+C で中止します。"
+                read -r
+            fi
+        else
+            RESULT_CODE="FAILED: git stash and pull failed"
+            echo "[ERROR] git stash に失敗しました。手動で解決してください。"
+            echo "  Enterキーで続行、Ctrl+C で中止します。"
+            read -r
+        fi
     fi
     # Show current version after pull
     if [ -f "VERSION" ]; then
