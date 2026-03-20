@@ -125,7 +125,6 @@ def _run_official_import_task(
             return
         
         export = cached["export"]
-        tmp_path = cached["tmp_path"]
         records = export.conversations
         
         # 2. Resolve selected records

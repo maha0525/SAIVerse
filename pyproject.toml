@@ -34,17 +34,19 @@ Issues = "https://github.com/maha0525/SAIVerse/issues"
 [tool.black]
 line-length = 100
 
-[tool.ruff]
-line-length = 100
-target-version = "py311"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "W", "B", "UP"]
-ignore = ["E501", "UP017"]
+# Ruff configuration is in ruff.toml (single source of truth)
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+# Smoke tests run without dependencies; other tests need full environment
+markers = [
+    "smoke: Quick tests without external dependencies",
+]
 
 [tool.setuptools]
 packages = ["saiverse"]

@@ -107,15 +107,8 @@ def create_message(
         # Prepare message dict
         created_at = request.created_at if request.created_at is not None else time.time()
 
-        message = {
-            "role": request.role,
-            "content": request.content,
-            "timestamp": None,  # Will use created_at
-            "metadata": request.metadata,
-        }
-
         # Extract suffix from thread_id (e.g., "persona:suffix" -> "suffix")
-        thread_suffix = thread_id.split(":", 1)[1] if ":" in thread_id else thread_id
+        # Note: thread_suffix is for logging/debugging purposes
 
         # Use internal method to append message
         # We need to manually create the message to get its ID back

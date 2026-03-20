@@ -984,7 +984,6 @@ def _format_table_preview(table_value: Any, limit: int = 3) -> Dict[str, Any]:
 def _load_selected_thread(manager, select_data: SelectData, summaries: List[Dict[str, Any]], persona_id: str, page_size_value: Any):
     payload = select_data if isinstance(select_data, SelectData) else None
     summaries_list = _coerce_summaries(summaries)
-    preview_ids = [item.get("thread_id") for item in summaries_list[:3]]
     payload_info = _format_select_payload(payload)
     LOGGER.debug(
         "[memory-settings] _load_selected_thread - persona_id=%s summary_count=%s",
@@ -1318,14 +1317,14 @@ def create_memory_settings_ui(manager) -> None:
 
         return result
 
-    thread_select_event = thread_table.select(
+    thread_table.select(
         fn=_handle_thread_select,
         inputs=[thread_summaries_state, persona_id_state, page_size_dropdown],
         outputs=[thread_selected_state, *load_outputs],
         show_progress=True,
     )
 
-    message_select_event = message_table.select(
+    message_table.select(
         fn=_on_message_select,
         inputs=[message_state],
         outputs=[message_state, selected_message_info, current_message_box, edit_message_box],

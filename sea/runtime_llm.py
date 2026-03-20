@@ -382,7 +382,6 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 output_keys_spec = getattr(node_def, "output_keys", None)
                 text_key = None
                 function_call_key = None
-                thought_key = None
 
                 if output_keys_spec:
                     for mapping in output_keys_spec:
@@ -390,8 +389,6 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             text_key = mapping["text"]
                         if "function_call" in mapping:
                             function_call_key = mapping["function_call"]
-                        if "thought" in mapping:
-                            thought_key = mapping["thought"]
 
                 # Debug: log result type and keys
                 LOGGER.info("[DEBUG] LLM result type='%s', has content=%s, has tool_name=%s",

@@ -26,7 +26,6 @@ def compile_with_langgraph(
     pulse_type: Optional[str] = None,
 ) -> Optional[List[str]]:
     _lg_outputs: List[str] = []
-    temperature = runtime._default_temperature(persona)
     parent = parent_state or {}
 
     # Update execution state: playbook started (LangGraph path)
