@@ -30,7 +30,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 1rem 1.5rem;
+    padding: calc(1rem + var(--safe-area-top)) 1.5rem 1rem;
     border-bottom: 1px solid rgba(0, 0, 0, 0.1);
     background: rgba(255, 255, 255, 0.8);
     backdrop-filter: blur(10px);
@@ -608,7 +608,7 @@
     gap: 0.5rem;
     box-sizing: border-box;
     z-index: 10;
-    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+    padding-bottom: max(1rem, var(--safe-area-bottom));
     pointer-events: none; /* Allow scrollbar clicks through transparent areas */
 }
 

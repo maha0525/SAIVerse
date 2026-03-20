@@ -51,6 +51,14 @@
 - 必要に応じて `requirements-dev.txt` または同等の開発依存定義
 - CI 設定ファイル
 
+### フェーズ 5: PWA不具合修正 (iOS Safe Area対応)
+
+- `frontend/src/app/globals.css`
+- `frontend/src/app/page.module.css`
+- `frontend/src/components/Sidebar.module.css`
+
+> **参照**: `docs/design/PWA不具合修正仕様書.md`
+
 ## フェーズ 1 ✅ 完了 (2026-03-20)
 
 ### 目的
@@ -198,6 +206,61 @@
 - [x] frontend の test script を追加した
 - [x] CI で backend / frontend の検証が回るようにした
 - [x] 実行手順を docs に反映した
+
+## フェーズ 5: PWA不具合修正 (iOS Safe Area対応)
+
+> **参照**: `docs/design/PWA不具合修正仕様書.md`
+
+### 目的
+
+- iPhone PWA standalone 起動時、上部 UI がステータスバーと重なる問題を解消
+- safe area 対応を共通変数として整理し、再利用可能にする
+
+### 背景
+
+SAIVerse は `viewport-fit=cover` と `display: standalone` を使用しているため、
+iOS ではコンテンツが画面上端まで広がる。アプリ側で `env(safe-area-inset-top)` を
+使って安全領域を考慮する必要があるが、現状は未対応。
+
+### 実施内容
+
+1. **`globals.css`**: safe area カスタムプロパティを定義
+   ```css
+   :root {
+     --safe-area-top: env(safe-area-inset-top, 0px);
+     --safe-area-right: env(safe-area-inset-right, 0px);
+     --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+     --safe-area-left: env(safe-area-inset-left, 0px);
+   }
+   ```
+
+2. **`page.module.css`**: `.header` の上部 padding に safe area を加算
+   ```css
+   padding: calc(1rem + var(--safe-area-top)) 1.5rem 1rem;
+   ```
+
+3. **`Sidebar.module.css`**: モバイル sidebar に safe area を反映
+   ```css
+   padding-top: calc(0.75rem + var(--safe-area-top));
+   ```
+
+4. 既存の `env(safe-area-inset-bottom)` 直接参照を共通変数へ統一
+
+### 完了条件
+
+- iPhone PWA standalone でヘッダーがステータスバーと重ならない
+- モバイル sidebar 上部がステータスバーと重ならない
+- 通常ブラウザ表示で余計な余白が増えない
+- PC / Android でレイアウト崩れがない
+
+### チェックリスト
+
+- [ ] `globals.css` に safe area 変数を追加した
+- [ ] `.header` の top padding に safe area を加算した
+- [ ] モバイル sidebar の `padding-top` を調整した
+- [ ] 既存 bottom safe area を共通変数化した
+- [ ] iPhone PWA で重なりが解消されたことを確認した
+- [ ] 通常ブラウザ / PC / Android で回帰がないことを確認した
 
 ## テスト方針
 

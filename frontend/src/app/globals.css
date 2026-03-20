@@ -11,6 +11,11 @@
   --text-primary: #1f2937;
   --text-secondary: #64748b;
   --accent-primary: #06b6d4;
+  /* Safe area insets for PWA standalone mode (iOS) */
+  --safe-area-top: env(safe-area-inset-top, 0px);
+  --safe-area-right: env(safe-area-inset-right, 0px);
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-left: env(safe-area-inset-left, 0px);
 }
 
 [data-theme="dark"] {
