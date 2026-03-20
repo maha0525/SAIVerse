@@ -80,7 +80,7 @@ call .venv\Scripts\activate.bat
 REM --- 4. pip install ---
 echo [UPDATE] Updating Python packages...
 python -m pip install --upgrade pip >nul 2>nul
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 if %errorlevel% neq 0 (
     echo [ERROR] pip install failed.
     pause
