@@ -463,8 +463,32 @@ def main():
     if frontend_pids:
         time.sleep(2)
 
-    # Step 2: Update code
-    logging.info("Step 2: Updating code...")
+    # Step 2: Initialize git if available but not set up
+    if not has_git and shutil.which("git") is not None:
+        git_dir = os.path.join(project_dir, ".git")
+        if not os.path.isdir(git_dir):
+            logging.info("Git found but repository not initialized. Setting up...")
+            try:
+                for cmd, label in [
+                    (["git", "init"], "git init"),
+                    (["git", "remote", "add", "origin",
+                      "https://github.com/maha0525/SAIVerse.git"], "git remote add"),
+                    (["git", "fetch", "origin"], "git fetch"),
+                    (["git", "reset", "origin/main"], "git reset"),
+                ]:
+                    r = subprocess.run(cmd, cwd=project_dir, capture_output=True,
+                                       text=True, timeout=120)
+                    if r.returncode != 0:
+                        logging.warning("%s failed: %s", label, r.stderr.strip()[:300])
+                        break
+                else:
+                    has_git = True
+                    logging.info("Git repository initialized successfully")
+            except (subprocess.SubprocessError, FileNotFoundError) as e:
+                logging.warning("Git init failed: %s", e)
+
+    # Step 3: Update code
+    logging.info("Step 3: Updating code...")
     if has_git:
         success = update_via_git(project_dir)
     else:
@@ -475,16 +499,16 @@ def main():
     else:
         logging.info("Code update successful")
 
-    # Step 3: Update dependencies
-    logging.info("Step 3: Updating dependencies...")
+    # Step 4: Update dependencies
+    logging.info("Step 4: Updating dependencies...")
     update_dependencies(project_dir, venv_python)
 
-    # Step 4: Restart
-    logging.info("Step 4: Restarting application...")
+    # Step 5: Restart
+    logging.info("Step 5: Restarting application...")
     restart_application(project_dir, city_name, plat)
 
-    # Step 5: Cleanup
-    logging.info("Step 5: Cleanup...")
+    # Step 6: Cleanup
+    logging.info("Step 6: Cleanup...")
     try:
         config_path.unlink(missing_ok=True)
     except OSError as e:

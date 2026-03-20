@@ -205,7 +205,23 @@ if not exist "expansion_data" (
     echo [OK] expansion_data already exists
 )
 
-REM --- 9. Create .env from example if not exists ---
+REM --- 9. Initialize git repository if git is available ---
+where git >nul 2>nul
+if %errorlevel% equ 0 (
+    if not exist ".git" (
+        echo.
+        echo [SETUP] Git found. Initializing repository for automatic updates...
+        git init
+        git remote add origin https://github.com/maha0525/SAIVerse.git
+        git fetch origin
+        git reset origin/main
+        echo [OK] Git repository initialized
+    ) else (
+        echo [OK] Git repository already exists
+    )
+)
+
+REM --- 10. Create .env from example if not exists ---
 if not exist ".env" (
     echo.
     echo [SETUP] Creating .env file...
@@ -216,7 +232,7 @@ if not exist ".env" (
     echo [OK] .env already exists
 )
 
-REM --- 10. SearXNG setup ---
+REM --- 11. SearXNG setup ---
 echo.
 echo [SETUP] Setting up SearXNG (web search engine)...
 powershell -ExecutionPolicy Bypass -File scripts\setup_searxng.ps1
@@ -226,7 +242,7 @@ if %errorlevel% neq 0 (
     echo [OK] SearXNG setup complete
 )
 
-REM --- 11. Pre-download embedding model ---
+REM --- 12. Pre-download embedding model ---
 echo.
 echo [SETUP] Downloading embedding model (first time only, may take a few minutes)...
 python -c "from huggingface_hub import snapshot_download; snapshot_download('intfloat/multilingual-e5-small', local_dir='sbert/multilingual-e5-small', ignore_patterns=['*.bin', '*.safetensors', '*.h5', 'openvino/*', '*.ot'])"
@@ -236,7 +252,7 @@ if %errorlevel% neq 0 (
     echo [OK] Embedding model downloaded
 )
 
-REM --- 12. Complete ---
+REM --- 13. Complete ---
 echo.
 echo ========================================
 echo   Setup Complete!
