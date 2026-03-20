@@ -19,18 +19,19 @@ class _FakeQuery:
 
     def all(self):
         """Return list of playbooks for router_callable query."""
-        model_name = getattr(self._model, "__name__", "")
-        if model_name == "Playbook":
+        # Check for Playbook model by its marker attribute
+        if hasattr(self._model, "router_callable"):
             return [SimpleNamespace(name="deep_research")] if self._playbook_exists else []
         return []
 
     def first(self):
         """Return playbook if exists, None otherwise."""
-        model_name = getattr(self._model, "__name__", "")
-        if model_name == "Playbook":
+        # Check for Playbook model by its marker attribute
+        if hasattr(self._model, "router_callable"):
             # For Playbook.name == selected_playbook query, return based on playbook_exists
             return SimpleNamespace(name="deep_research") if self._playbook_exists else None
-        if model_name == "UserSettings":
+        # Check for UserSettings by SELECTED_META_PLAYBOOK attribute
+        if hasattr(self._model, "SELECTED_META_PLAYBOOK"):
             return SimpleNamespace(SELECTED_META_PLAYBOOK=None)
         return None
 
