@@ -539,6 +539,14 @@ All session logs are written under `~/.saiverse/user_data/logs/{YYYYMMDD_HHMMSS}
 - **Asymmetric bugs indicate implementation mismatch**: If a bug occurs in scenario A but not in scenario B (despite similar logic), the cause is usually an implementation difference, not a timing/race condition. Compare code paths side-by-side to find where they diverge.
 - **CSS text wrapping requires multiple layers**: For reliable wrapping of long URLs/strings in CSS, combine: `word-break: break-word`, `overflow-wrap: anywhere`, `max-width: 100%`, and `overflow-x: hidden` on both content and container elements. A single property is often insufficient, especially with frameworks that inject many nested elements.
 
+### Setup/Update Script Parity
+The following script groups **MUST** maintain the same logic. When modifying one, always update the others:
+
+- **Update scripts**: `update.bat`, `update.sh`, `scripts/self_update.py` — all three perform the same update flow (git pull with stash retry, pip install, DB migration, playbook import, frontend update). Changes to update logic (e.g. error handling, stash behavior, new update phases) must be applied to all three.
+- **Setup scripts**: `setup.bat`, `setup.sh` — both perform the same setup flow (Python/Node check, venv creation, pip install, npm install, DB seed, git init, .env creation, SearXNG, embedding model download). Changes to setup steps must be applied to both.
+
+When adding or modifying a step, check all related scripts for consistency. The `pip` command must always be invoked as `python -m pip` (not bare `pip`) to avoid Device Guard issues on Windows.
+
 ## Dependencies
 
 Key packages (see `requirements.txt`):
