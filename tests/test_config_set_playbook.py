@@ -10,8 +10,11 @@ class _FakeQuery:
     def __init__(self, playbook_exists: bool = True) -> None:
         self._model = None
         self._playbook_exists = playbook_exists
+        self._filter_count = 0  # Track number of filter calls
 
-    def filter(self, *_args, **_kwargs):
+    def filter(self, *args, **kwargs):
+        """Track filter calls - we just count them for simplicity."""
+        self._filter_count += 1
         return self
 
     def all(self):
@@ -22,9 +25,11 @@ class _FakeQuery:
         return []
 
     def first(self):
+        """Return playbook if exists, None otherwise."""
         model_name = getattr(self._model, "__name__", "")
         if model_name == "Playbook":
-            return object() if self._playbook_exists else None
+            # For Playbook.name == selected_playbook query, return based on playbook_exists
+            return SimpleNamespace(name="deep_research") if self._playbook_exists else None
         if model_name == "UserSettings":
             return SimpleNamespace(SELECTED_META_PLAYBOOK=None)
         return None
