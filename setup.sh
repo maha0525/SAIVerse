@@ -96,7 +96,9 @@ if command -v git &>/dev/null; then
         git init
         git remote add origin https://github.com/maha0525/SAIVerse.git
         git fetch origin
+        git branch -M main
         git reset origin/main
+        git branch --set-upstream-to=origin/main
         echo "[OK] Git リポジトリを初期化しました"
     else
         echo "[OK] Git リポジトリは既に存在します"
