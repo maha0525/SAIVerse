@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
 from pydantic import BaseModel
 from typing import List, Optional, Any
 import shutil
 from pathlib import Path
 
 from api.deps import get_manager
+from api.security import local_or_token_guard
 from saiverse.saiverse_manager import SAIVerseManager
 
 router = APIRouter()
@@ -124,28 +125,28 @@ class ItemUpdate(BaseModel):
 
 # City
 @router.post("/cities")
-def create_city(city: CityCreate, manager: SAIVerseManager = Depends(get_manager)):
+def create_city(city: CityCreate, manager: SAIVerseManager = Depends(get_manager), request: Request = None, _guard: None = Depends(local_or_token_guard)):
     return _check_result(manager.create_city(city.name, city.description, city.ui_port, city.api_port, city.timezone))
 
 @router.put("/cities/{city_id}")
-def update_city(city_id: int, city: CityUpdate, manager: SAIVerseManager = Depends(get_manager)):
+def update_city(city_id: int, city: CityUpdate, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     return _check_result(manager.update_city(city_id, city.name, city.description, city.online_mode, city.ui_port, city.api_port, city.timezone, city.host_avatar_path, None))
 
 @router.delete("/cities/{city_id}")
-def delete_city(city_id: int, manager: SAIVerseManager = Depends(get_manager)):
+def delete_city(city_id: int, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     return _check_result(manager.delete_city(city_id))
 
 # Building
 @router.post("/buildings")
-def create_building(b: BuildingCreate, manager: SAIVerseManager = Depends(get_manager)):
+def create_building(b: BuildingCreate, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     return _check_result(manager.create_building(b.name, b.description, b.capacity, b.system_instruction, b.city_id, b.building_id))
 
 @router.put("/buildings/{building_id}")
-def update_building(building_id: str, b: BuildingUpdate, manager: SAIVerseManager = Depends(get_manager)):
+def update_building(building_id: str, b: BuildingUpdate, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     return _check_result(manager.update_building(building_id, b.name, b.capacity, b.description, b.system_instruction, b.city_id, b.tool_ids, b.auto_interval, b.image_path, b.extra_prompt_files))
 
 @router.delete("/buildings/{building_id}")
-def delete_building(building_id: str, manager: SAIVerseManager = Depends(get_manager)):
+def delete_building(building_id: str, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     return _check_result(manager.delete_building(building_id))
 
 @router.get("/prompts/available")
@@ -159,23 +160,23 @@ def get_available_prompts():
 
 # AI
 @router.post("/ais")
-def create_ai(ai: AICreate, manager: SAIVerseManager = Depends(get_manager)):
+def create_ai(ai: AICreate, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     success, msg, ai_id, room_id = manager.create_ai(ai.name, ai.system_prompt, ai.home_city_id, ai.ai_id)
     if not success:
         raise HTTPException(status_code=400, detail=msg)
     return {"message": msg, "ai_id": ai_id, "room_id": room_id}
 
 @router.put("/ais/{ai_id}")
-def update_ai(ai_id: str, ai: AIUpdate, manager: SAIVerseManager = Depends(get_manager)):
+def update_ai(ai_id: str, ai: AIUpdate, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     return _check_result(manager.update_ai(ai_id, ai.name, ai.description, ai.system_prompt, ai.home_city_id, ai.default_model, ai.lightweight_model, ai.interaction_mode, ai.avatar_path, None, ai.appearance_image_path, chronicle_enabled=ai.chronicle_enabled))
 
 @router.delete("/ais/{ai_id}")
-def delete_ai(ai_id: str, manager: SAIVerseManager = Depends(get_manager)):
+def delete_ai(ai_id: str, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     return _check_result(manager.delete_ai(ai_id))
 
 @router.post("/ais/{ai_id}/move")
-def move_ai(ai_id: str, move: AIMove, manager: SAIVerseManager = Depends(get_manager)):
-    # Resolve building ID from name if necessary, or client passes ID? 
+def move_ai(ai_id: str, move: AIMove, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
+    # Resolve building ID from name if necessary, or client passes ID?
     # Logic in ui/world_editor.py uses names. But manager method `move_ai_from_editor` takes ID.
     # UI helper `move_ai_ui` converts name to ID.
     # Let's rely on client passing generic building lookup or we look it up here.
@@ -187,7 +188,7 @@ def move_ai(ai_id: str, move: AIMove, manager: SAIVerseManager = Depends(get_man
         if b.name == move.target_building_name:
             target_id = b.building_id
             break
-    
+
     # Fallback: maybe client passed ID as name?
     if not target_id:
         target_id = move.target_building_name
@@ -196,19 +197,19 @@ def move_ai(ai_id: str, move: AIMove, manager: SAIVerseManager = Depends(get_man
 
 # Blueprint
 @router.post("/blueprints")
-def create_blueprint(bp: BlueprintCreate, manager: SAIVerseManager = Depends(get_manager)):
+def create_blueprint(bp: BlueprintCreate, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     return _check_result(manager.create_blueprint(bp.name, bp.description, bp.city_id, bp.system_prompt, bp.entity_type))
 
 @router.put("/blueprints/{bp_id}")
-def update_blueprint(bp_id: int, bp: BlueprintCreate, manager: SAIVerseManager = Depends(get_manager)):
+def update_blueprint(bp_id: int, bp: BlueprintCreate, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     return _check_result(manager.update_blueprint(bp_id, bp.name, bp.description, bp.city_id, bp.system_prompt, bp.entity_type))
 
 @router.delete("/blueprints/{bp_id}")
-def delete_blueprint(bp_id: int, manager: SAIVerseManager = Depends(get_manager)):
+def delete_blueprint(bp_id: int, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     return _check_result(manager.delete_blueprint(bp_id))
 
 @router.post("/blueprints/{bp_id}/spawn")
-def spawn_blueprint(bp_id: int, spawn: BlueprintSpawn, manager: SAIVerseManager = Depends(get_manager)):
+def spawn_blueprint(bp_id: int, spawn: BlueprintSpawn, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     success, msg = manager.spawn_entity_from_blueprint(bp_id, spawn.entity_name, spawn.building_name)
     if not success:
         raise HTTPException(status_code=400, detail=msg)
@@ -216,20 +217,20 @@ def spawn_blueprint(bp_id: int, spawn: BlueprintSpawn, manager: SAIVerseManager 
 
 # Tool
 @router.post("/tools")
-def create_tool(t: ToolCreate, manager: SAIVerseManager = Depends(get_manager)):
+def create_tool(t: ToolCreate, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     return _check_result(manager.create_tool(t.name, t.description, t.module_path, t.function_name))
 
 @router.put("/tools/{tool_id}")
-def update_tool(tool_id: int, t: ToolCreate, manager: SAIVerseManager = Depends(get_manager)):
+def update_tool(tool_id: int, t: ToolCreate, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     return _check_result(manager.update_tool(tool_id, t.name, t.description, t.module_path, t.function_name))
 
 @router.delete("/tools/{tool_id}")
-def delete_tool(tool_id: int, manager: SAIVerseManager = Depends(get_manager)):
+def delete_tool(tool_id: int, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     return _check_result(manager.delete_tool(tool_id))
 
 # Item
 @router.post("/items")
-def create_item(i: ItemCreate, manager: SAIVerseManager = Depends(get_manager)):
+def create_item(i: ItemCreate, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     description = i.description
     file_path = i.file_path
     
@@ -264,7 +265,7 @@ def create_item(i: ItemCreate, manager: SAIVerseManager = Depends(get_manager)):
     return _check_result(manager.create_item(i.name, i.item_type, description, i.owner_kind, i.owner_id, i.state_json, file_path, creator_id=i.creator_id, source_context=i.source_context))
 
 @router.put("/items/{item_id}")
-def update_item(item_id: str, i: ItemUpdate, manager: SAIVerseManager = Depends(get_manager)):
+def update_item(item_id: str, i: ItemUpdate, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     return _check_result(manager.update_item(item_id, i.name, i.item_type, i.description, i.owner_kind, i.owner_id, i.state_json, i.file_path))
 
 @router.get("/items/{item_id}")
@@ -276,7 +277,7 @@ def get_item(item_id: str, manager: SAIVerseManager = Depends(get_manager)):
     return details
 
 @router.delete("/items/{item_id}")
-def delete_item(item_id: str, manager: SAIVerseManager = Depends(get_manager)):
+def delete_item(item_id: str, manager: SAIVerseManager = Depends(get_manager), _guard: None = Depends(local_or_token_guard)):
     return _check_result(manager.delete_item(item_id))
 
 
@@ -374,16 +375,16 @@ def _validate_playbook_data(name: str, description: str, nodes_json: str, schema
         raise HTTPException(status_code=400, detail=f"Schema validation error: {e}")
 
 @router.post("/playbooks")
-def create_playbook(pb: PlaybookCreate, db = Depends(get_db)):
+def create_playbook(pb: PlaybookCreate, db = Depends(get_db), _guard: None = Depends(local_or_token_guard)):
     """Create a new playbook."""
     # Check name uniqueness
     existing = db.query(PlaybookModel).filter(PlaybookModel.name == pb.name).first()
     if existing:
         raise HTTPException(status_code=400, detail="Playbook with this name already exists")
-    
+
     # Validate
     _validate_playbook_data(pb.name, pb.description, pb.nodes_json, pb.schema_json)
-    
+
     playbook = PlaybookModel(
         name=pb.name,
         description=pb.description,
@@ -399,21 +400,21 @@ def create_playbook(pb: PlaybookCreate, db = Depends(get_db)):
     return {"success": True, "id": playbook.id}
 
 @router.put("/playbooks/{playbook_id}")
-def update_playbook(playbook_id: int, pb: PlaybookUpdate, db = Depends(get_db)):
+def update_playbook(playbook_id: int, pb: PlaybookUpdate, db = Depends(get_db), _guard: None = Depends(local_or_token_guard)):
     """Update an existing playbook."""
     playbook = db.query(PlaybookModel).filter(PlaybookModel.id == playbook_id).first()
     if not playbook:
         raise HTTPException(status_code=404, detail="Playbook not found")
-    
+
     # Check name uniqueness if changed
     if pb.name != playbook.name:
         existing = db.query(PlaybookModel).filter(PlaybookModel.name == pb.name).first()
         if existing:
             raise HTTPException(status_code=400, detail="Playbook with this name already exists")
-    
+
     # Validate
     _validate_playbook_data(pb.name, pb.description, pb.nodes_json, pb.schema_json)
-    
+
     playbook.name = pb.name
     playbook.description = pb.description
     playbook.scope = pb.scope
@@ -425,12 +426,12 @@ def update_playbook(playbook_id: int, pb: PlaybookUpdate, db = Depends(get_db)):
     return {"success": True}
 
 @router.delete("/playbooks/{playbook_id}")
-def delete_playbook(playbook_id: int, db = Depends(get_db)):
+def delete_playbook(playbook_id: int, db = Depends(get_db), _guard: None = Depends(local_or_token_guard)):
     """Delete a playbook."""
     playbook = db.query(PlaybookModel).filter(PlaybookModel.id == playbook_id).first()
     if not playbook:
         raise HTTPException(status_code=404, detail="Playbook not found")
-    
+
     db.delete(playbook)
     db.commit()
     return {"success": True}
@@ -442,7 +443,7 @@ class PlaybookImportRequest(BaseModel):
 
 
 @router.post("/playbooks/import")
-def import_playbook(req: PlaybookImportRequest, db = Depends(get_db)):
+def import_playbook(req: PlaybookImportRequest, db = Depends(get_db), _guard: None = Depends(local_or_token_guard)):
     """Import a playbook from JSON content. Creates new or updates existing based on name."""
     try:
         data = json.loads(req.playbook_json)

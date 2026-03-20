@@ -10,12 +10,13 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional
-from urllib.request import urlopen, Request
+from urllib.request import urlopen, Request as URLRequest
 from urllib.error import URLError
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Depends
 
 from saiverse import app_state
+from api.security import local_or_token_guard, get_destructive_token
 
 router = APIRouter()
 LOGGER = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ def _fetch_latest_release() -> Optional[dict]:
         return _cached_latest
 
     url = f"https://api.github.com/repos/{_GITHUB_REPO}/releases/latest"
-    req = Request(url, headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "SAIVerse"})
+    req = URLRequest(url, headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "SAIVerse"})
     try:
         with urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -127,7 +128,7 @@ def _fetch_announcements() -> Optional[dict]:
 
     # Append timestamp to bypass GitHub CDN cache (max-age=300)
     bust = f"{'&' if '?' in _ANNOUNCEMENTS_GIST_URL else '?'}t={int(now)}"
-    req = Request(_ANNOUNCEMENTS_GIST_URL + bust, headers={"User-Agent": "SAIVerse"})
+    req = URLRequest(_ANNOUNCEMENTS_GIST_URL + bust, headers={"User-Agent": "SAIVerse"})
     try:
         with urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -149,8 +150,13 @@ async def get_announcements():
 
 
 @router.post("/update")
-async def trigger_update():
-    """Trigger a self-update: spawn detached updater, then shutdown."""
+async def trigger_update(request: Request, _: None = Depends(local_or_token_guard)):
+    """Trigger a self-update: spawn detached updater, then shutdown.
+
+    This endpoint is protected and requires either:
+    - Request from localhost (127.0.0.1), OR
+    - Valid token in X-Destructive-Token header
+    """
     project_dir = app_state.project_dir
     if not project_dir:
         raise HTTPException(status_code=500, detail="Project directory not set")

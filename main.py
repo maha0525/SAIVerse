@@ -124,8 +124,47 @@ def find_pid_for_port(port: int) -> Optional[int]:
     return None
 
 
-def kill_process_by_pid(pid: int):
-    """PIDを指定してプロセスを終了させる。"""
+def _is_saiverse_process(pid: int) -> bool:
+    """Check if a process is likely a SAIVerse-related process.
+
+    Returns True if the process command line contains SAIVerse-related keywords.
+    """
+    if psutil is None:
+        # Without psutil, we can't verify, so assume it's not SAIVerse
+        return False
+
+    try:
+        proc = psutil.Process(pid)
+        cmdline = " ".join(proc.cmdline()).lower()
+        # Check for SAIVerse-related keywords
+        saiverse_keywords = [
+            "saiverse",
+            "uvicorn",
+            "main.py",
+            "api_server.py",
+            "sds_server.py",
+        ]
+        return any(kw in cmdline for kw in saiverse_keywords)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.Error):
+        return False
+
+
+def kill_process_by_pid(pid: int, force: bool = False):
+    """PIDを指定してプロセスを終了させる。
+
+    Args:
+        pid: Process ID to terminate
+        force: If True, skip SAIVerse process verification (dangerous)
+    """
+    # Safety check: don't kill non-SAIVerse processes unless forced
+    if not force and not _is_saiverse_process(pid):
+        logging.warning(
+            "Port is in use by non-SAIVerse process (PID %s). "
+            "Not terminating. Set SAIVERSE_FORCE_PORT_CLEANUP=true to override.",
+            pid
+        )
+        return False
+
     if sys.platform == "win32":
         try:
             subprocess.run(
@@ -135,6 +174,7 @@ def kill_process_by_pid(pid: int):
             )
             logging.info("Process with PID %s has been terminated.", pid)
             time.sleep(1)
+            return True
         except subprocess.CalledProcessError as exc:
             if exc.returncode == 128:
                 logging.warning("Process with PID %s not found. It might have already been closed.", pid)
@@ -143,7 +183,7 @@ def kill_process_by_pid(pid: int):
                 logging.error("Failed to terminate process with PID %s. Stderr: %s", pid, stderr)
         except Exception as exc:
             logging.error("An unexpected error occurred while killing process %s: %s", pid, exc)
-        return
+        return False
 
     try:
         os.kill(pid, signal.SIGTERM)
@@ -151,23 +191,36 @@ def kill_process_by_pid(pid: int):
         try:
             os.kill(pid, 0)
         except OSError:
-            return
+            return True
         time.sleep(0.5)
         os.kill(pid, signal.SIGKILL)
         logging.info("Process with PID %s forcefully terminated.", pid)
+        return True
     except ProcessLookupError:
         logging.warning("Process with PID %s not found. It might have already been closed.", pid)
     except PermissionError:
         logging.error("Permission denied when trying to terminate PID %s.", pid)
     except Exception as exc:
         logging.error("Failed to terminate process %s: %s", pid, exc)
+    return False
+
+
+def _should_force_port_cleanup() -> bool:
+    """Check if force port cleanup is enabled via environment variable."""
+    return os.getenv("SAIVERSE_FORCE_PORT_CLEANUP", "false").lower() == "true"
 
 def cleanup_and_start_server(port: int, script_path: Path, name: str):
     """ポートをクリーンアップし、指定されたスクリプトをモジュールとしてバックグラウンドで起動する"""
+    force = _should_force_port_cleanup()
     pid = find_pid_for_port(port)
     if pid:
-        logging.warning("Port %s for %s is already in use by PID %s. Attempting to terminate the process.", port, name, pid)
-        kill_process_by_pid(pid)
+        if not kill_process_by_pid(pid, force=force):
+            logging.warning(
+                "Port %s is occupied by another process. "
+                "Server may fail to start. Set SAIVERSE_FORCE_PORT_CLEANUP=true to force cleanup.",
+                port
+            )
+            # Continue anyway - the server will fail to bind if port is still in use
 
     project_root = Path(__file__).parent
     # Convert file path to module path (e.g., database\api_server.py -> database.api_server)
@@ -179,10 +232,15 @@ def cleanup_and_start_server(port: int, script_path: Path, name: str):
 
 def cleanup_and_start_server_with_args(port: int, script_path: Path, name: str, db_file: str):
     """ポートをクリーンアップし、引数付きでスクリプトをモジュールとして起動する"""
+    force = _should_force_port_cleanup()
     pid = find_pid_for_port(port)
     if pid:
-        logging.warning("Port %s for %s is already in use by PID %s. Attempting to terminate the process.", port, name, pid)
-        kill_process_by_pid(pid)
+        if not kill_process_by_pid(pid, force=force):
+            logging.warning(
+                "Port %s is occupied by another process. "
+                "Server may fail to start. Set SAIVERSE_FORCE_PORT_CLEANUP=true to force cleanup.",
+                port
+            )
 
     project_root = Path(__file__).parent
     module_path = str(script_path.relative_to(project_root)).replace(os.sep, '.')[:-3]
@@ -386,12 +444,40 @@ def main():
 
     app = FastAPI()
 
-    # CORS settings (Allow frontend access)
+    # CORS settings (Configurable via environment variable)
+    # SAIVERSE_CORS_ORIGINS: comma-separated list of allowed origins
+    # Default: localhost only for security (not "*" with credentials)
+    cors_origins_env = os.getenv("SAIVERSE_CORS_ORIGINS", "")
+    if cors_origins_env:
+        cors_origins = [origin.strip() for origin in cors_origins_env.split(",") if origin.strip()]
+    else:
+        # Default: localhost only (safe for development)
+        cors_origins = [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            f"http://localhost:{manager.ui_port}",
+            f"http://127.0.0.1:{manager.ui_port}",
+        ]
+
+    allow_credentials = os.getenv("SAIVERSE_CORS_CREDENTIALS", "true").lower() == "true"
+
+    # Security note: Never use allow_origins=["*"] with allow_credentials=True
+    # This violates CORS spec and is a security risk
+    if "*" in cors_origins and allow_credentials:
+        logging.warning(
+            "CORS misconfiguration: allow_origins=['*'] with allow_credentials=True is insecure. "
+            "Set SAIVERSE_CORS_ORIGINS explicitly for production."
+        )
+        # Force safe defaults
+        cors_origins = [f"http://localhost:{manager.ui_port}"]
+        allow_credentials = True
+
+    logging.info("CORS origins: %s (credentials=%s)", cors_origins, allow_credentials)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Development only: allow all
-        allow_credentials=True,
-        allow_methods=["*"],
+        allow_origins=cors_origins,
+        allow_credentials=allow_credentials,
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
 
