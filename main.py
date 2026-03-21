@@ -413,6 +413,10 @@ def main():
     builtin_icons_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/api/static/builtin_icons", StaticFiles(directory=str(builtin_icons_dir)), name="builtin_icons")
 
+    # Legacy compatibility: older clients/history may still request /api/static/icons/*.png
+    # Map that path to the same builtin icons directory to avoid 404s during mixed-version access.
+    app.mount("/api/static/icons", StaticFiles(directory=str(builtin_icons_dir)), name="legacy_builtin_icons")
+
     # Mount assets directory for static files (legacy fallback)
     # Access via /api/static/icons/user.png
     app.mount("/api/static", StaticFiles(directory="assets"), name="static")
