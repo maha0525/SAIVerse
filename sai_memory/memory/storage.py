@@ -153,6 +153,31 @@ def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pulse_logs_pulse_id ON pulse_logs(pulse_id)")
 
+    # Memory notes table for lightweight knowledge capture
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memory_notes (
+            id TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            source_pulse_id TEXT,
+            source_time INTEGER,
+            resolved INTEGER NOT NULL DEFAULT 0,
+            group_label TEXT,
+            action TEXT,
+            target_page_id TEXT,
+            suggested_title TEXT,
+            target_category TEXT,
+            created_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_notes_resolved ON memory_notes(resolved)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_notes_thread ON memory_notes(thread_id)")
+    # Ensure metadata columns exist for databases created before this migration
+    for col in ("group_label", "action", "target_page_id", "suggested_title", "target_category"):
+        _ensure_column(conn, "memory_notes", col, "TEXT")
+
     conn.commit()
     return conn
 
@@ -1045,4 +1070,246 @@ def delete_pulse_logs_before(conn: sqlite3.Connection, before_timestamp: int) ->
     )
     conn.commit()
     return cur.rowcount
+
+
+# ---------------------------------------------------------------------------
+# Memory Notes
+# ---------------------------------------------------------------------------
+
+@dataclass
+class MemoryNote:
+    id: str
+    thread_id: str
+    content: str
+    source_pulse_id: Optional[str]
+    source_time: Optional[int]
+    resolved: bool
+    created_at: int
+    # Organization metadata (set by memory_organize_plan)
+    group_label: Optional[str] = None
+    action: Optional[str] = None  # append_to_existing / create_child / create_new
+    target_page_id: Optional[str] = None
+    suggested_title: Optional[str] = None
+    target_category: Optional[str] = None
+
+
+def add_memory_notes(
+    conn: sqlite3.Connection,
+    *,
+    thread_id: str,
+    notes: List[str],
+    source_pulse_id: Optional[str] = None,
+    source_time: Optional[int] = None,
+) -> List[MemoryNote]:
+    """Add multiple memory note items at once.
+
+    Args:
+        thread_id: Active thread at the time of extraction.
+        notes: List of short text items (one knowledge point each).
+        source_pulse_id: Pulse that these notes were extracted from.
+        source_time: Representative timestamp of the source messages.
+
+    Returns:
+        List of created MemoryNote objects.
+    """
+    now = int(time.time())
+    result: List[MemoryNote] = []
+    for text in notes:
+        text = text.strip()
+        if not text:
+            continue
+        note_id = str(uuid.uuid4())
+        conn.execute(
+            """
+            INSERT INTO memory_notes (id, thread_id, content, source_pulse_id, source_time, resolved, created_at)
+            VALUES (?, ?, ?, ?, ?, 0, ?)
+            """,
+            (note_id, thread_id, text, source_pulse_id, source_time, now),
+        )
+        result.append(MemoryNote(
+            id=note_id,
+            thread_id=thread_id,
+            content=text,
+            source_pulse_id=source_pulse_id,
+            source_time=source_time,
+            resolved=False,
+            created_at=now,
+        ))
+    conn.commit()
+    return result
+
+
+_NOTE_SELECT_COLS = (
+    "id, thread_id, content, source_pulse_id, source_time, resolved, "
+    "created_at, group_label, action, target_page_id, suggested_title, target_category"
+)
+
+
+def _row_to_note(row) -> MemoryNote:
+    return MemoryNote(
+        id=row[0],
+        thread_id=row[1],
+        content=row[2],
+        source_pulse_id=row[3],
+        source_time=row[4],
+        resolved=bool(row[5]),
+        created_at=row[6],
+        group_label=row[7],
+        action=row[8],
+        target_page_id=row[9],
+        suggested_title=row[10],
+        target_category=row[11],
+    )
+
+
+def get_unresolved_notes(
+    conn: sqlite3.Connection,
+    *,
+    thread_id: Optional[str] = None,
+    limit: int = 100,
+) -> List[MemoryNote]:
+    """Get unresolved memory notes, optionally filtered by thread."""
+    if thread_id:
+        cur = conn.execute(
+            f"SELECT {_NOTE_SELECT_COLS} FROM memory_notes "
+            "WHERE resolved = 0 AND thread_id = ? ORDER BY created_at ASC LIMIT ?",
+            (thread_id, limit),
+        )
+    else:
+        cur = conn.execute(
+            f"SELECT {_NOTE_SELECT_COLS} FROM memory_notes "
+            "WHERE resolved = 0 ORDER BY created_at ASC LIMIT ?",
+            (limit,),
+        )
+    return [_row_to_note(row) for row in cur.fetchall()]
+
+
+def get_unplanned_notes(conn: sqlite3.Connection, *, limit: int = 200) -> List[MemoryNote]:
+    """Get unresolved notes that have no organization metadata yet (group_label IS NULL)."""
+    cur = conn.execute(
+        f"SELECT {_NOTE_SELECT_COLS} FROM memory_notes "
+        "WHERE resolved = 0 AND group_label IS NULL ORDER BY created_at ASC LIMIT ?",
+        (limit,),
+    )
+    return [_row_to_note(row) for row in cur.fetchall()]
+
+
+def get_planned_notes_by_group(conn: sqlite3.Connection, group_label: str) -> List[MemoryNote]:
+    """Get unresolved notes for a specific group (ready for execution)."""
+    cur = conn.execute(
+        f"SELECT {_NOTE_SELECT_COLS} FROM memory_notes "
+        "WHERE resolved = 0 AND group_label = ? ORDER BY created_at ASC",
+        (group_label,),
+    )
+    return [_row_to_note(row) for row in cur.fetchall()]
+
+
+def get_planned_group_labels(conn: sqlite3.Connection) -> List[str]:
+    """Get distinct group labels that have unresolved planned notes."""
+    cur = conn.execute(
+        "SELECT group_label FROM memory_notes "
+        "WHERE resolved = 0 AND group_label IS NOT NULL "
+        "GROUP BY group_label ORDER BY MIN(created_at)",
+    )
+    return [row[0] for row in cur.fetchall()]
+
+
+def set_note_plan(
+    conn: sqlite3.Connection,
+    note_ids: List[str],
+    *,
+    group_label: str,
+    action: str,
+    target_page_id: Optional[str] = None,
+    suggested_title: Optional[str] = None,
+    target_category: Optional[str] = None,
+) -> int:
+    """Set organization metadata on notes (called by memory_organize_plan).
+
+    Args:
+        note_ids: IDs of notes to update.
+        group_label: Group name for this batch of notes.
+        action: One of 'append_to_existing', 'create_child', 'create_new'.
+        target_page_id: Target page for append/child actions.
+        suggested_title: Suggested title for new page creation.
+        target_category: Category for new page creation.
+
+    Returns:
+        Number of updated rows.
+    """
+    if not note_ids:
+        return 0
+    placeholders = ",".join("?" for _ in note_ids)
+    cur = conn.execute(
+        f"UPDATE memory_notes SET group_label = ?, action = ?, target_page_id = ?, "
+        f"suggested_title = ?, target_category = ? "
+        f"WHERE id IN ({placeholders})",
+        [group_label, action, target_page_id, suggested_title, target_category] + note_ids,
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def clear_note_plan(conn: sqlite3.Connection, note_ids: List[str]) -> int:
+    """Clear organization metadata from notes (revert to unplanned).
+
+    Used when exec phase determines a note doesn't belong in its assigned group.
+    """
+    if not note_ids:
+        return 0
+    placeholders = ",".join("?" for _ in note_ids)
+    cur = conn.execute(
+        f"UPDATE memory_notes SET group_label = NULL, action = NULL, "
+        f"target_page_id = NULL, suggested_title = NULL, target_category = NULL "
+        f"WHERE id IN ({placeholders})",
+        note_ids,
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def resolve_memory_notes(conn: sqlite3.Connection, note_ids: List[str]) -> int:
+    """Mark memory notes as resolved. Returns number of updated rows."""
+    if not note_ids:
+        return 0
+    placeholders = ",".join("?" for _ in note_ids)
+    cur = conn.execute(
+        f"UPDATE memory_notes SET resolved = 1 WHERE id IN ({placeholders})",
+        note_ids,
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def delete_resolved_notes_before(conn: sqlite3.Connection, before_timestamp: int) -> int:
+    """Delete resolved notes older than the given timestamp."""
+    cur = conn.execute(
+        "DELETE FROM memory_notes WHERE resolved = 1 AND created_at < ?",
+        (before_timestamp,),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def count_unresolved_notes(conn: sqlite3.Connection) -> int:
+    """Count unresolved memory notes."""
+    cur = conn.execute("SELECT COUNT(*) FROM memory_notes WHERE resolved = 0")
+    return cur.fetchone()[0]
+
+
+def count_unplanned_notes(conn: sqlite3.Connection) -> int:
+    """Count unresolved notes without organization metadata."""
+    cur = conn.execute(
+        "SELECT COUNT(*) FROM memory_notes WHERE resolved = 0 AND group_label IS NULL"
+    )
+    return cur.fetchone()[0]
+
+
+def count_planned_groups(conn: sqlite3.Connection) -> int:
+    """Count distinct groups of planned (but unresolved) notes."""
+    cur = conn.execute(
+        "SELECT COUNT(DISTINCT group_label) FROM memory_notes "
+        "WHERE resolved = 0 AND group_label IS NOT NULL"
+    )
+    return cur.fetchone()[0]
 

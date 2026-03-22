@@ -771,6 +771,30 @@ def _run_chronicle_generation(
             except ImportError as e:
                 LOGGER.warning(f"Memopedia modules not available: {e}")
 
+        # Memory note extraction callback (runs alongside Memopedia callback)
+        memory_notes_total = 0
+        try:
+            from sai_memory.memory.note_extractor import make_batch_callback as make_note_callback
+            note_callback = make_note_callback(
+                client, conn, thread_id="main",
+                memopedia_context=memopedia_context or "",
+                persona_id=persona_id,
+            )
+
+            # Chain with existing batch_callback if present
+            existing_callback = batch_callback
+
+            def combined_batch_callback(batch_messages):
+                nonlocal memory_notes_total
+                if existing_callback:
+                    existing_callback(batch_messages)
+                note_callback(batch_messages)
+                memory_notes_total += 1  # Track batches processed
+
+            batch_callback = combined_batch_callback
+        except Exception as e:
+            LOGGER.warning(f"Memory note extraction setup failed: {e}")
+
         # Generate using unified method (filters processed, groups into runs, generates)
         _update_job(job_id, message="Generating Chronicle entries...")
 

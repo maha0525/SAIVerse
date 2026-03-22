@@ -675,6 +675,11 @@ def generate_diff(old_content: str, new_content: str, context_lines: int = 3) ->
     """Generate a unified diff between old and new content."""
     old_lines = old_content.splitlines(keepends=True)
     new_lines = new_content.splitlines(keepends=True)
+    # Ensure last line ends with \n to prevent concatenation in "".join()
+    if old_lines and not old_lines[-1].endswith('\n'):
+        old_lines[-1] += '\n'
+    if new_lines and not new_lines[-1].endswith('\n'):
+        new_lines[-1] += '\n'
     diff = difflib.unified_diff(
         old_lines,
         new_lines,

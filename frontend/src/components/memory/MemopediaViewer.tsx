@@ -12,6 +12,7 @@ interface MemopediaPage {
     vividness: string;
     is_trunk: boolean;
     is_important: boolean;
+    updated_at?: number;
     children: MemopediaPage[];
 }
 
@@ -58,6 +59,10 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
 
     // Expansion state: managed at parent level for persistence
     const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+
+    // Sort state
+    type SortMode = 'tree' | 'updated';
+    const [sortMode, setSortMode] = useState<SortMode>('tree');
 
     // History state
     const [showHistory, setShowHistory] = useState(false);
@@ -716,6 +721,24 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
         }
     };
 
+    // Flatten all pages for "updated" sort mode
+    const flatPages = useMemo(() => {
+        if (!tree || sortMode !== 'updated') return [];
+        const pages: MemopediaPage[] = [];
+        const collect = (page: MemopediaPage) => {
+            if (!page.id.startsWith('root_')) {
+                pages.push(page);
+            }
+            page.children?.forEach(collect);
+        };
+        tree.people.forEach(collect);
+        tree.terms.forEach(collect);
+        tree.plans.forEach(collect);
+        // Sort by updated_at descending (newest first)
+        pages.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+        return pages;
+    }, [tree, sortMode]);
+
     if (!tree) return <div className={styles.emptyState}>ナレッジベースを読み込み中...</div>;
 
     return (
@@ -723,31 +746,62 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
             <div className={`${styles.sidebar} ${!showList ? styles.mobileHidden : ''}`}>
                 <div className={styles.sidebarHeader}>
                     <span>ナレッジツリー</span>
-                    <button
-                        className={styles.generateButton}
-                        onClick={() => {
-                            setShowGenerateModal(true);
-                            setGenerateKeyword("");
-                            setGenerateDirections("");
-                            setGenerateCategory(null);
-                            setGenerateError(null);
-                            setGenerateResult(null);
-                        }}
-                        title="キーワードからページを生成"
-                    >
-                        <Sparkles size={14} />
-                        <span>生成</span>
-                    </button>
+                    <div className={styles.sidebarActions}>
+                        <button
+                            className={`${styles.sortButton} ${sortMode === 'updated' ? styles.active : ''}`}
+                            onClick={() => setSortMode(sortMode === 'tree' ? 'updated' : 'tree')}
+                            title={sortMode === 'tree' ? '更新日時順に並び替え' : 'ツリー表示に戻す'}
+                        >
+                            <Clock size={14} />
+                        </button>
+                        <button
+                            className={styles.generateButton}
+                            onClick={() => {
+                                setShowGenerateModal(true);
+                                setGenerateKeyword("");
+                                setGenerateDirections("");
+                                setGenerateCategory(null);
+                                setGenerateError(null);
+                                setGenerateResult(null);
+                            }}
+                            title="キーワードからページを生成"
+                        >
+                            <Sparkles size={14} />
+                            <span>生成</span>
+                        </button>
+                    </div>
                 </div>
                 <div className={styles.treeContainer}>
-                    <div className={styles.categoryTitle}>人物 / People</div>
-                    {tree.people.map(p => <TreeItem key={p.id} page={p} />)}
+                    {sortMode === 'tree' ? (
+                        <>
+                            <div className={styles.categoryTitle}>人物 / People</div>
+                            {tree.people.map(p => <TreeItem key={p.id} page={p} />)}
 
-                    <div className={styles.categoryTitle}>用語 / Terms</div>
-                    {tree.terms.map(p => <TreeItem key={p.id} page={p} />)}
+                            <div className={styles.categoryTitle}>用語 / Terms</div>
+                            {tree.terms.map(p => <TreeItem key={p.id} page={p} />)}
 
-                    <div className={styles.categoryTitle}>計画 / Plans</div>
-                    {tree.plans.map(p => <TreeItem key={p.id} page={p} />)}
+                            <div className={styles.categoryTitle}>計画 / Plans</div>
+                            {tree.plans.map(p => <TreeItem key={p.id} page={p} />)}
+                        </>
+                    ) : (
+                        <>
+                            <div className={styles.categoryTitle}>更新日時順</div>
+                            {flatPages.map(p => (
+                                <div
+                                    key={p.id}
+                                    className={`${styles.flatItem} ${selectedPageId === p.id ? styles.selected : ''}`}
+                                    onClick={() => { setSelectedPageId(p.id); setShowList(false); }}
+                                >
+                                    <div className={styles.flatItemTitle}>{p.title}</div>
+                                    <div className={styles.flatItemMeta}>
+                                        {p.updated_at ? new Date(p.updated_at * 1000).toLocaleString('ja-JP', {
+                                            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+                                        }) : ''}
+                                    </div>
+                                </div>
+                            ))}
+                        </>
+                    )}
                 </div>
             </div>
 
@@ -837,7 +891,39 @@ export default function MemopediaViewer({ personaId }: MemopediaViewerProps) {
                                         )}
                                         {selectedHistoryEntry?.id === entry.id && (
                                             <div className={styles.diffView}>
-                                                <div className={styles.diffHeader}>Diff</div>
+                                                <div className={styles.diffHeader}>
+                                                    <span>Diff</span>
+                                                    <button
+                                                        className={styles.rollbackButton}
+                                                        onClick={async (e) => {
+                                                            e.stopPropagation();
+                                                            if (!confirm(`この編集より前の状態に戻しますか？\n(${getEditTypeLabel(entry.edit_type)} - ${formatDate(entry.edited_at)})`)) return;
+                                                            try {
+                                                                const url = `/api/people/${personaId}/memopedia/pages/${entry.page_id}/rollback/${entry.id}`;
+                                                                console.log('[rollback] POST', url);
+                                                                const res = await fetch(url, { method: 'POST' });
+                                                                console.log('[rollback] response status:', res.status);
+                                                                if (res.ok) {
+                                                                    const data = await res.json();
+                                                                    setPageContent(data.page.content);
+                                                                    setShowHistory(false);
+                                                                    setSelectedHistoryEntry(null);
+                                                                    // Refresh tree
+                                                                    const treeRes = await fetch(`/api/people/${personaId}/memopedia/tree`);
+                                                                    if (treeRes.ok) setTree(await treeRes.json());
+                                                                } else {
+                                                                    const err = await res.json();
+                                                                    alert(`ロールバック失敗: ${err.detail || '不明なエラー'}`);
+                                                                }
+                                                            } catch (err) {
+                                                                alert(`ロールバック失敗: ${err}`);
+                                                            }
+                                                        }}
+                                                        title="この編集より前の状態に戻す"
+                                                    >
+                                                        ↩ 戻す
+                                                    </button>
+                                                </div>
                                                 <pre className={styles.diffContent}>{entry.diff_text || '(差分なし)'}</pre>
                                             </div>
                                         )}

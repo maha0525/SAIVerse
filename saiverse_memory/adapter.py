@@ -44,6 +44,20 @@ from sai_memory.memory.storage import (
     delete_pulse_logs_before,
     list_pulse_ids,
     count_pulse_ids,
+    # Memory notes
+    MemoryNote,
+    add_memory_notes,
+    get_unresolved_notes,
+    get_unplanned_notes,
+    get_planned_notes_by_group,
+    get_planned_group_labels,
+    set_note_plan,
+    clear_note_plan,
+    resolve_memory_notes,
+    delete_resolved_notes_before,
+    count_unresolved_notes,
+    count_unplanned_notes,
+    count_planned_groups,
 )
 from sai_memory.backup import BackupError, run_backup_auto
 
@@ -1194,6 +1208,157 @@ class SAIMemoryAdapter:
                 return count_pulse_ids(self.conn)
         except Exception as exc:
             LOGGER.warning("Failed to count pulse_ids: %s", exc)
+            return 0
+
+    # ------------------------------------------------------------------
+    # Memory Notes
+    # ------------------------------------------------------------------
+
+    def add_memory_notes(
+        self,
+        notes: List[str],
+        *,
+        source_pulse_id: Optional[str] = None,
+        source_time: Optional[int] = None,
+    ) -> List[MemoryNote]:
+        """Add lightweight knowledge notes from a conversation.
+
+        Args:
+            notes: List of short text items (one knowledge point each).
+            source_pulse_id: Pulse that these notes were extracted from.
+            source_time: Representative timestamp of the source messages.
+
+        Returns:
+            List of created MemoryNote objects.
+        """
+        if not self._ready or not notes:
+            return []
+        try:
+            with self._db_lock:
+                return add_memory_notes(
+                    self.conn,
+                    thread_id=self.active_thread,
+                    notes=notes,
+                    source_pulse_id=source_pulse_id,
+                    source_time=source_time,
+                )
+        except Exception as exc:
+            LOGGER.warning("Failed to add memory notes: %s", exc)
+            return []
+
+    def get_unresolved_notes(self, *, limit: int = 100) -> List[MemoryNote]:
+        """Get unresolved memory notes for the active thread."""
+        if not self._ready:
+            return []
+        try:
+            with self._db_lock:
+                return get_unresolved_notes(self.conn, limit=limit)
+        except Exception as exc:
+            LOGGER.warning("Failed to get unresolved notes: %s", exc)
+            return []
+
+    def resolve_memory_notes(self, note_ids: List[str]) -> int:
+        """Mark memory notes as resolved."""
+        if not self._ready or not note_ids:
+            return 0
+        try:
+            with self._db_lock:
+                return resolve_memory_notes(self.conn, note_ids)
+        except Exception as exc:
+            LOGGER.warning("Failed to resolve memory notes: %s", exc)
+            return 0
+
+    def count_unresolved_notes(self) -> int:
+        """Count unresolved memory notes."""
+        if not self._ready:
+            return 0
+        try:
+            with self._db_lock:
+                return count_unresolved_notes(self.conn)
+        except Exception as exc:
+            LOGGER.warning("Failed to count unresolved notes: %s", exc)
+            return 0
+
+    def get_unplanned_notes(self, *, limit: int = 200) -> List[MemoryNote]:
+        """Get unresolved notes without organization metadata."""
+        if not self._ready:
+            return []
+        try:
+            with self._db_lock:
+                return get_unplanned_notes(self.conn, limit=limit)
+        except Exception as exc:
+            LOGGER.warning("Failed to get unplanned notes: %s", exc)
+            return []
+
+    def get_planned_group_labels(self) -> List[str]:
+        """Get distinct group labels of planned notes."""
+        if not self._ready:
+            return []
+        try:
+            with self._db_lock:
+                return get_planned_group_labels(self.conn)
+        except Exception as exc:
+            LOGGER.warning("Failed to get planned group labels: %s", exc)
+            return []
+
+    def get_planned_notes_by_group(self, group_label: str) -> List[MemoryNote]:
+        """Get planned notes for a specific group."""
+        if not self._ready:
+            return []
+        try:
+            with self._db_lock:
+                return get_planned_notes_by_group(self.conn, group_label)
+        except Exception as exc:
+            LOGGER.warning("Failed to get planned notes for group %s: %s", group_label, exc)
+            return []
+
+    def set_note_plan(
+        self,
+        note_ids: List[str],
+        *,
+        group_label: str,
+        action: str,
+        target_page_id: Optional[str] = None,
+        suggested_title: Optional[str] = None,
+        target_category: Optional[str] = None,
+    ) -> int:
+        """Set organization metadata on notes."""
+        if not self._ready or not note_ids:
+            return 0
+        try:
+            with self._db_lock:
+                return set_note_plan(
+                    self.conn, note_ids,
+                    group_label=group_label,
+                    action=action,
+                    target_page_id=target_page_id,
+                    suggested_title=suggested_title,
+                    target_category=target_category,
+                )
+        except Exception as exc:
+            LOGGER.warning("Failed to set note plan: %s", exc)
+            return 0
+
+    def count_unplanned_notes(self) -> int:
+        """Count unresolved notes without organization metadata."""
+        if not self._ready:
+            return 0
+        try:
+            with self._db_lock:
+                return count_unplanned_notes(self.conn)
+        except Exception as exc:
+            LOGGER.warning("Failed to count unplanned notes: %s", exc)
+            return 0
+
+    def count_planned_groups(self) -> int:
+        """Count distinct groups of planned notes."""
+        if not self._ready:
+            return 0
+        try:
+            with self._db_lock:
+                return count_planned_groups(self.conn)
+        except Exception as exc:
+            LOGGER.warning("Failed to count planned groups: %s", exc)
             return 0
 
     # ------------------------------------------------------------------

@@ -80,6 +80,15 @@ else
     echo "[OK] データベースは既に存在します"
 fi
 
+# --- 7b. Import/update playbooks ---
+echo ""
+echo "[SETUP] Playbook を更新中..."
+if python scripts/import_all_playbooks.py --force; then
+    echo "[OK] Playbook の更新完了"
+else
+    echo "[WARN] Playbook の更新に失敗しました。後で再実行できます: python scripts/import_all_playbooks.py --force"
+fi
+
 # --- 8. Create expansion_data directory ---
 if [ ! -d "expansion_data" ]; then
     mkdir expansion_data

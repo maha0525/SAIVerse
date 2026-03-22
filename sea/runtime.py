@@ -1656,16 +1656,31 @@ class SEARuntime:
             cancel_fn = lambda: cancellation_token.is_cancelled()
 
         batch_size = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)))
+        persona_id_str = getattr(persona, "persona_id", None)
         generator = ArasujiGenerator(
             client, adapter.conn,
             batch_size=batch_size,
             consolidation_size=10,
-            persona_id=getattr(persona, "persona_id", None),
+            persona_id=persona_id_str,
         )
+
+        # Memory note extraction callback
+        note_callback = None
+        try:
+            from sai_memory.memory.note_extractor import make_batch_callback as make_note_callback
+            note_callback = make_note_callback(
+                client, adapter.conn,
+                thread_id=adapter.active_thread,
+                persona_id=persona_id_str,
+            )
+        except Exception as exc:
+            LOGGER.warning("[metabolism] Memory note extraction setup failed: %s", exc)
+
         level1, consolidated = generator.generate_unprocessed(
             all_messages,
             progress_callback=progress_fn,
             cancel_check=cancel_fn,
+            batch_callback=note_callback,
         )
         LOGGER.info(
             "[metabolism] Chronicle generation complete: %d level1, %d consolidated entries",

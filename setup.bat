@@ -197,6 +197,16 @@ if "!NEED_SEED!"=="1" (
     echo [OK] Database already exists
 )
 
+REM --- 7b. Import/update playbooks ---
+echo.
+echo [SETUP] Updating playbooks...
+python scripts\import_all_playbooks.py --force
+if !errorlevel! neq 0 (
+    echo [WARN] Playbook update failed. You can retry later with: python scripts\import_all_playbooks.py --force
+) else (
+    echo [OK] Playbooks updated
+)
+
 REM --- 8. Create expansion_data directory ---
 if not exist "expansion_data" (
     mkdir expansion_data

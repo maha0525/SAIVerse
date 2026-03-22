@@ -24,6 +24,103 @@
     align-items: center;
 }
 
+/* Sidebar header actions container */
+.sidebarActions {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+/* Sort toggle button */
+.sortButton {
+    display: flex;
+    align-items: center;
+    background: none;
+    border: 1px solid #444;
+    color: #888;
+    cursor: pointer;
+    padding: 0.3rem;
+    border-radius: 4px;
+    transition: all 0.2s;
+}
+
+.sortButton:hover {
+    color: #e0e0e0;
+    border-color: #666;
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.sortButton.active {
+    background: rgba(77, 171, 247, 0.15);
+    border-color: rgba(77, 171, 247, 0.4);
+    color: #4dabf7;
+}
+
+/* Flat list item (for updated_at sort) */
+.flatItem {
+    padding: 0.4rem 0.6rem;
+    cursor: pointer;
+    border-radius: 4px;
+    margin-bottom: 1px;
+    transition: background 0.1s;
+}
+
+.flatItem:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.flatItem.selected {
+    background: rgba(77, 171, 247, 0.1);
+}
+
+.flatItemTitle {
+    font-size: 0.85rem;
+    color: #e0e0e0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.flatItemMeta {
+    font-size: 0.7rem;
+    color: #666;
+    margin-top: 1px;
+}
+
+/* Light mode overrides */
+:global([data-theme="light"]) .sortButton {
+    border-color: #d1d5db;
+    color: #9ca3af;
+}
+
+:global([data-theme="light"]) .sortButton:hover {
+    color: #1f2937;
+    border-color: #9ca3af;
+    background: rgba(0, 0, 0, 0.05);
+}
+
+:global([data-theme="light"]) .sortButton.active {
+    background: rgba(37, 99, 235, 0.1);
+    border-color: rgba(37, 99, 235, 0.4);
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .flatItem:hover {
+    background: rgba(0, 0, 0, 0.03);
+}
+
+:global([data-theme="light"]) .flatItem.selected {
+    background: rgba(37, 99, 235, 0.08);
+}
+
+:global([data-theme="light"]) .flatItemTitle {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .flatItemMeta {
+    color: #9ca3af;
+}
+
 /* Generate Button (sidebar header) */
 .generateButton {
     display: flex;
@@ -393,6 +490,36 @@
     text-transform: uppercase;
     color: #888;
     margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.rollbackButton {
+    font-size: 0.7rem;
+    text-transform: none;
+    padding: 2px 8px;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 107, 107, 0.4);
+    background: rgba(255, 107, 107, 0.1);
+    color: #ff6b6b;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.rollbackButton:hover {
+    background: rgba(255, 107, 107, 0.2);
+    border-color: #ff6b6b;
+}
+
+:global([data-theme="light"]) .rollbackButton {
+    border-color: rgba(220, 38, 38, 0.3);
+    background: rgba(220, 38, 38, 0.05);
+    color: #dc2626;
+}
+
+:global([data-theme="light"]) .rollbackButton:hover {
+    background: rgba(220, 38, 38, 0.1);
 }
 
 .diffContent {

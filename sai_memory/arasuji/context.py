@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from sai_memory.memory.storage import Message, get_messages_paginated
 from sai_memory.arasuji.storage import (
@@ -13,6 +13,11 @@ from sai_memory.arasuji.storage import (
     get_entries_by_level,
     get_max_level,
 )
+
+# Minimum number of entries to read at a given level before allowing
+# promotion to the next level.  This keeps more Lv1 ("あらすじ") entries
+# in the context instead of compressing everything to Lv2+ immediately.
+MIN_ENTRIES_PER_LEVEL: int = 10
 
 
 @dataclass
@@ -136,6 +141,7 @@ def get_episode_context(
     result: List[ContextEntry] = []
     read_ids: Set[str] = set()  # IDs of entries that have been read or covered
     current_level = 0  # Start at level 0 (raw messages)
+    level_counts: Dict[int, int] = {}  # Track how many entries read per level
 
     # Get all arasuji sorted by end_time descending
     all_arasuji = _get_all_arasuji_sorted(conn)
@@ -186,8 +192,13 @@ def get_episode_context(
         for source_id in found_entry.source_ids:
             read_ids.add(source_id)
 
-        # Update current level and position
-        current_level = found_level
+        # Update level count and check promotion eligibility
+        level_counts[found_level] = level_counts.get(found_level, 0) + 1
+        if level_counts.get(found_level, 0) >= MIN_ENTRIES_PER_LEVEL:
+            # Read enough entries at this level, allow promotion
+            current_level = found_level
+        # else: stay at current_level (don't promote yet)
+
         # Subtract 1 to move to the position just before this entry's coverage
         position_time = (found_entry.start_time or 0) - 1
 
@@ -282,6 +293,7 @@ def get_episode_context_for_timerange(
     result: List[ContextEntry] = []
     read_ids: Set[str] = set()
     current_level = 0  # Start at level 0
+    level_counts: Dict[int, int] = {}  # Track how many entries read per level
 
     # Start just before the batch start time
     position_time = start_time - 1
@@ -309,8 +321,11 @@ def get_episode_context_for_timerange(
         for source_id in found_entry.source_ids:
             read_ids.add(source_id)
 
-        # Update position and level
-        current_level = found_entry.level
+        # Update level count and check promotion eligibility
+        level_counts[found_entry.level] = level_counts.get(found_entry.level, 0) + 1
+        if level_counts.get(found_entry.level, 0) >= MIN_ENTRIES_PER_LEVEL:
+            current_level = found_entry.level
+
         position_time = (found_entry.start_time or 0) - 1
 
         if position_time <= 0:

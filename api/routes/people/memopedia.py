@@ -81,6 +81,34 @@ def get_memopedia_page_history(persona_id: str, page_id: str, limit: int = 50, m
             raise HTTPException(status_code=500, detail=f"Memopedia error: {e}")
 
 
+@router.post("/{persona_id}/memopedia/pages/{page_id}/rollback/{edit_id}")
+def rollback_memopedia_page(persona_id: str, page_id: str, edit_id: str, manager = Depends(get_manager)):
+    """Rollback a page to the state before a specific edit."""
+    LOGGER.info("[rollback API] persona=%s page=%s edit=%s", persona_id, page_id, edit_id)
+    with get_adapter(persona_id, manager) as adapter:
+        try:
+            memopedia = _get_memopedia(adapter)
+            result = memopedia.rollback_page(page_id, edit_id)
+            if result is None:
+                LOGGER.warning("[rollback API] rollback_page returned None")
+                raise HTTPException(status_code=404, detail="Page or edit not found")
+            LOGGER.info("[rollback API] Success: page=%s title=%s", result.id, result.title)
+            return {
+                "success": True,
+                "page": {
+                    "id": result.id,
+                    "title": result.title,
+                    "summary": result.summary,
+                    "content": result.content,
+                }
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            LOGGER.exception("[rollback API] Exception: %s", e)
+            raise HTTPException(status_code=500, detail=f"Rollback failed: {e}")
+
+
 @router.put("/{persona_id}/memopedia/pages/{page_id}")
 def update_memopedia_page(
     persona_id: str,

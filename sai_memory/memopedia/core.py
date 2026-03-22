@@ -44,6 +44,98 @@ from sai_memory.memopedia.storage import (
 LOGGER = logging.getLogger(__name__)
 
 
+def _extract_before_from_diff(diff_text: str) -> list[str]:
+    """Extract the 'before' state from a unified diff.
+
+    Instead of reverse-applying the diff (which is fragile with the
+    non-standard format from generate_diff), simply collect all '-' lines
+    and ' ' (context) lines to reconstruct what the file looked like before.
+
+    This works because Memopedia diffs cover the entire file content.
+    """
+    import re
+
+    if not diff_text:
+        return []
+
+    # Fix concatenated headers from generate_diff(lineterm="") + "".join()
+    fixed = re.sub(r'(\-\-\- [^\n]*?)(\+\+\+ )', r'\1\n\2', diff_text)
+    fixed = re.sub(r'(\+\+\+ [^\n]*?)(@@ )', r'\1\n\2', fixed)
+
+    diff_lines = fixed.splitlines()
+
+    before_lines: list[str] = []
+    after_first_line: str | None = None  # First + line content (for concatenation fix)
+    in_hunk = False
+    hunk_header_re = re.compile(r'^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(.*)$')
+
+    for dline in diff_lines:
+        if dline.startswith('---') or dline.startswith('+++'):
+            continue
+
+        m = hunk_header_re.match(dline)
+        if m:
+            in_hunk = True
+            # Text after @@ may be a context line concatenated due to lineterm=""
+            trailing = m.group(1)
+            if trailing.startswith(' '):
+                # This is a context line glued to the hunk header
+                before_lines.append(trailing[1:] + '\n')
+            continue
+
+        if not in_hunk:
+            continue
+
+        if dline.startswith('-'):
+            before_lines.append(dline[1:] + '\n')
+        elif dline.startswith('+'):
+            if after_first_line is None:
+                after_first_line = dline[1:]
+        elif dline.startswith(' '):
+            before_lines.append(dline[1:] + '\n')
+
+    # Fix for old diffs where generate_diff(lineterm="") caused the last
+    # old line (without \n) to concatenate with the first + line.
+    # Example: "-old_last+new_first\n" → before gets "old_last+new_first".
+    # Detect by checking if the last before line ends with the first + line content.
+    if before_lines and after_first_line:
+        last = before_lines[-1].rstrip('\n')
+        if last.endswith(after_first_line) and len(last) > len(after_first_line):
+            fixed = last[:-len(after_first_line)]
+            before_lines[-1] = fixed + '\n'
+            LOGGER.info("[extract_before] Fixed last-line concatenation: removed %d trailing chars",
+                        len(after_first_line))
+
+    LOGGER.info("[extract_before] Extracted %d 'before' lines from diff", len(before_lines))
+    return before_lines
+
+
+def _parse_page_text(text: str) -> tuple[str, str, str]:
+    """Parse 'title: ...\nsummary: ...\ncontent:\n...' back into components."""
+    title = ""
+    summary = ""
+    content = ""
+
+    lines = text.split('\n')
+    mode = None
+    content_lines: list[str] = []
+
+    for line in lines:
+        if line.startswith('title: ') and mode is None:
+            title = line[len('title: '):]
+            mode = 'title'
+        elif line.startswith('summary: ') and mode in (None, 'title'):
+            summary = line[len('summary: '):]
+            mode = 'summary'
+        elif line.startswith('content:') and mode in (None, 'title', 'summary'):
+            mode = 'content'
+        elif mode == 'content':
+            content_lines.append(line)
+
+    content = '\n'.join(content_lines).strip()
+    return title, summary, content
+
+
 class Memopedia:
     """High-level interface for Memopedia operations."""
 
@@ -95,6 +187,7 @@ class Memopedia:
                 "is_important": page.is_important,
                 "content": page.content,  # Include content for vivid pages
                 "is_open": states.get(page.id, False),
+                "updated_at": page.updated_at,
                 "children": [_annotate(c) for c in page.children],
             }
             return result
@@ -415,6 +508,108 @@ class Memopedia:
         """
         with self._lock:
             return storage_get_page_edit_history(self.conn, page_id, limit)
+
+    def rollback_page(self, page_id: str, to_edit_id: str) -> Optional[MemopediaPage]:
+        """Rollback a page to the state BEFORE a specific edit.
+
+        Reconstructs the page state by taking the current content and
+        reverse-applying diffs from newest to the target edit (inclusive).
+
+        Args:
+            page_id: Page to rollback.
+            to_edit_id: The edit to undo back to (inclusive — the state BEFORE this edit is restored).
+
+        Returns:
+            Updated MemopediaPage, or None on failure.
+        """
+        LOGGER.info("[rollback] Starting rollback for page=%s to_edit=%s", page_id, to_edit_id)
+        with self._lock:
+            page = get_page(self.conn, page_id)
+            if page is None:
+                LOGGER.warning("[rollback] Page not found: %s", page_id)
+                return None
+
+            # Get all edits newest-first
+            history = storage_get_page_edit_history(self.conn, page_id, limit=200)
+            if not history:
+                LOGGER.warning("[rollback] No edit history for page %s", page_id)
+                return None
+
+            LOGGER.info("[rollback] Found %d history entries", len(history))
+
+            # Find edits to reverse (from newest up to and including to_edit_id)
+            edits_to_reverse: list[PageEditHistory] = []
+            found = False
+            for edit in history:
+                edits_to_reverse.append(edit)
+                if edit.id == to_edit_id:
+                    found = True
+                    break
+
+            if not found:
+                LOGGER.warning("[rollback] Edit %s not found in history", to_edit_id)
+                return None
+
+            LOGGER.info("[rollback] Will reverse %d edits", len(edits_to_reverse))
+
+            # For multiple edits to reverse, we chain: extract "before" from
+            # the newest diff, then from the next, etc.  For a single edit
+            # (the common case), we just extract "before" from that diff.
+            #
+            # We process newest-first.  Each diff's "before" IS the state
+            # after the previous (older) edit, which is also the "after" of
+            # that older edit's diff.  So for chained rollback, we extract
+            # "before" from each successive diff.
+            restored_lines = None
+            for i, edit in enumerate(edits_to_reverse):
+                LOGGER.info("[rollback] Processing edit %d/%d (%s, id=%s)",
+                            i + 1, len(edits_to_reverse), edit.edit_type, edit.id[:8])
+                restored_lines = _extract_before_from_diff(edit.diff_text)
+                if not restored_lines:
+                    LOGGER.warning("[rollback] No 'before' lines extracted from edit %s", edit.id[:8])
+                    return None
+                LOGGER.info("[rollback] Extracted %d 'before' lines", len(restored_lines))
+
+            # Parse restored text back into title/summary/content
+            restored_text = "".join(restored_lines)
+            title, summary, content = _parse_page_text(restored_text)
+            LOGGER.info("[rollback] Parsed restored: title=%s, summary_len=%d, content_len=%d",
+                        title[:30], len(summary), len(content))
+
+            # Fix for old diffs where generate_diff(lineterm="") caused the
+            # last line (without \n) to concatenate with the next +line.
+            # This leaves a "+..." artifact at the end of the restored content.
+            content_lines = content.split('\n')
+            while content_lines and content_lines[-1].startswith('+'):
+                removed = content_lines.pop()
+                LOGGER.info("[rollback] Removed concatenation artifact from content end: %s", removed[:60])
+            content = '\n'.join(content_lines).rstrip()
+
+            # Verify something actually changed
+            if summary == page.summary and content == page.content and title == page.title:
+                LOGGER.warning("[rollback] Nothing changed after rollback — diff extraction may have failed")
+                return None
+
+            # Apply the rollback as an update
+            result = update_page(
+                self.conn, page_id,
+                title=title, summary=summary, content=content,
+            )
+
+            if result:
+                old_text = f"title: {page.title}\nsummary: {page.summary}\ncontent:\n{page.content}"
+                new_text = f"title: {result.title}\nsummary: {result.summary}\ncontent:\n{result.content}"
+                diff_text = generate_diff(old_text, new_text)
+                if diff_text:
+                    record_page_edit(
+                        self.conn,
+                        page_id=page_id,
+                        diff_text=diff_text,
+                        edit_type="rollback",
+                        edit_source=f"rollback_to_before_{to_edit_id[:8]}",
+                    )
+
+            return result
 
     # ----- Page state operations (for thread/session) -----
 
