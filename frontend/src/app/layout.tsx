@@ -16,21 +16,11 @@ export const viewport: Viewport = {
 export const metadata: Metadata = {
     title: "SAIVerse City Interface",
     description: "Next Generation UI for SAIVerse",
-    manifest: "/manifest.json",
     icons: {
         icon: [
             { url: "/icon.jpg", type: "image/jpeg" },
-            { url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
-            { url: "/icons/icon-512.png", sizes: "512x512", type: "image/png" },
+            { url: "/icon.jpg", sizes: "any", type: "image/jpeg" },
         ],
-        apple: [
-            { url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
-        ],
-    },
-    appleWebApp: {
-        capable: true,
-        statusBarStyle: "black-translucent",
-        title: "SAIVerse",
     },
     formatDetection: {
         telephone: false,
