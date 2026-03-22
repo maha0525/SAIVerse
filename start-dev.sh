@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# SAIVerse 起動スクリプト
-# Usage: ./start.sh [city_name]
+# SAIVerse 起動スクリプト (Dev Mode - hot reload enabled)
+# Usage: ./start-dev.sh [city_name]
 #   city_name: 起動する都市名 (default: city_a)
 #
 # Environment variables:
 #   SAIVERSE_SEARXNG=1  SearXNG サーバーも同時起動する
+#
+# NOTE: Dev mode uses HMR which may cause page refreshes over Tailscale.
+# Use start.sh for stable remote access.
 
 CITY_NAME=${1:-city_a}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,11 +46,8 @@ SAIVERSE_PID=$!
 # Wait a bit for backend to initialize
 sleep 3
 
-echo "[INFO] Building SAIVerse Frontend..."
-(cd frontend && npm run build)
-
-echo "[INFO] Starting SAIVerse Frontend..."
-(cd frontend && npm start) &
+echo "[INFO] Starting SAIVerse Frontend (dev mode)..."
+(cd frontend && npm run dev) &
 FRONTEND_PID=$!
 
 sleep 3
@@ -61,11 +61,14 @@ fi
 
 echo ""
 echo "========================================"
-echo "  SAIVerse is running"
+echo "  SAIVerse is running (Dev Mode)"
 echo ""
 echo "  Web UI:  http://localhost:3000"
 echo "  Backend: PID $SAIVERSE_PID"
 echo "  Frontend: PID $FRONTEND_PID"
+echo ""
+echo "  NOTE: HMR enabled - may cause refreshes over Tailscale"
+echo "  Use start.sh for stable remote access"
 echo ""
 echo "  Press Ctrl+C to stop all services"
 echo "========================================"
