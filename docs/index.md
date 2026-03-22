@@ -27,7 +27,6 @@ SAIVerseの公式ドキュメントへようこそ。
 - [都市間連携](./features/inter-city.md) - マルチシティ構成
 - [ツールシステム](./features/tools-system.md) - AIが使えるツール
 - [Playbook/SEA](./features/playbooks.md) - 行動パターン定義
-- [Tailscale PWA](./features/tailscale-pwa.md) - スマホアクセスとPWA ⭐NEW
 - [Discord連携](./features/discord-gateway.md) - Discordとの接続
 - [Unity Gateway](./features/unity-gateway.md) - 3D/VR空間連携
 
