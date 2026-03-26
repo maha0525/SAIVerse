@@ -3,7 +3,7 @@ cd /d "%~dp0"
 setlocal
 
 echo ========================================
-echo   SAIVerse Starting...
+echo   SAIVerse Starting (Dev Mode)
 echo ========================================
 echo.
 
@@ -34,14 +34,12 @@ REM Wait for backend to initialize
 echo [INFO] Waiting for backend to initialize...
 timeout /t 5 /nobreak >nul
 
-REM Build and start Frontend (production mode for stability)
-echo [INFO] Building frontend...
-cd frontend && call npm run build && cd ..
-echo [INFO] Starting frontend...
-start "SAIVerse Frontend" cmd /k "title SAIVerse Frontend && cd frontend && npm start"
+REM Start Frontend (dev mode with hot reload)
+echo [INFO] Starting frontend (dev mode)...
+start "SAIVerse Frontend" cmd /k "title SAIVerse Frontend (Dev) && cd frontend && npm run dev"
 
 REM Wait for frontend to initialize
-timeout /t 3 /nobreak >nul
+timeout /t 5 /nobreak >nul
 
 REM Open browser
 echo [INFO] Opening browser...
@@ -49,7 +47,7 @@ start http://localhost:3000
 
 echo.
 echo ========================================
-echo   SAIVerse is running
+echo   SAIVerse is running (Dev Mode)
 echo ========================================
 echo.
 echo   Web UI: http://localhost:3000
@@ -57,8 +55,12 @@ echo.
 echo   Additional windows should be open:
 echo     [SearXNG]           - Web search server (if installed)
 echo     [SAIVerse Backend]  - Python server
-echo     [SAIVerse Frontend] - Next.js server
+echo     [SAIVerse Frontend] - Next.js dev server (hot reload enabled)
 echo   Do NOT close them while SAIVerse is running.
+echo.
+echo   NOTE: Dev mode uses hot reload (HMR).
+echo   This may cause page refreshes over Tailscale.
+echo   Use start.bat for stable remote access.
 echo.
 echo   To stop: close all the command prompt windows.
 echo.

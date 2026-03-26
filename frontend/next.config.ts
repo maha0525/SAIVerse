@@ -9,6 +9,15 @@ const nextConfig: NextConfig = {
     turbopack: {
         root: configDir,
     },
+    allowedDevOrigins: [
+        // Tailscale direct access uses "<machine>.<tailnet>.ts.net:3000".
+        // Next.js dev resources need the tailnet host to be explicitly allowed,
+        // otherwise hydration can stall after the shell renders.
+        "*.tail9e5ec9.ts.net",
+        "desktop-hcpvlhm.tail9e5ec9.ts.net",
+        "localhost",
+        "127.0.0.1",
+    ],
     async rewrites() {
         return [
             {
