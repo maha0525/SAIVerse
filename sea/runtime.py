@@ -1682,7 +1682,7 @@ class SEARuntime:
 
     # ---------------- context preparation -----------------
 
-    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None) -> List[Dict[str, Any]]:
+    def _prepare_context(self, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, exclude_pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None) -> List[Dict[str, Any]]:
         return prepare_context_impl(
             self,
             persona,
@@ -1690,6 +1690,7 @@ class SEARuntime:
             user_input,
             requirements=requirements,
             pulse_id=pulse_id,
+            exclude_pulse_id=exclude_pulse_id,
             warnings=warnings,
             preview_only=preview_only,
             event_callback=event_callback,
