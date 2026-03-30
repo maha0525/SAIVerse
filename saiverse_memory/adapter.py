@@ -1341,7 +1341,7 @@ class SAIMemoryAdapter:
             with self._db_lock:
                 return add_memory_notes(
                     self.conn,
-                    thread_id=self.active_thread,
+                    thread_id=self._thread_id(None),
                     notes=notes,
                     source_pulse_id=source_pulse_id,
                     source_time=source_time,

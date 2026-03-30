@@ -776,7 +776,7 @@ def _run_chronicle_generation(
         try:
             from sai_memory.memory.note_extractor import make_batch_callback as make_note_callback
             note_callback = make_note_callback(
-                client, conn, thread_id="main",
+                client, conn, thread_id=f"{persona_id}:__persona__",
                 memopedia_context=memopedia_context or "",
                 persona_id=persona_id,
             )

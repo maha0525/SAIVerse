@@ -1670,7 +1670,7 @@ class SEARuntime:
             from sai_memory.memory.note_extractor import make_batch_callback as make_note_callback
             note_callback = make_note_callback(
                 client, adapter.conn,
-                thread_id=adapter.active_thread,
+                thread_id=adapter._thread_id(None),
                 persona_id=persona_id_str,
             )
         except Exception as exc:
