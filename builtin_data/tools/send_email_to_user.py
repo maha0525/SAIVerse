@@ -114,7 +114,7 @@ def send_email_to_user(user_id: int, subject: str, body: str) -> str:
     message.set_content(body)
 
     try:
-        with smtplib.SMTP(cfg["host"], cfg["port"], timeout=10) as server:
+        with smtplib.SMTP(cfg["host"], cfg["port"], timeout=30) as server:
             if cfg["use_tls"]:
                 context = ssl.create_default_context()
                 server.starttls(context=context)
