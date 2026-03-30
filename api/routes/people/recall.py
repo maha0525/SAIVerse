@@ -445,3 +445,99 @@ def _recall_hybrid(adapter, query: str, keywords: list, topk: int, rrf_k: int, s
 
     print(f"[HYBRID DEBUG] Returning {len(hits)} hits", flush=True)
     return hits
+
+
+# ---------------------------------------------------------------------------
+# Unified Recall (Chronicle + Memopedia)
+# ---------------------------------------------------------------------------
+
+from pydantic import BaseModel
+from typing import List, Optional
+
+
+class UnifiedRecallRequest(BaseModel):
+    query: str
+    topk: int = 5
+    search_chronicle: bool = True
+    search_memopedia: bool = True
+
+
+class UnifiedRecallHit(BaseModel):
+    source_type: str
+    source_id: str
+    title: str
+    content: str
+    score: float
+    uri: str
+    level: Optional[int] = None
+    category: Optional[str] = None
+    start_time: Optional[int] = None
+    end_time: Optional[int] = None
+    message_count: Optional[int] = None
+
+
+class UnifiedRecallResponse(BaseModel):
+    query: str
+    total_hits: int
+    hits: List[UnifiedRecallHit]
+
+
+@router.post("/{persona_id}/unified-recall", response_model=UnifiedRecallResponse)
+def unified_recall_endpoint(
+    persona_id: str,
+    request: UnifiedRecallRequest,
+    manager=Depends(get_manager),
+):
+    """Search across Chronicle and Memopedia using embeddings."""
+    import logging
+    logger = logging.getLogger(__name__)
+    query = request.query.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query is required")
+
+    with get_adapter(persona_id, manager) as adapter:
+        try:
+            if not adapter.can_embed():
+                raise HTTPException(status_code=400, detail="Embedding model not available")
+
+            from sai_memory.arasuji import init_arasuji_tables
+            from sai_memory.memopedia import init_memopedia_tables
+            init_arasuji_tables(adapter.conn)
+            init_memopedia_tables(adapter.conn)
+
+            from sai_memory.unified_recall import unified_recall
+            hits = unified_recall(
+                adapter.conn,
+                adapter.embedder,
+                query,
+                topk=request.topk,
+                search_chronicle=request.search_chronicle,
+                search_memopedia=request.search_memopedia,
+                persona_id=persona_id,
+            )
+
+            return UnifiedRecallResponse(
+                query=query,
+                total_hits=len(hits),
+                hits=[
+                    UnifiedRecallHit(
+                        source_type=h.source_type,
+                        source_id=h.source_id,
+                        title=h.title,
+                        content=h.content,
+                        score=h.score,
+                        uri=h.uri,
+                        level=h.level,
+                        category=h.category,
+                        start_time=h.start_time,
+                        end_time=h.end_time,
+                        message_count=h.message_count,
+                    )
+                    for h in hits
+                ],
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Unified recall failed")
+            raise HTTPException(status_code=500, detail=f"Unified recall failed: {e}")

@@ -2,7 +2,7 @@ from fastapi import APIRouter
 from . import summon, memory, recall, config, autonomous
 from . import import_chatlog, reembed, memopedia, native_export_import
 from . import schedule, tasks, inventory, arasuji
-from . import x_auth, pulse_logs, memory_notes
+from . import x_auth, pulse_logs, memory_notes, working_memory
 
 router = APIRouter()
 
@@ -23,3 +23,4 @@ router.include_router(arasuji.router, tags=["people"])
 router.include_router(x_auth.router, tags=["people"])
 router.include_router(pulse_logs.router, tags=["people"])
 router.include_router(memory_notes.router, tags=["people"])
+router.include_router(working_memory.router, tags=["people"])

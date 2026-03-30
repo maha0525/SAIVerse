@@ -52,6 +52,28 @@ def _should_retry(err: Exception) -> bool:
     return _is_rate_limit_error(err) or _is_server_error(err) or _is_timeout_error(err)
 
 
+def _extract_ollama_error(err: Exception) -> str:
+    """Extract a human-readable error message from an Ollama HTTP error.
+
+    Ollama returns JSON like ``{"error": "model 'x' not found"}`` on failures.
+    This helper pulls out that message so callers can surface it instead of a
+    generic "404 Client Error" string.
+    """
+    if not isinstance(err, requests.exceptions.HTTPError):
+        return str(err)
+    response = getattr(err, "response", None)
+    if response is None:
+        return str(err)
+    try:
+        body = response.json()
+        ollama_msg = body.get("error", "")
+        if ollama_msg:
+            return f"Ollama error (HTTP {response.status_code}): {ollama_msg}"
+    except Exception:
+        pass
+    return str(err)
+
+
 # Allowed request parameters for Ollama (similar to OpenAI)
 OLLAMA_ALLOWED_REQUEST_PARAMS = {
     "temperature",
@@ -121,6 +143,12 @@ class OllamaClient(LLMClient):
             for part in str(preferred).split(","):
                 part = part.strip()
                 if part:
+                    # Add http:// scheme if missing (e.g. "0.0.0.0:11434" -> "http://0.0.0.0:11434")
+                    if not part.startswith(("http://", "https://")):
+                        part = f"http://{part}"
+                    # 0.0.0.0 is a listen address, not connectable (especially on Windows).
+                    # Replace with 127.0.0.1 for client connections.
+                    part = part.replace("://0.0.0.0", "://127.0.0.1")
                     candidates.append(part)
         candidates += [
             "http://127.0.0.1:11434",
@@ -196,8 +224,9 @@ class OllamaClient(LLMClient):
             options["temperature"] = temperature
 
         # Tool mode: return Dict with tool detection
+        # Priority: /v1/chat/completions -> /api/chat fallback
         if use_tools:
-            payload: Dict[str, Any] = {
+            tool_payload: Dict[str, Any] = {
                 "model": self.model,
                 "messages": messages,
                 "stream": False,
@@ -205,11 +234,11 @@ class OllamaClient(LLMClient):
                 "tools": tools_spec,
             }
             data = None
-            last_tool_error: Optional[Exception] = None
 
+            # 1st: Try /v1/chat/completions
             for attempt in range(MAX_RETRIES):
                 try:
-                    response = requests.post(self.url, json=payload, timeout=(3, 300))
+                    response = requests.post(self.url, json=tool_payload, timeout=(3, 300))
                     preview = response.text[:500] if response.text else "(empty)"
                     logging.debug(
                         "Ollama v1 tool detection response (attempt %d/%d) status=%s preview=%s",
@@ -217,22 +246,58 @@ class OllamaClient(LLMClient):
                     )
                     response.raise_for_status()
                     data = response.json()
-                    break  # Success, exit retry loop
+                    break  # Success
                 except Exception as e:
-                    last_tool_error = e
                     if _should_retry(e) and attempt < MAX_RETRIES - 1:
                         backoff = INITIAL_BACKOFF * (2 ** attempt)
                         logging.warning(
-                            "[ollama] Retryable tool detection error (attempt %d/%d): %s. Retrying in %.1fs...",
+                            "[ollama] Retryable v1 tool detection error (attempt %d/%d): %s. Retrying in %.1fs...",
                             attempt + 1, MAX_RETRIES, type(e).__name__, backoff
                         )
                         time.sleep(backoff)
                         continue
-                    logging.exception("Ollama tool detection call failed")
-                    raise RuntimeError("Ollama tool detection call failed")
+                    logging.warning("Ollama v1 tool detection failed: %s; falling back to /api/chat", _extract_ollama_error(e))
+                    break  # Fall through to /api/chat
+
+            # 2nd: Fallback to /api/chat
+            if data is None and self.chat_url:
+                chat_tool_payload: Dict[str, Any] = {
+                    "model": self.model,
+                    "messages": messages,
+                    "stream": False,
+                    "options": options,
+                    "tools": tools_spec,
+                }
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        response = requests.post(self.chat_url, json=chat_tool_payload, timeout=(3, 300))
+                        preview = response.text[:500] if response.text else "(empty)"
+                        logging.debug(
+                            "Ollama /api/chat tool detection (attempt %d/%d) status=%s preview=%s",
+                            attempt + 1, MAX_RETRIES, response.status_code, preview,
+                        )
+                        response.raise_for_status()
+                        raw = response.json()
+                        # Normalize /api/chat response to OpenAI-compatible structure
+                        msg = raw.get("message", {})
+                        data = {
+                            "choices": [{"message": msg}],
+                        }
+                        break
+                    except Exception as e:
+                        if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                            backoff = INITIAL_BACKOFF * (2 ** attempt)
+                            logging.warning(
+                                "[ollama] Retryable /api/chat tool detection error (attempt %d/%d): %s. Retrying in %.1fs...",
+                                attempt + 1, MAX_RETRIES, type(e).__name__, backoff
+                            )
+                            time.sleep(backoff)
+                            continue
+                        logging.exception("Ollama tool detection failed on all endpoints")
+                        raise RuntimeError(_extract_ollama_error(e))
 
             if data is None:
-                raise RuntimeError(f"Ollama tool detection call failed after {MAX_RETRIES} retries: {last_tool_error}")
+                raise RuntimeError("Ollama tool detection failed on all endpoints")
 
             # Store usage if available (Ollama may include it in OpenAI-compatible response)
             usage = data.get("usage")
@@ -387,7 +452,7 @@ class OllamaClient(LLMClient):
 
         # Legacy fallback to /api/chat
         if not self.chat_url:
-            raise RuntimeError(f"Ollama v1 endpoint failed and no fallback available: {last_v1_error}")
+            raise RuntimeError(f"Ollama v1 endpoint failed and no fallback available: {_extract_ollama_error(last_v1_error)}")
 
         last_legacy_error: Optional[Exception] = None
         for attempt in range(MAX_RETRIES):
@@ -433,9 +498,9 @@ class OllamaClient(LLMClient):
                     time.sleep(backoff)
                     continue
                 logging.exception("Ollama fallback /api/chat failed")
-                raise RuntimeError("Ollama API call failed on all endpoints")
+                raise RuntimeError(_extract_ollama_error(e))
 
-        raise RuntimeError(f"Ollama API call failed after {MAX_RETRIES} retries: {last_legacy_error}")
+        raise RuntimeError(f"Ollama API call failed after {MAX_RETRIES} retries: {_extract_ollama_error(last_legacy_error)}")
 
     def generate_stream(
         self,
@@ -447,19 +512,62 @@ class OllamaClient(LLMClient):
         **_: Any,
     ) -> Iterator[str]:
         # For structured output, use non-streaming to get complete JSON
+        # Priority: /api/chat (native, widely supported) -> /v1/chat/completions (fallback)
         if response_schema:
+            schema_payload = copy.deepcopy(response_schema)
+            stream_options: Dict[str, Any] = {"num_ctx": self.context_length}
+            for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
+                        "repeat_penalty", "presence_penalty", "frequency_penalty",
+                        "mirostat", "mirostat_tau", "mirostat_eta"):
+                if key in self._request_kwargs:
+                    stream_options[key] = self._request_kwargs[key]
+            if temperature is not None:
+                stream_options["temperature"] = temperature
+
+            # 1st: Try /api/chat with native Ollama format
+            if self.chat_url:
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        chat_payload: Dict[str, Any] = {
+                            "model": self.model,
+                            "messages": messages,
+                            "stream": False,
+                            "options": stream_options,
+                            "format": schema_payload,
+                        }
+                        response = requests.post(self.chat_url, json=chat_payload, timeout=(3, 300))
+                        chat_preview = response.text[:400] + "…" if response.text and len(response.text) > 400 else response.text
+                        logging.debug(
+                            "Ollama stream /api/chat structured (attempt %d/%d) status=%s body_preview=%s",
+                            attempt + 1, MAX_RETRIES, response.status_code,
+                            chat_preview if chat_preview is not None else "(None)",
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+                        content = data.get("message", {}).get("content", "")
+                        if content:
+                            logging.debug("Ollama stream structured output via /api/chat: %s", content)
+                            yield content
+                            return
+                        logging.warning("Ollama stream /api/chat returned empty content. raw=%s", chat_preview)
+                        break  # Empty response - fall through to v1
+                    except Exception as e:
+                        if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                            backoff = INITIAL_BACKOFF * (2 ** attempt)
+                            logging.warning(
+                                "[ollama] Retryable stream /api/chat error (attempt %d/%d): %s. Retrying in %.1fs...",
+                                attempt + 1, MAX_RETRIES, type(e).__name__, backoff
+                            )
+                            time.sleep(backoff)
+                            continue
+                        logging.exception("Ollama stream /api/chat structured call failed; falling back to /v1 endpoint")
+                        break  # Fall through to v1
+
+            # 2nd: Fallback to /v1/chat/completions with OpenAI-style format
             last_schema_error: Optional[Exception] = None
             for attempt in range(MAX_RETRIES):
                 try:
-                    stream_options: Dict[str, Any] = {"num_ctx": self.context_length}
-                    for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
-                                "repeat_penalty", "presence_penalty", "frequency_penalty",
-                                "mirostat", "mirostat_tau", "mirostat_eta"):
-                        if key in self._request_kwargs:
-                            stream_options[key] = self._request_kwargs[key]
-                    if temperature is not None:
-                        stream_options["temperature"] = temperature
-                    stream_payload: Dict[str, Any] = {
+                    v1_payload: Dict[str, Any] = {
                         "model": self.model,
                         "messages": messages,
                         "stream": False,
@@ -467,16 +575,27 @@ class OllamaClient(LLMClient):
                         "format": {
                             "type": "json_schema",
                             "json_schema": {
-                                "name": response_schema.get("title") or "saiverse_structured_output",
-                                "schema": response_schema,
+                                "name": schema_payload.get("title") or "saiverse_structured_output",
+                                "schema": schema_payload,
                                 "strict": True,
                             },
                         },
                     }
-                    response = requests.post(self.url, json=stream_payload, timeout=(3, 300))
+                    response = requests.post(self.url, json=v1_payload, timeout=(3, 300))
+                    v1_preview = response.text[:400] + "…" if response.text and len(response.text) > 400 else response.text
+                    logging.debug(
+                        "Ollama stream v1 structured (attempt %d/%d) status=%s body_preview=%s",
+                        attempt + 1, MAX_RETRIES, response.status_code,
+                        v1_preview if v1_preview is not None else "(None)",
+                    )
                     response.raise_for_status()
                     data = response.json()
-                    _ = data.get("choices", [{}])[0].get("message", {}).get("content", "")  # Structured output captured but not yielded
+                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    if content:
+                        logging.debug("Ollama stream structured output via v1: %s", content)
+                        yield content
+                        return
+                    logging.warning("Ollama stream v1 returned empty structured content. raw=%s", v1_preview)
                     yield ""
                     return
                 except Exception as e:
@@ -484,39 +603,36 @@ class OllamaClient(LLMClient):
                     if _should_retry(e) and attempt < MAX_RETRIES - 1:
                         backoff = INITIAL_BACKOFF * (2 ** attempt)
                         logging.warning(
-                            "[ollama] Retryable structured output error (attempt %d/%d): %s. Retrying in %.1fs...",
+                            "[ollama] Retryable stream v1 structured error (attempt %d/%d): %s. Retrying in %.1fs...",
                             attempt + 1, MAX_RETRIES, type(e).__name__, backoff
                         )
                         time.sleep(backoff)
                         continue
-                    logging.exception("Ollama structured output call failed")
-                    raise RuntimeError("Ollama structured output failed")
-            raise RuntimeError(f"Ollama structured output failed after {MAX_RETRIES} retries: {last_schema_error}")
+                    logging.exception("Ollama structured output failed on all endpoints")
+                    raise RuntimeError(_extract_ollama_error(e))
+            raise RuntimeError(f"Ollama structured output failed after {MAX_RETRIES} retries: {_extract_ollama_error(last_schema_error)}")
         
         # Normal streaming mode (no response_schema)
-        last_stream_error: Optional[Exception] = None
+        # Priority: /v1/chat/completions (OpenAI-compatible) -> /api/chat (native fallback)
+        stream_options: Dict[str, Any] = {"num_ctx": self.context_length}
+        for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
+                    "repeat_penalty", "presence_penalty", "frequency_penalty",
+                    "mirostat", "mirostat_tau", "mirostat_eta"):
+            if key in self._request_kwargs:
+                stream_options[key] = self._request_kwargs[key]
+        if temperature is not None:
+            stream_options["temperature"] = temperature
 
+        # 1st: Try /v1/chat/completions (OpenAI-compatible streaming)
+        last_v1_error: Optional[Exception] = None
         for attempt in range(MAX_RETRIES):
             try:
-                stream_options: Dict[str, Any] = {"num_ctx": self.context_length}
-                # Apply request_kwargs to options
-                for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
-                            "repeat_penalty", "presence_penalty", "frequency_penalty",
-                            "mirostat", "mirostat_tau", "mirostat_eta"):
-                    if key in self._request_kwargs:
-                        stream_options[key] = self._request_kwargs[key]
-                # Override with explicit temperature parameter if provided
-                if temperature is not None:
-                    stream_options["temperature"] = temperature
                 stream_payload: Dict[str, Any] = {
                     "model": self.model,
                     "messages": messages,
                     "stream": True,
                     "options": stream_options,
                 }
-                # When no schema is requested we allow plain-text responses. Ollama defaults to
-                # unstructured text, so we intentionally avoid forcing any response_format.
-
                 response = requests.post(
                     self.url,
                     json=stream_payload,
@@ -561,7 +677,6 @@ class OllamaClient(LLMClient):
                     except json.JSONDecodeError:
                         logging.warning("Failed to parse stream chunk: %s", chunk)
 
-                # ── Stream completed: log timing summary ──
                 stream_end = time.monotonic()
                 logging.info(
                     "[ollama_stream] Stream completed: total=%.2fs, chunks=%d, text_chunks=%d, "
@@ -573,19 +688,84 @@ class OllamaClient(LLMClient):
                 )
                 return  # Stream completed successfully
             except Exception as e:
-                last_stream_error = e
+                last_v1_error = e
                 if _should_retry(e) and attempt < MAX_RETRIES - 1:
                     backoff = INITIAL_BACKOFF * (2 ** attempt)
                     logging.warning(
-                        "[ollama] Retryable streaming error (attempt %d/%d): %s. Retrying in %.1fs...",
+                        "[ollama] Retryable v1 streaming error (attempt %d/%d): %s. Retrying in %.1fs...",
                         attempt + 1, MAX_RETRIES, type(e).__name__, backoff
                     )
                     time.sleep(backoff)
                     continue
-                logging.exception("Ollama call failed")
-                raise RuntimeError("Ollama streaming failed")
+                logging.warning("Ollama v1 streaming failed: %s; falling back to /api/chat", _extract_ollama_error(e))
+                break  # Fall through to /api/chat
 
-        raise RuntimeError(f"Ollama streaming failed after {MAX_RETRIES} retries: {last_stream_error}")
+        # 2nd: Fallback to /api/chat (native Ollama streaming)
+        if not self.chat_url:
+            raise RuntimeError(f"Ollama v1 streaming failed and no fallback available: {_extract_ollama_error(last_v1_error)}")
+
+        last_chat_error: Optional[Exception] = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                chat_payload: Dict[str, Any] = {
+                    "model": self.model,
+                    "messages": messages,
+                    "stream": True,
+                    "options": stream_options,
+                }
+                response = requests.post(
+                    self.chat_url,
+                    json=chat_payload,
+                    timeout=(3, 300),
+                    stream=True,
+                )
+                response.raise_for_status()
+
+                stream_start = time.monotonic()
+                chunk_count = 0
+                text_chunk_count = 0
+
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    chunk = line.decode("utf-8")
+                    chunk_count += 1
+                    try:
+                        data = json.loads(chunk)
+                        # /api/chat streaming format: {"message": {"content": "..."}, "done": false}
+                        if data.get("done"):
+                            logging.info(
+                                "[ollama_stream] /api/chat done at +%.2fs (chunk #%d)",
+                                time.monotonic() - stream_start, chunk_count,
+                            )
+                            break
+                        delta = data.get("message", {}).get("content", "")
+                        if delta:
+                            text_chunk_count += 1
+                        yield delta
+                    except json.JSONDecodeError:
+                        logging.warning("Failed to parse /api/chat stream chunk: %s", chunk)
+
+                stream_end = time.monotonic()
+                logging.info(
+                    "[ollama_stream] /api/chat stream completed: total=%.2fs, chunks=%d, text_chunks=%d",
+                    stream_end - stream_start, chunk_count, text_chunk_count,
+                )
+                return
+            except Exception as e:
+                last_chat_error = e
+                if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                    backoff = INITIAL_BACKOFF * (2 ** attempt)
+                    logging.warning(
+                        "[ollama] Retryable /api/chat streaming error (attempt %d/%d): %s. Retrying in %.1fs...",
+                        attempt + 1, MAX_RETRIES, type(e).__name__, backoff
+                    )
+                    time.sleep(backoff)
+                    continue
+                logging.exception("Ollama streaming failed on all endpoints")
+                raise RuntimeError(_extract_ollama_error(e))
+
+        raise RuntimeError(f"Ollama /api/chat streaming failed after {MAX_RETRIES} retries: {_extract_ollama_error(last_chat_error)}")
 
     def generate_with_tool_detection(
         self,

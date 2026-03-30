@@ -88,6 +88,17 @@ def init_arasuji_tables(conn: sqlite3.Connection) -> None:
         """
     )
 
+    # Embeddings for Chronicle entries (used by unified recall)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS arasuji_embeddings (
+            entry_id TEXT PRIMARY KEY,
+            vector TEXT NOT NULL,
+            FOREIGN KEY (entry_id) REFERENCES arasuji_entries(id)
+        )
+        """
+    )
+
     conn.commit()
 
 

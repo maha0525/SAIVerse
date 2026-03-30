@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Search, Loader2, AlertCircle, Brain, Bug, Trash2 } from 'lucide-react';
+import { Search, Loader2, AlertCircle, Brain, Bug, Trash2, Plus } from 'lucide-react';
 import styles from './MemoryRecall.module.css';
 
 interface MemoryRecallProps {
@@ -24,6 +24,26 @@ interface DebugResult {
     hits: DebugHit[];
 }
 
+interface UnifiedHit {
+    source_type: string;
+    source_id: string;
+    title: string;
+    content: string;
+    score: number;
+    uri: string;
+    level: number | null;
+    category: string | null;
+    start_time: number | null;
+    end_time: number | null;
+    message_count: number | null;
+}
+
+interface UnifiedResult {
+    query: string;
+    total_hits: number;
+    hits: UnifiedHit[];
+}
+
 export default function MemoryRecall({ personaId }: MemoryRecallProps) {
     const [query, setQuery] = useState('');
     const [keywords, setKeywords] = useState('');
@@ -43,6 +63,80 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
     const [confirmChronicle, setConfirmChronicle] = useState(false);
     const [confirmMemopedia, setConfirmMemopedia] = useState(false);
     const [deleteResult, setDeleteResult] = useState<string | null>(null);
+
+    // Working memory add state
+    const [addingToWm, setAddingToWm] = useState<string | null>(null);
+    const [wmAddResult, setWmAddResult] = useState<{ id: string; ok: boolean } | null>(null);
+
+    const handleAddToWorkingMemory = async (hit: UnifiedHit) => {
+        setAddingToWm(hit.source_id);
+        setWmAddResult(null);
+        try {
+            const res = await fetch(`/api/people/${personaId}/working-memory/recall`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    source_type: hit.source_type,
+                    source_id: hit.source_id,
+                    title: hit.title,
+                    uri: hit.uri,
+                }),
+            });
+            setWmAddResult({ id: hit.source_id, ok: res.ok });
+        } catch {
+            setWmAddResult({ id: hit.source_id, ok: false });
+        } finally {
+            setAddingToWm(null);
+        }
+    };
+
+    // Unified recall state
+    const [unifiedQuery, setUnifiedQuery] = useState('');
+    const [unifiedTopk, setUnifiedTopk] = useState(5);
+    const [unifiedSearchChronicle, setUnifiedSearchChronicle] = useState(true);
+    const [unifiedSearchMemopedia, setUnifiedSearchMemopedia] = useState(true);
+    const [unifiedResult, setUnifiedResult] = useState<UnifiedResult | null>(null);
+    const [unifiedLoading, setUnifiedLoading] = useState(false);
+    const [unifiedError, setUnifiedError] = useState<string | null>(null);
+
+    const handleUnifiedRecall = async () => {
+        const q = unifiedQuery.trim();
+        if (!q) {
+            setUnifiedError('検索クエリを入力してね');
+            return;
+        }
+        setUnifiedLoading(true);
+        setUnifiedError(null);
+        setUnifiedResult(null);
+        try {
+            const backendUrl = 'http://127.0.0.1:8000';
+            const res = await fetch(`${backendUrl}/api/people/${personaId}/unified-recall`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    query: q,
+                    topk: unifiedTopk,
+                    search_chronicle: unifiedSearchChronicle,
+                    search_memopedia: unifiedSearchMemopedia,
+                }),
+            });
+            if (!res.ok) {
+                const text = await res.text();
+                try {
+                    const data = JSON.parse(text);
+                    throw new Error(data.detail || 'Unified recall failed');
+                } catch {
+                    throw new Error(`Server error: ${text.substring(0, 200)}`);
+                }
+            }
+            const data = await res.json();
+            setUnifiedResult(data);
+        } catch (err: any) {
+            setUnifiedError(err.message || 'An error occurred');
+        } finally {
+            setUnifiedLoading(false);
+        }
+    };
 
     const handleRecall = async () => {
         const trimmedQuery = query.trim();
@@ -417,6 +511,152 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                                             <div className={styles.contentPreview}>
                                                 {hit.content}
                                             </div>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            )}
+
+            {/* Unified Recall Test */}
+            <div className={styles.header} style={{ marginTop: '2rem' }}>
+                <Search size={24} className={styles.icon} />
+                <div>
+                    <h3 className={styles.title}>Unified Recall Test</h3>
+                    <p className={styles.description}>
+                        Chronicle（あらすじ）とMemopedia（知識ベース）を横断してエンベディング検索します。
+                        事前に scripts/embed_recall_sources.py でエンベディングを付与してください。
+                    </p>
+                </div>
+            </div>
+
+            <div className={styles.inputSection}>
+                <label className={styles.label}>検索クエリ</label>
+                <textarea
+                    className={styles.queryInput}
+                    value={unifiedQuery}
+                    onChange={(e) => setUnifiedQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            handleUnifiedRecall();
+                        }
+                    }}
+                    placeholder="例: まはーの好きなもの"
+                    rows={2}
+                />
+            </div>
+
+            <div className={styles.paramsRow}>
+                <div className={styles.param}>
+                    <label className={styles.paramLabel}>topk</label>
+                    <input
+                        type="range" min={1} max={20}
+                        value={unifiedTopk}
+                        onChange={(e) => setUnifiedTopk(Number(e.target.value))}
+                        className={styles.slider}
+                    />
+                    <span className={styles.paramValue}>{unifiedTopk}</span>
+                </div>
+            </div>
+
+            <div className={styles.modeToggle}>
+                <label className={styles.toggleLabel}>
+                    <input type="checkbox" checked={unifiedSearchChronicle}
+                           onChange={(e) => setUnifiedSearchChronicle(e.target.checked)} />
+                    Chronicle
+                </label>
+                <label className={styles.toggleLabel}>
+                    <input type="checkbox" checked={unifiedSearchMemopedia}
+                           onChange={(e) => setUnifiedSearchMemopedia(e.target.checked)} />
+                    Memopedia
+                </label>
+            </div>
+
+            <button
+                className={styles.executeButton}
+                onClick={handleUnifiedRecall}
+                disabled={unifiedLoading || !unifiedQuery.trim()}
+            >
+                {unifiedLoading ? (
+                    <><Loader2 size={16} className={styles.loader} /> 実行中...</>
+                ) : (
+                    <><Search size={16} /> Unified Recall を実行</>
+                )}
+            </button>
+
+            {unifiedError && (
+                <div className={styles.error}>
+                    <AlertCircle size={16} />
+                    <span>{unifiedError}</span>
+                </div>
+            )}
+
+            {unifiedResult && (
+                <div className={styles.resultSection}>
+                    <label className={styles.label}>
+                        検索結果 ({unifiedResult.total_hits} hits)
+                    </label>
+                    <div className={styles.debugTable}>
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th className={styles.rankCol}>#</th>
+                                    <th className={styles.scoreCol}>Score</th>
+                                    <th className={styles.roleCol}>Source</th>
+                                    <th className={styles.contentCol}>Title / Content</th>
+                                    <th style={{ width: '3rem', textAlign: 'center' }}>WM</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {unifiedResult.hits.map((hit, i) => (
+                                    <tr key={hit.source_id}>
+                                        <td className={styles.rankCol}>{i + 1}</td>
+                                        <td className={styles.scoreCol}
+                                            style={{ color: getScoreColor(hit.score) }}>
+                                            {hit.score.toFixed(4)}
+                                        </td>
+                                        <td className={styles.roleCol}>
+                                            {hit.source_type === 'chronicle' ? 'Chronicle' : 'Memopedia'}
+                                            {hit.level != null && ` Lv${hit.level}`}
+                                            {hit.category && ` [${hit.category}]`}
+                                        </td>
+                                        <td className={styles.contentCol}>
+                                            <div className={styles.contentPreview}>
+                                                <strong>{hit.title}</strong>
+                                                {hit.content && <><br />{hit.content}</>}
+                                                <br />
+                                                <code style={{ fontSize: '0.7rem', color: '#666' }}>{hit.uri}</code>
+                                            </div>
+                                        </td>
+                                        <td style={{ textAlign: 'center' }}>
+                                            <button
+                                                onClick={() => handleAddToWorkingMemory(hit)}
+                                                disabled={addingToWm === hit.source_id}
+                                                title="ワーキングメモリに追加"
+                                                style={{
+                                                    background: wmAddResult?.id === hit.source_id && wmAddResult.ok
+                                                        ? 'rgba(43, 138, 62, 0.2)' : 'none',
+                                                    border: '1px solid #444',
+                                                    borderRadius: '4px',
+                                                    padding: '2px 6px',
+                                                    cursor: addingToWm === hit.source_id ? 'wait' : 'pointer',
+                                                    color: wmAddResult?.id === hit.source_id && wmAddResult.ok
+                                                        ? '#69db7c' : '#aaa',
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                }}
+                                            >
+                                                {addingToWm === hit.source_id ? (
+                                                    <Loader2 size={12} className={styles.loader} />
+                                                ) : wmAddResult?.id === hit.source_id && wmAddResult.ok ? (
+                                                    '✓'
+                                                ) : (
+                                                    <Plus size={12} />
+                                                )}
+                                            </button>
                                         </td>
                                     </tr>
                                 ))}

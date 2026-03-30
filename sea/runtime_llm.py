@@ -64,15 +64,18 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 if _profile:
                     _cache_key = f"_ctx_profile_{_profile_name}"
                     if _cache_key not in state:
+                        # Exclude current pulse messages from SAIMemory — PulseContext
+                        # provides them instead, avoiding duplication of memorized messages.
                         state[_cache_key] = runtime._prepare_context(
                             persona, building_id,
                             state.get("input") or None,
                             _profile["requirements"],
                             pulse_id=state.get("_pulse_id"),
+                            exclude_pulse_id=state.get("_pulse_id"),
                             event_callback=event_callback,
                         )
-                        LOGGER.info("[sea] Prepared context for profile '%s' (node=%s, %d messages)",
-                                    _profile_name, node_id, len(state[_cache_key]))
+                        LOGGER.info("[sea] Prepared context for profile '%s' (node=%s, %d messages, exclude_pulse=%s)",
+                                    _profile_name, node_id, len(state[_cache_key]), state.get("_pulse_id"))
                     _profile_base = state[_cache_key]
                     _pulse_ctx = state.get("_pulse_context")
                     _intermediate = _pulse_ctx.get_protocol_messages() if _pulse_ctx else []

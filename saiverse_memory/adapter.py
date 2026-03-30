@@ -236,6 +236,85 @@ class SAIMemoryAdapter:
         except Exception as exc:
             LOGGER.warning("Failed to save working_memory for %s: %s", self.persona_id, exc)
 
+    # ------------------------------------------------------------------
+    # Recalled IDs (working memory subset)
+    # ------------------------------------------------------------------
+    RECALLED_IDS_KEY = "recalled_ids"
+    RECALLED_IDS_MAX = 10
+
+    def get_recalled_ids(self) -> List[Dict[str, Any]]:
+        """Get the list of recalled memory IDs from working memory.
+
+        Returns:
+            List of dicts like {"type": "chronicle", "id": "...", ...}
+        """
+        wm = self.load_working_memory()
+        return wm.get(self.RECALLED_IDS_KEY, [])
+
+    def add_recalled_id(
+        self,
+        source_type: str,
+        source_id: str,
+        title: str,
+        uri: str,
+    ) -> None:
+        """Add a recalled ID to working memory (FIFO, max 10).
+
+        If the same source_id already exists, it is removed first
+        so the new entry goes to the end (most recent).
+        """
+        if not self._ready:
+            return
+        wm = self.load_working_memory()
+        ids: list = wm.get(self.RECALLED_IDS_KEY, [])
+
+        # Remove duplicate (refresh position)
+        ids = [item for item in ids if item.get("id") != source_id]
+
+        ids.append({
+            "type": source_type,
+            "id": source_id,
+            "title": title,
+            "uri": uri,
+            "recalled_at": time.time(),
+        })
+
+        # FIFO: drop oldest if over capacity
+        if len(ids) > self.RECALLED_IDS_MAX:
+            ids = ids[-self.RECALLED_IDS_MAX:]
+
+        wm[self.RECALLED_IDS_KEY] = ids
+        self.save_working_memory(wm)
+        LOGGER.debug(
+            "Added recalled_id %s/%s for %s (total: %d)",
+            source_type, source_id, self.persona_id, len(ids),
+        )
+
+    def remove_recalled_id(self, source_id: str) -> bool:
+        """Remove a specific recalled ID. Returns True if found and removed."""
+        if not self._ready:
+            return False
+        wm = self.load_working_memory()
+        ids: list = wm.get(self.RECALLED_IDS_KEY, [])
+        new_ids = [item for item in ids if item.get("id") != source_id]
+        if len(new_ids) == len(ids):
+            return False
+        wm[self.RECALLED_IDS_KEY] = new_ids
+        self.save_working_memory(wm)
+        return True
+
+    def clear_recalled_ids(self) -> int:
+        """Clear all recalled IDs. Returns the number cleared."""
+        if not self._ready:
+            return 0
+        wm = self.load_working_memory()
+        ids: list = wm.get(self.RECALLED_IDS_KEY, [])
+        count = len(ids)
+        if count > 0:
+            wm[self.RECALLED_IDS_KEY] = []
+            self.save_working_memory(wm)
+        return count
+
     def append_building_message(
         self,
         building_id: str,
@@ -305,6 +384,7 @@ class SAIMemoryAdapter:
         *,
         required_tags: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
+        exclude_pulse_id: Optional[str] = None,
     ) -> List[dict]:
         if not self._ready:
             return []
@@ -321,6 +401,7 @@ class SAIMemoryAdapter:
         consumed = 0
         required_tags = required_tags or []
         pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
+        exclude_tag = f"pulse:{exclude_pulse_id}" if exclude_pulse_id else None
 
         for payload in reversed(payloads):
             tags = []
@@ -329,6 +410,10 @@ class SAIMemoryAdapter:
                 raw_tags = metadata.get("tags")
                 if isinstance(raw_tags, list):
                     tags = [str(tag) for tag in raw_tags if tag]
+
+            # Exclude messages belonging to the specified pulse
+            if exclude_tag and exclude_tag in tags:
+                continue
 
             include = True
             if required_tags:
@@ -353,6 +438,7 @@ class SAIMemoryAdapter:
         *,
         required_tags: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
+        exclude_pulse_id: Optional[str] = None,
     ) -> List[dict]:
         """Get recent persona messages limited by message count instead of characters."""
         if not self._ready:
@@ -369,6 +455,7 @@ class SAIMemoryAdapter:
         selected: List[dict] = []
         required_tags = required_tags or []
         pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
+        exclude_tag = f"pulse:{exclude_pulse_id}" if exclude_pulse_id else None
 
         for payload in reversed(payloads):
             tags = []
@@ -377,6 +464,10 @@ class SAIMemoryAdapter:
                 raw_tags = metadata.get("tags")
                 if isinstance(raw_tags, list):
                     tags = [str(tag) for tag in raw_tags if tag]
+
+            # Exclude messages belonging to the specified pulse
+            if exclude_tag and exclude_tag in tags:
+                continue
 
             include = True
             if required_tags:
@@ -398,6 +489,7 @@ class SAIMemoryAdapter:
         *,
         required_tags: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
+        exclude_pulse_id: Optional[str] = None,
     ) -> List[dict]:
         """Get persona messages from anchor message onwards.
 
@@ -421,6 +513,7 @@ class SAIMemoryAdapter:
         selected: List[dict] = []
         required_tags = required_tags or []
         pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
+        exclude_tag = f"pulse:{exclude_pulse_id}" if exclude_pulse_id else None
 
         for payload in payloads:  # already in chronological order
             tags = []
@@ -429,6 +522,10 @@ class SAIMemoryAdapter:
                 raw_tags = metadata.get("tags")
                 if isinstance(raw_tags, list):
                     tags = [str(tag) for tag in raw_tags if tag]
+
+            # Exclude messages belonging to the specified pulse
+            if exclude_tag and exclude_tag in tags:
+                continue
 
             include = True
             if required_tags:
@@ -450,6 +547,7 @@ class SAIMemoryAdapter:
         *,
         required_tags: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
+        exclude_pulse_id: Optional[str] = None,
     ) -> List[dict]:
         """Get recent messages balanced across conversation partners.
 
@@ -461,6 +559,7 @@ class SAIMemoryAdapter:
             participant_ids: List of partner IDs to balance (e.g., ["user", "persona_b"])
             required_tags: Only include messages with these tags
             pulse_id: Always include messages with this pulse ID
+            exclude_pulse_id: Exclude messages with this pulse ID (for mid-pulse context_profile reads)
 
         Returns:
             List of messages, sorted by timestamp, balanced across participants
@@ -479,6 +578,7 @@ class SAIMemoryAdapter:
 
         required_tags = required_tags or []
         pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
+        exclude_tag = f"pulse:{exclude_pulse_id}" if exclude_pulse_id else None
 
         # Group messages by participant
         # Key: participant_id, Value: list of (index, payload) tuples
@@ -489,6 +589,10 @@ class SAIMemoryAdapter:
             metadata = payload.get("metadata") or {}
             tags = metadata.get("tags", [])
             with_list = metadata.get("with", [])
+
+            # Exclude messages belonging to the specified pulse
+            if exclude_tag and exclude_tag in tags:
+                continue
 
             # Check if message matches required tags
             include = True

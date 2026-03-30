@@ -208,6 +208,17 @@ def init_memopedia_tables(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_memopedia_edit_history_page ON memopedia_page_edit_history(page_id)"
     )
 
+    # Embeddings for Memopedia pages (used by unified recall)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memopedia_embeddings (
+            page_id TEXT PRIMARY KEY,
+            vector TEXT NOT NULL,
+            FOREIGN KEY (page_id) REFERENCES memopedia_pages(id)
+        )
+        """
+    )
+
     conn.commit()
 
     # Seed root pages if they don't exist

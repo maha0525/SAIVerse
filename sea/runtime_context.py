@@ -14,7 +14,7 @@ from saiverse.model_configs import (
 
 LOGGER = logging.getLogger(__name__)
 
-def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None) -> List[Dict[str, Any]]:
+def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, exclude_pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None) -> List[Dict[str, Any]]:
     from sea.playbook_models import ContextRequirements
 
     # Use provided requirements or default to full context
@@ -228,6 +228,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             # Case 1 or 2: valid anchor found
                             recent_from_anchor = history_mgr.get_history_from_anchor(
                                 anchor_id, required_tags=required_tags, pulse_id=pulse_id,
+                                exclude_pulse_id=exclude_pulse_id,
                             )
                             if recent_from_anchor:
                                 recent = recent_from_anchor
@@ -282,6 +283,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                         if anchor_id:
                             recent_from_anchor = history_mgr.get_history_from_anchor(
                                 anchor_id, required_tags=required_tags, pulse_id=pulse_id,
+                                exclude_pulse_id=exclude_pulse_id,
                             )
                             if recent_from_anchor:
                                 recent = recent_from_anchor
@@ -331,6 +333,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             limit_value,
                             required_tags=required_tags,
                             pulse_id=pulse_id,
+                            exclude_pulse_id=exclude_pulse_id,
                         )
                     elif reqs.history_balanced:
                         # Get conversation partners for balanced retrieval
@@ -346,6 +349,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             participant_ids,
                             required_tags=required_tags,
                             pulse_id=pulse_id,
+                            exclude_pulse_id=exclude_pulse_id,
                         )
                     else:
                         # Filter by required tags or current pulse_id
@@ -353,6 +357,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             limit_value,
                             required_tags=required_tags,
                             pulse_id=pulse_id,
+                            exclude_pulse_id=exclude_pulse_id,
                         )
 
                     # Set metabolism anchor on first count-based retrieval and persist (skip in preview)
@@ -372,6 +377,19 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                 messages.extend(enriched_recent)
             except Exception as exc:
                 LOGGER.exception("[sea][prepare-context] Failed to get history: %s", exc)
+
+    # ---- Recalled Memory Context (Working Memory) ----
+    # Expand recalled_ids to actual content at context tail (after history, before realtime).
+    # This is loaded once per pulse; changes during the pulse take effect on the next pulse.
+    if reqs.working_memory:
+        try:
+            sai_mem = getattr(persona, "sai_memory", None)
+            if sai_mem and sai_mem.is_ready():
+                recalled_ids = sai_mem.get_recalled_ids()
+                if recalled_ids:
+                    _expand_recalled_ids(runtime, persona, recalled_ids, messages)
+        except Exception as exc:
+            LOGGER.debug("[sea][prepare-context] Failed to expand recalled_ids: %s", exc)
 
     # ---- Realtime Context ----
     # Time-sensitive info placed just BEFORE the last user message to improve LLM caching.
@@ -424,6 +442,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                         and not meta.get("__visual_context__")
                         and not meta.get("__realtime_context__")
                         and not meta.get("__memory_weave_context__")
+                        and not meta.get("__recalled_memory__")
                     ):
                         history_indices.append(i)
 
@@ -477,6 +496,68 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
         LOGGER.debug("[sea][prepare-context] Token budget check failed: %s", exc)
 
     return messages
+
+
+def _expand_recalled_ids(
+    runtime,
+    persona: Any,
+    recalled_ids: List[Dict[str, Any]],
+    messages: List[Dict[str, Any]],
+) -> None:
+    """Expand recalled_ids into actual content and append as a system message.
+
+    Resolves each recalled ID via URI resolver to get the actual content,
+    then appends a single system message at the end of the messages list.
+    """
+    from saiverse.uri_resolver import UriResolver
+
+    resolver = UriResolver(manager=runtime.manager)
+    persona_id = getattr(persona, "persona_id", None)
+    if not persona_id:
+        return
+
+    sections = []
+    for item in recalled_ids:
+        uri = item.get("uri", "")
+        title = item.get("title", "")
+        source_type = item.get("type", "")
+
+        if not uri:
+            continue
+
+        try:
+            resolved = resolver.resolve(uri, persona_id=persona_id)
+            if resolved and resolved.content:
+                content = resolved.content
+                # Truncate per item to keep context manageable
+                if len(content) > 1500:
+                    content = content[:1500] + "..."
+                label = "Chronicle" if source_type == "chronicle" else "Memopedia"
+                sections.append(f"### [{label}] {title}\n{content}")
+            else:
+                LOGGER.debug(
+                    "[sea][prepare-context] Could not resolve recalled URI: %s", uri,
+                )
+        except Exception as exc:
+            LOGGER.debug(
+                "[sea][prepare-context] Error resolving recalled URI %s: %s", uri, exc,
+            )
+
+    if sections:
+        recalled_text = "## 想起した記憶\n以下はワーキングメモリに保持されている記憶です。\n\n" + "\n\n".join(sections)
+        messages.append({
+            "role": "system",
+            "content": recalled_text,
+            "metadata": {"__recalled_memory__": True},
+        })
+        LOGGER.info(
+            "[sea][prepare-context] Expanded %d/%d recalled_ids into context (%d chars)",
+            len(sections), len(recalled_ids), len(recalled_text),
+        )
+        LOGGER.debug(
+            "[sea][prepare-context] Recalled memory content:\n%s", recalled_text,
+        )
+
 
 def preview_context(
     runtime,

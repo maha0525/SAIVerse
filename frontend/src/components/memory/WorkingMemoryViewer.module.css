@@ -1,0 +1,308 @@
+.container {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+}
+
+.loadingContainer {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 100%;
+    color: #888;
+}
+
+.spinner {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.emptyContainer {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    color: #888;
+    gap: 8px;
+}
+
+.emptyIcon {
+    opacity: 0.3;
+    margin-bottom: 8px;
+}
+
+.emptyHint {
+    font-size: 0.85rem;
+    opacity: 0.6;
+    text-align: center;
+    max-width: 400px;
+    line-height: 1.5;
+}
+
+/* Toolbar */
+.toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-bottom: 1px solid #333;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.toolbarLeft {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.toolbarRight {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.countBadge {
+    font-size: 0.8rem;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background-color: rgba(77, 171, 247, 0.15);
+    color: #4dabf7;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+.refreshButton {
+    background: none;
+    border: none;
+    color: #888;
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+}
+
+.refreshButton:hover {
+    color: #e0e0e0;
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.clearButton {
+    font-size: 0.8rem;
+    padding: 4px 10px;
+    border-radius: 4px;
+    border: 1px solid #c92a2a;
+    background: rgba(201, 42, 42, 0.1);
+    color: #ff6b6b;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+}
+
+.clearButton:hover:not(:disabled) {
+    background: rgba(201, 42, 42, 0.2);
+}
+
+.clearButton:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* Items list */
+.itemsList {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+}
+
+.itemRow {
+    display: flex;
+    align-items: center;
+    padding: 10px 12px;
+    border-bottom: 1px solid #2a2b2e;
+    gap: 8px;
+}
+
+.itemRow:hover {
+    background-color: rgba(255, 255, 255, 0.03);
+}
+
+.itemInfo {
+    flex: 1;
+    min-width: 0;
+}
+
+.itemHeader {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.typeBadge {
+    font-size: 0.7rem;
+    padding: 1px 6px;
+    border-radius: 3px;
+    flex-shrink: 0;
+    font-weight: 500;
+}
+
+.typeBadgeChronicle {
+    background-color: rgba(255, 212, 59, 0.15);
+    color: #ffd43b;
+}
+
+.typeBadgeMemopedia {
+    background-color: rgba(77, 171, 247, 0.15);
+    color: #4dabf7;
+}
+
+.itemTitle {
+    font-size: 0.9rem;
+    color: #e0e0e0;
+    word-break: break-word;
+    line-height: 1.4;
+}
+
+.itemMeta {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.itemId {
+    font-size: 0.7rem;
+    color: #666;
+    font-family: monospace;
+}
+
+.itemTime {
+    font-size: 0.7rem;
+    color: #666;
+}
+
+.removeButton {
+    background: none;
+    border: none;
+    color: #666;
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.removeButton:hover:not(:disabled) {
+    color: #ff6b6b;
+    background-color: rgba(201, 42, 42, 0.1);
+}
+
+.removeButton:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* Info bar */
+.infoBar {
+    padding: 8px 12px;
+    border-top: 1px solid #333;
+    font-size: 0.75rem;
+    color: #666;
+    flex-shrink: 0;
+    line-height: 1.5;
+}
+
+/* Light mode */
+:global([data-theme="light"]) .toolbar {
+    border-bottom-color: #e2e8f0;
+}
+
+:global([data-theme="light"]) .countBadge {
+    background-color: rgba(37, 99, 235, 0.1);
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .refreshButton {
+    color: #64748b;
+}
+
+:global([data-theme="light"]) .refreshButton:hover {
+    color: #1f2937;
+    background-color: rgba(0, 0, 0, 0.05);
+}
+
+:global([data-theme="light"]) .clearButton {
+    border-color: #dc2626;
+    background: rgba(220, 38, 38, 0.05);
+    color: #dc2626;
+}
+
+:global([data-theme="light"]) .clearButton:hover:not(:disabled) {
+    background: rgba(220, 38, 38, 0.1);
+}
+
+:global([data-theme="light"]) .itemRow {
+    border-bottom-color: #f1f5f9;
+}
+
+:global([data-theme="light"]) .itemRow:hover {
+    background-color: rgba(0, 0, 0, 0.02);
+}
+
+:global([data-theme="light"]) .typeBadgeChronicle {
+    background-color: rgba(245, 158, 11, 0.1);
+    color: #d97706;
+}
+
+:global([data-theme="light"]) .typeBadgeMemopedia {
+    background-color: rgba(37, 99, 235, 0.08);
+    color: #2563eb;
+}
+
+:global([data-theme="light"]) .itemTitle {
+    color: #1f2937;
+}
+
+:global([data-theme="light"]) .itemId {
+    color: #9ca3af;
+}
+
+:global([data-theme="light"]) .itemTime {
+    color: #9ca3af;
+}
+
+:global([data-theme="light"]) .removeButton {
+    color: #9ca3af;
+}
+
+:global([data-theme="light"]) .removeButton:hover:not(:disabled) {
+    color: #dc2626;
+    background-color: rgba(220, 38, 38, 0.05);
+}
+
+:global([data-theme="light"]) .infoBar {
+    border-top-color: #e2e8f0;
+    color: #9ca3af;
+}
+
+/* Mobile */
+@media (max-width: 768px) {
+    .toolbar {
+        padding: 6px 8px;
+    }
+
+    .itemRow {
+        padding: 8px;
+    }
+}
