@@ -595,7 +595,7 @@ def regenerate_entry(
     messages.sort(key=lambda m: m.created_at)
     
     # 5. Call scripts layer for business logic
-    from scripts.build_arasuji import regenerate_entry_from_messages
+    from scripts.arasuji.build_arasuji_core import regenerate_entry_from_messages
     new_entry = regenerate_entry_from_messages(conn, messages, model_name, persona_id=persona_id)
     
     if not new_entry:
