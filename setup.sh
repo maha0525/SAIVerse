@@ -110,9 +110,12 @@ if [ ! -f ".env" ]; then
     echo ""
     echo "[SETUP] .env ファイルを作成中..."
     cp .env.example .env
-    echo "[OK] .env を作成しました"
+    chmod 600 .env
+    echo "[OK] .env を作成しました (権限: 600)"
     echo "  APIキーの設定は初回起動時のチュートリアルで行えます。"
 else
+    # 既存の .env も安全な権限に修正
+    chmod 600 .env
     echo "[OK] .env は既に存在します"
 fi
 

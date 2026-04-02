@@ -7,7 +7,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from saiverse.logging_config import log_sea_trace
 from sea.playbook_models import PlaybookSchema
-from sea.runtime_utils import _format
+from sea.runtime_utils import _format, _resolve_template_arg
 
 LOGGER = logging.getLogger(__name__)
 
@@ -211,7 +211,7 @@ class RuntimeEngine:
                 state_vars = {k: v for k, v in state.items() if not k.startswith("_")}
                 for key, tmpl in static_args.items():
                     if isinstance(tmpl, str):
-                        child_args[key] = _format(tmpl, state_vars)
+                        child_args[key] = _resolve_template_arg(tmpl, state_vars)
                     else:
                         child_args[key] = tmpl
             # 2. Merge dynamic args from args_source (takes precedence)

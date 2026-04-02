@@ -291,6 +291,7 @@ class SAIMemoryAdapter:
         *,
         required_tags: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
+        exclude_pulse_id: Optional[str] = None,
     ) -> List[dict]:
         if not self._ready:
             return []
@@ -307,6 +308,7 @@ class SAIMemoryAdapter:
         consumed = 0
         required_tags = required_tags or []
         pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
+        exclude_tag = f"pulse:{exclude_pulse_id}" if exclude_pulse_id else None
 
         for payload in reversed(payloads):
             tags = []
@@ -315,6 +317,10 @@ class SAIMemoryAdapter:
                 raw_tags = metadata.get("tags")
                 if isinstance(raw_tags, list):
                     tags = [str(tag) for tag in raw_tags if tag]
+
+            # Exclude messages belonging to the specified pulse
+            if exclude_tag and exclude_tag in tags:
+                continue
 
             include = True
             if required_tags:
@@ -339,6 +345,7 @@ class SAIMemoryAdapter:
         *,
         required_tags: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
+        exclude_pulse_id: Optional[str] = None,
     ) -> List[dict]:
         """Get recent persona messages limited by message count instead of characters."""
         if not self._ready:
@@ -355,6 +362,7 @@ class SAIMemoryAdapter:
         selected: List[dict] = []
         required_tags = required_tags or []
         pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
+        exclude_tag = f"pulse:{exclude_pulse_id}" if exclude_pulse_id else None
 
         for payload in reversed(payloads):
             tags = []
@@ -363,6 +371,10 @@ class SAIMemoryAdapter:
                 raw_tags = metadata.get("tags")
                 if isinstance(raw_tags, list):
                     tags = [str(tag) for tag in raw_tags if tag]
+
+            # Exclude messages belonging to the specified pulse
+            if exclude_tag and exclude_tag in tags:
+                continue
 
             include = True
             if required_tags:
@@ -384,6 +396,7 @@ class SAIMemoryAdapter:
         *,
         required_tags: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
+        exclude_pulse_id: Optional[str] = None,
     ) -> List[dict]:
         """Get persona messages from anchor message onwards.
 
@@ -407,6 +420,7 @@ class SAIMemoryAdapter:
         selected: List[dict] = []
         required_tags = required_tags or []
         pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
+        exclude_tag = f"pulse:{exclude_pulse_id}" if exclude_pulse_id else None
 
         for payload in payloads:  # already in chronological order
             tags = []
@@ -415,6 +429,10 @@ class SAIMemoryAdapter:
                 raw_tags = metadata.get("tags")
                 if isinstance(raw_tags, list):
                     tags = [str(tag) for tag in raw_tags if tag]
+
+            # Exclude messages belonging to the specified pulse
+            if exclude_tag and exclude_tag in tags:
+                continue
 
             include = True
             if required_tags:
@@ -436,6 +454,7 @@ class SAIMemoryAdapter:
         *,
         required_tags: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
+        exclude_pulse_id: Optional[str] = None,
     ) -> List[dict]:
         """Get recent messages balanced across conversation partners.
 
@@ -447,6 +466,7 @@ class SAIMemoryAdapter:
             participant_ids: List of partner IDs to balance (e.g., ["user", "persona_b"])
             required_tags: Only include messages with these tags
             pulse_id: Always include messages with this pulse ID
+            exclude_pulse_id: Exclude messages with this pulse ID (for mid-pulse context_profile reads)
 
         Returns:
             List of messages, sorted by timestamp, balanced across participants
@@ -465,6 +485,7 @@ class SAIMemoryAdapter:
 
         required_tags = required_tags or []
         pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
+        exclude_tag = f"pulse:{exclude_pulse_id}" if exclude_pulse_id else None
 
         # Group messages by participant
         # Key: participant_id, Value: list of (index, payload) tuples
@@ -475,6 +496,10 @@ class SAIMemoryAdapter:
             metadata = payload.get("metadata") or {}
             tags = metadata.get("tags", [])
             with_list = metadata.get("with", [])
+
+            # Exclude messages belonging to the specified pulse
+            if exclude_tag and exclude_tag in tags:
+                continue
 
             # Check if message matches required tags
             include = True

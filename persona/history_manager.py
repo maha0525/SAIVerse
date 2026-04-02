@@ -236,6 +236,7 @@ class HistoryManager:
         *,
         required_tags: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
+        exclude_pulse_id: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         """Retrieves recent messages from persona history up to a character limit."""
         if self.memory_adapter is not None:
@@ -251,6 +252,7 @@ class HistoryManager:
                     max_chars,
                     required_tags=required_tags,
                     pulse_id=pulse_id,
+                    exclude_pulse_id=exclude_pulse_id,
                 )
                 LOGGER.debug(
                     "SAIMemory returned %d persona messages for %s",
@@ -278,6 +280,7 @@ class HistoryManager:
         *,
         required_tags: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
+        exclude_pulse_id: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         """Retrieves recent messages from persona history up to a message count limit."""
         if self.memory_adapter is not None:
@@ -293,6 +296,7 @@ class HistoryManager:
                     max_messages,
                     required_tags=required_tags,
                     pulse_id=pulse_id,
+                    exclude_pulse_id=exclude_pulse_id,
                 )
                 LOGGER.debug(
                     "SAIMemory returned %d persona messages for %s",
@@ -315,6 +319,7 @@ class HistoryManager:
         *,
         required_tags: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
+        exclude_pulse_id: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         """Retrieves messages from anchor onwards (for metabolism anchor-based retrieval)."""
         if self.memory_adapter is not None:
@@ -330,6 +335,7 @@ class HistoryManager:
                     anchor_message_id,
                     required_tags=required_tags,
                     pulse_id=pulse_id,
+                    exclude_pulse_id=exclude_pulse_id,
                 )
                 LOGGER.debug(
                     "SAIMemory returned %d messages from anchor for %s",
@@ -357,6 +363,7 @@ class HistoryManager:
         *,
         required_tags: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
+        exclude_pulse_id: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         """Retrieves recent messages balanced across conversation partners.
 
@@ -365,6 +372,7 @@ class HistoryManager:
             participant_ids: List of partner IDs to balance (e.g., ["user", "persona_b"])
             required_tags: Only include messages with these tags
             pulse_id: Always include messages with this pulse ID
+            exclude_pulse_id: Exclude messages with this pulse ID
 
         Returns:
             List of messages balanced across participants
@@ -381,6 +389,7 @@ class HistoryManager:
                 participant_ids,
                 required_tags=required_tags,
                 pulse_id=pulse_id,
+                exclude_pulse_id=exclude_pulse_id,
             )
             LOGGER.debug(
                 "SAIMemory returned %d balanced messages for %s",
@@ -394,6 +403,7 @@ class HistoryManager:
             max_chars,
             required_tags=required_tags,
             pulse_id=pulse_id,
+            exclude_pulse_id=exclude_pulse_id,
         )
 
     def get_last_user_message(self) -> Optional[str]:

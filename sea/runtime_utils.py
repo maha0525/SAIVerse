@@ -27,3 +27,23 @@ def _format(template: str, variables: Dict[str, Any]) -> str:
         return match.group(0)
 
     return re.sub(r"\{([\w.]+)\}", replacer, template)
+
+
+def _resolve_template_arg(template: str, variables: Dict[str, Any]) -> Any:
+    """Resolve a template arg, preserving non-string types for pure variable references.
+
+    If the template is exactly ``{key}`` (a single variable reference with no
+    surrounding text) and the corresponding value is a dict or list, return
+    the original value instead of stringifying it.  This allows structured
+    data (e.g. metadata dicts) to flow through playbook args without being
+    converted to their ``str()`` representation.
+
+    For any other template pattern (e.g. ``"prefix {key} suffix"``), fall
+    back to the regular ``_format`` string interpolation.
+    """
+    m = re.fullmatch(r"\{([\w.]+)\}", template)
+    if m:
+        key = m.group(1)
+        if key in variables:
+            return variables[key]
+    return _format(template, variables)

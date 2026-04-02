@@ -138,7 +138,7 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
         if not sub_pb:
             state["last"] = f"Sub-playbook {sub_name} not found"
             return state
-        from .runtime_utils import _format as runtime_format
+        from .runtime_utils import _resolve_template_arg
 
         # Build child args from node_def.args, resolving template strings against current state
         node_args = getattr(node_def, "args", None)
@@ -147,7 +147,7 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
             child_args = {}
             for key, tmpl in node_args.items():
                 if isinstance(tmpl, str):
-                    child_args[key] = runtime_format(tmpl, state_vars)
+                    child_args[key] = _resolve_template_arg(tmpl, state_vars)
                 else:
                     child_args[key] = tmpl
             sub_input = child_args.get("input") or child_args.get("query") or ""

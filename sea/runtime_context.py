@@ -14,7 +14,7 @@ from saiverse.model_configs import (
 
 LOGGER = logging.getLogger(__name__)
 
-def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None) -> List[Dict[str, Any]]:
+def prepare_context(runtime, persona: Any, building_id: str, user_input: Optional[str], requirements: Optional[Any] = None, pulse_id: Optional[str] = None, exclude_pulse_id: Optional[str] = None, warnings: Optional[List[Dict[str, Any]]] = None, preview_only: bool = False, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, cancellation_token: Optional[Any] = None) -> List[Dict[str, Any]]:
     from sea.playbook_models import ContextRequirements
 
     # Use provided requirements or default to full context
@@ -228,6 +228,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             # Case 1 or 2: valid anchor found
                             recent_from_anchor = history_mgr.get_history_from_anchor(
                                 anchor_id, required_tags=required_tags, pulse_id=pulse_id,
+                                exclude_pulse_id=exclude_pulse_id,
                             )
                             if recent_from_anchor:
                                 recent = recent_from_anchor
@@ -282,6 +283,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                         if anchor_id:
                             recent_from_anchor = history_mgr.get_history_from_anchor(
                                 anchor_id, required_tags=required_tags, pulse_id=pulse_id,
+                                exclude_pulse_id=exclude_pulse_id,
                             )
                             if recent_from_anchor:
                                 recent = recent_from_anchor
@@ -331,6 +333,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             limit_value,
                             required_tags=required_tags,
                             pulse_id=pulse_id,
+                            exclude_pulse_id=exclude_pulse_id,
                         )
                     elif reqs.history_balanced:
                         # Get conversation partners for balanced retrieval
@@ -346,6 +349,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             participant_ids,
                             required_tags=required_tags,
                             pulse_id=pulse_id,
+                            exclude_pulse_id=exclude_pulse_id,
                         )
                     else:
                         # Filter by required tags or current pulse_id
@@ -353,6 +357,7 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             limit_value,
                             required_tags=required_tags,
                             pulse_id=pulse_id,
+                            exclude_pulse_id=exclude_pulse_id,
                         )
 
                     # Set metabolism anchor on first count-based retrieval and persist (skip in preview)
