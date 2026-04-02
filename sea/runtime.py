@@ -1664,17 +1664,16 @@ class SEARuntime:
             persona_id=persona_id_str,
         )
 
-        # Memory note extraction callback
+        # Entity extraction callback (extracts entities → reflects to Memopedia)
         note_callback = None
         try:
-            from sai_memory.memory.note_extractor import make_batch_callback as make_note_callback
-            note_callback = make_note_callback(
+            from sai_memory.memory.entity_extractor import make_batch_callback as make_entity_callback
+            note_callback = make_entity_callback(
                 client, adapter.conn,
-                thread_id=adapter._thread_id(None),
                 persona_id=persona_id_str,
             )
         except Exception as exc:
-            LOGGER.warning("[metabolism] Memory note extraction setup failed: %s", exc)
+            LOGGER.warning("[metabolism] Entity extraction setup failed: %s", exc)
 
         level1, consolidated = generator.generate_unprocessed(
             all_messages,

@@ -1,20 +1,16 @@
 """Build Memopedia knowledge base from existing chat logs.
 
-Processes messages from oldest to newest, extracting memory notes in batches.
-When unresolved notes reach a threshold, organizes them into Memopedia pages.
-Repeats until all messages are processed.
+Processes messages from oldest to newest, extracting entities and their
+knowledge in batches, then reflecting them directly to Memopedia pages.
 
 Usage:
     python scripts/build_memopedia_from_logs.py <persona_id> [options]
 
 Examples:
-    # Full run with defaults (organize every 30 notes)
+    # Full run with defaults
     python scripts/build_memopedia_from_logs.py eris_city_a
 
-    # Customize thresholds
-    python scripts/build_memopedia_from_logs.py eris_city_a --organize-threshold 20
-
-    # Dry run (extract + organize preview, no DB writes)
+    # Dry run (show what would be extracted, no DB writes)
     python scripts/build_memopedia_from_logs.py eris_city_a --dry-run
 
     # Process only first 500 messages
@@ -72,16 +68,6 @@ def _init_memopedia(conn):
     return Memopedia(conn)
 
 
-def _get_memopedia_context(memopedia) -> str:
-    try:
-        ctx = memopedia.get_tree_markdown(include_keywords=False, show_markers=False)
-        if ctx == "(まだページはありません)":
-            return ""
-        return ctx
-    except Exception:
-        return ""
-
-
 def _fetch_messages(conn, *, limit: int = 0, start_after: float = 0):
     from sai_memory.memory.storage import Message
 
@@ -121,34 +107,6 @@ def _fetch_messages(conn, *, limit: int = 0, start_after: float = 0):
     return messages
 
 
-def _run_organize(client, conn, memopedia, persona_id: str, dry_run: bool) -> int:
-    """Run organize_notes and return number of notes resolved."""
-    from sai_memory.memory.storage import count_unplanned_notes
-
-    n_unplanned = count_unplanned_notes(conn)
-    if n_unplanned == 0:
-        return 0
-
-    if dry_run:
-        from sai_memory.memory.note_organizer import plan_notes
-        tree = memopedia.get_tree()
-        groups = plan_notes(client, conn, tree, persona_id=persona_id)
-        total = sum(len(g.get("note_ids", [])) for g in groups)
-        print(f"    [organize/dry-run] {len(groups)} groups, {total} notes planned")
-        for g in groups:
-            target = g.get("target_page_id") or g.get("suggested_title") or "?"
-            print(f"      [{g['group_label']}] {len(g['note_ids'])} notes → {g['action']} ({target})")
-        return 0
-    else:
-        from sai_memory.memory.note_organizer import organize_notes
-        results = organize_notes(client, conn, memopedia, persona_id=persona_id)
-        total = sum(r.note_count for r in results)
-        print(f"    [organize] {len(results)} groups, {total} notes → Memopedia")
-        for r in results:
-            print(f"      [{r.group_label}] {r.action} → {r.page_id[:12]}... ({r.note_count} notes)")
-        return total
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Build Memopedia knowledge base from chat logs",
@@ -156,8 +114,7 @@ def main():
     parser.add_argument("persona_id", help="Persona ID (e.g., eris_city_a)")
     parser.add_argument("--limit", type=int, default=0, help="Max messages to process (0=all)")
     parser.add_argument("--batch-size", type=int, default=20, help="Messages per extraction batch (default: 20)")
-    parser.add_argument("--organize-threshold", type=int, default=30, help="Organize when unresolved notes reach this count (default: 30)")
-    parser.add_argument("--model", type=str, default=None, help="Model to use for extraction and organization")
+    parser.add_argument("--model", type=str, default=None, help="Model to use for extraction")
     parser.add_argument("--start-after", type=float, default=0, help="Process messages after this timestamp (for resuming)")
     parser.add_argument("--dry-run", action="store_true", help="Preview only, no DB writes")
     args = parser.parse_args()
@@ -166,7 +123,6 @@ def main():
     client = _init_llm(args.model)
     memopedia = _init_memopedia(conn)
 
-    # Fetch all target messages
     messages = _fetch_messages(conn, limit=args.limit, start_after=args.start_after)
     if not messages:
         print("No messages found")
@@ -176,18 +132,21 @@ def main():
     print(f"Found {len(messages)} messages to process")
     print(f"  Oldest: {time.strftime('%Y-%m-%d %H:%M', time.localtime(messages[0].created_at))}")
     print(f"  Newest: {time.strftime('%Y-%m-%d %H:%M', time.localtime(messages[-1].created_at))}")
-    print(f"  Batch size: {args.batch_size}, Organize threshold: {args.organize_threshold}")
+    print(f"  Batch size: {args.batch_size}")
     print()
 
-    from sai_memory.memory.note_extractor import extract_memory_notes
-    from sai_memory.memory.storage import add_memory_notes, get_unresolved_notes, count_unresolved_notes
+    from sai_memory.memory.entity_extractor import (
+        extract_entities,
+        reflect_to_memopedia,
+        _format_page_list,
+    )
     from sai_memory.arasuji.context import get_episode_context_for_timerange
 
-    total_notes_extracted = 0
-    total_notes_organized = 0
+    total_entities = 0
+    total_notes = 0
+    total_new_pages = 0
+    total_updated_pages = 0
     batch_count = 0
-    organize_count = 0
-    thread_id = f"{args.persona_id}:__persona__"
 
     for i in range(0, len(messages), args.batch_size):
         batch = messages[i:i + args.batch_size]
@@ -200,7 +159,7 @@ def main():
         end_time = max(m.created_at for m in batch)
         time_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(start_time))
 
-        # Episode context for this time range
+        # Episode context
         ep_ctx = ""
         try:
             ep_ctx = get_episode_context_for_timerange(
@@ -209,76 +168,51 @@ def main():
         except Exception:
             pass
 
-        # Memopedia context (refreshed after each organize)
-        memopedia_context = _get_memopedia_context(memopedia)
-
-        # Existing notes for dedup
-        existing = get_unresolved_notes(conn, limit=200)
-        existing_contents = [n.content for n in existing]
+        # Existing pages (refreshed each batch to include newly created pages)
+        existing_pages = _format_page_list(memopedia)
 
         print(f"[Batch {batch_count}] {time_str} | msgs {i+1}-{i+len(batch)}/{len(messages)}", end="")
 
-        notes = extract_memory_notes(
+        entities = extract_entities(
             client, batch,
             episode_context=ep_ctx,
-            memopedia_context=memopedia_context,
-            existing_notes=existing_contents,
+            existing_pages=existing_pages,
             persona_id=args.persona_id,
         )
 
-        if notes:
-            print(f" → {len(notes)} notes")
-            for note in notes:
-                print(f"    + {note}")
+        if not entities:
+            print(" → 0 entities")
+            continue
 
-            if not args.dry_run:
-                add_memory_notes(
-                    conn, thread_id=thread_id, notes=notes,
-                    source_time=int(end_time),
-                )
+        print(f" → {len(entities)} entities")
+        for ent in entities:
+            print(f"    [{ent.category}] {ent.name}:")
+            for note in ent.notes:
+                print(f"      - {note}")
 
-            total_notes_extracted += len(notes)
-        else:
-            print(" → 0 notes")
+        if not args.dry_run:
+            results = reflect_to_memopedia(
+                entities, memopedia,
+                source_time=int(end_time),
+            )
+            for r in results:
+                status = "NEW" if r.is_new_page else "UPDATE"
+                print(f"    → [{status}] {r.entity_name} ({r.notes_appended} notes)")
+            total_new_pages += sum(1 for r in results if r.is_new_page)
+            total_updated_pages += sum(1 for r in results if not r.is_new_page)
 
-        # Check if we should organize
-        if args.dry_run:
-            unresolved = total_notes_extracted - total_notes_organized
-            if unresolved >= args.organize_threshold:
-                print(f"\n  --- [dry-run] Organize would run here ({unresolved} notes) ---\n")
-                total_notes_organized += unresolved
-                organize_count += 1
-        else:
-            unresolved = count_unresolved_notes(conn)
-            if unresolved >= args.organize_threshold:
-                print(f"\n  --- Organizing ({unresolved} unresolved notes) ---")
-                organized = _run_organize(client, conn, memopedia, args.persona_id, dry_run=False)
-                total_notes_organized += organized
-                organize_count += 1
-                print()
-
-    # Final organize for remaining notes
-    if args.dry_run:
-        final_unresolved = total_notes_extracted - total_notes_organized
-        if final_unresolved > 0:
-            print(f"\n  --- [dry-run] Final organize would run here ({final_unresolved} notes) ---")
-            total_notes_organized += final_unresolved
-            organize_count += 1
-    else:
-        final_unresolved = count_unresolved_notes(conn)
-        if final_unresolved > 0:
-            print(f"\n  --- Final organize ({final_unresolved} remaining notes) ---")
-            organized = _run_organize(client, conn, memopedia, args.persona_id, dry_run=False)
-            total_notes_organized += organized
-            organize_count += 1
+        total_entities += len(entities)
+        total_notes += sum(len(e.notes) for e in entities)
 
     # Summary
     print(f"\n{'='*60}")
     print("Done!")
     print(f"  Messages processed: {batch_count * args.batch_size} (in {batch_count} batches)")
-    print(f"  Notes extracted: {total_notes_extracted}")
-    print(f"  Notes organized: {total_notes_organized}")
-    print(f"  Organize rounds: {organize_count}")
+    print(f"  Entities found: {total_entities}")
+    print(f"  Notes extracted: {total_notes}")
+    if not args.dry_run:
+        print(f"  New pages created: {total_new_pages}")
+        print(f"  Existing pages updated: {total_updated_pages}")
     if messages:
         print(f"  Last message timestamp: {messages[-1].created_at}")
         print(f"  (Use --start-after {messages[-1].created_at} to resume)")
