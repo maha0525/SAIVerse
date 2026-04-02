@@ -188,14 +188,14 @@ python main.py city_a
 
 <details>
 <summary>Mac/Linux向けの導入</summary>
+
+#### ダウンロード
+
 **Git導入済みの場合：**<br>
-コマンドプロンプトから
+ターミナルから
 ```bash
 git clone https://github.com/maha0525/SAIVerse.git
 cd SAIVerse
-chmod +x setup.sh start.sh
-./setup.sh
-./start.sh
 ```
 
 **Git非導入の場合：**<br>
@@ -210,16 +210,28 @@ chmod +x setup.sh start.sh
 </p>
 </details>
 
-初回起動時にチュートリアルが表示され、ユーザー名やAPIキーの設定を案内します。
+#### インストール
 
-`SAIVerse` フォルダ内の **`setup.sh`** をダブルクリック
+ターミナルで `SAIVerse` フォルダに移動し、以下を実行してください：
+```bash
+chmod +x setup.sh start.sh
+./setup.sh
+```
 ![setup.sh](assets/image/guide/quickstart_setup_linux.png)
 ※Python仮想環境の作成、依存パッケージのインストール、データベース初期化、埋め込みモデルのダウンロードを自動実行します
 
-**`start.sh`** をダブルクリック
-![start.bat](assets/image/guide/quickstart_start_linux.png)
-→2～3個コンソールウィンドウが開きます
+初回起動時にチュートリアルが表示され、ユーザー名やAPIキーの設定を案内します。
+
+#### 起動
+
+```bash
+./start.sh
+```
+![start.sh](assets/image/guide/quickstart_start_linux.png)
 →ブラウザで http://localhost:3000 が自動的に開きます
+
+### 終了
+ターミナルでCtrl+Cを押下すると終了できます。
 
 </details>
 
