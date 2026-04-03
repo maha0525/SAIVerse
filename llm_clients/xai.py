@@ -123,6 +123,7 @@ def _convert_tools(tools_spec: List[Dict[str, Any]]) -> list:
 def _build_xai_messages(
     messages: List[Dict[str, Any]],
     supports_images: bool,
+    max_image_bytes: Optional[int] = None,
 ) -> list:
     """Convert SAIVerse message dicts to xai_sdk message objects.
 
@@ -181,6 +182,7 @@ def _build_xai_messages(
                     if should_embed:
                         data, effective_mime = load_image_bytes_for_llm(
                             att["path"], att["mime_type"],
+                            max_bytes=max_image_bytes,
                         )
                         if data and effective_mime:
                             b64 = base64.b64encode(data).decode("ascii")
@@ -242,6 +244,7 @@ class XAIClient(LLMClient):
         api_key: Optional[str] = None,
         api_key_env: Optional[str] = None,
         reasoning_effort: Optional[str] = None,
+        max_image_bytes: Optional[int] = None,
     ) -> None:
         super().__init__(supports_images=supports_images)
         import xai_sdk
@@ -257,6 +260,7 @@ class XAIClient(LLMClient):
         self.client = xai_sdk.Client(api_key=resolved_key, timeout=3600)
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.max_image_bytes: Optional[int] = max_image_bytes
         self._request_kwargs: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
@@ -373,7 +377,7 @@ class XAIClient(LLMClient):
         if temperature is not None:
             chat_kwargs["temperature"] = temperature
 
-        xai_messages = _build_xai_messages(messages, self.supports_images)
+        xai_messages = _build_xai_messages(messages, self.supports_images, max_image_bytes=self.max_image_bytes)
         get_llm_logger().debug(
             "[xai] generate: model=%s, messages=%d, tools=%d, schema=%s",
             self.model, len(xai_messages), len(tools_spec), bool(response_schema),
@@ -529,7 +533,7 @@ class XAIClient(LLMClient):
         self._store_reasoning([])
         reasoning_chunks: List[str] = []
 
-        xai_messages = _build_xai_messages(messages, self.supports_images)
+        xai_messages = _build_xai_messages(messages, self.supports_images, max_image_bytes=self.max_image_bytes)
 
         try:
             if not use_tools:
