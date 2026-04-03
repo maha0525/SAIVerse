@@ -109,6 +109,10 @@ def write_env_updates(updates: Dict[str, str]) -> None:
         if new_lines:
             f.write("\n")
 
+    # Ensure .env is only readable by owner (Linux/macOS)
+    if os.name != "nt":
+        os.chmod(ENV_FILE_PATH, 0o600)
+
     # Also update os.environ so changes take effect immediately
     for key, val in updates.items():
         os.environ[key] = val
