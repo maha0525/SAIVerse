@@ -94,6 +94,13 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
             if isinstance(reasoning_passback, str) and reasoning_passback.strip():
                 extra_kwargs["reasoning_passback_field"] = reasoning_passback.strip()
 
+        # Default max_image_bytes for OpenAI provider: 5MB.  OpenAI APIs
+        # accept up to 20MB but very large images (e.g. 18MB) cause vision
+        # recognition failures despite 200 OK responses.  Resizing client-
+        # side is cheap and keeps base64 payloads reasonable.
+        if supports_images and "max_image_bytes" not in extra_kwargs:
+            extra_kwargs["max_image_bytes"] = 5 * 1024 * 1024
+
         logging.debug("Creating OpenAI client for model '%s' with kwargs: %s", api_model, extra_kwargs)
         client = OpenAIClient(api_model, supports_images=supports_images, **extra_kwargs)
     elif provider == "nvidia_nim":
@@ -162,6 +169,9 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
             reasoning_effort = config.get("reasoning_effort")
             if isinstance(reasoning_effort, str) and reasoning_effort.strip():
                 extra_kwargs["reasoning_effort"] = reasoning_effort.strip()
+
+        if supports_images and "max_image_bytes" not in extra_kwargs:
+            extra_kwargs["max_image_bytes"] = 5 * 1024 * 1024
 
         logging.debug("Creating xAI client for model '%s' with kwargs: %s", api_model, extra_kwargs)
         client = XAIClient(api_model, supports_images=supports_images, **extra_kwargs)

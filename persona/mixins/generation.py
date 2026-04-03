@@ -621,7 +621,7 @@ class PersonaGenerationMixin:
     def _filter_metadata_for_llm(self, metadata: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         if not isinstance(metadata, dict):
             return None
-        allowed_keys = {"media"}
+        allowed_keys = {"media", "images"}
         filtered = {key: copy.deepcopy(value) for key, value in metadata.items() if key in allowed_keys}
         return filtered or None
 
