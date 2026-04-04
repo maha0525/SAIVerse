@@ -288,6 +288,108 @@ def get_arasuji_stats(persona_id: str, manager = Depends(get_manager)):
     finally:
         conn.close()
 
+@router.get("/{persona_id}/arasuji/diagnosis")
+def get_chronicle_diagnosis(persona_id: str, manager=Depends(get_manager)):
+    """Get diagnostic information about Chronicle structure (no message content)."""
+    from sai_memory.arasuji.storage import (
+        get_entries_by_level,
+        count_entries_by_level,
+        count_unconsolidated_by_level,
+        get_max_level,
+        get_progress,
+    )
+    from sai_memory.memory.storage import count_messages
+
+    conn = _get_arasuji_db(persona_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+
+    try:
+        total_messages = count_messages(conn)
+        counts_by_level = count_entries_by_level(conn)
+        unconsolidated_by_level = count_unconsolidated_by_level(conn)
+        max_level = get_max_level(conn)
+        progress = get_progress(conn)
+
+        # Build per-level entry details (no content)
+        level_details: Dict[int, list] = {}
+        lv1_entries = []
+        for level in range(1, max_level + 1):
+            entries = get_entries_by_level(conn, level, order_by_time=True)
+            if level == 1:
+                lv1_entries = entries
+            level_details[level] = [
+                {
+                    "id": e.id,
+                    "start_time": e.start_time,
+                    "end_time": e.end_time,
+                    "source_count": e.source_count,
+                    "message_count": e.message_count,
+                    "is_consolidated": e.is_consolidated,
+                    "parent_id": e.parent_id,
+                }
+                for e in entries
+            ]
+
+        # Gap analysis: messages between consecutive Lv1 Chronicles
+        gaps = []
+        for i in range(len(lv1_entries) - 1):
+            e1 = lv1_entries[i]
+            e2 = lv1_entries[i + 1]
+            if e1.end_time is not None and e2.start_time is not None and e1.end_time < e2.start_time:
+                cur = conn.execute(
+                    "SELECT COUNT(*) FROM messages WHERE created_at > ? AND created_at < ?",
+                    (e1.end_time, e2.start_time),
+                )
+                gap_count = cur.fetchone()[0]
+                if gap_count > 0:
+                    gaps.append({
+                        "prev_chronicle_id": e1.id,
+                        "next_chronicle_id": e2.id,
+                        "gap_start_time": e1.end_time,
+                        "gap_end_time": e2.start_time,
+                        "isolated_message_count": gap_count,
+                    })
+
+        # Messages after last Chronicle
+        messages_after_last = 0
+        last_end_time = None
+        if lv1_entries:
+            last_entry = lv1_entries[-1]
+            last_end_time = last_entry.end_time
+            if last_end_time is not None:
+                cur = conn.execute(
+                    "SELECT COUNT(*) FROM messages WHERE created_at > ?",
+                    (last_end_time,),
+                )
+                messages_after_last = cur.fetchone()[0]
+        else:
+            messages_after_last = total_messages
+
+        messages_covered = sum(e.message_count for e in lv1_entries)
+
+        return {
+            "persona_id": persona_id,
+            "generated_at": int(time.time()),
+            "total_messages": total_messages,
+            "messages_covered_by_lv1": messages_covered,
+            "messages_after_last_chronicle": messages_after_last,
+            "max_level": max_level,
+            "counts_by_level": counts_by_level,
+            "unconsolidated_by_level": unconsolidated_by_level,
+            "last_chronicle_end_time": last_end_time,
+            "last_processed_message_id": progress.last_processed_message_id if progress else None,
+            "last_processed_at": progress.last_processed_at if progress else None,
+            "level_details": level_details,
+            "gaps": gaps,
+        }
+    except Exception as e:
+        LOGGER.error("Failed to get chronicle diagnosis for %s: %s", persona_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get chronicle diagnosis: {e}")
+    finally:
+        conn.close()
+
+
 @router.get("/{persona_id}/arasuji", response_model=ArasujiListResponse, tags=["Chronicle"])
 def list_arasuji_entries(
     persona_id: str,
