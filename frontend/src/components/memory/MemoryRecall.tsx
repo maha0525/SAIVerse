@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Search, Loader2, AlertCircle, Brain, Bug, Trash2, FileDown, Activity } from 'lucide-react';
+import { Search, Loader2, AlertCircle, Brain, Bug, Trash2, FileDown, Activity, LifeBuoy } from 'lucide-react';
 import styles from './MemoryRecall.module.css';
 
 interface MemoryRecallProps {
@@ -43,6 +43,39 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
     const [confirmChronicle, setConfirmChronicle] = useState(false);
     const [confirmMemopedia, setConfirmMemopedia] = useState(false);
     const [deleteResult, setDeleteResult] = useState<string | null>(null);
+
+    // Stelis thread rescue state
+    const [isRescuing, setIsRescuing] = useState(false);
+    const [rescueResult, setRescueResult] = useState<{
+        rescued_thread_id: string;
+        parent_thread_id: string | null;
+        former_stelis_depth: number;
+        former_stelis_status: string;
+        label: string | null;
+        messages_rescued: number;
+    } | null>(null);
+    const [rescueError, setRescueError] = useState<string | null>(null);
+
+    const handleRescueStelisThread = async () => {
+        setIsRescuing(true);
+        setRescueResult(null);
+        setRescueError(null);
+        try {
+            const backendUrl = 'http://127.0.0.1:8000';
+            const res = await fetch(`${backendUrl}/api/people/${personaId}/rescue-stelis-thread`, {
+                method: 'POST',
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                throw new Error(data.detail || 'Stelis救出に失敗しました');
+            }
+            setRescueResult(data);
+        } catch (err: any) {
+            setRescueError(err.message || 'エラーが発生しました');
+        } finally {
+            setIsRescuing(false);
+        }
+    };
 
     // Chronicle diagnosis state
     const [isDiagnosing, setIsDiagnosing] = useState(false);
@@ -562,6 +595,56 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                             </tbody>
                         </table>
                     </div>
+                </div>
+            )}
+
+            {/* Stelis Thread Rescue */}
+            <div className={styles.header} style={{ marginTop: '2rem' }}>
+                <LifeBuoy size={24} className={styles.icon} />
+                <div>
+                    <h3 className={styles.title}>Stelisスレッド救出</h3>
+                    <p className={styles.description}>
+                        アクティブスレッドがStelisスレッドのままになっている場合、通常スレッドとして再分類します。
+                        Chronicle生成がそのメッセージを処理できるようになります。
+                    </p>
+                </div>
+            </div>
+
+            <button
+                className={styles.executeButton}
+                onClick={handleRescueStelisThread}
+                disabled={isRescuing}
+                style={{ background: '#5c4a1e' }}
+            >
+                {isRescuing ? (
+                    <><Loader2 size={16} className={styles.loader} /> 処理中...</>
+                ) : (
+                    <><LifeBuoy size={16} /> Stelisスレッドを救出</>
+                )}
+            </button>
+
+            {rescueError && (
+                <div className={styles.error}>
+                    <AlertCircle size={16} />
+                    <span>{rescueError}</span>
+                </div>
+            )}
+
+            {rescueResult && (
+                <div className={styles.resultSection}>
+                    <label className={styles.label}>救出完了</label>
+                    <div style={{ fontSize: '0.85rem', lineHeight: '1.6', color: '#69db7c' }}>
+                        <div>スレッドID: <code style={{ fontSize: '0.75rem' }}>{rescueResult.rescued_thread_id}</code></div>
+                        <div>救出メッセージ数: {rescueResult.messages_rescued} 件</div>
+                        <div>元のStelis深度: {rescueResult.former_stelis_depth}</div>
+                        {rescueResult.label && <div>ラベル: {rescueResult.label}</div>}
+                        {rescueResult.parent_thread_id && (
+                            <div>親スレッドID: <code style={{ fontSize: '0.75rem' }}>{rescueResult.parent_thread_id}</code></div>
+                        )}
+                    </div>
+                    <p style={{ fontSize: '0.8rem', color: '#adb5bd', marginTop: '0.5rem' }}>
+                        Chronicle生成を再実行すると、このスレッドのメッセージが処理されます。
+                    </p>
                 </div>
             )}
 
