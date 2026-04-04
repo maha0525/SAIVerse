@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 import logging
 import time
+
+LOGGER = logging.getLogger(__name__)
 from api.deps import get_manager
 from .models import (
     ThreadSummary, MessageItem, MessagesResponse, UpdateMessageRequest, CreateMessageRequest
@@ -215,3 +217,67 @@ def set_active_thread(
         if not success:
             raise HTTPException(status_code=500, detail="Failed to set active thread")
         return {"success": True, "thread_id": thread_id}
+
+
+@router.post("/{persona_id}/rescue-stelis-thread")
+def rescue_stelis_thread(persona_id: str, manager=Depends(get_manager)):
+    """Convert the current active Stelis thread to a normal thread.
+
+    Removes the active thread from stelis_threads so that Chronicle generation
+    will process its messages. The thread content and active state are preserved.
+    """
+    import sqlite3
+    from pathlib import Path
+
+    # Verify active thread is a Stelis thread using the adapter
+    with get_adapter(persona_id, manager) as adapter:
+        summaries = adapter.list_thread_summaries()
+
+    active_summary = next((s for s in summaries if s.get("active")), None)
+    if not active_summary:
+        raise HTTPException(status_code=400, detail="No active thread found")
+    if not active_summary.get("is_stelis"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Active thread is not a Stelis thread (thread_id: {active_summary['thread_id']})"
+        )
+
+    thread_id = active_summary["thread_id"]
+    db_path = Path.home() / ".saiverse" / "personas" / persona_id / "memory.db"
+    if not db_path.exists():
+        raise HTTPException(status_code=404, detail="Memory database not found")
+
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    try:
+        cur = conn.execute(
+            "SELECT parent_thread_id, depth, status, label FROM stelis_threads WHERE thread_id = ?",
+            (thread_id,)
+        )
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=400, detail="Thread not found in stelis_threads table")
+
+        parent_thread_id, depth, status, label = row
+
+        cur = conn.execute("SELECT COUNT(*) FROM messages WHERE thread_id = ?", (thread_id,))
+        message_count = cur.fetchone()[0]
+
+        conn.execute("DELETE FROM stelis_threads WHERE thread_id = ?", (thread_id,))
+        conn.commit()
+
+        LOGGER.info(
+            "rescue_stelis_thread: persona=%s thread_id=%s parent=%s depth=%d messages=%d",
+            persona_id, thread_id, parent_thread_id, depth, message_count
+        )
+
+        return {
+            "success": True,
+            "rescued_thread_id": thread_id,
+            "parent_thread_id": parent_thread_id,
+            "former_stelis_depth": depth,
+            "former_stelis_status": status,
+            "label": label,
+            "messages_rescued": message_count,
+        }
+    finally:
+        conn.close()
