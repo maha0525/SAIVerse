@@ -61,22 +61,46 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         lines.push(`ペルソナ: ${data.persona_id}`);
         lines.push('');
 
+        // --- 全体サマリー ---
         lines.push('== 全体サマリー ==');
-        lines.push(`総メッセージ数: ${data.total_messages}`);
-        lines.push(`Lv1 Chronicle がカバーするメッセージ数: ${data.messages_covered_by_lv1}`);
-        lines.push(`最後の Chronicle 以降の未処理メッセージ数: ${data.messages_after_last_chronicle}`);
+        lines.push(`総メッセージ数 (Stelis含む): ${data.total_messages}`);
+        lines.push(`最後の Chronicle 以降のメッセージ数 (Stelis含む): ${data.messages_after_last_chronicle}`);
         lines.push(`Chronicle の最大レベル: ${data.max_level}`);
         if (data.last_chronicle_end_time != null) {
             lines.push(`最後の Chronicle 終端時刻: ${formatTime(data.last_chronicle_end_time)}`);
         }
         if (data.last_processed_at != null) {
-            lines.push(`最後の Chronicle 生成日時: ${formatTime(data.last_processed_at)}`);
+            lines.push(`最後の Chronicle 生成日時 (CLI経由): ${formatTime(data.last_processed_at)}`);
         }
         if (data.last_processed_message_id) {
-            lines.push(`最後に処理したメッセージID: ${data.last_processed_message_id}`);
+            lines.push(`最後に処理したメッセージID (CLI経由): ${data.last_processed_message_id}`);
         }
         lines.push('');
 
+        // --- Stelis 除外後の統計 ---
+        lines.push('== Stelis 除外後の統計 (generate_unprocessed の実行環境に相当) ==');
+        if (data.stelis_stats_error) {
+            lines.push(`  ※ stelis_threads テーブルが存在しません: ${data.stelis_stats_error}`);
+            lines.push('  ※ generate_unprocessed はこのエラーで全メッセージをスキップする可能性があります');
+        } else {
+            lines.push(`  Stelis 除外メッセージ数: ${data.stelis_excluded_messages ?? '(取得失敗)'}`);
+            lines.push(`  生成対象の総メッセージ数 (Stelis除外): ${data.non_stelis_total_messages ?? '(取得失敗)'}`);
+            lines.push(`  生成対象の未処理メッセージ数 (Stelis除外 & 最後のChronicle以降): ${data.non_stelis_after_last_chronicle ?? '(取得失敗)'}`);
+        }
+        lines.push('');
+
+        // --- source_ids 実態調査 ---
+        lines.push('== Level 1 source_ids 実態調査 ==');
+        lines.push(`  【実際の source_ids 合計数】: ${data.lv1_actual_source_ids_total}`);
+        lines.push(`  【DB保存の message_count 合計】: ${data.messages_covered_by_lv1_stored}  ← 上と乖離していれば異常`);
+        lines.push(`  generate_unprocessed が「処理済み」とみなす件数 (ユニーク source_ids): ${data.lv1_unique_source_ids}`);
+        lines.push(`  重複 source_ids 数: ${data.lv1_duplicate_source_ids}  ${data.lv1_duplicate_source_ids > 0 ? '⚠️ 異常' : '(正常)'}`);
+        lines.push(`  孤児 source_ids 数 (存在しないメッセージ参照): ${data.lv1_orphan_source_ids}  ${data.lv1_orphan_source_ids > 0 ? '⚠️ 異常' : '(正常)'}`);
+        lines.push(`  source_count と実際の長さが不一致なエントリ数: ${data.lv1_mismatched_entries}  ${data.lv1_mismatched_entries > 0 ? '⚠️ 異常' : '(正常)'}`);
+        lines.push(`  source_ids 長の統計 (実値): 平均 ${data.lv1_actual_source_ids_avg}  最大 ${data.lv1_actual_source_ids_max}  最小 ${data.lv1_actual_source_ids_min}`);
+        lines.push('');
+
+        // --- レベル別統計 ---
         lines.push('== レベル別統計 ==');
         for (let level = 1; level <= data.max_level; level++) {
             const total = data.counts_by_level[level] ?? 0;
@@ -86,14 +110,20 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
         }
         lines.push('');
 
-        // Per-level entry details
+        // --- Per-level エントリ詳細 ---
         for (let level = 1; level <= data.max_level; level++) {
             const entries: any[] = data.level_details[level] ?? [];
             lines.push(`== Level ${level} Chronicle エントリ詳細 (${entries.length} 件) ==`);
             entries.forEach((entry: any, idx: number) => {
                 lines.push(`  [${idx + 1}] ID: ${entry.id}`);
                 lines.push(`       期間: ${formatTime(entry.start_time)}  〜  ${formatTime(entry.end_time)}`);
-                lines.push(`       含むメッセージ数: ${entry.message_count}  ソース数: ${entry.source_count}`);
+                if (level === 1) {
+                    const mismatch = entry.actual_source_ids_count !== entry.source_count_stored
+                        ? `  ⚠️ DB保存値: ${entry.source_count_stored}` : '';
+                    lines.push(`       source_ids 実数: ${entry.actual_source_ids_count}${mismatch}  message_count: ${entry.message_count}`);
+                } else {
+                    lines.push(`       source_count: ${entry.source_count_stored}  message_count: ${entry.message_count}`);
+                }
                 const consolidatedStr = entry.is_consolidated
                     ? `はい → 親ID: ${entry.parent_id ?? '(なし)'}`
                     : 'いいえ';
@@ -102,7 +132,7 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             lines.push('');
         }
 
-        // Gap analysis
+        // --- ギャップ分析 ---
         lines.push('== ギャップ分析 (Chronicle 間の孤立メッセージ) ==');
         if (data.gaps.length > 0) {
             data.gaps.forEach((gap: any, idx: number) => {
