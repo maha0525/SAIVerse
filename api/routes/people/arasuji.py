@@ -288,6 +288,209 @@ def get_arasuji_stats(persona_id: str, manager = Depends(get_manager)):
     finally:
         conn.close()
 
+@router.get("/{persona_id}/arasuji/diagnosis")
+def get_chronicle_diagnosis(persona_id: str, manager=Depends(get_manager)):
+    """Get diagnostic information about Chronicle structure (no message content)."""
+    from sai_memory.arasuji.storage import (
+        get_entries_by_level,
+        count_entries_by_level,
+        count_unconsolidated_by_level,
+        get_max_level,
+        get_progress,
+    )
+    from sai_memory.memory.storage import count_messages
+
+    conn = _get_arasuji_db(persona_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail=f"Memory database not found for {persona_id}")
+
+    try:
+        total_messages = count_messages(conn)
+        counts_by_level = count_entries_by_level(conn)
+        unconsolidated_by_level = count_unconsolidated_by_level(conn)
+        max_level = get_max_level(conn)
+        progress = get_progress(conn)
+
+        # --- Level-1 source_ids 実態調査 ---
+        # DB保存値（source_count/message_count）ではなく source_ids_json の実際の内容を集計
+
+        # 各エントリの実際の source_ids 長（json_array_length）をまとめて取得
+        cur = conn.execute(
+            "SELECT id, json_array_length(source_ids_json) FROM arasuji_entries WHERE level = 1"
+        )
+        lv1_actual_lengths: Dict[str, int] = {row[0]: (row[1] or 0) for row in cur.fetchall()}
+
+        if lv1_actual_lengths:
+            lengths = list(lv1_actual_lengths.values())
+            lv1_actual_total = sum(lengths)
+            lv1_actual_avg = lv1_actual_total / len(lengths)
+            lv1_actual_max = max(lengths)
+            lv1_actual_min = min(lengths)
+        else:
+            lv1_actual_total = lv1_actual_avg = lv1_actual_max = lv1_actual_min = 0
+
+        # ユニーク source_ids 数（generate_unprocessed が「処理済み」とみなす件数と同じ）
+        cur = conn.execute(
+            "SELECT COUNT(DISTINCT value) "
+            "FROM arasuji_entries, json_each(source_ids_json) WHERE level = 1"
+        )
+        lv1_unique_source_ids = cur.fetchone()[0] or 0
+
+        # source_ids 重複数（合計 - ユニーク）
+        lv1_duplicate_source_ids = lv1_actual_total - lv1_unique_source_ids
+
+        # 存在しないメッセージを指す source_ids（孤児）
+        cur = conn.execute(
+            "SELECT COUNT(DISTINCT value) "
+            "FROM arasuji_entries, json_each(source_ids_json) "
+            "WHERE level = 1 AND value NOT IN (SELECT id FROM messages)"
+        )
+        lv1_orphan_source_ids = cur.fetchone()[0] or 0
+
+        # source_count フィールドと実際の長さが異なるエントリ
+        cur = conn.execute(
+            "SELECT COUNT(*) FROM arasuji_entries "
+            "WHERE level = 1 AND source_count != json_array_length(source_ids_json)"
+        )
+        lv1_mismatched_entries = cur.fetchone()[0] or 0
+
+        # --- Stelis 除外後の統計 ---
+        stelis_excluded: Optional[int] = None
+        non_stelis_total: Optional[int] = None
+        non_stelis_after_last: Optional[int] = None
+        stelis_error: Optional[str] = None
+        try:
+            cur = conn.execute(
+                "SELECT COUNT(*) FROM messages "
+                "WHERE thread_id IN (SELECT thread_id FROM stelis_threads)"
+            )
+            stelis_excluded = cur.fetchone()[0] or 0
+            non_stelis_total = total_messages - stelis_excluded
+        except Exception as ex:
+            stelis_error = str(ex)
+
+        # --- per-level エントリ詳細（実際の source_ids 長を含む）---
+        level_details: Dict[int, list] = {}
+        lv1_entries = []
+        for level in range(1, max_level + 1):
+            entries = get_entries_by_level(conn, level, order_by_time=True)
+            if level == 1:
+                lv1_entries = entries
+
+            if level == 1:
+                level_details[level] = [
+                    {
+                        "id": e.id,
+                        "start_time": e.start_time,
+                        "end_time": e.end_time,
+                        "source_count_stored": e.source_count,
+                        "actual_source_ids_count": lv1_actual_lengths.get(e.id, 0),
+                        "message_count": e.message_count,
+                        "is_consolidated": e.is_consolidated,
+                        "parent_id": e.parent_id,
+                    }
+                    for e in entries
+                ]
+            else:
+                level_details[level] = [
+                    {
+                        "id": e.id,
+                        "start_time": e.start_time,
+                        "end_time": e.end_time,
+                        "source_count_stored": e.source_count,
+                        "message_count": e.message_count,
+                        "is_consolidated": e.is_consolidated,
+                        "parent_id": e.parent_id,
+                    }
+                    for e in entries
+                ]
+
+        # --- Gap analysis: Level-1 Chronicle 間の孤立メッセージ ---
+        gaps = []
+        for i in range(len(lv1_entries) - 1):
+            e1 = lv1_entries[i]
+            e2 = lv1_entries[i + 1]
+            if e1.end_time is not None and e2.start_time is not None and e1.end_time < e2.start_time:
+                cur = conn.execute(
+                    "SELECT COUNT(*) FROM messages WHERE created_at > ? AND created_at < ?",
+                    (e1.end_time, e2.start_time),
+                )
+                gap_count = cur.fetchone()[0]
+                if gap_count > 0:
+                    gaps.append({
+                        "prev_chronicle_id": e1.id,
+                        "next_chronicle_id": e2.id,
+                        "gap_start_time": e1.end_time,
+                        "gap_end_time": e2.start_time,
+                        "isolated_message_count": gap_count,
+                    })
+
+        # --- 最後の Chronicle 以降のメッセージ数 ---
+        messages_after_last = 0
+        last_end_time = None
+        if lv1_entries:
+            last_end_time = lv1_entries[-1].end_time
+            if last_end_time is not None:
+                cur = conn.execute(
+                    "SELECT COUNT(*) FROM messages WHERE created_at > ?",
+                    (last_end_time,),
+                )
+                messages_after_last = cur.fetchone()[0]
+                if non_stelis_total is not None:
+                    try:
+                        cur = conn.execute(
+                            "SELECT COUNT(*) FROM messages WHERE created_at > ? "
+                            "AND thread_id NOT IN (SELECT thread_id FROM stelis_threads)",
+                            (last_end_time,),
+                        )
+                        non_stelis_after_last = cur.fetchone()[0] or 0
+                    except Exception:
+                        pass
+        else:
+            messages_after_last = total_messages
+            non_stelis_after_last = non_stelis_total
+
+        # DB保存の message_count 合計（旧来の値）
+        messages_covered_stored = sum(e.message_count for e in lv1_entries)
+
+        return {
+            "persona_id": persona_id,
+            "generated_at": int(time.time()),
+            # --- 全体サマリー ---
+            "total_messages": total_messages,
+            "messages_covered_by_lv1_stored": messages_covered_stored,  # DB保存値の合計（不正確な可能性あり）
+            "messages_after_last_chronicle": messages_after_last,
+            "max_level": max_level,
+            "counts_by_level": counts_by_level,
+            "unconsolidated_by_level": unconsolidated_by_level,
+            "last_chronicle_end_time": last_end_time,
+            "last_processed_message_id": progress.last_processed_message_id if progress else None,
+            "last_processed_at": progress.last_processed_at if progress else None,
+            # --- source_ids 実態調査 ---
+            "lv1_actual_source_ids_total": lv1_actual_total,
+            "lv1_unique_source_ids": lv1_unique_source_ids,        # generate_unprocessed の processed_ids 件数と同値
+            "lv1_duplicate_source_ids": lv1_duplicate_source_ids,  # 重複分（0でなければ異常）
+            "lv1_orphan_source_ids": lv1_orphan_source_ids,        # 存在しないメッセージ参照数
+            "lv1_mismatched_entries": lv1_mismatched_entries,      # source_count != 実際長 のエントリ数
+            "lv1_actual_source_ids_avg": round(lv1_actual_avg, 1),
+            "lv1_actual_source_ids_max": lv1_actual_max,
+            "lv1_actual_source_ids_min": lv1_actual_min,
+            # --- Stelis 除外後の統計 ---
+            "stelis_excluded_messages": stelis_excluded,
+            "non_stelis_total_messages": non_stelis_total,
+            "non_stelis_after_last_chronicle": non_stelis_after_last,
+            "stelis_stats_error": stelis_error,
+            # --- 詳細 ---
+            "level_details": level_details,
+            "gaps": gaps,
+        }
+    except Exception as e:
+        LOGGER.error("Failed to get chronicle diagnosis for %s: %s", persona_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get chronicle diagnosis: {e}")
+    finally:
+        conn.close()
+
+
 @router.get("/{persona_id}/arasuji", response_model=ArasujiListResponse, tags=["Chronicle"])
 def list_arasuji_entries(
     persona_id: str,

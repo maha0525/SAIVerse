@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Search, Loader2, AlertCircle, Brain, Bug, Trash2, Plus } from 'lucide-react';
+import { Search, Loader2, AlertCircle, Brain, Bug, Trash2, Plus, FileDown, Activity } from 'lucide-react';
 import styles from './MemoryRecall.module.css';
 
 interface MemoryRecallProps {
@@ -135,6 +135,145 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             setUnifiedError(err.message || 'An error occurred');
         } finally {
             setUnifiedLoading(false);
+        }
+    };
+
+    // Chronicle diagnosis state
+    const [isDiagnosing, setIsDiagnosing] = useState(false);
+    const [diagnosisError, setDiagnosisError] = useState<string | null>(null);
+
+    const formatDiagnosisReport = (data: any): string => {
+        const lines: string[] = [];
+        const formatTime = (ts: number | null): string => {
+            if (ts == null) return '(不明)';
+            return new Date(ts * 1000).toISOString().replace('T', ' ').replace('.000Z', '') + ' UTC';
+        };
+
+        lines.push('Chronicle 診断レポート');
+        lines.push('='.repeat(60));
+        lines.push(`生成日時: ${formatTime(data.generated_at)}`);
+        lines.push(`ペルソナ: ${data.persona_id}`);
+        lines.push('');
+
+        // --- 全体サマリー ---
+        lines.push('== 全体サマリー ==');
+        lines.push(`総メッセージ数 (Stelis含む): ${data.total_messages}`);
+        lines.push(`最後の Chronicle 以降のメッセージ数 (Stelis含む): ${data.messages_after_last_chronicle}`);
+        lines.push(`Chronicle の最大レベル: ${data.max_level}`);
+        if (data.last_chronicle_end_time != null) {
+            lines.push(`最後の Chronicle 終端時刻: ${formatTime(data.last_chronicle_end_time)}`);
+        }
+        if (data.last_processed_at != null) {
+            lines.push(`最後の Chronicle 生成日時 (CLI経由): ${formatTime(data.last_processed_at)}`);
+        }
+        if (data.last_processed_message_id) {
+            lines.push(`最後に処理したメッセージID (CLI経由): ${data.last_processed_message_id}`);
+        }
+        lines.push('');
+
+        // --- Stelis 除外後の統計 ---
+        lines.push('== Stelis 除外後の統計 (generate_unprocessed の実行環境に相当) ==');
+        if (data.stelis_stats_error) {
+            lines.push(`  ※ stelis_threads テーブルが存在しません: ${data.stelis_stats_error}`);
+            lines.push('  ※ generate_unprocessed はこのエラーで全メッセージをスキップする可能性があります');
+        } else {
+            lines.push(`  Stelis 除外メッセージ数: ${data.stelis_excluded_messages ?? '(取得失敗)'}`);
+            lines.push(`  生成対象の総メッセージ数 (Stelis除外): ${data.non_stelis_total_messages ?? '(取得失敗)'}`);
+            lines.push(`  生成対象の未処理メッセージ数 (Stelis除外 & 最後のChronicle以降): ${data.non_stelis_after_last_chronicle ?? '(取得失敗)'}`);
+        }
+        lines.push('');
+
+        // --- source_ids 実態調査 ---
+        lines.push('== Level 1 source_ids 実態調査 ==');
+        lines.push(`  【実際の source_ids 合計数】: ${data.lv1_actual_source_ids_total}`);
+        lines.push(`  【DB保存の message_count 合計】: ${data.messages_covered_by_lv1_stored}  ← 上と乖離していれば異常`);
+        lines.push(`  generate_unprocessed が「処理済み」とみなす件数 (ユニーク source_ids): ${data.lv1_unique_source_ids}`);
+        lines.push(`  重複 source_ids 数: ${data.lv1_duplicate_source_ids}  ${data.lv1_duplicate_source_ids > 0 ? '⚠️ 異常' : '(正常)'}`);
+        lines.push(`  孤児 source_ids 数 (存在しないメッセージ参照): ${data.lv1_orphan_source_ids}  ${data.lv1_orphan_source_ids > 0 ? '⚠️ 異常' : '(正常)'}`);
+        lines.push(`  source_count と実際の長さが不一致なエントリ数: ${data.lv1_mismatched_entries}  ${data.lv1_mismatched_entries > 0 ? '⚠️ 異常' : '(正常)'}`);
+        lines.push(`  source_ids 長の統計 (実値): 平均 ${data.lv1_actual_source_ids_avg}  最大 ${data.lv1_actual_source_ids_max}  最小 ${data.lv1_actual_source_ids_min}`);
+        lines.push('');
+
+        // --- レベル別統計 ---
+        lines.push('== レベル別統計 ==');
+        for (let level = 1; level <= data.max_level; level++) {
+            const total = data.counts_by_level[level] ?? 0;
+            const unconsolidated = data.unconsolidated_by_level[level] ?? 0;
+            const consolidated = total - unconsolidated;
+            lines.push(`  Level ${level}: 計 ${total} 件  (統合済み: ${consolidated}  未統合: ${unconsolidated})`);
+        }
+        lines.push('');
+
+        // --- Per-level エントリ詳細 ---
+        for (let level = 1; level <= data.max_level; level++) {
+            const entries: any[] = data.level_details[level] ?? [];
+            lines.push(`== Level ${level} Chronicle エントリ詳細 (${entries.length} 件) ==`);
+            entries.forEach((entry: any, idx: number) => {
+                lines.push(`  [${idx + 1}] ID: ${entry.id}`);
+                lines.push(`       期間: ${formatTime(entry.start_time)}  〜  ${formatTime(entry.end_time)}`);
+                if (level === 1) {
+                    const mismatch = entry.actual_source_ids_count !== entry.source_count_stored
+                        ? `  ⚠️ DB保存値: ${entry.source_count_stored}` : '';
+                    lines.push(`       source_ids 実数: ${entry.actual_source_ids_count}${mismatch}  message_count: ${entry.message_count}`);
+                } else {
+                    lines.push(`       source_count: ${entry.source_count_stored}  message_count: ${entry.message_count}`);
+                }
+                const consolidatedStr = entry.is_consolidated
+                    ? `はい → 親ID: ${entry.parent_id ?? '(なし)'}`
+                    : 'いいえ';
+                lines.push(`       統合済み: ${consolidatedStr}`);
+            });
+            lines.push('');
+        }
+
+        // --- ギャップ分析 ---
+        lines.push('== ギャップ分析 (Chronicle 間の孤立メッセージ) ==');
+        if (data.gaps.length > 0) {
+            data.gaps.forEach((gap: any, idx: number) => {
+                lines.push(`  ギャップ ${idx + 1}:`);
+                lines.push(`    孤立メッセージ数: ${gap.isolated_message_count}`);
+                lines.push(`    期間: ${formatTime(gap.gap_start_time)}  〜  ${formatTime(gap.gap_end_time)}`);
+                lines.push(`    直前の Chronicle ID: ${gap.prev_chronicle_id}`);
+                lines.push(`    直後の Chronicle ID: ${gap.next_chronicle_id}`);
+            });
+        } else {
+            lines.push('  ギャップなし (Level 1 Chronicle 間に孤立メッセージは検出されませんでした)');
+        }
+
+        return lines.join('\n');
+    };
+
+    const handleDownloadDiagnosis = async () => {
+        setIsDiagnosing(true);
+        setDiagnosisError(null);
+        try {
+            const backendUrl = 'http://127.0.0.1:8000';
+            const res = await fetch(`${backendUrl}/api/people/${personaId}/arasuji/diagnosis`);
+            if (!res.ok) {
+                const text = await res.text();
+                try {
+                    const data = JSON.parse(text);
+                    throw new Error(data.detail || 'Chronicle診断の取得に失敗しました');
+                } catch {
+                    throw new Error(`Server error: ${text.substring(0, 200)}`);
+                }
+            }
+            const data = await res.json();
+            const report = formatDiagnosisReport(data);
+            const blob = new Blob([report], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+            a.download = `chronicle_diagnosis_${personaId}_${ts}.txt`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch (err: any) {
+            setDiagnosisError(err.message || 'エラーが発生しました');
+        } finally {
+            setIsDiagnosing(false);
         }
     };
 
@@ -663,6 +802,38 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                             </tbody>
                         </table>
                     </div>
+                </div>
+            )}
+
+            {/* Chronicle Diagnosis Download */}
+            <div className={styles.header} style={{ marginTop: '2rem' }}>
+                <Activity size={24} className={styles.icon} />
+                <div>
+                    <h3 className={styles.title}>Chronicle 診断</h3>
+                    <p className={styles.description}>
+                        Chronicle の構造情報（レベル別統計・各エントリの期間・ギャップ分析）をテキストファイルでダウンロードします。
+                        チャットログや Chronicle の本文は含まれません。
+                    </p>
+                </div>
+            </div>
+
+            <button
+                className={styles.executeButton}
+                onClick={handleDownloadDiagnosis}
+                disabled={isDiagnosing}
+                style={{ background: '#495057' }}
+            >
+                {isDiagnosing ? (
+                    <><Loader2 size={16} className={styles.loader} /> 取得中...</>
+                ) : (
+                    <><FileDown size={16} /> 診断レポートをダウンロード</>
+                )}
+            </button>
+
+            {diagnosisError && (
+                <div className={styles.error}>
+                    <AlertCircle size={16} />
+                    <span>{diagnosisError}</span>
                 </div>
             )}
 
