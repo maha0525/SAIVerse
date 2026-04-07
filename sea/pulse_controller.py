@@ -61,6 +61,12 @@ EXECUTION_TYPES: Dict[str, ExecutionType] = {
         same_priority_policy="first",  # First auto wins
         on_blocked="skip",  # Skip if busy (will retry in 10s anyway)
     ),
+    "autonomy": ExecutionType(
+        name="autonomy",
+        priority=Priority.AUTO,  # Same priority as auto
+        same_priority_policy="first",
+        on_blocked="skip",
+    ),
 }
 
 
@@ -110,13 +116,28 @@ class PulseController:
     
     def __init__(self, sea_runtime: "SEARuntime"):
         self.sea_runtime = sea_runtime
-        
+
         # Per-persona state
         self._current: Dict[str, ExecutionRequest] = {}  # persona_id -> running request
         self._queues: Dict[str, List[ExecutionRequest]] = {}  # persona_id -> pending queue
         self._locks: Dict[str, threading.RLock] = {}  # persona_id -> lock
-        
+
+        # Interrupt callbacks: called when auto execution is interrupted by user
+        # Signature: callback(persona_id: str, interrupted_by: str) -> None
+        self._on_interrupt_callbacks: List[Callable] = []
+        # Completion callbacks: called when user execution finishes
+        # Signature: callback(persona_id: str) -> None
+        self._on_user_complete_callbacks: List[Callable] = []
+
         LOGGER.info("[PulseController] Initialized")
+
+    def register_on_interrupt(self, callback: Callable) -> None:
+        """Register a callback for when auto execution is interrupted."""
+        self._on_interrupt_callbacks.append(callback)
+
+    def register_on_user_complete(self, callback: Callable) -> None:
+        """Register a callback for when user execution completes."""
+        self._on_user_complete_callbacks.append(callback)
     
     def _get_lock(self, persona_id: str) -> threading.RLock:
         """Get or create lock for persona."""
@@ -158,11 +179,19 @@ class PulseController:
                     current.type, current.priority, request.type, request.priority, persona_id
                 )
                 current.cancellation_token.cancel(interrupted_by=request.type)
-                
+
+                # Notify interrupt callbacks (e.g., AutonomyManager pause)
+                if current.type == "auto" and request.type == "user":
+                    for cb in self._on_interrupt_callbacks:
+                        try:
+                            cb(persona_id, request.type)
+                        except Exception:
+                            LOGGER.debug("[PulseController] Interrupt callback error", exc_info=True)
+
                 # Queue current for resumption if it has wait policy
                 if current.config.on_blocked == "wait":
                     self._queue_for_resumption(current)
-                
+
                 # Register new request
                 self._current[persona_id] = request
                 action = "execute"
@@ -272,7 +301,15 @@ class PulseController:
             with lock:
                 if self._current.get(persona_id) is request:
                     del self._current[persona_id]
-                
+
+                # Notify user-complete callbacks (e.g., AutonomyManager resume)
+                if request.type == "user":
+                    for cb in self._on_user_complete_callbacks:
+                        try:
+                            cb(persona_id)
+                        except Exception:
+                            LOGGER.debug("[PulseController] User-complete callback error", exc_info=True)
+
                 # Process next queued request
                 self._process_queue(persona_id)
     
@@ -289,7 +326,7 @@ class PulseController:
             user_input = self._build_resumption_prompt(request)
         
         # Call SEARuntime with cancellation token and pulse_type
-        if request.type == "auto":
+        if request.type == "auto" and request.meta_playbook is None:
             # Auto uses run_meta_auto which has no return value
             self.sea_runtime.run_meta_auto(
                 persona=persona,

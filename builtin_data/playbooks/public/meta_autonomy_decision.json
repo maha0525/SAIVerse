@@ -1,0 +1,83 @@
+{
+    "name": "meta_autonomy_decision",
+    "display_name": "自律行動: 意思決定",
+    "description": "自律行動の意思決定フェイズ。前回の実行結果を検収し、次に実行するPlaybookと意図を決定する。",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "Trigger input"
+        },
+        {
+            "name": "last_report",
+            "description": "前回のサイクルの実行結果レポート（初回はなし）",
+            "required": false
+        }
+    ],
+    "output_schema": [
+        "autonomy_decision"
+    ],
+    "router_callable": false,
+    "user_selectable": false,
+    "nodes": [
+        {
+            "id": "get_situation",
+            "type": "tool",
+            "action": "get_building_messages",
+            "args": {},
+            "output_key": "perception_summary",
+            "next": "get_memopedia_health"
+        },
+        {
+            "id": "get_memopedia_health",
+            "type": "tool",
+            "action": "memopedia_health",
+            "args": {},
+            "output_key": "memopedia_health_report",
+            "next": "decide"
+        },
+        {
+            "id": "decide",
+            "type": "llm",
+            "context_profile": "conversation",
+            "action": "あなたは自律的に行動しています。現在の状況を踏まえて、次に何をするか決めてください。\n\n## 現在の状況\n{perception_summary}\n\n## Memopedia 状況\n{memopedia_health_report}\n\n## 前回の実行結果\n{last_report}\n\n## 行動の選択肢\n以下の中から、今最もやるべきことを選んでください。\n\n- **conversation**: ビルディングにいる他のAIやユーザーと会話する\n- **memory_organization**: Memopediaの整理（ページの分割、統合、不要情報の削除など）\n- **creation**: 創作活動（小説、詩、イラスト生成など）\n- **self_reflection**: 日記や自己分析を行う\n- **web_research**: Web検索で情報を調べる\n- **wait**: 特にやることがないので待機する\n\n## 指示\n- 前回の結果が retry の場合、失敗原因を踏まえて改善方針を立ててください\n- intent には具体的に何をしたいかを自然言語で記述してください\n- 特にやることがない場合は wait を選んでください\n\nJSON形式で回答してください。",
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "inspection": {
+                        "type": "object",
+                        "properties": {
+                            "verdict": {
+                                "type": "string",
+                                "description": "前回の結果の評価: approved(承認), retry(再試行), noted(参考記録), none(初回)"
+                            },
+                            "feedback": {
+                                "type": "string",
+                                "description": "検収コメント"
+                            }
+                        },
+                        "required": ["verdict", "feedback"]
+                    },
+                    "next_task": {
+                        "type": "object",
+                        "properties": {
+                            "activity_type": {
+                                "type": "string",
+                                "description": "活動種別: conversation, memory_organization, creation, self_reflection, web_research, wait"
+                            },
+                            "intent": {
+                                "type": "string",
+                                "description": "具体的に何をしたいかの自然言語記述"
+                            }
+                        },
+                        "required": ["activity_type", "intent"]
+                    }
+                },
+                "required": ["inspection", "next_task"]
+            },
+            "output_key": "autonomy_decision",
+            "memorize": {"tags": ["internal", "autonomy_decision"]},
+            "next": null
+        }
+    ],
+    "start_node": "get_situation"
+}

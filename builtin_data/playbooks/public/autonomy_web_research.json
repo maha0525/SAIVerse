@@ -1,0 +1,129 @@
+{
+    "name": "autonomy_web_research",
+    "display_name": "自律行動: Web調査",
+    "description": "Web検索とURL読み込みで情報を収集し、得た知識をMemopediaに記録する自律行動Playbook。ツールの使用は自由選択で、十分な情報が集まったらMemopediaページを作成して終了する。",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "調査の目的・テーマ（意思決定フェイズのintent）"
+        }
+    ],
+    "output_schema": null,
+    "router_callable": false,
+    "user_selectable": false,
+    "nodes": [
+        {
+            "id": "init",
+            "type": "set",
+            "assignments": {
+                "loop_count": 0,
+                "max_loops": 15,
+                "research_notes": ""
+            },
+            "next": "research_loop"
+        },
+        {
+            "id": "research_loop",
+            "type": "llm",
+            "context_profile": "conversation",
+            "model_type": "lightweight",
+            "action": "あなたは自律的にWeb調査を行っています。\n\n## 調査テーマ\n{input}\n\n## これまでの調査メモ\n{research_notes}\n\n## 利用可能なアクション\n以下のツールを自由に使って調査を進めてください:\n- **searxng_search**: キーワードでWeb検索（スニペット取得）\n- **read_url_content**: URLからページ全文を取得\n- **memopedia_get_tree**: 既存のMemopediaページ一覧を確認\n- **memopedia_save_page**: 調査結果をMemopediaページとして保存\n\n## 進め方\n1. まず検索で概要を掴む\n2. 有用そうなURLの詳細を読む\n3. 十分な情報が集まったら memopedia_save_page で知識を保存する\n4. ツールを使わずにテキストだけ返すと調査は終了します\n\n次のアクションを選んでください。",
+            "available_tools": [
+                "searxng_search",
+                "read_url_content",
+                "memopedia_get_tree",
+                "memopedia_save_page"
+            ],
+            "output_keys": [
+                {"text": "response_text"},
+                {"function_call": "fc"}
+            ],
+            "memorize": {"tags": ["internal", "web_research"]},
+            "next": "check_tool_call"
+        },
+        {
+            "id": "check_tool_call",
+            "type": "pass",
+            "conditional_next": {
+                "field": "tool_called",
+                "operator": "eq",
+                "cases": {
+                    "True": "exec_tool",
+                    "default": "finalize"
+                }
+            }
+        },
+        {
+            "id": "exec_tool",
+            "type": "tool_call",
+            "call_source": "fc",
+            "output_key": "tool_result",
+            "next": "accumulate"
+        },
+        {
+            "id": "accumulate",
+            "type": "set",
+            "assignments": {
+                "research_notes": "{research_notes}\n\n### [{fc.name}]\n{tool_result}",
+                "loop_count": "={loop_count} + 1"
+            },
+            "next": "check_loop_limit"
+        },
+        {
+            "id": "check_loop_limit",
+            "type": "pass",
+            "conditional_next": {
+                "field": "loop_count",
+                "operator": "gte",
+                "cases": {
+                    "15": "force_save",
+                    "default": "research_loop"
+                }
+            }
+        },
+        {
+            "id": "force_save",
+            "type": "llm",
+            "context_profile": "conversation",
+            "model_type": "lightweight",
+            "action": "調査のループ上限に達しました。これまでに収集した情報をMemopediaページとして保存してください。\n\n## 調査テーマ\n{input}\n\n## 収集情報\n{research_notes}\n\nmemopedia_save_page ツールを使って保存してください。",
+            "available_tools": [
+                "memopedia_save_page"
+            ],
+            "output_keys": [
+                {"text": "response_text"},
+                {"function_call": "fc"}
+            ],
+            "memorize": {"tags": ["internal", "web_research"]},
+            "next": "force_save_exec"
+        },
+        {
+            "id": "force_save_exec",
+            "type": "pass",
+            "conditional_next": {
+                "field": "tool_called",
+                "operator": "eq",
+                "cases": {
+                    "True": "force_save_tool",
+                    "default": "finalize"
+                }
+            }
+        },
+        {
+            "id": "force_save_tool",
+            "type": "tool_call",
+            "call_source": "fc",
+            "output_key": "save_result",
+            "next": "finalize"
+        },
+        {
+            "id": "finalize",
+            "type": "memorize",
+            "action": "Web調査完了: {input}\n\n最終メモ:\n{response_text}",
+            "role": "assistant",
+            "tags": ["internal", "web_research", "completed"],
+            "next": null
+        }
+    ],
+    "start_node": "init"
+}

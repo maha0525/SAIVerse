@@ -58,6 +58,22 @@ interface AutonomousStatus {
     is_active: boolean;
 }
 
+interface AutonomyStatus {
+    persona_id: string;
+    state: string;
+    interval_minutes: number;
+    decision_model: string | null;
+    execution_model: string | null;
+    stelis_thread_id: string | null;
+    current_cycle_id: string | null;
+    last_report: {
+        cycle_id: string;
+        playbook: string | null;
+        intent: string;
+        status: string;
+    } | null;
+}
+
 export default function SettingsModal({ isOpen, onClose, personaId }: SettingsModalProps) {
     const [config, setConfig] = useState<AIConfig | null>(null);
     const [availableModels, setAvailableModels] = useState<ModelChoice[]>([]);
@@ -65,6 +81,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
     const [autonomousStatus, setAutonomousStatus] = useState<AutonomousStatus | null>(null);
+    const [autonomyStatus, setAutonomyStatus] = useState<AutonomyStatus | null>(null);
+    const [autonomyInterval, setAutonomyInterval] = useState(5);
+    const [isAutonomyLoading, setIsAutonomyLoading] = useState(false);
     const [developerMode, setDeveloperMode] = useState(false);
 
     // Form state
@@ -149,6 +168,14 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setAutonomousStatus(statusData);
             }
 
+            // Load autonomy manager status
+            const autonomyRes = await fetch(`/api/people/${personaId}/autonomy`);
+            if (autonomyRes.ok) {
+                const autonomyData = await autonomyRes.json();
+                setAutonomyStatus(autonomyData);
+                setAutonomyInterval(autonomyData.interval_minutes);
+            }
+
             // Load Chronicle cost estimate
             try {
                 const costRes = await fetch(`/api/people/${personaId}/arasuji/cost-estimate`);
@@ -201,6 +228,49 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
             alert("設定の保存中にエラーが発生しました");
         } finally {
             setIsSaving(false);
+        }
+    };
+
+    const fetchAutonomyStatus = async () => {
+        try {
+            const res = await fetch(`/api/people/${personaId}/autonomy`);
+            if (res.ok) {
+                const data = await res.json();
+                setAutonomyStatus(data);
+                setAutonomyInterval(data.interval_minutes);
+            }
+        } catch (e) {
+            console.error('Failed to fetch autonomy status:', e);
+        }
+    };
+
+    const handleAutonomyStart = async () => {
+        setIsAutonomyLoading(true);
+        try {
+            const res = await fetch(`/api/people/${personaId}/autonomy/start`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ interval_minutes: autonomyInterval }),
+            });
+            if (res.ok) await fetchAutonomyStatus();
+        } catch (e) {
+            console.error('Failed to start autonomy:', e);
+        } finally {
+            setIsAutonomyLoading(false);
+        }
+    };
+
+    const handleAutonomyStop = async () => {
+        setIsAutonomyLoading(true);
+        try {
+            const res = await fetch(`/api/people/${personaId}/autonomy/stop`, {
+                method: 'POST',
+            });
+            if (res.ok) await fetchAutonomyStatus();
+        } catch (e) {
+            console.error('Failed to stop autonomy:', e);
+        } finally {
+            setIsAutonomyLoading(false);
         }
     };
 
@@ -294,6 +364,105 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                     )}
                                 </div>
                             )}
+
+                            {/* Autonomy Manager Control */}
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>自律行動マネージャー</label>
+                                <div style={{
+                                    padding: '0.75rem',
+                                    background: 'rgba(100, 100, 100, 0.1)',
+                                    borderRadius: '6px',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '0.5rem',
+                                }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                                        <span style={{
+                                            fontSize: '0.85rem',
+                                            padding: '2px 8px',
+                                            borderRadius: '10px',
+                                            background: autonomyStatus?.state === 'stopped'
+                                                ? 'rgba(100,100,100,0.2)'
+                                                : autonomyStatus?.state === 'waiting'
+                                                    ? 'rgba(255,193,7,0.15)'
+                                                    : 'rgba(0,200,0,0.15)',
+                                            color: autonomyStatus?.state === 'stopped'
+                                                ? '#888'
+                                                : autonomyStatus?.state === 'waiting'
+                                                    ? '#ffd43b'
+                                                    : '#69db7c',
+                                        }}>
+                                            {autonomyStatus?.state || 'stopped'}
+                                        </span>
+
+                                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem' }}>
+                                            間隔:
+                                            <input
+                                                type="number"
+                                                min={1}
+                                                max={120}
+                                                step={1}
+                                                value={autonomyInterval}
+                                                onChange={(e) => setAutonomyInterval(Number(e.target.value))}
+                                                disabled={autonomyStatus?.state !== 'stopped'}
+                                                style={{
+                                                    width: '4rem',
+                                                    padding: '2px 6px',
+                                                    borderRadius: '4px',
+                                                    border: '1px solid #444',
+                                                    background: 'transparent',
+                                                    color: 'inherit',
+                                                    textAlign: 'center',
+                                                }}
+                                            />
+                                            分
+                                        </label>
+
+                                        {(!autonomyStatus || autonomyStatus.state === 'stopped') ? (
+                                            <button
+                                                onClick={handleAutonomyStart}
+                                                disabled={isAutonomyLoading}
+                                                style={{
+                                                    padding: '4px 12px',
+                                                    borderRadius: '4px',
+                                                    border: '1px solid #2b8a3e',
+                                                    background: 'rgba(43, 138, 62, 0.1)',
+                                                    color: '#69db7c',
+                                                    cursor: 'pointer',
+                                                    fontSize: '0.85rem',
+                                                }}
+                                            >
+                                                開始
+                                            </button>
+                                        ) : (
+                                            <button
+                                                onClick={handleAutonomyStop}
+                                                disabled={isAutonomyLoading}
+                                                style={{
+                                                    padding: '4px 12px',
+                                                    borderRadius: '4px',
+                                                    border: '1px solid #c92a2a',
+                                                    background: 'rgba(201, 42, 42, 0.1)',
+                                                    color: '#ff6b6b',
+                                                    cursor: 'pointer',
+                                                    fontSize: '0.85rem',
+                                                }}
+                                            >
+                                                停止
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    {autonomyStatus?.last_report && (
+                                        <div style={{ fontSize: '0.8rem', color: '#888' }}>
+                                            前回: {autonomyStatus.last_report.playbook || '—'} / {autonomyStatus.last_report.status}
+                                            {autonomyStatus.last_report.intent && (
+                                                <span> — {autonomyStatus.last_report.intent.slice(0, 50)}</span>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
 
                             <div className={styles.fieldGroup}>
                                 <label className={styles.label}>Chronicle 自動生成</label>

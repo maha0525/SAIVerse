@@ -246,6 +246,13 @@ def _sanitize_messages_for_log(messages: list) -> list:
     return sanitized
 
 
+def _json_fallback(obj):
+    """Fallback serializer for non-JSON-serializable objects (bytes, etc.)."""
+    if isinstance(obj, bytes):
+        return f"<bytes: {len(obj)} bytes>"
+    return f"<{type(obj).__name__}>"
+
+
 def log_llm_request(
     source: str,
     node_id: str,
@@ -276,7 +283,7 @@ def log_llm_request(
         "persona_name": persona_name,
         "messages": formatted_messages,
     }
-    logger.debug("LLM_REQUEST: %s", json.dumps(entry, ensure_ascii=False))
+    logger.debug("LLM_REQUEST: %s", json.dumps(entry, ensure_ascii=False, default=_json_fallback))
 
 
 def log_llm_response(

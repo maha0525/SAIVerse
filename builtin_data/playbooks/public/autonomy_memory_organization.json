@@ -1,0 +1,96 @@
+{
+    "name": "autonomy_memory_organization",
+    "display_name": "自律行動: 記憶整理",
+    "description": "Memopediaページの分割、概要生成、不要情報の削除など、知識ベースの整理を行う自律行動Playbook。",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "整理の目的・対象（意思決定フェイズのintent）"
+        }
+    ],
+    "output_schema": null,
+    "router_callable": false,
+    "user_selectable": false,
+    "nodes": [
+        {
+            "id": "init",
+            "type": "set",
+            "assignments": {
+                "loop_count": 0,
+                "max_loops": 10,
+                "work_log": ""
+            },
+            "next": "organize_loop"
+        },
+        {
+            "id": "organize_loop",
+            "type": "llm",
+            "context_profile": "conversation",
+            "model_type": "lightweight",
+            "action": "あなたは自律的にMemopedia（知識ベース）の整理を行っています。\n\n## 整理の目的\n{input}\n\n## これまでの作業\n{work_log}\n\n## 利用可能なアクション\n以下のツールを自由に使って整理を進めてください:\n- **memopedia_get_tree**: ページ一覧を確認\n- **memopedia_get_page**: 特定ページの内容を読む\n- **memopedia_save_page**: ページの作成・更新（分割後の子ページ作成、内容の編集など）\n- **memopedia_search**: キーワードでページを検索\n- **memopedia_health**: ページサイズや健康状態の確認\n- **memopedia_manage**: ページの削除、移動（親ページ変更）、鮮明度変更、重要フラグの設定\n\n## 整理の指針\n- 3000字を超えるページは子ページに分割する（親ページに概要、子ページに詳細）\n- 概要（summary）がないページには概要を設定する\n- 重複する情報があれば統合する\n- 古くなった情報や価値の低い情報は鮮明度を下げる（faint/buried）\n- 特に重要なページは重要フラグを設定する（rough以下に減衰しなくなる）\n- ツールを使わずにテキストだけ返すと作業は終了します\n\n次のアクションを選んでください。",
+            "available_tools": [
+                "memopedia_get_tree",
+                "memopedia_get_page",
+                "memopedia_save_page",
+                "memopedia_search",
+                "memopedia_health",
+                "memopedia_manage"
+            ],
+            "output_keys": [
+                {"text": "response_text"},
+                {"function_call": "fc"}
+            ],
+            "memorize": {"tags": ["internal", "memory_organization"]},
+            "next": "check_tool_call"
+        },
+        {
+            "id": "check_tool_call",
+            "type": "pass",
+            "conditional_next": {
+                "field": "tool_called",
+                "operator": "eq",
+                "cases": {
+                    "True": "exec_tool",
+                    "default": "finalize"
+                }
+            }
+        },
+        {
+            "id": "exec_tool",
+            "type": "tool_call",
+            "call_source": "fc",
+            "output_key": "tool_result",
+            "next": "accumulate"
+        },
+        {
+            "id": "accumulate",
+            "type": "set",
+            "assignments": {
+                "work_log": "{work_log}\n\n### [{fc.name}]\n{tool_result}",
+                "loop_count": "={loop_count} + 1"
+            },
+            "next": "check_loop_limit"
+        },
+        {
+            "id": "check_loop_limit",
+            "type": "pass",
+            "conditional_next": {
+                "field": "loop_count",
+                "operator": "gte",
+                "cases": {
+                    "10": "finalize",
+                    "default": "organize_loop"
+                }
+            }
+        },
+        {
+            "id": "finalize",
+            "type": "memorize",
+            "action": "記憶整理完了: {input}\n\n作業ログ:\n{response_text}",
+            "role": "assistant",
+            "tags": ["internal", "memory_organization", "completed"],
+            "next": null
+        }
+    ],
+    "start_node": "init"
+}

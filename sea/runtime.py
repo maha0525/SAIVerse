@@ -460,7 +460,7 @@ class SEARuntime:
             log_llm_request(source, node_id, persona_id, persona_name, messages)
             log_llm_response(source, node_id, persona_id, persona_name, output_text)
         except Exception:
-            LOGGER.debug("failed to dump LLM io", exc_info=True)
+            LOGGER.warning("failed to dump LLM io", exc_info=True)
 
     def _debug_playbook(self, pb: PlaybookSchema, source: str) -> None:
         if not self._trace:
