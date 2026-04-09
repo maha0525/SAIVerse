@@ -178,6 +178,7 @@ class OpenAIClient(LLMClient):
         structured_output_backend: Optional[str] = None,
         structured_output_mode: Optional[str] = None,
         reasoning_passback_field: Optional[str] = None,
+        timeout: Optional[float] = None,
     ) -> None:
         super().__init__(supports_images=supports_images)
         key_env = api_key_env or "OPENAI_API_KEY"
@@ -188,9 +189,11 @@ class OpenAIClient(LLMClient):
                 user_message="OpenAI APIキーが設定されていません。管理者にお問い合わせください。"
             )
 
-        client_kwargs: Dict[str, str] = {"api_key": api_key}
+        client_kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
             client_kwargs["base_url"] = base_url
+        if timeout is not None:
+            client_kwargs["timeout"] = timeout
 
         self.client = OpenAI(**client_kwargs)
         self.model = model

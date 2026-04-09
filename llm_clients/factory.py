@@ -94,6 +94,12 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
             if isinstance(reasoning_passback, str) and reasoning_passback.strip():
                 extra_kwargs["reasoning_passback_field"] = reasoning_passback.strip()
 
+            # Custom timeout (seconds) for slow local models
+            timeout = config.get("timeout")
+            if isinstance(timeout, (int, float)) and timeout > 0:
+                extra_kwargs["timeout"] = float(timeout)
+                logging.info("Using custom timeout=%.0fs for model '%s'", float(timeout), api_model)
+
         # Default max_image_bytes for OpenAI provider: 5MB.  OpenAI APIs
         # accept up to 20MB but very large images (e.g. 18MB) cause vision
         # recognition failures despite 200 OK responses.  Resizing client-
