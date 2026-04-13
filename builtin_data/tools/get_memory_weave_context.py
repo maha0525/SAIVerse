@@ -100,9 +100,14 @@ def get_memory_weave_context(
                 },
             })
         if memopedia_text:
+            memopedia_intro = (
+                "以下は、あなたの長期記憶（Memopedia: 記憶ベース）です。\n"
+                "タイトルと概要のみが表示されているページは、ここに載っている以上の詳細な内容を持っています。"
+                "特定のページの詳細を確認したい場合は、memopedia_get_page ツールを使って本文を読んでください。"
+            )
             messages.append({
                 "role": "user",
-                "content": f"以下は、あなたの長期記憶（Memopedia: 記憶ベース）です。\n\n{memopedia_text}",
+                "content": f"{memopedia_intro}\n\n{memopedia_text}",
                 "metadata": {
                     MEMORY_WEAVE_CONTEXT_MARKER: True,
                     "__memory_weave_type__": "memopedia",

@@ -139,6 +139,7 @@ def generate_level1_arasuji(
     memopedia_context: Optional[str] = None,
     debug_log_path: Optional[Path] = None,
     persona_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
 ) -> Optional[ArasujiEntry]:
     """Generate a level-1 arasuji from messages.
 
@@ -285,6 +286,7 @@ def generate_level1_arasuji(
                 end_time=end_time,
                 source_count=len(messages),
                 message_count=len(messages),
+                thread_id=thread_id,
             )
             LOGGER.info(f"Created level-1 arasuji: {content}")
             return entry
@@ -313,6 +315,7 @@ def generate_consolidated_arasuji(
     dry_run: bool = False,
     include_timestamp: bool = True,
     persona_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
 ) -> Optional[ArasujiEntry]:
     """Generate a consolidated arasuji from lower-level entries.
 
@@ -453,6 +456,7 @@ def generate_consolidated_arasuji(
                 end_time=end_time,
                 source_count=len(entries),
                 message_count=total_messages,
+                thread_id=thread_id,
             )
             break
         except Exception as e:
@@ -510,6 +514,7 @@ def maybe_consolidate(
     dry_run: bool = False,
     include_timestamp: bool = True,
     persona_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
 ) -> List[ArasujiEntry]:
     """Check if consolidation is needed at a level and perform it recursively.
 
@@ -542,6 +547,7 @@ def maybe_consolidate(
             dry_run=dry_run,
             include_timestamp=include_timestamp,
             persona_id=persona_id,
+            thread_id=thread_id,
         )
 
         if entry:
@@ -556,6 +562,7 @@ def maybe_consolidate(
                 dry_run=dry_run,
                 include_timestamp=include_timestamp,
                 persona_id=persona_id,
+                thread_id=thread_id,
             )
             created.extend(higher)
         else:
@@ -864,6 +871,7 @@ class ArasujiGenerator:
         self.include_timestamp = include_timestamp
         self.memopedia_context = memopedia_context
         self.persona_id = persona_id
+        self.thread_id: Optional[str] = None  # Set to associate entries with a specific thread
         self.debug_log_path = None  # Can be set externally
 
     def generate_from_messages(
@@ -932,6 +940,7 @@ class ArasujiGenerator:
                     memopedia_context=self.memopedia_context,
                     debug_log_path=self.debug_log_path,
                     persona_id=self.persona_id,
+                    thread_id=self.thread_id,
                 )
             except LLMError as e:
                 # Add batch context to user_message and re-raise
@@ -1033,6 +1042,7 @@ class ArasujiGenerator:
                     dry_run=dry_run,
                     include_timestamp=self.include_timestamp,
                     persona_id=self.persona_id,
+                    thread_id=self.thread_id,
                 )
                 # Track Level-2 entries created in this run
                 for c in consolidated:

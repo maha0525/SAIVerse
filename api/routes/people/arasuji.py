@@ -861,6 +861,9 @@ def _run_chronicle_generation(
             SELECT id, thread_id, role, content, resource_id, created_at, metadata
             FROM messages
             WHERE thread_id NOT IN (SELECT thread_id FROM stelis_threads)
+              AND NOT EXISTS (
+                SELECT 1 FROM json_each(metadata, '$.tags') WHERE json_each.value = 'handy_tool'
+              )
             ORDER BY created_at ASC
         """)
 

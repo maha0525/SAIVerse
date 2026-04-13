@@ -51,6 +51,15 @@ class ArasujiProgress:
     last_processed_at: Optional[int]
 
 
+def _ensure_arasuji_column(conn: sqlite3.Connection, table: str, column: str, col_type: str) -> None:
+    """Add a column to a table if it doesn't exist."""
+    try:
+        conn.execute(f"SELECT {column} FROM {table} LIMIT 0")
+    except sqlite3.OperationalError:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+        conn.commit()
+
+
 def init_arasuji_tables(conn: sqlite3.Connection) -> None:
     """Initialize arasuji tables if they don't exist."""
     conn.execute(
@@ -77,6 +86,10 @@ def init_arasuji_tables(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_arasuji_consolidated ON arasuji_entries(is_consolidated)"
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_arasuji_parent ON arasuji_entries(parent_id)")
+
+    # Migration: add thread_id column for Stelis thread isolation
+    _ensure_arasuji_column(conn, "arasuji_entries", "thread_id", "TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_arasuji_thread ON arasuji_entries(thread_id)")
 
     conn.execute(
         """
@@ -139,17 +152,24 @@ def create_entry(
     source_count: int,
     message_count: int,
     entry_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
 ) -> ArasujiEntry:
-    """Create a new arasuji entry."""
+    """Create a new arasuji entry.
+
+    Args:
+        thread_id: If set, associates this entry with a specific thread
+                   (e.g., Stelis thread). NULL = main thread.
+    """
     eid = entry_id or str(uuid.uuid4())
     now = int(time.time())
     conn.execute(
         """
         INSERT INTO arasuji_entries (
             id, level, content, source_ids_json, start_time, end_time,
-            source_count, message_count, parent_id, is_consolidated, created_at
+            source_count, message_count, parent_id, is_consolidated, created_at,
+            thread_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?)
         """,
         (
             eid,
@@ -161,6 +181,7 @@ def create_entry(
             source_count,
             message_count,
             now,
+            thread_id,
         ),
     )
     conn.commit()
@@ -529,6 +550,33 @@ def dismantle_entry(
         entry.level, entry_id[:8], len(freed_ids),
     )
     return True, freed_ids
+
+
+def get_entries_by_thread(
+    conn: sqlite3.Connection,
+    thread_id: str,
+    *,
+    max_entries: int = 20,
+) -> List[ArasujiEntry]:
+    """Get Chronicle entries associated with a specific thread.
+
+    Returns entries ordered by end_time descending, up to max_entries.
+    Used for Stelis anchor rendering.
+    """
+    cur = conn.execute(
+        """
+        SELECT id, level, content, source_ids_json, start_time, end_time,
+               source_count, message_count, parent_id, is_consolidated, created_at
+        FROM arasuji_entries
+        WHERE thread_id = ?
+        ORDER BY end_time DESC
+        LIMIT ?
+        """,
+        (thread_id, max_entries),
+    )
+    entries = [_row_to_entry(row) for row in cur.fetchall()]
+    entries.reverse()  # chronological order
+    return entries
 
 
 def clear_all_entries(conn: sqlite3.Connection) -> int:

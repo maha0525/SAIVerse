@@ -1,0 +1,128 @@
+{
+    "1": {
+        "inputs": {
+            "filename_prefix": "SAIVerse",
+            "images": [
+                "8",
+                0
+            ]
+        },
+        "class_type": "SaveImage",
+        "_meta": {
+            "title": "画像を保存"
+        }
+    },
+    "8": {
+        "inputs": {
+            "samples": [
+                "19",
+                0
+            ],
+            "vae": [
+                "15",
+                0
+            ]
+        },
+        "class_type": "VAEDecode",
+        "_meta": {
+            "title": "VAEデコード"
+        }
+    },
+    "11": {
+        "inputs": {
+            "text": "{positive_prompt}",
+            "clip": [
+                "45",
+                0
+            ]
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "CLIP Text Encode (Positive Prompt)"
+        }
+    },
+    "12": {
+        "inputs": {
+            "text": "{negative_prompt}",
+            "clip": [
+                "45",
+                0
+            ]
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+            "title": "CLIP Text Encode (Negative Prompt)"
+        }
+    },
+    "15": {
+        "inputs": {
+            "vae_name": "qwen_image_vae.safetensors"
+        },
+        "class_type": "VAELoader",
+        "_meta": {
+            "title": "VAEを読み込む"
+        }
+    },
+    "19": {
+        "inputs": {
+            "seed": 0,
+            "steps": 30,
+            "cfg": 4,
+            "sampler_name": "er_sde",
+            "scheduler": "simple",
+            "denoise": 1,
+            "model": [
+                "44",
+                0
+            ],
+            "positive": [
+                "11",
+                0
+            ],
+            "negative": [
+                "12",
+                0
+            ],
+            "latent_image": [
+                "28",
+                0
+            ]
+        },
+        "class_type": "KSampler",
+        "_meta": {
+            "title": "Kサンプラー"
+        }
+    },
+    "28": {
+        "inputs": {
+            "width": 1024,
+            "height": 1024,
+            "batch_size": 1
+        },
+        "class_type": "EmptyLatentImage",
+        "_meta": {
+            "title": "空の潜在画像"
+        }
+    },
+    "44": {
+        "inputs": {
+            "unet_name": "anima-preview3-base.safetensors",
+            "weight_dtype": "default"
+        },
+        "class_type": "UNETLoader",
+        "_meta": {
+            "title": "拡散モデルを読み込む"
+        }
+    },
+    "45": {
+        "inputs": {
+            "clip_name": "qwen_3_06b_base.safetensors",
+            "type": "stable_diffusion",
+            "device": "default"
+        },
+        "class_type": "CLIPLoader",
+        "_meta": {
+            "title": "CLIPを読み込む"
+        }
+    }
+}

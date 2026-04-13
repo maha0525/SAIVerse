@@ -15,6 +15,7 @@ from sai_memory.memopedia.storage import (
     CATEGORY_PEOPLE,
     CATEGORY_TERMS,
     CATEGORY_PLANS,
+    CATEGORY_EVENTS,
     build_tree,
     create_page,
     delete_page,
@@ -196,6 +197,7 @@ class Memopedia:
             "people": [_annotate(p) for p in tree.get(CATEGORY_PEOPLE, [])],
             "terms": [_annotate(p) for p in tree.get(CATEGORY_TERMS, [])],
             "plans": [_annotate(p) for p in tree.get(CATEGORY_PLANS, [])],
+            "events": [_annotate(p) for p in tree.get(CATEGORY_EVENTS, [])],
         }
 
     def get_tree_markdown(
@@ -226,6 +228,7 @@ class Memopedia:
             "people": "人物",
             "terms": "用語",
             "plans": "予定",
+            "events": "出来事",
         }
 
         def _render_page(page: Dict[str, Any], depth: int = 0, current_depth: int = 0) -> None:
@@ -267,7 +270,7 @@ class Memopedia:
                 for child in children:
                     _render_page(child, depth + 1, current_depth + 1)
 
-        for category_key in ["people", "terms", "plans"]:
+        for category_key in ["people", "terms", "plans", "events"]:
             category_name = category_names.get(category_key, category_key)
             pages = tree.get(category_key, [])
             if pages:
@@ -795,6 +798,7 @@ class Memopedia:
             CATEGORY_PEOPLE: "人物",
             CATEGORY_TERMS: "用語",
             CATEGORY_PLANS: "予定",
+            CATEGORY_EVENTS: "出来事",
         }
 
         sections: List[str] = ["# Memopedia\n"]
@@ -812,7 +816,7 @@ class Memopedia:
                 lines.extend(_render_page(child, level + 1))
             return lines
 
-        for category in [CATEGORY_PEOPLE, CATEGORY_TERMS, CATEGORY_PLANS]:
+        for category in [CATEGORY_PEOPLE, CATEGORY_TERMS, CATEGORY_PLANS, CATEGORY_EVENTS]:
             category_name = category_names.get(category, category)
             pages = tree.get(category, [])
             if not pages:

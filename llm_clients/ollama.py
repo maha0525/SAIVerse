@@ -83,11 +83,13 @@ OLLAMA_ALLOWED_REQUEST_PARAMS = {
     "stop",
     "seed",
     "repeat_penalty",
+    "repeat_last_n",
     "presence_penalty",
     "frequency_penalty",
     "mirostat",
     "mirostat_tau",
     "mirostat_eta",
+    "think",  # top-level /api/chat parameter (not in options), controls thinking/reasoning mode
 }
 
 
@@ -216,7 +218,7 @@ class OllamaClient(LLMClient):
 
         options: Dict[str, Any] = {"num_ctx": self.context_length}
         for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
-                    "repeat_penalty", "presence_penalty", "frequency_penalty",
+                    "repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty",
                     "mirostat", "mirostat_tau", "mirostat_eta"):
             if key in self._request_kwargs:
                 options[key] = self._request_kwargs[key]
@@ -613,17 +615,122 @@ class OllamaClient(LLMClient):
             raise RuntimeError(f"Ollama structured output failed after {MAX_RETRIES} retries: {_extract_ollama_error(last_schema_error)}")
         
         # Normal streaming mode (no response_schema)
-        # Priority: /v1/chat/completions (OpenAI-compatible) -> /api/chat (native fallback)
+        # Priority: /api/chat (native, supports think param) -> /v1/chat/completions (fallback)
+        # NOTE: /v1/chat/completions has a Gemma 4 bug where content is routed to reasoning field
+        # See: https://github.com/ollama/ollama/issues/15368
         stream_options: Dict[str, Any] = {"num_ctx": self.context_length}
         for key in ("temperature", "top_p", "top_k", "num_predict", "stop", "seed",
-                    "repeat_penalty", "presence_penalty", "frequency_penalty",
+                    "repeat_penalty", "repeat_last_n", "presence_penalty", "frequency_penalty",
                     "mirostat", "mirostat_tau", "mirostat_eta"):
             if key in self._request_kwargs:
                 stream_options[key] = self._request_kwargs[key]
         if temperature is not None:
             stream_options["temperature"] = temperature
 
-        # 1st: Try /v1/chat/completions (OpenAI-compatible streaming)
+        logging.info("[ollama_stream] stream_options=%s", stream_options)
+
+        # 1st: Try /api/chat (native Ollama streaming, supports think parameter)
+        if not self.chat_url:
+            last_chat_error: Optional[Exception] = None
+        else:
+            last_chat_error = None
+            for attempt in range(MAX_RETRIES):
+                try:
+                    chat_payload: Dict[str, Any] = {
+                        "model": self.model,
+                        "messages": messages,
+                        "stream": True,
+                        "options": stream_options,
+                    }
+                    # think is a top-level /api/chat parameter, not an option
+                    if "think" in self._request_kwargs:
+                        chat_payload["think"] = self._request_kwargs["think"]
+
+                    response = requests.post(
+                        self.chat_url,
+                        json=chat_payload,
+                        timeout=(3, 300),
+                        stream=True,
+                    )
+                    response.raise_for_status()
+
+                    stream_start = time.monotonic()
+                    first_text_chunk_time: float | None = None
+                    last_text_chunk_time: float | None = None
+                    chunk_count = 0
+                    text_chunk_count = 0
+                    thinking_chunk_count = 0
+                    thinking_total_chars = 0
+                    done_received = False
+                    last_raw_chunk: str | None = None
+
+                    for line in response.iter_lines():
+                        if not line:
+                            continue
+                        chunk = line.decode("utf-8")
+                        chunk_count += 1
+                        last_raw_chunk = chunk
+                        try:
+                            data = json.loads(chunk)
+                            # Log first 5 raw chunks to inspect actual Ollama streaming format
+                            if chunk_count <= 5:
+                                logging.info("[ollama_stream] raw_chunk #%d: %s", chunk_count, chunk)
+                            # /api/chat streaming format: {"message": {"content": "...", "thinking": "..."}, "done": false}
+                            if data.get("done"):
+                                done_received = True
+                                done_reason = data.get("done_reason", "unknown")
+                                eval_count = data.get("eval_count", "?")
+                                prompt_eval_count = data.get("prompt_eval_count", "?")
+                                logging.info(
+                                    "[ollama_stream] /api/chat done=true at +%.2fs (chunk #%d) "
+                                    "done_reason=%s eval_count=%s prompt_eval_count=%s",
+                                    time.monotonic() - stream_start, chunk_count,
+                                    done_reason, eval_count, prompt_eval_count,
+                                )
+                                break
+                            msg = data.get("message", {})
+                            delta = msg.get("content", "")
+                            thinking_delta = msg.get("thinking", "")
+                            if thinking_delta:
+                                thinking_chunk_count += 1
+                                thinking_total_chars += len(thinking_delta)
+                            if delta:
+                                text_chunk_count += 1
+                                now = time.monotonic()
+                                if first_text_chunk_time is None:
+                                    first_text_chunk_time = now
+                                last_text_chunk_time = now
+                            yield delta
+                        except json.JSONDecodeError:
+                            logging.warning("Failed to parse /api/chat stream chunk: %s", chunk)
+
+                    stream_end = time.monotonic()
+                    logging.info(
+                        "[ollama_stream] /api/chat stream completed: total=%.2fs, chunks=%d, "
+                        "text_chunks=%d, thinking_chunks=%d, thinking_chars=%d, "
+                        "first_text=+%.2fs, last_text=+%.2fs, done_received=%s, last_chunk=%s",
+                        stream_end - stream_start, chunk_count,
+                        text_chunk_count, thinking_chunk_count, thinking_total_chars,
+                        (first_text_chunk_time - stream_start) if first_text_chunk_time else -1,
+                        (last_text_chunk_time - stream_start) if last_text_chunk_time else -1,
+                        done_received,
+                        last_raw_chunk,
+                    )
+                    return
+                except Exception as e:
+                    last_chat_error = e
+                    if _should_retry(e) and attempt < MAX_RETRIES - 1:
+                        backoff = INITIAL_BACKOFF * (2 ** attempt)
+                        logging.warning(
+                            "[ollama] Retryable /api/chat streaming error (attempt %d/%d): %s. Retrying in %.1fs...",
+                            attempt + 1, MAX_RETRIES, type(e).__name__, backoff
+                        )
+                        time.sleep(backoff)
+                        continue
+                    logging.warning("Ollama /api/chat streaming failed: %s; falling back to /v1", _extract_ollama_error(e))
+                    break
+
+        # 2nd: Fallback to /v1/chat/completions (OpenAI-compatible streaming)
         last_v1_error: Optional[Exception] = None
         for attempt in range(MAX_RETRIES):
             try:
@@ -643,19 +750,21 @@ class OllamaClient(LLMClient):
 
                 # ── Streaming timing instrumentation ──
                 stream_start = time.monotonic()
-                first_text_chunk_time: float | None = None
-                last_text_chunk_time: float | None = None
+                first_text_chunk_time = None
+                last_text_chunk_time = None
                 done_time: float | None = None
                 chunk_count = 0
                 text_chunk_count = 0
+                last_raw_chunk: str | None = None
 
                 for line in response.iter_lines():
                     if not line:
                         continue
                     chunk = line.decode("utf-8")
                     chunk_count += 1
+                    last_raw_chunk = chunk
                     if chunk.startswith("data: "):
-                        chunk = chunk[len("data: ") :]
+                        chunk = chunk[len("data: "):]
                     if chunk.strip() == "[DONE]":
                         done_time = time.monotonic()
                         logging.info(
@@ -665,7 +774,11 @@ class OllamaClient(LLMClient):
                         break
                     try:
                         data = json.loads(chunk)
-                        delta = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                        choice = data.get("choices", [{}])[0]
+                        delta = choice.get("delta", {}).get("content", "")
+                        finish_reason = choice.get("finish_reason")
+                        if finish_reason:
+                            logging.info("[ollama_stream] finish_reason=%s at chunk #%d", finish_reason, chunk_count)
                         if delta:
                             text_chunk_count += 1
                             now = time.monotonic()
@@ -680,11 +793,12 @@ class OllamaClient(LLMClient):
                 stream_end = time.monotonic()
                 logging.info(
                     "[ollama_stream] Stream completed: total=%.2fs, chunks=%d, text_chunks=%d, "
-                    "first_text=+%.2fs, last_text=+%.2fs, done_signal at +%.2fs",
+                    "first_text=+%.2fs, last_text=+%.2fs, done_signal at +%.2fs, last_chunk=%s",
                     stream_end - stream_start, chunk_count, text_chunk_count,
                     (first_text_chunk_time - stream_start) if first_text_chunk_time else -1,
                     (last_text_chunk_time - stream_start) if last_text_chunk_time else -1,
                     (done_time - stream_start) if done_time else -1,
+                    last_raw_chunk,
                 )
                 return  # Stream completed successfully
             except Exception as e:
@@ -697,75 +811,10 @@ class OllamaClient(LLMClient):
                     )
                     time.sleep(backoff)
                     continue
-                logging.warning("Ollama v1 streaming failed: %s; falling back to /api/chat", _extract_ollama_error(e))
-                break  # Fall through to /api/chat
+                logging.exception("Ollama v1 streaming failed on all endpoints")
+                break
 
-        # 2nd: Fallback to /api/chat (native Ollama streaming)
-        if not self.chat_url:
-            raise RuntimeError(f"Ollama v1 streaming failed and no fallback available: {_extract_ollama_error(last_v1_error)}")
-
-        last_chat_error: Optional[Exception] = None
-        for attempt in range(MAX_RETRIES):
-            try:
-                chat_payload: Dict[str, Any] = {
-                    "model": self.model,
-                    "messages": messages,
-                    "stream": True,
-                    "options": stream_options,
-                }
-                response = requests.post(
-                    self.chat_url,
-                    json=chat_payload,
-                    timeout=(3, 300),
-                    stream=True,
-                )
-                response.raise_for_status()
-
-                stream_start = time.monotonic()
-                chunk_count = 0
-                text_chunk_count = 0
-
-                for line in response.iter_lines():
-                    if not line:
-                        continue
-                    chunk = line.decode("utf-8")
-                    chunk_count += 1
-                    try:
-                        data = json.loads(chunk)
-                        # /api/chat streaming format: {"message": {"content": "..."}, "done": false}
-                        if data.get("done"):
-                            logging.info(
-                                "[ollama_stream] /api/chat done at +%.2fs (chunk #%d)",
-                                time.monotonic() - stream_start, chunk_count,
-                            )
-                            break
-                        delta = data.get("message", {}).get("content", "")
-                        if delta:
-                            text_chunk_count += 1
-                        yield delta
-                    except json.JSONDecodeError:
-                        logging.warning("Failed to parse /api/chat stream chunk: %s", chunk)
-
-                stream_end = time.monotonic()
-                logging.info(
-                    "[ollama_stream] /api/chat stream completed: total=%.2fs, chunks=%d, text_chunks=%d",
-                    stream_end - stream_start, chunk_count, text_chunk_count,
-                )
-                return
-            except Exception as e:
-                last_chat_error = e
-                if _should_retry(e) and attempt < MAX_RETRIES - 1:
-                    backoff = INITIAL_BACKOFF * (2 ** attempt)
-                    logging.warning(
-                        "[ollama] Retryable /api/chat streaming error (attempt %d/%d): %s. Retrying in %.1fs...",
-                        attempt + 1, MAX_RETRIES, type(e).__name__, backoff
-                    )
-                    time.sleep(backoff)
-                    continue
-                logging.exception("Ollama streaming failed on all endpoints")
-                raise RuntimeError(_extract_ollama_error(e))
-
-        raise RuntimeError(f"Ollama /api/chat streaming failed after {MAX_RETRIES} retries: {_extract_ollama_error(last_chat_error)}")
+        raise RuntimeError(f"Ollama streaming failed on all endpoints: {_extract_ollama_error(last_v1_error)}")
 
     def generate_with_tool_detection(
         self,
@@ -799,6 +848,9 @@ class OllamaClient(LLMClient):
         if not isinstance(parameters, dict):
             return
         for key, value in parameters.items():
+            # Translate max_tokens (OpenAI/common name) to num_predict (Ollama name)
+            if key == "max_tokens":
+                key = "num_predict"
             if key not in OLLAMA_ALLOWED_REQUEST_PARAMS:
                 continue
             if value is None:

@@ -1,7 +1,7 @@
 {
     "name": "autonomy_web_research",
     "display_name": "自律行動: Web調査",
-    "description": "Web検索とURL読み込みで情報を収集し、得た知識をMemopediaに記録する自律行動Playbook。ツールの使用は自由選択で、十分な情報が集まったらMemopediaページを作成して終了する。",
+    "description": "Web検索とURL読み込みで情報を収集し、得た知識をMemopediaに記録する自律行動Playbook。",
     "input_schema": [
         {
             "name": "input",
@@ -16,18 +16,16 @@
             "id": "init",
             "type": "set",
             "assignments": {
-                "loop_count": 0,
-                "max_loops": 15,
-                "research_notes": ""
+                "loop_count": 0
             },
-            "next": "research_loop"
+            "next": "first_prompt"
         },
         {
-            "id": "research_loop",
+            "id": "first_prompt",
             "type": "llm",
             "context_profile": "conversation",
             "model_type": "lightweight",
-            "action": "あなたは自律的にWeb調査を行っています。\n\n## 調査テーマ\n{input}\n\n## これまでの調査メモ\n{research_notes}\n\n## 利用可能なアクション\n以下のツールを自由に使って調査を進めてください:\n- **searxng_search**: キーワードでWeb検索（スニペット取得）\n- **read_url_content**: URLからページ全文を取得\n- **memopedia_get_tree**: 既存のMemopediaページ一覧を確認\n- **memopedia_save_page**: 調査結果をMemopediaページとして保存\n\n## 進め方\n1. まず検索で概要を掴む\n2. 有用そうなURLの詳細を読む\n3. 十分な情報が集まったら memopedia_save_page で知識を保存する\n4. ツールを使わずにテキストだけ返すと調査は終了します\n\n次のアクションを選んでください。",
+            "action": "あなたは自律的にWeb調査を行います。\n\n## 調査テーマ\n{input}\n\n## 利用可能なツール\n- **searxng_search**: キーワードでWeb検索（スニペット取得）\n- **read_url_content**: URLからページ全文を取得\n- **memopedia_get_tree**: 既存のMemopediaページ一覧を確認\n- **memopedia_save_page**: 調査結果をMemopediaページとして保存\n\n## 進め方\n1. まず検索で概要を掴む\n2. 有用そうなURLの詳細を読む\n3. 十分な情報が集まったら memopedia_save_page で知識を保存する\n\n## 終了方法\nツールを使わずにテキストだけ返すと調査は終了します。\n\nまず最初のアクションを選んでください。",
             "available_tools": [
                 "searxng_search",
                 "read_url_content",
@@ -58,13 +56,20 @@
             "type": "tool_call",
             "call_source": "fc",
             "output_key": "tool_result",
-            "next": "accumulate"
+            "next": "record_result"
         },
         {
-            "id": "accumulate",
+            "id": "record_result",
+            "type": "memorize",
+            "action": "[{fc.name}の結果]\n{tool_result}",
+            "role": "user",
+            "tags": ["internal", "web_research", "tool_result"],
+            "next": "increment"
+        },
+        {
+            "id": "increment",
             "type": "set",
             "assignments": {
-                "research_notes": "{research_notes}\n\n### [{fc.name}]\n{tool_result}",
                 "loop_count": "={loop_count} + 1"
             },
             "next": "check_loop_limit"
@@ -77,16 +82,35 @@
                 "operator": "gte",
                 "cases": {
                     "15": "force_save",
-                    "default": "research_loop"
+                    "default": "continue_loop"
                 }
             }
+        },
+        {
+            "id": "continue_loop",
+            "type": "llm",
+            "context_profile": "conversation",
+            "model_type": "lightweight",
+            "action": "結果を確認しました。次のアクションを選んでください。ツールを使わず返答すると調査を終了します。",
+            "available_tools": [
+                "searxng_search",
+                "read_url_content",
+                "memopedia_get_tree",
+                "memopedia_save_page"
+            ],
+            "output_keys": [
+                {"text": "response_text"},
+                {"function_call": "fc"}
+            ],
+            "memorize": {"tags": ["internal", "web_research"]},
+            "next": "check_tool_call"
         },
         {
             "id": "force_save",
             "type": "llm",
             "context_profile": "conversation",
             "model_type": "lightweight",
-            "action": "調査のループ上限に達しました。これまでに収集した情報をMemopediaページとして保存してください。\n\n## 調査テーマ\n{input}\n\n## 収集情報\n{research_notes}\n\nmemopedia_save_page ツールを使って保存してください。",
+            "action": "調査のループ上限に達しました。これまでに収集した情報をMemopediaページとして保存してください。memopedia_save_page を使ってください。",
             "available_tools": [
                 "memopedia_save_page"
             ],
@@ -95,22 +119,22 @@
                 {"function_call": "fc"}
             ],
             "memorize": {"tags": ["internal", "web_research"]},
-            "next": "force_save_exec"
+            "next": "force_save_check"
         },
         {
-            "id": "force_save_exec",
+            "id": "force_save_check",
             "type": "pass",
             "conditional_next": {
                 "field": "tool_called",
                 "operator": "eq",
                 "cases": {
-                    "True": "force_save_tool",
+                    "True": "force_save_exec",
                     "default": "finalize"
                 }
             }
         },
         {
-            "id": "force_save_tool",
+            "id": "force_save_exec",
             "type": "tool_call",
             "call_source": "fc",
             "output_key": "save_result",
@@ -119,7 +143,7 @@
         {
             "id": "finalize",
             "type": "memorize",
-            "action": "Web調査完了: {input}\n\n最終メモ:\n{response_text}",
+            "action": "Web調査完了: {input}",
             "role": "assistant",
             "tags": ["internal", "web_research", "completed"],
             "next": null

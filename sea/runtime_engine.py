@@ -51,10 +51,15 @@ class RuntimeEngine:
 
                 # Build kwargs from args_input (None or {} = no args)
                 # Supports nested keys via dot notation (e.g., "tool_call.args.playbook_name")
+                # String values are resolved as state variable paths.
+                # To pass a literal string, use {"$literal": "value"} syntax.
                 kwargs: Dict[str, Any] = {}
                 if args_input:
                     for arg_name, source in args_input.items():
-                        if isinstance(source, str):
+                        if isinstance(source, dict) and "$literal" in source:
+                            value = source["$literal"]
+                            LOGGER.debug("[sea][tool] Using $literal arg '%s' = %s", arg_name, value)
+                        elif isinstance(source, str):
                             value = self.runtime._resolve_state_value(state, source)
                             LOGGER.debug("[sea][tool] Mapping arg '%s' <- state['%s'] = %s", arg_name, source, value)
                         else:
@@ -126,7 +131,15 @@ class RuntimeEngine:
                         tool_name=tool_name,
                         important=getattr(node_def, "important", False) or False))
             except Exception as exc:
-                state["last"] = f"Tool error: {exc}"
+                error_msg = f"Tool error: {exc}"
+                state["last"] = error_msg
+                # Populate output_keys so downstream nodes can resolve template variables
+                if output_keys:
+                    for key in output_keys:
+                        state[key] = None
+                    state[output_keys[0]] = error_msg
+                if output_key and not output_keys:
+                    state[output_key] = error_msg
                 LOGGER.exception("SEA LangGraph tool %s failed", tool_name)
                 # Append error to PulseContext
                 _pulse_ctx = state.get("_pulse_context")

@@ -15,6 +15,7 @@ class ToolSchema:
     description: str
     parameters: Dict[str, Any]   # JSON Schema
     result_type: str             # "string" / "number" / ...
+    handy: bool = False          # If True, tool is auto-injected into all LLM nodes (when no response_schema)
 
 
 @dataclass

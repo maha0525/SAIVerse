@@ -24,6 +24,7 @@ TOOL_REGISTRY: Dict[str, Callable] = {}
 OPENAI_TOOLS_SPEC: List[Dict[str, Any]] = []
 GEMINI_TOOLS_SPEC: List[Any] = []
 TOOL_SCHEMAS: List[ToolSchema] = []
+HANDY_TOOL_NAMES: set[str] = set()  # Tools auto-injected into LLM nodes
 
 
 def _register_multiple_tools(module: Any) -> bool:
@@ -50,8 +51,10 @@ def _register_multiple_tools(module: Any) -> bool:
             OPENAI_TOOLS_SPEC.append(oa.to_openai(meta))
             GEMINI_TOOLS_SPEC.append(gm.to_gemini(meta))
             TOOL_SCHEMAS.append(meta)
+            if getattr(meta, "handy", False):
+                HANDY_TOOL_NAMES.add(meta.name)
             registered = True
-            LOGGER.debug("Registered tool '%s' from schemas()", meta.name)
+            LOGGER.debug("Registered tool '%s' from schemas() (handy=%s)", meta.name, getattr(meta, "handy", False))
 
         return registered
     except Exception as e:
@@ -85,7 +88,9 @@ def _register_tool(module: Any) -> bool:
         OPENAI_TOOLS_SPEC.append(oa.to_openai(meta))
         GEMINI_TOOLS_SPEC.append(gm.to_gemini(meta))
         TOOL_SCHEMAS.append(meta)
-        
+        if getattr(meta, "handy", False):
+            HANDY_TOOL_NAMES.add(meta.name)
+
         # Handle aliases
         alias = getattr(module, "ALIASES", None)
         if isinstance(alias, dict):

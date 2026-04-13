@@ -4,6 +4,7 @@ from .storage import (
     CATEGORY_PEOPLE,
     CATEGORY_TERMS,
     CATEGORY_PLANS,
+    CATEGORY_EVENTS,
     PageEditHistory,
 )
 
@@ -13,6 +14,7 @@ __all__ = [
     "CATEGORY_PEOPLE",
     "CATEGORY_TERMS",
     "CATEGORY_PLANS",
+    "CATEGORY_EVENTS",
     "PageEditHistory",
 ]
 

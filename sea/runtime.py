@@ -1521,9 +1521,15 @@ class SEARuntime:
         # Previously this only fetched from the default persona thread, missing
         # messages logged on building-specific threads.
         import json as _json
+        # Exclude handy_tool tagged messages — they contain Memopedia content
+        # that is already stored there, so including them would cause duplication.
         cur = adapter.conn.execute(
             "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
-            "FROM messages ORDER BY created_at ASC"
+            "FROM messages "
+            "WHERE NOT EXISTS ("
+            "  SELECT 1 FROM json_each(metadata, '$.tags') WHERE json_each.value = 'handy_tool'"
+            ") "
+            "ORDER BY created_at ASC"
         )
         all_messages = []
         for row in cur.fetchall():

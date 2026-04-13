@@ -15,6 +15,119 @@ from saiverse.usage_tracker import get_usage_tracker
 
 LOGGER = logging.getLogger(__name__)
 
+# ── Handy Tool inline execution ──
+
+_MAX_HANDY_TOOL_LOOPS = 3
+
+
+def _execute_handy_tool_inline(
+    tool_name: str,
+    tool_args: dict,
+    persona: Any,
+    building_id: str,
+    playbook_name: str,
+    state: dict,
+    messages: list,
+    runtime: Any,
+    event_callback: Optional[Callable] = None,
+    thought_signature: Optional[str] = None,
+) -> str:
+    """Execute a handy tool inline within the LLM node and append protocol messages.
+
+    Returns the tool result string. Modifies `messages` in place (appends
+    assistant tool_call + tool result messages).
+    """
+    from tools import TOOL_REGISTRY
+    from tools.context import persona_context
+    from pathlib import Path
+    from sea.pulse_context import PulseLogEntry
+
+    tc_id = f"tc_{uuid.uuid4().hex}"
+
+    # Append assistant tool_call message to conversation
+    tc_entry: Dict[str, Any] = {
+        "id": tc_id,
+        "type": "function",
+        "function": {"name": tool_name, "arguments": json.dumps(tool_args, ensure_ascii=False)},
+    }
+    # Gemini thinking models require thought_signature echoed back on function call parts
+    if thought_signature:
+        tc_entry["thought_signature"] = thought_signature
+    tool_call_msg = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [tc_entry],
+    }
+    messages.append(tool_call_msg)
+
+    # Execute the tool
+    tool_func = TOOL_REGISTRY.get(tool_name)
+    if not tool_func:
+        result_str = f"Tool '{tool_name}' not found in registry"
+        LOGGER.error("[sea][handy] %s", result_str)
+    else:
+        persona_obj = state.get("_persona_obj") or persona
+        persona_id = getattr(persona_obj, "persona_id", "unknown")
+        persona_dir = getattr(persona_obj, "persona_log_path", None)
+        persona_dir = persona_dir.parent if persona_dir else Path.cwd()
+        manager_ref = getattr(persona_obj, "manager_ref", None)
+        try:
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=False, event_callback=event_callback):
+                raw_result = tool_func(**tool_args)
+            result_str = str(raw_result)
+            LOGGER.info("[sea][handy] Executed %s → %s", tool_name, result_str[:200])
+        except Exception as exc:
+            result_str = f"Handy tool error ({tool_name}): {exc}"
+            LOGGER.exception("[sea][handy] %s failed", tool_name)
+
+    # Append tool result message to conversation
+    tool_result_msg = {
+        "role": "tool",
+        "tool_call_id": tc_id,
+        "name": tool_name,
+        "content": result_str,
+    }
+    messages.append(tool_result_msg)
+
+    # Record to PulseContext
+    _pulse_ctx = state.get("_pulse_context")
+    if _pulse_ctx:
+        # Assistant tool_call entry
+        _pulse_ctx.append(PulseLogEntry(
+            role="assistant", content="",
+            node_id=f"handy_{tool_name}", playbook_name=playbook_name,
+            tool_calls=[{
+                "id": tc_id,
+                "type": "function",
+                "function": {"name": tool_name, "arguments": json.dumps(tool_args, ensure_ascii=False)},
+            }],
+        ))
+        # Tool result entry
+        _pulse_ctx.append(PulseLogEntry(
+            role="tool", content=result_str,
+            node_id=f"handy_{tool_name}", playbook_name=playbook_name,
+            tool_call_id=tc_id, tool_name=tool_name,
+        ))
+
+    # Store to SAIMemory with handy_tool tag
+    pulse_id = state.get("_pulse_id")
+    runtime._store_memory(
+        persona,
+        f"[Handy Tool: {tool_name}]\n{result_str}",
+        role="system",
+        tags=["conversation", "handy_tool"],
+        pulse_id=pulse_id,
+        playbook_name=playbook_name,
+    )
+
+    # Record to activity trace (merged into final say event, not a separate bubble)
+    _at = state.get("_activity_trace")
+    if isinstance(_at, list):
+        _at.append({"action": "handy_tool", "name": tool_name, "playbook": playbook_name})
+
+    return result_str
+
+
 def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
     async def node(state: dict):
         # Check for cancellation at start of node
@@ -125,10 +238,22 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
             available_tools = getattr(node_def, "available_tools", None)
             LOGGER.info("[DEBUG] available_tools = %s", available_tools)
 
-            if available_tools:
+            # Inject handy tools when no response_schema (structured output blocks tool use)
+            from tools import HANDY_TOOL_NAMES
+            effective_tools: list[str] = list(available_tools or [])
+            _handy_injected: set[str] = set()
+            if not response_schema and HANDY_TOOL_NAMES:
+                for ht_name in sorted(HANDY_TOOL_NAMES):
+                    if ht_name not in effective_tools:
+                        effective_tools.append(ht_name)
+                        _handy_injected.add(ht_name)
+                if _handy_injected:
+                    LOGGER.info("[sea] Injected %d handy tools: %s", len(_handy_injected), _handy_injected)
+
+            if effective_tools:
                 LOGGER.info("[DEBUG] Entering tools mode (generate with tools)")
                 # Tool calling mode - use unified generate() with tools
-                tools_spec = runtime._build_tools_spec(available_tools, llm_client)
+                tools_spec = runtime._build_tools_spec(effective_tools, llm_client)
 
                 # Check if we should use streaming in tool mode
                 speak_flag = getattr(node_def, "speak", None)
@@ -400,6 +525,120 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 # Debug: log result type and keys
                 LOGGER.info("[DEBUG] LLM result type='%s', has content=%s, has tool_name=%s",
                            result.get("type"), "content" in result, "tool_name" in result)
+
+                # ── Handy tool inline loop ──
+                # If LLM called a handy tool, execute it transparently and re-invoke LLM.
+                _handy_all_names = HANDY_TOOL_NAMES | _handy_injected
+                _handy_loop_count = 0
+                while (
+                    result.get("type") in ("tool_call", "both")
+                    and result.get("tool_name") in _handy_all_names
+                    and _handy_loop_count < _MAX_HANDY_TOOL_LOOPS
+                ):
+                    _handy_loop_count += 1
+                    _ht_name = result["tool_name"]
+                    _ht_args = result.get("tool_args", {})
+                    if not isinstance(_ht_args, dict):
+                        _ht_args = {}
+                    LOGGER.info("[sea][handy] Loop %d: executing %s (args=%s)", _handy_loop_count, _ht_name, _ht_args)
+
+                    # Note: "both" type text was already emitted to Building history
+                    # by the streaming path above (streaming_complete + _emit_say).
+                    # Do NOT emit again here to avoid duplicate bubbles.
+
+                    _execute_handy_tool_inline(
+                        _ht_name, _ht_args,
+                        persona, building_id, playbook.name,
+                        state, messages, runtime,
+                        event_callback=event_callback,
+                        thought_signature=result.get("thought_signature"),
+                    )
+
+                    # Accumulate usage from first call (already recorded above)
+                    # Re-invoke LLM with updated messages (handy tool result now in context)
+                    LOGGER.info("[sea][handy] Re-invoking LLM after handy tool %s", _ht_name)
+                    _retry_result = llm_client.generate(
+                        messages,
+                        tools=tools_spec,
+                        temperature=runtime._default_temperature(persona),
+                        **runtime._get_cache_kwargs(),
+                    )
+                    # Record usage from re-invocation
+                    _retry_usage = llm_client.consume_usage()
+                    if _retry_usage:
+                        get_usage_tracker().record_usage(
+                            model_id=_retry_usage.model,
+                            input_tokens=_retry_usage.input_tokens,
+                            output_tokens=_retry_usage.output_tokens,
+                            cached_tokens=_retry_usage.cached_tokens,
+                            cache_write_tokens=_retry_usage.cache_write_tokens,
+                            cache_ttl=_retry_usage.cache_ttl,
+                            persona_id=getattr(persona, "persona_id", None),
+                            building_id=building_id,
+                            node_type="llm_handy_retry",
+                            playbook_name=playbook.name,
+                            category="persona_speak",
+                        )
+                        from saiverse.model_configs import calculate_cost
+                        _retry_cost = calculate_cost(
+                            _retry_usage.model, _retry_usage.input_tokens, _retry_usage.output_tokens,
+                            _retry_usage.cached_tokens, _retry_usage.cache_write_tokens, cache_ttl=_retry_usage.cache_ttl,
+                        )
+                        runtime._accumulate_usage(
+                            state, _retry_usage.model, _retry_usage.input_tokens,
+                            _retry_usage.output_tokens, _retry_cost,
+                            _retry_usage.cached_tokens, _retry_usage.cache_write_tokens,
+                        )
+
+                    # Check tool detection from retry
+                    _retry_tool = llm_client.consume_tool_detection()
+                    if _retry_tool and _retry_tool.get("type") in ("tool_call", "both"):
+                        result = _retry_tool
+                    elif isinstance(_retry_result, dict) and _retry_result.get("type") in ("tool_call", "both"):
+                        result = _retry_result
+                    else:
+                        # Text response from retry — use it
+                        _retry_content = ""
+                        if isinstance(_retry_result, dict):
+                            _retry_content = _retry_result.get("content", "")
+                        elif isinstance(_retry_result, str):
+                            _retry_content = _retry_result
+                        result = {"type": "text", "content": _retry_content}
+                    LOGGER.info("[sea][handy] After retry: result type=%s", result.get("type"))
+
+                if _handy_loop_count > 0:
+                    LOGGER.info("[sea][handy] Completed %d handy tool loop(s), final result type=%s",
+                               _handy_loop_count, result.get("type"))
+
+                    # Emit the final response to chat UI and Building history.
+                    # The sync re-invocation result was NOT streamed, so we need to
+                    # explicitly send it to the UI and Building history here.
+                    if result.get("type") == "text" and result.get("content"):
+                        _handy_final_text = result["content"]
+                        pulse_id = state.get("_pulse_id")
+                        eff_bid = runtime._effective_building_id(persona, building_id)
+
+                        # Build metadata for Building history
+                        _handy_msg_meta: Dict[str, Any] = {}
+                        _handy_at = state.get("_activity_trace")
+                        if _handy_at:
+                            _handy_msg_meta["activity_trace"] = list(_handy_at)
+
+                        # Send to UI as a say event (with activity trace for inline display)
+                        if event_callback:
+                            _say_event: Dict[str, Any] = {
+                                "type": "say",
+                                "content": _handy_final_text,
+                                "persona_id": getattr(persona, "persona_id", None),
+                            }
+                            if _handy_at:
+                                _say_event["activity_trace"] = list(_handy_at)
+                            event_callback(_say_event)
+
+                        # Save to Building history
+                        runtime._emit_say(persona, eff_bid, _handy_final_text, pulse_id=pulse_id,
+                                          metadata=_handy_msg_meta if _handy_msg_meta else None)
+                        LOGGER.info("[sea][handy] Emitted final response to UI and Building history (len=%d)", len(_handy_final_text))
 
                 if result["type"] == "tool_call":
                     LOGGER.info("[DEBUG] Entering tool_call branch")

@@ -386,6 +386,7 @@ def get_embeddings_for_scope(
     thread_id: Optional[str] = None,
     resource_id: Optional[str] = None,
     required_tags: Optional[List[str]] = None,
+    exclude_tags: Optional[List[str]] = None,
 ) -> List[Tuple[Message, List[float], int]]:
     # Build tags filter clause
     tags_clause = ""
@@ -400,6 +401,13 @@ def get_embeddings_for_scope(
             )
             params.append(tag)
         tags_clause = " AND (" + " OR ".join(tag_conditions) + ")"
+
+    if exclude_tags:
+        for tag in exclude_tags:
+            tags_clause += (
+                " AND NOT EXISTS (SELECT 1 FROM json_each(m.metadata, '$.tags') WHERE json_each.value = ?)"
+            )
+            params.append(tag)
 
     base_query = """
         SELECT m.id, m.thread_id, m.role, m.content, m.resource_id, m.created_at, m.metadata, e.vector, e.chunk_index
@@ -591,22 +599,60 @@ def _render_stelis_anchor_full(
         msg_count = cur.fetchone()[0]
         lines.append(f"- メッセージ数: {msg_count}")
 
-        # Chronicle summary
+        # Chronicle summary (legacy: manual summary set on thread completion)
         if stelis.chronicle_summary:
             lines.append("")
-            lines.append("## Chronicle")
+            lines.append("## Chronicle (完了時サマリー)")
             lines.append(stelis.chronicle_summary)
 
-        # Recent messages (last 3, full content)
+        # Chronicle entries for this Stelis thread (generated with thread_id)
+        try:
+            from sai_memory.arasuji.storage import get_entries_by_thread
+            thread_entries = get_entries_by_thread(conn, stelis_thread_id, max_entries=20)
+            if thread_entries:
+                lines.append("")
+                lines.append("## 活動のあらすじ")
+                lines.append("```")
+                for entry in thread_entries:
+                    level_prefix = "  " * (entry.level - 1)
+                    lines.append(f"{level_prefix}[Lv{entry.level}] {entry.content}")
+                lines.append("```")
+        except Exception:
+            pass  # Chronicle not available
+
+        # First messages (opening context, e.g., decision phase)
+        cur_first = conn.execute(
+            "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+            "FROM messages WHERE thread_id=? ORDER BY created_at ASC LIMIT 3",
+            (stelis_thread_id,),
+        )
+        first_msgs = [_row_to_message(r) for r in cur_first.fetchall()]
+        first_ids = {m.id for m in first_msgs}
+
+        if first_msgs:
+            lines.append("")
+            lines.append("## 開始時のやり取り")
+            lines.append("```")
+            for msg in first_msgs:
+                role = "assistant" if msg.role == "model" else msg.role
+                content = (msg.content or "").strip()
+                if content:
+                    lines.append(f"[{role}]: {content}")
+            lines.append("```")
+
+        # Recent messages (last 3, excluding those already shown)
         recent_msgs = get_messages_last(conn, stelis_thread_id, 3)
+        recent_msgs = [m for m in recent_msgs if m.id not in first_ids]
         if recent_msgs:
             lines.append("")
             lines.append("## 最新のやり取り")
+            lines.append("```")
             for msg in recent_msgs:
                 role = "assistant" if msg.role == "model" else msg.role
                 content = (msg.content or "").strip()
                 if content:
                     lines.append(f"[{role}]: {content}")
+            lines.append("```")
     else:
         lines.append("- 状態: 情報取得不可")
 

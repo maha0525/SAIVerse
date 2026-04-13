@@ -597,6 +597,7 @@ Critical settings (see `.env.example`):
   1. `generate_query` LLM node with `response_schema` to structure output
   2. `recall` TOOL node with `args_input` mapping state variables to tool parameters
   3. `record` MEMORIZE node to save results to SAIMemory
+- **`args_input` value types**: String values are resolved as state variable paths (e.g., `"gen_params.title"`). Non-string values (int, bool, etc.) are used as literals. To pass a **literal string**, use `{"$literal": "value"}` syntax (e.g., `{"$literal": "Anima.json"}`). Without `$literal`, a string like `"Anima.json"` would be interpreted as a state key lookup and resolve to `None`.
 - **Multi-value tool returns**: Tools returning tuples (e.g., `generate_image`) can use `output_keys` to expand values into multiple state variables. Example: `"output_keys": ["text", "snippet", "file_path", "metadata"]`
 - **Adding new node fields**: When adding new fields to playbook nodes (e.g., `model_type`, `output_keys`):
   1. **MUST update** `sea/playbook_models.py` node definitions (`LLMNodeDef`, `ToolNodeDef`, etc.) with the new field

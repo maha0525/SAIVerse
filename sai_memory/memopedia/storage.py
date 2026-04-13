@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 CATEGORY_PEOPLE = "people"
 CATEGORY_TERMS = "terms"
 CATEGORY_PLANS = "plans"
+CATEGORY_EVENTS = "events"
 
 INITIAL_ROOTS = [
     {
@@ -35,6 +36,13 @@ INITIAL_ROOTS = [
         "title": "予定",
         "category": CATEGORY_PLANS,
         "summary": "進行中や計画中のプロジェクト・予定",
+        "content": "",
+    },
+    {
+        "id": "root_events",
+        "title": "出来事",
+        "category": CATEGORY_EVENTS,
+        "summary": "出来事、体験、時事的な話題",
         "content": "",
     },
 ]
@@ -471,6 +479,7 @@ def build_tree(conn: sqlite3.Connection) -> Dict[str, List[MemopediaPage]]:
         CATEGORY_PEOPLE: [],
         CATEGORY_TERMS: [],
         CATEGORY_PLANS: [],
+        CATEGORY_EVENTS: [],
     }
     for root in roots:
         if root.category in result:

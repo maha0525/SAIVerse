@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Search, Loader2, AlertCircle, Brain, Bug, Trash2, Plus, FileDown, Activity, LifeBuoy } from 'lucide-react';
+import React, { useState, useRef } from 'react';
+import { Search, Loader2, AlertCircle, Brain, Bug, Trash2, Plus, FileDown, FileUp, Activity, LifeBuoy, Download, Upload } from 'lucide-react';
 import styles from './MemoryRecall.module.css';
 
 interface MemoryRecallProps {
@@ -63,6 +63,82 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
     const [confirmChronicle, setConfirmChronicle] = useState(false);
     const [confirmMemopedia, setConfirmMemopedia] = useState(false);
     const [deleteResult, setDeleteResult] = useState<string | null>(null);
+
+    // Memopedia export/import state
+    const [isExporting, setIsExporting] = useState(false);
+    const [isImporting, setIsImporting] = useState(false);
+    const [importClear, setImportClear] = useState(false);
+    const [confirmImportClear, setConfirmImportClear] = useState(false);
+    const [exportImportResult, setExportImportResult] = useState<string | null>(null);
+    const [exportImportError, setExportImportError] = useState<string | null>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
+    const handleExportMemopedia = async () => {
+        setIsExporting(true);
+        setExportImportResult(null);
+        setExportImportError(null);
+        try {
+            const backendUrl = 'http://127.0.0.1:8000';
+            const res = await fetch(`${backendUrl}/api/people/${personaId}/memopedia/export`);
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.detail || `HTTP ${res.status}`);
+            }
+            const data = await res.json();
+            const pageCount = data.pages?.length ?? 0;
+            const json = JSON.stringify(data, null, 2);
+            const blob = new Blob([json], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${personaId}_memopedia_${timestamp}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+            setExportImportResult(`${pageCount} ページをエクスポートしました`);
+        } catch (e: any) {
+            setExportImportError(e.message || 'エクスポートに失敗しました');
+        } finally {
+            setIsExporting(false);
+        }
+    };
+
+    const handleImportMemopedia = async (file: File) => {
+        setIsImporting(true);
+        setExportImportResult(null);
+        setExportImportError(null);
+        try {
+            const text = await file.text();
+            const data = JSON.parse(text);
+            if (!data.pages || !Array.isArray(data.pages)) {
+                throw new Error('無効なフォーマット: pages 配列が見つかりません');
+            }
+            const shouldClear = importClear && confirmImportClear;
+            const backendUrl = 'http://127.0.0.1:8000';
+            const res = await fetch(
+                `${backendUrl}/api/people/${personaId}/memopedia/import?clear=${shouldClear}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data),
+                }
+            );
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.detail || `HTTP ${res.status}`);
+            }
+            const result = await res.json();
+            setExportImportResult(
+                `${result.imported_count} ページをインポートしました${shouldClear ? '（既存データを削除後）' : '（マージ）'}`
+            );
+            setConfirmImportClear(false);
+        } catch (e: any) {
+            setExportImportError(e.message || 'インポートに失敗しました');
+        } finally {
+            setIsImporting(false);
+            if (fileInputRef.current) fileInputRef.current.value = '';
+        }
+    };
 
     // Working memory add state
     const [addingToWm, setAddingToWm] = useState<string | null>(null);
@@ -917,6 +993,92 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                 <div className={styles.error}>
                     <AlertCircle size={16} />
                     <span>{diagnosisError}</span>
+                </div>
+            )}
+
+            {/* Memopedia Export / Import */}
+            <div className={styles.header} style={{ marginTop: '2rem' }}>
+                <Download size={24} className={styles.icon} />
+                <div>
+                    <h3 className={styles.title}>Memopedia エクスポート / インポート</h3>
+                    <p className={styles.description}>
+                        Memopedia の全ページを JSON ファイルとしてエクスポート、またはインポートします。
+                    </p>
+                </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                <button
+                    className={styles.executeButton}
+                    onClick={handleExportMemopedia}
+                    disabled={isExporting}
+                    style={{ background: '#2b6cb0', flex: 'none' }}
+                >
+                    {isExporting ? (
+                        <><Loader2 size={16} className={styles.loader} /> エクスポート中...</>
+                    ) : (
+                        <><FileDown size={16} /> JSON エクスポート</>
+                    )}
+                </button>
+
+                <input
+                    type="file"
+                    ref={fileInputRef}
+                    accept=".json"
+                    style={{ display: 'none' }}
+                    onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) handleImportMemopedia(file);
+                    }}
+                />
+                <button
+                    className={styles.executeButton}
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isImporting}
+                    style={{ background: '#2f855a', flex: 'none' }}
+                >
+                    {isImporting ? (
+                        <><Loader2 size={16} className={styles.loader} /> インポート中...</>
+                    ) : (
+                        <><FileUp size={16} /> JSON インポート</>
+                    )}
+                </button>
+            </div>
+
+            <div style={{ marginTop: '0.5rem' }}>
+                <label className={styles.toggleLabel}>
+                    <input
+                        type="checkbox"
+                        checked={importClear}
+                        onChange={(e) => {
+                            setImportClear(e.target.checked);
+                            if (!e.target.checked) setConfirmImportClear(false);
+                        }}
+                    />
+                    インポート前に既存ページを削除
+                </label>
+                {importClear && (
+                    <label className={styles.toggleLabel} style={{ marginLeft: '1rem', color: '#e53e3e' }}>
+                        <input
+                            type="checkbox"
+                            checked={confirmImportClear}
+                            onChange={(e) => setConfirmImportClear(e.target.checked)}
+                        />
+                        削除を確認
+                    </label>
+                )}
+            </div>
+
+            {exportImportError && (
+                <div className={styles.error}>
+                    <AlertCircle size={16} />
+                    <span>{exportImportError}</span>
+                </div>
+            )}
+
+            {exportImportResult && (
+                <div className={styles.deleteResult} style={{ color: '#69db7c' }}>
+                    {exportImportResult}
                 </div>
             )}
 

@@ -137,6 +137,7 @@ def _recall_single_query(adapter, query: str, topk: int, start_ts=None, end_ts=N
             scope=adapter.settings.scope,
             exclude_message_ids=set(),
             required_tags=["conversation"],
+            exclude_tags=["handy_tool"],
         )
 
     hits = []
@@ -287,6 +288,7 @@ def _recall_keywords_only(adapter, keywords: list, topk: int, start_ts=None, end
         messages = get_all_messages_for_search(
             adapter.conn,
             required_tags=["conversation"],
+            exclude_tags=["handy_tool"],
         )
 
     print(f"[KEYWORD DEBUG] Got {len(messages)} messages to search", flush=True)

@@ -69,8 +69,9 @@ def schema() -> ToolSchema:
     return ToolSchema(
         name="memopedia_get_page",
         description=(
-            "Get a Memopedia page's full content by title or ID. "
-            "Use this to read existing pages before editing them."
+            "Read a Memopedia page's full content by title or ID. "
+            "Use this to recall your own knowledge — the result stays in context "
+            "so you can reference it in subsequent messages."
         ),
         parameters={
             "type": "object",
@@ -86,4 +87,5 @@ def schema() -> ToolSchema:
             },
         },
         result_type="string",
+        handy=True,
     )

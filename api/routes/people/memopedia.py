@@ -174,6 +174,40 @@ def delete_memopedia_page(persona_id: str, page_id: str, manager = Depends(get_m
             raise HTTPException(status_code=500, detail=f"Memopedia error: {e}")
 
 
+@router.get("/{persona_id}/memopedia/export", tags=["Memopedia"])
+def export_memopedia(persona_id: str, manager=Depends(get_manager)):
+    """Export all Memopedia pages as JSON."""
+    with get_adapter(persona_id, manager) as adapter:
+        try:
+            memopedia = _get_memopedia(adapter)
+            data = memopedia.export_json()
+            return data
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Memopedia export error: {e}")
+
+
+@router.post("/{persona_id}/memopedia/import", tags=["Memopedia"])
+def import_memopedia(persona_id: str, body: dict, clear: bool = False, manager=Depends(get_manager)):
+    """Import Memopedia pages from JSON.
+
+    Query params:
+        clear: If true, delete all existing pages before importing.
+    Body:
+        JSON data in the same format as export_json() output.
+    """
+    with get_adapter(persona_id, manager) as adapter:
+        try:
+            memopedia = _get_memopedia(adapter)
+            imported = memopedia.import_json(body, clear_existing=clear)
+            return {
+                "success": True,
+                "imported_count": imported,
+                "message": f"Imported {imported} pages",
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Memopedia import error: {e}")
+
+
 @router.delete("/{persona_id}/memopedia/pages", tags=["Memopedia"])
 def delete_all_memopedia_pages(persona_id: str, manager=Depends(get_manager)):
     """Delete ALL non-root Memopedia pages (and their edit history)."""

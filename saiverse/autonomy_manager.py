@@ -140,9 +140,26 @@ class AutonomyManager:
             )
             if stelis:
                 self._stelis_thread_id = stelis.thread_id
+
+                # Insert Stelis anchor in parent thread (same as stelis_start node)
+                # This enables automatic summary injection when parent thread is viewed
+                parent_suffix = self._original_thread_id.split(":")[-1] if ":" in self._original_thread_id else self._original_thread_id
+                anchor_message = {
+                    "role": "system",
+                    "content": "",
+                    "metadata": {
+                        "type": "stelis_anchor",
+                        "stelis_thread_id": stelis.thread_id,
+                        "stelis_label": "autonomy",
+                        "created_at": int(time.time()),
+                    },
+                    "embedding_chunks": 0,
+                }
+                sai_mem.append_persona_message(anchor_message, thread_suffix=parent_suffix)
+
                 sai_mem.set_active_thread(stelis.thread_id)
                 LOGGER.info(
-                    "[Autonomy:%s] Started Stelis thread: %s",
+                    "[Autonomy:%s] Started Stelis thread: %s (anchor in parent)",
                     self.persona_id, stelis.thread_id,
                 )
             else:
@@ -172,7 +189,8 @@ class AutonomyManager:
     def stop(self) -> bool:
         """Stop the autonomous behavior loop.
 
-        Ends the Stelis thread and restores the original thread.
+        Cancels any running execution, ends the Stelis thread,
+        and restores the original thread.
         Returns True if stopped, False if not running.
         """
         with self._lock:
@@ -181,6 +199,17 @@ class AutonomyManager:
 
             self._stop_event.set()
             self._state = AutonomyState.STOPPED
+
+        # Cancel any running execution via PulseController
+        try:
+            pc = getattr(self.manager, "pulse_controller", None)
+            if pc:
+                current = pc._current.get(self.persona_id)
+                if current and current.type == "autonomy":
+                    current.cancellation_token.cancel(interrupted_by="autonomy_stop")
+                    LOGGER.info("[Autonomy:%s] Cancelled running execution", self.persona_id)
+        except Exception as exc:
+            LOGGER.debug("[Autonomy:%s] Failed to cancel execution: %s", self.persona_id, exc)
 
         # Wait for thread to finish (outside lock)
         if self._thread and self._thread.is_alive():
@@ -347,6 +376,11 @@ class AutonomyManager:
                     "[Autonomy:%s] Cycle %s: %s (%.1fs)",
                     self.persona_id, cycle_id, report.status, elapsed,
                 )
+
+
+                # Phase 2.5: Generate Chronicle for the Stelis thread
+                if report.status == "completed" and report.playbook != "wait":
+                    self._generate_stelis_chronicle()
 
             except Exception as exc:
                 LOGGER.exception(
@@ -602,6 +636,99 @@ class AutonomyManager:
             LOGGER.warning(
                 "[Autonomy:%s] Artifact gathering failed: %s",
                 self.persona_id, exc,
+            )
+
+    # ------------------------------------------------------------------
+    # Chronicle generation for Stelis thread
+    # ------------------------------------------------------------------
+
+    def _generate_stelis_chronicle(self) -> None:
+        """Generate Chronicle entries for the Stelis thread's messages.
+
+        Uses the same ArasujiGenerator as normal threads, but scoped
+        to the Stelis thread's messages only.
+        """
+        if not self._stelis_thread_id:
+            return
+
+        persona = self._get_persona()
+        if not persona:
+            return
+
+        sai_mem = getattr(persona, "sai_memory", None)
+        if not sai_mem or not sai_mem.is_ready():
+            return
+
+        try:
+            import json as json_mod
+            from sai_memory.memory.storage import Message
+            from sai_memory.arasuji import init_arasuji_tables
+            from sai_memory.arasuji.generator import ArasujiGenerator
+
+            conn = sai_mem.conn
+            init_arasuji_tables(conn)
+
+            # Fetch messages from the Stelis thread
+            cur = conn.execute(
+                "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+                "FROM messages WHERE thread_id = ? ORDER BY created_at ASC",
+                (self._stelis_thread_id,),
+            )
+            messages = []
+            for row in cur.fetchall():
+                msg_id, tid, role, content, resource_id, created_at, metadata_raw = row
+                metadata = {}
+                if metadata_raw:
+                    try:
+                        metadata = json_mod.loads(metadata_raw)
+                    except Exception:
+                        pass
+                messages.append(Message(
+                    id=msg_id, thread_id=tid, role=role, content=content,
+                    resource_id=resource_id, created_at=created_at, metadata=metadata,
+                ))
+
+            if not messages:
+                return
+
+            # Get LLM client for Chronicle generation (use lightweight model)
+            from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+            from saiverse.model_configs import find_model_config
+            from llm_clients.factory import get_llm_client
+            import os
+
+            model_name = self.execution_model or os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
+            resolved_model_id, model_config = find_model_config(model_name)
+            if not resolved_model_id:
+                LOGGER.warning("[Autonomy:%s] Chronicle model not found: %s", self.persona_id, model_name)
+                return
+
+            provider = model_config.get("provider", "gemini")
+            context_length = model_config.get("context_length", 128000)
+            client = get_llm_client(resolved_model_id, provider, context_length, config=model_config)
+
+            generator = ArasujiGenerator(
+                client, conn,
+                batch_size=20,
+                consolidation_size=10,
+                persona_id=self.persona_id,
+            )
+            generator.thread_id = self._stelis_thread_id
+
+            level1, consolidated = generator.generate_unprocessed(messages)
+
+            if level1 or consolidated:
+                LOGGER.info(
+                    "[Autonomy:%s] Stelis Chronicle generated: %d Lv1, %d consolidated",
+                    self.persona_id, len(level1), len(consolidated),
+                )
+            else:
+                LOGGER.debug("[Autonomy:%s] No new Chronicle entries for Stelis thread", self.persona_id)
+
+        except Exception as exc:
+            LOGGER.warning(
+                "[Autonomy:%s] Stelis Chronicle generation failed: %s",
+                self.persona_id, exc, exc_info=True,
             )
 
     # ------------------------------------------------------------------

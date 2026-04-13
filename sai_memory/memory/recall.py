@@ -353,15 +353,16 @@ def semantic_recall(
     scope: str,
     exclude_message_ids: set[str] | None = None,
     required_tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
 ) -> List[Message]:
     vectors: List[List[float]] = embedder.embed([query_text], is_query=True)
     q = np.array(vectors[0], dtype=np.float32)
     vector_dim = q.shape[0]
 
     if scope == "resource" and resource_id:
-        corpus = get_embeddings_for_scope(conn, thread_id=None, resource_id=resource_id, required_tags=required_tags)
+        corpus = get_embeddings_for_scope(conn, thread_id=None, resource_id=resource_id, required_tags=required_tags, exclude_tags=exclude_tags)
     else:
-        corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None, required_tags=required_tags)
+        corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None, required_tags=required_tags, exclude_tags=exclude_tags)
 
     scored_map: dict[str, Tuple[Message, float, int]] = {}
     for msg, vec, chunk_index in corpus:
@@ -424,6 +425,7 @@ def semantic_recall_groups(
     scope: str,
     exclude_message_ids: set[str] | None = None,
     required_tags: list[str] | None = None,
+    exclude_tags: list[str] | None = None,
 ) -> List[Tuple[Message, List[Message], float]]:
     """Return top-k recall groups as (seed, group_messages_sorted, score).
 
@@ -436,9 +438,9 @@ def semantic_recall_groups(
     vector_dim = q.shape[0]
 
     if scope == "resource" and resource_id:
-        corpus = get_embeddings_for_scope(conn, thread_id=None, resource_id=resource_id, required_tags=required_tags)
+        corpus = get_embeddings_for_scope(conn, thread_id=None, resource_id=resource_id, required_tags=required_tags, exclude_tags=exclude_tags)
     else:
-        corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None, required_tags=required_tags)
+        corpus = get_embeddings_for_scope(conn, thread_id=thread_id, resource_id=None, required_tags=required_tags, exclude_tags=exclude_tags)
 
     scored_map: dict[str, Tuple[Message, float, int]] = {}
     for msg, vec, chunk_index in corpus:
@@ -519,6 +521,7 @@ def build_context_payload(
             range_before=range_before,
             range_after=range_after,
             scope=scope,
+            exclude_tags=["handy_tool"],
         )
         for _, bundle, score in groups:
             # Build a single system message summarizing the group
@@ -565,6 +568,7 @@ def build_context(
         range_before=range_before,
         range_after=range_after,
         scope=scope,
+        exclude_tags=["handy_tool"],
     )
     merged: List[Message] = []
     seen = set()

@@ -676,7 +676,7 @@ def generate_memopedia_page(
 以下のJSON形式で返してください:
 ```json
 {{
-  "category": "people|terms|plans",
+  "category": "people|terms|plans|events",
   "title": "ページタイトル",
   "summary": "1-2文の要約",
   "content": "本文（Markdown可）",
@@ -720,6 +720,7 @@ def generate_memopedia_page(
             "people": "root_people",
             "terms": "root_terms",
             "plans": "root_plans",
+            "events": "root_events",
         }.get(page_data.get("category", "terms"), "root_terms")
 
         new_page = memopedia.create_page(

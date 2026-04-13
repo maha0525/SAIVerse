@@ -158,6 +158,7 @@ def memory_search_brief(
                 scope=adapter.settings.scope,
                 exclude_message_ids=guard_ids,
                 required_tags=["conversation"],
+                exclude_tags=["handy_tool"],
             )
         rank_counter = 0
         for seed, _bundle, _score in groups_raw:
