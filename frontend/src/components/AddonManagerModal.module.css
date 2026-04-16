@@ -1,0 +1,439 @@
+.modal {
+    background: white;
+    border-radius: 1rem;
+    width: 560px;
+    max-width: 95vw;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.15);
+    overflow: hidden;
+}
+
+.header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1.25rem 1.5rem;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+    flex-shrink: 0;
+}
+
+.headerTitle {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    color: #1e293b;
+}
+
+.headerTitle h2 {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+}
+
+.closeButton {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #94a3b8;
+    padding: 0.25rem;
+    border-radius: 0.4rem;
+    display: flex;
+    align-items: center;
+    transition: color 0.15s;
+}
+
+.closeButton:hover {
+    color: #475569;
+}
+
+.content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+/* --- Loading / Empty --- */
+
+.loadingText {
+    color: #94a3b8;
+    text-align: center;
+    padding: 2rem 0;
+    font-size: 0.9rem;
+}
+
+.emptyState {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 2.5rem 1rem;
+    color: #94a3b8;
+    text-align: center;
+}
+
+.emptyIcon {
+    opacity: 0.3;
+    margin-bottom: 0.25rem;
+}
+
+.emptyHint {
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+
+/* --- Addon Card --- */
+
+.addonCard {
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 0.75rem;
+    overflow: hidden;
+    transition: border-color 0.15s;
+}
+
+.addonCard:hover {
+    border-color: rgba(0, 0, 0, 0.14);
+}
+
+.addonCard.disabled {
+    opacity: 0.65;
+}
+
+.addonCardHeader {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.8rem 1rem;
+    cursor: default;
+    user-select: none;
+}
+
+.expandBtn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #94a3b8;
+    padding: 0.1rem;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    border-radius: 0.25rem;
+    transition: color 0.15s;
+}
+
+.expandBtn:hover {
+    color: #475569;
+}
+
+.addonMeta {
+    flex: 1;
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    min-width: 0;
+    cursor: pointer;
+}
+
+.addonName {
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: #1e293b;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.addonVersion {
+    font-size: 0.75rem;
+    color: #94a3b8;
+    flex-shrink: 0;
+}
+
+.addonDesc {
+    font-size: 0.8rem;
+    color: #64748b;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.addonCardBody {
+    padding: 0 1rem 0.9rem 1rem;
+    border-top: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.disabledNote {
+    font-size: 0.85rem;
+    color: #94a3b8;
+    padding-top: 0.75rem;
+    margin: 0;
+}
+
+/* --- Toggle --- */
+
+.enabledToggle {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.toggleInput {
+    opacity: 0;
+    width: 0;
+    height: 0;
+    position: absolute;
+}
+
+.toggleSlider {
+    display: inline-block;
+    width: 38px;
+    height: 22px;
+    background: #cbd5e1;
+    border-radius: 11px;
+    position: relative;
+    transition: background 0.2s;
+    flex-shrink: 0;
+}
+
+.toggleSlider::after {
+    content: '';
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: white;
+    top: 3px;
+    left: 3px;
+    transition: transform 0.2s;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+.toggleInput:checked + .toggleSlider {
+    background: #6366f1;
+}
+
+.toggleInput:checked + .toggleSlider::after {
+    transform: translateX(16px);
+}
+
+/* --- ParamsSection --- */
+
+.paramsSection {
+    padding-top: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.noParams {
+    font-size: 0.85rem;
+    color: #94a3b8;
+    margin: 0.5rem 0 0;
+}
+
+.paramsGroup {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.paramsGroupLabel {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.25rem;
+}
+
+.paramRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-height: 2rem;
+}
+
+.paramLabel {
+    font-size: 0.88rem;
+    color: #374151;
+    flex: 1;
+}
+
+.savingHint {
+    font-size: 0.78rem;
+    color: #94a3b8;
+    margin-top: 0.25rem;
+}
+
+/* --- Dropdown / Select --- */
+
+.select {
+    font-size: 0.85rem;
+    padding: 0.3rem 0.5rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.4rem;
+    background: white;
+    color: #374151;
+    cursor: pointer;
+    min-width: 120px;
+}
+
+/* --- Slider --- */
+
+.sliderRow {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.slider {
+    width: 120px;
+    cursor: pointer;
+    accent-color: #6366f1;
+}
+
+.sliderValue {
+    font-size: 0.82rem;
+    color: #64748b;
+    min-width: 2.5rem;
+    text-align: right;
+}
+
+/* --- File --- */
+
+.fileDropArea {
+    position: relative;
+    border: 1px dashed #cbd5e1;
+    border-radius: 0.5rem;
+    padding: 0.4rem 0.7rem;
+    font-size: 0.82rem;
+    color: #64748b;
+    cursor: pointer;
+    min-width: 140px;
+    text-align: center;
+    transition: border-color 0.15s;
+}
+
+.fileDropArea:hover {
+    border-color: #6366f1;
+}
+
+.fileDropText {
+    pointer-events: none;
+}
+
+.fileInput {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+    width: 100%;
+    height: 100%;
+}
+
+.unsupported {
+    font-size: 0.8rem;
+    color: #94a3b8;
+}
+
+/* --- Persona config --- */
+
+.personaSection {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.personaSectionHeader {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.addPersonaBtn {
+    background: none;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.4rem;
+    cursor: pointer;
+    padding: 0.2rem 0.3rem;
+    display: flex;
+    align-items: center;
+    color: #64748b;
+    transition: all 0.15s;
+}
+
+.addPersonaBtn:hover {
+    border-color: #6366f1;
+    color: #6366f1;
+}
+
+.personaPickerList {
+    border: 1px solid #e2e8f0;
+    border-radius: 0.5rem;
+    overflow: hidden;
+}
+
+.personaPickerItem {
+    padding: 0.5rem 0.75rem;
+    font-size: 0.88rem;
+    color: #374151;
+    cursor: pointer;
+    transition: background 0.1s;
+}
+
+.personaPickerItem:hover {
+    background: #f1f5f9;
+}
+
+.personaConfigBlock {
+    border: 1px solid #e2e8f0;
+    border-radius: 0.5rem;
+    padding: 0.6rem 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.personaConfigHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.25rem;
+}
+
+.personaName {
+    font-size: 0.85rem;
+    font-weight: 500;
+    color: #475569;
+}
+
+.deletePersonaBtn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #cbd5e1;
+    padding: 0.15rem;
+    display: flex;
+    align-items: center;
+    border-radius: 0.25rem;
+    transition: color 0.15s;
+}
+
+.deletePersonaBtn:hover {
+    color: #ef4444;
+}
+
+/* toggle used standalone (inside ParamsSection) */
+.toggleLabel {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+}

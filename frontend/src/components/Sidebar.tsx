@@ -2,11 +2,12 @@
 
 import { useEffect, useState, useRef } from 'react';
 import styles from './Sidebar.module.css';
-import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, Navigation, Bell } from 'lucide-react';
+import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, Navigation, Bell, Package } from 'lucide-react';
 import GlobalSettingsModal from './GlobalSettingsModal';
 import UserProfileModal from './UserProfileModal';
 import PersonaWizard from './PersonaWizard';
 import TutorialSelectModal from './tutorial/TutorialSelectModal';
+import AddonManagerModal from './AddonManagerModal';
 
 interface UserStatus {
     is_online: boolean;  // Backward compatibility
@@ -41,6 +42,7 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
     const [newBuildingName, setNewBuildingName] = useState('');
     const [isCreatingBuilding, setIsCreatingBuilding] = useState(false);
     const [isTutorialSelectOpen, setIsTutorialSelectOpen] = useState(false);
+    const [isAddonManagerOpen, setIsAddonManagerOpen] = useState(false);
     const [developerMode, setDeveloperMode] = useState(false);
 
     // Swipe Logic for Control
@@ -342,6 +344,14 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                             <HelpCircle size={16} /> チュートリアル
                         </span>
                     </div>
+                    <div
+                        className={styles.buildingItem}
+                        onClick={() => setIsAddonManagerOpen(true)}
+                    >
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <Package size={16} /> アドオン
+                        </span>
+                    </div>
                 </div>
 
                 {/* Footer: Settings + Profile */}
@@ -399,6 +409,11 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                 <TutorialSelectModal
                     isOpen={isTutorialSelectOpen}
                     onClose={() => setIsTutorialSelectOpen(false)}
+                />
+
+                <AddonManagerModal
+                    isOpen={isAddonManagerOpen}
+                    onClose={() => setIsAddonManagerOpen(false)}
                 />
             </aside>
         </>

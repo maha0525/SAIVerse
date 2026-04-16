@@ -22,3 +22,7 @@ api_router.include_router(system.router, prefix="/system", tags=["system"])
 from api.routes.people.x_auth import callback_router as x_callback_router
 api_router.include_router(x_callback_router, prefix="/x", tags=["x"])
 
+from api.routes import addon, addon_events
+api_router.include_router(addon.router, prefix="/addon", tags=["addon"])
+api_router.include_router(addon_events.router, prefix="/addon", tags=["addon-events"])
+

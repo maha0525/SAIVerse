@@ -321,3 +321,52 @@ class UserSettings(Base):
     SELECTED_META_PLAYBOOK = Column(String(255), nullable=True)  # User's preferred meta playbook
     FAVORITE_MODELS = Column(Text, nullable=True)  # JSON array of favorite model IDs
 
+
+class AddonConfig(Base):
+    """アドオンのグローバル設定テーブル。
+
+    アドオンの有効/無効状態とデフォルトパラメータを管理する。
+    addon_name は expansion_data/ 下のディレクトリ名と一致する。
+    """
+    __tablename__ = "addon_config"
+    addon_name = Column(String(255), primary_key=True)
+    is_enabled = Column(Boolean, default=True, nullable=False)
+    params_json = Column(Text, nullable=True)  # JSON: アドオンのグローバルパラメータ
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class AddonPersonaConfig(Base):
+    """ペルソナごとのアドオンパラメータ上書きテーブル。
+
+    アドオンのパラメータをペルソナ単位で上書きする。
+    設定がない場合は AddonConfig のデフォルト値が使われる。
+    """
+    __tablename__ = "addon_persona_config"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    addon_name = Column(String(255), nullable=False)
+    persona_id = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
+    params_json = Column(Text, nullable=False)  # JSON: ペルソナ固有のパラメータ上書き
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    __table_args__ = (
+        UniqueConstraint("addon_name", "persona_id", name="uq_addon_persona"),
+    )
+
+
+class AddonMessageMetadata(Base):
+    """メッセージに紐付くアドオンメタデータテーブル。
+
+    アドオンがチャットメッセージに対してメタデータを付与するために使用する。
+    例: TTS アドオンが生成した音声ファイルのパスを message_id に紐付ける。
+    アドオンが無効でもデータは保持される（無効時は単に参照されないだけ）。
+    """
+    __tablename__ = "addon_message_metadata"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    message_id = Column(String(255), nullable=False)
+    addon_name = Column(String(100), nullable=False)
+    key = Column(String(100), nullable=False)
+    value = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    __table_args__ = (
+        UniqueConstraint("message_id", "addon_name", "key", name="uq_addon_msg_meta"),
+    )
+

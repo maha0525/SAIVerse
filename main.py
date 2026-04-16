@@ -425,6 +425,17 @@ def main():
     from api.main import api_router
     app.include_router(api_router, prefix="/api")
 
+    # Load addon API routers from expansion_data/*/api_routes.py
+    from saiverse.addon_loader import load_addon_routers
+    load_addon_routers(app)
+
+    # Register event loop for addon_events (enables emit from background threads)
+    @app.on_event("startup")
+    async def _register_addon_event_loop():
+        import asyncio
+        from saiverse.addon_events import set_event_loop
+        set_event_loop(asyncio.get_event_loop())
+
     logging.info(f"Starting SAIVerse backend on http://0.0.0.0:{manager.ui_port}")
     logging.info(f"API endpoints available at http://0.0.0.0:{manager.ui_port}/api")
     logging.info("")

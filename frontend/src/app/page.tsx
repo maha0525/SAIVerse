@@ -22,6 +22,8 @@ import ChronicleConfirmDialog, { ChronicleConfirmData } from '@/components/Chron
 import ModalOverlay from '@/components/common/ModalOverlay';
 import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
+import { useAddonEvents } from '@/hooks/useAddonEvents';
+import AddonBubbleButtons, { BubbleButtonDef } from '@/components/AddonBubbleButtons';
 
 // Allow className on HTML elements used by thinking blocks (<details>, <div>, <summary>)
 const sanitizeSchema = {
@@ -129,6 +131,22 @@ export default function Home() {
     // Enable user presence tracking (heartbeat + visibility)
     useActivityTracker();
 
+    // アドオンSSEイベント購読：audio_ready など非同期完了イベントを受信してメタデータを更新
+    useAddonEvents(useCallback((event) => {
+        if (event.message_id && event.data) {
+            setAddonMetadata((prev) => ({
+                ...prev,
+                [event.message_id!]: {
+                    ...(prev[event.message_id!] ?? {}),
+                    [event.addon]: {
+                        ...(prev[event.message_id!]?.[event.addon] ?? {}),
+                        ...event.data,
+                    },
+                },
+            }));
+        }
+    }, []));
+
     const [messages, setMessages] = useState<Message[]>([]);
     const [inputValue, setInputValue] = useState('');
     const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
@@ -157,6 +175,10 @@ export default function Home() {
     const [moveTrigger, setMoveTrigger] = useState(0); // To trigger RightSidebar refresh
     const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null); // Track which message was copied
     const [usageTooltipId, setUsageTooltipId] = useState<string | null>(null); // Track which message's usage tooltip is open
+    // アドオン: 有効なバブルボタン定義
+    const [addonBubbleButtons, setAddonBubbleButtons] = useState<BubbleButtonDef[]>([]);
+    // アドオン: メッセージごとのメタデータ { message_id: { addon_name: { key: value } } }
+    const [addonMetadata, setAddonMetadata] = useState<Record<string, Record<string, Record<string, unknown>>>>({});
 
     // ItemModal for saiverse:// item links
     const [linkItemModalItem, setLinkItemModalItem] = useState<{ id: string; name: string; description?: string; type: string } | null>(null);
@@ -187,6 +209,37 @@ export default function Home() {
         } catch (err) {
             console.error('Failed to copy:', err);
         }
+    }, []);
+
+    // アドオン一覧を取得してバブルボタン定義を構築する
+    useEffect(() => {
+        fetch('/api/addon/')
+            .then((r) => r.ok ? r.json() : [])
+            .then((addons: Array<{
+                addon_name: string;
+                is_enabled: boolean;
+                ui_extensions?: {
+                    bubble_buttons?: Array<{
+                        id: string;
+                        icon: string;
+                        label: string;
+                        action?: string;
+                        tool?: string;
+                        metadata_key?: string;
+                        show_when?: string;
+                    }>;
+                };
+            }>) => {
+                const buttons: BubbleButtonDef[] = [];
+                for (const addon of addons) {
+                    if (!addon.is_enabled) continue;
+                    for (const btn of addon.ui_extensions?.bubble_buttons ?? []) {
+                        buttons.push({ ...btn, addon_name: addon.addon_name });
+                    }
+                }
+                setAddonBubbleButtons(buttons);
+            })
+            .catch(() => {/* addon APIが無い環境では無視 */});
     }, []);
 
     useEffect(() => {
@@ -1938,6 +1991,14 @@ export default function Home() {
                                     >
                                         {copiedMessageId === (msg.id || `msg-${idx}`) ? <Check size={14} /> : <Copy size={14} />}
                                     </button>
+                                    {/* アドオンバブルボタン（assistantメッセージにのみ表示） */}
+                                    {msg.role === 'assistant' && addonBubbleButtons.length > 0 && (
+                                        <AddonBubbleButtons
+                                            messageId={msg.id || `msg-${idx}`}
+                                            addonMetadata={addonMetadata[msg.id || `msg-${idx}`] ?? {}}
+                                            buttons={addonBubbleButtons}
+                                        />
+                                    )}
                                 </div>
                             </div>
                         </div>

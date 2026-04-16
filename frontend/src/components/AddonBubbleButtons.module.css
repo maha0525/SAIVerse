@@ -1,0 +1,44 @@
+.bubbleBtn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0.25rem;
+    border-radius: 0.3rem;
+    color: #94a3b8;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.15s, background 0.15s;
+    line-height: 1;
+}
+
+.bubbleBtn:hover:not(:disabled) {
+    color: #475569;
+    background: rgba(0, 0, 0, 0.05);
+}
+
+.bubbleBtn.playing {
+    color: #6366f1;
+}
+
+.bubbleBtn.error {
+    color: #ef4444;
+}
+
+.bubbleBtn.pending {
+    cursor: default;
+    opacity: 0.5;
+}
+
+.bubbleBtn:disabled {
+    cursor: default;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.spinner {
+    animation: spin 1s linear infinite;
+}
