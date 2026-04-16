@@ -7,7 +7,8 @@ import {
     File,
     Eye,
     EyeOff,
-    Settings
+    Settings,
+    Package
 } from 'lucide-react';
 import ItemModal from './ItemModal';
 import PersonaMenu from './PersonaMenu';
@@ -33,9 +34,11 @@ interface Occupant {
 interface Item {
     id: string;
     name: string;
-    type: 'document' | 'picture' | 'other';
+    type: 'document' | 'picture' | 'bag' | 'other';
     description?: string;
     is_open?: boolean;  // Whether item content is included in visual context
+    contained_items?: Item[];  // For bag type: items inside this bag
+    contained_count?: number;  // Number of items directly inside this bag
 }
 
 interface BuildingDetails {
@@ -263,15 +266,22 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
                                             onClick={() => setSelectedItem(item)}
                                         >
                                             <div className={styles.cardIcon}>
-                                                {item.type === 'picture' ? <ImageIcon size={20} /> : <File size={20} />}
+                                                {item.type === 'picture' ? <ImageIcon size={20} />
+                                                    : item.type === 'bag' ? <Package size={20} />
+                                                    : <File size={20} />}
                                             </div>
                                             <div className={styles.cardInfo}>
-                                                <div className={styles.cardName}>{item.name}</div>
+                                                <div className={styles.cardName}>
+                                                    {item.name}
+                                                    {item.type === 'bag' && item.contained_count != null && (
+                                                        <span className={styles.bagCount}> ({item.contained_count})</span>
+                                                    )}
+                                                </div>
                                                 {item.description && (
                                                     <div className={styles.cardDesc}>{item.description}</div>
                                                 )}
                                             </div>
-                                            {(item.type === 'picture' || item.type === 'document') && (
+                                            {(item.type === 'picture' || item.type === 'document' || item.type === 'bag') && (
                                                 <button
                                                     className={`${styles.toggleOpenBtn} ${item.is_open ? styles.isOpen : ''}`}
                                                     onClick={(e) => handleToggleOpen(e, item)}

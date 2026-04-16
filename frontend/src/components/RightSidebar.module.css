@@ -218,6 +218,16 @@
     border-left: 3px solid #60a5fa;
 }
 
+.card.bag {
+    border-left: 3px solid #a78bfa;
+}
+
+.bagCount {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    font-weight: normal;
+}
+
 /* Item Open State */
 .card.itemOpen {
     background: rgba(16, 185, 129, 0.1);

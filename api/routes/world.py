@@ -103,9 +103,9 @@ class ToolCreate(BaseModel):
 
 class ItemCreate(BaseModel):
     name: str
-    item_type: str
+    item_type: str  # 'object', 'picture', 'document', 'bag'
     description: str = ""  # Optional - auto-generated if empty for picture/document
-    owner_kind: str
+    owner_kind: str  # 'world', 'building', 'persona', 'bag'
     owner_id: Optional[str] = None
     state_json: str = "{}"
     file_path: Optional[str] = None  # Relative path to file (for picture/document items)

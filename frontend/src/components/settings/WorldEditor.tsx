@@ -595,6 +595,7 @@ export default function WorldEditor() {
                                 <option value="picture">画像</option>
                                 <option value="document">ドキュメント</option>
                                 <option value="object">オブジェクト（ファイルなし）</option>
+                                <option value="bag">バッグ（アイテム格納用）</option>
                             </Select></Field>
                             <div className={styles.row}>
                                 <Field label="所有者">
@@ -602,6 +603,7 @@ export default function WorldEditor() {
                                         <option value="world">ワールド（グローバル）</option>
                                         <option value="building">Building</option>
                                         <option value="persona">ペルソナ</option>
+                                        <option value="bag">Bag（バッグ内）</option>
                                     </Select>
                                 </Field>
                                 {formData.owner_kind === 'building' && (
@@ -617,6 +619,16 @@ export default function WorldEditor() {
                                         <Select value={formData.owner_id || ''} onChange={(e: any) => setFormData({ ...formData, owner_id: e.target.value })}>
                                             <option value="">ペルソナを選択...</option>
                                             {ais.map(a => <option key={a.AIID} value={a.AIID}>{a.AINAME}</option>)}
+                                        </Select>
+                                    </Field>
+                                )}
+                                {formData.owner_kind === 'bag' && (
+                                    <Field label="Bag">
+                                        <Select value={formData.owner_id || ''} onChange={(e: any) => setFormData({ ...formData, owner_id: e.target.value })}>
+                                            <option value="">Bagを選択...</option>
+                                            {items.filter(i => i.TYPE === 'bag' && i.ITEM_ID !== selectedItem?.ITEM_ID).map(i => (
+                                                <option key={i.ITEM_ID} value={i.ITEM_ID}>{i.NAME}</option>
+                                            ))}
                                         </Select>
                                     </Field>
                                 )}

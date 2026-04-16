@@ -32,6 +32,7 @@ class ItemService:
         self.item_locations: Dict[str, Dict] = {}
         self.items_by_building: Dict[str, List[str]] = defaultdict(list)
         self.items_by_persona: Dict[str, List[str]] = defaultdict(list)
+        self.items_by_bag: Dict[str, List[str]] = defaultdict(list)
         self.world_items: List[str] = []
 
     def _resolve_file_path(self, file_path_str: str) -> Path:
@@ -103,6 +104,7 @@ class ItemService:
         self.item_locations.clear()
         self.items_by_building.clear()
         self.items_by_persona.clear()
+        self.items_by_bag.clear()
         self.world_items.clear()
 
         for row in item_rows:
@@ -141,6 +143,8 @@ class ItemService:
                 self.items_by_building[owner_id].append(loc.ITEM_ID)
             elif owner_kind == "persona":
                 self.items_by_persona[owner_id].append(loc.ITEM_ID)
+            elif owner_kind == "bag":
+                self.items_by_bag[owner_id].append(loc.ITEM_ID)
             else:
                 self.world_items.append(loc.ITEM_ID)
 
@@ -174,6 +178,7 @@ class ItemService:
             self.state.item_locations = self.item_locations
             self.state.items_by_building = {k: list(v) for k, v in self.items_by_building.items()}
             self.state.items_by_persona = {k: list(v) for k, v in self.items_by_persona.items()}
+            self.state.items_by_bag = {k: list(v) for k, v in self.items_by_bag.items()}
             self.state.world_items = list(self.world_items)
 
     def refresh_building_system_instruction(self, building_id: str) -> None:
@@ -233,6 +238,12 @@ class ItemService:
             persona_obj = self.manager.personas.get(prev_owner)
             if persona_obj:
                 persona_obj.set_inventory(self.items_by_persona.get(prev_owner, []))
+        elif prev_kind == "bag" and prev_owner:
+            bag_contents = self.items_by_bag.get(prev_owner, [])
+            if bag_contents and item_id in bag_contents:
+                bag_contents[:] = [itm for itm in bag_contents if itm != item_id]
+            if not bag_contents:
+                self.items_by_bag.pop(prev_owner, None)
         else:
             if item_id in self.world_items:
                 self.world_items[:] = [itm for itm in self.world_items if itm != item_id]
@@ -250,6 +261,10 @@ class ItemService:
             persona_obj = self.manager.personas.get(owner_id)
             if persona_obj:
                 persona_obj.set_inventory(list(inventory))
+        elif owner_kind == "bag" and owner_id:
+            bag_contents = self.items_by_bag[owner_id]
+            if item_id not in bag_contents:
+                bag_contents.append(item_id)
         else:
             if item_id not in self.world_items:
                 self.world_items.append(item_id)
@@ -970,6 +985,360 @@ class ItemService:
 
         LOGGER.info(f"Created document item {item_id} from user upload in {building_id}")
         return item_id
+
+    # ========== Bag operations ==========
+
+    def get_items_in_bag(self, bag_item_id: str) -> List[Dict]:
+        """Get all items directly contained in a bag."""
+        items = []
+        for item_id in self.items_by_bag.get(bag_item_id, []):
+            item = self.items.get(item_id)
+            if item:
+                items.append(item)
+        return items
+
+    def get_bag_contents_recursive(
+        self, bag_item_id: str, max_depth: int = 10, _visited: Optional[set] = None,
+    ) -> List[Dict]:
+        """Get bag contents recursively, including nested bags.
+
+        Each returned dict includes a '_depth' key indicating nesting level
+        and '_children' for nested bag contents.
+        Returns a tree structure for display purposes.
+        """
+        if _visited is None:
+            _visited = set()
+        if bag_item_id in _visited or max_depth <= 0:
+            return []
+        _visited.add(bag_item_id)
+
+        result = []
+        for item_id in self.items_by_bag.get(bag_item_id, []):
+            item = self.items.get(item_id)
+            if not item:
+                continue
+            entry = dict(item)
+            item_type = (item.get("type") or "").lower()
+            if item_type == "bag":
+                entry["_children"] = self.get_bag_contents_recursive(
+                    item_id, max_depth - 1, _visited,
+                )
+            else:
+                entry["_children"] = []
+            result.append(entry)
+        return result
+
+    def _is_ancestor_bag(self, item_id: str, potential_ancestor_id: str, max_depth: int = 50) -> bool:
+        """Check if potential_ancestor_id is an ancestor bag of item_id (circular reference check)."""
+        current = item_id
+        visited = set()
+        for _ in range(max_depth):
+            loc = self.item_locations.get(current)
+            if not loc or loc.get("owner_kind") != "bag":
+                return False
+            parent_bag_id = loc.get("owner_id")
+            if not parent_bag_id or parent_bag_id in visited:
+                return False
+            if parent_bag_id == potential_ancestor_id:
+                return True
+            visited.add(parent_bag_id)
+            current = parent_bag_id
+        return False
+
+    def _find_building_for_bag(self, bag_item_id: str, max_depth: int = 50) -> Optional[str]:
+        """Find the building that ultimately contains this bag (traversing parent bags)."""
+        current = bag_item_id
+        visited = set()
+        for _ in range(max_depth):
+            loc = self.item_locations.get(current)
+            if not loc:
+                return None
+            kind = loc.get("owner_kind")
+            owner = loc.get("owner_id")
+            if kind == "building":
+                return owner
+            if kind == "bag" and owner and owner not in visited:
+                visited.add(current)
+                current = owner
+                continue
+            return None
+        return None
+
+    def move_item(
+        self, persona_id: str, item_ids: List[str],
+        destination_kind: str, destination_id: str,
+    ) -> str:
+        """Move items to a destination (building, persona inventory, or bag).
+
+        Args:
+            persona_id: The persona performing the action.
+            item_ids: List of item IDs to move (max 100).
+            destination_kind: "building", "persona", or "bag".
+            destination_id: building_id, "self" (for persona), or bag item_id.
+        """
+        if len(item_ids) > 100:
+            raise RuntimeError("一度に移動できるアイテムは最大100個です。")
+
+        persona = self.manager.personas.get(persona_id)
+        if not persona or getattr(persona, "is_proxy", False):
+            raise RuntimeError("このペルソナではアイテムを扱えません。")
+
+        # Resolve destination
+        if destination_kind == "persona":
+            destination_id = persona_id
+        elif destination_kind == "building":
+            if not destination_id:
+                destination_id = persona.current_building_id
+            if not destination_id:
+                raise RuntimeError("移動先のBuildingが不明です。")
+            if destination_id not in self.manager.building_map:
+                raise RuntimeError(f"Building '{destination_id}' が見つかりません。")
+        elif destination_kind == "bag":
+            if not destination_id:
+                raise RuntimeError("移動先のBagアイテムIDが必要です。")
+            bag_item = self.items.get(destination_id)
+            if not bag_item:
+                raise RuntimeError(f"Bagアイテム '{destination_id}' が見つかりません。")
+            if (bag_item.get("type") or "").lower() != "bag":
+                raise RuntimeError(f"アイテム '{destination_id}' はBagタイプではありません。")
+        else:
+            raise RuntimeError(f"未対応の移動先タイプ: {destination_kind}")
+
+        # Validate all items exist and are accessible
+        validated_items = []
+        for item_id in item_ids:
+            item = self.items.get(item_id)
+            if not item:
+                raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
+
+            # Cannot move item into itself
+            if destination_kind == "bag" and item_id == destination_id:
+                raise RuntimeError(f"アイテム '{item_id}' を自分自身の中に入れることはできません。")
+
+            # Circular reference check for bags
+            if destination_kind == "bag":
+                if (item.get("type") or "").lower() == "bag":
+                    if self._is_ancestor_bag(destination_id, item_id):
+                        item_name = item.get("name", item_id)
+                        raise RuntimeError(
+                            f"循環参照: '{item_name}' は移動先Bagの祖先です。"
+                        )
+
+            # Check accessibility: item must be in persona's inventory, current building, or a bag in current building
+            location = self.item_locations.get(item_id)
+            if location:
+                loc_kind = location.get("owner_kind")
+                loc_owner = location.get("owner_id")
+                in_inventory = loc_kind == "persona" and loc_owner == persona_id
+                in_current_building = loc_kind == "building" and loc_owner == persona.current_building_id
+                in_bag = loc_kind == "bag"
+                if not (in_inventory or in_current_building or in_bag):
+                    raise RuntimeError(
+                        f"アイテム '{item.get('name', item_id)}' にアクセスできません。"
+                    )
+
+            validated_items.append((item_id, item))
+
+        # Execute moves
+        timestamp = datetime.utcnow()
+        moved_names = []
+        db = self.manager.SessionLocal()
+        try:
+            for item_id, item in validated_items:
+                row = db.query(ItemLocationModel).filter(
+                    ItemLocationModel.ITEM_ID == item_id
+                ).one_or_none()
+                if row is None:
+                    row = ItemLocationModel(
+                        ITEM_ID=item_id,
+                        OWNER_KIND=destination_kind,
+                        OWNER_ID=destination_id,
+                        UPDATED_AT=timestamp,
+                    )
+                    db.add(row)
+                else:
+                    row.OWNER_KIND = destination_kind
+                    row.OWNER_ID = destination_id
+                    row.UPDATED_AT = timestamp
+                moved_names.append(item.get("name", item_id))
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
+        finally:
+            db.close()
+
+        # Update in-memory cache
+        for item_id, _item in validated_items:
+            self.update_item_cache(item_id, destination_kind, destination_id, timestamp)
+
+        self._sync_to_state()
+
+        # Build result message
+        if destination_kind == "building":
+            dest_name = (
+                self.manager.building_map[destination_id].name
+                if destination_id in self.manager.building_map
+                else destination_id
+            )
+            dest_label = f"Building「{dest_name}」"
+        elif destination_kind == "persona":
+            dest_label = "自分のインベントリ"
+        else:
+            bag_item = self.items.get(destination_id)
+            bag_name = bag_item.get("name", destination_id) if bag_item else destination_id
+            dest_label = f"Bag「{bag_name}」"
+
+        if len(moved_names) == 1:
+            actor_msg = f"「{moved_names[0]}」を{dest_label}に移動した。"
+        else:
+            actor_msg = f"{len(moved_names)}個のアイテムを{dest_label}に移動した。"
+
+        self.manager.record_persona_event(persona_id, actor_msg)
+
+        building_id = persona.current_building_id
+        if building_id:
+            other_ids = [
+                oid for oid in self.manager.occupants.get(building_id, [])
+                if oid and oid != persona_id
+            ]
+            if other_ids:
+                notice = f"{persona.persona_name}が{actor_msg}"
+                self.broadcast_item_event(other_ids, notice)
+
+            note = (
+                '<div class="note-box">📦 Item Move:<br>'
+                f'<b>{persona.persona_name}が{actor_msg}</b></div>'
+            )
+            self.manager._append_building_history_note(building_id, note)
+
+        return actor_msg
+
+    def view_items(self, persona_id: str, item_ids: List[str]) -> str:
+        """View multiple items (up to 5). For bags, shows contents list."""
+        if len(item_ids) > 5:
+            raise RuntimeError("一度に閲覧できるアイテムは最大5個です。")
+
+        persona = self.manager.personas.get(persona_id)
+        if not persona or getattr(persona, "is_proxy", False):
+            raise RuntimeError("このペルソナではアイテムを扱えません。")
+
+        results = []
+        for item_id in item_ids:
+            item = self.items.get(item_id)
+            if not item:
+                results.append(f"[{item_id}] アイテムが見つかりません。")
+                continue
+
+            item_type = (item.get("type") or "").lower()
+            item_name = item.get("name", item_id)
+
+            if item_type == "bag":
+                contents = self.get_bag_contents_recursive(item_id)
+                results.append(self._format_bag_contents(item_name, item_id, item, contents))
+            elif item_type == "picture":
+                file_path_str = item.get("file_path")
+                if not file_path_str:
+                    results.append(f"[{item_name}] この画像にはファイルパスが設定されていません。")
+                    continue
+                file_path = self._resolve_file_path(file_path_str)
+                if not file_path.exists():
+                    results.append(f"[{item_name}] ファイルが見つかりません: {file_path}")
+                    continue
+                results.append(f"[{item_name}] 画像ファイル: {file_path}")
+            elif item_type == "document":
+                file_path_str = item.get("file_path")
+                if not file_path_str:
+                    results.append(f"[{item_name}] この文書にはファイルパスが設定されていません。")
+                    continue
+                file_path = self._resolve_file_path(file_path_str)
+                if not file_path.exists():
+                    results.append(f"[{item_name}] ファイルが見つかりません: {file_path}")
+                    continue
+                try:
+                    content = file_path.read_text(encoding="utf-8")
+                    results.append(f"[{item_name}] 文書の内容:\n\n{content}")
+                except OSError as exc:
+                    results.append(f"[{item_name}] ファイル読み込みエラー: {exc}")
+            else:
+                description = (item.get("description") or "").strip() or "(説明なし)"
+                results.append(f"[{item_name}] {description}")
+
+        return "\n\n---\n\n".join(results)
+
+    def _format_bag_contents(
+        self, bag_name: str, bag_id: str, bag_item: Dict, contents: List[Dict], indent: int = 0,
+    ) -> str:
+        """Format bag contents as readable text."""
+        prefix = "  " * indent
+        description = (bag_item.get("description") or "").strip() or "(説明なし)"
+        lines = [f"{prefix}[Bag] {bag_name} (id: {bag_id})"]
+        lines.append(f"{prefix}  {description}")
+
+        if not contents:
+            lines.append(f"{prefix}  (空)")
+        else:
+            lines.append(f"{prefix}  中身 ({len(contents)}個):")
+            for entry in contents:
+                child_id = entry.get("item_id", "")
+                child_name = entry.get("name", "不明")
+                child_type = (entry.get("type") or "").lower()
+                child_desc = (entry.get("description") or "").strip() or "(説明なし)"
+                if len(child_desc) > 100:
+                    child_desc = child_desc[:97] + "..."
+                type_label = {
+                    "picture": "Image", "document": "Document",
+                    "object": "Object", "bag": "Bag",
+                }.get(child_type, child_type.capitalize() or "Item")
+
+                lines.append(f"{prefix}  - [{type_label}] {child_name} (id: {child_id})")
+                lines.append(f"{prefix}    {child_desc}")
+
+                children = entry.get("_children", [])
+                if children and child_type == "bag":
+                    child_item = self.items.get(child_id, entry)
+                    sub_text = self._format_bag_contents(
+                        child_name, child_id, child_item, children, indent + 2,
+                    )
+                    # Skip the header line (already printed above)
+                    sub_lines = sub_text.split("\n")
+                    # Append only the content lines (skip first 2 that duplicate header)
+                    for sl in sub_lines[2:]:
+                        lines.append(sl)
+        return "\n".join(lines)
+
+    def get_bag_items_in_building(self, building_id: str) -> List[Dict]:
+        """Get all bag-type items in a building."""
+        bags = []
+        for item_id in self.items_by_building.get(building_id, []):
+            item = self.items.get(item_id)
+            if item and (item.get("type") or "").lower() == "bag":
+                bags.append(item)
+        return bags
+
+    def get_items_inside_bags_in_building(self, building_id: str) -> set:
+        """Get set of item IDs that are inside bags that are in a building.
+
+        Used to exclude bag-contained items from top-level building item lists.
+        """
+        bag_contained_ids: set = set()
+        bag_ids = [
+            item_id for item_id in self.items_by_building.get(building_id, [])
+            if self.items.get(item_id, {}).get("type", "").lower() == "bag"
+        ]
+        for bag_id in bag_ids:
+            self._collect_bag_contents_recursive(bag_id, bag_contained_ids)
+        return bag_contained_ids
+
+    def _collect_bag_contents_recursive(self, bag_id: str, collected: set, max_depth: int = 10) -> None:
+        """Recursively collect all item IDs inside a bag."""
+        if max_depth <= 0 or bag_id in collected:
+            return
+        for item_id in self.items_by_bag.get(bag_id, []):
+            collected.add(item_id)
+            item = self.items.get(item_id)
+            if item and (item.get("type") or "").lower() == "bag":
+                self._collect_bag_contents_recursive(item_id, collected, max_depth - 1)
 
 
 __all__ = ["ItemService"]

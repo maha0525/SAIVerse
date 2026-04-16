@@ -535,6 +535,26 @@ class SAIVerseManager(
         """Create a document item from user upload and place it in the specified building."""
         return self.item_service.create_document_item_for_user(name, description, file_path, building_id, is_open, creator_id=creator_id, source_context=source_context)
 
+    def move_item_for_persona(self, persona_id: str, item_ids: list, destination_kind: str, destination_id: str) -> str:
+        """Move items to a destination (building, persona, or bag)."""
+        return self.item_service.move_item(persona_id, item_ids, destination_kind, destination_id)
+
+    def view_items_for_persona(self, persona_id: str, item_ids: list) -> str:
+        """View multiple items (up to 5). For bags, shows contents list."""
+        return self.item_service.view_items(persona_id, item_ids)
+
+    def get_bag_items_in_building(self, building_id: str) -> list:
+        """Get all bag-type items in a building."""
+        return self.item_service.get_bag_items_in_building(building_id)
+
+    def get_items_in_bag(self, bag_item_id: str) -> list:
+        """Get all items directly contained in a bag."""
+        return self.item_service.get_items_in_bag(bag_item_id)
+
+    def get_bag_contents_recursive(self, bag_item_id: str) -> list:
+        """Get bag contents recursively, including nested bags."""
+        return self.item_service.get_bag_contents_recursive(bag_item_id)
+
     # Note: Persona event methods (_load_persona_event_logs, record_persona_event,
     # get_persona_pending_events, archive_persona_events) are in PersonaEventMixin
 

@@ -19,9 +19,11 @@ class ItemInfo(BaseModel):
     id: str
     name: str
     description: str
-    type: str # 'object', 'document', 'picture'
+    type: str # 'object', 'document', 'picture', 'bag'
     file_path: Optional[str] = None
     is_open: bool = False  # Whether item content is included in visual context
+    contained_items: Optional[List["ItemInfo"]] = None  # For bag type: items inside this bag
+    contained_count: int = 0  # Number of items directly inside this bag
 
 class BuildingDetailsResponse(BaseModel):
     id: str
@@ -30,6 +32,29 @@ class BuildingDetailsResponse(BaseModel):
     image_path: Optional[str] = None  # Building interior image for visual context
     occupants: List[OccupantInfo]
     items: List[ItemInfo]
+
+def _build_item_info(data: dict, manager: Any = None) -> dict:
+    """Build an ItemInfo dict from an item data dict."""
+    item_id = data.get("item_id", "")
+    raw_name = data.get("name", "") or ""
+    display_name = raw_name.strip() if raw_name.strip() else "(名前なし)"
+    item_type = data.get("type", "object")
+    info: dict = {
+        "id": item_id,
+        "name": display_name,
+        "description": data.get("description", ""),
+        "type": item_type,
+        "file_path": data.get("file_path"),
+        "is_open": data.get("state", {}).get("is_open", False) if isinstance(data.get("state"), dict) else False,
+    }
+    if item_type == "bag" and manager and hasattr(manager, 'get_items_in_bag'):
+        contained = manager.get_items_in_bag(item_id)
+        info["contained_count"] = len(contained)
+        info["contained_items"] = [_build_item_info(c, manager) for c in contained]
+    else:
+        info["contained_count"] = 0
+    return info
+
 
 @router.get("/details", response_model=BuildingDetailsResponse)
 def get_building_details(building_id: Optional[str] = None, manager = Depends(get_manager)):
@@ -62,33 +87,48 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
                 })
 
     # 2. Items
+    # Collect item IDs that are inside bags (to exclude from top-level)
+    bag_contained_ids: set = set()
+    if hasattr(manager, 'item_service'):
+        bag_contained_ids = manager.item_service.get_items_inside_bags_in_building(building_id)
+
     items_list = []
     if building_id in manager.items_by_building:
         item_ids = manager.items_by_building[building_id]
         sorted_item_ids = sorted(item_ids) if item_ids else []
         for item_id in sorted_item_ids:
+            # Skip items that are inside a bag (they'll appear as contained_items)
+            if item_id in bag_contained_ids:
+                continue
+
             if item_id in manager.item_registry:
-                item_data = manager.item_registry[item_id] # item_registry or items? manager.items seems to be the one used in app.py
-                # Actually app.py uses manager.items for retrieval but manager.item_registry might be the source of truth for listing?
-                # Let's check saiverse_manager.py if distinct. Usually they are same or items is runtime dict.
-                # Assuming manager.items is safer based on app.py logic.
-                
-                # Check if manager.items is available or use registry
-                data = item_data # Default to registry
+                item_data = manager.item_registry[item_id]
+                data = item_data
                 if hasattr(manager, 'items') and item_id in manager.items:
                     data = manager.items[item_id]
-                
+
                 raw_name = data.get("name", "") or ""
                 display_name = raw_name.strip() if raw_name.strip() else "(名前なし)"
-                
-                items_list.append({
+                item_type = data.get("type", "object")
+
+                item_info: dict = {
                     "id": item_id,
                     "name": display_name,
                     "description": data.get("description", ""),
-                    "type": data.get("type", "object"),
+                    "type": item_type,
                     "file_path": data.get("file_path"),
                     "is_open": data.get("state", {}).get("is_open", False) if isinstance(data.get("state"), dict) else False,
-                })
+                }
+
+                # For bag items, include contained items
+                if item_type == "bag" and hasattr(manager, 'get_items_in_bag'):
+                    contained = manager.get_items_in_bag(item_id)
+                    item_info["contained_count"] = len(contained)
+                    item_info["contained_items"] = [
+                        _build_item_info(c, manager) for c in contained
+                    ]
+
+                items_list.append(item_info)
 
     # Get Building image path from database
     building_image_path = None
@@ -113,6 +153,24 @@ def get_building_details(building_id: Optional[str] = None, manager = Depends(ge
         "occupants": occupants_list,
         "items": items_list
     }
+
+@router.get("/item/{item_id}/bag-contents")
+def get_bag_contents(item_id: str, manager = Depends(get_manager)):
+    """Get the contents of a bag item."""
+    items_dict = manager.items if hasattr(manager, 'items') else {}
+    item = items_dict.get(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    if (item.get("type") or "").lower() != "bag":
+        raise HTTPException(status_code=400, detail="Item is not a bag")
+
+    contained = manager.get_items_in_bag(item_id) if hasattr(manager, 'get_items_in_bag') else []
+    return {
+        "bag_id": item_id,
+        "bag_name": item.get("name", ""),
+        "items": [_build_item_info(c, manager) for c in contained],
+    }
+
 
 @router.get("/item/{item_id}")
 def get_item_content(item_id: str, manager = Depends(get_manager)):

@@ -202,7 +202,7 @@ class ItemLocation(Base):
     __tablename__ = "item_location"
     LOCATION_ID = Column(Integer, primary_key=True, autoincrement=True)
     ITEM_ID = Column(String(36), ForeignKey("item.ITEM_ID"), nullable=False)
-    OWNER_KIND = Column(String(32), nullable=False)  # building / persona / world
+    OWNER_KIND = Column(String(32), nullable=False)  # building / persona / world / bag
     OWNER_ID = Column(String(255), nullable=False)
     UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
     __table_args__ = (

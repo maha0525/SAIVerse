@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { X, FileText, Code2, Pencil, Save, XCircle, Settings, ArrowRightLeft } from 'lucide-react';
+import { X, FileText, Code2, Pencil, Save, XCircle, Settings, ArrowRightLeft, Package, Image as ImageIcon, File } from 'lucide-react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
@@ -12,6 +12,21 @@ interface Item {
     name: string;
     description?: string;
     type: string;
+}
+
+interface BagContentItem {
+    id: string;
+    name: string;
+    type: string;
+    description: string;
+    is_open?: boolean;
+    contained_items?: BagContentItem[];
+    contained_count?: number;
+}
+
+interface BagItem {
+    id: string;
+    name: string;
 }
 
 interface Building {
@@ -56,6 +71,16 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated }: Item
     const [buildings, setBuildings] = useState<Building[]>([]);
     const [isLoadingBuildings, setIsLoadingBuildings] = useState(false);
     const [isSavingMeta, setIsSavingMeta] = useState(false);
+
+    // Bag contents
+    const [bagContents, setBagContents] = useState<BagContentItem[]>([]);
+    const [isLoadingBagContents, setIsLoadingBagContents] = useState(false);
+
+    // Bag items in current building (for location dropdown)
+    const [bagItems, setBagItems] = useState<BagItem[]>([]);
+
+    // Nested item modal for viewing items inside bags
+    const [nestedItem, setNestedItem] = useState<Item | null>(null);
 
     // Load buildings list
     const loadBuildings = useCallback(async () => {
@@ -109,15 +134,33 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated }: Item
                     setError("コンテンツの読み込みに失敗しました");
                 })
                 .finally(() => setIsLoading(false));
+        } else if (isOpen && item && item.type === 'bag') {
+            setIsLoadingBagContents(true);
+            setError(null);
+            setIsEditing(false);
+            setIsMetaEditing(false);
+            fetch(`/api/info/item/${item.id}/bag-contents`)
+                .then(async res => {
+                    if (!res.ok) throw new Error("Failed to load bag contents");
+                    const data = await res.json();
+                    setBagContents(data.items || []);
+                })
+                .catch(err => {
+                    console.error(err);
+                    setError("バッグの中身の読み込みに失敗しました");
+                })
+                .finally(() => setIsLoadingBagContents(false));
         } else {
             setContent(null);
             setEditContent('');
+            setBagContents([]);
             setError(null);
             setIsEditing(false);
             setIsMetaEditing(false);
         }
         // Reset meta editing state when modal opens/closes
         setItemDetails(null);
+        setNestedItem(null);
     }, [isOpen, item]);
 
     const handleStartEdit = () => {
@@ -160,11 +203,27 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated }: Item
     };
 
     // Meta editing handlers
+    const loadBagItemsInBuilding = useCallback(async () => {
+        try {
+            const res = await fetch('/api/info/details');
+            if (res.ok) {
+                const data = await res.json();
+                const bags = (data.items || []).filter(
+                    (i: { type: string; id: string }) => i.type === 'bag' && i.id !== item?.id
+                );
+                setBagItems(bags.map((b: { id: string; name: string }) => ({ id: b.id, name: b.name })));
+            }
+        } catch (err) {
+            console.error('Failed to load bag items:', err);
+        }
+    }, [item?.id]);
+
     const handleStartMetaEdit = async () => {
         if (!item) return;
         await Promise.all([
             loadItemDetails(item.id),
-            loadBuildings()
+            loadBuildings(),
+            loadBagItemsInBuilding(),
         ]);
         setIsMetaEditing(true);
         setIsEditing(false);
@@ -294,23 +353,36 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated }: Item
                                 </label>
                                 <select
                                     id="itemLocation"
-                                    value={editOwnerKind === 'building' ? editOwnerId : 'world'}
+                                    value={editOwnerKind === 'bag' ? `bag:${editOwnerId}` : editOwnerKind === 'building' ? editOwnerId : 'world'}
                                     onChange={(e) => {
-                                        if (e.target.value === 'world') {
+                                        const val = e.target.value;
+                                        if (val === 'world') {
                                             setEditOwnerKind('world');
                                             setEditOwnerId('');
+                                        } else if (val.startsWith('bag:')) {
+                                            setEditOwnerKind('bag');
+                                            setEditOwnerId(val.slice(4));
                                         } else {
                                             setEditOwnerKind('building');
-                                            setEditOwnerId(e.target.value);
+                                            setEditOwnerId(val);
                                         }
                                     }}
                                     className={styles.select}
                                     disabled={isSavingMeta || isLoadingBuildings}
                                 >
                                     <option value="world">ワールド（どこにも配置しない）</option>
-                                    {buildings.map(b => (
-                                        <option key={b.id} value={b.id}>{b.name}</option>
-                                    ))}
+                                    <optgroup label="Building">
+                                        {buildings.map(b => (
+                                            <option key={b.id} value={b.id}>{b.name}</option>
+                                        ))}
+                                    </optgroup>
+                                    {bagItems.length > 0 && (
+                                        <optgroup label="Bag">
+                                            {bagItems.map(b => (
+                                                <option key={b.id} value={`bag:${b.id}`}>📦 {b.name}</option>
+                                            ))}
+                                        </optgroup>
+                                    )}
                                 </select>
                             </div>
                             <div className={styles.metaEditActions}>
@@ -449,12 +521,59 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated }: Item
                                 )
                             )}
                         </div>
+                    ) : item.type === 'bag' ? (
+                        <div className={styles.bagContainer}>
+                            {isLoadingBagContents && <div className={styles.loading}>読み込み中...</div>}
+                            {error && <div className={styles.error}>{error}</div>}
+                            {!isLoadingBagContents && (
+                                bagContents.length > 0 ? (
+                                    <div className={styles.bagGrid}>
+                                        {bagContents.map(ci => (
+                                            <div
+                                                key={ci.id}
+                                                className={`${styles.bagCard} ${styles[`bagCard_${ci.type}`] || ''}`}
+                                                onClick={() => setNestedItem({ id: ci.id, name: ci.name, type: ci.type, description: ci.description })}
+                                            >
+                                                <div className={styles.bagCardIcon}>
+                                                    {ci.type === 'picture' ? <ImageIcon size={18} />
+                                                        : ci.type === 'bag' ? <Package size={18} />
+                                                        : <File size={18} />}
+                                                </div>
+                                                <div className={styles.bagCardInfo}>
+                                                    <div className={styles.bagCardName}>
+                                                        {ci.name}
+                                                        {ci.type === 'bag' && ci.contained_count != null && (
+                                                            <span className={styles.bagCardCount}> ({ci.contained_count})</span>
+                                                        )}
+                                                    </div>
+                                                    {ci.description && (
+                                                        <div className={styles.bagCardDesc}>{ci.description}</div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <div className={styles.bagEmpty}>バッグは空です</div>
+                                )
+                            )}
+                        </div>
                     ) : (
                         <div className={styles.unsupported}>
                             このアイテムタイプ ({item.type}) の表示はサポートされていません。
                         </div>
                     )}
                 </div>
+
+                {/* Nested item modal for items inside bags */}
+                {nestedItem && (
+                    <ItemModal
+                        isOpen={true}
+                        onClose={() => setNestedItem(null)}
+                        item={nestedItem}
+                        onItemUpdated={onItemUpdated}
+                    />
+                )}
             </div>
         </ModalOverlay>
     );

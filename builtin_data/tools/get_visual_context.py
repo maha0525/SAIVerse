@@ -109,6 +109,37 @@ def _add_to_media_list(file_path: str, media_list: List[Dict[str, str]]) -> None
     })
 
 
+def _render_bag_contents(
+    contents: List[Dict[str, Any]],
+    text_parts: List[str],
+    media_list: List[Dict[str, str]],
+    manager: Any,
+    indent: int = 1,
+) -> None:
+    """Render bag contents as indented list (all items shown as closed)."""
+    prefix = "  " * indent
+    type_labels = {
+        "picture": "Image", "document": "Document",
+        "object": "Object", "bag": "Bag",
+    }
+    for entry in contents:
+        child_id = entry.get("item_id", "")
+        child_name = entry.get("name", "不明なアイテム")
+        child_type = (entry.get("type") or "").lower()
+        child_desc = (entry.get("description") or "").strip() or "(説明なし)"
+        if len(child_desc) > 160:
+            child_desc = child_desc[:157] + "..."
+        label = type_labels.get(child_type, child_type.capitalize() or "Item")
+
+        text_parts.append(f"{prefix}- [{label}] {child_name} (id: {child_id})")
+        text_parts.append(f"{prefix}  {child_desc}")
+
+        # Recurse into nested bags
+        children = entry.get("_children", [])
+        if children and child_type == "bag":
+            _render_bag_contents(children, text_parts, media_list, manager, indent + 1)
+
+
 def _render_item(
     item: Dict[str, Any],
     text_parts: List[str],
@@ -128,6 +159,7 @@ def _render_item(
         "picture": "Image",
         "document": "Document",
         "object": "Object",
+        "bag": "Bag",
     }.get(item_type, item_type.capitalize() or "Item")
 
     if item_type == "object":
@@ -177,6 +209,21 @@ def _render_item(
                 text_parts.append(description)
         else:
             text_parts.append(description)
+        text_parts.append("")
+
+    elif item_type == "bag":
+        open_label = "(Open) " if is_open else "(Closed) "
+        text_parts.append(f"[{type_label}] {item_name}")
+        text_parts.append(f"{open_label}id: {item_id}")
+        text_parts.append(description)
+
+        if is_open and manager and hasattr(manager, 'get_bag_contents_recursive'):
+            contents = manager.get_bag_contents_recursive(item_id)
+            if contents:
+                text_parts.append("")
+                _render_bag_contents(contents, text_parts, media_list, manager, indent=1)
+            else:
+                text_parts.append("  (空)")
         text_parts.append("")
 
     else:

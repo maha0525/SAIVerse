@@ -1,22 +1,23 @@
+"""item_view — View item details. For bags, shows contents list."""
 from __future__ import annotations
-
-from pathlib import Path
 
 from tools.context import get_active_manager, get_active_persona_id
 from tools.core import ToolSchema
 
 
-def item_view(item_id: str) -> str:
+def item_view(item_id: str = "", item_ids: str = "") -> str:
     """
-    View the full content of a picture or document item.
+    View the full content of items. For bags, shows the contents list.
 
     Args:
-        item_id: Identifier of the item to view.
+        item_id: Single item ID (for backward compatibility).
+        item_ids: Comma-separated item IDs to view (max 5).
 
     Returns:
         - picture: File path for display
         - document: Full text content of the file
-        - object: Error message (not supported)
+        - bag: Contents list with names, IDs, and descriptions
+        - object: Description text
     """
     persona_id = get_active_persona_id()
     if not persona_id:
@@ -26,22 +27,41 @@ def item_view(item_id: str) -> str:
     if manager is None:
         raise RuntimeError("Manager context is not available; item_view cannot be executed.")
 
-    return manager.view_item_for_persona(persona_id, item_id)
+    # Merge item_id and item_ids into a single list
+    ids = []
+    if item_ids:
+        ids = [s.strip() for s in item_ids.split(",") if s.strip()]
+    if item_id and item_id not in ids:
+        ids.insert(0, item_id)
+
+    if not ids:
+        raise RuntimeError("閲覧するアイテムIDが指定されていません。")
+
+    return manager.view_items_for_persona(persona_id, ids)
 
 
 def schema() -> ToolSchema:
     return ToolSchema(
         name="item_view",
-        description="View the full content of a picture or document item. Returns image path for pictures and full text for documents.",
+        description=(
+            "View item details. For pictures: shows the image. "
+            "For documents: shows full text. For bags: shows contents list. "
+            "Supports viewing multiple items at once (max 5)."
+        ),
         parameters={
             "type": "object",
             "properties": {
                 "item_id": {
                     "type": "string",
-                    "description": "Identifier of the item to view.",
+                    "description": "Single item ID to view.",
+                },
+                "item_ids": {
+                    "type": "string",
+                    "description": "Comma-separated item IDs to view (max 5).",
                 },
             },
-            "required": ["item_id"],
         },
         result_type="string",
+        spell=True,
+        spell_display_name="アイテム閲覧",
     )

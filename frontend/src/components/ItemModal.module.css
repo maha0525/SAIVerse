@@ -237,6 +237,88 @@
     object-fit: contain;
 }
 
+/* Bag contents */
+.bagContainer {
+    padding: 0.5rem 0;
+}
+
+.bagGrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 0.5rem;
+}
+
+.bagCard {
+    background: #111827;
+    border: 1px solid #374151;
+    border-radius: 8px;
+    padding: 0.75rem;
+    cursor: pointer;
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-start;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.bagCard:hover {
+    background: #1f2937;
+    border-color: #6b7280;
+}
+
+.bagCard_picture {
+    border-left: 3px solid #f472b6;
+}
+
+.bagCard_document {
+    border-left: 3px solid #60a5fa;
+}
+
+.bagCard_bag {
+    border-left: 3px solid #a78bfa;
+}
+
+.bagCardIcon {
+    color: #9ca3af;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
+.bagCardInfo {
+    min-width: 0;
+    flex: 1;
+}
+
+.bagCardName {
+    font-size: 0.85rem;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.bagCardCount {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    font-weight: normal;
+}
+
+.bagCardDesc {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    margin-top: 0.25rem;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.bagEmpty {
+    text-align: center;
+    color: #6b7280;
+    padding: 2rem 1rem;
+    font-size: 0.9rem;
+}
+
 .documentContainer {
     background: #111827;
     padding: 1rem;

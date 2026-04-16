@@ -543,12 +543,18 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
     ) -> str:
         normalized_kind = (owner_kind or "world").strip().lower()
         owner_id = (owner_id or "").strip()
-        if normalized_kind in {"building", "persona"} and not owner_id:
-            return "Error: owner_id is required for building or persona ownership."
+        if normalized_kind in {"building", "persona", "bag"} and not owner_id:
+            return f"Error: owner_id is required for {normalized_kind} ownership."
         if normalized_kind == "building" and owner_id not in self.building_map:
             return f"Error: Building '{owner_id}' not found."
         if normalized_kind == "persona" and owner_id not in self.personas:
             return f"Error: Persona '{owner_id}' not found."
+        if normalized_kind == "bag":
+            bag_item = self.manager.item_service.items.get(owner_id)
+            if not bag_item:
+                return f"Error: Bag item '{owner_id}' not found."
+            if (bag_item.get("type") or "").lower() != "bag":
+                return f"Error: Item '{owner_id}' is not a bag."
         state_payload = (state_json or "").strip()
         if state_payload:
             try:
@@ -604,12 +610,20 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
     ) -> str:
         normalized_kind = (owner_kind or "world").strip().lower()
         owner_id = (owner_id or "").strip()
-        if normalized_kind in {"building", "persona"} and not owner_id:
-            return "Error: owner_id is required for building or persona ownership."
+        if normalized_kind in {"building", "persona", "bag"} and not owner_id:
+            return f"Error: owner_id is required for {normalized_kind} ownership."
         if normalized_kind == "building" and owner_id not in self.building_map:
             return f"Error: Building '{owner_id}' not found."
         if normalized_kind == "persona" and owner_id not in self.personas:
             return f"Error: Persona '{owner_id}' not found."
+        if normalized_kind == "bag":
+            bag_item = self.manager.item_service.items.get(owner_id)
+            if not bag_item:
+                return f"Error: Bag item '{owner_id}' not found."
+            if (bag_item.get("type") or "").lower() != "bag":
+                return f"Error: Item '{owner_id}' is not a bag."
+            if owner_id == item_id:
+                return "Error: Cannot place an item inside itself."
         state_payload = (state_json or "").strip()
         if state_payload:
             try:
