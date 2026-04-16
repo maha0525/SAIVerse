@@ -66,6 +66,9 @@ class AnthropicClient(LLMClient):
         # Anthropic has a 5MB limit for images (configurable via model config)
         self.max_image_bytes = cfg.get("max_image_bytes", 5 * 1024 * 1024)
 
+        # Image embed count limit; None means "use parse_attachment_limit() default"
+        self.max_image_embeds: Optional[int] = cfg.get("max_image_embeds")
+
         # Extended thinking configuration
         self._thinking_config: Optional[Dict[str, Any]] = None
         self._thinking_effort: Optional[str] = None  # "low", "medium", "high", "max"
@@ -327,6 +330,7 @@ class AnthropicClient(LLMClient):
             thinking_effort=self._thinking_effort,
             supports_images=self.supports_images,
             max_image_bytes=self.max_image_bytes,
+            max_image_embeds=self.max_image_embeds,
         )
         request_params = build_result["request_params"]
         use_tools = bool(build_result["use_tools"])
@@ -414,6 +418,7 @@ class AnthropicClient(LLMClient):
             thinking_effort=self._thinking_effort,
             supports_images=self.supports_images,
             max_image_bytes=self.max_image_bytes,
+            max_image_embeds=self.max_image_embeds,
         )
         request_params = build_result["request_params"]
         use_tools = bool(build_result["use_tools"])
