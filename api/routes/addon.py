@@ -43,6 +43,7 @@ class AddonUiBubbleButton(BaseModel):
     id: str
     icon: str
     label: str
+    action: Optional[str] = None  # "play_audio" 等のクライアント側ビルトインアクション
     tool: Optional[str] = None
     metadata_key: Optional[str] = None
     show_when: Optional[str] = None  # "metadata_exists" | "always"

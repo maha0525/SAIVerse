@@ -56,8 +56,10 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
             persona_dir = persona_dir.parent if persona_dir else Path.cwd()
             manager_ref = getattr(persona_obj, "manager_ref", None)
             LOGGER.info("[sea][tool_call] CALL %s (persona=%s) args=%s", tool_name, persona_id, tool_args)
+            # 直前の LLM speak ノードが保存した message_id を後続ツールに引き継ぐ。
+            _current_msg_id = state.get("_last_message_id")
             if persona_id and persona_dir:
-                with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback):
+                with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback, message_id=_current_msg_id):
                     result = tool_func(**tool_args)
             else:
                 result = tool_func(**tool_args)

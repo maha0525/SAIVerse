@@ -47,6 +47,7 @@ export function useAddonEvents(onEvent: AddonEventHandler): void {
         };
 
         es.onerror = () => {
+            console.warn('[addon-events] SSE connection error, reconnecting in 5s');
             // エラー時は一定時間後に再接続
             es.close();
             esRef.current = null;

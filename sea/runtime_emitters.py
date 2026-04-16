@@ -71,7 +71,7 @@ class RuntimeEmitters:
         text: str,
         pulse_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> Optional[Dict[str, Any]]:
         msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
         msg_metadata: Dict[str, Any] = {}
         if pulse_id:
@@ -97,12 +97,21 @@ class RuntimeEmitters:
 
         if msg_metadata:
             msg["metadata"] = msg_metadata
+        building_msg: Optional[Dict[str, Any]] = None
         try:
-            persona.history_manager.add_to_building_only(building_id, msg)
+            building_msg = persona.history_manager.add_to_building_only(building_id, msg)
+            # BuildingHistory 保存完了直後に message_id を ContextVar に確定させる。
+            # 後続のアドオンツール (TTS 等) が get_active_message_id() で正しい ID を
+            # 取得できるよう、emit_speak と同様の配線を行う。
+            msg_id = building_msg.get("message_id") if building_msg else None
+            if msg_id:
+                from tools.context import set_active_message_id
+                set_active_message_id(str(msg_id))
             self.runtime.manager.gateway_handle_ai_replies(building_id, persona, [text])
         except Exception:
             LOGGER.exception("Failed to emit say message")
         self.notify_unity_speak(persona, text)
+        return building_msg
 
     def emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True) -> None:
         if not record_history:

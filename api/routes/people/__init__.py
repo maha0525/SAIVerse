@@ -1,10 +1,38 @@
+from typing import List
+
 from fastapi import APIRouter
+from pydantic import BaseModel
+
 from . import summon, memory, recall, config, autonomous
 from . import import_chatlog, reembed, memopedia, native_export_import
 from . import schedule, tasks, inventory, arasuji
 from . import x_auth, pulse_logs, memory_notes, working_memory, autonomy
 
 router = APIRouter()
+
+
+class PersonaListItem(BaseModel):
+    id: str
+    name: str
+
+
+@router.get("/", response_model=List[PersonaListItem], tags=["people"])
+def list_all_personas() -> List[PersonaListItem]:
+    """Return all registered personas (AI rows).
+
+    アドオン管理UIの「ペルソナ別設定」でペルソナを選択するために使用される。
+    AddonManagerModal が `/api/people/` を叩いているが、対応するハンドラが
+    無かったため 404 になっていた。シンプルな id/name のリストを返す。
+    """
+    from database.models import AI
+    from database.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        rows = db.query(AI.AIID, AI.AINAME).all()
+        return [PersonaListItem(id=r.AIID, name=r.AINAME or r.AIID) for r in rows]
+    finally:
+        db.close()
 
 # 各サブモジュールのルーターを include
 router.include_router(summon.router, tags=["people"])

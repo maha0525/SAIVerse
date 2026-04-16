@@ -76,8 +76,12 @@ class RuntimeEngine:
                     LOGGER.info("[sea][tool] Tool function found: %s", tool_func)
 
                 # Execute tool with persona context
+                # 直前の LLM speak ノードが保存した message_id を後続ツールにも
+                # 引き継ぐ。persona_context は毎回 _MESSAGE_ID を強制的に書き換える
+                # ため、state 経由で明示的に渡さないとアドオン連携が切れる。
+                _current_msg_id = state.get("_last_message_id")
                 if persona_id and persona_dir:
-                    with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback):
+                    with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback, message_id=_current_msg_id):
                         result = tool_func(**kwargs) if callable(tool_func) else None
                 else:
                     result = tool_func(**kwargs) if callable(tool_func) else None
