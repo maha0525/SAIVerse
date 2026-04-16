@@ -184,8 +184,12 @@ class HistoryManager:
         building_id: str,
         *,
         heard_by: Optional[List[str]] = None,
-    ) -> None:
-        """Adds a message to both persona and building history."""
+    ) -> Dict[str, Any]:
+        """Adds a message to both persona and building history.
+
+        Returns the saved building message dict (including confirmed message_id).
+        Callers can use the returned message_id to associate addon metadata.
+        """
         prepared_msg = self._prepare_message(msg)
         # Add to persona history and trim by size
         self.messages.append(prepared_msg)
@@ -197,6 +201,7 @@ class HistoryManager:
         building_msg = self._decorate_building_message(building_id, prepared_msg, heard_by)
         hist.append(building_msg)
         self._ensure_size_limit(hist, self._get_building_memory_path(building_id))
+        return building_msg
 
     def _get_building_memory_path(self, building_id: str) -> Path:
         path = self.building_memory_paths.get(building_id)

@@ -51,7 +51,14 @@ class RuntimeEmitters:
         msg["metadata"] = metadata
         if record_history:
             try:
-                persona.history_manager.add_message(msg, building_id, heard_by=None)
+                building_msg = persona.history_manager.add_message(msg, building_id, heard_by=None)
+                # BuildingHistory保存完了直後にmessage_idを確定させる。
+                # これにより後続のアドオンツール（TTSなど）が get_active_message_id() で
+                # 正しいIDを取得してメタデータを紐付けられる。
+                msg_id = building_msg.get("message_id") if building_msg else None
+                if msg_id:
+                    from tools.context import set_active_message_id
+                    set_active_message_id(str(msg_id))
                 self.runtime.manager.gateway_handle_ai_replies(building_id, persona, [text])
             except Exception:
                 LOGGER.exception("Failed to emit speak message")
