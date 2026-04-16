@@ -543,12 +543,12 @@ export default function ChatOptions({ isOpen, onClose, currentModel: propCurrent
                                                 min={0}
                                                 max={50}
                                                 value={maxImageEmbeds ?? ''}
-                                                placeholder={maxImageEmbedsDefault ? `（自動: ${maxImageEmbedsDefault}）` : '（無制限）'}
+                                                placeholder={maxImageEmbedsDefault ? `（自動: ${maxImageEmbedsDefault}）` : '（デフォルト: 4）'}
                                                 onChange={(e) => handleMaxImageEmbedsInput(e.target.value)}
                                                 onBlur={() => handleMaxImageEmbedsCommit()}
                                             />
                                             <span className={styles.hint}>
-                                                LLMに送信する画像の最大枚数。超過分はテキスト要約に置換されます。0で全画像をテキスト化。空欄で無制限。
+                                                LLMに送信する画像の最大枚数。超過分はテキスト要約に置換されます。0で全画像をテキスト化。空欄でデフォルト値（4枚）を使用。
                                             </span>
                                         </div>
                                         {cacheConfig.supported && (
