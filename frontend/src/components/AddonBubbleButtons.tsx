@@ -41,7 +41,9 @@ function PlayAudioButton({
         if (!audioRef.current) {
             audioRef.current = new Audio(audioUrl);
             audioRef.current.onended = () => setPlaying(false);
-            audioRef.current.onerror = () => {
+            audioRef.current.onerror = (e) => {
+                const mediaErr = audioRef.current?.error;
+                console.error('[PlayAudioButton] audio error', mediaErr?.code, mediaErr?.message, e);
                 setPlaying(false);
                 setError(true);
             };
@@ -55,7 +57,8 @@ function PlayAudioButton({
             try {
                 await audioRef.current.play();
                 setPlaying(true);
-            } catch {
+            } catch (err) {
+                console.error('[PlayAudioButton] play() rejected', err);
                 setError(true);
             }
         }

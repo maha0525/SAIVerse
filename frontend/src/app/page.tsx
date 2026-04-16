@@ -523,6 +523,38 @@ export default function Home() {
                     setMessages(newMessages);
                     setTimeout(() => setIsHistoryLoaded(true), 150);
                 }
+
+                // アシスタントメッセージに紐付くアドオンメタデータを先読みする。
+                // SSE の audio_ready イベントは発生時に1回だけ配信されるため、
+                // ページリロード後に過去メッセージのバブルボタンを復元するには
+                // ここで明示的にフェッチする必要がある。
+                const assistantIds = newMessages
+                    .filter(m => m.role === 'assistant' && m.id)
+                    .map(m => m.id as string);
+                if (assistantIds.length > 0) {
+                    void Promise.all(
+                        assistantIds.map(async (mid) => {
+                            try {
+                                const r = await fetch(
+                                    `/api/addon/messages/${encodeURIComponent(mid)}/metadata`,
+                                );
+                                if (!r.ok) return;
+                                const body = await r.json() as {
+                                    metadata?: Record<string, Record<string, unknown>>;
+                                };
+                                const meta = body.metadata;
+                                if (meta && Object.keys(meta).length > 0) {
+                                    setAddonMetadata(prev => ({
+                                        ...prev,
+                                        [mid]: { ...(prev[mid] ?? {}), ...meta },
+                                    }));
+                                }
+                            } catch {
+                                // 個別失敗は無視(他メッセージは継続)
+                            }
+                        }),
+                    );
+                }
             } else {
                 const errorPayload: HistoryResponse | null = await res.json().catch(() => null);
                 console.error("[DEBUG] Fetch failed", {

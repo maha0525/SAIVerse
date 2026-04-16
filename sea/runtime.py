@@ -1209,8 +1209,8 @@ class SEARuntime:
     def _emit_speak(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, record_history: bool = True, extra_metadata: Optional[Dict[str, Any]] = None) -> None:
         self._emitters.emit_speak(persona, building_id, text, pulse_id=pulse_id, record_history=record_history, extra_metadata=extra_metadata)
 
-    def _emit_say(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> None:
-        self._emitters.emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=metadata)
+    def _emit_say(self, persona: Any, building_id: str, text: str, pulse_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        return self._emitters.emit_say(persona, building_id, text, pulse_id=pulse_id, metadata=metadata)
 
     def _emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True) -> None:
         self._emitters.emit_think(persona, pulse_id, text, record_history=record_history)

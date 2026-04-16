@@ -573,7 +573,11 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             if _at_both:
                                 msg_metadata["activity_trace"] = list(_at_both)
                             eff_bid = runtime._effective_building_id(persona, building_id)
-                            runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+                            _last_bmsg = runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+                            if isinstance(_last_bmsg, dict):
+                                _last_mid = _last_bmsg.get("message_id")
+                                if _last_mid:
+                                    state["_last_message_id"] = str(_last_mid)
                             LOGGER.info("[sea] 'both' response: text kept in UI and Building history (len=%d), tool call continues", len(text))
                         elif text_chunks:
                             # "tool_call" only — discard streamed text
@@ -620,7 +624,13 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         if accumulator:
                             msg_metadata["llm_usage_total"] = dict(accumulator)
                         eff_bid = runtime._effective_building_id(persona, building_id)
-                        runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+                        _last_bmsg = runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+                        # 後続ツールが新しい persona_context 配下でも
+                        # 最新の message_id を参照できるよう state に残す。
+                        if isinstance(_last_bmsg, dict):
+                            _last_mid = _last_bmsg.get("message_id")
+                            if _last_mid:
+                                state["_last_message_id"] = str(_last_mid)
 
                 else:
                     # ── Synchronous tool mode (original) ──
@@ -1235,7 +1245,13 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         if accumulator:
                             msg_metadata["llm_usage_total"] = dict(accumulator)
                         eff_bid = runtime._effective_building_id(persona, building_id)
-                        runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+                        _last_bmsg = runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+                        # 後続ツールが新しい persona_context 配下でも
+                        # 最新の message_id を参照できるよう state に残す。
+                        if isinstance(_last_bmsg, dict):
+                            _last_mid = _last_bmsg.get("message_id")
+                            if _last_mid:
+                                state["_last_message_id"] = str(_last_mid)
 
                     # Store reasoning in state for downstream speak/say nodes
                     if reasoning_text:
@@ -1418,7 +1434,13 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         if accumulator:
                             msg_metadata["llm_usage_total"] = dict(accumulator)
                         eff_bid = runtime._effective_building_id(persona, building_id)
-                        runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+                        _last_bmsg = runtime._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+                        # 後続ツールが新しい persona_context 配下でも
+                        # 最新の message_id を参照できるよう state に残す。
+                        if isinstance(_last_bmsg, dict):
+                            _last_mid = _last_bmsg.get("message_id")
+                            if _last_mid:
+                                state["_last_message_id"] = str(_last_mid)
                         if event_callback is not None:
                             LOGGER.info("[DEBUG] Sending 'say' event with content: %s", text[:100] if text else "(empty)")
                             say_event: Dict[str, Any] = {

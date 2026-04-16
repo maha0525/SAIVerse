@@ -217,16 +217,19 @@ class HistoryManager:
         msg: Dict[str, str],
         *,
         heard_by: Optional[List[str]] = None,
-    ) -> None:
+    ) -> Dict[str, Any]:
         """Adds a message only to a specific building's history.
 
         building_id must be the canonical building ID present in building_memory_paths.
+        Returns the saved building message dict (including confirmed message_id) so
+        callers can associate addon metadata (same contract as add_message).
         """
         prepared_msg = self._prepare_message(msg)
         hist = self.building_histories.setdefault(building_id, [])
         building_msg = self._decorate_building_message(building_id, prepared_msg, heard_by)
         hist.append(building_msg)
         self._ensure_size_limit(hist, self._get_building_memory_path(building_id))
+        return building_msg
 
     def add_to_persona_only(self, msg: Dict[str, str]) -> None:
         """Adds a message only to the persona's main history."""
