@@ -320,8 +320,8 @@ def reflect_to_memopedia(
                     page.id, notes_block,
                     edit_source="entity_extractor",
                 )
-            # Update summary if the page doesn't have one yet
-            if entity.summary and not page.summary:
+            # Update summary to reflect latest understanding
+            if entity.summary and entity.summary != page.summary:
                 from sai_memory.memopedia.storage import update_page as _update_page
                 _update_page(
                     memopedia.conn, page.id,

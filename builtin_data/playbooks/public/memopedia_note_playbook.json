@@ -22,7 +22,7 @@
             "id": "compose",
             "type": "llm",
             "context_profile": "conversation",
-            "action": "Memopediaに書き込む内容を構成してください。結果はmemopedia_noteツールで保存されます。\n\n指示: {write_instruction}\n\n## ルール\n\n### 新規ページの場合\n- page_id は空文字にしてください\n- title, content, category, keywords を全て指定してください\n- content は会話の文脈から得られた情報をMarkdown形式で構成してください\n\n### 既存ページへの追記の場合\n- URI（saiverse://self/memopedia/page/xxx）やページIDを指定されている場合、page_id にそのまま設定してください\n- ページタイトルで指定されている場合は、page_id は空にして title にそのタイトルを設定してください（タイトルで検索して追記されます）\n- content には追記する内容のみを記述してください（既存内容の繰り返しは不要）\n\n### category の選び方\n- people: 人物に関する情報\n- terms: 用語・概念・出来事・一般的なトピック\n- plans: 予定・計画・目標\n\n### content の書き方\n- 会話で得られた具体的な事実、エピソード、日付を優先して記録\n- 推測や曖昧な情報は含めない\n- Markdown形式で見出し・リストを適宜使用",
+            "action": "Memopediaに書き込む内容を構成してください。結果はmemopedia_noteツールで保存されます。\n\n指示: {write_instruction}\n\n## ルール\n\n### 新規ページの場合\n- page_id は空文字にしてください\n- title, content, summary, category, keywords を全て指定してください\n- content は会話の文脈から得られた情報をMarkdown形式で構成してください\n\n### 既存ページへの追記の場合\n- URI（saiverse://self/memopedia/page/xxx）やページIDを指定されている場合、page_id にそのまま設定してください\n- ページタイトルで指定されている場合は、page_id は空にして title にそのタイトルを設定してください（タイトルで検索して追記されます）\n- content には追記する内容のみを記述してください（既存内容の繰り返しは不要）\n- **summary（概要）の更新**: 追記する内容がページの概要に影響する場合は、summary に更新後の概要を記述してください。概要は Memory weave context でページ一覧として常に参照されるため、ページの現在の内容を正確に反映している必要があります。追記内容が概要に影響しない場合は summary を空文字にしてください\n\n### category の選び方\n- people: 人物に関する情報\n- terms: 用語・概念・出来事・一般的なトピック\n- plans: 予定・計画・目標\n\n### content の書き方\n- 会話で得られた具体的な事実、エピソード、日付を優先して記録\n- 推測や曖昧な情報は含めない\n- Markdown形式で見出し・リストを適宜使用",
             "response_schema": {
                 "type": "object",
                 "properties": {

@@ -26,11 +26,16 @@ import { useActivityTracker } from '@/hooks/useActivityTracker';
 // Allow className on HTML elements used by thinking blocks (<details>, <div>, <summary>)
 const sanitizeSchema = {
     ...defaultSchema,
+    tagNames: [...(defaultSchema.tagNames || []), 'svg', 'path', 'polyline', 'circle'],
     attributes: {
         ...defaultSchema.attributes,
         details: [...(defaultSchema.attributes?.details || []), 'className'],
         div: [...(defaultSchema.attributes?.div || []), 'className'],
         summary: [...(defaultSchema.attributes?.summary || []), 'className'],
+        span: [...(defaultSchema.attributes?.span || []), 'className'],
+        code: [...(defaultSchema.attributes?.code || []), 'className'],
+        svg: ['width', 'height', 'viewBox', 'fill', 'stroke', 'strokeWidth', 'stroke-width', 'className'],
+        path: ['d', 'fill', 'stroke', 'strokeWidth', 'stroke-width'],
     },
     protocols: {
         ...defaultSchema.protocols,

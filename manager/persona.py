@@ -474,6 +474,7 @@ class PersonaMixin:
                 "IS_DISPATCHED": ai.IS_DISPATCHED,
                 "DEFAULT_MODEL": ai.DEFAULT_MODEL,
                 "INTERACTION_MODE": ai.INTERACTION_MODE,
+                "SPELL_ENABLED": ai.SPELL_ENABLED,
             }
         finally:
             db.close()

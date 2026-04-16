@@ -94,6 +94,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [interactionMode, setInteractionMode] = useState<string>('auto');
     const [chronicleEnabled, setChronicleEnabled] = useState(true);
     const [memoryWeaveContext, setMemoryWeaveContext] = useState(true);
+    const [spellEnabled, setSpellEnabled] = useState(false);
     const [costEstimate, setCostEstimate] = useState<ChronicleCostEstimate | null>(null);
     const [avatarPath, setAvatarPath] = useState('');
     const [appearanceImagePath, setAppearanceImagePath] = useState('');
@@ -154,6 +155,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                 setInteractionMode(data.interaction_mode || 'auto');
                 setChronicleEnabled(data.chronicle_enabled ?? true);
                 setMemoryWeaveContext(data.memory_weave_context ?? true);
+                setSpellEnabled(data.spell_enabled ?? false);
                 setAvatarPath(data.avatar_path || '');
                 setAppearanceImagePath(data.appearance_image_path || '');
                 setLinkedUserId(data.linked_user_id ? String(data.linked_user_id) : '');
@@ -207,6 +209,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     interaction_mode: interactionMode,
                     chronicle_enabled: chronicleEnabled,
                     memory_weave_context: memoryWeaveContext,
+                    spell_enabled: spellEnabled,
                     avatar_path: avatarPath || null,
                     appearance_image_path: appearanceImagePath || null,
                     linked_user_id: linkedUserId ? parseInt(linkedUserId) : 0  // 0 = clear link
@@ -522,6 +525,23 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                 </div>
                                 <div className={styles.description}>
                                     会話時にChronicle・Memopediaの情報をLLMに提供します。無効にするとコンテキスト量が減りますが、長期記憶を参照できなくなります。
+                                </div>
+                            </div>
+
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>スペル</label>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={spellEnabled}
+                                            onChange={(e) => setSpellEnabled(e.target.checked)}
+                                        />
+                                        <span>{spellEnabled ? '有効' : '無効'}</span>
+                                    </label>
+                                </div>
+                                <div className={styles.description}>
+                                    発言中に /spell コマンドを使って、Memopediaやチャットログを直接参照できるようにします。ツール定義を使わないため、キャッシュ効率に影響しません。
                                 </div>
                             </div>
 

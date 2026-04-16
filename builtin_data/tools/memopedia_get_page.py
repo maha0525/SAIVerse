@@ -87,5 +87,6 @@ def schema() -> ToolSchema:
             },
         },
         result_type="string",
-        handy=True,
+        spell=True,
+        spell_display_name="Memopediaページ参照",
     )

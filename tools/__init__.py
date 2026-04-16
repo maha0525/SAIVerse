@@ -24,7 +24,8 @@ TOOL_REGISTRY: Dict[str, Callable] = {}
 OPENAI_TOOLS_SPEC: List[Dict[str, Any]] = []
 GEMINI_TOOLS_SPEC: List[Any] = []
 TOOL_SCHEMAS: List[ToolSchema] = []
-HANDY_TOOL_NAMES: set[str] = set()  # Tools auto-injected into LLM nodes
+SPELL_TOOL_NAMES: set[str] = set()  # Tools available as spells (invoked via /spell in text)
+SPELL_TOOL_SCHEMAS: Dict[str, ToolSchema] = {}  # Spell tool schemas for system prompt generation
 
 
 def _register_multiple_tools(module: Any) -> bool:
@@ -51,10 +52,11 @@ def _register_multiple_tools(module: Any) -> bool:
             OPENAI_TOOLS_SPEC.append(oa.to_openai(meta))
             GEMINI_TOOLS_SPEC.append(gm.to_gemini(meta))
             TOOL_SCHEMAS.append(meta)
-            if getattr(meta, "handy", False):
-                HANDY_TOOL_NAMES.add(meta.name)
+            if getattr(meta, "spell", False):
+                SPELL_TOOL_NAMES.add(meta.name)
+                SPELL_TOOL_SCHEMAS[meta.name] = meta
             registered = True
-            LOGGER.debug("Registered tool '%s' from schemas() (handy=%s)", meta.name, getattr(meta, "handy", False))
+            LOGGER.debug("Registered tool '%s' from schemas() (spell=%s)", meta.name, getattr(meta, "spell", False))
 
         return registered
     except Exception as e:
@@ -88,8 +90,9 @@ def _register_tool(module: Any) -> bool:
         OPENAI_TOOLS_SPEC.append(oa.to_openai(meta))
         GEMINI_TOOLS_SPEC.append(gm.to_gemini(meta))
         TOOL_SCHEMAS.append(meta)
-        if getattr(meta, "handy", False):
-            HANDY_TOOL_NAMES.add(meta.name)
+        if getattr(meta, "spell", False):
+            SPELL_TOOL_NAMES.add(meta.name)
+            SPELL_TOOL_SCHEMAS[meta.name] = meta
 
         # Handle aliases
         alias = getattr(module, "ALIASES", None)

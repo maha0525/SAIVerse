@@ -124,6 +124,9 @@ def compile_with_langgraph(
         _thread_id = _adapter.get_current_thread() if _adapter else None
         pulse_ctx = runtime._get_or_create_pulse_context(pulse_id, _thread_id or "")
 
+    # Check spell toggle for this persona
+    _spell_enabled = runtime._is_spell_enabled_for_persona(persona)
+
     initial_state = {
         # System variables (_ prefix, auto-inherited, nodes don't touch)
         "_messages": list(base_messages),
@@ -136,6 +139,7 @@ def compile_with_langgraph(
         "_pulse_usage_accumulator": usage_accumulator,  # Inherit from parent or create new
         "_activity_trace": activity_trace,  # Shared trace of exec/tool activities
         "_pulse_context": pulse_ctx,  # Pulse-level log context (replaces _intermediate_msgs)
+        "_spell_enabled": _spell_enabled,  # Per-persona spell system toggle
         # Playbook variables (no prefix)
         "last": user_input or "",
         "input": user_input or "",

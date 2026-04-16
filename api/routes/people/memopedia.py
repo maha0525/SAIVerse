@@ -15,6 +15,7 @@ from .models import (
     MovePagesToTrunkRequest,
     GenerateMemopediaRequest,
     GenerationJobStatus,
+    BuildMemopediaFromLogsRequest,
 )
 from .utils import get_adapter
 
@@ -598,5 +599,228 @@ def get_memopedia_generation_status(
     
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
     return job
+
+
+# -----------------------------------------------------------------------------
+# Build Memopedia from Logs API (entity extraction)
+# -----------------------------------------------------------------------------
+
+def _run_build_memopedia_from_logs(
+    job_id: str,
+    persona_id: str,
+    batch_size: int,
+    limit: int,
+    start_after: float,
+    model_name: str | None,
+) -> None:
+    """Background worker for building Memopedia from chat logs."""
+    import json
+    import time as _time
+    from sai_memory.memory.storage import init_db, Message
+    from sai_memory.memopedia import Memopedia, init_memopedia_tables
+    from sai_memory.arasuji import init_arasuji_tables
+    from sai_memory.memory.entity_extractor import (
+        extract_entities,
+        reflect_to_memopedia,
+        _format_page_list,
+    )
+    from sai_memory.arasuji.context import get_episode_context_for_timerange
+
+    try:
+        _update_memopedia_job(job_id, message="データベースを初期化中...")
+
+        persona_dir = Path.home() / ".saiverse" / "personas" / persona_id
+        db_path = persona_dir / "memory.db"
+
+        if not db_path.exists():
+            _update_memopedia_job(job_id, status="failed", error=f"Database not found: {db_path}")
+            return
+
+        conn = init_db(str(db_path), check_same_thread=False)
+        init_arasuji_tables(conn)
+        init_memopedia_tables(conn)
+
+        # Initialize LLM client
+        _update_memopedia_job(job_id, message="LLMクライアントを初期化中...")
+
+        from saiverse.model_defaults import BUILTIN_DEFAULT_LITE_MODEL
+        from saiverse.model_configs import find_model_config
+        from llm_clients.factory import get_llm_client
+
+        env_model = os.getenv("MEMORY_WEAVE_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
+        model_to_use = model_name or env_model
+
+        resolved_model_id, model_config = find_model_config(model_to_use)
+        if not resolved_model_id:
+            _update_memopedia_job(job_id, status="failed", error=f"Model '{model_to_use}' not found")
+            conn.close()
+            return
+
+        provider = model_config.get("provider", "gemini")
+        context_length = model_config.get("context_length", 128000)
+        client = get_llm_client(resolved_model_id, provider, context_length, config=model_config)
+        LOGGER.info("[Build Memopedia] LLM: %s / %s", model_config.get("model", resolved_model_id), provider)
+
+        # Fetch messages
+        _update_memopedia_job(job_id, message="メッセージを取得中...")
+
+        query = """
+            SELECT id, thread_id, role, content, resource_id, created_at, metadata
+            FROM messages
+            WHERE thread_id NOT IN (SELECT thread_id FROM stelis_threads)
+        """
+        params = []
+        if start_after > 0:
+            query += " AND created_at > ?"
+            params.append(start_after)
+        query += " ORDER BY created_at ASC"
+        if limit > 0:
+            query += " LIMIT ?"
+            params.append(limit)
+
+        cur = conn.execute(query, params)
+        messages = []
+        for row in cur.fetchall():
+            msg_id, tid, role, content, resource_id, created_at, metadata_raw = row
+            metadata = {}
+            if metadata_raw:
+                try:
+                    metadata = json.loads(metadata_raw)
+                except Exception:
+                    pass
+            messages.append(Message(
+                id=msg_id, thread_id=tid, role=role, content=content,
+                resource_id=resource_id, created_at=created_at, metadata=metadata,
+            ))
+
+        if not messages:
+            _update_memopedia_job(
+                job_id, status="completed", progress=0, total=0,
+                message="処理対象のメッセージがありません",
+            )
+            conn.close()
+            return
+
+        total_batches = (len(messages) + batch_size - 1) // batch_size
+        _update_memopedia_job(
+            job_id, progress=0, total=total_batches,
+            message=f"{len(messages)} メッセージを {total_batches} バッチで処理開始",
+        )
+
+        memopedia = Memopedia(conn)
+        total_entities = 0
+        total_new_pages = 0
+        total_updated_pages = 0
+        batch_count = 0
+
+        for i in range(0, len(messages), batch_size):
+            batch = messages[i:i + batch_size]
+            if len(batch) < batch_size // 2 and i > 0:
+                LOGGER.info("Skipping small final batch (%d messages)", len(batch))
+                continue
+
+            batch_count += 1
+            start_time = min(m.created_at for m in batch)
+            end_time = max(m.created_at for m in batch)
+            time_str = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(start_time))
+
+            _update_memopedia_job(
+                job_id, progress=batch_count, total=total_batches,
+                message=f"バッチ {batch_count}/{total_batches} ({time_str})",
+            )
+
+            # Episode context
+            ep_ctx = ""
+            try:
+                ep_ctx = get_episode_context_for_timerange(
+                    conn, start_time=start_time, end_time=end_time, max_entries=10,
+                )
+            except Exception:
+                pass
+
+            existing_pages = _format_page_list(memopedia)
+
+            entities = extract_entities(
+                client, batch,
+                episode_context=ep_ctx,
+                existing_pages=existing_pages,
+                persona_id=persona_id,
+            )
+
+            if not entities:
+                continue
+
+            results = reflect_to_memopedia(
+                entities, memopedia,
+                source_time=int(end_time),
+            )
+
+            total_entities += len(entities)
+            total_new_pages += sum(1 for r in results if r.is_new_page)
+            total_updated_pages += sum(1 for r in results if not r.is_new_page)
+
+        conn.close()
+
+        last_ts = messages[-1].created_at if messages else 0
+        _update_memopedia_job(
+            job_id, status="completed", progress=total_batches, total=total_batches,
+            message=(
+                f"完了: {total_entities} エンティティ抽出, "
+                f"{total_new_pages} 新規ページ, {total_updated_pages} 更新"
+            ),
+            result={
+                "total_entities": total_entities,
+                "new_pages": total_new_pages,
+                "updated_pages": total_updated_pages,
+                "batches_processed": batch_count,
+                "messages_processed": len(messages),
+                "last_message_timestamp": last_ts,
+            },
+        )
+
+    except Exception as e:
+        LOGGER.exception("Build Memopedia from logs failed: %s", e)
+        _update_memopedia_job(job_id, status="failed", error=str(e))
+
+
+@router.post("/{persona_id}/memopedia/build-from-logs", tags=["Memopedia"])
+async def start_build_memopedia_from_logs(
+    persona_id: str,
+    request: BuildMemopediaFromLogsRequest,
+    background_tasks: BackgroundTasks,
+    manager=Depends(get_manager),
+):
+    """Start building Memopedia pages from chat logs as a background job.
+
+    Processes messages in batches, extracting entities and reflecting them
+    to Memopedia pages (creating new pages or appending to existing ones).
+    """
+    persona_dir = Path.home() / ".saiverse" / "personas" / persona_id
+    if not persona_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Persona not found: {persona_id}")
+
+    job_id = str(uuid.uuid4())
+    with _memopedia_jobs_lock:
+        _memopedia_jobs[job_id] = {
+            "job_id": job_id,
+            "status": "running",
+            "progress": 0,
+            "total": 0,
+            "message": "Starting...",
+            "result": None,
+            "error": None,
+        }
+
+    background_tasks.add_task(
+        _run_build_memopedia_from_logs,
+        job_id=job_id,
+        persona_id=persona_id,
+        batch_size=request.batch_size,
+        limit=request.limit,
+        start_after=request.start_after,
+        model_name=request.model,
+    )
+
+    return {"job_id": job_id, "status": "running"}

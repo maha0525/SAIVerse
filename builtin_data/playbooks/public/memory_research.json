@@ -462,6 +462,10 @@
                         "type": "string",
                         "description": "記録する知識（Markdown形式、保存する場合）"
                     },
+                    "summary": {
+                        "type": "string",
+                        "description": "1-2文の概要（保存する場合。既存ページへの追記で概要更新が必要な場合も記述）"
+                    },
                     "category": {
                         "type": "string",
                         "enum": [
@@ -509,6 +513,7 @@
             "args_input": {
                 "content": "writeback.content",
                 "title": "writeback.title",
+                "summary": "writeback.summary",
                 "category": "writeback.category"
             },
             "output_key": "writeback_result",

@@ -1150,6 +1150,7 @@ class SAIVerseManager(
         appearance_image_path: Optional[str] = None,
         chronicle_enabled: Optional[bool] = None,
         memory_weave_context: Optional[bool] = None,
+        spell_enabled: Optional[bool] = None,
     ) -> str:
         """ワールドエディタからAIの設定を更新する"""
         return self.admin.update_ai(
@@ -1166,6 +1167,7 @@ class SAIVerseManager(
             appearance_image_path,
             chronicle_enabled=chronicle_enabled,
             memory_weave_context=memory_weave_context,
+            spell_enabled=spell_enabled,
         )
 
     def delete_ai(self, ai_id: str) -> str:

@@ -850,7 +850,7 @@ class SAIMemoryAdapter:
                     scope=self.settings.scope,
                     exclude_message_ids=guard_ids,
                     required_tags=["conversation"],
-                    exclude_tags=["handy_tool"],
+                    exclude_tags=["handy_tool", "spell"],
                 )
                 groups = []
                 for seed, bundle, score in groups_raw:
@@ -983,7 +983,7 @@ class SAIMemoryAdapter:
                     scope=self.settings.scope,
                     exclude_message_ids=guard_ids,
                     required_tags=["conversation"],
-                    exclude_tags=["handy_tool"],
+                    exclude_tags=["handy_tool", "spell"],
                 )
             rank_counter = 0
             for seed, _bundle, _score in groups_raw:

@@ -475,6 +475,105 @@ def get_messages_around(
     return before_rows + after_rows
 
 
+def get_messages_around_timestamp(
+    conn: sqlite3.Connection,
+    timestamp: int,
+    count: int = 10,
+    thread_id: Optional[str] = None,
+) -> List[Message]:
+    """Retrieve messages closest to a given Unix timestamp.
+
+    Finds the nearest message to *timestamp* and returns *count* messages
+    centred on that point (half before, half after).  When *thread_id* is
+    ``None`` the search spans all threads.
+    """
+    if count <= 0:
+        return []
+
+    half = count // 2
+
+    # --- messages AT or BEFORE the timestamp (descending) ---
+    if thread_id:
+        cur = conn.execute(
+            "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+            "FROM messages WHERE thread_id=? AND created_at <= ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (thread_id, timestamp, half + 1),
+        )
+    else:
+        cur = conn.execute(
+            "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+            "FROM messages WHERE created_at <= ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (timestamp, half + 1),
+        )
+    before_rows = [_row_to_message(r) for r in cur.fetchall()][::-1]
+
+    # --- messages AFTER the timestamp (ascending) ---
+    if thread_id:
+        cur = conn.execute(
+            "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+            "FROM messages WHERE thread_id=? AND created_at > ? "
+            "ORDER BY created_at ASC LIMIT ?",
+            (thread_id, timestamp, count - len(before_rows)),
+        )
+    else:
+        cur = conn.execute(
+            "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+            "FROM messages WHERE created_at > ? "
+            "ORDER BY created_at ASC LIMIT ?",
+            (timestamp, count - len(before_rows)),
+        )
+    after_rows = [_row_to_message(r) for r in cur.fetchall()]
+
+    combined = before_rows + after_rows
+
+    # If we got fewer before-rows than expected, backfill from after side
+    # (and vice versa) so we always try to return *count* messages total.
+    if len(combined) < count:
+        if len(before_rows) < half + 1 and after_rows:
+            # Need more after
+            last_ts = combined[-1].created_at
+            need = count - len(combined)
+            if thread_id:
+                cur = conn.execute(
+                    "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+                    "FROM messages WHERE thread_id=? AND created_at > ? "
+                    "ORDER BY created_at ASC LIMIT ?",
+                    (thread_id, last_ts, need),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+                    "FROM messages WHERE created_at > ? "
+                    "ORDER BY created_at ASC LIMIT ?",
+                    (last_ts, need),
+                )
+            combined.extend(_row_to_message(r) for r in cur.fetchall())
+        elif len(after_rows) == 0 or (before_rows and len(after_rows) < count - len(before_rows)):
+            # Need more before
+            first_ts = combined[0].created_at if combined else timestamp
+            need = count - len(combined)
+            if thread_id:
+                cur = conn.execute(
+                    "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+                    "FROM messages WHERE thread_id=? AND created_at < ? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (thread_id, first_ts, need),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+                    "FROM messages WHERE created_at < ? "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (first_ts, need),
+                )
+            extra = [_row_to_message(r) for r in cur.fetchall()][::-1]
+            combined = extra + combined
+
+    return combined[:count]
+
+
 def count_threads(conn: sqlite3.Connection) -> int:
     cur = conn.execute("SELECT COUNT(*) FROM threads")
     return int(cur.fetchone()[0])

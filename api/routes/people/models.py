@@ -121,6 +121,7 @@ class AIConfigResponse(BaseModel):
     interaction_mode: str
     chronicle_enabled: bool = True
     memory_weave_context: bool = True
+    spell_enabled: bool = False
     avatar_path: Optional[str] = None
     appearance_image_path: Optional[str] = None  # Visual context appearance image
     home_city_id: int
@@ -134,6 +135,7 @@ class UpdateAIConfigRequest(BaseModel):
     interaction_mode: Optional[str] = None
     chronicle_enabled: Optional[bool] = None
     memory_weave_context: Optional[bool] = None
+    spell_enabled: Optional[bool] = None
     avatar_path: Optional[str] = None
     appearance_image_path: Optional[str] = None  # Visual context appearance image
     linked_user_id: Optional[int] = None  # Set linked user (None = no change, 0 = clear)
@@ -406,6 +408,14 @@ class GenerateMemopediaRequest(BaseModel):
     max_loops: int = 5  # 最大検索ループ数
     context_window: int = 5  # 周辺メッセージ取得数
     with_chronicle: bool = True  # Chronicle（あらすじ）を参照するか
+    model: Optional[str] = None  # デフォルトはMEMORY_WEAVE_MODEL
+
+
+class BuildMemopediaFromLogsRequest(BaseModel):
+    """ログからMemopediaを構築するリクエスト"""
+    batch_size: int = 20  # バッチサイズ
+    limit: int = 0  # 処理対象メッセージ上限 (0=全件)
+    start_after: float = 0  # このタイムスタンプ以降のメッセージを処理
     model: Optional[str] = None  # デフォルトはMEMORY_WEAVE_MODEL
 
 

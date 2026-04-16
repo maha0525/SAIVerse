@@ -33,6 +33,7 @@ def get_persona_config(persona_id: str, manager = Depends(get_manager)):
         interaction_mode=details["INTERACTION_MODE"],
         chronicle_enabled=details.get("CHRONICLE_ENABLED", True),
         memory_weave_context=details.get("MEMORY_WEAVE_CONTEXT", True),
+        spell_enabled=details.get("SPELL_ENABLED", False),
         avatar_path=avatar_path_to_url(details.get("AVATAR_IMAGE")),
         appearance_image_path=avatar_path_to_url(details.get("APPEARANCE_IMAGE_PATH")),
         home_city_id=details["HOME_CITYID"],
@@ -80,6 +81,7 @@ def update_persona_config(
         appearance_image_path=new_appearance,
         chronicle_enabled=req.chronicle_enabled,
         memory_weave_context=req.memory_weave_context,
+        spell_enabled=req.spell_enabled,
     )
 
     if result.startswith("Error:"):

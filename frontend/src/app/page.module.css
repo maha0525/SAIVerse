@@ -1377,6 +1377,112 @@
     animation: thinkingSpin 0.8s linear infinite;
 }
 
+/* Spell blocks (rendered via raw HTML in ReactMarkdown, so use :global) */
+:global(.spellBlock) {
+    margin: 8px 0;
+    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(168, 85, 247, 0.06) 0%, rgba(139, 92, 246, 0.06) 100%);
+    border: 1px solid rgba(168, 85, 247, 0.15);
+    font-size: 0.85rem;
+    overflow: hidden;
+}
+
+:global([data-theme="dark"] .spellBlock) {
+    background: linear-gradient(135deg, rgba(168, 85, 247, 0.1) 0%, rgba(139, 92, 246, 0.08) 100%);
+    border-color: rgba(168, 85, 247, 0.2);
+}
+
+:global(.spellSummary) {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    cursor: pointer;
+    user-select: none;
+    color: rgba(168, 85, 247, 0.8);
+    font-weight: 500;
+    font-size: 0.8rem;
+    list-style: none;
+}
+
+:global(.spellSummary::-webkit-details-marker) {
+    display: none;
+}
+
+:global(.spellSummary::after) {
+    content: '';
+    margin-left: auto;
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid currentColor;
+    opacity: 0.5;
+    transition: transform 0.2s;
+}
+
+:global(.spellBlock[open] .spellSummary::after) {
+    transform: rotate(180deg);
+}
+
+:global(.spellIcon) {
+    display: flex;
+    align-items: center;
+    opacity: 0.7;
+}
+
+:global(.spellContent) {
+    padding: 0 12px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+:global(.spellParams) {
+    font-size: 0.78rem;
+    color: rgba(100, 100, 120, 0.7);
+}
+
+:global([data-theme="dark"] .spellParams) {
+    color: rgba(160, 160, 180, 0.6);
+}
+
+:global(.spellParams code) {
+    background: rgba(168, 85, 247, 0.08);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 0.85em;
+}
+
+:global(.spellResultLabel) {
+    font-size: 0.72rem;
+    color: rgba(168, 85, 247, 0.6);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 2px;
+}
+
+:global(.spellResult) {
+    font-size: 0.78rem;
+    color: rgba(80, 80, 100, 0.85);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 300px;
+    overflow-y: auto;
+    background: rgba(168, 85, 247, 0.04);
+    border-radius: 6px;
+    padding: 8px 10px;
+    border: 1px solid rgba(168, 85, 247, 0.08);
+}
+
+:global([data-theme="dark"] .spellResult) {
+    color: rgba(200, 200, 220, 0.8);
+    background: rgba(168, 85, 247, 0.06);
+    border-color: rgba(168, 85, 247, 0.12);
+}
+
 /* Toast notifications */
 .toastContainer {
     position: fixed;

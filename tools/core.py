@@ -15,7 +15,8 @@ class ToolSchema:
     description: str
     parameters: Dict[str, Any]   # JSON Schema
     result_type: str             # "string" / "number" / ...
-    handy: bool = False          # If True, tool is auto-injected into all LLM nodes (when no response_schema)
+    spell: bool = False          # If True, tool is available as a spell (invoked via /spell in LLM text output)
+    spell_display_name: str = ""  # Japanese display name for spell UI (e.g. "特定時刻のログ取得")
 
 
 @dataclass

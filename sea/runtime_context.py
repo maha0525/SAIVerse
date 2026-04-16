@@ -149,6 +149,36 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
             except Exception as exc:
                 LOGGER.debug("Failed to add working_memory section: %s", exc)
 
+        # 6. Spell section
+        try:
+            spell_enabled = runtime._is_spell_enabled_for_persona(persona)
+            if spell_enabled:
+                from tools import SPELL_TOOL_SCHEMAS
+                if SPELL_TOOL_SCHEMAS:
+                    spell_lines = [
+                        "## スペル",
+                        "発言中にスペルを唱えると、情報を取得できます。スペルを唱えると、結果が返ってくるのでそれを踏まえて発言を続けてください。",
+                        "構造化出力（JSON応答）内ではスペルは使用できません。",
+                        "",
+                        "### 使い方",
+                        "/spell name='ツール名' args={'引数名': '値'}",
+                        "",
+                        "### 利用可能なスペル",
+                    ]
+                    for sname, sschema in SPELL_TOOL_SCHEMAS.items():
+                        display = sschema.spell_display_name or sname
+                        spell_lines.append(f"- **{sname}** ({display}): {sschema.description}")
+                        props = sschema.parameters.get("properties", {})
+                        required_list = sschema.parameters.get("required", [])
+                        for pname, pdef in props.items():
+                            req_mark = "必須" if pname in required_list else "省略可"
+                            spell_lines.append(f"  - {pname} ({pdef.get('type', '?')}, {req_mark}): {pdef.get('description', '')}")
+                    system_sections.append("\n".join(spell_lines))
+            else:
+                system_sections.append("## スペル\nスペルは現在使用できません。/spell コマンドを使用しないでください。")
+        except Exception as exc:
+            LOGGER.debug("Failed to add spell section: %s", exc)
+
         # NOTE: Spatial context (Unity) has been moved to Realtime Context
         # to improve LLM context caching efficiency.
 

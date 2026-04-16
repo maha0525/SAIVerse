@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Search, Loader2, AlertCircle, Brain, Bug, Trash2, Plus, FileDown, FileUp, Activity, LifeBuoy, Download, Upload } from 'lucide-react';
 import styles from './MemoryRecall.module.css';
 
@@ -246,6 +246,84 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
             setIsRescuing(false);
         }
     };
+
+    // Build Memopedia from logs state
+    const [isBuildingMemopedia, setIsBuildingMemopedia] = useState(false);
+    const [buildMemopediaJobId, setBuildMemopediaJobId] = useState<string | null>(null);
+    const [buildMemopediaProgress, setBuildMemopediaProgress] = useState<string | null>(null);
+    const [buildMemopediaResult, setBuildMemopediaResult] = useState<string | null>(null);
+    const [buildMemopediaError, setBuildMemopediaError] = useState<string | null>(null);
+    const buildMemopediaPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+    const handleBuildMemopediaFromLogs = async () => {
+        setIsBuildingMemopedia(true);
+        setBuildMemopediaProgress(null);
+        setBuildMemopediaResult(null);
+        setBuildMemopediaError(null);
+        try {
+            const backendUrl = 'http://127.0.0.1:8000';
+            const res = await fetch(`${backendUrl}/api/people/${personaId}/memopedia/build-from-logs`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ batch_size: 20, limit: 0, start_after: 0 }),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.detail || `HTTP ${res.status}`);
+            }
+            const data = await res.json();
+            const jobId = data.job_id;
+            setBuildMemopediaJobId(jobId);
+            setBuildMemopediaProgress('開始しました...');
+
+            // Poll for status
+            buildMemopediaPollRef.current = setInterval(async () => {
+                try {
+                    const statusRes = await fetch(`${backendUrl}/api/people/${personaId}/memopedia/generate/${jobId}`);
+                    if (!statusRes.ok) return;
+                    const status = await statusRes.json();
+                    const progressText = status.total > 0
+                        ? `${status.progress}/${status.total} バッチ処理中: ${status.message || ''}`
+                        : (status.message || '処理中...');
+                    setBuildMemopediaProgress(progressText);
+
+                    if (status.status === 'completed' || status.status === 'failed') {
+                        if (buildMemopediaPollRef.current) {
+                            clearInterval(buildMemopediaPollRef.current);
+                            buildMemopediaPollRef.current = null;
+                        }
+                        setIsBuildingMemopedia(false);
+                        if (status.status === 'completed') {
+                            const r = status.result;
+                            if (r) {
+                                setBuildMemopediaResult(
+                                    `${r.total_entities} エンティティ抽出, ${r.new_pages} 新規, ${r.updated_pages} 更新 (${r.batches_processed} バッチ, ${r.messages_processed} メッセージ)`
+                                );
+                            } else {
+                                setBuildMemopediaResult(status.message || '完了');
+                            }
+                        } else {
+                            setBuildMemopediaError(status.error || '失敗しました');
+                        }
+                    }
+                } catch {
+                    // polling error, ignore
+                }
+            }, 2000);
+        } catch (e: any) {
+            setIsBuildingMemopedia(false);
+            setBuildMemopediaError(e.message || '開始に失敗しました');
+        }
+    };
+
+    // Cleanup build-memopedia polling on unmount
+    useEffect(() => {
+        return () => {
+            if (buildMemopediaPollRef.current) {
+                clearInterval(buildMemopediaPollRef.current);
+            }
+        };
+    }, []);
 
     // Chronicle diagnosis state
     const [isDiagnosing, setIsDiagnosing] = useState(false);
@@ -993,6 +1071,50 @@ export default function MemoryRecall({ personaId }: MemoryRecallProps) {
                 <div className={styles.error}>
                     <AlertCircle size={16} />
                     <span>{diagnosisError}</span>
+                </div>
+            )}
+
+            {/* Build Memopedia from Logs */}
+            <div className={styles.header} style={{ marginTop: '2rem' }}>
+                <Brain size={24} className={styles.icon} />
+                <div>
+                    <h3 className={styles.title}>Memopedia ログ構築</h3>
+                    <p className={styles.description}>
+                        チャットログからエンティティ（人物・用語・計画等）を抽出し、Memopediaページを自動生成・更新します。
+                        既存ページには新しい情報が追記されます。
+                    </p>
+                </div>
+            </div>
+
+            <button
+                className={styles.executeButton}
+                onClick={handleBuildMemopediaFromLogs}
+                disabled={isBuildingMemopedia}
+                style={{ background: '#6b46c1' }}
+            >
+                {isBuildingMemopedia ? (
+                    <><Loader2 size={16} className={styles.loader} /> 処理中...</>
+                ) : (
+                    <><Brain size={16} /> ログからMemopediaを構築</>
+                )}
+            </button>
+
+            {buildMemopediaProgress && isBuildingMemopedia && (
+                <div style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: '#a78bfa' }}>
+                    {buildMemopediaProgress}
+                </div>
+            )}
+
+            {buildMemopediaError && (
+                <div className={styles.error}>
+                    <AlertCircle size={16} />
+                    <span>{buildMemopediaError}</span>
+                </div>
+            )}
+
+            {buildMemopediaResult && (
+                <div className={styles.deleteResult} style={{ color: '#69db7c' }}>
+                    {buildMemopediaResult}
                 </div>
             )}
 

@@ -521,7 +521,7 @@ def build_context_payload(
             range_before=range_before,
             range_after=range_after,
             scope=scope,
-            exclude_tags=["handy_tool"],
+            exclude_tags=["handy_tool", "spell"],
         )
         for _, bundle, score in groups:
             # Build a single system message summarizing the group

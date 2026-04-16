@@ -1484,6 +1484,19 @@ class SEARuntime:
         finally:
             db.close()
 
+    def _is_spell_enabled_for_persona(self, persona) -> bool:
+        """Check per-persona spell system toggle from DB."""
+        persona_id = getattr(persona, "persona_id", None)
+        if not persona_id or not self.manager:
+            return False  # fallback: disabled
+        db = self.manager.SessionLocal()
+        try:
+            from database.models import AI as AIModel
+            ai = db.query(AIModel).filter_by(AIID=persona_id).first()
+            return ai.SPELL_ENABLED if ai else False
+        finally:
+            db.close()
+
     def _generate_chronicle(
         self,
         persona,
@@ -1521,13 +1534,13 @@ class SEARuntime:
         # Previously this only fetched from the default persona thread, missing
         # messages logged on building-specific threads.
         import json as _json
-        # Exclude handy_tool tagged messages — they contain Memopedia content
+        # Exclude handy_tool/spell tagged messages — they contain Memopedia/log content
         # that is already stored there, so including them would cause duplication.
         cur = adapter.conn.execute(
             "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
             "FROM messages "
             "WHERE NOT EXISTS ("
-            "  SELECT 1 FROM json_each(metadata, '$.tags') WHERE json_each.value = 'handy_tool'"
+            "  SELECT 1 FROM json_each(metadata, '$.tags') WHERE json_each.value IN ('handy_tool', 'spell')"
             ") "
             "ORDER BY created_at ASC"
         )

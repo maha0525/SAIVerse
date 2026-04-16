@@ -704,6 +704,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "INTERACTION_MODE": ai.INTERACTION_MODE,
                 "CHRONICLE_ENABLED": ai.CHRONICLE_ENABLED,
                 "MEMORY_WEAVE_CONTEXT": ai.MEMORY_WEAVE_CONTEXT,
+                "SPELL_ENABLED": ai.SPELL_ENABLED,
             }
         finally:
             db.close()
@@ -745,6 +746,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         appearance_image_path: Optional[str] = None,
         chronicle_enabled: Optional[bool] = None,
         memory_weave_context: Optional[bool] = None,
+        spell_enabled: Optional[bool] = None,
     ) -> str:
         db = self.SessionLocal()
         try:
@@ -849,6 +851,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             # Update Memory Weave context injection toggle
             if memory_weave_context is not None:
                 ai.MEMORY_WEAVE_CONTEXT = memory_weave_context
+            # Update Spell system toggle
+            if spell_enabled is not None:
+                ai.SPELL_ENABLED = spell_enabled
             db.commit()
 
             llm_warnings = []

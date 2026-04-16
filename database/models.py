@@ -49,6 +49,7 @@ class AI(Base):
     PREVIOUS_INTERACTION_MODE = Column(String(32), default='auto', nullable=False)
     CHRONICLE_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona Chronicle auto-generation toggle
     MEMORY_WEAVE_CONTEXT = Column(Boolean, default=True, nullable=False)  # Per-persona Memory Weave context injection toggle
+    SPELL_ENABLED = Column(Boolean, default=False, nullable=False)  # Per-persona spell system toggle
     METABOLISM_ANCHORS = Column(Text, nullable=True)  # JSON: per-model anchor state {"model": {"anchor_id": "...", "updated_at": "..."}}
 
 class Building(Base):
