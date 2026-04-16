@@ -64,12 +64,15 @@ def merge_reasoning_strings(chunks: List[str]) -> List[Dict[str, str]]:
 # Image attachment helpers (shared across providers)
 # ---------------------------------------------------------------------------
 
-def parse_attachment_limit(provider: str = "") -> Optional[int]:
+DEFAULT_ATTACHMENT_LIMIT = 4
+
+
+def parse_attachment_limit(provider: str = "") -> int:
     """Parse image attachment embed limit from environment variables.
 
     Checks ``SAIVERSE_{PROVIDER}_ATTACHMENT_LIMIT`` first, then the
     universal ``SAIVERSE_ATTACHMENT_LIMIT`` as fallback.
-    Returns ``None`` when no limit is configured.
+    Returns ``DEFAULT_ATTACHMENT_LIMIT`` (4) when no limit is configured.
     """
     limit_str = None
     if provider:
@@ -77,13 +80,13 @@ def parse_attachment_limit(provider: str = "") -> Optional[int]:
     if limit_str is None:
         limit_str = os.getenv("SAIVERSE_ATTACHMENT_LIMIT")
     if limit_str is None:
-        return None
+        return DEFAULT_ATTACHMENT_LIMIT
     try:
         val = int(limit_str.strip())
         return max(val, 0)
     except ValueError:
         _log.warning("Invalid attachment limit '%s'; ignoring", limit_str)
-        return None
+        return DEFAULT_ATTACHMENT_LIMIT
 
 
 def compute_allowed_attachment_keys(

@@ -604,6 +604,23 @@ def load_image_bytes_for_llm(path: Path, mime_type: str, max_bytes: Optional[int
             LOGGER.exception("Failed to read image for LLM: %s", path)
             return None, None
 
+        # Verify actual format matches declared MIME type using PIL.
+        # mimetypes.guess_type() can be unreliable on Windows (registry-dependent),
+        # causing e.g. JPEG files to be declared as image/png.
+        if Image is not None:
+            try:
+                detected_fmt = Image.open(BytesIO(data)).format  # 'JPEG', 'PNG', etc.
+                if detected_fmt:
+                    detected_mime = f"image/{detected_fmt.lower()}"
+                    if detected_mime in SUPPORTED_LLM_IMAGE_MIME and detected_mime != effective_mime:
+                        LOGGER.warning(
+                            "MIME type mismatch for %s: declared=%s, detected=%s; using detected",
+                            path, effective_mime, detected_mime,
+                        )
+                        effective_mime = detected_mime
+            except Exception:
+                pass  # PIL detection failed; proceed with declared MIME type
+
     if effective_mime not in SUPPORTED_LLM_IMAGE_MIME:
         LOGGER.warning("Using raw bytes for potentially unsupported mime '%s'", mime_type)
 

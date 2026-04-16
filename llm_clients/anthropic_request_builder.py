@@ -72,8 +72,11 @@ def _prepare_anthropic_system(
 
 def _collect_attachment_state(
     messages: List[Dict[str, Any]],
-) -> Tuple[Dict[int, List[Dict[str, Any]]], Set[int], Optional[int], Optional[Set[Tuple[int, int]]]]:
-    max_image_embeds = parse_attachment_limit("ANTHROPIC")
+    max_image_embeds: Optional[int] = None,
+) -> Tuple[Dict[int, List[Dict[str, Any]]], Set[int], int, Optional[Set[Tuple[int, int]]]]:
+    # Use caller-supplied value (from client config / session override) if provided,
+    # otherwise fall back to env var / default (DEFAULT_ATTACHMENT_LIMIT=4).
+    effective_limit = max_image_embeds if max_image_embeds is not None else parse_attachment_limit("ANTHROPIC")
     attachment_cache: Dict[int, List[Dict[str, Any]]] = {}
     skip_summary_indices: Set[int] = set()
     exempt_indices: Set[int] = set()
@@ -91,8 +94,8 @@ def _collect_attachment_state(
         if media_items:
             attachment_cache[idx] = list(media_items)
 
-    allowed_attachment_keys = compute_allowed_attachment_keys(attachment_cache, max_image_embeds, exempt_indices)
-    return attachment_cache, skip_summary_indices, max_image_embeds, allowed_attachment_keys
+    allowed_attachment_keys = compute_allowed_attachment_keys(attachment_cache, effective_limit, exempt_indices)
+    return attachment_cache, skip_summary_indices, effective_limit, allowed_attachment_keys
 
 
 def _build_anthropic_content_blocks(
@@ -165,13 +168,16 @@ def _prepare_anthropic_messages(
     messages: List[Dict[str, Any]],
     supports_images: bool = False,
     max_image_bytes: Optional[int] = None,
+    max_image_embeds: Optional[int] = None,
     enable_cache: bool = True,
     cache_ttl: str = "5m",
 ) -> List[Dict[str, Any]]:
-    attachment_cache, skip_summary_indices, max_image_embeds, allowed_attachment_keys = _collect_attachment_state(messages)
+    attachment_cache, skip_summary_indices, effective_limit, allowed_attachment_keys = _collect_attachment_state(
+        messages, max_image_embeds=max_image_embeds
+    )
     logging.debug(
         "[anthropic] attachment limit=%s, cached=%d msgs with images",
-        "∞" if max_image_embeds is None else max_image_embeds,
+        effective_limit,
         len(attachment_cache),
     )
 
@@ -250,12 +256,14 @@ def build_request_params(
     thinking_effort: Optional[str],
     supports_images: bool,
     max_image_bytes: Optional[int],
+    max_image_embeds: Optional[int] = None,
 ) -> Dict[str, Any]:
     system_blocks, remaining_messages = _prepare_anthropic_system(messages, enable_cache=enable_cache, cache_ttl=cache_ttl)
     prepared_messages = _prepare_anthropic_messages(
         remaining_messages,
         supports_images=supports_images,
         max_image_bytes=max_image_bytes,
+        max_image_embeds=max_image_embeds,
         enable_cache=enable_cache,
         cache_ttl=cache_ttl,
     )
