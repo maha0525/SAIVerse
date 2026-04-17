@@ -47,6 +47,7 @@ async def addon_events():
                     yield ": keep-alive\n\n"
         except asyncio.CancelledError:
             LOGGER.debug("addon_events: SSE client disconnected (cancelled)")
+            raise
         except Exception:
             LOGGER.exception("addon_events: unexpected error in SSE generator")
         finally:

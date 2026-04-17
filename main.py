@@ -447,7 +447,8 @@ def main():
         app,
         host="0.0.0.0",
         port=manager.ui_port,
-        log_level="info"
+        log_level="info",
+        timeout_graceful_shutdown=5,
     )
 
 
