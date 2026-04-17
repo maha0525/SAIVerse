@@ -343,7 +343,7 @@ function ParamsSection({
     const [saving, setSaving] = useState(false);
     const [addingPersona, setAddingPersona] = useState(false);
 
-    const configurableSchemas = addon.params_schema;
+    const configurableSchemas = addon.params_schema.filter((s) => !s.persona_configurable);
     const personaConfigurableSchemas = addon.params_schema.filter((s) => s.persona_configurable);
 
     // 保存（グローバル）
