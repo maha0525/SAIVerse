@@ -7,10 +7,14 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
+import re
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from api.deps import get_manager
@@ -27,16 +31,22 @@ router = APIRouter()
 class AddonParamSchema(BaseModel):
     key: str
     label: str
-    type: str  # "toggle" | "dropdown" | "slider" | "file"
+    description: Optional[str] = None
+    type: str  # "toggle" | "text" | "number" | "file" | "dropdown" | "slider"
     default: Any = None
     persona_configurable: bool = False
+    placeholder: Optional[str] = None  # text / number 用の placeholder
     # dropdown 用
     options: Optional[List[str]] = None
-    # slider 用
+    # number / slider 用
     min: Optional[float] = None
     max: Optional[float] = None
     step: Optional[float] = None
     value_type: Optional[str] = None  # "int" | "float"
+    # file 用
+    accept: Optional[str] = None  # MIME type CSV: "audio/wav,audio/mpeg,video/mp4"
+    max_size_mb: Optional[float] = None  # デフォルト 500MB。本体上限 1GB
+    preview: Optional[str] = None  # "audio" | "image" | None
 
 
 class AddonUiBubbleButton(BaseModel):
@@ -398,3 +408,301 @@ def get_message_addon_metadata(
         return {"message_id": message_id, "metadata": result}
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# File parameter endpoints (per-persona)
+# ---------------------------------------------------------------------------
+
+_SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+_SYSTEM_MAX_SIZE_BYTES = 1024 * 1024 * 1024  # 1 GB
+
+
+def _addon_files_base() -> Path:
+    from saiverse.data_paths import get_saiverse_home
+    return get_saiverse_home() / "user_data" / "addon_files"
+
+
+def _validate_names(*names: str) -> None:
+    for name in names:
+        if not name or not _SAFE_NAME_RE.match(name):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid name (alphanumeric, -, _ only): {name!r}",
+            )
+
+
+def _get_file_param_schema(addon_name: str, param_key: str) -> AddonParamSchema:
+    from saiverse.data_paths import EXPANSION_DATA_DIR
+    manifest_path = EXPANSION_DATA_DIR / addon_name / "addon.json"
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail=f"Addon manifest not found: {addon_name}")
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read addon manifest: {exc}")
+    for param in data.get("params_schema", []):
+        if param.get("key") == param_key and param.get("type") == "file":
+            return AddonParamSchema(**param)
+    raise HTTPException(
+        status_code=404,
+        detail=f"File parameter '{param_key}' not found in addon '{addon_name}'",
+    )
+
+
+def _resolve_file_dir(addon_name: str, persona_id: Optional[str], param_key: str) -> Path:
+    base = _addon_files_base() / addon_name
+    if persona_id:
+        return base / "personas" / persona_id
+    return base / "global"
+
+
+def _ext_from_content_type(content_type: str) -> str:
+    ext = mimetypes.guess_extension(content_type)
+    if ext:
+        return ext
+    mapping = {
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+        "audio/mpeg": ".mp3",
+        "audio/mp3": ".mp3",
+        "audio/flac": ".flac",
+        "audio/ogg": ".ogg",
+        "video/mp4": ".mp4",
+        "video/webm": ".webm",
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/webp": ".webp",
+    }
+    return mapping.get(content_type, "")
+
+
+@router.post("/{addon_name}/config/persona/{persona_id}/file/{param_key}")
+async def upload_persona_file(
+    addon_name: str,
+    persona_id: str,
+    param_key: str,
+    file: UploadFile = File(...),
+    _manager=Depends(get_manager),
+):
+    """ペルソナ別のファイルパラメータをアップロードする。
+
+    addon.json の params_schema で type="file" かつ persona_configurable=true の
+    パラメータにのみ使用可能。ファイルは ~/.saiverse/user_data/addon_files/ 配下に
+    保存され、AddonPersonaConfig.params_json に保存先パスが書き込まれる。
+    """
+    _validate_names(addon_name, persona_id, param_key)
+    schema = _get_file_param_schema(addon_name, param_key)
+
+    if not schema.persona_configurable:
+        raise HTTPException(status_code=400, detail="This parameter is not persona-configurable")
+
+    # Content-type validation
+    ct = file.content_type or "application/octet-stream"
+    if schema.accept:
+        allowed = [t.strip() for t in schema.accept.split(",")]
+        if ct not in allowed:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File type '{ct}' not allowed. Accepted: {schema.accept}",
+            )
+
+    # Size limit
+    max_bytes = int((schema.max_size_mb or 500) * 1024 * 1024)
+    max_bytes = min(max_bytes, _SYSTEM_MAX_SIZE_BYTES)
+
+    # Read file with size check
+    content = await file.read()
+    if len(content) > max_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large ({len(content)} bytes). Max: {max_bytes} bytes ({max_bytes / 1024 / 1024:.0f} MB)",
+        )
+
+    # Determine extension and save
+    ext = _ext_from_content_type(ct)
+    dest_dir = _resolve_file_dir(addon_name, persona_id, param_key)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_file = dest_dir / f"{param_key}{ext}"
+
+    # Atomic write: temp file then rename
+    tmp_file = dest_file.with_suffix(dest_file.suffix + ".tmp")
+    try:
+        tmp_file.write_bytes(content)
+        shutil.move(str(tmp_file), str(dest_file))
+    except Exception as exc:
+        tmp_file.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {exc}")
+
+    # Update AddonPersonaConfig.params_json
+    from database.models import AddonPersonaConfig
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    db = _get_session()
+    try:
+        row = (
+            db.query(AddonPersonaConfig)
+            .filter(
+                AddonPersonaConfig.addon_name == addon_name,
+                AddonPersonaConfig.persona_id == persona_id,
+            )
+            .first()
+        )
+        params: Dict[str, Any] = {}
+        if row and row.params_json:
+            try:
+                params = json.loads(row.params_json)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        params[param_key] = str(dest_file)
+        params_str = json.dumps(params, ensure_ascii=False)
+
+        stmt = sqlite_insert(AddonPersonaConfig).values(
+            addon_name=addon_name,
+            persona_id=persona_id,
+            params_json=params_str,
+        ).on_conflict_do_update(
+            index_elements=["addon_name", "persona_id"],
+            set_={"params_json": params_str},
+        )
+        db.execute(stmt)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+    LOGGER.info(
+        "addon file uploaded: addon=%s persona=%s key=%s size=%d path=%s",
+        addon_name, persona_id, param_key, len(content), dest_file,
+    )
+    return {
+        "path": str(dest_file),
+        "size": len(content),
+        "content_type": ct,
+    }
+
+
+@router.get("/{addon_name}/config/persona/{persona_id}/file/{param_key}")
+async def get_persona_file(
+    addon_name: str,
+    persona_id: str,
+    param_key: str,
+    _manager=Depends(get_manager),
+):
+    """ペルソナ別のファイルパラメータを取得(プレビュー/ダウンロード)する。"""
+    _validate_names(addon_name, persona_id, param_key)
+    _get_file_param_schema(addon_name, param_key)
+
+    # Look up file path from AddonPersonaConfig
+    from database.models import AddonPersonaConfig
+    db = _get_session()
+    try:
+        row = (
+            db.query(AddonPersonaConfig)
+            .filter(
+                AddonPersonaConfig.addon_name == addon_name,
+                AddonPersonaConfig.persona_id == persona_id,
+            )
+            .first()
+        )
+        if not row or not row.params_json:
+            raise HTTPException(status_code=404, detail="No persona config found")
+        params = json.loads(row.params_json)
+        file_path = params.get(param_key)
+        if not file_path:
+            raise HTTPException(status_code=404, detail="File parameter not set")
+    finally:
+        db.close()
+
+    path = Path(file_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="File not found on disk")
+
+    ct = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+    return FileResponse(
+        path=str(path),
+        media_type=ct,
+        filename=path.name,
+        content_disposition_type="inline",
+    )
+
+
+@router.delete("/{addon_name}/config/persona/{persona_id}/file/{param_key}")
+async def delete_persona_file(
+    addon_name: str,
+    persona_id: str,
+    param_key: str,
+    _manager=Depends(get_manager),
+):
+    """ペルソナ別のファイルパラメータを削除する。"""
+    _validate_names(addon_name, persona_id, param_key)
+
+    # Remove from params_json
+    from database.models import AddonPersonaConfig
+    db = _get_session()
+    file_path: Optional[str] = None
+    try:
+        row = (
+            db.query(AddonPersonaConfig)
+            .filter(
+                AddonPersonaConfig.addon_name == addon_name,
+                AddonPersonaConfig.persona_id == persona_id,
+            )
+            .first()
+        )
+        if row and row.params_json:
+            params = json.loads(row.params_json)
+            file_path = params.pop(param_key, None)
+            row.params_json = json.dumps(params, ensure_ascii=False)
+            db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+    # Delete physical file
+    if file_path:
+        p = Path(file_path)
+        if p.exists():
+            p.unlink()
+            LOGGER.info("addon file deleted: %s", p)
+
+    return {"deleted": True}
+
+
+# ---------------------------------------------------------------------------
+# File parameter endpoints (global) — scaffold
+# ---------------------------------------------------------------------------
+
+@router.post("/{addon_name}/config/file/{param_key}")
+async def upload_global_file(
+    addon_name: str,
+    param_key: str,
+    file: UploadFile = File(...),
+    _manager=Depends(get_manager),
+):
+    """グローバルのファイルパラメータをアップロードする（雛形）。"""
+    raise HTTPException(status_code=501, detail="Global file upload not yet implemented")
+
+
+@router.get("/{addon_name}/config/file/{param_key}")
+async def get_global_file(
+    addon_name: str,
+    param_key: str,
+    _manager=Depends(get_manager),
+):
+    """グローバルのファイルパラメータを取得する（雛形）。"""
+    raise HTTPException(status_code=501, detail="Global file retrieval not yet implemented")
+
+
+@router.delete("/{addon_name}/config/file/{param_key}")
+async def delete_global_file(
+    addon_name: str,
+    param_key: str,
+    _manager=Depends(get_manager),
+):
+    """グローバルのファイルパラメータを削除する（雛形）。"""
+    raise HTTPException(status_code=501, detail="Global file deletion not yet implemented")

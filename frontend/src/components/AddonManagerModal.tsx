@@ -12,14 +12,19 @@ import styles from './AddonManagerModal.module.css';
 interface AddonParamSchema {
     key: string;
     label: string;
-    type: 'toggle' | 'dropdown' | 'slider' | 'file';
+    description?: string;
+    type: 'toggle' | 'text' | 'number' | 'dropdown' | 'slider' | 'file';
     default: unknown;
     persona_configurable: boolean;
+    placeholder?: string;
     options?: string[];
     min?: number;
     max?: number;
     step?: number;
     value_type?: 'int' | 'float';
+    accept?: string;
+    max_size_mb?: number;
+    preview?: 'audio' | 'image';
 }
 
 interface AddonInfo {
@@ -55,10 +60,14 @@ function ParamControl({
     schema,
     value,
     onChange,
+    addonName,
+    personaId,
 }: {
     schema: AddonParamSchema;
     value: unknown;
     onChange: (key: string, val: unknown) => void;
+    addonName?: string;
+    personaId?: string;
 }) {
     const current = value !== undefined ? value : schema.default;
 
@@ -75,6 +84,38 @@ function ParamControl({
                     <span className={styles.toggleSlider} />
                 </label>
             );
+
+        case 'text':
+            return (
+                <input
+                    type="text"
+                    className={styles.textInput}
+                    value={String(current ?? '')}
+                    placeholder={schema.placeholder ?? ''}
+                    onChange={(e) => onChange(schema.key, e.target.value)}
+                />
+            );
+
+        case 'number': {
+            const num = typeof current === 'number' ? current : Number(current ?? schema.min ?? 0);
+            return (
+                <input
+                    type="number"
+                    className={styles.numberInput}
+                    value={num}
+                    min={schema.min}
+                    max={schema.max}
+                    step={schema.step ?? 1}
+                    placeholder={schema.placeholder ?? ''}
+                    onChange={(e) => {
+                        const v = schema.value_type === 'int'
+                            ? parseInt(e.target.value, 10)
+                            : parseFloat(e.target.value);
+                        onChange(schema.key, isNaN(v) ? schema.default : v);
+                    }}
+                />
+            );
+        }
 
         case 'dropdown':
             return (
@@ -93,7 +134,7 @@ function ParamControl({
             const min = schema.min ?? 0;
             const max = schema.max ?? 100;
             const step = schema.step ?? 1;
-            const num = typeof current === 'number' ? current : Number(current ?? min);
+            const snum = typeof current === 'number' ? current : Number(current ?? min);
             return (
                 <div className={styles.sliderRow}>
                     <input
@@ -102,7 +143,7 @@ function ParamControl({
                         min={min}
                         max={max}
                         step={step}
-                        value={num}
+                        value={snum}
                         onChange={(e) => {
                             const v = schema.value_type === 'int'
                                 ? parseInt(e.target.value, 10)
@@ -110,39 +151,180 @@ function ParamControl({
                             onChange(schema.key, v);
                         }}
                     />
-                    <span className={styles.sliderValue}>{num}</span>
+                    <span className={styles.sliderValue}>{snum}</span>
                 </div>
             );
         }
 
         case 'file':
             return (
-                <div
-                    className={styles.fileDropArea}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={(e) => {
-                        e.preventDefault();
-                        const file = e.dataTransfer.files[0];
-                        if (file) onChange(schema.key, file.name);
-                    }}
-                >
-                    <span className={styles.fileDropText}>
-                        {current ? String(current) : 'ファイルをドロップ or クリック'}
-                    </span>
-                    <input
-                        type="file"
-                        className={styles.fileInput}
-                        onChange={(e) => {
-                            const file = e.target.files?.[0];
-                            if (file) onChange(schema.key, file.name);
-                        }}
-                    />
-                </div>
+                <FileParamControl
+                    schema={schema}
+                    value={current}
+                    onChange={onChange}
+                    addonName={addonName}
+                    personaId={personaId}
+                />
             );
 
         default:
             return <span className={styles.unsupported}>（未対応の型: {schema.type}）</span>;
     }
+}
+
+// ---------------------------------------------------------------------------
+// FileParamControl — file upload / preview / delete
+// ---------------------------------------------------------------------------
+
+function FileParamControl({
+    schema,
+    value,
+    onChange,
+    addonName,
+    personaId,
+}: {
+    schema: AddonParamSchema;
+    value: unknown;
+    onChange: (key: string, val: unknown) => void;
+    addonName?: string;
+    personaId?: string;
+}) {
+    const [uploading, setUploading] = React.useState(false);
+    const [error, setError] = React.useState<string | null>(null);
+    const [previewUrl, setPreviewUrl] = React.useState<string | null>(null);
+    const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+    const hasFile = !!value;
+    const canUpload = !!addonName && !!personaId;
+
+    // Build API URLs
+    const fileApiBase = canUpload
+        ? `/api/addon/${addonName}/config/persona/${encodeURIComponent(personaId!)}/file/${schema.key}`
+        : null;
+
+    // Set preview URL when file exists
+    React.useEffect(() => {
+        if (hasFile && fileApiBase) {
+            setPreviewUrl(fileApiBase);
+        } else {
+            setPreviewUrl(null);
+        }
+    }, [hasFile, fileApiBase]);
+
+    const handleUpload = async (file: File) => {
+        if (!fileApiBase) return;
+        setUploading(true);
+        setError(null);
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            const res = await fetch(fileApiBase, {
+                method: 'POST',
+                body: formData,
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({ detail: res.statusText }));
+                throw new Error(body.detail || `Upload failed: ${res.status}`);
+            }
+            const data = await res.json();
+            onChange(schema.key, data.path);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Upload failed');
+        } finally {
+            setUploading(false);
+        }
+    };
+
+    const handleDelete = async () => {
+        if (!fileApiBase) return;
+        setError(null);
+        try {
+            await fetch(fileApiBase, { method: 'DELETE' });
+            onChange(schema.key, undefined);
+            setPreviewUrl(null);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Delete failed');
+        }
+    };
+
+    const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const f = e.target.files?.[0];
+        if (f) handleUpload(f);
+        if (e.target) e.target.value = '';
+    };
+
+    const handleDrop = (e: React.DragEvent) => {
+        e.preventDefault();
+        const f = e.dataTransfer.files[0];
+        if (f) handleUpload(f);
+    };
+
+    return (
+        <div className={styles.fileControl}>
+            {/* Current file info + preview */}
+            {hasFile && previewUrl && (
+                <div className={styles.filePreviewRow}>
+                    {schema.preview === 'audio' && (
+                        <audio controls src={previewUrl} className={styles.audioPreview}>
+                            <track kind="captions" />
+                        </audio>
+                    )}
+                    {schema.preview === 'image' && (
+                        <img src={previewUrl} alt={schema.label} className={styles.imagePreview} />
+                    )}
+                    {!schema.preview && (
+                        <span className={styles.fileNameDisplay}>
+                            {String(value).split(/[\\/]/).pop()}
+                        </span>
+                    )}
+                    <button
+                        className={styles.fileDeleteBtn}
+                        onClick={handleDelete}
+                        title="削除（デフォルトに戻す）"
+                    >
+                        <Trash2 size={13} />
+                    </button>
+                </div>
+            )}
+
+            {/* Upload area */}
+            <div
+                className={`${styles.fileDropArea} ${uploading ? styles.fileUploading : ''}`}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={handleDrop}
+                onClick={() => fileInputRef.current?.click()}
+            >
+                <span className={styles.fileDropText}>
+                    {uploading
+                        ? 'アップロード中...'
+                        : hasFile
+                            ? 'ファイルを差し替え'
+                            : 'ファイルをドロップ or クリック'}
+                </span>
+                {schema.description && !hasFile && (
+                    <span className={styles.fileHint}>{schema.description}</span>
+                )}
+                <input
+                    ref={fileInputRef}
+                    type="file"
+                    className={styles.fileInput}
+                    accept={schema.accept}
+                    onChange={handleFileSelect}
+                />
+            </div>
+
+            {/* Error display */}
+            {error && <span className={styles.fileError}>{error}</span>}
+
+            {/* Size limit hint */}
+            {!hasFile && schema.max_size_mb && (
+                <span className={styles.fileHint}>
+                    最大 {schema.max_size_mb >= 1024 ? `${(schema.max_size_mb / 1024).toFixed(1)} GB` : `${schema.max_size_mb} MB`}
+                    {schema.accept && ` / ${schema.accept.split(',').map(t => t.split('/')[1]).join(', ')}`}
+                </span>
+            )}
+        </div>
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -258,6 +440,7 @@ function ParamsSection({
                             schema={schema}
                             value={globalParams[schema.key]}
                             onChange={handleGlobalChange}
+                            addonName={addon.addon_name}
                         />
                     </div>
                 ))}
@@ -313,6 +496,8 @@ function ParamsSection({
                                         schema={schema}
                                         value={pc.params[schema.key]}
                                         onChange={(key, val) => handlePersonaChange(pc.persona_id, key, val)}
+                                        addonName={addon.addon_name}
+                                        personaId={pc.persona_id}
                                     />
                                 </div>
                             ))}

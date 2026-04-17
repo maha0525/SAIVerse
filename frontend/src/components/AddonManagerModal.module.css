@@ -338,9 +338,99 @@
     height: 100%;
 }
 
+/* --- Text / Number --- */
+
+.textInput,
+.numberInput {
+    padding: 0.3rem 0.5rem;
+    border: 1px solid #cbd5e1;
+    border-radius: 0.375rem;
+    font-size: 0.85rem;
+    background: transparent;
+    color: inherit;
+    min-width: 120px;
+    outline: none;
+    transition: border-color 0.15s;
+}
+
+.textInput:focus,
+.numberInput:focus {
+    border-color: #6366f1;
+}
+
+.numberInput {
+    min-width: 80px;
+    max-width: 120px;
+}
+
 .unsupported {
     font-size: 0.8rem;
     color: #94a3b8;
+}
+
+/* --- FileControl --- */
+
+.fileControl {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    min-width: 200px;
+}
+
+.filePreviewRow {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.audioPreview {
+    max-width: 220px;
+    height: 32px;
+}
+
+.imagePreview {
+    max-width: 120px;
+    max-height: 80px;
+    border-radius: 0.375rem;
+    object-fit: contain;
+}
+
+.fileNameDisplay {
+    font-size: 0.8rem;
+    color: #64748b;
+    word-break: break-all;
+}
+
+.fileDeleteBtn {
+    background: none;
+    border: none;
+    color: #94a3b8;
+    cursor: pointer;
+    padding: 0.2rem;
+    border-radius: 0.25rem;
+    display: flex;
+    align-items: center;
+}
+
+.fileDeleteBtn:hover {
+    color: #ef4444;
+    background: rgba(239, 68, 68, 0.1);
+}
+
+.fileUploading {
+    opacity: 0.5;
+    pointer-events: none;
+}
+
+.fileError {
+    font-size: 0.75rem;
+    color: #ef4444;
+}
+
+.fileHint {
+    font-size: 0.72rem;
+    color: #94a3b8;
+    display: block;
 }
 
 /* --- Persona config --- */
