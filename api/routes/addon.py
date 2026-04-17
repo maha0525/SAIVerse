@@ -147,6 +147,7 @@ def _get_session():
 # ---------------------------------------------------------------------------
 
 @router.get("/", response_model=List[AddonInfo])
+@router.get("", response_model=List[AddonInfo], include_in_schema=False)
 def list_addons(_manager=Depends(get_manager)):
     """expansion_data/ 下のアドオン一覧を返す。
 

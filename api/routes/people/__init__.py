@@ -17,6 +17,7 @@ class PersonaListItem(BaseModel):
 
 
 @router.get("/", response_model=List[PersonaListItem], tags=["people"])
+@router.get("", response_model=List[PersonaListItem], include_in_schema=False)
 def list_all_personas() -> List[PersonaListItem]:
     """Return all registered personas (AI rows).
 

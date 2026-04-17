@@ -610,13 +610,21 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
     const [addons, setAddons] = useState<AddonInfo[]>([]);
     const [personas, setPersonas] = useState<{ id: string; name: string }[]>([]);
     const [loading, setLoading] = useState(false);
+    const [fetchError, setFetchError] = useState<string | null>(null);
 
     useEffect(() => {
         if (!isOpen) return;
         setLoading(true);
+        setFetchError(null);
         Promise.all([
-            fetch('/api/addon/').then((r) => r.json()),
-            fetch('/api/people/').then((r) => r.json()),
+            fetch('/api/addon/').then((r) => {
+                if (!r.ok) throw new Error(`/api/addon/ ${r.status} ${r.statusText}`);
+                return r.json();
+            }),
+            fetch('/api/people/').then((r) => {
+                if (!r.ok) throw new Error(`/api/people/ ${r.status} ${r.statusText}`);
+                return r.json();
+            }),
         ]).then(([addonData, peopleData]) => {
             setAddons(Array.isArray(addonData) ? addonData : []);
             const list = Array.isArray(peopleData)
@@ -626,6 +634,10 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
                 }))
                 : [];
             setPersonas(list);
+        }).catch((err: unknown) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            setFetchError(msg);
+            console.error('[AddonManager] fetch failed:', msg);
         }).finally(() => setLoading(false));
     }, [isOpen]);
 
@@ -652,7 +664,13 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
 
                 <div className={styles.content}>
                     {loading && <p className={styles.loadingText}>読み込み中...</p>}
-                    {!loading && addons.length === 0 && (
+                    {!loading && fetchError && (
+                        <div className={styles.errorState}>
+                            <p>読み込みに失敗しました</p>
+                            <p className={styles.errorDetail}>{fetchError}</p>
+                        </div>
+                    )}
+                    {!loading && !fetchError && addons.length === 0 && (
                         <div className={styles.emptyState}>
                             <Package size={40} className={styles.emptyIcon} />
                             <p>インストール済みのアドオンはありません</p>
