@@ -25,6 +25,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import hashlib
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from database.paths import default_db_path
@@ -34,6 +36,11 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
+
+
+def _canonical_hash(data: dict) -> str:
+    canonical = json.dumps(data, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
 def import_playbooks_from_directory(
@@ -96,6 +103,11 @@ def import_playbooks_from_directory(
                     json.dumps(required_credentials, ensure_ascii=False)
                     if required_credentials else None
                 )
+                try:
+                    source_rel = str(json_path.resolve().relative_to(ROOT))
+                except ValueError:
+                    source_rel = str(json_path)
+                source_hash = _canonical_hash(data)
 
                 # Check if already exists
                 existing = session.query(Playbook).filter(Playbook.name == name).first()
@@ -120,6 +132,8 @@ def import_playbooks_from_directory(
                             existing.user_selectable = user_selectable
                             existing.dev_only = dev_only
                             existing.required_credentials = required_credentials_json
+                            existing.source_file = source_rel
+                            existing.source_hash = source_hash
                             updated_count += 1
                             logging.info(f"Updated playbook '{name}' (router_callable={router_callable})")
                     else:
@@ -153,6 +167,8 @@ def import_playbooks_from_directory(
                         user_selectable=user_selectable,
                         dev_only=dev_only,
                         required_credentials=required_credentials_json,
+                        source_file=source_rel,
+                        source_hash=source_hash,
                     )
                     session.add(record)
                     imported_count += 1

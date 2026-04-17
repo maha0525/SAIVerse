@@ -319,9 +319,12 @@ def main():
     app_state.set_city_name(args.city_name)
     app_state.set_project_dir(str(Path(__file__).parent.resolve()))
 
-    # Sync builtin playbook flags from JSON definitions to DB.
-    # Fixes seed.py bug where user_selectable/dev_only/display_name were not set.
-    _sync_builtin_playbook_flags(manager.SessionLocal)
+    # Sync all file-based playbooks (builtin / expansion_data / user_data) to DB.
+    # Performs diff-based update: new files are imported, changed files are updated,
+    # unchanged files are skipped. DB-only playbooks (created via save_playbook tool)
+    # are left untouched.
+    from saiverse.playbook_sync import sync_playbooks_from_files
+    sync_playbooks_from_files(manager.SessionLocal)
 
     # Unity Gateway の起動（オプション）
     unity_gateway_port = int(os.getenv("UNITY_GATEWAY_PORT", "8765"))

@@ -307,7 +307,7 @@ function FileParamControl({
                 <input
                     ref={fileInputRef}
                     type="file"
-                    className={styles.fileInput}
+                    style={{ display: 'none' }}
                     accept={schema.accept}
                     onChange={handleFileSelect}
                 />
@@ -342,6 +342,16 @@ function ParamsSection({
     const [personaConfigs, setPersonaConfigs] = useState<PersonaPersonaConfig[]>([]);
     const [saving, setSaving] = useState(false);
     const [addingPersona, setAddingPersona] = useState(false);
+    const [collapsedPersonas, setCollapsedPersonas] = useState<Set<string>>(new Set());
+
+    const togglePersonaCollapse = (personaId: string) => {
+        setCollapsedPersonas((prev) => {
+            const next = new Set(prev);
+            if (next.has(personaId)) next.delete(personaId);
+            else next.add(personaId);
+            return next;
+        });
+    };
 
     const configurableSchemas = addon.params_schema.filter((s) => !s.persona_configurable);
     const personaConfigurableSchemas = addon.params_schema.filter((s) => s.persona_configurable);
@@ -477,32 +487,45 @@ function ParamsSection({
                         </div>
                     )}
 
-                    {personaConfigs.map((pc) => (
-                        <div key={pc.persona_id} className={styles.personaConfigBlock}>
-                            <div className={styles.personaConfigHeader}>
-                                <span className={styles.personaName}>{pc.persona_name}</span>
-                                <button
-                                    className={styles.deletePersonaBtn}
-                                    onClick={() => deletePersonaConfig(pc.persona_id)}
-                                    title="削除（デフォルトに戻す）"
+                    {personaConfigs.map((pc) => {
+                        const isCollapsed = collapsedPersonas.has(pc.persona_id);
+                        return (
+                            <div key={pc.persona_id} className={styles.personaConfigBlock}>
+                                <div
+                                    className={styles.personaConfigHeader}
+                                    onClick={() => togglePersonaCollapse(pc.persona_id)}
+                                    style={{ cursor: 'pointer' }}
                                 >
-                                    <Trash2 size={13} />
-                                </button>
-                            </div>
-                            {personaConfigurableSchemas.map((schema) => (
-                                <div key={schema.key} className={styles.paramRow}>
-                                    <span className={styles.paramLabel}>{schema.label}</span>
-                                    <ParamControl
-                                        schema={schema}
-                                        value={pc.params[schema.key]}
-                                        onChange={(key, val) => handlePersonaChange(pc.persona_id, key, val)}
-                                        addonName={addon.addon_name}
-                                        personaId={pc.persona_id}
-                                    />
+                                    <div className={styles.personaConfigHeaderLeft}>
+                                        {isCollapsed
+                                            ? <ChevronRight size={13} />
+                                            : <ChevronDown size={13} />
+                                        }
+                                        <span className={styles.personaName}>{pc.persona_name}</span>
+                                    </div>
+                                    <button
+                                        className={styles.deletePersonaBtn}
+                                        onClick={(e) => { e.stopPropagation(); deletePersonaConfig(pc.persona_id); }}
+                                        title="削除（デフォルトに戻す）"
+                                    >
+                                        <Trash2 size={13} />
+                                    </button>
                                 </div>
-                            ))}
-                        </div>
-                    ))}
+                                {!isCollapsed && personaConfigurableSchemas.map((schema) => (
+                                    <div key={schema.key} className={styles.paramRow}>
+                                        <span className={styles.paramLabel}>{schema.label}</span>
+                                        <ParamControl
+                                            schema={schema}
+                                            value={pc.params[schema.key]}
+                                            onChange={(key, val) => handlePersonaChange(pc.persona_id, key, val)}
+                                            addonName={addon.addon_name}
+                                            personaId={pc.persona_id}
+                                        />
+                                    </div>
+                                ))}
+                            </div>
+                        );
+                    })}
                 </div>
             )}
         </div>
@@ -545,10 +568,12 @@ function AddonCard({
                     {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
                 </button>
                 <div className={styles.addonMeta} onClick={() => setExpanded((v) => !v)}>
-                    <span className={styles.addonName}>{addon.display_name || addon.addon_name}</span>
-                    {addon.version && (
-                        <span className={styles.addonVersion}>v{addon.version}</span>
-                    )}
+                    <div className={styles.addonMetaRow}>
+                        <span className={styles.addonName}>{addon.display_name || addon.addon_name}</span>
+                        {addon.version && (
+                            <span className={styles.addonVersion}>v{addon.version}</span>
+                        )}
+                    </div>
                     {addon.description && (
                         <span className={styles.addonDesc}>{addon.description}</span>
                     )}

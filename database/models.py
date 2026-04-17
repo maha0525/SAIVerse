@@ -151,6 +151,8 @@ class Playbook(Base):
     user_selectable = Column(Boolean, nullable=False, default=False)  # Can be selected by user in UI
     dev_only = Column(Boolean, nullable=False, default=False)  # Only available when developer mode is enabled
     required_credentials = Column(Text, nullable=True, default=None)  # JSON list of required credential types e.g. '["x"]'
+    source_file = Column(String(512), nullable=True, default=None)  # Relative path from project root (file-originated playbooks)
+    source_hash = Column(String(64), nullable=True, default=None)   # SHA256 of canonical nodes_json (for diff detection)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
