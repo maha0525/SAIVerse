@@ -66,6 +66,21 @@ async function proxy(
     const method = req.method.toUpperCase();
     const headers = filterHeaders(req.headers, STRIP_REQUEST_HEADERS);
 
+    // audio/video 系 GET は Range ヘッダを剥がして常に 200 OK で全量取得する。
+    // Chrome の <audio> は progressive streaming (Range + 206) モードだと
+    // 途中でソケットを読み止めるケースがあり (Chrome 内部バッファ制御の副作用)、
+    // 結果として長時間音声が途中で停止する事象になっていた。シーク機能は
+    // 犠牲になるが、<audio> 要素は duration 判明後なら currentTime 書き込みで
+    // 擬似シーク可能なので実用上の影響は小さい。
+    const isMediaGet =
+        method === "GET" &&
+        (/\/audio\//.test(upstream.pathname) ||
+            /\/video\//.test(upstream.pathname) ||
+            /\.(wav|mp3|ogg|flac|mp4|webm|mov|m4a|aac)$/i.test(upstream.pathname));
+    if (isMediaGet) {
+        headers.delete("range");
+    }
+
     const hasBody = method !== "GET" && method !== "HEAD";
 
     let upstreamResp: Response;
