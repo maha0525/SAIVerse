@@ -1,0 +1,12 @@
+.indicator {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.4rem;
+    color: #6366f1;
+    border-radius: 0.4rem;
+}
+
+:global([data-theme="dark"]) .indicator {
+    color: #818cf8;
+}
