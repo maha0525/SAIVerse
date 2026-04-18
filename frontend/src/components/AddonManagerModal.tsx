@@ -443,13 +443,6 @@ function ParamsSection({
         });
     };
 
-    const deletePersonaConfig = async (personaId: string) => {
-        await fetch(`/api/addon/${addon.addon_name}/config/persona/${personaId}`, {
-            method: 'DELETE',
-        });
-        setPersonaConfigs((prev) => prev.filter((c) => c.persona_id !== personaId));
-    };
-
     const handlePersonaChange = (personaId: string, key: string, val: unknown) => {
         setPersonaConfigs((prev) => {
             const next = prev.map((c) =>
@@ -505,34 +498,21 @@ function ParamsSection({
                         <span className={styles.paramsGroupLabel}>ペルソナ別設定</span>
                     </div>
 
-                    <div className={styles.personaSelectorRow}>
-                        <select
-                            className={styles.personaSelector}
-                            value={selectedPersonaId}
-                            onChange={(e) => setSelectedPersonaId(e.target.value)}
-                        >
-                            <option value="">-- ペルソナを選択 --</option>
-                            {personas.map((p) => {
-                                const isConfigured = personaConfigs.some((c) => c.persona_id === p.id);
-                                return (
-                                    <option key={p.id} value={p.id}>
-                                        {p.name}{isConfigured ? '' : '（未設定）'}
-                                    </option>
-                                );
-                            })}
-                        </select>
-                        {selectedConfig && (
-                            <button
-                                className={styles.deletePersonaBtn}
-                                onClick={() => {
-                                    deletePersonaConfig(selectedPersonaId);
-                                }}
-                                title="削除（デフォルトに戻す）"
-                            >
-                                <Trash2 size={13} />
-                            </button>
-                        )}
-                    </div>
+                    <select
+                        className={styles.personaSelector}
+                        value={selectedPersonaId}
+                        onChange={(e) => setSelectedPersonaId(e.target.value)}
+                    >
+                        <option value="">-- ペルソナを選択 --</option>
+                        {personas.map((p) => {
+                            const isConfigured = personaConfigs.some((c) => c.persona_id === p.id);
+                            return (
+                                <option key={p.id} value={p.id}>
+                                    {p.name}{isConfigured ? '' : '（未設定）'}
+                                </option>
+                            );
+                        })}
+                    </select>
 
                     {selectedPersonaId && !selectedConfig && selectedPersona && (
                         <div className={styles.personaUnconfiguredHint}>

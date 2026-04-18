@@ -467,12 +467,6 @@
     gap: 0.5rem;
 }
 
-.personaSelectorRow {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
 .personaSelector {
     flex: 1;
     padding: 0.4rem 0.6rem;
@@ -529,23 +523,6 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
-}
-
-.deletePersonaBtn {
-    background: none;
-    border: 1px solid #e2e8f0;
-    cursor: pointer;
-    color: #cbd5e1;
-    padding: 0.35rem 0.4rem;
-    display: flex;
-    align-items: center;
-    border-radius: 0.4rem;
-    transition: all 0.15s;
-}
-
-.deletePersonaBtn:hover {
-    color: #ef4444;
-    border-color: #ef4444;
 }
 
 /* toggle used standalone (inside ParamsSection) */
@@ -673,10 +650,6 @@
 }
 
 :global([data-theme="dark"]) .personaConfigBlock {
-    border-color: #334155;
-}
-
-:global([data-theme="dark"]) .deletePersonaBtn {
     border-color: #334155;
 }
 
