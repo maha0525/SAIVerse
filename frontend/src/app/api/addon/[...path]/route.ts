@@ -91,14 +91,46 @@ async function proxy(
     }
 
     const respHeaders = filterHeaders(upstreamResp.headers, STRIP_RESPONSE_HEADERS);
-    return new Response(
-        method === "HEAD" ? null : upstreamResp.body,
-        {
+
+    // Connection: close を明示的に消して keep-alive が維持されるようにする。
+    // <audio> 要素が 206 レスポンス + Connection: close の組み合わせで、
+    // Content-Length 到達前に早期停止するケースがあるため。
+    respHeaders.delete("connection");
+    respHeaders.delete("keep-alive");
+
+    // 音声/動画など大きなメディアは「ストリーム素通し」だと Node fetch → Next
+    // ランタイム間のバックプレッシャーで upstream 側の socket が早期 close
+    // される事象が観測された (curl は問題なし、<audio> のみで再現)。
+    // メディア系 Content-Type のみバッファ展開してから返すことで、
+    // ブラウザ側への転送を Next ランタイム内完結にする。
+    const contentType = upstreamResp.headers.get("content-type") ?? "";
+    const isMedia =
+        contentType.startsWith("audio/") ||
+        contentType.startsWith("video/") ||
+        contentType.startsWith("image/");
+
+    if (method === "HEAD") {
+        return new Response(null, {
             status: upstreamResp.status,
             statusText: upstreamResp.statusText,
             headers: respHeaders,
-        },
-    );
+        });
+    }
+
+    if (isMedia) {
+        const buffer = await upstreamResp.arrayBuffer();
+        return new Response(buffer, {
+            status: upstreamResp.status,
+            statusText: upstreamResp.statusText,
+            headers: respHeaders,
+        });
+    }
+
+    return new Response(upstreamResp.body, {
+        status: upstreamResp.status,
+        statusText: upstreamResp.statusText,
+        headers: respHeaders,
+    });
 }
 
 export const GET = proxy;
