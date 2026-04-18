@@ -38,6 +38,10 @@ class AddonParamSchema(BaseModel):
     placeholder: Optional[str] = None  # text / number 用の placeholder
     # dropdown 用
     options: Optional[List[str]] = None
+    # dropdown 用（動的）: 指定された場合、アドオン側エンドポイントから選択肢を取得する。
+    # パスは "/audio-devices" のようなアドオンローカルパスでも、
+    # "/api/addon/<name>/..." のような絶対パスでも可。
+    options_endpoint: Optional[str] = None
     # number / slider 用
     min: Optional[float] = None
     max: Optional[float] = None

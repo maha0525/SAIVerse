@@ -467,40 +467,59 @@
     gap: 0.5rem;
 }
 
-.addPersonaBtn {
-    background: none;
-    border: 1px solid #e2e8f0;
-    border-radius: 0.4rem;
-    cursor: pointer;
-    padding: 0.2rem 0.3rem;
+.personaSelectorRow {
     display: flex;
     align-items: center;
-    color: #64748b;
-    transition: all 0.15s;
+    gap: 0.5rem;
 }
 
-.addPersonaBtn:hover {
-    border-color: #6366f1;
-    color: #6366f1;
-}
-
-.personaPickerList {
-    border: 1px solid #e2e8f0;
-    border-radius: 0.5rem;
-    overflow-y: auto;
-    max-height: 200px;
-}
-
-.personaPickerItem {
-    padding: 0.5rem 0.75rem;
+.personaSelector {
+    flex: 1;
+    padding: 0.4rem 0.6rem;
     font-size: 0.88rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.4rem;
+    background: #ffffff;
     color: #374151;
     cursor: pointer;
-    transition: background 0.1s;
+    transition: border-color 0.15s;
 }
 
-.personaPickerItem:hover {
-    background: #f1f5f9;
+.personaSelector:hover {
+    border-color: #6366f1;
+}
+
+.personaSelector:focus {
+    outline: none;
+    border-color: #6366f1;
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+}
+
+.personaUnconfiguredHint {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px dashed #cbd5e1;
+    border-radius: 0.5rem;
+    font-size: 0.85rem;
+    color: #64748b;
+}
+
+.createPersonaConfigBtn {
+    background: #6366f1;
+    color: #ffffff;
+    border: none;
+    border-radius: 0.4rem;
+    padding: 0.35rem 0.7rem;
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.createPersonaConfigBtn:hover {
+    background: #4f46e5;
 }
 
 .personaConfigBlock {
@@ -512,41 +531,21 @@
     gap: 0.4rem;
 }
 
-.personaConfigHeader {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 0.25rem;
-    user-select: none;
-}
-
-.personaConfigHeaderLeft {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    color: #94a3b8;
-}
-
-.personaName {
-    font-size: 0.85rem;
-    font-weight: 500;
-    color: #475569;
-}
-
 .deletePersonaBtn {
     background: none;
-    border: none;
+    border: 1px solid #e2e8f0;
     cursor: pointer;
     color: #cbd5e1;
-    padding: 0.15rem;
+    padding: 0.35rem 0.4rem;
     display: flex;
     align-items: center;
-    border-radius: 0.25rem;
-    transition: color 0.15s;
+    border-radius: 0.4rem;
+    transition: all 0.15s;
 }
 
 .deletePersonaBtn:hover {
     color: #ef4444;
+    border-color: #ef4444;
 }
 
 /* toggle used standalone (inside ParamsSection) */
@@ -658,38 +657,27 @@
     color: #94a3b8;
 }
 
-:global([data-theme="dark"]) .personaPickerList {
-    border-color: #334155;
-}
-
-:global([data-theme="dark"]) .personaPickerItem {
-    color: #cbd5e1;
-}
-
-:global([data-theme="dark"]) .personaPickerItem:hover {
+:global([data-theme="dark"]) .personaSelector {
     background: #0f172a;
+    border-color: #334155;
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .personaSelector:hover {
+    border-color: #6366f1;
+}
+
+:global([data-theme="dark"]) .personaUnconfiguredHint {
+    border-color: #334155;
+    color: #94a3b8;
 }
 
 :global([data-theme="dark"]) .personaConfigBlock {
     border-color: #334155;
 }
 
-:global([data-theme="dark"]) .personaName {
-    color: #94a3b8;
-}
-
-:global([data-theme="dark"]) .personaConfigHeaderLeft {
-    color: #64748b;
-}
-
-:global([data-theme="dark"]) .addPersonaBtn {
+:global([data-theme="dark"]) .deletePersonaBtn {
     border-color: #334155;
-    color: #94a3b8;
-}
-
-:global([data-theme="dark"]) .addPersonaBtn:hover {
-    border-color: #6366f1;
-    color: #6366f1;
 }
 
 :global([data-theme="dark"]) .toggleSlider {

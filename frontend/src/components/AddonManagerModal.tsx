@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { X, Package, ChevronDown, ChevronRight, Plus, Trash2 } from 'lucide-react';
+import { X, Package, ChevronDown, ChevronRight, Trash2 } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
 import styles from './AddonManagerModal.module.css';
 
@@ -18,6 +18,7 @@ interface AddonParamSchema {
     persona_configurable: boolean;
     placeholder?: string;
     options?: string[];
+    options_endpoint?: string;
     min?: number;
     max?: number;
     step?: number;
@@ -119,15 +120,12 @@ function ParamControl({
 
         case 'dropdown':
             return (
-                <select
-                    className={styles.select}
-                    value={String(current ?? '')}
-                    onChange={(e) => onChange(schema.key, e.target.value)}
-                >
-                    {(schema.options ?? []).map((opt) => (
-                        <option key={opt} value={opt}>{opt}</option>
-                    ))}
-                </select>
+                <DropdownParamControl
+                    schema={schema}
+                    value={current}
+                    onChange={onChange}
+                    addonName={addonName}
+                />
             );
 
         case 'slider': {
@@ -170,6 +168,61 @@ function ParamControl({
         default:
             return <span className={styles.unsupported}>（未対応の型: {schema.type}）</span>;
     }
+}
+
+// ---------------------------------------------------------------------------
+// DropdownParamControl — static options or dynamically fetched from addon API
+// ---------------------------------------------------------------------------
+
+function DropdownParamControl({
+    schema,
+    value,
+    onChange,
+    addonName,
+}: {
+    schema: AddonParamSchema;
+    value: unknown;
+    onChange: (key: string, val: unknown) => void;
+    addonName?: string;
+}) {
+    const [dynamicOptions, setDynamicOptions] = useState<string[] | null>(null);
+    const [loading, setLoading] = useState(false);
+
+    useEffect(() => {
+        if (!schema.options_endpoint || !addonName) return;
+        const ep = schema.options_endpoint;
+        const url = ep.startsWith('/') ? ep : `/api/addon/${addonName}/${ep}`;
+        setLoading(true);
+        fetch(url)
+            .then((r) => r.json())
+            .then((data) => {
+                // 想定レスポンス: {"options": [...]} または [...]（プレーン配列）
+                const opts: unknown = Array.isArray(data) ? data : data?.options;
+                if (Array.isArray(opts)) {
+                    setDynamicOptions(opts.map((o) => String(o)));
+                }
+            })
+            .catch(() => setDynamicOptions([]))
+            .finally(() => setLoading(false));
+    }, [schema.options_endpoint, addonName]);
+
+    const options = dynamicOptions ?? schema.options ?? [];
+    const current = value !== undefined ? value : schema.default;
+
+    return (
+        <select
+            className={styles.select}
+            value={String(current ?? '')}
+            onChange={(e) => onChange(schema.key, e.target.value)}
+            disabled={loading}
+        >
+            {loading && <option value="">読み込み中...</option>}
+            {!loading && options.length === 0 && <option value="">（選択肢なし）</option>}
+            {!loading && options.map((opt) => (
+                <option key={opt} value={opt}>{opt}</option>
+            ))}
+        </select>
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -341,17 +394,7 @@ function ParamsSection({
     const [globalParams, setGlobalParams] = useState<Record<string, unknown>>(addon.params ?? {});
     const [personaConfigs, setPersonaConfigs] = useState<PersonaPersonaConfig[]>([]);
     const [saving, setSaving] = useState(false);
-    const [addingPersona, setAddingPersona] = useState(false);
-    const [collapsedPersonas, setCollapsedPersonas] = useState<Set<string>>(new Set());
-
-    const togglePersonaCollapse = (personaId: string) => {
-        setCollapsedPersonas((prev) => {
-            const next = new Set(prev);
-            if (next.has(personaId)) next.delete(personaId);
-            else next.add(personaId);
-            return next;
-        });
-    };
+    const [selectedPersonaId, setSelectedPersonaId] = useState<string>('');
 
     const configurableSchemas = addon.params_schema.filter((s) => !s.persona_configurable);
     const personaConfigurableSchemas = addon.params_schema.filter((s) => s.persona_configurable);
@@ -427,16 +470,14 @@ function ParamsSection({
         const newConfig: PersonaPersonaConfig = { persona_id: personaId, persona_name: personaName, params: defaultParams };
         setPersonaConfigs((prev) => [...prev, newConfig]);
         savePersona(personaId, defaultParams);
-        setAddingPersona(false);
     };
 
-    if (configurableSchemas.length === 0) {
+    if (configurableSchemas.length === 0 && personaConfigurableSchemas.length === 0) {
         return <p className={styles.noParams}>設定項目はありません</p>;
     }
 
-    const unconfiguredPersonas = personas.filter(
-        (p) => !personaConfigs.find((c) => c.persona_id === p.id)
-    );
+    const selectedConfig = personaConfigs.find((c) => c.persona_id === selectedPersonaId);
+    const selectedPersona = personas.find((p) => p.id === selectedPersonaId);
 
     return (
         <div className={styles.paramsSection}>
@@ -462,70 +503,65 @@ function ParamsSection({
                 <div className={styles.personaSection}>
                     <div className={styles.personaSectionHeader}>
                         <span className={styles.paramsGroupLabel}>ペルソナ別設定</span>
-                        {unconfiguredPersonas.length > 0 && (
+                    </div>
+
+                    <div className={styles.personaSelectorRow}>
+                        <select
+                            className={styles.personaSelector}
+                            value={selectedPersonaId}
+                            onChange={(e) => setSelectedPersonaId(e.target.value)}
+                        >
+                            <option value="">-- ペルソナを選択 --</option>
+                            {personas.map((p) => {
+                                const isConfigured = personaConfigs.some((c) => c.persona_id === p.id);
+                                return (
+                                    <option key={p.id} value={p.id}>
+                                        {p.name}{isConfigured ? '' : '（未設定）'}
+                                    </option>
+                                );
+                            })}
+                        </select>
+                        {selectedConfig && (
                             <button
-                                className={styles.addPersonaBtn}
-                                onClick={() => setAddingPersona((v) => !v)}
-                                title="ペルソナを追加"
+                                className={styles.deletePersonaBtn}
+                                onClick={() => {
+                                    deletePersonaConfig(selectedPersonaId);
+                                }}
+                                title="削除（デフォルトに戻す）"
                             >
-                                <Plus size={14} />
+                                <Trash2 size={13} />
                             </button>
                         )}
                     </div>
 
-                    {addingPersona && (
-                        <div className={styles.personaPickerList}>
-                            {unconfiguredPersonas.map((p) => (
-                                <div
-                                    key={p.id}
-                                    className={styles.personaPickerItem}
-                                    onClick={() => addPersonaConfig(p.id, p.name)}
-                                >
-                                    {p.name}
+                    {selectedPersonaId && !selectedConfig && selectedPersona && (
+                        <div className={styles.personaUnconfiguredHint}>
+                            <span>このペルソナには個別設定がありません。</span>
+                            <button
+                                className={styles.createPersonaConfigBtn}
+                                onClick={() => addPersonaConfig(selectedPersona.id, selectedPersona.name)}
+                            >
+                                個別設定を作成
+                            </button>
+                        </div>
+                    )}
+
+                    {selectedConfig && (
+                        <div className={styles.personaConfigBlock}>
+                            {personaConfigurableSchemas.map((schema) => (
+                                <div key={schema.key} className={styles.paramRow}>
+                                    <span className={styles.paramLabel}>{schema.label}</span>
+                                    <ParamControl
+                                        schema={schema}
+                                        value={selectedConfig.params[schema.key]}
+                                        onChange={(key, val) => handlePersonaChange(selectedConfig.persona_id, key, val)}
+                                        addonName={addon.addon_name}
+                                        personaId={selectedConfig.persona_id}
+                                    />
                                 </div>
                             ))}
                         </div>
                     )}
-
-                    {personaConfigs.map((pc) => {
-                        const isCollapsed = collapsedPersonas.has(pc.persona_id);
-                        return (
-                            <div key={pc.persona_id} className={styles.personaConfigBlock}>
-                                <div
-                                    className={styles.personaConfigHeader}
-                                    onClick={() => togglePersonaCollapse(pc.persona_id)}
-                                    style={{ cursor: 'pointer' }}
-                                >
-                                    <div className={styles.personaConfigHeaderLeft}>
-                                        {isCollapsed
-                                            ? <ChevronRight size={13} />
-                                            : <ChevronDown size={13} />
-                                        }
-                                        <span className={styles.personaName}>{pc.persona_name}</span>
-                                    </div>
-                                    <button
-                                        className={styles.deletePersonaBtn}
-                                        onClick={(e) => { e.stopPropagation(); deletePersonaConfig(pc.persona_id); }}
-                                        title="削除（デフォルトに戻す）"
-                                    >
-                                        <Trash2 size={13} />
-                                    </button>
-                                </div>
-                                {!isCollapsed && personaConfigurableSchemas.map((schema) => (
-                                    <div key={schema.key} className={styles.paramRow}>
-                                        <span className={styles.paramLabel}>{schema.label}</span>
-                                        <ParamControl
-                                            schema={schema}
-                                            value={pc.params[schema.key]}
-                                            onChange={(key, val) => handlePersonaChange(pc.persona_id, key, val)}
-                                            addonName={addon.addon_name}
-                                            personaId={pc.persona_id}
-                                        />
-                                    </div>
-                                ))}
-                            </div>
-                        );
-                    })}
                 </div>
             )}
         </div>
