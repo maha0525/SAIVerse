@@ -22,10 +22,11 @@ api_router.include_router(system.router, prefix="/system", tags=["system"])
 from api.routes.people.x_auth import callback_router as x_callback_router
 api_router.include_router(x_callback_router, prefix="/x", tags=["x"])
 
-from api.routes import addon, addon_events
+from api.routes import addon, addon_events, client_debug
 # addon_events(/events など固定パス)を addon(/{addon_name} キャッチオール)より
 # 先に登録する。逆順だと GET /api/addon/events が GET /api/addon/{addon_name} に
 # 飲まれて 404 "Addon not found" になる。
 api_router.include_router(addon_events.router, prefix="/addon", tags=["addon-events"])
 api_router.include_router(addon.router, prefix="/addon", tags=["addon"])
+api_router.include_router(client_debug.router, prefix="/client_debug", tags=["client-debug"])
 
