@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Callable, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, Callable, TYPE_CHECKING
 
 from sqlalchemy.orm import Session
 
@@ -24,6 +24,7 @@ class OccupancyManager:
         building_histories: Dict[str, List[Dict[str, str]]],
         id_to_name_map: Dict[str, str],
         user_id: int,
+        manager_ref: Optional[Any] = None,
     ):
         self.SessionLocal = session_factory
         self.city_id = city_id
@@ -33,6 +34,7 @@ class OccupancyManager:
         self.building_histories = building_histories
         self.id_to_name_map = id_to_name_map
         self.user_entity_id = str(user_id)
+        self._manager_ref = manager_ref
 
     def move_entity(
         self,
@@ -106,6 +108,19 @@ class OccupancyManager:
             self.building_histories.setdefault(to_id, []).append({"role": "host", "content": entered_message})
 
             logging.info(f"Moved {entity_type} '{entity_id}' from {from_id} to {to_id}.")
+
+            # Dynamic State Sync: AIペルソナ入室時のスナップショット初期化
+            if entity_type == "ai":
+                try:
+                    from saiverse.dynamic_state import DynamicStateManager
+                    manager = self._manager_ref
+                    if manager:
+                        persona = getattr(manager, "personas", {}).get(entity_id)
+                        if persona:
+                            DynamicStateManager.on_building_entered(persona, to_id, manager)
+                except Exception:
+                    logging.exception("[dynamic_state] on_building_entered failed for %s -> %s", entity_id, to_id)
+
             return True, None
         except Exception as e:
             if manage_session_locally: db.rollback()

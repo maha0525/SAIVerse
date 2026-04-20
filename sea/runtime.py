@@ -95,6 +95,13 @@ class SEARuntime:
         # Store pulse_type in persona for tools to access
         persona._current_pulse_type = pulse_type
 
+        # Dynamic State Sync: C ≠ B ならイベントメッセージを会話履歴に挿入
+        try:
+            from saiverse.dynamic_state import DynamicStateManager
+            DynamicStateManager.maybe_inject_event_messages(persona, self.manager)
+        except Exception:
+            LOGGER.exception("[dynamic_state] Event injection failed in run_meta_user")
+
         # Record user input to history before processing
         if user_input:
             try:
@@ -163,6 +170,13 @@ class SEARuntime:
 
         # Store pulse_type in persona for tools to access
         persona._current_pulse_type = pulse_type
+
+        # Dynamic State Sync: C ≠ B ならイベントメッセージを会話履歴に挿入
+        try:
+            from saiverse.dynamic_state import DynamicStateManager
+            DynamicStateManager.maybe_inject_event_messages(persona, self.manager)
+        except Exception:
+            LOGGER.exception("[dynamic_state] Event injection failed in run_meta_auto")
 
         # Update last pulse time for get_situation_snapshot
         persona._last_conscious_prompt_time_utc = datetime.now(dt_timezone.utc)
@@ -1448,7 +1462,14 @@ class SEARuntime:
                 self._update_anchor_for_model(persona, persona_model, new_anchor_id)
             LOGGER.info("[metabolism] Updated anchor to %s (evicted %d, kept %d)", new_anchor_id, evict_count, keep_count)
 
-        # 4. Notify completion
+        # 4. Dynamic State Sync: AをCで更新し、ビジュアルコンテキストキャッシュを無効化
+        try:
+            from saiverse.dynamic_state import DynamicStateManager
+            DynamicStateManager.on_metabolism(persona, self.manager)
+        except Exception:
+            LOGGER.exception("[dynamic_state] on_metabolism failed")
+
+        # 5. Notify completion
         if event_callback:
             event_callback({
                 "type": "metabolism",
@@ -1534,13 +1555,14 @@ class SEARuntime:
         # Previously this only fetched from the default persona thread, missing
         # messages logged on building-specific threads.
         import json as _json
-        # Exclude handy_tool/spell tagged messages — they contain Memopedia/log content
-        # that is already stored there, so including them would cause duplication.
+        # Exclude handy_tool/spell/event_message tagged messages.
+        # handy_tool/spell: Memopedia/logの内容を含むため重複になる
+        # event_message: Dynamic State Syncの通知メッセージ。Chronicle編纂には不要
         cur = adapter.conn.execute(
             "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
             "FROM messages "
             "WHERE NOT EXISTS ("
-            "  SELECT 1 FROM json_each(metadata, '$.tags') WHERE json_each.value IN ('handy_tool', 'spell')"
+            "  SELECT 1 FROM json_each(metadata, '$.tags') WHERE json_each.value IN ('handy_tool', 'spell', 'event_message')"
             ") "
             "ORDER BY created_at ASC"
         )

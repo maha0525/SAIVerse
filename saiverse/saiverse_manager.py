@@ -170,6 +170,7 @@ class SAIVerseManager(
             building_histories=self.building_histories,
             id_to_name_map=self.id_to_name_map,
             user_id=self.state.user_id,
+            manager_ref=self,
         )
         logging.info("Initialized OccupancyManager.")
 

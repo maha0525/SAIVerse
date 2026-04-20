@@ -135,19 +135,8 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
             except Exception as exc:
                 LOGGER.debug("Failed to add available playbooks section: %s", exc)
 
-        # 5. "## 現在の状況" section (working memory)
-        if reqs.working_memory:
-            try:
-                sai_mem = getattr(persona, "sai_memory", None)
-                if sai_mem and sai_mem.is_ready():
-                    wm_data = sai_mem.load_working_memory()
-                    if wm_data:
-                        import json as json_mod
-                        wm_text = json_mod.dumps(wm_data, ensure_ascii=False, indent=2)
-                        system_sections.append(f"## 現在の状況\n```json\n{wm_text}\n```")
-                        LOGGER.debug("[sea][prepare-context] Added working_memory section")
-            except Exception as exc:
-                LOGGER.debug("Failed to add working_memory section: %s", exc)
+        # 5. "## 現在の状況" section (working memory) — 廃止済み
+        # Dynamic State Sync に移行。イベントメッセージを会話履歴末尾に挿入する方式に変更。
 
         # 6. Spell section
         try:
@@ -217,15 +206,33 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
             LOGGER.exception("[sea][prepare-context] Failed to get Memory Weave context: %s", exc)
 
     # ---- visual context (Building / Persona images) ----
-    # Inserted right after system prompt but before conversation history
+    # Inserted right after system prompt but before conversation history.
+    # キャッシュ: Metabolismアンカーが変わっていなければ前回生成したものを再利用し、
+    # コンテキスト先頭部分のキャッシュヒット率を維持する。
     if reqs.visual_context:
         try:
             from builtin_data.tools.get_visual_context import get_visual_context
-            from tools.context import persona_context, get_active_manager
+            from tools.context import persona_context
             persona_id = getattr(persona, "persona_id", None)
             persona_dir = getattr(persona, "persona_dir", None)
-            with persona_context(persona_id, persona_dir, runtime.manager):
-                visual_messages = get_visual_context(building_id=building_id)
+
+            # 現在のMetabolismアンカーを取得
+            history_mgr = getattr(persona, "history_manager", None)
+            current_anchor = getattr(history_mgr, "metabolism_anchor_message_id", None)
+
+            cached_msgs = getattr(persona, "_visual_context_cache", None)
+            cached_anchor = getattr(persona, "_visual_context_anchor", None)
+
+            if cached_msgs is not None and cached_anchor == current_anchor:
+                visual_messages = cached_msgs
+                LOGGER.debug("[sea][prepare-context] Using cached visual context (anchor=%s)", current_anchor)
+            else:
+                with persona_context(persona_id, persona_dir, runtime.manager):
+                    visual_messages = get_visual_context(building_id=building_id)
+                persona._visual_context_cache = visual_messages
+                persona._visual_context_anchor = current_anchor
+                LOGGER.debug("[sea][prepare-context] Generated fresh visual context (anchor=%s)", current_anchor)
+
             if visual_messages:
                 messages.extend(visual_messages)
                 LOGGER.debug("[sea][prepare-context] Added %d visual context messages", len(visual_messages))
@@ -239,7 +246,8 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
         if history_mgr:
             try:
                 # Determine which tags to include
-                required_tags = ["conversation"]
+                # event_message: conversationと同様に常に表示（ただし想起・Chronicle対象外）
+                required_tags = ["conversation", "event_message"]
                 if reqs.include_internal:
                     required_tags.append("internal")
 
@@ -413,18 +421,9 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
             except Exception as exc:
                 LOGGER.exception("[sea][prepare-context] Failed to get history: %s", exc)
 
-    # ---- Recalled Memory Context (Working Memory) ----
-    # Expand recalled_ids to actual content at context tail (after history, before realtime).
-    # This is loaded once per pulse; changes during the pulse take effect on the next pulse.
-    if reqs.working_memory:
-        try:
-            sai_mem = getattr(persona, "sai_memory", None)
-            if sai_mem and sai_mem.is_ready():
-                recalled_ids = sai_mem.get_recalled_ids()
-                if recalled_ids:
-                    _expand_recalled_ids(runtime, persona, recalled_ids, messages)
-        except Exception as exc:
-            LOGGER.debug("[sea][prepare-context] Failed to expand recalled_ids: %s", exc)
+    # ---- Recalled Memory Context — 廃止済み ----
+    # recalled_ids はシステムプロンプトへの注入から廃止。
+    # recall_entry / recall_navigate ツールが想起時に直接会話履歴へ内容を追記する。
 
     # ---- Realtime Context ----
     # Time-sensitive info placed just BEFORE the last user message to improve LLM caching.

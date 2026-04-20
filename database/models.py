@@ -356,6 +356,19 @@ class AddonPersonaConfig(Base):
     )
 
 
+class PersonaBuildingState(Base):
+    """ペルソナごとのBuilding状態スナップショット（Dynamic State Sync用）。
+
+    A状態（ベースライン）とB状態（最終通知済み状態）を永続化する。
+    """
+    __tablename__ = "persona_building_state"
+    PERSONA_ID = Column(String(255), ForeignKey("ai.AIID"), primary_key=True)
+    BUILDING_ID = Column(String(255), ForeignKey("building.BUILDINGID"), primary_key=True)
+    BASELINE_JSON = Column(Text, nullable=True)       # A: Metabolism/入室時のスナップショット
+    LAST_NOTIFIED_JSON = Column(Text, nullable=True)  # B: 最後にLLMへ通知した状態
+    UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class AddonMessageMetadata(Base):
     """メッセージに紐付くアドオンメタデータテーブル。
 
