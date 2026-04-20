@@ -18,12 +18,21 @@ const nextConfig: NextConfig = {
         return origins;
     })(),
     async rewrites() {
-        return [
-            {
-                source: '/api/:path*',
-                destination: 'http://127.0.0.1:8000/api/:path*',
-            },
-        ];
+        // fallback に置くことで、Next.js の動的 Route Handler
+        // (app/api/addon/[...path]/route.ts など) が先に評価される。
+        // 通常配列で返すと `afterFiles` 相当になり filesystem 静的ルートの
+        // 次・動的ルートの前で評価されてしまい、動的 Route Handler が
+        // 完全に無視される問題があった。
+        return {
+            beforeFiles: [],
+            afterFiles: [],
+            fallback: [
+                {
+                    source: '/api/:path*',
+                    destination: 'http://127.0.0.1:8000/api/:path*',
+                },
+            ],
+        };
     },
     devIndicators: false as any,
     // Allow larger file uploads for ChatGPT export import
