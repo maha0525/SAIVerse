@@ -4,6 +4,13 @@
     width: 560px;
     max-width: 95vw;
     max-height: 85vh;
+    /* iOS Safari は 100vh にアドレスバー非表示分を含めるため、アドレスバーが
+       展開中だと max-height: 85vh だとコンテンツがビューポート下端を越えて
+       見切れる/スクロールできない事象が発生する。dvh (dynamic viewport
+       height) を使うことで、実際の可視ビューポート基準でサイズが決まり
+       content 側の overflow-y:auto が正しく効くようになる。
+       dvh 未対応の環境では 85vh にフォールバックされる。 */
+    max-height: 85dvh;
     display: flex;
     flex-direction: column;
     box-shadow: 0 8px 40px rgba(0, 0, 0, 0.15);
@@ -51,6 +58,12 @@
 .content {
     flex: 1;
     overflow-y: auto;
+    /* iOS Safari 等のブラウザで flex child の overflow-y が効かないケースを
+       回避するための明示 min-height:0。これが無いと子要素の intrinsic height
+       が flex container に継承されてスクロール不能になる。 */
+    min-height: 0;
+    /* iOS Safari の慣性スクロールを有効化 */
+    -webkit-overflow-scrolling: touch;
     padding: 1rem 1.25rem;
     display: flex;
     flex-direction: column;
@@ -659,4 +672,37 @@
 
 :global([data-theme="dark"]) .emptyState {
     color: #64748b;
+}
+
+/* --- Mobile (narrow viewport) --- */
+
+/* 狭いビューポートでは label + 入力を横並びにすると、長いラベル (例:
+   「出力オーディオデバイス」) が 1 文字ずつ縦積みに折り返される事象が発生する
+   (paramLabel の flex:1 が押し潰されて幅 < 1 字分になるため)。
+   縦並びに切り替えて、ラベル行 → 入力行の 2 段構成にする。 */
+@media (max-width: 600px) {
+    .paramRow {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.35rem;
+    }
+    .paramLabel {
+        flex: initial;
+    }
+    .select,
+    .textInput,
+    .numberInput {
+        min-width: 0;
+        width: 100%;
+    }
+    .sliderRow {
+        width: 100%;
+    }
+    .slider {
+        flex: 1;
+    }
+    .fileControl,
+    .fileDropArea {
+        width: 100%;
+    }
 }
