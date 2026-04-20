@@ -4,6 +4,14 @@
     width: 560px;
     max-width: 95vw;
     max-height: 85vh;
+    /* iOS Safari の 100vh はアドレスバー非表示時の値を含むため、アドレスバー
+       展開中はコンテンツが可視領域を超えてスクロール不能になる。段階的に
+       より安全な単位にフォールバック:
+         - svh: small viewport height (最小値、常に安全)
+         - dvh: dynamic viewport height (リサイズに追従)
+       未対応環境は vh にフォールバック。 */
+    max-height: 85svh;
+    max-height: 85dvh;
     display: flex;
     flex-direction: column;
     box-shadow: 0 8px 40px rgba(0, 0, 0, 0.15);
@@ -51,6 +59,17 @@
 .content {
     flex: 1;
     overflow-y: auto;
+    /* iOS Safari 等のブラウザで flex child の overflow-y が効かないケースを
+       回避するための明示 min-height:0。これが無いと子要素の intrinsic height
+       が flex container に継承されてスクロール不能になる。 */
+    min-height: 0;
+    /* iOS Safari の慣性スクロールを有効化 */
+    -webkit-overflow-scrolling: touch;
+    /* モバイル: 縦スクロールのみ許可。touch-action を明示することで、
+       ブラウザは「このエリアは縦スクロール対象」と判断して JS の touch
+       イベントより先にネイティブスクロールを走らせる (親の touchmove
+       ハンドラが誤って間に入っても native scroll が優先される)。 */
+    touch-action: pan-y;
     padding: 1rem 1.25rem;
     display: flex;
     flex-direction: column;
@@ -659,4 +678,55 @@
 
 :global([data-theme="dark"]) .emptyState {
     color: #64748b;
+}
+
+/* --- Mobile (narrow viewport) --- */
+
+/* 狭いビューポートでは label + 入力を横並びにすると、長いラベル (例:
+   「出力オーディオデバイス」) が 1 文字ずつ縦積みに折り返される事象が発生する
+   (paramLabel の flex:1 が押し潰されて幅 < 1 字分になるため)。
+   縦並びに切り替えて、ラベル行 → 入力行の 2 段構成にする。 */
+@media (max-width: 600px) {
+    .paramRow {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.35rem;
+    }
+    .paramLabel {
+        flex: initial;
+    }
+    .select,
+    .textInput,
+    .numberInput {
+        min-width: 0;
+        width: 100%;
+    }
+    .sliderRow {
+        width: 100%;
+    }
+    .slider {
+        flex: 1;
+    }
+    .fileControl,
+    .fileDropArea {
+        width: 100%;
+    }
+}
+
+/* モバイル: モーダル内部 nested scroll は iOS Safari で効かないため、
+   オーバーレイ側のスクロールに委ねる構造に切替える。モーダル自体は
+   max-height を解除して自然な高さに、content の overflow-y:auto も外す。
+   こうすることでコンテンツ全体がドキュメントフローに乗り、オーバーレイの
+   overflow-y:auto で確実にスクロールできるようになる。 */
+@media (max-width: 768px) {
+    .modal {
+        max-height: none;
+        max-width: 100vw;
+        width: 100%;
+        border-radius: 0;
+    }
+    .content {
+        overflow-y: visible;
+        min-height: 0;
+    }
 }
