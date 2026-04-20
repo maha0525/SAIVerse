@@ -18,13 +18,9 @@
  */
 import type { ClientActionExecutor } from "@/lib/clientActionRegistry";
 import { resolveActionValue } from "@/lib/clientActionRegistry";
-import { clientDebugLog } from "@/lib/clientDebugLog";
 
 // 再利用する単一の <audio> 要素。
 let sharedAudio: HTMLAudioElement | null = null;
-// 最終ユーザージェスチャー時刻。iOS の gesture recency 判定が 5 秒程度と厳しい
-// ため、unlock が成立していれば経過時間は無視できるが、診断用にログに残す。
-let lastGestureAt = 0;
 // 共有要素が gesture 中に play() を通されて unlock されたかどうか。
 // iOS では「最初の gesture 同期タイミングで play() を呼んだ HTMLAudioElement」
 // だけが以降 autoplay 許可される挙動のため、この状態を明示的に管理する。
@@ -70,7 +66,6 @@ function getSharedAudio(): HTMLAudioElement {
 // 事実は残るので try/catch で静かに握りつぶす。
 if (typeof window !== "undefined") {
     const onGesture = () => {
-        lastGestureAt = Date.now();
         if (unlocked) return;
         try {
             const audio = getSharedAudio();
@@ -80,24 +75,14 @@ if (typeof window !== "undefined") {
             // 記録は残る)。
             const p = audio.play();
             if (p && typeof p.then === "function") {
-                p.then(() => {
-                    unlocked = true;
-                    clientDebugLog("info", "play_audio", "unlock: gesture play() resolved");
-                }).catch((err) => {
-                    // iOS 側は unlock 済みだが Promise は rejected になることがある。
-                    // それでも以降の play_audio は通るため、unlock 成功扱いにする。
-                    unlocked = true;
-                    clientDebugLog("info", "play_audio", "unlock: gesture play() rejected (treated as unlocked)", {
-                        error: err instanceof Error ? err.message : String(err),
-                    });
-                });
+                // resolved でも rejected でも unlock 成功扱いにする
+                // (iOS は rejected でも internal に gesture 使用を記録する)
+                p.then(() => { unlocked = true; }).catch(() => { unlocked = true; });
             } else {
                 unlocked = true;
             }
-        } catch (err) {
-            clientDebugLog("warn", "play_audio", "unlock: gesture handler threw", {
-                error: err instanceof Error ? err.message : String(err),
-            });
+        } catch {
+            // gesture handler 内の失敗は致命的ではない (次の gesture で再試行可)
         }
     };
     window.addEventListener("click", onGesture, { passive: true });
@@ -112,73 +97,69 @@ if (typeof window !== "undefined") {
 // 切り分ける。
 let playbackToken = 0;
 
+async function tryPlayUrl(
+    audio: HTMLAudioElement,
+    url: string,
+): Promise<void> {
+    audio.src = url;
+    await audio.play();
+}
+
 export const playAudioExecutor: ClientActionExecutor = async (ctx) => {
     const { action } = ctx;
 
-    clientDebugLog("info", "play_audio", "executor invoked", {
-        event: ctx.event.event,
-        messageId: ctx.event.message_id,
-        gestureAgeMs: lastGestureAt ? Date.now() - lastGestureAt : null,
-        unlocked,
-        hasEventData: !!ctx.event.data,
-        hasMetadata: Object.keys(ctx.metadata).length > 0,
-    });
+    const primaryUrl = resolveActionValue(ctx, action.source_metadata_key) as
+        | string
+        | undefined;
+    const fallbackUrl = resolveActionValue(ctx, action.fallback_metadata_key) as
+        | string
+        | undefined;
 
-    const url =
-        (resolveActionValue(ctx, action.source_metadata_key) as string | undefined) ??
-        (resolveActionValue(ctx, action.fallback_metadata_key) as string | undefined);
-
-    if (!url || typeof url !== "string") {
-        clientDebugLog("warn", "play_audio", "URL unresolved", {
-            source_key: action.source_metadata_key,
-            fallback_key: action.fallback_metadata_key,
-            event_data: ctx.event.data,
-            metadata: ctx.metadata,
-        });
+    const firstUrl = primaryUrl ?? fallbackUrl;
+    if (!firstUrl || typeof firstUrl !== "string") {
         throw new Error(
             `play_audio: no URL resolved from metadata (source=${action.source_metadata_key}, fallback=${action.fallback_metadata_key})`,
         );
     }
 
-    clientDebugLog("info", "play_audio", "resolved URL", { url });
-
     const audio = getSharedAudio();
     const myToken = ++playbackToken;
 
-    // src 差し替えは load() を暗黙に呼ぶので明示的な load() は不要。
-    // pause() / currentTime 書き換えも、unlock 直後の play() を abort する
-    // ことがあるので避ける (element は src 差し替えだけで十分リセットされる)。
-    audio.src = url;
-
     try {
-        clientDebugLog("info", "play_audio", "calling audio.play()", {
-            myToken,
-            gestureAgeMs: lastGestureAt ? Date.now() - lastGestureAt : null,
-        });
-        await audio.play();
-        clientDebugLog("info", "play_audio", "play() resolved", {
-            myToken,
-            paused: audio.paused,
-            ended: audio.ended,
-            duration: isFinite(audio.duration) ? audio.duration : null,
-            currentTime: audio.currentTime,
-            muted: audio.muted,
-            volume: audio.volume,
-            readyState: audio.readyState,
-            networkState: audio.networkState,
-        });
+        await tryPlayUrl(audio, firstUrl);
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        clientDebugLog("warn", "play_audio", "play() rejected", {
-            error: msg,
-            myToken,
-            latestToken: playbackToken,
-        });
+
         // 自分より後に別の play_audio 呼び出しが走った場合、src 差し替えで
         // AbortError になるのは想定通り (後勝ち)。失敗扱いにしない。
         if (myToken !== playbackToken && /abort/i.test(msg)) {
             return;
         }
-        throw new Error(`play_audio: audio.play() rejected: ${msg}`);
+
+        // Primary (stream URL 等) が失敗 かつ fallback URL (完了 wav 等) があれば
+        // それでリトライする。ストリーミング中にネットワーク問題等で progressive
+        // 再生が立ち上がらないときの保険。
+        const shouldTryFallback =
+            fallbackUrl && primaryUrl && fallbackUrl !== primaryUrl;
+        if (!shouldTryFallback) {
+            throw new Error(`play_audio: audio.play() rejected: ${msg}`);
+        }
+
+        // 自分がまだ最新トークンか再確認 (この間に新しい発話が来てれば譲る)
+        if (myToken !== playbackToken) {
+            return;
+        }
+
+        try {
+            await tryPlayUrl(audio, fallbackUrl);
+        } catch (fbErr) {
+            const fbMsg = fbErr instanceof Error ? fbErr.message : String(fbErr);
+            if (myToken !== playbackToken && /abort/i.test(fbMsg)) {
+                return;
+            }
+            throw new Error(
+                `play_audio: both primary and fallback failed (primary=${msg}, fallback=${fbMsg})`,
+            );
+        }
     }
 };
