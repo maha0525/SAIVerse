@@ -124,6 +124,11 @@ async function proxy(
         contentType.startsWith("video/") ||
         contentType.startsWith("image/");
 
+    // ただし URL 末尾が /stream のエンドポイントは progressive streaming が
+    // 本来の役割 (合成中のチャンクを順次届ける等)。arrayBuffer でバッファ
+    // 展開するとストリーミングの利点が消えるため素通しする。
+    const isStreamEndpoint = /\/stream\/?$/.test(upstream.pathname);
+
     if (method === "HEAD") {
         return new Response(null, {
             status: upstreamResp.status,
@@ -132,9 +137,36 @@ async function proxy(
         });
     }
 
-    if (isMedia) {
+    if (isMedia && !isStreamEndpoint) {
         const buffer = await upstreamResp.arrayBuffer();
         return new Response(buffer, {
+            status: upstreamResp.status,
+            statusText: upstreamResp.statusText,
+            headers: respHeaders,
+        });
+    }
+
+    // /stream エンドポイントは明示的なポンプで chunk を流す。
+    // Node.js fetch の body を Next.js にそのまま渡すと buffering される
+    // ケースがあるため、TransformStream で手動ポンプする。
+    if (isStreamEndpoint && upstreamResp.body) {
+        const reader = upstreamResp.body.getReader();
+        const piped = new ReadableStream<Uint8Array>({
+            async pull(controller) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    controller.close();
+                    return;
+                }
+                if (value) {
+                    controller.enqueue(value);
+                }
+            },
+            cancel(reason) {
+                return reader.cancel(reason);
+            },
+        });
+        return new Response(piped, {
             status: upstreamResp.status,
             statusText: upstreamResp.statusText,
             headers: respHeaders,
