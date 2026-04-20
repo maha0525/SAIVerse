@@ -43,6 +43,7 @@ interface ItemDetails {
     STATE_JSON: string;
     OWNER_KIND: string;
     OWNER_ID: string;
+    CREATED_AT?: string | null;
 }
 
 interface ItemModalProps {
@@ -158,10 +159,14 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated }: Item
             setIsEditing(false);
             setIsMetaEditing(false);
         }
-        // Reset meta editing state when modal opens/closes
+        // Load item details and buildings (for location and creation date display)
         setItemDetails(null);
         setNestedItem(null);
-    }, [isOpen, item]);
+        if (isOpen && item) {
+            loadItemDetails(item.id);
+            loadBuildings();
+        }
+    }, [isOpen, item, loadItemDetails, loadBuildings]);
 
     const handleStartEdit = () => {
         setEditContent(content || '');
@@ -415,6 +420,11 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated }: Item
                                 <span className={styles.location}>
                                     <ArrowRightLeft size={14} style={{ marginRight: 4 }} />
                                     {buildings.find(b => b.id === itemDetails.OWNER_ID)?.name || itemDetails.OWNER_ID}
+                                </span>
+                            )}
+                            {itemDetails?.CREATED_AT && (
+                                <span className={styles.createdAt}>
+                                    {new Date(itemDetails.CREATED_AT).toLocaleString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
                                 </span>
                             )}
                         </div>

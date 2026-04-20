@@ -139,6 +139,11 @@
     font-size: 0.8rem;
 }
 
+.createdAt {
+    color: #6b7280;
+    font-size: 0.78rem;
+}
+
 /* Meta editing section */
 .metaEditSection {
     padding: 1rem 1.5rem;

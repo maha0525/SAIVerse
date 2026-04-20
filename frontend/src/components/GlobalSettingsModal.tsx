@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { X, Settings, Database, Globe, Layers, Save, RefreshCw, Power, Play, Pause, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { X, Settings, Database, Globe, Layers, Save, RefreshCw, Power, Play, Pause, Monitor, Sun, Moon, Cpu, ChevronDown, ChevronRight, Info, ExternalLink, Wrench, CheckCircle, XCircle, Loader } from 'lucide-react';
 import styles from './GlobalSettingsModal.module.css';
 import WorldEditor from './settings/WorldEditor';
 import ModalOverlay from './common/ModalOverlay';
@@ -50,7 +50,7 @@ interface PlaybookPermEntry {
     permission_level: string;
 }
 
-type TabId = 'env' | 'world' | 'db' | 'models' | 'playbooks' | 'about';
+type TabId = 'env' | 'world' | 'db' | 'models' | 'playbooks' | 'about' | 'utilities';
 
 export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsModalProps) {
     const [activeTab, setActiveTab] = useState<TabId>('env');
@@ -98,6 +98,48 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
     const [playbookPerms, setPlaybookPerms] = useState<PlaybookPermEntry[]>([]);
     const [playbookPermsLoading, setPlaybookPermsLoading] = useState(false);
 
+    // Utilities — backfill item descriptions
+    interface BackfillResult { item_id: string; item_name: string; status: string; reason?: string | null; description?: string | null; }
+    const [bfBuildings, setBfBuildings] = useState<{id: string; name: string}[]>([]);
+    const [bfPersonas, setBfPersonas] = useState<{persona_id: string; persona_name: string}[]>([]);
+    const [bfBuildingId, setBfBuildingId] = useState('');
+    const [bfPersonaId, setBfPersonaId] = useState('');
+    const [bfDryRun, setBfDryRun] = useState(true);
+    const [bfRunning, setBfRunning] = useState(false);
+    const [bfResults, setBfResults] = useState<{processed: number; skipped: number; failed: number; results: BackfillResult[]} | null>(null);
+
+    const loadBackfillOptions = useCallback(async () => {
+        if (bfBuildings.length > 0) return;
+        const [bRes, pRes] = await Promise.all([
+            fetch('/api/user/buildings'),
+            fetch('/api/usage/personas'),
+        ]);
+        if (bRes.ok) { const d = await bRes.json(); setBfBuildings(d.buildings || []); }
+        if (pRes.ok) { const d = await pRes.json(); setBfPersonas(d); }
+    }, [bfBuildings.length]);
+
+    const runBackfill = async () => {
+        setBfRunning(true);
+        setBfResults(null);
+        try {
+            const res = await fetch('/api/admin/backfill-item-descriptions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    building_id: bfBuildingId || null,
+                    persona_id: bfPersonaId || null,
+                    dry_run: bfDryRun,
+                }),
+            });
+            if (!res.ok) throw new Error(await res.text());
+            setBfResults(await res.json());
+        } catch (e) {
+            console.error(e);
+        } finally {
+            setBfRunning(false);
+        }
+    };
+
     useEffect(() => {
         if (isOpen && activeTab === 'env') {
             loadGlobalAutoState();
@@ -121,7 +163,10 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
         if (isOpen && activeTab === 'playbooks') {
             loadPlaybookPerms();
         }
-    }, [isOpen, activeTab]);
+        if (isOpen && activeTab === 'utilities') {
+            loadBackfillOptions();
+        }
+    }, [isOpen, activeTab, loadBackfillOptions]);
 
     // Load env vars when section is expanded
     useEffect(() => {
@@ -519,6 +564,12 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                             onClick={() => setActiveTab('about')}
                         >
                             <Info size={18} /> 情報
+                        </div>
+                        <div
+                            className={`${styles.navItem} ${activeTab === 'utilities' ? styles.active : ''}`}
+                            onClick={() => setActiveTab('utilities')}
+                        >
+                            <Wrench size={18} /> 便利機能
                         </div>
                     </div>
 
@@ -958,6 +1009,90 @@ export default function GlobalSettingsModal({ isOpen, onClose }: GlobalSettingsM
                                             <ExternalLink size={14} className={styles.aboutLinkArrow} />
                                         </a>
                                     </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'utilities' && (
+                            <div className={styles.utilitiesContainer}>
+                                <div className={styles.sectionHeader}>
+                                    <h3>便利機能</h3>
+                                </div>
+
+                                {/* アイテム概要の一括生成 */}
+                                <div className={styles.utilityCard}>
+                                    <h4 className={styles.utilityTitle}>アイテム概要の一括生成</h4>
+                                    <p className={styles.utilityDesc}>
+                                        概要が未設定（またはデフォルト）の画像アイテムに対して、作成当時の会話履歴を参照しながら概要を自動生成します。
+                                    </p>
+
+                                    <div className={styles.utilityForm}>
+                                        <div className={styles.utilityRow}>
+                                            <label>対象Building</label>
+                                            <select value={bfBuildingId} onChange={e => { setBfBuildingId(e.target.value); setBfPersonaId(''); }}>
+                                                <option value="">すべて（City全体）</option>
+                                                {bfBuildings.map(b => (
+                                                    <option key={b.id} value={b.id}>{b.name}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+
+                                        {bfBuildingId && (
+                                            <div className={styles.utilityRow}>
+                                                <label>参照ペルソナ</label>
+                                                <select value={bfPersonaId} onChange={e => setBfPersonaId(e.target.value)}>
+                                                    <option value="">自動（全ペルソナから最近傍を選択）</option>
+                                                    {bfPersonas.map(p => (
+                                                        <option key={p.persona_id} value={p.persona_id}>{p.persona_name}</option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                        )}
+
+                                        <div className={styles.utilityRow}>
+                                            <label className={styles.checkboxLabel}>
+                                                <input type="checkbox" checked={bfDryRun} onChange={e => setBfDryRun(e.target.checked)} />
+                                                ドライラン（確認のみ・DBに書き込まない）
+                                            </label>
+                                        </div>
+
+                                        <button
+                                            className={styles.utilityRunBtn}
+                                            onClick={runBackfill}
+                                            disabled={bfRunning}
+                                        >
+                                            {bfRunning ? <><Loader size={14} className={styles.spin} /> 処理中...</> : '実行'}
+                                        </button>
+                                    </div>
+
+                                    {bfResults && (
+                                        <div className={styles.utilityResults}>
+                                            <div className={styles.utilityStats}>
+                                                <span className={styles.statUpdated}>更新: {bfResults.processed}</span>
+                                                <span className={styles.statSkipped}>スキップ: {bfResults.skipped}</span>
+                                                <span className={styles.statFailed}>失敗: {bfResults.failed}</span>
+                                                {bfDryRun && <span className={styles.dryRunBadge}>DRY RUN</span>}
+                                            </div>
+                                            <div className={styles.utilityResultList}>
+                                                {bfResults.results.map(r => (
+                                                    <div key={r.item_id} className={`${styles.utilityResultItem} ${styles[`result_${r.status}`]}`}>
+                                                        <span className={styles.resultIcon}>
+                                                            {r.status === 'updated' || r.status === 'dry_run'
+                                                                ? <CheckCircle size={14} />
+                                                                : r.status === 'failed'
+                                                                    ? <XCircle size={14} />
+                                                                    : <span>—</span>}
+                                                        </span>
+                                                        <div className={styles.resultBody}>
+                                                            <span className={styles.resultName}>{r.item_name}</span>
+                                                            {r.description && <span className={styles.resultDesc}>{r.description}</span>}
+                                                            {r.reason && <span className={styles.resultReason}>{r.reason}</span>}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         )}

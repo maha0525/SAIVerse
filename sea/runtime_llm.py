@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import ast
+import asyncio
 import json
 import logging
 import os
 import re
 import uuid
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from llm_clients.exceptions import LLMError
 from sea.runtime_utils import _format, _is_llm_streaming_enabled
@@ -17,37 +19,121 @@ LOGGER = logging.getLogger(__name__)
 
 # ── Spell system (text-based tool invocation) ──
 
-_MAX_SPELL_LOOPS = 3
+_MAX_SPELL_LOOPS = int(os.getenv("SAIVERSE_SPELL_MAX_ROUNDS", "3"))
+
+# Canonical form: /spell name='tool' args={...}
 _SPELL_PATTERN = re.compile(
     r"^/spell\s+name='([^']+)'\s+args=(.+)$",
     re.MULTILINE,
 )
+# Fuzzy form: /spell tool_name key='value' key2='value2' ...
+_SPELL_PATTERN_FUZZY = re.compile(
+    r"^/spell\s+(\w+)\s+(.+)$",
+    re.MULTILINE,
+)
+# key=value pair within fuzzy args (value may be single/double-quoted, dict literal, or bare word)
+_KV_PATTERN = re.compile(
+    r"(\w+)="
+    r"(?:'([^']*)'|\"([^\"]*)\"|(\{[^}]*\})|([\w\-./]+))"
+)
+
+
+def _parse_spell_args(args_raw: str) -> Optional[dict]:
+    """Parse spell args string (Python dict or JSON). Returns dict or None."""
+    try:
+        result = ast.literal_eval(args_raw)
+    except (ValueError, SyntaxError):
+        try:
+            result = json.loads(args_raw)
+        except json.JSONDecodeError:
+            LOGGER.warning("[sea][spell] Failed to parse args: %s", args_raw)
+            return None
+    if not isinstance(result, dict):
+        LOGGER.warning("[sea][spell] Args is not a dict: %s", type(result))
+        return None
+    return result
+
+
+def _parse_fuzzy_spell_args(args_raw: str) -> Optional[dict]:
+    """Parse informal key=value... spell args into a dict.
+
+    Handles single/double-quoted values, dict literals, and bare words.
+    Falls back to _parse_spell_args for standard dict/JSON forms.
+    """
+    result = _parse_spell_args(args_raw)
+    if result is not None:
+        return result
+    pairs = {}
+    for m in _KV_PATTERN.finditer(args_raw):
+        key = m.group(1)
+        # Groups 2-5 correspond to: single-quoted, double-quoted, dict-literal, bare-word
+        value_raw = next(v for v in m.groups()[1:] if v is not None)
+        # dict literals: try to parse as proper dict
+        if value_raw.startswith("{"):
+            parsed = _parse_spell_args(value_raw)
+            pairs[key] = parsed if parsed is not None else value_raw
+        else:
+            pairs[key] = value_raw
+    if pairs:
+        return pairs
+    return None
+
+
+def _normalize_spell_line(tool_name: str, tool_args: dict) -> str:
+    """Produce the canonical /spell line for a given tool name and args dict."""
+    return f"/spell name='{tool_name}' args={json.dumps(tool_args, ensure_ascii=False)}"
 
 
 def _parse_spell_line(text: str):
-    """Parse the first /spell invocation in *text*.
+    """Parse the first /spell invocation in *text* (canonical form only).
 
     Returns ``(tool_name, tool_args, match)`` or ``None``.
     """
     m = _SPELL_PATTERN.search(text)
     if not m:
         return None
-    tool_name = m.group(1)
-    args_raw = m.group(2).strip()
-    # Try ast.literal_eval first (Python dict syntax), then JSON
-    import ast
-    try:
-        tool_args = ast.literal_eval(args_raw)
-    except (ValueError, SyntaxError):
-        try:
-            tool_args = json.loads(args_raw)
-        except json.JSONDecodeError:
-            LOGGER.warning("[sea][spell] Failed to parse args: %s", args_raw)
-            return None
-    if not isinstance(tool_args, dict):
-        LOGGER.warning("[sea][spell] Args is not a dict: %s", type(tool_args))
+    tool_args = _parse_spell_args(m.group(2).strip())
+    if tool_args is None:
         return None
-    return tool_name, tool_args, m
+    return m.group(1), tool_args, m
+
+
+def _parse_spell_lines(text: str) -> List[Tuple[str, dict, Any, str]]:
+    """Parse ALL /spell invocations in *text*, including fuzzy (informal) syntax.
+
+    Returns list of ``(tool_name, tool_args, match, normalized_line)``.
+    - ``match`` points to the original text position (for text_before calculation).
+    - ``normalized_line`` is the canonical ``/spell name='...' args={...}`` form,
+      which is used in SAIMemory storage so the persona learns correct syntax.
+    Unparseable entries are silently skipped.
+    """
+    found: List[Tuple[str, dict, Any, str]] = []
+    matched_spans: List[Tuple[int, int]] = []
+
+    # Pass 1: canonical form
+    for m in _SPELL_PATTERN.finditer(text):
+        tool_args = _parse_spell_args(m.group(2).strip())
+        if tool_args is not None:
+            normalized = _normalize_spell_line(m.group(1), tool_args)
+            found.append((m.group(1), tool_args, m, normalized))
+            matched_spans.append(m.span())
+
+    # Pass 2: fuzzy form — skip spans already matched by canonical pattern
+    for m in _SPELL_PATTERN_FUZZY.finditer(text):
+        span = m.span()
+        if any(s <= span[0] < e for s, e in matched_spans):
+            continue
+        tool_name = m.group(1)
+        tool_args = _parse_fuzzy_spell_args(m.group(2).strip())
+        if tool_args is not None:
+            normalized = _normalize_spell_line(tool_name, tool_args)
+            LOGGER.info("[sea][spell] Fuzzy-parsed spell '%s' → %s", tool_name, normalized)
+            found.append((tool_name, tool_args, m, normalized))
+            matched_spans.append(span)
+
+    # Sort by position in text so rounds process spells in order
+    found.sort(key=lambda x: x[2].start())
+    return found
 
 
 def _build_spell_details_html(tool_name: str, tool_args: dict, display_name: str, result_str: str = "") -> str:
@@ -192,104 +278,205 @@ def _execute_handy_tool_inline(
     return result_str
 
 
-def _execute_spell_inline(
+async def _run_spell_tool_async(
     tool_name: str,
     tool_args: dict,
     persona: Any,
-    building_id: str,
-    playbook_name: str,
     state: dict,
-    messages: list,
-    runtime: Any,
-    text_before: str,
-    spell_line: str,
-    event_callback: Optional[Callable] = None,
+    playbook_name: str,
+    event_callback: Optional[Callable],
 ) -> str:
-    """Execute a spell tool inline and append context messages.
-
-    Unlike handy tools, spells do NOT use the tool_call/tool protocol.
-    Instead they add assistant text + system result messages.
-    Returns the tool result string.
-    """
+    """Execute a single spell tool in a thread executor. Returns result string."""
     from tools import TOOL_REGISTRY
     from tools.context import persona_context
     from pathlib import Path
-    from sea.pulse_context import PulseLogEntry
 
-    # Append assistant message (text up to and including spell line)
-    assistant_content = (text_before + "\n" + spell_line).strip()
-    messages.append({"role": "assistant", "content": assistant_content})
-
-    # Execute the tool
     tool_func = TOOL_REGISTRY.get(tool_name)
     if not tool_func:
         result_str = f"Spell '{tool_name}' not found in registry"
         LOGGER.error("[sea][spell] %s", result_str)
-    else:
-        persona_obj = state.get("_persona_obj") or persona
-        persona_id = getattr(persona_obj, "persona_id", "unknown")
-        persona_dir = getattr(persona_obj, "persona_log_path", None)
-        persona_dir = persona_dir.parent if persona_dir else Path.cwd()
-        manager_ref = getattr(persona_obj, "manager_ref", None)
-        try:
-            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=False, event_callback=event_callback):
-                raw_result = tool_func(**tool_args)
-            result_str = str(raw_result)
-            LOGGER.info("[sea][spell] Executed %s → %s", tool_name, result_str[:200])
-        except Exception as exc:
-            result_str = f"Spell error ({tool_name}): {exc}"
-            LOGGER.exception("[sea][spell] %s failed", tool_name)
+        return result_str
 
-    # Append spell result as user message (wrapped in <system> tags).
-    # Using "user" role because Gemini converts "system" role to system_instruction,
-    # which would strip it from the conversation flow. The <system> wrapper
-    # signals to the LLM that this is system-provided context, not user input.
-    result_msg = {
-        "role": "user",
-        "content": f"<system>[Spell Result: {tool_name}]\n{result_str}</system>",
-    }
-    messages.append(result_msg)
+    persona_obj = state.get("_persona_obj") or persona
+    persona_id = getattr(persona_obj, "persona_id", "unknown")
+    persona_dir = getattr(persona_obj, "persona_log_path", None)
+    persona_dir = persona_dir.parent if persona_dir else Path.cwd()
+    manager_ref = getattr(persona_obj, "manager_ref", None)
 
-    # Record to PulseContext
-    _pulse_ctx = state.get("_pulse_context")
-    if _pulse_ctx:
-        _pulse_ctx.append(PulseLogEntry(
-            role="assistant", content=assistant_content,
-            node_id=f"spell_{tool_name}", playbook_name=playbook_name,
-        ))
-        _pulse_ctx.append(PulseLogEntry(
-            role="system", content=result_str,
-            node_id=f"spell_{tool_name}", playbook_name=playbook_name,
-        ))
+    def _run():
+        with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=False, event_callback=event_callback):
+            return tool_func(**tool_args)
 
-    # Store assistant message (text before spell) to SAIMemory
-    pulse_id = state.get("_pulse_id")
-    if text_before.strip():
-        runtime._store_memory(
-            persona,
-            text_before,
-            role="assistant",
-            tags=["conversation"],
-            pulse_id=pulse_id,
-            playbook_name=playbook_name,
-        )
-
-    # Store spell result to SAIMemory with spell tag
-    runtime._store_memory(
-        persona,
-        f"[Spell: {tool_name}]\n{result_str}",
-        role="system",
-        tags=["conversation", "spell"],
-        pulse_id=pulse_id,
-        playbook_name=playbook_name,
-    )
-
-    # Record to activity trace
-    _at = state.get("_activity_trace")
-    if isinstance(_at, list):
-        _at.append({"action": "spell", "name": tool_name, "playbook": playbook_name})
+    try:
+        raw_result = await asyncio.get_event_loop().run_in_executor(None, _run)
+        result_str = str(raw_result)
+        LOGGER.info("[sea][spell] Executed %s → %s", tool_name, result_str[:200])
+    except Exception as exc:
+        result_str = f"Spell error ({tool_name}): {exc}"
+        LOGGER.exception("[sea][spell] %s failed", tool_name)
 
     return result_str
+
+
+async def _run_spell_loop(
+    text: str,
+    spell_enabled: bool,
+    llm_client: Any,
+    runtime: Any,
+    persona: Any,
+    building_id: str,
+    state: dict,
+    messages: list,
+    playbook: Any,
+    event_callback: Optional[Callable],
+) -> Tuple[str, List[Tuple[str, str]], int]:
+    """Execute the spell loop with parallel spell execution per LLM round.
+
+    Each round: find ALL /spell lines → execute in parallel → re-invoke LLM once.
+    Sequential rounds handle dependency chains (result of round N used in round N+1).
+
+    Returns ``(final_text, details_blocks, loop_count)``.
+    ``details_blocks`` is a list of ``(text_before, html_details)`` pairs where
+    only the first entry of each round carries the text_before prefix.
+    """
+    from tools import SPELL_TOOL_NAMES, SPELL_TOOL_SCHEMAS
+    from sea.pulse_context import PulseLogEntry
+
+    if not spell_enabled or not text:
+        return text, [], 0
+
+    loop_count = 0
+    details_blocks: List[Tuple[str, str]] = []
+
+    while loop_count < _MAX_SPELL_LOOPS:
+        # Parse all spells from current text (canonical + fuzzy), filter to registered ones
+        all_parsed = _parse_spell_lines(text)
+        valid_spells = [
+            (name, args, m, norm) for name, args, m, norm in all_parsed
+            if name in SPELL_TOOL_NAMES
+        ]
+        unknown = [name for name, _, _, _ in all_parsed if name not in SPELL_TOOL_NAMES]
+        for name in unknown:
+            LOGGER.warning("[sea][spell] Unknown spell '%s', skipping", name)
+
+        if not valid_spells:
+            break
+
+        loop_count += 1
+        spell_names = [s[0] for s in valid_spells]
+        LOGGER.info("[sea][spell] Round %d: executing %d spell(s) in parallel: %s",
+                    loop_count, len(valid_spells), spell_names)
+
+        # text_before = text preceding the first spell
+        text_before = text[:valid_spells[0][2].start()].rstrip()
+
+        # Canonical assistant message: text_before + normalized spell lines
+        all_spell_lines_normalized = "\n".join(norm for _, _, _, norm in valid_spells)
+        assistant_content = (text_before + "\n" + all_spell_lines_normalized).strip()
+        messages.append({"role": "assistant", "content": assistant_content})
+
+        # Execute all spells in parallel
+        results: List[str] = list(await asyncio.gather(*[
+            _run_spell_tool_async(name, args, persona, state, playbook.name, event_callback)
+            for name, args, _, _ in valid_spells
+        ]))
+
+        # All spell results in one user message (reduces per-result message overhead)
+        combined_results = "\n".join(
+            f"[Spell Result: {name}]\n{result}"
+            for (name, _, _, _), result in zip(valid_spells, results)
+        )
+        messages.append({"role": "user", "content": f"<system>{combined_results}</system>"})
+
+        # Record to PulseContext
+        pulse_ctx = state.get("_pulse_context")
+        if pulse_ctx:
+            pulse_ctx.append(PulseLogEntry(
+                role="assistant", content=assistant_content,
+                node_id=f"spell_round_{loop_count}", playbook_name=playbook.name,
+            ))
+            pulse_ctx.append(PulseLogEntry(
+                role="system", content=combined_results,
+                node_id=f"spell_round_{loop_count}", playbook_name=playbook.name,
+            ))
+
+        # Store to SAIMemory as single entries — spell lines (assistant) + all results
+        # combined (system). This avoids N separate result entries per round.
+        pulse_id = state.get("_pulse_id")
+        if assistant_content:
+            runtime._store_memory(
+                persona, assistant_content, role="assistant",
+                tags=["conversation"], pulse_id=pulse_id, playbook_name=playbook.name,
+            )
+        if combined_results:
+            runtime._store_memory(
+                persona, combined_results, role="system",
+                tags=["conversation", "spell"], pulse_id=pulse_id, playbook_name=playbook.name,
+            )
+
+        # Record to activity trace
+        _at = state.get("_activity_trace")
+        if isinstance(_at, list):
+            for name, _, _, _ in valid_spells:
+                _at.append({"action": "spell", "name": name, "playbook": playbook.name})
+
+        # Build UI details blocks (first spell carries text_before; others get "")
+        for i, ((name, args, _, _), result) in enumerate(zip(valid_spells, results)):
+            schema = SPELL_TOOL_SCHEMAS.get(name)
+            display = (schema.spell_display_name if schema else "") or name
+            details_blocks.append((
+                text_before if i == 0 else "",
+                _build_spell_details_html(name, args, display, result),
+            ))
+
+        # Re-invoke LLM once for the entire round
+        LOGGER.info("[sea][spell] Re-invoking LLM after round %d (%d spell(s))", loop_count, len(valid_spells))
+        retry_result = llm_client.generate(
+            messages,
+            tools=None,
+            temperature=runtime._default_temperature(persona),
+            **runtime._get_cache_kwargs(),
+        )
+
+        retry_usage = llm_client.consume_usage()
+        if retry_usage:
+            get_usage_tracker().record_usage(
+                model_id=retry_usage.model,
+                input_tokens=retry_usage.input_tokens,
+                output_tokens=retry_usage.output_tokens,
+                cached_tokens=retry_usage.cached_tokens,
+                cache_write_tokens=retry_usage.cache_write_tokens,
+                cache_ttl=retry_usage.cache_ttl,
+                persona_id=getattr(persona, "persona_id", None),
+                building_id=building_id,
+                node_type="llm_spell_retry",
+                playbook_name=playbook.name,
+                category="persona_speak",
+            )
+            from saiverse.model_configs import calculate_cost
+            retry_cost = calculate_cost(
+                retry_usage.model, retry_usage.input_tokens, retry_usage.output_tokens,
+                retry_usage.cached_tokens, retry_usage.cache_write_tokens, cache_ttl=retry_usage.cache_ttl,
+            )
+            runtime._accumulate_usage(
+                state, retry_usage.model, retry_usage.input_tokens,
+                retry_usage.output_tokens, retry_cost,
+                retry_usage.cached_tokens, retry_usage.cache_write_tokens,
+            )
+
+        if isinstance(retry_result, dict):
+            text = retry_result.get("content", "")
+        elif isinstance(retry_result, str):
+            text = retry_result
+        else:
+            text = ""
+
+        LOGGER.info("[sea][spell] After round %d: has_more_spells=%s",
+                    loop_count, bool(_SPELL_PATTERN.search(text)))
+
+    LOGGER.info("[sea][spell] Completed %d round(s), %d total spell(s)",
+                loop_count, len(details_blocks))
+    return text, details_blocks, loop_count
 
 
 def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
@@ -693,98 +880,26 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 LOGGER.info("[DEBUG] LLM result type='%s', has content=%s, has tool_name=%s",
                            result.get("type"), "content" in result, "tool_name" in result)
 
-                # ── Spell inline loop ──
-                # If LLM output contains /spell lines and spells are enabled,
-                # execute them and re-invoke LLM with results.
-                _spell_loop_count = 0
-                _spell_details_blocks: list[str] = []  # Accumulated <details> blocks for UI
-                if _spell_enabled and result.get("type") == "text" and result.get("content"):
-                    _spell_parsed = _parse_spell_line(result["content"])
-                    while _spell_parsed and _spell_loop_count < _MAX_SPELL_LOOPS:
-                        _spell_loop_count += 1
-                        _sp_name, _sp_args, _sp_match = _spell_parsed
-                        LOGGER.info("[sea][spell] Loop %d: executing %s (args=%s)", _spell_loop_count, _sp_name, _sp_args)
-
-                        from tools import SPELL_TOOL_NAMES, SPELL_TOOL_SCHEMAS
-                        if _sp_name not in SPELL_TOOL_NAMES:
-                            LOGGER.warning("[sea][spell] Unknown spell '%s', skipping", _sp_name)
-                            break
-
-                        _sp_schema = SPELL_TOOL_SCHEMAS.get(_sp_name)
-                        _sp_display = (_sp_schema.spell_display_name if _sp_schema else "") or _sp_name
-
-                        # Text before the spell line
-                        _text_before = result["content"][:_sp_match.start()].rstrip()
-                        _spell_line = _sp_match.group(0)
-
-                        # Execute spell
-                        _sp_result = _execute_spell_inline(
-                            _sp_name, _sp_args,
-                            persona, building_id, playbook.name,
-                            state, messages, runtime,
-                            text_before=_text_before,
-                            spell_line=_spell_line,
-                            event_callback=event_callback,
-                        )
-
-                        # Build <details> block for UI (after execution, includes result)
-                        _details = _build_spell_details_html(_sp_name, _sp_args, _sp_display, _sp_result)
-                        _spell_details_blocks.append((_text_before, _details))
-
-                        # Re-invoke LLM without tools (spell results are in messages)
-                        LOGGER.info("[sea][spell] Re-invoking LLM after spell %s", _sp_name)
-                        _retry_result = llm_client.generate(
-                            messages,
-                            tools=None,
-                            temperature=runtime._default_temperature(persona),
-                            **runtime._get_cache_kwargs(),
-                        )
-                        # Record usage
-                        _retry_usage = llm_client.consume_usage()
-                        if _retry_usage:
-                            get_usage_tracker().record_usage(
-                                model_id=_retry_usage.model,
-                                input_tokens=_retry_usage.input_tokens,
-                                output_tokens=_retry_usage.output_tokens,
-                                cached_tokens=_retry_usage.cached_tokens,
-                                cache_write_tokens=_retry_usage.cache_write_tokens,
-                                cache_ttl=_retry_usage.cache_ttl,
-                                persona_id=getattr(persona, "persona_id", None),
-                                building_id=building_id,
-                                node_type="llm_spell_retry",
-                                playbook_name=playbook.name,
-                                category="persona_speak",
-                            )
-                            from saiverse.model_configs import calculate_cost
-                            _retry_cost = calculate_cost(
-                                _retry_usage.model, _retry_usage.input_tokens, _retry_usage.output_tokens,
-                                _retry_usage.cached_tokens, _retry_usage.cache_write_tokens, cache_ttl=_retry_usage.cache_ttl,
-                            )
-                            runtime._accumulate_usage(
-                                state, _retry_usage.model, _retry_usage.input_tokens,
-                                _retry_usage.output_tokens, _retry_cost,
-                                _retry_usage.cached_tokens, _retry_usage.cache_write_tokens,
-                            )
-
-                        # Extract text from retry result
-                        _retry_content = ""
-                        if isinstance(_retry_result, dict):
-                            _retry_content = _retry_result.get("content", "")
-                        elif isinstance(_retry_result, str):
-                            _retry_content = _retry_result
-                        result = {"type": "text", "content": _retry_content}
-
-                        # Check for more spells in new output
-                        _spell_parsed = _parse_spell_line(result["content"])
-                        LOGGER.info("[sea][spell] After retry: has_more_spells=%s", _spell_parsed is not None)
-
+                # ── Spell loop (parallel execution per round) ──
+                _spell_text, _spell_details_blocks, _spell_loop_count = await _run_spell_loop(
+                    text=result.get("content", "") if result.get("type") == "text" else "",
+                    spell_enabled=_spell_enabled,
+                    llm_client=llm_client,
+                    runtime=runtime,
+                    persona=persona,
+                    building_id=building_id,
+                    state=state,
+                    messages=messages,
+                    playbook=playbook,
+                    event_callback=event_callback,
+                )
                 if _spell_loop_count > 0:
-                    LOGGER.info("[sea][spell] Completed %d spell loop(s)", _spell_loop_count)
+                    result = {"type": "text", "content": _spell_text}
 
                     pulse_id = state.get("_pulse_id")
                     eff_bid = runtime._effective_building_id(persona, building_id)
 
-                    # Bubble 1: text_before of first spell (no metadata)
+                    # Bubble 1: text before the first spell (no metadata)
                     _first_text_before = _spell_details_blocks[0][0] if _spell_details_blocks else ""
                     if _first_text_before.strip():
                         if event_callback:
@@ -795,7 +910,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             })
                         runtime._emit_say(persona, eff_bid, _first_text_before, pulse_id=pulse_id)
 
-                    # Bubble 2: details + continuation (with metadata)
+                    # Bubble 2: all details blocks + continuation text (with metadata)
                     _bubble2_parts: list[str] = []
                     for _i, (_tb, _db) in enumerate(_spell_details_blocks):
                         if _i > 0 and _tb:
@@ -822,7 +937,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
 
                     runtime._emit_say(persona, eff_bid, _spell_bubble2, pulse_id=pulse_id,
                                       metadata=_spell_msg_meta if _spell_msg_meta else None)
-                    LOGGER.info("[sea][spell] Emitted bubble1 + bubble2 to UI and Building history")
+                    LOGGER.info("[sea][spell] Tool-mode: emitted bubble1 + bubble2 to UI and Building history")
 
                 if result["type"] == "tool_call":
                     LOGGER.info("[DEBUG] Entering tool_call branch")
@@ -1002,6 +1117,20 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         if cancelled_during_stream:
                             break  # Don't retry on cancellation
 
+                        # Check for server-side stream interruption (e.g. 504 DEADLINE_EXCEEDED)
+                        _stream_error = (
+                            llm_client.consume_stream_error()
+                            if hasattr(llm_client, "consume_stream_error") else None
+                        )
+                        if _stream_error:
+                            LOGGER.warning(
+                                "[sea][llm] Stream interrupted by server: code=%s status=%s — "
+                                "will re-speak after storing partial response",
+                                _stream_error.get("code"), _stream_error.get("status", ""),
+                            )
+                            state["_stream_error"] = _stream_error
+                            break  # Don't retry; handle at speak level below
+
                         # Check for empty response
                         if text.strip():
                             break  # Got valid response
@@ -1066,91 +1195,25 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     ) if reasoning_entries else ""
                     reasoning_details = llm_client.consume_reasoning_details()
 
-                    # ── Spell detection in normal streaming mode ──
-                    _spell_loop_count_ns = 0
-                    _spell_details_blocks_ns: list[str] = []
-                    if _spell_enabled and text and _parse_spell_line(text):
-                        _spell_parsed_ns = _parse_spell_line(text)
-                        while _spell_parsed_ns and _spell_loop_count_ns < _MAX_SPELL_LOOPS:
-                            _spell_loop_count_ns += 1
-                            _sp_name_ns, _sp_args_ns, _sp_match_ns = _spell_parsed_ns
-                            LOGGER.info("[sea][spell] Normal-stream loop %d: executing %s (args=%s)", _spell_loop_count_ns, _sp_name_ns, _sp_args_ns)
-
-                            from tools import SPELL_TOOL_NAMES, SPELL_TOOL_SCHEMAS
-                            if _sp_name_ns not in SPELL_TOOL_NAMES:
-                                LOGGER.warning("[sea][spell] Unknown spell '%s', skipping", _sp_name_ns)
-                                break
-
-                            _sp_schema_ns = SPELL_TOOL_SCHEMAS.get(_sp_name_ns)
-                            _sp_display_ns = (_sp_schema_ns.spell_display_name if _sp_schema_ns else "") or _sp_name_ns
-
-                            _text_before_ns = text[:_sp_match_ns.start()].rstrip()
-                            _spell_line_ns = _sp_match_ns.group(0)
-
-                            _sp_result_ns = _execute_spell_inline(
-                                _sp_name_ns, _sp_args_ns,
-                                persona, building_id, playbook.name,
-                                state, messages, runtime,
-                                text_before=_text_before_ns,
-                                spell_line=_spell_line_ns,
-                                event_callback=event_callback,
-                            )
-
-                            _details_ns = _build_spell_details_html(_sp_name_ns, _sp_args_ns, _sp_display_ns, _sp_result_ns)
-                            _spell_details_blocks_ns.append((_text_before_ns, _details_ns))
-
-                            LOGGER.info("[sea][spell] Re-invoking LLM after spell %s", _sp_name_ns)
-                            _retry_result_ns = llm_client.generate(
-                                messages,
-                                tools=None,
-                                temperature=runtime._default_temperature(persona),
-                                **runtime._get_cache_kwargs(),
-                            )
-                            _retry_usage_ns = llm_client.consume_usage()
-                            if _retry_usage_ns:
-                                get_usage_tracker().record_usage(
-                                    model_id=_retry_usage_ns.model,
-                                    input_tokens=_retry_usage_ns.input_tokens,
-                                    output_tokens=_retry_usage_ns.output_tokens,
-                                    cached_tokens=_retry_usage_ns.cached_tokens,
-                                    cache_write_tokens=_retry_usage_ns.cache_write_tokens,
-                                    cache_ttl=_retry_usage_ns.cache_ttl,
-                                    persona_id=getattr(persona, "persona_id", None),
-                                    building_id=building_id,
-                                    node_type="llm_spell_retry",
-                                    playbook_name=playbook.name,
-                                    category="persona_speak",
-                                )
-                                from saiverse.model_configs import calculate_cost
-                                _retry_cost_ns = calculate_cost(
-                                    _retry_usage_ns.model, _retry_usage_ns.input_tokens, _retry_usage_ns.output_tokens,
-                                    _retry_usage_ns.cached_tokens, _retry_usage_ns.cache_write_tokens, cache_ttl=_retry_usage_ns.cache_ttl,
-                                )
-                                runtime._accumulate_usage(
-                                    state, _retry_usage_ns.model, _retry_usage_ns.input_tokens,
-                                    _retry_usage_ns.output_tokens, _retry_cost_ns,
-                                    _retry_usage_ns.cached_tokens, _retry_usage_ns.cache_write_tokens,
-                                )
-
-                            if isinstance(_retry_result_ns, dict):
-                                text = _retry_result_ns.get("content", "")
-                            elif isinstance(_retry_result_ns, str):
-                                text = _retry_result_ns
-                            else:
-                                text = ""
-
-                            _spell_parsed_ns = _parse_spell_line(text)
-                            LOGGER.info("[sea][spell] After retry: has_more_spells=%s", _spell_parsed_ns is not None)
+                    # ── Spell loop (parallel execution per round) ──
+                    text, _spell_details_blocks_ns, _spell_loop_count_ns = await _run_spell_loop(
+                        text=text,
+                        spell_enabled=_spell_enabled,
+                        llm_client=llm_client,
+                        runtime=runtime,
+                        persona=persona,
+                        building_id=building_id,
+                        state=state,
+                        messages=messages,
+                        playbook=playbook,
+                        event_callback=event_callback,
+                    )
 
                     if _spell_loop_count_ns > 0:
-                        LOGGER.info("[sea][spell] Normal-stream: completed %d spell loop(s)", _spell_loop_count_ns)
-
                         pulse_id = state.get("_pulse_id")
                         eff_bid = runtime._effective_building_id(persona, building_id)
 
-                        # ── Bubble 1: text_before (discard streamed content, re-emit clean) ──
-                        # The streaming already sent the full text (including /spell line) as chunks.
-                        # Discard that and replace with just text_before.
+                        # Bubble 1: discard streamed content, re-emit just text_before clean
                         _first_text_before_ns = _spell_details_blocks_ns[0][0] if _spell_details_blocks_ns else ""
                         if event_callback:
                             event_callback({
@@ -1166,13 +1229,10 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                     "persona_id": getattr(persona, "persona_id", None),
                                 })
                             runtime._emit_say(persona, eff_bid, _first_text_before_ns, pulse_id=pulse_id)
-                            LOGGER.info("[sea][spell] Bubble 1: text_before emitted (len=%d)", len(_first_text_before_ns))
 
-                        # ── Bubble 2: details blocks + continuation (with metadata) ──
+                        # Bubble 2: all details blocks + continuation (with metadata)
                         _bubble2_parts: list[str] = []
                         for _i_ns, (_tb_ns, _db_ns) in enumerate(_spell_details_blocks_ns):
-                            # text_before of first spell → already in Bubble 1
-                            # text_before of subsequent spells (from retry results) → include
                             if _i_ns > 0 and _tb_ns:
                                 _bubble2_parts.append(_tb_ns)
                             _bubble2_parts.append(_db_ns)
@@ -1204,10 +1264,9 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
 
                         runtime._emit_say(persona, eff_bid, _spell_bubble2_ns, pulse_id=pulse_id,
                                           metadata=_spell_msg_meta_ns if _spell_msg_meta_ns else None)
-                        LOGGER.info("[sea][spell] Bubble 2: details+continuation emitted (len=%d)", len(_spell_bubble2_ns))
+                        LOGGER.info("[sea][spell] Normal-stream: emitted bubble1 + bubble2 (len=%d)", len(_spell_bubble2_ns))
 
                         # text = continuation only (for state["last"] / memorize — no duplication)
-                        # text is already the last retry result (continuation), don't overwrite
                     else:
                         # No spells — normal completion path
                         # Resolve metadata_key for speak (e.g., media attachments from tool execution)
@@ -1252,6 +1311,88 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             _last_mid = _last_bmsg.get("message_id")
                             if _last_mid:
                                 state["_last_message_id"] = str(_last_mid)
+
+                        # ── 504 DEADLINE_EXCEEDED: re-speak after partial response ──
+                        _stream_err = state.pop("_stream_error", None)
+                        if _stream_err and text.strip():
+                            _err_code = _stream_err.get("code", 504)
+                            _err_msg = _stream_err.get("message", "Deadline expired before operation could complete.")
+                            LOGGER.warning(
+                                "[sea][llm] Triggering re-speak after 504 stream interruption for persona=%s",
+                                getattr(persona, "persona_id", None),
+                            )
+
+                            # 1. Emit info event to frontend
+                            if event_callback:
+                                event_callback({
+                                    "type": "info",
+                                    "content": (
+                                        f"ℹ️ メッセージの生成が予期せず終了しました。"
+                                        f"({_err_code} {_err_msg})\n"
+                                        "ペルソナが再発言を行います。"
+                                    ),
+                                    "persona_id": getattr(persona, "persona_id", None),
+                                })
+
+                            # 2. Store partial to SAIMemory now (before continuation, to preserve order)
+                            runtime._store_memory(
+                                persona, text,
+                                role="assistant",
+                                tags=["conversation"],
+                                pulse_id=state.get("_pulse_id"),
+                            )
+
+                            # 3. Build continuation messages:
+                            #    existing context + assistant(partial) + user(<system>prompt</system>)
+                            _cont_messages = list(messages) + [
+                                {"role": "assistant", "content": text},
+                                {"role": "user", "content": (
+                                    "<system>あなたの応答がサーバータイムアウトにより途中で終了しました。"
+                                    "続きがあれば引き続き発言してください。</system>"
+                                )},
+                            ]
+
+                            # 4. Stream continuation
+                            _cont_chunks: list[str] = []
+                            try:
+                                _cont_iter = llm_client.generate_stream(
+                                    _cont_messages,
+                                    tools=[],
+                                    temperature=runtime._default_temperature(persona),
+                                    **runtime._get_cache_kwargs(),
+                                )
+                                for _cont_chunk in _cont_iter:
+                                    if isinstance(_cont_chunk, dict):
+                                        continue
+                                    _cont_chunks.append(_cont_chunk)
+                                    if event_callback:
+                                        event_callback({
+                                            "type": "streaming_chunk",
+                                            "content": _cont_chunk,
+                                            "persona_id": getattr(persona, "persona_id", None),
+                                            "node_id": getattr(node_def, "id", "llm"),
+                                        })
+                            finally:
+                                if hasattr(_cont_iter, "close"):
+                                    _cont_iter.close()
+
+                            _cont_text = "".join(_cont_chunks)
+
+                            if _cont_text.strip():
+                                # Send streaming_complete for continuation
+                                if event_callback:
+                                    event_callback({
+                                        "type": "streaming_complete",
+                                        "persona_id": getattr(persona, "persona_id", None),
+                                        "node_id": getattr(node_def, "id", "llm"),
+                                    })
+                                # Store continuation to building history
+                                runtime._emit_say(persona, eff_bid, _cont_text, pulse_id=pulse_id)
+                                # state["speak_content"] = continuation so compose/memorize node
+                                # stores it to SAIMemory (partial was stored directly above)
+                                text = _cont_text
+                            else:
+                                LOGGER.warning("[sea][llm] Re-speak after 504 returned empty response")
 
                     # Store reasoning in state for downstream speak/say nodes
                     if reasoning_text:
@@ -1307,84 +1448,22 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     ) if reasoning_entries else ""
                     reasoning_details = llm_client.consume_reasoning_details()
 
-                    # ── Spell detection in non-streaming normal mode ──
-                    _spell_loop_count_sync = 0
-                    _spell_details_blocks_sync: list[str] = []
-                    if _spell_enabled and not response_schema and isinstance(text, str) and text and _parse_spell_line(text):
-                        _spell_parsed_sync = _parse_spell_line(text)
-                        while _spell_parsed_sync and _spell_loop_count_sync < _MAX_SPELL_LOOPS:
-                            _spell_loop_count_sync += 1
-                            _sp_name_sync, _sp_args_sync, _sp_match_sync = _spell_parsed_sync
-                            LOGGER.info("[sea][spell] Sync loop %d: executing %s (args=%s)", _spell_loop_count_sync, _sp_name_sync, _sp_args_sync)
-
-                            from tools import SPELL_TOOL_NAMES, SPELL_TOOL_SCHEMAS
-                            if _sp_name_sync not in SPELL_TOOL_NAMES:
-                                LOGGER.warning("[sea][spell] Unknown spell '%s', skipping", _sp_name_sync)
-                                break
-
-                            _sp_schema_sync = SPELL_TOOL_SCHEMAS.get(_sp_name_sync)
-                            _sp_display_sync = (_sp_schema_sync.spell_display_name if _sp_schema_sync else "") or _sp_name_sync
-
-                            _text_before_sync = text[:_sp_match_sync.start()].rstrip()
-                            _spell_line_sync = _sp_match_sync.group(0)
-
-                            _sp_result_sync = _execute_spell_inline(
-                                _sp_name_sync, _sp_args_sync,
-                                persona, building_id, playbook.name,
-                                state, messages, runtime,
-                                text_before=_text_before_sync,
-                                spell_line=_spell_line_sync,
-                                event_callback=event_callback,
-                            )
-
-                            _details_sync = _build_spell_details_html(_sp_name_sync, _sp_args_sync, _sp_display_sync, _sp_result_sync)
-                            _spell_details_blocks_sync.append((_text_before_sync, _details_sync))
-
-                            LOGGER.info("[sea][spell] Re-invoking LLM after spell %s", _sp_name_sync)
-                            _retry_result_sync = llm_client.generate(
-                                messages,
-                                tools=None,
-                                temperature=runtime._default_temperature(persona),
-                                **runtime._get_cache_kwargs(),
-                            )
-                            _retry_usage_sync = llm_client.consume_usage()
-                            if _retry_usage_sync:
-                                get_usage_tracker().record_usage(
-                                    model_id=_retry_usage_sync.model,
-                                    input_tokens=_retry_usage_sync.input_tokens,
-                                    output_tokens=_retry_usage_sync.output_tokens,
-                                    cached_tokens=_retry_usage_sync.cached_tokens,
-                                    cache_write_tokens=_retry_usage_sync.cache_write_tokens,
-                                    cache_ttl=_retry_usage_sync.cache_ttl,
-                                    persona_id=getattr(persona, "persona_id", None),
-                                    building_id=building_id,
-                                    node_type="llm_spell_retry",
-                                    playbook_name=playbook.name,
-                                    category="persona_speak",
-                                )
-                                from saiverse.model_configs import calculate_cost
-                                _retry_cost_sync = calculate_cost(
-                                    _retry_usage_sync.model, _retry_usage_sync.input_tokens, _retry_usage_sync.output_tokens,
-                                    _retry_usage_sync.cached_tokens, _retry_usage_sync.cache_write_tokens, cache_ttl=_retry_usage_sync.cache_ttl,
-                                )
-                                runtime._accumulate_usage(
-                                    state, _retry_usage_sync.model, _retry_usage_sync.input_tokens,
-                                    _retry_usage_sync.output_tokens, _retry_cost_sync,
-                                    _retry_usage_sync.cached_tokens, _retry_usage_sync.cache_write_tokens,
-                                )
-
-                            if isinstance(_retry_result_sync, dict):
-                                text = _retry_result_sync.get("content", "")
-                            elif isinstance(_retry_result_sync, str):
-                                text = _retry_result_sync
-                            else:
-                                text = ""
-
-                            _spell_parsed_sync = _parse_spell_line(text)
+                    # ── Spell loop (parallel execution per round) ──
+                    _spell_text_sync = text if (not response_schema and isinstance(text, str)) else ""
+                    text, _spell_details_blocks_sync, _spell_loop_count_sync = await _run_spell_loop(
+                        text=_spell_text_sync,
+                        spell_enabled=_spell_enabled,
+                        llm_client=llm_client,
+                        runtime=runtime,
+                        persona=persona,
+                        building_id=building_id,
+                        state=state,
+                        messages=messages,
+                        playbook=playbook,
+                        event_callback=event_callback,
+                    )
 
                     if _spell_loop_count_sync > 0:
-                        LOGGER.info("[sea][spell] Sync: completed %d spell loop(s)", _spell_loop_count_sync)
-
                         # Bubble 1: text_before of first spell (no metadata)
                         _first_text_before_sync = _spell_details_blocks_sync[0][0] if _spell_details_blocks_sync else ""
                         if _first_text_before_sync.strip() and speak_flag is True:
@@ -1398,7 +1477,8 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                     "persona_id": getattr(persona, "persona_id", None),
                                 })
 
-                        # Bubble 2: details + continuation (text_before excluded)
+                        # Bubble 2: all details blocks + continuation
+                        # text = bubble2 content for the speak_flag path below to emit with metadata
                         _bubble2_parts_sync: list[str] = []
                         for _i_sync, (_tb_sync, _db_sync) in enumerate(_spell_details_blocks_sync):
                             if _i_sync > 0 and _tb_sync:
@@ -1406,7 +1486,6 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             _bubble2_parts_sync.append(_db_sync)
                         if text:
                             _bubble2_parts_sync.append(text)
-                        # text = bubble2 content for the speak_flag path below to emit with metadata
                         text = "\n".join(_bubble2_parts_sync)
 
                     # If speak=true but streaming disabled, send complete text and record to Building history

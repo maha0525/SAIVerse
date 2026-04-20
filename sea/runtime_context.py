@@ -163,6 +163,11 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                         "### 使い方",
                         "/spell name='ツール名' args={'引数名': '値'}",
                         "",
+                        "### 複数スペルの同時使用",
+                        "1回の発言に複数の /spell 行を書くと、すべて並列実行されます。結果はまとめて返ってきます。",
+                        "互いに独立したスペルは同じ発言にまとめて書いてください（LLM呼び出しが節約されます）。",
+                        "あるスペルの結果を次のスペルの引数に使いたい場合は、別の発言で順番に使用してください。",
+                        "",
                         "### 利用可能なスペル",
                     ]
                     for sname, sschema in SPELL_TOOL_SCHEMAS.items():

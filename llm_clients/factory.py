@@ -109,6 +109,19 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
 
         logging.debug("Creating OpenAI client for model '%s' with kwargs: %s", api_model, extra_kwargs)
         client = OpenAIClient(api_model, supports_images=supports_images, **extra_kwargs)
+
+        # Wrap with llama.cpp slot cache if configured
+        if isinstance(config, dict) and config.get("llama_slot_save_path"):
+            from .llama_cache import LlamaCacheManager, LlamaCachedClient
+            slot_save_path = str(config["llama_slot_save_path"])
+            parallel = int(config.get("llama_parallel", 1))
+            base_url = str(config.get("base_url", "http://127.0.0.1:8080"))
+            cache_mgr = LlamaCacheManager(base_url, slot_save_path, parallel)
+            client = LlamaCachedClient(client, cache_mgr)
+            logging.info(
+                "[factory] LlamaCachedClient enabled: slot_save_path=%s, parallel=%d",
+                slot_save_path, parallel,
+            )
     elif provider == "nvidia_nim":
         extra_kwargs: Dict[str, object] = {}
         if isinstance(config, dict):

@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -14,6 +15,17 @@ logger = logging.getLogger(__name__)
 # Retry configuration
 MAX_RETRIES = 3
 INITIAL_BACKOFF = 0.5  # seconds
+
+# Special tokens that may leak into model output (e.g. Gemma 4's <|channel>, <unused8>)
+_SPECIAL_TOKEN_RE = re.compile(r"<\|[^|>]*\|?>|<unused\d+>")
+
+
+def _strip_special_tokens(text: str) -> str:
+    """Remove leaked model special tokens from generated text."""
+    cleaned = _SPECIAL_TOKEN_RE.sub("", text)
+    if cleaned != text:
+        logger.debug("Stripped special tokens from llama.cpp response: %r", text[:120])
+    return cleaned
 
 
 def _should_retry(err: Exception) -> bool:
@@ -166,7 +178,7 @@ class LlamaCppClient(LLMClient):
 
                     choice = response["choices"][0]
                     message = choice["message"]
-                    content = message.get("content", "") or ""
+                    content = _strip_special_tokens(message.get("content", "") or "")
                     tool_calls = message.get("tool_calls", [])
 
                     if tool_calls:
@@ -225,7 +237,7 @@ class LlamaCppClient(LLMClient):
                         output_tokens=usage.get("completion_tokens", 0) or 0,
                     )
 
-                content = response["choices"][0]["message"]["content"] or ""
+                content = _strip_special_tokens(response["choices"][0]["message"]["content"] or "")
                 # Check for empty response
                 if not content.strip():
                     logger.error(
@@ -331,7 +343,7 @@ class LlamaCppClient(LLMClient):
                             first_text_chunk_time = now
                             logger.debug("[llama_cpp_stream] First text chunk at +%.2fs", now - stream_start)
                         last_text_chunk_time = now
-                        yield delta["content"]
+                        yield _strip_special_tokens(delta["content"])
 
                 # ── Stream completed: log timing summary ──
                 stream_end = time.monotonic()

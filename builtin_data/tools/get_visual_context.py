@@ -140,11 +140,95 @@ def _render_bag_contents(
             _render_bag_contents(children, text_parts, media_list, manager, indent + 1)
 
 
+def _format_item_created_at(item: Dict[str, Any]) -> str:
+    """Format item creation datetime for display."""
+    from datetime import datetime
+    created_at = item.get("created_at")
+    if isinstance(created_at, datetime):
+        return created_at.strftime("%Y-%m-%d %H:%M")
+    if created_at is not None:
+        try:
+            return datetime.utcfromtimestamp(float(created_at)).strftime("%Y-%m-%d %H:%M")
+        except (TypeError, ValueError):
+            pass
+    return ""
+
+
+def _fetch_item_memory_recall(item: Dict[str, Any], persona_id: str, manager: Any, count: int = 10) -> Optional[str]:
+    """Return log text around the item's creation time if it predates the current context.
+
+    Only fetches when the item's creation timestamp is older than the oldest
+    message currently in the persona's context window.
+    """
+    if not persona_id or not manager:
+        return None
+
+    from datetime import datetime, timezone
+
+    created_at = item.get("created_at")
+    if created_at is None:
+        return None
+    if isinstance(created_at, datetime):
+        try:
+            created_at_epoch = float(created_at.replace(tzinfo=timezone.utc).timestamp())
+        except Exception:
+            return None
+    else:
+        try:
+            created_at_epoch = float(created_at)
+        except (TypeError, ValueError):
+            return None
+
+    # Resolve oldest context timestamp via ItemService helper if available
+    try:
+        if hasattr(manager, "item_service"):
+            oldest_ts = manager.item_service._get_oldest_context_timestamp(persona_id)
+        else:
+            return None
+    except Exception as exc:
+        LOGGER.debug("_fetch_item_memory_recall: failed to get oldest context ts: %s", exc)
+        return None
+
+    if oldest_ts is None or created_at_epoch >= oldest_ts:
+        return None
+
+    # Fetch surrounding messages
+    try:
+        persona = (
+            manager.all_personas.get(persona_id)
+            or (manager.personas.get(persona_id) if hasattr(manager, "personas") else None)
+        )
+        if not persona:
+            return None
+        memory = getattr(persona, "sai_memory", None)
+        if not memory or not memory.is_ready():
+            return None
+
+        from sai_memory.memory.storage import get_messages_around_timestamp
+        messages = get_messages_around_timestamp(
+            memory.conn,
+            timestamp=int(created_at_epoch),
+            count=count,
+        )
+        if not messages:
+            return None
+        lines: List[str] = []
+        for msg in messages:
+            dt_str = datetime.utcfromtimestamp(msg.created_at).strftime("%Y-%m-%d %H:%M")
+            role = msg.role or "unknown"
+            lines.append(f"[{dt_str}] ({role})\n{msg.content}")
+        return "\n---\n".join(lines)
+    except Exception as exc:
+        LOGGER.debug("_fetch_item_memory_recall: failed for item %s: %s", item.get("item_id"), exc)
+        return None
+
+
 def _render_item(
     item: Dict[str, Any],
     text_parts: List[str],
     media_list: List[Dict[str, str]],
     manager: Any,
+    persona_id: Optional[str] = None,
 ) -> None:
     """Render a single item into the visual context text and media list."""
     item_id = item.get("item_id", "")
@@ -154,6 +238,7 @@ def _render_item(
     state = item.get("state", {})
     is_open = isinstance(state, dict) and state.get("is_open", False)
     file_path_str = item.get("file_path")
+    created_at_str = _format_item_created_at(item)
 
     type_label = {
         "picture": "Image",
@@ -166,6 +251,8 @@ def _render_item(
         # Objects have no open/closed concept
         text_parts.append(f"[{type_label}] {item_name}")
         text_parts.append(f"id: {item_id}")
+        if created_at_str:
+            text_parts.append(f"作成日時: {created_at_str}")
         text_parts.append(description)
         text_parts.append("")
 
@@ -173,6 +260,8 @@ def _render_item(
         open_label = "(Open) " if is_open else "(Closed) "
         text_parts.append(f"[{type_label}] {item_name}")
         text_parts.append(f"{open_label}id: {item_id}")
+        if created_at_str:
+            text_parts.append(f"作成日時: {created_at_str}")
 
         if is_open and file_path_str:
             resolved = _resolve_item_file_path(manager, file_path_str)
@@ -180,6 +269,13 @@ def _render_item(
                 text_parts.append(f"saiverse://item/{item_id}/image")
                 _add_to_media_list(resolved, media_list)
                 LOGGER.debug("get_visual_context: Added open picture item: %s", item_name)
+                # Append description as caption when image is displayed
+                text_parts.append(description)
+                # Auto-recall: attach surrounding log if creation predates current context
+                recall = _fetch_item_memory_recall(item, persona_id, manager)
+                if recall:
+                    text_parts.append("--- あの時の思い出 ---")
+                    text_parts.append(recall)
             else:
                 text_parts.append(description)
         else:
@@ -190,6 +286,8 @@ def _render_item(
         open_label = "(Open) " if is_open else "(Closed) "
         text_parts.append(f"[{type_label}] {item_name}")
         text_parts.append(f"{open_label}id: {item_id}")
+        if created_at_str:
+            text_parts.append(f"作成日時: {created_at_str}")
 
         if is_open and file_path_str:
             resolved = _resolve_item_file_path(manager, file_path_str)
@@ -215,6 +313,8 @@ def _render_item(
         open_label = "(Open) " if is_open else "(Closed) "
         text_parts.append(f"[{type_label}] {item_name}")
         text_parts.append(f"{open_label}id: {item_id}")
+        if created_at_str:
+            text_parts.append(f"作成日時: {created_at_str}")
         text_parts.append(description)
 
         if is_open and manager and hasattr(manager, 'get_bag_contents_recursive'):
@@ -230,6 +330,8 @@ def _render_item(
         # Unknown type — show as generic item
         text_parts.append(f"[{type_label}] {item_name}")
         text_parts.append(f"id: {item_id}")
+        if created_at_str:
+            text_parts.append(f"作成日時: {created_at_str}")
         text_parts.append(description)
         text_parts.append("")
 
@@ -281,14 +383,16 @@ def get_visual_context(
 
     text_parts.append("<system>")
     text_parts.append("# ビジュアルコンテキスト")
-    text_parts.append("以下は現在の状況を視覚的に示す情報です。")
+    text_parts.append("以下は現在の状況を視覚的に示す情報です。この情報はメッセージ履歴の位置にかかわらず、常に現在時点のリアルタイム状態を反映しています。")
     text_parts.append("")
     text_parts.append("---")
     text_parts.append("")
 
     # ========== Section 1: ペルソナ ==========
     text_parts.append("## ペルソナ")
-    occupants = manager.occupants.get(building_id, [])
+    all_occupants = manager.occupants.get(building_id, [])
+    # ユーザーIDはall_personasに存在しないのでフィルタしてAIペルソナのみに絞る
+    occupants = [oid for oid in all_occupants if manager.all_personas.get(oid)]
     persona_count = len(occupants)
     if persona_count <= 1:
         text_parts.append("現在、このBuildingにはあなただけがいます。")
@@ -325,6 +429,28 @@ def get_visual_context(
                 _add_to_media_list(other_image_path, media_list)
                 LOGGER.debug("get_visual_context: Added other persona image: %s (%s)", other_id, other_image_path)
             text_parts.append("")
+
+    # ========== Section 1b: ユーザー ==========
+    user_occupants = [oid for oid in all_occupants if not manager.all_personas.get(oid)]
+    if user_occupants:
+        text_parts.append("## ユーザー")
+        text_parts.append(f"現在、このBuildingには{len(user_occupants)}人のユーザーがいます。")
+        try:
+            from database.session import SessionLocal as _SessionLocal
+            from database.models import User as UserModel
+            db = _SessionLocal()
+            try:
+                for uid in user_occupants:
+                    user = db.query(UserModel).filter(UserModel.USERID == int(uid)).first()
+                    uname = user.USERNAME if user else uid
+                    text_parts.append(f"- {uname} (ID:{uid})")
+            finally:
+                db.close()
+        except Exception as exc:
+            LOGGER.debug("get_visual_context: Failed to fetch user names: %s", exc)
+            for uid in user_occupants:
+                text_parts.append(f"- (ID:{uid})")
+        text_parts.append("")
 
     # ========== Section 2: Building ==========
     text_parts.append("---")
@@ -372,7 +498,7 @@ def get_visual_context(
         text_parts.append(f"### あなた自身（{persona_name}）のインベントリ内")
         text_parts.append("")
         for item in inventory_items:
-            _render_item(item, text_parts, media_list, manager)
+            _render_item(item, text_parts, media_list, manager, persona_id=persona_id)
 
     # 3b. Building items
     building_items = (
@@ -383,7 +509,7 @@ def get_visual_context(
         text_parts.append("### Building内")
         text_parts.append("")
         for item in building_items:
-            _render_item(item, text_parts, media_list, manager)
+            _render_item(item, text_parts, media_list, manager, persona_id=persona_id)
 
     if not inventory_items and not building_items:
         text_parts.append("アイテムはありません。")

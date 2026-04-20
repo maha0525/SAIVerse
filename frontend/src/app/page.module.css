@@ -1151,6 +1151,31 @@
     line-height: 1.5;
 }
 
+.infoCard {
+    border-left: 4px solid #5bc0de;
+    background-color: rgba(91, 192, 222, 0.08);
+}
+
+.infoContent {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.5rem 0;
+}
+
+.infoIcon {
+    flex-shrink: 0;
+    font-size: 0.95rem;
+    line-height: 1.5;
+}
+
+.infoMessage {
+    color: var(--foreground);
+    font-size: 0.9rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+}
+
 :global([data-theme="dark"]) .error_rate_limit {
     background-color: rgba(255, 193, 7, 0.1);
 }

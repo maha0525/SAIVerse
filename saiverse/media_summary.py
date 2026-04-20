@@ -178,6 +178,81 @@ def _generate_image_summary(path: Path, mime_type: str) -> Optional[str]:
     return None
 
 
+def generate_contextual_image_description(
+    path: Path, mime_type: str, user_message: str, prev_ai_message: str
+) -> Optional[str]:
+    """Generate a description for an uploaded image using surrounding conversation context.
+
+    Saves the result to the .summary.txt file so that ensure_image_summary()
+    won't regenerate a context-free description afterwards.
+    """
+    client = _get_summary_client()
+    if client is None:
+        return None
+
+    if not client.supports_images:
+        LOGGER.warning(
+            "Image summary model '%s' does not support images; cannot generate contextual description for %s",
+            _IMAGE_SUMMARY_MODEL_RAW,
+            path,
+        )
+        return None
+
+    context_parts: List[str] = []
+    if prev_ai_message:
+        context_parts.append(f"【直前のAI発言】{prev_ai_message[:300]}")
+    if user_message:
+        context_parts.append(f"【ユーザーのメッセージ】{user_message[:300]}")
+
+    context_text = "\n".join(context_parts)
+    if context_text:
+        prompt_text = (
+            "あなたはファイル管理システムのメタデータ生成エンジンです。"
+            "添付画像の内容を、客観的・中立的な立場で300文字以内の日本語で説明してください。\n"
+            "ルール:\n"
+            "- 一人称（私、僕など）を使わない\n"
+            "- 感情や意見を含めない\n"
+            "- 画像に何が写っているか、何を示しているかを端的に記述する\n"
+            "- 以下の会話文脈は「何についての画像か」を判断する補助情報としてのみ使用する\n\n"
+            f"{context_text}"
+        )
+    else:
+        prompt_text = (
+            "あなたはファイル管理システムのメタデータ生成エンジンです。"
+            "添付画像の内容を、客観的・中立的な立場で300文字以内の日本語で説明してください。"
+            "一人称や感情表現は使わず、何が写っているかを端的に記述してください。"
+        )
+
+    messages: List[Dict[str, Any]] = [
+        {
+            "role": "user",
+            "content": prompt_text,
+            "metadata": {
+                "media": [
+                    {
+                        "path": str(path),
+                        "mime_type": mime_type,
+                        "uri": str(path),
+                    },
+                ],
+                "__skip_image_summary__": True,
+            },
+        },
+    ]
+
+    try:
+        result = client.generate(messages, temperature=0.2)
+        if isinstance(result, str) and result.strip():
+            generated = result.strip()
+            # Save to .summary.txt so ensure_image_summary() won't regenerate
+            save_media_summary(path, generated)
+            return generated
+        LOGGER.warning("Contextual image description returned empty result for %s", path)
+    except Exception:
+        LOGGER.exception("Contextual image description generation failed for %s", path)
+    return None
+
+
 def _generate_document_summary(path: Path) -> Optional[str]:
     client = _get_summary_client()
     if client is None:

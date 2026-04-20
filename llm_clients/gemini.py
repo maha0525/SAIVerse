@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
@@ -27,6 +28,11 @@ try:  # pragma: no cover - optional defensive patching
     from google.genai import _api_client as _genai_api_client
 except Exception:  # pragma: no cover - absence is fine
     _genai_api_client = None
+
+
+# Thread-local storage for SSE error payload detected mid-stream (e.g. 504 DEADLINE_EXCEEDED).
+# The SSE patch and generate_stream/call run in the same thread, so thread-local works here.
+_sse_error_local: threading.local = threading.local()
 
 
 def _install_gemini_stream_patch() -> None:
@@ -56,10 +62,11 @@ def _install_gemini_stream_patch() -> None:
         return raw.rstrip("\r\n")
 
     class _SSEAccumulator:
-        __slots__ = ("_buffer",)
+        __slots__ = ("_buffer", "_error_buffer")
 
         def __init__(self) -> None:
             self._buffer: List[str] = []
+            self._error_buffer: List[str] = []
 
         def feed(self, line: str) -> Optional[str]:
             if not line:
@@ -67,6 +74,8 @@ def _install_gemini_stream_patch() -> None:
                     data = "".join(self._buffer)
                     self._buffer.clear()
                     return data
+                # Empty line may also delimit a bare JSON error block
+                self._flush_error_buffer()
                 return None
             if line.startswith("data:"):
                 value = line[5:]
@@ -76,8 +85,8 @@ def _install_gemini_stream_patch() -> None:
             elif line.startswith(":"):
                 return None
             else:
-                # Skip other SSE fields (event:, id:, retry:, etc.)
-                return None
+                # Bare lines (not SSE data:) — accumulate as potential JSON error payload
+                self._error_buffer.append(line)
             return None
 
         def flush(self) -> Optional[str]:
@@ -86,6 +95,31 @@ def _install_gemini_stream_patch() -> None:
                 self._buffer.clear()
                 return data
             return None
+
+        def flush_remaining(self) -> None:
+            """Call after stream iteration ends to detect any buffered SSE error."""
+            self._flush_error_buffer()
+
+        def _flush_error_buffer(self) -> None:
+            if not self._error_buffer:
+                return
+            raw = "\n".join(self._error_buffer)
+            self._error_buffer.clear()
+            try:
+                obj = json.loads(raw)
+                if isinstance(obj, dict) and "error" in obj:
+                    err = obj["error"]
+                    _sse_error_local.error = {
+                        "code": err.get("code"),
+                        "message": err.get("message", ""),
+                        "status": err.get("status", ""),
+                    }
+                    logging.warning(
+                        "[gemini_sse] Server error detected in SSE stream: code=%s status=%s message=%s",
+                        err.get("code"), err.get("status", ""), err.get("message", ""),
+                    )
+            except (json.JSONDecodeError, TypeError):
+                pass
 
     original_segments = HttpResponse.segments
     original_async_segments = HttpResponse.async_segments
@@ -104,6 +138,8 @@ def _install_gemini_stream_patch() -> None:
         if final:
             _sse_logger.debug("Gemini SSE final payload: %s", final)
             yield json.loads(final)
+        # After all lines consumed, check for any buffered error payload (e.g. 504 DEADLINE_EXCEEDED)
+        acc.flush_remaining()
 
     async def _yield_json_chunks_async(iterator: Any) -> Any:
         _sse_logger = logging.getLogger("saiverse.llm")
@@ -274,6 +310,18 @@ class GeminiClient(LLMClient):
 
         # Safety settings overrides
         self._safety_overrides: Dict[str, str] = {}
+
+        # Set by generate_stream when SSE stream was interrupted by a server error (e.g. 504)
+        self._last_stream_error: Optional[Dict[str, Any]] = None
+
+    def consume_stream_error(self) -> Optional[Dict[str, Any]]:
+        """Return and clear the last SSE stream error (e.g. 504 DEADLINE_EXCEEDED).
+
+        Returns a dict with keys 'code', 'message', 'status', or None if no error occurred.
+        """
+        err = self._last_stream_error
+        self._last_stream_error = None
+        return err
 
     def _build_thinking_config(self) -> Optional[types.ThinkingConfig]:
         """Build ThinkingConfig from current settings."""
@@ -881,6 +929,21 @@ class GeminiClient(LLMClient):
                     if not saw_any_chunk:
                         raise EmptyResponseError("No chunks received from stream")
 
+                    # Check for server error detected in SSE stream (e.g. 504 DEADLINE_EXCEEDED)
+                    # For call() / structured output, treat as timeout → retry
+                    _sse_err = getattr(_sse_error_local, "error", None)
+                    if _sse_err is not None:
+                        _sse_error_local.error = None
+                        logging.warning(
+                            "[gemini] SSE server error in call() path: code=%s status=%s — retrying",
+                            _sse_err.get("code"), _sse_err.get("status", ""),
+                        )
+                        from .exceptions import LLMTimeoutError as _LLMTimeoutError
+                        raise _LLMTimeoutError(
+                            f"Gemini stream interrupted by server: {_sse_err.get('status', '')} "
+                            f"({_sse_err.get('code', '')}): {_sse_err.get('message', '')}",
+                        )
+
                     # Prompt-level block: input rejected before generation
                     if prompt_block_reason:
                         block_str = str(prompt_block_reason)
@@ -1232,6 +1295,10 @@ class GeminiClient(LLMClient):
         self._store_reasoning([])
         reasoning_chunks: List[str] = []
 
+        # Clear any leftover SSE error from a previous call on this thread
+        _sse_error_local.error = None
+        self._last_stream_error = None
+
         if use_tools:
             if tools is not None:
                 # Explicit tools from runtime — let LLM decide natively (AUTO)
@@ -1411,9 +1478,19 @@ class GeminiClient(LLMClient):
             post_finish_chunk_count, post_finish_wait,
         )
 
-        if fcall is None and saw_chunks and not stream_completed:
-            # Log as warning but continue with received content
-            logging.warning("Gemini stream ended without completion signal, but content was received. Continuing with partial response.")
+        # Check if SSE patch detected a server error (e.g. 504 DEADLINE_EXCEEDED)
+        sse_error = getattr(_sse_error_local, "error", None)
+        if sse_error is not None:
+            _sse_error_local.error = None
+            self._last_stream_error = sse_error
+            logging.warning(
+                "[gemini_stream] Stream interrupted by server error: code=%s status=%s — partial content retained",
+                sse_error.get("code"), sse_error.get("status", ""),
+            )
+
+        if fcall is None and saw_chunks and not stream_completed and self._last_stream_error is None:
+            # finish_reason not received — known Gemini API quirk, not an error
+            logging.debug("Gemini stream ended without finish_reason (known Gemini API behavior).")
 
         # Store usage from last chunk (uses self.config_key for pricing)
         logging.info("[DEBUG] generate_stream last_chunk exists: %s", last_chunk is not None)

@@ -523,6 +523,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "STATE_JSON": item.STATE_JSON or "",
                 "CREATOR_ID": item.CREATOR_ID,
                 "SOURCE_CONTEXT": item.SOURCE_CONTEXT,
+                "CREATED_AT": item.CREATED_AT.isoformat() if item.CREATED_AT else None,
                 "OWNER_KIND": location.OWNER_KIND if location else "world",
                 "OWNER_ID": location.OWNER_ID if location else "",
             }

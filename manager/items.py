@@ -1214,6 +1214,83 @@ class ItemService:
 
         return actor_msg
 
+    def _get_oldest_context_timestamp(self, persona_id: str) -> Optional[float]:
+        """Get the epoch timestamp of the oldest message in the persona's current context.
+
+        Returns None if the memory adapter is not available.
+        """
+        persona = self.manager.personas.get(persona_id)
+        if not persona:
+            return None
+        memory = getattr(persona, "sai_memory", None)
+        if not memory or not memory.is_ready():
+            return None
+        try:
+            recent = memory.recent_persona_messages_by_count(max_messages=100)
+            if not recent:
+                return None
+            return min(
+                (float(m["created_at"]) for m in recent if m.get("created_at") is not None),
+                default=None,
+            )
+        except Exception as exc:
+            LOGGER.debug("Failed to get oldest context timestamp for %s: %s", persona_id, exc)
+            return None
+
+    def _fetch_memory_recall_for_item(self, item: Dict, persona_id: str, count: int = 10) -> Optional[str]:
+        """Fetch surrounding log messages for an item based on its creation time.
+
+        Returns formatted log text if the item's creation time predates the current
+        context window, or None otherwise.
+        """
+        created_at = item.get("created_at")
+        if created_at is None:
+            return None
+
+        # Convert datetime to epoch
+        if isinstance(created_at, datetime):
+            from datetime import timezone
+            try:
+                created_at_epoch = float(created_at.replace(tzinfo=timezone.utc).timestamp())
+            except Exception:
+                return None
+        else:
+            try:
+                created_at_epoch = float(created_at)
+            except (TypeError, ValueError):
+                return None
+
+        oldest_ts = self._get_oldest_context_timestamp(persona_id)
+        if oldest_ts is None or created_at_epoch >= oldest_ts:
+            return None
+
+        # Fetch log messages around the creation time
+        persona = self.manager.personas.get(persona_id)
+        if not persona:
+            return None
+        memory = getattr(persona, "sai_memory", None)
+        if not memory or not memory.is_ready():
+            return None
+
+        try:
+            from sai_memory.memory.storage import get_messages_around_timestamp
+            messages = get_messages_around_timestamp(
+                memory.conn,
+                timestamp=int(created_at_epoch),
+                count=count,
+            )
+            if not messages:
+                return None
+            lines: List[str] = []
+            for msg in messages:
+                dt_str = datetime.utcfromtimestamp(msg.created_at).strftime("%Y-%m-%d %H:%M")
+                role = msg.role or "unknown"
+                lines.append(f"[{dt_str}] ({role})\n{msg.content}")
+            return "\n---\n".join(lines)
+        except Exception as exc:
+            LOGGER.debug("Failed to fetch memory recall for item %s: %s", item.get("item_id"), exc)
+            return None
+
     def view_items(self, persona_id: str, item_ids: List[str]) -> str:
         """View multiple items (up to 5). For bags, shows contents list."""
         if len(item_ids) > 5:
@@ -1233,6 +1310,13 @@ class ItemService:
             item_type = (item.get("type") or "").lower()
             item_name = item.get("name", item_id)
 
+            # Format creation datetime for display
+            created_at = item.get("created_at")
+            if isinstance(created_at, datetime):
+                created_at_str = created_at.strftime("%Y-%m-%d %H:%M")
+            else:
+                created_at_str = str(created_at) if created_at else ""
+
             if item_type == "bag":
                 contents = self.get_bag_contents_recursive(item_id)
                 results.append(self._format_bag_contents(item_name, item_id, item, contents))
@@ -1245,7 +1329,17 @@ class ItemService:
                 if not file_path.exists():
                     results.append(f"[{item_name}] ファイルが見つかりません: {file_path}")
                     continue
-                results.append(f"[{item_name}] 画像ファイル: {file_path}")
+                lines = [f"[{item_name}] 画像ファイル: {file_path}"]
+                if created_at_str:
+                    lines.append(f"作成日時: {created_at_str}")
+                description = (item.get("description") or "").strip()
+                if description:
+                    lines.append(f"概要: {description}")
+                recall = self._fetch_memory_recall_for_item(item, persona_id)
+                if recall:
+                    lines.append("\n--- あの時の思い出 ---")
+                    lines.append(recall)
+                results.append("\n".join(lines))
             elif item_type == "document":
                 file_path_str = item.get("file_path")
                 if not file_path_str:
@@ -1257,12 +1351,18 @@ class ItemService:
                     continue
                 try:
                     content = file_path.read_text(encoding="utf-8")
-                    results.append(f"[{item_name}] 文書の内容:\n\n{content}")
+                    header = f"[{item_name}]"
+                    if created_at_str:
+                        header += f" (作成日時: {created_at_str})"
+                    results.append(f"{header} 文書の内容:\n\n{content}")
                 except OSError as exc:
                     results.append(f"[{item_name}] ファイル読み込みエラー: {exc}")
             else:
                 description = (item.get("description") or "").strip() or "(説明なし)"
-                results.append(f"[{item_name}] {description}")
+                header = f"[{item_name}]"
+                if created_at_str:
+                    header += f" (作成日時: {created_at_str})"
+                results.append(f"{header} {description}")
 
         return "\n\n---\n\n".join(results)
 
@@ -1339,6 +1439,217 @@ class ItemService:
             item = self.items.get(item_id)
             if item and (item.get("type") or "").lower() == "bag":
                 self._collect_bag_contents_recursive(item_id, collected, max_depth - 1)
+
+
+    def _extract_context_from_memory(self, memory: Any, timestamp_epoch: int):
+        """Extract (user_message, prev_ai_message) from SAIMemory around a timestamp."""
+        try:
+            from sai_memory.memory.storage import get_messages_around_timestamp
+            messages = get_messages_around_timestamp(memory.conn, timestamp=timestamp_epoch, count=10)
+            if not messages:
+                return "", ""
+            messages = sorted(messages, key=lambda m: m.created_at)
+            user_msg = ""
+            ai_msg = ""
+            for msg in messages:
+                if msg.role == "user" and abs(msg.created_at - timestamp_epoch) < 300:
+                    user_msg = (msg.content or "")[:400]
+                    break
+            for msg in reversed(messages):
+                if msg.role in ("assistant", "model"):
+                    ai_msg = (msg.content or "")[:400]
+                    break
+            return user_msg, ai_msg
+        except Exception as exc:
+            LOGGER.debug("Failed to extract context from memory: %s", exc)
+            return "", ""
+
+    def _find_best_context_for_timestamp(self, timestamp_epoch: int):
+        """Auto mode: search all personas' SAIMemory and pick the closest match."""
+        best_user_msg = ""
+        best_ai_msg = ""
+        min_diff: float = float("inf")
+        for persona in self.manager.personas.values():
+            if getattr(persona, "is_proxy", False):
+                continue
+            memory = getattr(persona, "sai_memory", None)
+            if not memory or not memory.is_ready():
+                continue
+            try:
+                from sai_memory.memory.storage import get_messages_around_timestamp
+                messages = get_messages_around_timestamp(memory.conn, timestamp=timestamp_epoch, count=10)
+                if not messages:
+                    continue
+                closest = min(abs(msg.created_at - timestamp_epoch) for msg in messages)
+                if closest < min_diff:
+                    min_diff = closest
+                    best_user_msg, best_ai_msg = self._extract_context_from_memory(memory, timestamp_epoch)
+            except Exception as exc:
+                LOGGER.debug("Auto context search failed for persona: %s", exc)
+        return best_user_msg, best_ai_msg
+
+    def backfill_item_descriptions(
+        self,
+        building_id: Optional[str] = None,
+        persona_id: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Batch-generate descriptions for picture items that only have placeholder text.
+
+        Args:
+            building_id: If given, process only items in this building.
+            persona_id: If given alongside building_id, use only this persona's SAIMemory.
+                        In auto mode (None), all personas are searched and the closest match wins.
+            dry_run: Preview what would be generated without writing to DB.
+        """
+        import mimetypes
+        from datetime import timezone
+        from saiverse.media_summary import generate_contextual_image_description
+
+        results: List[Dict] = []
+
+        # Collect target item IDs
+        if building_id:
+            candidate_ids = list(self.items_by_building.get(building_id, []))
+        else:
+            candidate_ids = list(self.items.keys())
+
+        # Filter to picture items with placeholder/empty descriptions
+        target_items = []
+        for item_id in candidate_ids:
+            item = self.items.get(item_id)
+            if not item:
+                continue
+            if (item.get("type") or "").lower() != "picture":
+                continue
+            desc = (item.get("description") or "").strip()
+            if desc and not desc.startswith("User uploaded image:"):
+                results.append({"item_id": item_id, "item_name": item.get("name", item_id),
+                                 "status": "skipped", "reason": "既に概要が設定されています", "description": None})
+                continue
+            if not item.get("file_path"):
+                results.append({"item_id": item_id, "item_name": item.get("name", item_id),
+                                 "status": "skipped", "reason": "ファイルパスが設定されていません", "description": None})
+                continue
+            target_items.append((item_id, item))
+
+        for item_id, item in target_items:
+            item_name = item.get("name", item_id)
+            try:
+                file_path = self._resolve_file_path(item["file_path"])
+                if not file_path.exists():
+                    results.append({"item_id": item_id, "item_name": item_name,
+                                     "status": "failed", "reason": f"ファイルが見つかりません: {file_path}", "description": None})
+                    continue
+
+                mime_type = mimetypes.guess_type(str(file_path))[0] or "image/jpeg"
+
+                # Convert creation time to epoch
+                created_at = item.get("created_at")
+                if isinstance(created_at, datetime):
+                    created_at_epoch = int(created_at.replace(tzinfo=timezone.utc).timestamp())
+                elif created_at is not None:
+                    created_at_epoch = int(created_at)
+                else:
+                    created_at_epoch = None
+
+                # Retrieve conversation context
+                user_message = ""
+                prev_ai_message = ""
+                if created_at_epoch:
+                    if persona_id:
+                        persona = self.manager.personas.get(persona_id)
+                        if persona:
+                            memory = getattr(persona, "sai_memory", None)
+                            if memory and memory.is_ready():
+                                user_message, prev_ai_message = self._extract_context_from_memory(
+                                    memory, created_at_epoch
+                                )
+                    else:
+                        user_message, prev_ai_message = self._find_best_context_for_timestamp(created_at_epoch)
+
+                description = generate_contextual_image_description(
+                    file_path, mime_type, user_message, prev_ai_message
+                )
+                if not description:
+                    results.append({"item_id": item_id, "item_name": item_name,
+                                     "status": "failed", "reason": "説明の生成に失敗しました", "description": None})
+                    continue
+
+                if not dry_run:
+                    self.update_item_description(item_id, description)
+
+                results.append({"item_id": item_id, "item_name": item_name,
+                                 "status": "dry_run" if dry_run else "updated",
+                                 "reason": None, "description": description})
+
+            except Exception as exc:
+                LOGGER.exception("Backfill failed for item %s: %s", item_id, exc)
+                results.append({"item_id": item_id, "item_name": item_name,
+                                 "status": "failed", "reason": str(exc), "description": None})
+
+        return {
+            "processed": sum(1 for r in results if r["status"] in ("updated", "dry_run")),
+            "skipped": sum(1 for r in results if r["status"] == "skipped"),
+            "failed": sum(1 for r in results if r["status"] == "failed"),
+            "results": results,
+        }
+
+    def update_item_description(self, item_id: str, description: str) -> None:
+        """Update an item's description in DB and in-memory cache."""
+        item = self.items.get(item_id)
+        if not item:
+            raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
+
+        timestamp = datetime.utcnow()
+        db = self.manager.SessionLocal()
+        try:
+            row = db.query(ItemModel).filter(ItemModel.ITEM_ID == item_id).one_or_none()
+            if row is None:
+                raise RuntimeError("アイテムがDBに見つかりません。")
+            row.DESCRIPTION = description
+            row.UPDATED_AT = timestamp
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
+        finally:
+            db.close()
+
+        item["description"] = description
+        item["updated_at"] = timestamp
+        location = self.item_locations.get(item_id, {})
+        if location.get("owner_kind") == "building" and location.get("owner_id"):
+            self.refresh_building_system_instruction(location["owner_id"])
+        LOGGER.info("Updated description for item %s", item_id)
+
+    def update_item_name(self, item_id: str, name: str) -> None:
+        """Update an item's name in DB and in-memory cache."""
+        item = self.items.get(item_id)
+        if not item:
+            raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")
+
+        timestamp = datetime.utcnow()
+        db = self.manager.SessionLocal()
+        try:
+            row = db.query(ItemModel).filter(ItemModel.ITEM_ID == item_id).one_or_none()
+            if row is None:
+                raise RuntimeError("アイテムがDBに見つかりません。")
+            row.NAME = name
+            row.UPDATED_AT = timestamp
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RuntimeError(f"データベース更新に失敗しました: {exc}") from exc
+        finally:
+            db.close()
+
+        item["name"] = name
+        item["updated_at"] = timestamp
+        location = self.item_locations.get(item_id, {})
+        if location.get("owner_kind") == "building" and location.get("owner_id"):
+            self.refresh_building_system_instruction(location["owner_id"])
+        LOGGER.info("Updated name for item %s to '%s'", item_id, name)
 
 
 __all__ = ["ItemService"]

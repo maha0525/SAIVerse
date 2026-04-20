@@ -1219,3 +1219,200 @@
     background: #dcfce7;
     color: #166534;
 }
+
+/* ===== Utilities tab ===== */
+.utilitiesContainer {
+    max-width: 800px;
+    margin: 0 auto;
+    width: 100%;
+}
+
+.utilityCard {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.utilityTitle {
+    margin: 0 0 0.5rem;
+    font-size: 1rem;
+    font-weight: 600;
+    color: #e5e7eb;
+}
+
+.utilityDesc {
+    margin: 0 0 1.25rem;
+    font-size: 0.85rem;
+    color: #9ca3af;
+    line-height: 1.5;
+}
+
+.utilityForm {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.utilityRow {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.875rem;
+}
+
+.utilityRow label {
+    min-width: 130px;
+    color: #d1d5db;
+    flex-shrink: 0;
+}
+
+.utilityRow select {
+    flex: 1;
+    background: #1f2937;
+    border: 1px solid #374151;
+    color: #e5e7eb;
+    border-radius: 6px;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.875rem;
+}
+
+.checkboxLabel {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    color: #d1d5db;
+    min-width: unset !important;
+}
+
+.utilityRunBtn {
+    align-self: flex-start;
+    margin-top: 0.25rem;
+    background: #3b82f6;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 0.45rem 1.2rem;
+    font-size: 0.875rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.utilityRunBtn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.utilityRunBtn:hover:not(:disabled) {
+    background: #2563eb;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.spin {
+    animation: spin 1s linear infinite;
+}
+
+/* Results */
+.utilityResults {
+    margin-top: 1.25rem;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    padding-top: 1rem;
+}
+
+.utilityStats {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.8rem;
+    margin-bottom: 0.75rem;
+    align-items: center;
+}
+
+.statUpdated { color: #34d399; }
+.statSkipped { color: #9ca3af; }
+.statFailed  { color: #f87171; }
+
+.dryRunBadge {
+    background: #92400e;
+    color: #fcd34d;
+    font-size: 0.7rem;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-weight: 600;
+}
+
+.utilityResultList {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-height: 320px;
+    overflow-y: auto;
+}
+
+.utilityResultItem {
+    display: flex;
+    gap: 0.6rem;
+    align-items: flex-start;
+    padding: 0.5rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.82rem;
+    background: rgba(255,255,255,0.03);
+}
+
+.result_updated, .result_dry_run { border-left: 3px solid #34d399; }
+.result_skipped { border-left: 3px solid #6b7280; }
+.result_failed  { border-left: 3px solid #f87171; }
+
+.resultIcon { padding-top: 1px; flex-shrink: 0; }
+.result_updated .resultIcon, .result_dry_run .resultIcon { color: #34d399; }
+.result_skipped .resultIcon { color: #6b7280; }
+.result_failed .resultIcon  { color: #f87171; }
+
+.resultBody {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    min-width: 0;
+}
+
+.resultName {
+    font-weight: 500;
+    color: #e5e7eb;
+    word-break: break-all;
+}
+
+.resultDesc {
+    color: #9ca3af;
+    font-size: 0.78rem;
+    line-height: 1.4;
+}
+
+.resultReason {
+    color: #f87171;
+    font-size: 0.78rem;
+}
+
+/* Light mode */
+:global([data-theme="light"]) .utilityCard {
+    background: #f9fafb;
+    border-color: #e5e7eb;
+}
+:global([data-theme="light"]) .utilityTitle { color: #111827; }
+:global([data-theme="light"]) .utilityDesc  { color: #6b7280; }
+:global([data-theme="light"]) .utilityRow label { color: #374151; }
+:global([data-theme="light"]) .utilityRow select {
+    background: #ffffff;
+    border-color: #d1d5db;
+    color: #111827;
+}
+:global([data-theme="light"]) .checkboxLabel { color: #374151; }
+:global([data-theme="light"]) .utilityResultItem { background: #f3f4f6; }
+:global([data-theme="light"]) .resultName { color: #111827; }
+:global([data-theme="light"]) .resultDesc  { color: #6b7280; }

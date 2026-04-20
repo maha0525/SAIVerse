@@ -85,6 +85,8 @@ interface Message {
     // Warning information
     isWarning?: boolean;
     warningCode?: string;
+    // Info notification (e.g. stream interrupted, re-speaking)
+    isInfo?: boolean;
     // Reasoning (thinking) from LLM
     reasoning?: string;
     // Activity trace (exec/tool steps before final response)
@@ -1482,6 +1484,14 @@ export default function Home() {
                                     timestamp: new Date().toISOString()
                                 }]);
                             }
+                        } else if (event.type === 'info') {
+                            // Info notification (e.g. 504 stream interruption)
+                            setMessages(prev => [...prev, {
+                                role: 'system',
+                                content: event.content || '',
+                                isInfo: true,
+                                timestamp: new Date().toISOString()
+                            }]);
                         } else if (event.type === 'cancelled') {
                             // Server-side cancellation: finalize streaming message
                             setMessages(prev => {
@@ -1859,7 +1869,7 @@ export default function Home() {
                     {isLoadingMore && <div style={{ textAlign: 'center', padding: '10px', color: '#666' }}>Loading history...</div>}
                     {messages.map((msg, idx) => (
                         <div key={msg.id || idx} className={`${styles.message} ${styles[msg.role]}`}>
-                            <div className={`${styles.card} ${msg.isError ? styles.errorCard : ''} ${msg.isWarning ? styles.warningCard : ''} ${msg.isError && msg.errorCode ? styles[`error_${msg.errorCode}`] : ''}`}>
+                            <div className={`${styles.card} ${msg.isError ? styles.errorCard : ''} ${msg.isWarning ? styles.warningCard : ''} ${msg.isInfo ? styles.infoCard : ''} ${msg.isError && msg.errorCode ? styles[`error_${msg.errorCode}`] : ''}`}>
                                 <div className={styles.cardHeader}>
                                     <img
                                         src={msg.avatar || (msg.role === 'user' ? '/api/static/builtin_icons/user.png' : '/api/static/builtin_icons/host.png')}
@@ -1911,6 +1921,11 @@ export default function Home() {
                                     ) : msg.isWarning ? (
                                         <div className={styles.warningContent}>
                                             <span className={styles.warningMessage}>{msg.content}</span>
+                                        </div>
+                                    ) : msg.isInfo ? (
+                                        <div className={styles.infoContent}>
+                                            <span className={styles.infoIcon}>ℹ️</span>
+                                            <span className={styles.infoMessage}>{msg.content}</span>
                                         </div>
                                     ) : (
                                         <>

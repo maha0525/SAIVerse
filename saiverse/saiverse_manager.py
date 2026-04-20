@@ -555,6 +555,25 @@ class SAIVerseManager(
         """Get bag contents recursively, including nested bags."""
         return self.item_service.get_bag_contents_recursive(bag_item_id)
 
+    def update_item_description(self, item_id: str, description: str) -> None:
+        """Update an item's description in DB and cache."""
+        self.item_service.update_item_description(item_id, description)
+
+    def update_item_name(self, item_id: str, name: str) -> None:
+        """Update an item's name in DB and cache."""
+        self.item_service.update_item_name(item_id, name)
+
+    def backfill_item_descriptions(
+        self,
+        building_id: Optional[str] = None,
+        persona_id: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> dict:
+        """Batch-generate descriptions for picture items with placeholder text."""
+        return self.item_service.backfill_item_descriptions(
+            building_id=building_id, persona_id=persona_id, dry_run=dry_run
+        )
+
     # Note: Persona event methods (_load_persona_event_logs, record_persona_event,
     # get_persona_pending_events, archive_persona_events) are in PersonaEventMixin
 

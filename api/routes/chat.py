@@ -357,7 +357,9 @@ def _store_image_attachment(
     data: bytes,
     att: AttachmentData,
     manager,
-    building_id: str
+    building_id: str,
+    user_message: str = "",
+    prev_ai_message: str = "",
 ) -> Dict[str, Any]:
     """Store image and create picture Item."""
     dest_dir = Path.home() / ".saiverse" / "image"
@@ -375,7 +377,7 @@ def _store_image_attachment(
     dest_path = dest_dir / dest_name
     dest_path.write_bytes(data)
 
-    # Create picture Item
+    # Create picture Item with placeholder description
     item_id = None
     try:
         item_id = manager.create_picture_item_for_user(
@@ -388,6 +390,25 @@ def _store_image_attachment(
         )
     except Exception as e:
         logging.warning("Failed to create picture item: %s", e, exc_info=True)
+
+    # Generate contextual description in background
+    if item_id and (user_message or prev_ai_message):
+        import threading
+        _path = dest_path
+        _mime = att.mime_type
+        _item_id = item_id
+
+        def _generate_description():
+            try:
+                from saiverse.media_summary import generate_contextual_image_description
+                desc = generate_contextual_image_description(_path, _mime, user_message, prev_ai_message)
+                if desc:
+                    manager.update_item_description(_item_id, desc)
+                    logging.info("Generated contextual description for item %s", _item_id)
+            except Exception as e:
+                logging.warning("Background description generation failed for item %s: %s", _item_id, e)
+
+        threading.Thread(target=_generate_description, daemon=True).start()
 
     return {
         "type": "image",
@@ -463,7 +484,9 @@ def _store_document_attachment(
 def _store_uploaded_attachment_v2(
     att: AttachmentData,
     manager,
-    building_id: str
+    building_id: str,
+    user_message: str = "",
+    prev_ai_message: str = "",
 ) -> Optional[Dict[str, Any]]:
     """Process attachment and create appropriate Item type."""
     try:
@@ -472,19 +495,19 @@ def _store_uploaded_attachment_v2(
         data = base64.b64decode(encoded)
 
         if att.type == 'image':
-            return _store_image_attachment(data, att, manager, building_id)
+            return _store_image_attachment(data, att, manager, building_id, user_message, prev_ai_message)
         elif att.type == 'document':
             return _store_document_attachment(data, att, manager, building_id)
         else:
             # Unknown type: determine from extension
             ext = Path(att.filename).suffix.lower().lstrip('.')
             if ext in IMAGE_EXTENSIONS:
-                return _store_image_attachment(data, att, manager, building_id)
+                return _store_image_attachment(data, att, manager, building_id, user_message, prev_ai_message)
             elif ext in TEXT_EXTENSIONS:
                 return _store_document_attachment(data, att, manager, building_id)
             else:
                 # Default to image for compatibility
-                return _store_image_attachment(data, att, manager, building_id)
+                return _store_image_attachment(data, att, manager, building_id, user_message, prev_ai_message)
     except Exception as e:
         logging.error(f"Failed to process attachment: {e}")
         return None
@@ -508,12 +531,29 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
     # Combine metadata
     metadata = req.metadata or {}
 
+    # Get last AI message for contextual image description
+    prev_ai_message = ""
+    try:
+        history = manager.get_building_history(building_id)
+        for msg in reversed(history):
+            if msg.get("role") in ("assistant", "model"):
+                content = msg.get("content", "")
+                if content and not content.startswith('<div class="note-box">'):
+                    prev_ai_message = content[:500]
+                    break
+    except Exception:
+        pass
+
     # Handle new multi-attachment format
     if req.attachments:
         images = []
         documents = []
         for att in req.attachments:
-            result = _store_uploaded_attachment_v2(att, manager, building_id)
+            result = _store_uploaded_attachment_v2(
+                att, manager, building_id,
+                user_message=req.message or "",
+                prev_ai_message=prev_ai_message,
+            )
             if result:
                 if result["type"] == "image":
                     images.append({
