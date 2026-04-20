@@ -1,7 +1,7 @@
 """item_change_name — Rename an item."""
 from __future__ import annotations
 
-from tools.context import get_active_manager
+from tools.context import get_active_manager, get_active_persona_id
 from tools.core import ToolSchema
 
 
@@ -16,6 +16,7 @@ def item_change_name(item_id: str, name: str) -> str:
     Returns:
         Confirmation message.
     """
+    persona_id = get_active_persona_id()
     manager = get_active_manager()
     if manager is None:
         raise RuntimeError("Manager context is not available.")
@@ -24,6 +25,8 @@ def item_change_name(item_id: str, name: str) -> str:
     if not name or not name.strip():
         raise RuntimeError("name が空です。")
 
+    if persona_id:
+        item_id = manager.resolve_item_ref_for_persona(persona_id, item_id)
     item = manager.items.get(item_id)
     if not item:
         raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")

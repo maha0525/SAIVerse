@@ -27,10 +27,11 @@ def item_move(item_ids: str, destination_type: str, destination_id: str = "") ->
     if manager is None:
         raise RuntimeError("Manager context is not available; item_move cannot be executed.")
 
-    # Parse item IDs
-    ids = [s.strip() for s in item_ids.split(",") if s.strip()]
-    if not ids:
+    # Parse item IDs and resolve slot references
+    raw_ids = [s.strip() for s in item_ids.split(",") if s.strip()]
+    if not raw_ids:
         raise RuntimeError("移動するアイテムIDが指定されていません。")
+    ids = [manager.resolve_item_ref_for_persona(persona_id, ref) for ref in raw_ids]
 
     return manager.move_item_for_persona(persona_id, ids, destination_type, destination_id)
 

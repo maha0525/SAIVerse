@@ -1,7 +1,7 @@
 """item_write_description — Overwrite an item's description."""
 from __future__ import annotations
 
-from tools.context import get_active_manager
+from tools.context import get_active_manager, get_active_persona_id
 from tools.core import ToolSchema
 
 
@@ -16,12 +16,15 @@ def item_write_description(item_id: str, description: str) -> str:
     Returns:
         Confirmation message.
     """
+    persona_id = get_active_persona_id()
     manager = get_active_manager()
     if manager is None:
         raise RuntimeError("Manager context is not available.")
     if not item_id:
         raise RuntimeError("item_id が指定されていません。")
 
+    if persona_id:
+        item_id = manager.resolve_item_ref_for_persona(persona_id, item_id)
     item = manager.items.get(item_id)
     if not item:
         raise RuntimeError(f"アイテム '{item_id}' が見つかりません。")

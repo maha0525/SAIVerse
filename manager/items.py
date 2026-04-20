@@ -135,6 +135,7 @@ class ItemService:
                 "owner_id": (loc.OWNER_ID or "").strip(),
                 "updated_at": loc.UPDATED_AT,
                 "location_id": loc.LOCATION_ID,
+                "slot_number": loc.SLOT_NUMBER,
             }
             self.item_locations[loc.ITEM_ID] = payload
             owner_kind = payload["owner_kind"]
@@ -214,7 +215,8 @@ class ItemService:
             building.system_instruction = f"{base_text.rstrip()}\n\n{marker}\n{items_block}"
 
     def update_item_cache(
-        self, item_id: str, owner_kind: str, owner_id: Optional[str], updated_at: datetime
+        self, item_id: str, owner_kind: str, owner_id: Optional[str], updated_at: datetime,
+        slot_number: Optional[int] = None,
     ) -> None:
         """Update in-memory cache when item location changes."""
         prev = self.item_locations.get(item_id)
@@ -273,6 +275,7 @@ class ItemService:
             "owner_kind": owner_kind,
             "owner_id": owner_id,
             "updated_at": updated_at,
+            "slot_number": slot_number,
         }
 
     def broadcast_item_event(self, persona_ids: List[str], message: str) -> None:
@@ -303,8 +306,10 @@ class ItemService:
             row = db.query(ItemLocationModel).filter(ItemLocationModel.ITEM_ID == item_id).one_or_none()
             if row is None:
                 raise RuntimeError("アイテムの配置情報が見つかりませんでした。")
+            slot_num = self._assign_slot(db, "persona", persona_id)
             row.OWNER_KIND = "persona"
             row.OWNER_ID = persona_id
+            row.SLOT_NUMBER = slot_num
             row.UPDATED_AT = timestamp
             db.commit()
         except Exception as exc:
@@ -313,7 +318,7 @@ class ItemService:
         finally:
             db.close()
 
-        self.update_item_cache(item_id, "persona", persona_id, timestamp)
+        self.update_item_cache(item_id, "persona", persona_id, timestamp, slot_number=slot_num)
         item_name = item.get("name", item_id)
         actor_msg = f"「{item_name}」を拾った。"
         self.manager.record_persona_event(persona_id, actor_msg)
@@ -351,17 +356,20 @@ class ItemService:
         db = self.manager.SessionLocal()
         try:
             row = db.query(ItemLocationModel).filter(ItemLocationModel.ITEM_ID == item_id).one_or_none()
+            slot_num = self._assign_slot(db, "building", building_id)
             if row is None:
                 row = ItemLocationModel(
                     ITEM_ID=item_id,
                     OWNER_KIND="building",
                     OWNER_ID=building_id,
+                    SLOT_NUMBER=slot_num,
                     UPDATED_AT=timestamp,
                 )
                 db.add(row)
             else:
                 row.OWNER_KIND = "building"
                 row.OWNER_ID = building_id
+                row.SLOT_NUMBER = slot_num
                 row.UPDATED_AT = timestamp
             db.commit()
         except Exception as exc:
@@ -370,7 +378,7 @@ class ItemService:
         finally:
             db.close()
 
-        self.update_item_cache(item_id, "building", building_id, timestamp)
+        self.update_item_cache(item_id, "building", building_id, timestamp, slot_number=slot_num)
         building_name = self.manager.building_map.get(building_id).name if building_id in self.manager.building_map else building_id
         item_name = item.get("name", item_id)
         actor_msg = f"「{item_name}」を{building_name}に置いた。"
@@ -628,21 +636,27 @@ class ItemService:
         return open_items
 
     def get_all_items_in_building(self, building_id: str) -> List[Dict]:
-        """Get all items in a building (regardless of open state)."""
+        """Get all items in a building (regardless of open state), sorted by slot number."""
         all_items = []
         for item_id in self.items_by_building.get(building_id, []):
             item = self.items.get(item_id)
             if item:
-                all_items.append(item)
+                entry = dict(item)
+                entry["slot_number"] = self.item_locations.get(item_id, {}).get("slot_number")
+                all_items.append(entry)
+        all_items.sort(key=lambda x: (x.get("slot_number") is None, x.get("slot_number") or 0))
         return all_items
 
     def get_all_items_for_persona(self, persona_id: str) -> List[Dict]:
-        """Get all items in a persona's inventory (regardless of open state)."""
+        """Get all items in a persona's inventory (regardless of open state), sorted by slot number."""
         all_items = []
         for item_id in self.items_by_persona.get(persona_id, []):
             item = self.items.get(item_id)
             if item:
-                all_items.append(item)
+                entry = dict(item)
+                entry["slot_number"] = self.item_locations.get(item_id, {}).get("slot_number")
+                all_items.append(entry)
+        all_items.sort(key=lambda x: (x.get("slot_number") is None, x.get("slot_number") or 0))
         return all_items
 
     def create_document_item(self, persona_id: str, name: str, description: str, content: str, source_context: Optional[str] = None) -> str:
@@ -687,10 +701,12 @@ class ItemService:
             )
             db.add(item_row)
 
+            slot_num = self._assign_slot(db, "building", building_id)
             location_row = ItemLocationModel(
                 ITEM_ID=item_id,
                 OWNER_KIND="building",
                 OWNER_ID=building_id,
+                SLOT_NUMBER=slot_num,
                 UPDATED_AT=timestamp,
             )
             db.add(location_row)
@@ -718,6 +734,7 @@ class ItemService:
             "owner_id": building_id,
             "updated_at": timestamp,
             "location_id": None,
+            "slot_number": slot_num,
         }
         self.items_by_building[building_id].append(item_id)
         self.refresh_building_system_instruction(building_id)
@@ -775,10 +792,12 @@ class ItemService:
             )
             db.add(item_row)
 
+            slot_num = self._assign_slot(db, "building", building_id)
             location_row = ItemLocationModel(
                 ITEM_ID=item_id,
                 OWNER_KIND="building",
                 OWNER_ID=building_id,
+                SLOT_NUMBER=slot_num,
                 UPDATED_AT=timestamp,
             )
             db.add(location_row)
@@ -806,6 +825,7 @@ class ItemService:
             "owner_id": building_id,
             "updated_at": timestamp,
             "location_id": None,
+            "slot_number": slot_num,
         }
         self.items_by_building[building_id].append(item_id)
         self.refresh_building_system_instruction(building_id)
@@ -857,10 +877,12 @@ class ItemService:
             )
             db.add(item_row)
 
+            slot_num = self._assign_slot(db, "building", building_id)
             location_row = ItemLocationModel(
                 ITEM_ID=item_id,
                 OWNER_KIND="building",
                 OWNER_ID=building_id,
+                SLOT_NUMBER=slot_num,
                 UPDATED_AT=timestamp,
             )
             db.add(location_row)
@@ -888,6 +910,7 @@ class ItemService:
             "owner_id": building_id,
             "updated_at": timestamp,
             "location_id": None,
+            "slot_number": slot_num,
         }
         self.items_by_building[building_id].append(item_id)
         self.refresh_building_system_instruction(building_id)
@@ -941,10 +964,12 @@ class ItemService:
             )
             db.add(item_row)
 
+            slot_num = self._assign_slot(db, "building", building_id)
             location_row = ItemLocationModel(
                 ITEM_ID=item_id,
                 OWNER_KIND="building",
                 OWNER_ID=building_id,
+                SLOT_NUMBER=slot_num,
                 UPDATED_AT=timestamp,
             )
             db.add(location_row)
@@ -972,6 +997,7 @@ class ItemService:
             "owner_id": building_id,
             "updated_at": timestamp,
             "location_id": None,
+            "slot_number": slot_num,
         }
         self.items_by_building[building_id].append(item_id)
         self.refresh_building_system_instruction(building_id)
@@ -1018,6 +1044,7 @@ class ItemService:
             if not item:
                 continue
             entry = dict(item)
+            entry["slot_number"] = self.item_locations.get(item_id, {}).get("slot_number")
             item_type = (item.get("type") or "").lower()
             if item_type == "bag":
                 entry["_children"] = self.get_bag_contents_recursive(
@@ -1026,7 +1053,87 @@ class ItemService:
             else:
                 entry["_children"] = []
             result.append(entry)
+        result.sort(key=lambda x: (x.get("slot_number") is None, x.get("slot_number") or 0))
         return result
+
+    def _assign_slot(self, db, owner_kind: str, owner_id: str) -> int:
+        """コンテナ内の最小空きスロット番号を返す（DB参照）。"""
+        rows = db.query(ItemLocationModel).filter(
+            ItemLocationModel.OWNER_KIND == owner_kind,
+            ItemLocationModel.OWNER_ID == owner_id,
+        ).all()
+        occupied = {row.SLOT_NUMBER for row in rows if row.SLOT_NUMBER is not None}
+        slot = 1
+        while slot in occupied:
+            slot += 1
+        return slot
+
+    def _find_item_by_slot(self, owner_kind: str, owner_id: str, slot_number: int) -> Optional[str]:
+        """コンテナ内の指定スロット番号のアイテムIDを返す。"""
+        if owner_kind == "building":
+            candidates = self.items_by_building.get(owner_id, [])
+        elif owner_kind == "persona":
+            candidates = self.items_by_persona.get(owner_id, [])
+        elif owner_kind == "bag":
+            candidates = self.items_by_bag.get(owner_id, [])
+        else:
+            return None
+        for item_id in candidates:
+            loc = self.item_locations.get(item_id)
+            if loc and loc.get("slot_number") == slot_number:
+                return item_id
+        return None
+
+    def resolve_slot_ref(self, ref: str, persona_id: str, building_id: Optional[str]) -> str:
+        """スロット参照またはUUIDをアイテムUUIDに解決する。
+
+        b:3    → buildingのスロット3
+        i:3    → personaインベントリのスロット3
+        b:5>2  → buildingスロット5のbag内スロット2
+        i:2>1  → inventoryスロット2のbag内スロット1
+        UUID形式はそのまま返す（後方互換）。
+        """
+        ref = ref.strip()
+        if len(ref) == 36 and ref.count("-") == 4:
+            return ref
+
+        parts = ref.split(">")
+        first = parts[0].strip()
+        if ":" not in first:
+            raise RuntimeError(f"無効なアイテム参照形式: '{ref}' (例: b:3, i:2, b:5>1)")
+
+        prefix, slot_str = first.split(":", 1)
+        try:
+            slot_num = int(slot_str)
+        except ValueError:
+            raise RuntimeError(f"スロット番号が無効: '{slot_str}'")
+
+        if prefix == "b":
+            if not building_id:
+                raise RuntimeError("現在のBuilding情報が取得できません。")
+            item_id = self._find_item_by_slot("building", building_id, slot_num)
+            if not item_id:
+                raise RuntimeError(f"Buildingのスロット{slot_num}にアイテムが見つかりません。")
+        elif prefix == "i":
+            item_id = self._find_item_by_slot("persona", persona_id, slot_num)
+            if not item_id:
+                raise RuntimeError(f"インベントリのスロット{slot_num}にアイテムが見つかりません。")
+        else:
+            raise RuntimeError(f"無効なプレフィックス: '{prefix}' (b=Building, i=インベントリ)")
+
+        for nested_part in parts[1:]:
+            try:
+                nested_slot = int(nested_part.strip())
+            except ValueError:
+                raise RuntimeError(f"スロット番号が無効: '{nested_part}'")
+            bag_item = self.items.get(item_id)
+            if not bag_item or (bag_item.get("type") or "").lower() != "bag":
+                raise RuntimeError("スロット参照の途中にBagでないアイテムがあります。")
+            item_id = self._find_item_by_slot("bag", item_id, nested_slot)
+            if not item_id:
+                raise RuntimeError(f"Bag内のスロット{nested_slot}にアイテムが見つかりません。")
+
+        return item_id
 
     def _is_ancestor_bag(self, item_id: str, potential_ancestor_id: str, max_depth: int = 50) -> bool:
         """Check if potential_ancestor_id is an ancestor bag of item_id (circular reference check)."""
@@ -1144,21 +1251,38 @@ class ItemService:
         moved_names = []
         db = self.manager.SessionLocal()
         try:
+            # Pre-compute slot assignments for all items moving to the same container
+            dest_rows = db.query(ItemLocationModel).filter(
+                ItemLocationModel.OWNER_KIND == destination_kind,
+                ItemLocationModel.OWNER_ID == destination_id,
+            ).all()
+            occupied_slots = {row.SLOT_NUMBER for row in dest_rows if row.SLOT_NUMBER is not None}
+            slot_assignments: Dict[str, int] = {}
+            for item_id, _item in validated_items:
+                slot = 1
+                while slot in occupied_slots:
+                    slot += 1
+                occupied_slots.add(slot)
+                slot_assignments[item_id] = slot
+
             for item_id, item in validated_items:
                 row = db.query(ItemLocationModel).filter(
                     ItemLocationModel.ITEM_ID == item_id
                 ).one_or_none()
+                slot_num = slot_assignments[item_id]
                 if row is None:
                     row = ItemLocationModel(
                         ITEM_ID=item_id,
                         OWNER_KIND=destination_kind,
                         OWNER_ID=destination_id,
+                        SLOT_NUMBER=slot_num,
                         UPDATED_AT=timestamp,
                     )
                     db.add(row)
                 else:
                     row.OWNER_KIND = destination_kind
                     row.OWNER_ID = destination_id
+                    row.SLOT_NUMBER = slot_num
                     row.UPDATED_AT = timestamp
                 moved_names.append(item.get("name", item_id))
             db.commit()
@@ -1170,7 +1294,8 @@ class ItemService:
 
         # Update in-memory cache
         for item_id, _item in validated_items:
-            self.update_item_cache(item_id, destination_kind, destination_id, timestamp)
+            self.update_item_cache(item_id, destination_kind, destination_id, timestamp,
+                                   slot_number=slot_assignments[item_id])
 
         self._sync_to_state()
 

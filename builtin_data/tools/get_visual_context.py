@@ -115,6 +115,7 @@ def _render_bag_contents(
     media_list: List[Dict[str, str]],
     manager: Any,
     indent: int = 1,
+    parent_ref: Optional[str] = None,
 ) -> None:
     """Render bag contents as indented list (all items shown as closed)."""
     prefix = "  " * indent
@@ -123,7 +124,6 @@ def _render_bag_contents(
         "object": "Object", "bag": "Bag",
     }
     for entry in contents:
-        child_id = entry.get("item_id", "")
         child_name = entry.get("name", "不明なアイテム")
         child_type = (entry.get("type") or "").lower()
         child_desc = (entry.get("description") or "").strip() or "(説明なし)"
@@ -131,13 +131,21 @@ def _render_bag_contents(
             child_desc = child_desc[:157] + "..."
         label = type_labels.get(child_type, child_type.capitalize() or "Item")
 
-        text_parts.append(f"{prefix}- [{label}] {child_name} (id: {child_id})")
+        slot_num = entry.get("slot_number")
+        if parent_ref and slot_num is not None:
+            child_ref = f"{parent_ref}>{slot_num}"
+        elif slot_num is not None:
+            child_ref = str(slot_num)
+        else:
+            child_ref = "?"
+
+        text_parts.append(f"{prefix}- [{child_ref}] [{label}] {child_name}")
         text_parts.append(f"{prefix}  {child_desc}")
 
         # Recurse into nested bags
         children = entry.get("_children", [])
         if children and child_type == "bag":
-            _render_bag_contents(children, text_parts, media_list, manager, indent + 1)
+            _render_bag_contents(children, text_parts, media_list, manager, indent + 1, parent_ref=child_ref)
 
 
 def _format_item_created_at(item: Dict[str, Any]) -> str:
@@ -229,6 +237,7 @@ def _render_item(
     media_list: List[Dict[str, str]],
     manager: Any,
     persona_id: Optional[str] = None,
+    slot_ref: Optional[str] = None,
 ) -> None:
     """Render a single item into the visual context text and media list."""
     item_id = item.get("item_id", "")
@@ -240,6 +249,8 @@ def _render_item(
     file_path_str = item.get("file_path")
     created_at_str = _format_item_created_at(item)
 
+    ref_label = f"[{slot_ref}] " if slot_ref else ""
+
     type_label = {
         "picture": "Image",
         "document": "Document",
@@ -249,17 +260,16 @@ def _render_item(
 
     if item_type == "object":
         # Objects have no open/closed concept
-        text_parts.append(f"[{type_label}] {item_name}")
-        text_parts.append(f"id: {item_id}")
+        text_parts.append(f"{ref_label}[{type_label}] {item_name}")
         if created_at_str:
             text_parts.append(f"作成日時: {created_at_str}")
         text_parts.append(description)
         text_parts.append("")
 
     elif item_type == "picture":
-        open_label = "(Open) " if is_open else "(Closed) "
-        text_parts.append(f"[{type_label}] {item_name}")
-        text_parts.append(f"{open_label}id: {item_id}")
+        open_label = "(Open)" if is_open else "(Closed)"
+        text_parts.append(f"{ref_label}[{type_label}] {item_name}")
+        text_parts.append(open_label)
         if created_at_str:
             text_parts.append(f"作成日時: {created_at_str}")
 
@@ -283,9 +293,9 @@ def _render_item(
         text_parts.append("")
 
     elif item_type == "document":
-        open_label = "(Open) " if is_open else "(Closed) "
-        text_parts.append(f"[{type_label}] {item_name}")
-        text_parts.append(f"{open_label}id: {item_id}")
+        open_label = "(Open)" if is_open else "(Closed)"
+        text_parts.append(f"{ref_label}[{type_label}] {item_name}")
+        text_parts.append(open_label)
         if created_at_str:
             text_parts.append(f"作成日時: {created_at_str}")
 
@@ -310,9 +320,9 @@ def _render_item(
         text_parts.append("")
 
     elif item_type == "bag":
-        open_label = "(Open) " if is_open else "(Closed) "
-        text_parts.append(f"[{type_label}] {item_name}")
-        text_parts.append(f"{open_label}id: {item_id}")
+        open_label = "(Open)" if is_open else "(Closed)"
+        text_parts.append(f"{ref_label}[{type_label}] {item_name}")
+        text_parts.append(open_label)
         if created_at_str:
             text_parts.append(f"作成日時: {created_at_str}")
         text_parts.append(description)
@@ -321,15 +331,14 @@ def _render_item(
             contents = manager.get_bag_contents_recursive(item_id)
             if contents:
                 text_parts.append("")
-                _render_bag_contents(contents, text_parts, media_list, manager, indent=1)
+                _render_bag_contents(contents, text_parts, media_list, manager, indent=1, parent_ref=slot_ref)
             else:
                 text_parts.append("  (空)")
         text_parts.append("")
 
     else:
         # Unknown type — show as generic item
-        text_parts.append(f"[{type_label}] {item_name}")
-        text_parts.append(f"id: {item_id}")
+        text_parts.append(f"{ref_label}[{type_label}] {item_name}")
         if created_at_str:
             text_parts.append(f"作成日時: {created_at_str}")
         text_parts.append(description)
@@ -498,7 +507,9 @@ def get_visual_context(
         text_parts.append(f"### あなた自身（{persona_name}）のインベントリ内")
         text_parts.append("")
         for item in inventory_items:
-            _render_item(item, text_parts, media_list, manager, persona_id=persona_id)
+            slot_num = item.get("slot_number")
+            slot_ref = f"i:{slot_num}" if slot_num is not None else None
+            _render_item(item, text_parts, media_list, manager, persona_id=persona_id, slot_ref=slot_ref)
 
     # 3b. Building items
     building_items = (
@@ -509,7 +520,9 @@ def get_visual_context(
         text_parts.append("### Building内")
         text_parts.append("")
         for item in building_items:
-            _render_item(item, text_parts, media_list, manager, persona_id=persona_id)
+            slot_num = item.get("slot_number")
+            slot_ref = f"b:{slot_num}" if slot_num is not None else None
+            _render_item(item, text_parts, media_list, manager, persona_id=persona_id, slot_ref=slot_ref)
 
     if not inventory_items and not building_items:
         text_parts.append("アイテムはありません。")

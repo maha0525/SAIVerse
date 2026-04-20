@@ -11,6 +11,7 @@ def item_pickup(item_id: str) -> str:
     manager = get_active_manager()
     if manager is None:
         raise RuntimeError("Manager context is not available; item_pickup cannot be executed.")
+    item_id = manager.resolve_item_ref_for_persona(persona_id, item_id)
     return manager.pickup_item_for_persona(persona_id, item_id)
 
 

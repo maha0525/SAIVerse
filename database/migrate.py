@@ -148,7 +148,10 @@ def migrate_database_in_place(db_path: str):
                 raise
 
         logging.info("すべてのテーブルのデータ移行が正常に完了しました。")
-        
+
+        # Post-migration: assign slot numbers to existing items (in order of CREATED_AT)
+        _assign_initial_slot_numbers(target_engine)
+
     except Exception as e:
         logging.error(f"マイグレーション中にエラーが発生しました: {e}", exc_info=True)
         logging.info("ロールバックを試みます...")
@@ -163,6 +166,37 @@ def migrate_database_in_place(db_path: str):
                 logging.info("ロールバックが完了しました。元のデータベースが復元されました。")
         except Exception as rb_e:
             logging.error(f"ロールバックに失敗しました: {rb_e}", exc_info=True)
+
+def _assign_initial_slot_numbers(engine) -> None:
+    """既存アイテムに作成日時順でスロット番号を割り当てる。"""
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text("""
+                SELECT il.LOCATION_ID, il.OWNER_KIND, il.OWNER_ID, i.CREATED_AT
+                FROM item_location il
+                JOIN item i ON il.ITEM_ID = i.ITEM_ID
+                WHERE il.SLOT_NUMBER IS NULL
+                ORDER BY il.OWNER_KIND, il.OWNER_ID, i.CREATED_AT
+            """))
+            rows = result.fetchall()
+
+            from collections import defaultdict
+            container_counters = defaultdict(int)
+
+            for row in rows:
+                location_id, owner_kind, owner_id, _created_at = row
+                container_key = (owner_kind, owner_id)
+                container_counters[container_key] += 1
+                slot_num = container_counters[container_key]
+                conn.execute(
+                    text("UPDATE item_location SET SLOT_NUMBER = :slot WHERE LOCATION_ID = :lid"),
+                    {"slot": slot_num, "lid": location_id},
+                )
+
+            logging.info("スロット番号を %d 件のアイテムに割り当てました。", len(rows))
+    except Exception as e:
+        logging.warning("スロット番号の割り当てに失敗しました（スキップ）: %s", e)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SAIVerse データベース マイグレーションツール")

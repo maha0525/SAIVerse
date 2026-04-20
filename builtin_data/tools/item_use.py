@@ -25,6 +25,7 @@ def item_use(item_id: str, action_json: str) -> str:
     manager = get_active_manager()
     if manager is None:
         raise RuntimeError("Manager context is not available; item_use cannot be executed.")
+    item_id = manager.resolve_item_ref_for_persona(persona_id, item_id)
     return manager.use_item_for_persona(persona_id, item_id, action_json)
 
 

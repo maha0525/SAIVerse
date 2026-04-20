@@ -13,6 +13,7 @@ def item_place(item_id: str, building_id: Optional[str] = None) -> str:
     manager = get_active_manager()
     if manager is None:
         raise RuntimeError("Manager context is not available; item_place cannot be executed.")
+    item_id = manager.resolve_item_ref_for_persona(persona_id, item_id)
     return manager.place_item_from_persona(persona_id, item_id, building_id=building_id)
 
 

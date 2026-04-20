@@ -485,6 +485,12 @@ class SAIVerseManager(
     def _broadcast_item_event(self, persona_ids: List[str], message: str) -> None:
         self.item_service.broadcast_item_event(persona_ids, message)
 
+    def resolve_item_ref_for_persona(self, persona_id: str, ref: str) -> str:
+        """スロット参照（b:3, i:2, b:5>1 等）またはUUIDをアイテムUUIDに解決する。"""
+        persona = self.personas.get(persona_id)
+        building_id = getattr(persona, "current_building_id", None) if persona else None
+        return self.item_service.resolve_slot_ref(ref, persona_id, building_id)
+
     def pickup_item_for_persona(self, persona_id: str, item_id: str) -> str:
         return self.item_service.pickup_item(persona_id, item_id)
 

@@ -28,15 +28,16 @@ def item_view(item_id: str = "", item_ids: str = "") -> str:
         raise RuntimeError("Manager context is not available; item_view cannot be executed.")
 
     # Merge item_id and item_ids into a single list
-    ids = []
+    raw_ids = []
     if item_ids:
-        ids = [s.strip() for s in item_ids.split(",") if s.strip()]
-    if item_id and item_id not in ids:
-        ids.insert(0, item_id)
+        raw_ids = [s.strip() for s in item_ids.split(",") if s.strip()]
+    if item_id and item_id not in raw_ids:
+        raw_ids.insert(0, item_id)
 
-    if not ids:
+    if not raw_ids:
         raise RuntimeError("閲覧するアイテムIDが指定されていません。")
 
+    ids = [manager.resolve_item_ref_for_persona(persona_id, ref) for ref in raw_ids]
     return manager.view_items_for_persona(persona_id, ids)
 
 

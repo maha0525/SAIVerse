@@ -206,9 +206,11 @@ class ItemLocation(Base):
     ITEM_ID = Column(String(36), ForeignKey("item.ITEM_ID"), nullable=False)
     OWNER_KIND = Column(String(32), nullable=False)  # building / persona / world / bag
     OWNER_ID = Column(String(255), nullable=False)
+    SLOT_NUMBER = Column(Integer, nullable=True)
     UPDATED_AT = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
     __table_args__ = (
         UniqueConstraint("ITEM_ID", name="uq_item_location_item_id"),
+        UniqueConstraint("OWNER_KIND", "OWNER_ID", "SLOT_NUMBER", name="uq_item_slot"),
     )
 
 
