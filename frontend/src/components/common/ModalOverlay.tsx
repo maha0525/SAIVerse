@@ -48,17 +48,17 @@ export default function ModalOverlay({ onClose, children, className }: ModalOver
         overlayMouseDownRef.current = false;
     };
 
-    // Prevent touch events from bubbling (for mobile)
-    const handleTouchStart = (e: React.TouchEvent) => e.stopPropagation();
-    const handleTouchMove = (e: React.TouchEvent) => e.stopPropagation();
+    // NOTE: 以前は onTouchStart/onTouchMove でバブリング抑止をしていたが、
+    // React 17+ のイベント委譲と相互作用して iOS Safari でモーダル内の
+    // ネイティブスクロールが効かなくなる事象があったため撤去した。背景タップで
+    // モーダル閉じる動作は onMouseDown/Up (モバイルでも touch→mouse 合成が
+    // 発火する) で十分カバーできる。
 
     const overlay = (
         <div
             className={`${styles.overlay} ${className || ''}`}
             onMouseDown={handleMouseDown}
             onMouseUp={handleMouseUp}
-            onTouchStart={handleTouchStart}
-            onTouchMove={handleTouchMove}
         >
             {children}
         </div>

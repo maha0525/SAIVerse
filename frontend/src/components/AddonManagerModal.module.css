@@ -4,12 +4,13 @@
     width: 560px;
     max-width: 95vw;
     max-height: 85vh;
-    /* iOS Safari は 100vh にアドレスバー非表示分を含めるため、アドレスバーが
-       展開中だと max-height: 85vh だとコンテンツがビューポート下端を越えて
-       見切れる/スクロールできない事象が発生する。dvh (dynamic viewport
-       height) を使うことで、実際の可視ビューポート基準でサイズが決まり
-       content 側の overflow-y:auto が正しく効くようになる。
-       dvh 未対応の環境では 85vh にフォールバックされる。 */
+    /* iOS Safari の 100vh はアドレスバー非表示時の値を含むため、アドレスバー
+       展開中はコンテンツが可視領域を超えてスクロール不能になる。段階的に
+       より安全な単位にフォールバック:
+         - svh: small viewport height (最小値、常に安全)
+         - dvh: dynamic viewport height (リサイズに追従)
+       未対応環境は vh にフォールバック。 */
+    max-height: 85svh;
     max-height: 85dvh;
     display: flex;
     flex-direction: column;
@@ -64,6 +65,11 @@
     min-height: 0;
     /* iOS Safari の慣性スクロールを有効化 */
     -webkit-overflow-scrolling: touch;
+    /* モバイル: 縦スクロールのみ許可。touch-action を明示することで、
+       ブラウザは「このエリアは縦スクロール対象」と判断して JS の touch
+       イベントより先にネイティブスクロールを走らせる (親の touchmove
+       ハンドラが誤って間に入っても native scroll が優先される)。 */
+    touch-action: pan-y;
     padding: 1rem 1.25rem;
     display: flex;
     flex-direction: column;
@@ -704,5 +710,23 @@
     .fileControl,
     .fileDropArea {
         width: 100%;
+    }
+}
+
+/* モバイル: モーダル内部 nested scroll は iOS Safari で効かないため、
+   オーバーレイ側のスクロールに委ねる構造に切替える。モーダル自体は
+   max-height を解除して自然な高さに、content の overflow-y:auto も外す。
+   こうすることでコンテンツ全体がドキュメントフローに乗り、オーバーレイの
+   overflow-y:auto で確実にスクロールできるようになる。 */
+@media (max-width: 768px) {
+    .modal {
+        max-height: none;
+        max-width: 100vw;
+        width: 100%;
+        border-radius: 0;
+    }
+    .content {
+        overflow-y: visible;
+        min-height: 0;
     }
 }
