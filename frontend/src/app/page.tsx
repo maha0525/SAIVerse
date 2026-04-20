@@ -23,6 +23,9 @@ import ModalOverlay from '@/components/common/ModalOverlay';
 import { Send, Plus, Paperclip, Eye, X, Info, Users, Menu, Copy, Check, SlidersHorizontal, ChevronDown, AlertTriangle, ArrowUpCircle, Loader, RefreshCw, Square, Bell } from 'lucide-react';
 import { useActivityTracker } from '@/hooks/useActivityTracker';
 import { useAddonEvents } from '@/hooks/useAddonEvents';
+import { useActiveClientTab } from '@/hooks/useActiveClientTab';
+import { useClientActions } from '@/hooks/useClientActions';
+import { ActiveClientIndicator } from '@/components/ActiveClientIndicator';
 import AddonBubbleButtons, { BubbleButtonDef } from '@/components/AddonBubbleButtons';
 
 // Allow className on HTML elements used by thinking blocks (<details>, <div>, <summary>)
@@ -133,6 +136,26 @@ export default function Home() {
     // Enable user presence tracking (heartbeat + visibility)
     useActivityTracker();
 
+    // アクティブクライアントタブ (最後にユーザー操作があったタブ) 判定
+    const { isActive: isActiveClientTab } = useActiveClientTab();
+
+    // addon metadata lookup (client action executor に渡すため useClientActions から使われる)
+    const getAddonMetadata = useCallback(
+        (messageId: string | undefined, addonName: string) => {
+            if (!messageId) return {};
+            return addonMetadata[messageId]?.[addonName] ?? {};
+        },
+        // addonMetadata は下で useState 宣言されるため TDZ 回避用に closure 参照とする
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [],
+    );
+
+    // client_actions (addon.json の ui_extensions.client_actions) ディスパッチャ
+    const { dispatch: dispatchClientActions } = useClientActions({
+        isActiveTab: isActiveClientTab,
+        getAddonMetadata,
+    });
+
     // アドオンSSEイベント購読：audio_ready など非同期完了イベントを受信してメタデータを更新
     useAddonEvents(useCallback((event) => {
         if (event.message_id && event.data) {
@@ -147,7 +170,9 @@ export default function Home() {
                 },
             }));
         }
-    }, []));
+        // 同時に client_actions をディスパッチ (event.data 経由で URL 等を解決)
+        dispatchClientActions(event);
+    }, [dispatchClientActions]));
 
     const [messages, setMessages] = useState<Message[]>([]);
     const [inputValue, setInputValue] = useState('');
@@ -1754,6 +1779,7 @@ export default function Home() {
                         <h1>{currentBuildingName}</h1>
                     </div>
                     <div className={styles.headerRight}>
+                        <ActiveClientIndicator isActive={isActiveClientTab} />
                         {hasUnreadAnnouncements && (
                             <button
                                 className={styles.iconBtn}

@@ -71,9 +71,37 @@ class AddonUiInputButton(BaseModel):
     behavior: Optional[str] = None  # "replace_input" | "append_input"
 
 
+class AddonClientAction(BaseModel):
+    """SSE イベント受信時にクライアント側で実行するアクションの宣言。
+
+    本体側の action executor registry に登録された `action` 名に対応する関数が
+    実行される。初期実装は ``play_audio`` のみ対応。
+
+    フィールド:
+      - ``id``: addon 内で一意な識別子（ログ用）
+      - ``event``: 購読する SSE イベント名（例 ``audio_ready``）
+      - ``action``: 実行する action executor 名（例 ``play_audio``）
+      - ``source_metadata_key`` / ``fallback_metadata_key``: action が
+        参照する metadata キー。executor が必要とするもののみ指定
+      - ``requires_active_tab``: true のときアクティブクライアントタブでのみ実行
+      - ``requires_enabled_param``: 指定した addon param が truthy のときのみ実行
+      - ``on_failure_endpoint``: action 失敗時に POST する addon ローカルパス。
+        失敗情報 (action_id / event / error_reason / message_id) を渡す
+    """
+    id: str
+    event: str
+    action: str  # "play_audio" 等（本体の executor registry に登録された名前）
+    source_metadata_key: Optional[str] = None
+    fallback_metadata_key: Optional[str] = None
+    requires_active_tab: bool = False
+    requires_enabled_param: Optional[str] = None
+    on_failure_endpoint: Optional[str] = None
+
+
 class AddonUiExtensions(BaseModel):
     bubble_buttons: List[AddonUiBubbleButton] = []
     input_buttons: List[AddonUiInputButton] = []
+    client_actions: List[AddonClientAction] = []
 
 
 class AddonManifest(BaseModel):
