@@ -8,6 +8,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from saiverse.logging_config import log_sea_trace
 from sea.playbook_models import PlaybookSchema
 from sea.runtime_utils import _format, _resolve_template_arg
+from tools import TOOL_REGISTRY
+from tools.context import persona_context
 
 LOGGER = logging.getLogger(__name__)
 
@@ -24,9 +26,6 @@ class RuntimeEngine:
 
     def lg_tool_node(self, node_def: Any, persona: Any, playbook: PlaybookSchema, event_callback: EventCallback = None, auto_mode: bool = False) -> StateNode:
         from pathlib import Path
-
-        from tools import TOOL_REGISTRY
-        from tools.context import persona_context
 
         tool_name = node_def.action
         args_input = getattr(node_def, "args_input", None)
@@ -477,11 +476,13 @@ class RuntimeEngine:
             speak_metadata["reasoning"] = reasoning_text
         if reasoning_details_val is not None:
             speak_metadata["reasoning_details"] = reasoning_details_val
-        self.emitters["speak"](persona, eff_bid, text, pulse_id=pulse_id, extra_metadata=speak_metadata if speak_metadata else None)
+        building_msg = self.emitters["speak"](persona, eff_bid, text, pulse_id=pulse_id, extra_metadata=speak_metadata if speak_metadata else None)
         if outputs is not None:
             outputs.append(text)
         if event_callback:
             say_event: Dict[str, Any] = {"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None)}
+            if building_msg and building_msg.get("message_id"):
+                say_event["message_id"] = str(building_msg["message_id"])
             if reasoning_text:
                 say_event["reasoning"] = reasoning_text
             if reasoning_details_val is not None:

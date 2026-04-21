@@ -194,14 +194,22 @@ class PersonaHistoryMixin:
                     last_seq = int(hist[-1].get("seq", len(hist)))
                 except (TypeError, ValueError):
                     last_seq = len(hist)
-            self.entry_markers[building_id] = last_seq
             prior_cursor = self.pulse_cursors.get(building_id, 0)
-            self.pulse_cursors[building_id] = max(prior_cursor, last_seq)
+            if prior_cursor > 0:
+                # Re-entering a building visited before: preserve the cursor as the entry
+                # point so unseen messages (seq > prior_cursor) remain visible.
+                # Do not advance pulse_cursors here; auto_ingest will do that.
+                self.entry_markers[building_id] = prior_cursor
+            else:
+                # First visit: skip existing history to avoid flooding.
+                self.entry_markers[building_id] = last_seq
+                self.pulse_cursors[building_id] = last_seq
             logging.debug(
-                "[entry] entry marker set: %s -> %d (prev_cursor=%d)",
+                "[entry] entry marker set: %s -> %d (prev_cursor=%d last_seq=%d)",
                 building_id,
-                last_seq,
+                self.entry_markers[building_id],
                 prior_cursor,
+                last_seq,
             )
         except Exception:
             logging.warning("Failed to mark entry for building %s", building_id, exc_info=True)

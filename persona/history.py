@@ -12,6 +12,15 @@ def initialise_pulse_state(persona) -> None:
     hist_map = persona.history_manager.building_histories
     computed_cursors: Dict[str, int] = {}
     max_seq_map: Dict[str, int] = {}
+    raw_cursor_data = persona._raw_pulse_cursor_data if hasattr(persona, "_raw_pulse_cursor_data") else {}
+    _log.info(
+        "[init_pulse] persona=%s hist_map_keys=%s raw_cursor_keys=%s format=%s current_building=%s",
+        getattr(persona, "persona_id", "?"),
+        sorted(hist_map.keys()),
+        sorted(raw_cursor_data.keys()),
+        getattr(persona, "_raw_pulse_cursor_format", "?"),
+        getattr(persona, "current_building_id", "?"),
+    )
     for b_id, hist in hist_map.items():
         max_seq = 0
         for msg in hist:
@@ -22,8 +31,14 @@ def initialise_pulse_state(persona) -> None:
                 seq_val = 0
             max_seq = max(max_seq, seq_val)
         max_seq_map[b_id] = max_seq
-        raw_value = persona._raw_pulse_cursor_data.get(b_id) if hasattr(persona, "_raw_pulse_cursor_data") else None
+        raw_value = raw_cursor_data.get(b_id)
         cursor = max_seq
+        _log.info(
+            "[init_pulse] persona=%s b_id=%s max_seq=%d raw_value=%s -> cursor_before_clamp=%s",
+            getattr(persona, "persona_id", "?"),
+            b_id, max_seq, raw_value,
+            raw_value if raw_value is None else "will_compute",
+        )
         if raw_value is not None:
             if persona._raw_pulse_cursor_format == "seq":
                 try:
@@ -51,6 +66,7 @@ def initialise_pulse_state(persona) -> None:
                         except (TypeError, ValueError):
                             cursor = idx
         computed_cursors[b_id] = max(0, cursor)
+        _log.info("[init_pulse] persona=%s b_id=%s final_cursor=%d", getattr(persona, "persona_id", "?"), b_id, computed_cursors[b_id])
 
     for b_id, hist in hist_map.items():
         if b_id not in computed_cursors:
@@ -58,12 +74,10 @@ def initialise_pulse_state(persona) -> None:
 
     persona.pulse_cursors = computed_cursors
 
-    for b_id, hist in hist_map.items():
+    for b_id in hist_map:
         if b_id not in persona.entry_markers:
-            persona.entry_markers[b_id] = max_seq_map.get(b_id, 0)
-
-    if persona.current_building_id in hist_map:
-        persona.entry_markers[persona.current_building_id] = persona.pulse_cursors.get(
-            persona.current_building_id,
-            persona.entry_markers.get(persona.current_building_id, 0),
-        )
+            # Use the restored cursor, not max_seq.
+            # max_seq would block unseen pre-restart messages when the persona's
+            # current_building_id at startup differs from the building they were
+            # actually chatting in before the restart.
+            persona.entry_markers[b_id] = computed_cursors.get(b_id, 0)

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List, Optional
-from api.deps import get_manager
+from api.deps import get_manager, avatar_path_to_url
 from database.models import Playbook as PlaybookModel
 from .models import PersonaInfo, SummonRequest
 
@@ -26,7 +26,7 @@ def get_summonable_personas(building_id: Optional[str] = None, manager = Depends
             continue
             
         # Get avatar url
-        avatar_url = f"/api/chat/persona/{pid}/avatar"
+        avatar_url = avatar_path_to_url(persona.avatar_image)
         
         results.append(PersonaInfo(
             id=pid,

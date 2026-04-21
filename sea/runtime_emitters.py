@@ -21,7 +21,7 @@ class RuntimeEmitters:
         pulse_id: Optional[str] = None,
         record_history: bool = True,
         extra_metadata: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> Optional[Dict[str, Any]]:
         msg = {"role": "assistant", "content": text, "persona_id": persona.persona_id}
         # Build metadata with tags and conversation partners
         metadata: Dict[str, Any] = {"tags": ["conversation"]}
@@ -49,9 +49,21 @@ class RuntimeEmitters:
             metadata["with"] = partners
 
         msg["metadata"] = metadata
+        building_msg: Optional[Dict[str, Any]] = None
         if record_history:
             try:
-                building_msg = persona.history_manager.add_message(msg, building_id, heard_by=None)
+                from saiverse.content_tags import strip_in_heart
+                heard_by_list = list(occupants)
+                if persona.persona_id not in heard_by_list:
+                    heard_by_list.append(persona.persona_id)
+                # SAIMemory: 生のテキスト（<in_heart>タグ含む）を保存
+                persona.history_manager.add_to_persona_only(msg)
+                # building_histories: <in_heart>を除去したテキストを保存
+                building_content = strip_in_heart(text)
+                building_msg_dict = {**msg, "content": building_content}
+                building_msg = persona.history_manager.add_to_building_only(
+                    building_id, building_msg_dict, heard_by=heard_by_list
+                )
                 # BuildingHistory保存完了直後にmessage_idを確定させる。
                 # これにより後続のアドオンツール（TTSなど）が get_active_message_id() で
                 # 正しいIDを取得してメタデータを紐付けられる。
@@ -63,6 +75,7 @@ class RuntimeEmitters:
             except Exception:
                 LOGGER.exception("Failed to emit speak message")
         self.notify_unity_speak(persona, text)
+        return building_msg
 
     def emit_say(
         self,
@@ -99,7 +112,16 @@ class RuntimeEmitters:
             msg["metadata"] = msg_metadata
         building_msg: Optional[Dict[str, Any]] = None
         try:
-            building_msg = persona.history_manager.add_to_building_only(building_id, msg)
+            from saiverse.content_tags import strip_in_heart, wrap_spell_blocks
+            heard_by_list = list(occupants)
+            if persona.persona_id not in heard_by_list:
+                heard_by_list.append(persona.persona_id)
+            # スペルブロックを <user_only alt="Name"> でラッピング、<in_heart> を除去
+            building_content = wrap_spell_blocks(strip_in_heart(text))
+            building_msg_for_hist = {**msg, "content": building_content}
+            building_msg = persona.history_manager.add_to_building_only(
+                building_id, building_msg_for_hist, heard_by=heard_by_list
+            )
             # BuildingHistory 保存完了直後に message_id を ContextVar に確定させる。
             # 後続のアドオンツール (TTS 等) が get_active_message_id() で正しい ID を
             # 取得できるよう、emit_speak と同様の配線を行う。

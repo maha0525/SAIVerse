@@ -130,7 +130,14 @@ class HistoryManager:
     ) -> Dict[str, str]:
         enriched = msg.copy()
         seq_value = enriched.get("seq")
-        next_candidate = self._building_seq_counter.get(building_id, 1)
+        # building_histories は全ペルソナ共有なので、実際の末尾 seq から次候補を導出する。
+        # ペルソナ固有カウンターだけを使うと他ペルソナのメッセージと seq が衝突する。
+        hist = self.building_histories.get(building_id)
+        if hist:
+            last_seq = int(hist[-1].get("seq", 0))
+            next_candidate = max(self._building_seq_counter.get(building_id, 1), last_seq + 1)
+        else:
+            next_candidate = self._building_seq_counter.get(building_id, 1)
         if isinstance(seq_value, int):
             seq = seq_value
         else:

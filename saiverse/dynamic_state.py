@@ -39,6 +39,7 @@ class ItemEntry:
 class MemopediaPageEntry:
     page_id: str
     title: str
+    created_at: int  # Unix timestamp（新規検出用）
     updated_at: int  # Unix timestamp（更新検出用）
 
 
@@ -249,12 +250,12 @@ class DynamicStateManager:
             return []
         try:
             cur = sai_mem.conn.execute(
-                "SELECT id, title, updated_at FROM memopedia_pages "
+                "SELECT id, title, created_at, updated_at FROM memopedia_pages "
                 "WHERE COALESCE(is_deleted, 0) = 0 "
                 "ORDER BY updated_at DESC LIMIT 200"
             )
             return [
-                MemopediaPageEntry(page_id=row[0], title=row[1], updated_at=int(row[2] or 0))
+                MemopediaPageEntry(page_id=row[0], title=row[1], created_at=int(row[2] or 0), updated_at=int(row[3] or 0))
                 for row in cur.fetchall()
             ]
         except Exception as exc:
@@ -333,16 +334,17 @@ class DynamicStateManager:
                 ))
 
         # --- Memopedia差分 ---
+        # タイムスタンプ比較で検出: b.captured_atより新しいcreated_at/updated_atを持つものが変化対象
         b_mp = {e.page_id: e for e in b.memopedia_pages}
         c_mp = {e.page_id: e for e in c.memopedia_pages}
 
         for page_id, c_page in c_mp.items():
-            if page_id not in b_mp:
+            if c_page.created_at > b.captured_at:
                 changes.append(StateChange(
                     kind="memopedia_created",
                     label=f"Memopedia「{c_page.title}」が作成されました",
                 ))
-            elif b_mp[page_id].updated_at < c_page.updated_at:
+            elif c_page.updated_at > b.captured_at:
                 changes.append(StateChange(
                     kind="memopedia_updated",
                     label=f"Memopedia「{c_page.title}」が更新されました",
@@ -356,8 +358,8 @@ class DynamicStateManager:
                 ))
 
         # --- Chronicle差分 ---
-        b_chr = {e.entry_id for e in b.chronicle_entries}
-        new_chr = [e for e in c.chronicle_entries if e.entry_id not in b_chr]
+        # タイムスタンプ比較: b.captured_atより新しいcreated_atのエントリのみ通知
+        new_chr = [e for e in c.chronicle_entries if e.created_at > b.captured_at]
         if new_chr:
             by_level: Dict[int, int] = {}
             for e in new_chr:

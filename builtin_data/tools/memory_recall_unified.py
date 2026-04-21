@@ -1,4 +1,9 @@
-"""Unified recall entry point: search across Chronicle and Memopedia."""
+"""Unified memory recall: semantic search across Chronicle and Memopedia.
+
+Chronicle results include the full arasuji text.
+Memopedia results include the full page summary.
+Both include the saiverse:// URI for further navigation.
+"""
 
 from __future__ import annotations
 
@@ -8,15 +13,17 @@ from tools.context import get_active_persona_id, get_active_persona_path
 from tools.core import ToolSchema
 
 
-def recall_entry(
+def memory_recall_unified(
     query: str,
     topk: int = 5,
     search_chronicle: bool = True,
     search_memopedia: bool = True,
 ) -> str:
-    """Search memory across Chronicle and Memopedia using semantic similarity.
+    """Search memory semantically across Chronicle and Memopedia.
 
-    Returns ranked results with URIs for further navigation via recall_navigate.
+    Returns ranked results with full Chronicle content and Memopedia summaries,
+    plus saiverse:// URIs for further navigation via chronicle_context_up/down
+    or memopedia_get_page.
 
     Args:
         query: What to search for (natural language).
@@ -40,6 +47,8 @@ def recall_entry(
         raise RuntimeError("Semantic search not available (embedding model may be missing)")
 
     from sai_memory.unified_recall import unified_recall
+    from sai_memory.arasuji.storage import get_entry
+    from sai_memory.memopedia.storage import get_page
 
     hits = unified_recall(
         adapter.conn,
@@ -54,25 +63,34 @@ def recall_entry(
     if not hits:
         return "関連する記憶が見つかりませんでした。"
 
-    # Store recalled IDs in working memory
-    for hit in hits:
-        adapter.add_recalled_id(
-            source_type=hit.source_type,
-            source_id=hit.source_id,
-            title=hit.title,
-            uri=hit.uri,
-        )
+    # Enrich hits with full content
+    with adapter._db_lock:
+        for hit in hits:
+            if hit.source_type == "chronicle":
+                entry = get_entry(adapter.conn, hit.source_id)
+                if entry:
+                    hit.content = entry.content
+            elif hit.source_type == "memopedia":
+                page = get_page(adapter.conn, hit.source_id)
+                if page:
+                    hit.content = page.summary or ""
 
-    lines = [f"検索結果: {len(hits)}件\n"]
+    lines = [f"記憶検索結果: {len(hits)}件\n"]
     for i, hit in enumerate(hits, 1):
-        source_label = "Chronicle" if hit.source_type == "chronicle" else "Memopedia"
-        lines.append(f"[{i}] ({source_label}) {hit.title}")
-        lines.append(f"    スコア: {hit.score:.4f}")
-        lines.append(f"    URI: {hit.uri}")
-        if hit.content:
-            lines.append(f"    概要: {hit.content}")
-        if hit.message_count:
-            lines.append(f"    メッセージ数: {hit.message_count}")
+        if hit.source_type == "chronicle":
+            from datetime import datetime
+            start = datetime.fromtimestamp(hit.start_time).strftime("%Y-%m-%d %H:%M") if hit.start_time else "?"
+            end = datetime.fromtimestamp(hit.end_time).strftime("%Y-%m-%d %H:%M") if hit.end_time else "?"
+            lines.append(f"[{i}] Chronicle Lv{hit.level} | {start} ~ {end} | {hit.message_count}件")
+            lines.append(f"    URI: {hit.uri}")
+            lines.append(f"    {hit.content}")
+        else:
+            lines.append(f"[{i}] Memopedia: {hit.title}")
+            if hit.category:
+                lines.append(f"    カテゴリ: {hit.category}")
+            lines.append(f"    URI: {hit.uri}")
+            if hit.content:
+                lines.append(f"    概要: {hit.content}")
         lines.append("")
 
     return "\n".join(lines)
@@ -80,11 +98,12 @@ def recall_entry(
 
 def schema() -> ToolSchema:
     return ToolSchema(
-        name="recall_entry",
+        name="memory_recall_unified",
         description=(
-            "記憶を検索します。Chronicle（あらすじ）とMemopedia（知識ベース）を横断して、"
-            "クエリに関連する記憶を探します。結果にはURIが含まれており、recall_navigateで"
-            "詳細を確認できます。"
+            "ChronicleとMemopediaを横断してセマンティック検索を行います。"
+            "Chronicleはあらすじ全文、MemopediaはページのURIと概要を返します。"
+            "取得したURIを使って chronicle_context_up/down や memopedia_get_page で"
+            "さらに詳しく参照できます。"
         ),
         parameters={
             "type": "object",
@@ -112,4 +131,6 @@ def schema() -> ToolSchema:
             "required": ["query"],
         },
         result_type="string",
+        spell=True,
+        spell_display_name="記憶想起",
     )

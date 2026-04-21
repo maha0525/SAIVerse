@@ -11,6 +11,7 @@ from saiverse.model_configs import (
     get_model_pricing,
     get_model_provider,
 )
+from tools import SPELL_TOOL_SCHEMAS, TOOL_REGISTRY
 
 LOGGER = logging.getLogger(__name__)
 
@@ -117,7 +118,6 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
         # 4. "## 利用可能な能力" section (available playbooks)
         if reqs.available_playbooks:
             try:
-                from tools import TOOL_REGISTRY
                 list_playbooks_func = TOOL_REGISTRY.get("list_available_playbooks")
                 if list_playbooks_func:
                     # Get available playbooks JSON (tool returns string; accept old tuple form)
@@ -142,7 +142,6 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
         try:
             spell_enabled = runtime._is_spell_enabled_for_persona(persona)
             if spell_enabled:
-                from tools import SPELL_TOOL_SCHEMAS
                 if SPELL_TOOL_SCHEMAS:
                     spell_lines = [
                         "## スペル",

@@ -151,7 +151,7 @@ export default function PeopleModal({ isOpen, onClose }: PeopleModalProps) {
                                 {personas.map(p => (
                                     <div key={p.id} className={styles.card} onClick={() => handleSummon(p.id, p.name)}>
                                         <div className={styles.avatarWrapper}>
-                                            <img src={p.avatar} alt={p.name} className={styles.avatar} />
+                                            <img src={p.avatar || "/api/static/icons/host.png"} alt={p.name} className={styles.avatar} />
                                             {summoningId === p.id && (
                                                 <div className={styles.summoningOverlay}>
                                                     <RefreshCw className={styles.spinner} size={20} />

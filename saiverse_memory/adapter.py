@@ -237,17 +237,15 @@ class SAIMemoryAdapter:
             LOGGER.warning("Failed to save working_memory for %s: %s", self.persona_id, exc)
 
     # ------------------------------------------------------------------
-    # Recalled IDs (working memory subset)
+    # Recalled IDs (working memory subset) — DEPRECATED
+    # recall_entry / recall_navigate ツールが廃止されたため、これらのメソッドは
+    # 現在呼び出し元がなく非推奨。working_memory テーブルへの書き込みも停止済み。
     # ------------------------------------------------------------------
     RECALLED_IDS_KEY = "recalled_ids"
     RECALLED_IDS_MAX = 10
 
     def get_recalled_ids(self) -> List[Dict[str, Any]]:
-        """Get the list of recalled memory IDs from working memory.
-
-        Returns:
-            List of dicts like {"type": "chronicle", "id": "...", ...}
-        """
+        """[DEPRECATED] Get recalled IDs from working memory."""
         wm = self.load_working_memory()
         return wm.get(self.RECALLED_IDS_KEY, [])
 
@@ -258,19 +256,13 @@ class SAIMemoryAdapter:
         title: str,
         uri: str,
     ) -> None:
-        """Add a recalled ID to working memory (FIFO, max 10).
-
-        If the same source_id already exists, it is removed first
-        so the new entry goes to the end (most recent).
-        """
+        """[DEPRECATED] Add a recalled ID to working memory."""
         if not self._ready:
             return
         wm = self.load_working_memory()
         ids: list = wm.get(self.RECALLED_IDS_KEY, [])
 
-        # Remove duplicate (refresh position)
         ids = [item for item in ids if item.get("id") != source_id]
-
         ids.append({
             "type": source_type,
             "id": source_id,
@@ -278,20 +270,14 @@ class SAIMemoryAdapter:
             "uri": uri,
             "recalled_at": time.time(),
         })
-
-        # FIFO: drop oldest if over capacity
         if len(ids) > self.RECALLED_IDS_MAX:
             ids = ids[-self.RECALLED_IDS_MAX:]
 
         wm[self.RECALLED_IDS_KEY] = ids
         self.save_working_memory(wm)
-        LOGGER.debug(
-            "Added recalled_id %s/%s for %s (total: %d)",
-            source_type, source_id, self.persona_id, len(ids),
-        )
 
     def remove_recalled_id(self, source_id: str) -> bool:
-        """Remove a specific recalled ID. Returns True if found and removed."""
+        """[DEPRECATED] Remove a specific recalled ID."""
         if not self._ready:
             return False
         wm = self.load_working_memory()
@@ -304,7 +290,7 @@ class SAIMemoryAdapter:
         return True
 
     def clear_recalled_ids(self) -> int:
-        """Clear all recalled IDs. Returns the number cleared."""
+        """[DEPRECATED] Clear all recalled IDs."""
         if not self._ready:
             return 0
         wm = self.load_working_memory()

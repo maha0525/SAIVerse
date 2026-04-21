@@ -400,6 +400,21 @@ class RuntimeService(
                 "[runtime] received metadata with keys=%s", list(metadata.keys())
             )
 
+        # ユーザーメッセージを building_histories へ1回だけ記録（全ペルソナ heard_by 付き）
+        # 各ペルソナの auto_ingest がこれを時系列順に取り込む
+        if responding_personas:
+            all_pids = [p.persona_id for p in responding_personas]
+            canonical_bid = self._canonical_building_id(building_id)
+            bh_user_entry: Dict[str, Any] = {"role": "user", "content": message}
+            if metadata:
+                bh_user_entry["metadata"] = dict(metadata)
+            try:
+                responding_personas[0].history_manager.add_to_building_only(
+                    canonical_bid, bh_user_entry, heard_by=all_pids
+                )
+            except Exception:
+                logging.exception("[runtime] Failed to pre-add user message to building_histories")
+
         # SEA runtime handles history recording internally
         replies: List[str] = []
         for persona in responding_personas:
@@ -473,6 +488,23 @@ class RuntimeService(
 
         def backend_worker():
             try:
+                # ユーザーメッセージを building_histories へ1回だけ記録（全ペルソナ heard_by 付き）
+                if responding_personas:
+                    all_pids = [p.persona_id for p in responding_personas]
+                    canonical_bid = self._canonical_building_id(building_id)
+                    bh_user_entry: Dict[str, Any] = {"role": "user", "content": message}
+                    if metadata:
+                        bh_user_entry["metadata"] = dict(metadata)
+                    try:
+                        bm = responding_personas[0].history_manager.add_to_building_only(
+                            canonical_bid, bh_user_entry, heard_by=all_pids
+                        )
+                        user_msg_id = bm.get("message_id") if bm else None
+                        if user_msg_id:
+                            _enrich_event({"type": "user_message_id", "message_id": str(user_msg_id)})
+                    except Exception:
+                        logging.exception("[runtime] Failed to pre-add user message to building_histories")
+
                 for persona in responding_personas:
                     if stop_event.is_set():
                         logging.info("[runtime] Stop event detected; breaking persona loop for building %s", building_id)

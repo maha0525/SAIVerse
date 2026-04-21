@@ -659,6 +659,14 @@ export default function Home() {
                 console.log(`[syncAfterResponse] local=${prev.length} server=${serverMessages.length} matched=${matched} final=${result.length}`);
                 return result;
             });
+
+            // Force latestMessageIdRef to the newest server-known message ID.
+            // This prevents polling from using a stale ref and re-adding already-seen messages.
+            const newestServerId = serverMessages[serverMessages.length - 1]?.id;
+            if (newestServerId) {
+                latestMessageIdRef.current = newestServerId;
+                console.log(`[syncAfterResponse] latestMessageIdRef forced to ${newestServerId}`);
+            }
         } catch (err) {
             console.error("syncAfterResponse failed", err);
         }
@@ -1436,6 +1444,7 @@ export default function Home() {
                                 }
                                 return [...prev, {
                                     role: 'assistant',
+                                    id: event.message_id || undefined,
                                     content: event.content,
                                     sender: event.persona_name || 'Assistant',
                                     avatar: avatarUrl,
@@ -1468,6 +1477,21 @@ export default function Home() {
                             } else {
                                 // started, running, etc. — show content as loading status
                                 setLoadingStatus(event.content || '記憶を整理しています...');
+                            }
+                        } else if (event.type === 'user_message_id') {
+                            // Update the optimistic user message (temp id) with server-assigned id
+                            if (event.message_id) {
+                                setMessages(prev => {
+                                    // Find the last user message with a temp id and update it
+                                    for (let i = prev.length - 1; i >= 0; i--) {
+                                        if (prev[i].role === 'user' && prev[i].id?.startsWith('temp-')) {
+                                            const updated = [...prev];
+                                            updated[i] = { ...prev[i], id: event.message_id };
+                                            return updated;
+                                        }
+                                    }
+                                    return prev;
+                                });
                             }
                         } else if (event.type === 'permission_request') {
                             setPermissionRequest({

@@ -102,18 +102,13 @@ class SEARuntime:
         except Exception:
             LOGGER.exception("[dynamic_state] Event injection failed in run_meta_user")
 
-        # Record user input to history before processing
-        if user_input:
-            try:
-                user_msg: Dict[str, Any] = {"role": "user", "content": user_input}
-                # Build metadata with "with" field for user messages
-                msg_metadata: Dict[str, Any] = {"with": ["user"]}
-                if metadata:
-                    msg_metadata.update(metadata)
-                user_msg["metadata"] = msg_metadata
-                persona.history_manager.add_message(user_msg, building_id, heard_by=None)
-            except Exception:
-                LOGGER.exception("Failed to record user input to history")
+        # 同Building内の他ペルソナ発言とユーザーメッセージを building_histories から時系列順に取り込む
+        # （ユーザーメッセージは manager が事前に building_histories へ追加済み）
+        try:
+            from builtin_data.tools.get_building_messages import auto_ingest_building_messages
+            auto_ingest_building_messages(persona, self.manager)
+        except Exception:
+            LOGGER.exception("[auto_ingest] Failed in run_meta_user")
 
         # Use user-selected meta playbook if specified, otherwise choose automatically
         if meta_playbook:
@@ -177,6 +172,13 @@ class SEARuntime:
             DynamicStateManager.maybe_inject_event_messages(persona, self.manager)
         except Exception:
             LOGGER.exception("[dynamic_state] Event injection failed in run_meta_auto")
+
+        # 同Building内の他ペルソナ発言を自動取り込み
+        try:
+            from builtin_data.tools.get_building_messages import auto_ingest_building_messages
+            auto_ingest_building_messages(persona, self.manager)
+        except Exception:
+            LOGGER.exception("[auto_ingest] Failed in run_meta_auto")
 
         # Update last pulse time for get_situation_snapshot
         persona._last_conscious_prompt_time_utc = datetime.now(dt_timezone.utc)
@@ -761,11 +763,13 @@ class SEARuntime:
                 msg_metadata["activity_trace"] = list(activity_trace)
 
             eff_bid = self._effective_building_id(persona, building_id)
-            self._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
+            building_msg = self._emit_say(persona, eff_bid, text, pulse_id=pulse_id, metadata=msg_metadata if msg_metadata else None)
             if outputs is not None:
                 outputs.append(text)
             if event_callback:
                 say_event: Dict[str, Any] = {"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None), "metadata": msg_metadata if msg_metadata else None}
+                if building_msg and building_msg.get("message_id"):
+                    say_event["message_id"] = str(building_msg["message_id"])
                 if reasoning_text:
                     say_event["reasoning"] = reasoning_text
                 if activity_trace:
