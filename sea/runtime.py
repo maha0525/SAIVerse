@@ -110,6 +110,19 @@ class SEARuntime:
         except Exception:
             LOGGER.exception("[auto_ingest] Failed in run_meta_user")
 
+        # スケジュール実行時はプロンプトをペルソナ自身のhistoryに直接追加（他のペルソナには見せない）
+        if pulse_type == "schedule" and user_input:
+            try:
+                schedule_msg: Dict[str, Any] = {
+                    "role": "user",
+                    "content": user_input,
+                    "metadata": {"with": ["system"], **(metadata or {})},
+                }
+                persona.history_manager.add_to_persona_only(schedule_msg)
+                LOGGER.debug("[schedule] Recorded schedule prompt to persona history for %s", getattr(persona, "persona_id", "?"))
+            except Exception:
+                LOGGER.exception("[schedule] Failed to record schedule prompt to persona history")
+
         # Use user-selected meta playbook if specified, otherwise choose automatically
         if meta_playbook:
             playbook = self._load_playbook_for(meta_playbook, persona, building_id)
