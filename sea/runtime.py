@@ -1715,6 +1715,42 @@ class SEARuntime:
 
         batch_size = int(os.getenv("MEMORY_WEAVE_BATCH_SIZE", str(DEFAULT_BATCH_SIZE)))
         persona_id_str = getattr(persona, "persona_id", None)
+
+        # Ensure persona pages for conversation partners
+        current_building_id = getattr(persona, "current_building_id", None)
+        if current_building_id:
+            try:
+                occupants = getattr(persona, "occupants", {})
+                building_occupants = occupants.get(current_building_id, [])
+                if building_occupants:
+                    id_to_name_map = getattr(persona, "id_to_name_map", {})
+                    history_manager = getattr(persona, "history_manager", None)
+
+                    for occupant_id in building_occupants:
+                        # Skip self and users
+                        if occupant_id == persona_id_str or occupant_id.startswith("user_"):
+                            continue
+
+                        # Get persona name from id_to_name_map
+                        occupant_name = id_to_name_map.get(occupant_id, occupant_id)
+
+                        # Ensure Memopedia page exists
+                        if history_manager:
+                            success = history_manager.ensure_persona_page(occupant_id, occupant_name)
+                            if success:
+                                LOGGER.debug(
+                                    "[metabolism] Ensured Memopedia page for persona=%s (name=%s)",
+                                    occupant_id,
+                                    occupant_name,
+                                )
+                            else:
+                                LOGGER.warning(
+                                    "[metabolism] Failed to ensure Memopedia page for persona=%s",
+                                    occupant_id,
+                                )
+            except Exception:
+                LOGGER.exception("[metabolism] Failed to ensure persona pages for conversation partners")
+
         generator = ArasujiGenerator(
             client, adapter.conn,
             batch_size=batch_size,

@@ -102,9 +102,9 @@ class OccupancyManager:
             from_building_name = self.building_map[from_id].name
             to_building_name = self.building_map[to_id].name
             action_type = "AI Action" if entity_type == 'ai' else "User Action"
-            left_message = f'<div class="note-box">🚶 {action_type}:<br><b>{entity_name}が{to_building_name}へ移動しました</b></div>'
+            left_message = f'<div class="note-box" data-entity-id="{entity_id}">🚶 {action_type}:<br><b>{entity_name}が{to_building_name}へ移動しました</b></div>'
             self.building_histories.setdefault(from_id, []).append({"role": "host", "content": left_message})
-            entered_message = f'<div class="note-box">🚶 {action_type}:<br><b>{entity_name}が{from_building_name}から入室しました</b></div>'
+            entered_message = f'<div class="note-box" data-entity-id="{entity_id}">🚶 {action_type}:<br><b>{entity_name}が{from_building_name}から入室しました</b></div>'
             self.building_histories.setdefault(to_id, []).append({"role": "host", "content": entered_message})
 
             logging.info(f"Moved {entity_type} '{entity_id}' from {from_id} to {to_id}.")

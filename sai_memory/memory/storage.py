@@ -574,6 +574,69 @@ def get_messages_around_timestamp(
     return combined[:count]
 
 
+def get_messages_with_persona_in_audience(
+    conn: sqlite3.Connection,
+    persona_id: str,
+    *,
+    thread_id: Optional[str] = None,
+    exclude_message_ids: Optional[set[str]] = None,
+    required_tags: Optional[List[str]] = None,
+    limit: int = 10,
+) -> List[Message]:
+    """Get messages where a specific persona is in the audience.
+
+    Filters messages where metadata.audience.personas contains persona_id.
+
+    Args:
+        conn: Database connection
+        persona_id: Persona ID to search for in audience
+        thread_id: Optional thread filter
+        exclude_message_ids: Message IDs to exclude (e.g., recent context)
+        required_tags: Only include messages with these tags
+        limit: Maximum number of messages to return
+
+    Returns:
+        List of messages, ordered by created_at DESC (most recent first)
+    """
+    params = [persona_id]
+
+    # Build WHERE clause
+    where_conditions = [
+        "EXISTS (SELECT 1 FROM json_each(metadata, '$.audience.personas') WHERE json_each.value = ?)"
+    ]
+
+    if thread_id:
+        where_conditions.append("thread_id = ?")
+        params.append(thread_id)
+
+    if required_tags:
+        for tag in required_tags:
+            where_conditions.append(
+                "EXISTS (SELECT 1 FROM json_each(metadata, '$.tags') WHERE json_each.value = ?)"
+            )
+            params.append(tag)
+
+    where_clause = " AND ".join(where_conditions)
+
+    query = f"""
+        SELECT id, thread_id, role, content, resource_id, created_at, metadata
+        FROM messages
+        WHERE {where_clause}
+        ORDER BY created_at DESC
+        LIMIT ?
+    """
+    params.append(limit)
+
+    cur = conn.execute(query, params)
+    all_messages = [_row_to_message(r) for r in cur.fetchall()]
+
+    # Filter out excluded message IDs
+    if exclude_message_ids:
+        all_messages = [m for m in all_messages if m.id not in exclude_message_ids]
+
+    return all_messages
+
+
 def count_threads(conn: sqlite3.Connection) -> int:
     cur = conn.execute("SELECT COUNT(*) FROM threads")
     return int(cur.fetchone()[0])

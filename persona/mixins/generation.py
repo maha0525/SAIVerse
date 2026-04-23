@@ -364,6 +364,26 @@ class PersonaGenerationMixin:
 
         combined_info = info_text or ""
         recall_visible: List[str] = []
+
+        # Persona recall: Check if we should recall past conversations with recent entrants
+        try:
+            recent_entrants = self.history_manager.get_recent_entrants(
+                self.current_building_id,
+                lookback_messages=10,
+            )
+            for entrant_id in recent_entrants:
+                if self.history_manager.should_recall_persona(entrant_id):
+                    recall_msg = self.history_manager.recall_conversation_with(entrant_id)
+                    if recall_msg:
+                        logging.info(
+                            "[recall] Recalling conversation with persona=%s for %s",
+                            entrant_id,
+                            self.persona_id,
+                        )
+                        recall_visible.append(recall_msg)
+        except Exception:
+            logging.exception("[recall] Failed to check persona recall")
+
         if self.sai_memory is not None:
             try:
                 recall_source = (
@@ -460,6 +480,30 @@ class PersonaGenerationMixin:
                 logging.debug("Injected user message for context")
 
         combined_info = info_text or ""
+
+        # Persona recall: Check if we should recall past conversations with recent entrants
+        try:
+            recent_entrants = self.history_manager.get_recent_entrants(
+                self.current_building_id,
+                lookback_messages=10,
+            )
+            for entrant_id in recent_entrants:
+                if self.history_manager.should_recall_persona(entrant_id):
+                    recall_msg = self.history_manager.recall_conversation_with(entrant_id)
+                    if recall_msg:
+                        logging.info(
+                            "[recall] Recalling conversation with persona=%s for %s",
+                            entrant_id,
+                            self.persona_id,
+                        )
+                        combined_info = (
+                            (combined_info + "\n" + recall_msg).strip()
+                            if combined_info
+                            else recall_msg
+                        )
+        except Exception:
+            logging.exception("[recall] Failed to check persona recall")
+
         if self.sai_memory is not None:
             try:
                 recall_source = (

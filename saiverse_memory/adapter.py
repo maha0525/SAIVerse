@@ -27,6 +27,7 @@ from sai_memory.memory.storage import (
     init_db,
     compose_message_content,
     replace_message_embeddings,
+    get_messages_with_persona_in_audience,
     # Stelis thread management
     StelisThread,
     create_stelis_thread,
@@ -1688,6 +1689,43 @@ class SAIMemoryAdapter:
                 return get_active_stelis_threads(self.conn, parent_thread_id)
         except Exception as exc:
             LOGGER.warning("Failed to list active Stelis threads: %s", exc)
+            return []
+
+    def get_messages_with_persona_in_audience(
+        self,
+        persona_id: str,
+        *,
+        exclude_message_ids: Optional[set[str]] = None,
+        required_tags: Optional[List[str]] = None,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Get messages where a specific persona is in the audience.
+
+        Args:
+            persona_id: Persona ID to search for in audience
+            exclude_message_ids: Message IDs to exclude (e.g., recent context)
+            required_tags: Only include messages with these tags
+            limit: Maximum number of messages to return
+
+        Returns:
+            List of message payloads, ordered by created_at DESC
+        """
+        if not self._ready:
+            return []
+        try:
+            with self._db_lock:
+                messages = get_messages_with_persona_in_audience(
+                    self.conn,
+                    persona_id,
+                    thread_id=None,  # Search across all threads
+                    exclude_message_ids=exclude_message_ids,
+                    required_tags=required_tags,
+                    limit=limit,
+                )
+                thread_id = self._thread_id(None)
+                return [self._payload_from_message_locked(msg, viewing_thread_id=thread_id) for msg in messages]
+        except Exception as exc:
+            LOGGER.warning("Failed to get messages with persona %s in audience: %s", persona_id, exc)
             return []
 
     def _append_message(
