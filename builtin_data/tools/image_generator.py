@@ -30,7 +30,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Type definitions
-ModelType = Literal["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"]
+ModelType = Literal["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "gpt_image_2", "grok_imagine"]
 AspectRatioType = Literal["1:1", "16:9", "9:16", "4:3", "3:4", "2:3", "3:2", "4:5", "5:4", "1:4", "4:1", "1:8", "8:1", "21:9"]
 QualityType = Literal["low", "medium", "high", "auto"]
 
@@ -204,7 +204,7 @@ def _generate_with_nano_banana_pro(
     raise RuntimeError("No image data in response")
 
 
-def _generate_with_gpt_image(
+def _generate_with_gpt_image_1_5(
     prompt: str,
     aspect_ratio: str = "1:1",
     quality: str = "high",
@@ -265,6 +265,66 @@ def _generate_with_gpt_image(
     # GPT Image returns PNG by default
     return image_bytes, "image/png"
 
+def _generate_with_gpt_image_2(
+    prompt: str,
+    aspect_ratio: str = "1:1",
+    quality: str = "high",
+    input_image_paths: Optional[List[Path]] = None,
+) -> Tuple[bytes, str]:
+    """Generate image using OpenAI GPT Image 2."""
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
+
+    client = OpenAI(api_key=api_key)
+    size = _aspect_ratio_to_openai_size(aspect_ratio)
+    effective_quality = quality if quality != "auto" else "high"
+
+    if input_image_paths:
+        # Use images.edit for input image processing
+        logger.info(
+            f"[gpt_image] Editing with {len(input_image_paths)} input images, "
+            f"size={size}, quality={effective_quality}"
+        )
+
+        # Prepare input images as file-like objects
+        image_files = []
+        for img_path in input_image_paths:
+            image_files.append(open(img_path, "rb"))
+            logger.info(f"[gpt_image] Added input image: {img_path.name}")
+
+        try:
+            result = client.images.edit(
+                model="gpt-image-2",
+                image=image_files if len(image_files) > 1 else image_files[0],
+                prompt=prompt,
+                size=size,
+                quality=effective_quality,
+                n=1,
+            )
+        finally:
+            for f in image_files:
+                f.close()
+    else:
+        # Standard generation without input images
+        logger.info(f"[gpt_image] Generating with size={size}, quality={effective_quality}")
+
+        result = client.images.generate(
+            model="gpt-image-2",
+            prompt=prompt,
+            size=size,
+            quality=effective_quality,
+            n=1,
+        )
+
+    if not result.data or not result.data[0].b64_json:
+        raise RuntimeError("No image data returned from OpenAI")
+
+    image_bytes = base64.b64decode(result.data[0].b64_json)
+    # GPT Image returns PNG by default
+    return image_bytes, "image/png"
 
 def _generate_with_grok_imagine(
     prompt: str,
@@ -506,8 +566,12 @@ def generate_image(
                 image_data, mime = _generate_with_nano_banana_pro(
                     prompt, aspect_ratio, quality, input_image_paths
                 )
+            elif attempt_model == "gpt_image_2":
+                image_data, mime = _generate_with_gpt_image_2(
+                    prompt, aspect_ratio, quality, input_image_paths
+                )
             elif attempt_model == "gpt_image_1_5":
-                image_data, mime = _generate_with_gpt_image(
+                image_data, mime = _generate_with_gpt_image_1_5(
                     prompt, aspect_ratio, quality, input_image_paths
                 )
             elif attempt_model == "grok_imagine":
@@ -618,12 +682,12 @@ def schema() -> ToolSchema:
                 },
                 "model": {
                     "type": "string",
-                    "enum": ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"],
+                    "enum": ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "gpt_image_2", "grok_imagine"],
                     "description": (
                         "Image generation model: "
                         "nano_banana_2 (fast, high quality, Gemini 3.1 Flash), "
-                        "nano_banana_pro (highest quality, Gemini 3 Pro), "
-                        "gpt_image_1_5 (state of the art), grok_imagine (xAI Grok Imagine Pro)"
+                        "nano_banana_pro (a bit higher quality, Gemini 3 Pro), "
+                        "gpt_image_1_5 (legacy model), gpt_image_2 (state of the art), grok_imagine (this can also create slightly NSFW images)"
                     ),
                     "default": "nano_banana_2"
                 },

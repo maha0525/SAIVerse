@@ -32,10 +32,10 @@
                         "type": "string",
                         "enum": [
                             "nano_banana_2",
-                            "gpt_image_1_5",
+                            "gpt_image_2",
                             "grok_imagine"
                         ],
-                        "description": "使用するモデル。nano_banana_2(高速・高品質, Gemini 3.1 Flash), gpt_image_1_5(最高品質, OpenAI), grok_imagine(xAI Grok Imagine Pro)。デフォルトはnano_banana_2"
+                        "description": "使用するモデル。nano_banana_2(高速・高品質, Gemini 3.1 Flash), gpt_image_2(常軌を逸した最高品質, OpenAI), grok_imagine(多少NSFWな画像の生成が可能, xAI Grok Imagine Pro)。デフォルトはnano_banana_2"
                     },
                     "quality": {
                         "type": "string",
@@ -84,7 +84,10 @@
             },
             "output_key": "gen_params",
             "memorize": {
-                "tags": ["internal", "generate_image"]
+                "tags": [
+                    "internal",
+                    "generate_image"
+                ]
             },
             "next": "generate"
         },

@@ -18,7 +18,7 @@ def process_structured_output(node_def: Any, text: Any, state: Dict[str, Any]) -
         return False
 
     node_id = getattr(node_def, "id", "?")
-    LOGGER.debug("[sea] _process_structured_output: node=%s, text type=%s", node_id, type(text).__name__)
+    LOGGER.debug("[sea] _process_structured_output: node=%s, text type=%s, len=%s, repr=%r", node_id, type(text).__name__, len(text) if isinstance(text, str) else "(not str)", text if isinstance(text, str) and len(text) < 200 else "(truncated)" if isinstance(text, str) else text)
 
     parsed: Optional[Dict[str, Any]]
     if isinstance(text, dict):
@@ -158,8 +158,10 @@ def resolve_state_value(state: Dict[str, Any], key: str) -> Any:
 
 
 def extract_structured_json(text: str) -> Optional[Dict[str, Any]]:
+    LOGGER.debug("[sea] extract_structured_json: CALLED with text type=%s, len=%d", type(text).__name__, len(text))
     candidate = text.strip()
     if not candidate:
+        LOGGER.debug("[sea] extract_structured_json: candidate is empty after strip")
         return None
     if candidate.startswith("```"):
         for seg in candidate.split("```"):
@@ -171,11 +173,18 @@ def extract_structured_json(text: str) -> Optional[Dict[str, Any]]:
         match = re.search(r"\{.*\}", candidate, re.DOTALL)
         if match:
             candidate = match.group(0)
+    LOGGER.debug("[sea] extract_structured_json: attempting to parse JSON, candidate (first 200 chars): %s", candidate[:200])
     try:
         parsed = json.loads(candidate)
-    except Exception:
+        LOGGER.debug("[sea] extract_structured_json: json.loads succeeded, type(parsed)=%s", type(parsed).__name__)
+    except Exception as e:
+        LOGGER.warning("[sea] extract_structured_json: JSON parse failed: %s", e, exc_info=True)
+        LOGGER.debug("[sea] extract_structured_json: candidate text (first 500 chars): %s", candidate[:500])
         return None
-    return parsed if isinstance(parsed, dict) else None
+    if not isinstance(parsed, dict):
+        LOGGER.warning("[sea] extract_structured_json: parsed is not a dict, type=%s, value=%s", type(parsed).__name__, str(parsed)[:200])
+        return None
+    return parsed
 
 
 def update_router_selection(state: Dict[str, Any], text: str, parsed: Optional[Dict[str, Any]] = None) -> None:

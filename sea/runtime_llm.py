@@ -1401,6 +1401,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         state["_reasoning_details"] = reasoning_details
                 else:
                     # Non-streaming mode
+                    LOGGER.debug("[sea][llm] Calling llm_client.generate() with response_schema=%s", response_schema is not None)
                     text = llm_client.generate(
                         messages,
                         tools=[],
@@ -1408,6 +1409,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         response_schema=response_schema,
                         **runtime._get_cache_kwargs(),
                     )
+                    LOGGER.debug("[sea][llm] llm_client.generate() returned: type=%s, len=%s, repr=%s", type(text).__name__, len(text) if isinstance(text, str) else "(not str)", repr(text)[:200] if isinstance(text, str) else text)
 
                     # Record usage
                     usage = llm_client.consume_usage()
@@ -1449,19 +1451,25 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     reasoning_details = llm_client.consume_reasoning_details()
 
                     # ── Spell loop (parallel execution per round) ──
-                    _spell_text_sync = text if (not response_schema and isinstance(text, str)) else ""
-                    text, _spell_details_blocks_sync, _spell_loop_count_sync = await _run_spell_loop(
-                        text=_spell_text_sync,
-                        spell_enabled=_spell_enabled,
-                        llm_client=llm_client,
-                        runtime=runtime,
-                        persona=persona,
-                        building_id=building_id,
-                        state=state,
-                        messages=messages,
-                        playbook=playbook,
-                        event_callback=event_callback,
-                    )
+                    if isinstance(text, str):
+                        # Normal text mode - run spell processing
+                        text, _spell_details_blocks_sync, _spell_loop_count_sync = await _run_spell_loop(
+                            text=text,
+                            spell_enabled=_spell_enabled,
+                            llm_client=llm_client,
+                            runtime=runtime,
+                            persona=persona,
+                            building_id=building_id,
+                            state=state,
+                            messages=messages,
+                            playbook=playbook,
+                            event_callback=event_callback,
+                        )
+                    else:
+                        # text is dict (from structured output) - skip spell processing
+                        LOGGER.debug("[sea][llm] text is dict (structured output), skipping spell processing")
+                        _spell_details_blocks_sync = []
+                        _spell_loop_count_sync = 0
 
                     if _spell_loop_count_sync > 0:
                         # Bubble 1: text_before of first spell (no metadata)
