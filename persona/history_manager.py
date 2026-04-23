@@ -81,6 +81,17 @@ class HistoryManager:
                 new_msg.pop("metadata", None)
         return new_msg
 
+    def _extract_occupancy_event(self, msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        metadata = msg.get("metadata")
+        if not isinstance(metadata, dict):
+            return None
+        event = metadata.get("event")
+        if not isinstance(event, dict):
+            return None
+        if event.get("type") != "occupancy":
+            return None
+        return event
+
     def _normalise_building_histories(self) -> None:
         for b_id, path in self.building_memory_paths.items():
             hist = self.building_histories.setdefault(b_id, [])
@@ -467,60 +478,75 @@ class HistoryManager:
             selected.append(msg)
         return list(reversed(selected))
 
-    def get_recent_entrants(
+    def get_recent_entrant_events(
         self,
         building_id: str,
         *,
         lookback_messages: int = 10,
-    ) -> List[str]:
-        """Get persona IDs who recently entered the building.
-
-        Parses building history for entrance events and extracts persona IDs
-        from data-entity-id attributes.
+    ) -> List[Dict[str, str]]:
+        """Get recent structured entrant events for AI personas.
 
         Args:
             building_id: Building to check
             lookback_messages: Number of recent messages to check (default: 10)
 
         Returns:
-            List of persona IDs who recently entered (unique, in reverse chronological order)
+            List of entrant event dicts in reverse chronological order.
         """
         history = self.building_histories.get(building_id, [])
         if not history:
             return []
 
-        entrants: List[str] = []
+        entrants: List[Dict[str, str]] = []
         seen: set = set()
 
-        # Check recent messages for entrance events
         for msg in reversed(history[-lookback_messages:]):
-            content = msg.get("content", "")
-            if not content:
+            event = self._extract_occupancy_event(msg)
+            if not event:
                 continue
-
-            # Parse data-entity-id from HTML
-            import re
-            match = re.search(r'data-entity-id="([^"]+)"', content)
-            if match:
-                entity_id = match.group(1)
-                # Filter for AI personas (exclude users)
-                if entity_id and not entity_id.startswith("user_"):
-                    if entity_id not in seen:
-                        seen.add(entity_id)
-                        entrants.append(entity_id)
+            if event.get("action") != "enter":
+                continue
+            if event.get("entity_type") != "ai":
+                continue
+            entity_id = str(event.get("entity_id") or "")
+            event_key = str(event.get("event_key") or "")
+            if not entity_id or not event_key:
+                continue
+            if event_key in seen:
+                continue
+            seen.add(event_key)
+            entrants.append({"entity_id": entity_id, "event_key": event_key})
 
         return entrants
+
+    def mark_entrant_event_recalled(self, building_id: str, event_key: str) -> bool:
+        """Mark a structured entrant event as already recalled for this persona."""
+        history = self.building_histories.get(building_id, [])
+        for msg in reversed(history):
+            event = self._extract_occupancy_event(msg)
+            if not event or event.get("event_key") != event_key:
+                continue
+            recalled_by = event.setdefault("recalled_by", [])
+            if not isinstance(recalled_by, list):
+                recalled_by = []
+                event["recalled_by"] = recalled_by
+            if self.persona_id not in recalled_by:
+                recalled_by.append(self.persona_id)
+            return True
+        return False
 
     def should_recall_persona(
         self,
         target_persona_id: str,
         *,
+        building_id: Optional[str] = None,
+        event_key: Optional[str] = None,
         check_messages: int = 20,
     ) -> bool:
         """Check if we should recall past conversation with target persona.
 
         Returns True if the target persona has no messages in recent context
-        AND we haven't already recalled conversation with them.
+        AND the latest entrant event has not already been recalled.
 
         Args:
             target_persona_id: Persona to check for
@@ -530,17 +556,19 @@ class HistoryManager:
             True if recall is needed (no messages from target in context,
                                     and no previous recall message found)
         """
-        # Get recent messages from persona history
+        if building_id and event_key:
+            history = self.building_histories.get(building_id, [])
+            for msg in reversed(history):
+                event = self._extract_occupancy_event(msg)
+                if not event or event.get("event_key") != event_key:
+                    continue
+                recalled_by = event.get("recalled_by", [])
+                if isinstance(recalled_by, list) and self.persona_id in recalled_by:
+                    return False
+                break
+
         recent = self.messages[-check_messages:] if len(self.messages) > check_messages else self.messages
 
-        # Check if we already have a recall message for this persona
-        recall_header = f"[想起: {target_persona_id}との過去の会話]"
-        for msg in recent:
-            content = msg.get("content", "")
-            if recall_header in content:
-                return False  # Already recalled, no need to recall again
-
-        # Check if any message has the target persona in audience
         for msg in recent:
             metadata = msg.get("metadata")
             if isinstance(metadata, dict):
@@ -548,19 +576,19 @@ class HistoryManager:
                 if isinstance(audience, dict):
                     personas = audience.get("personas", [])
                     if isinstance(personas, list) and target_persona_id in personas:
-                        return False  # Found target persona in context, no recall needed
+                        return False
 
-        # Also check if any message is FROM the target persona
         for msg in recent:
             if msg.get("persona_id") == target_persona_id:
-                return False  # Found message from target, no recall needed
+                return False
 
-        return True  # Target persona not found in context, recall needed
+        return True
 
     def recall_conversation_with(
         self,
         target_persona_id: str,
         *,
+        current_thread_only: bool = True,
         max_results: int = 6,
     ) -> Optional[str]:
         """Recall past conversation with a specific persona from SAIMemory.
@@ -587,6 +615,7 @@ class HistoryManager:
                 target_persona_id,
                 exclude_message_ids=recent_msg_ids,
                 required_tags=["conversation"],
+                current_thread_only=current_thread_only,
                 limit=max_results,
             )
 
@@ -675,7 +704,6 @@ class HistoryManager:
                 get_page_by_persona_id,
                 get_page_by_title,
                 create_page,
-                update_page,
                 CATEGORY_PEOPLE,
             )
 
@@ -689,27 +717,6 @@ class HistoryManager:
                 )
                 return True
 
-            # Check if page with same title exists in people category
-            title_page = get_page_by_title(
-                self.memory_adapter.conn,
-                persona_name,
-                category=CATEGORY_PEOPLE,
-            )
-
-            if title_page:
-                # Update existing page with persona_id metadata
-                update_page(
-                    self.memory_adapter.conn,
-                    title_page.id,
-                    metadata={"persona_id": target_persona_id},
-                )
-                LOGGER.info(
-                    "Updated Memopedia page %s with persona_id=%s",
-                    title_page.id,
-                    target_persona_id,
-                )
-                return True
-
             # Create new page for this persona
             from sai_memory.memopedia.storage import get_page
             root_people = get_page(self.memory_adapter.conn, "root_people")
@@ -717,10 +724,21 @@ class HistoryManager:
                 LOGGER.error("root_people page not found in Memopedia")
                 return False
 
+            existing_title_page = get_page_by_title(
+                self.memory_adapter.conn,
+                persona_name,
+                category=CATEGORY_PEOPLE,
+            )
+            page_title = (
+                f"{persona_name} ({target_persona_id})"
+                if existing_title_page
+                else persona_name
+            )
+
             new_page = create_page(
                 self.memory_adapter.conn,
                 parent_id=root_people.id,
-                title=persona_name,
+                title=page_title,
                 summary=f"{persona_name}についての記録",
                 content="",
                 category=CATEGORY_PEOPLE,

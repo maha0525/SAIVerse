@@ -102,10 +102,38 @@ class OccupancyManager:
             from_building_name = self.building_map[from_id].name
             to_building_name = self.building_map[to_id].name
             action_type = "AI Action" if entity_type == 'ai' else "User Action"
+            event_key = f"occupancy:{entity_id}:{from_id}:{to_id}:{int(now.timestamp())}"
+            left_metadata = {
+                "event": {
+                    "type": "occupancy",
+                    "action": "leave",
+                    "entity_id": entity_id,
+                    "entity_type": entity_type,
+                    "from_building_id": from_id,
+                    "to_building_id": to_id,
+                    "event_key": event_key,
+                }
+            }
+            enter_metadata = {
+                "event": {
+                    "type": "occupancy",
+                    "action": "enter",
+                    "entity_id": entity_id,
+                    "entity_type": entity_type,
+                    "from_building_id": from_id,
+                    "to_building_id": to_id,
+                    "event_key": event_key,
+                    "recalled_by": [],
+                }
+            }
             left_message = f'<div class="note-box" data-entity-id="{entity_id}">🚶 {action_type}:<br><b>{entity_name}が{to_building_name}へ移動しました</b></div>'
-            self.building_histories.setdefault(from_id, []).append({"role": "host", "content": left_message})
+            self.building_histories.setdefault(from_id, []).append(
+                {"role": "host", "content": left_message, "metadata": left_metadata}
+            )
             entered_message = f'<div class="note-box" data-entity-id="{entity_id}">🚶 {action_type}:<br><b>{entity_name}が{from_building_name}から入室しました</b></div>'
-            self.building_histories.setdefault(to_id, []).append({"role": "host", "content": entered_message})
+            self.building_histories.setdefault(to_id, []).append(
+                {"role": "host", "content": entered_message, "metadata": enter_metadata}
+            )
 
             logging.info(f"Moved {entity_type} '{entity_id}' from {from_id} to {to_id}.")
 

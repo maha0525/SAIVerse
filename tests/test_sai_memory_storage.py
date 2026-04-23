@@ -3,6 +3,7 @@ import unittest
 from sai_memory.memory.recall import semantic_recall, semantic_recall_groups
 from sai_memory.memory.storage import (
     add_message,
+    get_messages_with_persona_in_audience,
     get_or_create_thread,
     init_db,
     replace_message_embeddings,
@@ -21,6 +22,7 @@ class TestSAIMemoryStorage(unittest.TestCase):
     def setUp(self):
         self.conn = init_db(":memory:")
         get_or_create_thread(self.conn, "thread-1", resource_id="resource-1")
+        get_or_create_thread(self.conn, "thread-2", resource_id="resource-2")
 
     def test_replace_message_embeddings_multiple_chunks(self):
         mid = add_message(
@@ -116,21 +118,21 @@ class TestSAIMemoryStorage(unittest.TestCase):
             self.conn,
             thread_id="thread-1",
             role="user",
-            content="ユーザーの発言",
+            content="first context",
             resource_id="resource-1",
         )
         mid_target = add_message(
             self.conn,
             thread_id="thread-1",
             role="assistant",
-            content="ターゲット",
+            content="target",
             resource_id="resource-1",
         )
         mid_after = add_message(
             self.conn,
             thread_id="thread-1",
             role="user",
-            content="次の発言",
+            content="after context",
             resource_id="resource-1",
         )
         replace_message_embeddings(self.conn, mid_user, ([0.5, 0.5],))
@@ -154,6 +156,42 @@ class TestSAIMemoryStorage(unittest.TestCase):
         self.assertIn(mid_user, bundle_ids)
         self.assertIn(mid_target, bundle_ids)
         self.assertIn(mid_after, bundle_ids)
+
+    def test_get_messages_with_persona_in_audience_respects_thread_filter(self):
+        add_message(
+            self.conn,
+            thread_id="thread-1",
+            role="assistant",
+            content="current thread",
+            resource_id="resource-1",
+            metadata={
+                "audience": {"personas": ["friend"], "users": []},
+                "tags": ["conversation"],
+            },
+        )
+        add_message(
+            self.conn,
+            thread_id="thread-2",
+            role="assistant",
+            content="other thread",
+            resource_id="resource-2",
+            metadata={
+                "audience": {"personas": ["friend"], "users": []},
+                "tags": ["conversation"],
+            },
+        )
+
+        messages = get_messages_with_persona_in_audience(
+            self.conn,
+            "friend",
+            thread_id="thread-1",
+            required_tags=["conversation"],
+            limit=10,
+        )
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0].thread_id, "thread-1")
+        self.assertEqual(messages[0].content, "current thread")
 
 
 if __name__ == "__main__":

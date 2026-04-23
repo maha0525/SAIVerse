@@ -605,7 +605,7 @@ def get_messages_with_persona_in_audience(
         "EXISTS (SELECT 1 FROM json_each(metadata, '$.audience.personas') WHERE json_each.value = ?)"
     ]
 
-    if thread_id:
+    if thread_id is not None:
         where_conditions.append("thread_id = ?")
         params.append(thread_id)
 
@@ -1520,4 +1520,3 @@ def count_planned_groups(conn: sqlite3.Connection) -> int:
         "WHERE resolved = 0 AND group_label IS NOT NULL"
     )
     return cur.fetchone()[0]
-

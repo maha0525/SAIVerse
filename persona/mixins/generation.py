@@ -367,12 +367,18 @@ class PersonaGenerationMixin:
 
         # Persona recall: Check if we should recall past conversations with recent entrants
         try:
-            recent_entrants = self.history_manager.get_recent_entrants(
+            recent_entrants = self.history_manager.get_recent_entrant_events(
                 self.current_building_id,
                 lookback_messages=10,
             )
-            for entrant_id in recent_entrants:
-                if self.history_manager.should_recall_persona(entrant_id):
+            for entrant in recent_entrants:
+                entrant_id = entrant["entity_id"]
+                event_key = entrant["event_key"]
+                if self.history_manager.should_recall_persona(
+                    entrant_id,
+                    building_id=self.current_building_id,
+                    event_key=event_key,
+                ):
                     recall_msg = self.history_manager.recall_conversation_with(entrant_id)
                     if recall_msg:
                         logging.info(
@@ -381,6 +387,10 @@ class PersonaGenerationMixin:
                             self.persona_id,
                         )
                         recall_visible.append(recall_msg)
+                        self.history_manager.mark_entrant_event_recalled(
+                            self.current_building_id,
+                            event_key,
+                        )
         except Exception:
             logging.exception("[recall] Failed to check persona recall")
 
@@ -483,12 +493,18 @@ class PersonaGenerationMixin:
 
         # Persona recall: Check if we should recall past conversations with recent entrants
         try:
-            recent_entrants = self.history_manager.get_recent_entrants(
+            recent_entrants = self.history_manager.get_recent_entrant_events(
                 self.current_building_id,
                 lookback_messages=10,
             )
-            for entrant_id in recent_entrants:
-                if self.history_manager.should_recall_persona(entrant_id):
+            for entrant in recent_entrants:
+                entrant_id = entrant["entity_id"]
+                event_key = entrant["event_key"]
+                if self.history_manager.should_recall_persona(
+                    entrant_id,
+                    building_id=self.current_building_id,
+                    event_key=event_key,
+                ):
                     recall_msg = self.history_manager.recall_conversation_with(entrant_id)
                     if recall_msg:
                         logging.info(
@@ -500,6 +516,10 @@ class PersonaGenerationMixin:
                             (combined_info + "\n" + recall_msg).strip()
                             if combined_info
                             else recall_msg
+                        )
+                        self.history_manager.mark_entrant_event_recalled(
+                            self.current_building_id,
+                            event_key,
                         )
         except Exception:
             logging.exception("[recall] Failed to check persona recall")

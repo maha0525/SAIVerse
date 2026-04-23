@@ -1,11 +1,10 @@
-import unittest
-from unittest.mock import patch, MagicMock, mock_open
 import json
+import unittest
 from pathlib import Path
-from datetime import datetime
+from unittest.mock import MagicMock, patch
 
-# テスト対象のモジュールをインポート
 from persona.history_manager import HistoryManager
+
 
 class TestHistoryManager(unittest.TestCase):
     def assertMessagesMatch(self, actual, expected):
@@ -15,7 +14,6 @@ class TestHistoryManager(unittest.TestCase):
         )
 
     def setUp(self):
-        # 各テストメソッドの実行前に呼ばれるセットアップ
         self.persona_id = "test_persona"
         self.persona_log_path = Path("/mock/saiverse_home/personas/test_persona/log.json")
         self.building_memory_paths = {
@@ -28,30 +26,26 @@ class TestHistoryManager(unittest.TestCase):
             "deep_think_room": [],
         }
 
-        # Pathオブジェクトのメソッドをモック化
-        self.mock_path_exists = patch('pathlib.Path.exists').start()
-        self.mock_path_read_text = patch('pathlib.Path.read_text').start()
-        self.mock_path_write_text = patch('pathlib.Path.write_text').start()
-        self.mock_path_mkdir = patch('pathlib.Path.mkdir').start()
-        self.mock_path_glob = patch('pathlib.Path.glob').start()
-        self.mock_path_stat = patch('pathlib.Path.stat').start()
+        self.mock_path_exists = patch("pathlib.Path.exists").start()
+        self.mock_path_read_text = patch("pathlib.Path.read_text").start()
+        self.mock_path_write_text = patch("pathlib.Path.write_text").start()
+        self.mock_path_mkdir = patch("pathlib.Path.mkdir").start()
+        self.mock_path_glob = patch("pathlib.Path.glob").start()
+        self.mock_path_stat = patch("pathlib.Path.stat").start()
 
-        # デフォルトのモックの振る舞いを設定
-        self.mock_path_exists.return_value = True # ファイルは存在すると仮定
-        self.mock_path_read_text.return_value = "[]" # ファイル内容は空のJSONリストと仮定
-        self.mock_path_glob.return_value = [] # globは空リストを返す
-        self.mock_path_stat.return_value.st_size = 0 # ファイルサイズは0と仮定
-
+        self.mock_path_exists.return_value = True
+        self.mock_path_read_text.return_value = "[]"
+        self.mock_path_glob.return_value = []
+        self.mock_path_stat.return_value.st_size = 0
         self.history_manager = HistoryManager(
             persona_id=self.persona_id,
             persona_log_path=self.persona_log_path,
             building_memory_paths=self.building_memory_paths,
             initial_persona_history=self.initial_persona_history,
-            initial_building_histories=self.initial_building_histories
+            initial_building_histories=self.initial_building_histories,
         )
 
     def tearDown(self):
-        # 各テストメソッドの実行後に呼ばれるクリーンアップ
         patch.stopall()
 
     def test_initialization(self):
@@ -59,10 +53,10 @@ class TestHistoryManager(unittest.TestCase):
         self.assertEqual(self.history_manager.persona_log_path, self.persona_log_path)
         self.assertEqual(self.history_manager.building_memory_paths, self.building_memory_paths)
         self.assertEqual(self.history_manager.messages, [])
-        self.assertEqual(self.history_manager.building_histories, {
-            "user_room": [],
-            "deep_think_room": [],
-        })
+        self.assertEqual(
+            self.history_manager.building_histories,
+            {"user_room": [], "deep_think_room": []},
+        )
 
     def test_add_message(self):
         msg1 = {"role": "user", "content": "Hello"}
@@ -86,38 +80,38 @@ class TestHistoryManager(unittest.TestCase):
         self.assertIn("message_id", building_entry_2)
         self.assertEqual(building_entry_2["heard_by"], ["assistant", "user"])
 
-        # persona_idが自動で付与されるか確認
         msg3 = {"role": "assistant", "content": "Auto ID"}
         self.history_manager.add_message(msg3, "user_room")
         self.assertEqual(self.history_manager.messages[2]["persona_id"], "test_persona")
 
     def test_add_message_trimming_persona_history(self):
-        # 2MBを超えるメッセージを追加してトリミングをテスト
-        # 1MBのメッセージを3つ追加 -> 合計3MBとなり、2MB制限を超える
         long_msg = {"role": "user", "content": "a" * (1024 * 1024)}
-        self.history_manager.add_message(long_msg, "user_room") # 1MB
-        self.history_manager.add_message(long_msg, "user_room") # 2MB
-        self.history_manager.add_message(long_msg, "user_room") # 3MB -> 最初のメッセージが削除される
-
-        # 2MB制限を超過したため、メッセージがトリミングされ、old_logに書き込まれたことを確認
-        # 厳密な残るメッセージ数は、JSONエンコードのオーバーヘッドによって変動するため、
-        # 2MB以下になっていることと、old_logへの書き込みが行われたことを確認する
-        self.assertLessEqual(len(json.dumps(self.history_manager.messages, ensure_ascii=False).encode("utf-8")), 2000 * 1024)
+        self.history_manager.add_message(long_msg, "user_room")
+        self.history_manager.add_message(long_msg, "user_room")
+        self.history_manager.add_message(long_msg, "user_room")
+        self.assertLessEqual(
+            len(json.dumps(self.history_manager.messages, ensure_ascii=False).encode("utf-8")),
+            2000 * 1024,
+        )
         self.mock_path_mkdir.assert_called_with(parents=True, exist_ok=True)
-        self.mock_path_write_text.assert_called() # old_logへの書き込み
+        self.mock_path_write_text.assert_called()
 
     def test_add_message_trimming_building_history(self):
-        # 2MBを超えるメッセージを追加してビルディング履歴のトリミングをテスト
-        # 1MBのメッセージを3つ追加 -> 合計3MBとなり、2MB制限を超える
         long_msg = {"role": "user", "content": "b" * (1024 * 1024)}
-        self.history_manager.add_message(long_msg, "deep_think_room") # 1MB
-        self.history_manager.add_message(long_msg, "deep_think_room") # 2MB
-        self.history_manager.add_message(long_msg, "deep_think_room") # 3MB -> 最初のメッセージが削除される
-
-        # 2MB制限を超過したため、メッセージがトリミングされ、old_logに書き込まれたことを確認
-        self.assertLessEqual(len(json.dumps(self.history_manager.building_histories["deep_think_room"], ensure_ascii=False).encode("utf-8")), 2000 * 1024)
+        self.history_manager.add_message(long_msg, "deep_think_room")
+        self.history_manager.add_message(long_msg, "deep_think_room")
+        self.history_manager.add_message(long_msg, "deep_think_room")
+        self.assertLessEqual(
+            len(
+                json.dumps(
+                    self.history_manager.building_histories["deep_think_room"],
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ),
+            2000 * 1024,
+        )
         self.mock_path_mkdir.assert_called_with(parents=True, exist_ok=True)
-        self.mock_path_write_text.assert_called() # old_logへの書き込み
+        self.mock_path_write_text.assert_called()
 
     def test_add_to_building_only(self):
         msg = {"role": "system", "content": "Building specific"}
@@ -128,7 +122,7 @@ class TestHistoryManager(unittest.TestCase):
         self.assertEqual(entry["heard_by"], ["observer"])
         self.assertIn("message_id", entry)
         self.assertIn("seq", entry)
-        self.assertEqual(self.history_manager.messages, []) # persona history should be unchanged
+        self.assertEqual(self.history_manager.messages, [])
 
     def test_add_to_building_only_with_unknown_building_id_raises_value_error(self):
         with self.assertRaises(ValueError):
@@ -145,7 +139,7 @@ class TestHistoryManager(unittest.TestCase):
         self.assertEqual(stored["role"], msg["role"])
         self.assertEqual(stored["content"], msg["content"])
         self.assertIn("timestamp", stored)
-        self.assertEqual(self.history_manager.building_histories["user_room"], []) # building history should be unchanged
+        self.assertEqual(self.history_manager.building_histories["user_room"], [])
 
     def test_get_recent_history(self):
         msgs = [
@@ -157,27 +151,30 @@ class TestHistoryManager(unittest.TestCase):
         for msg in msgs:
             self.history_manager.add_message(msg, "user_room")
 
-        # 全て取得
         recent = self.history_manager.get_recent_history(100)
         self.assertMessagesMatch(recent, msgs)
         for item in recent:
             self.assertIn("timestamp", item)
-        self.assertTrue(all(item.get("role") != "assistant" or item.get("persona_id") == self.persona_id for item in recent))
+        self.assertTrue(
+            all(
+                item.get("role") != "assistant" or item.get("persona_id") == self.persona_id
+                for item in recent
+            )
+        )
 
-        # 制限付きで取得
-        recent = self.history_manager.get_recent_history(7) # "333" + "4444" = 7文字
+        recent = self.history_manager.get_recent_history(7)
         self.assertMessagesMatch(recent, [msgs[2], msgs[3]])
 
         recent = self.history_manager.get_recent_history(3)
-        self.assertEqual(recent, []) # "4444" (4文字) が制限を超えるため、何も返されない
+        self.assertEqual(recent, [])
 
-        recent = self.history_manager.get_recent_history(4) # "4444" = 4文字
+        recent = self.history_manager.get_recent_history(4)
         self.assertMessagesMatch(recent, [msgs[3]])
 
         recent = self.history_manager.get_recent_history(6)
-        self.assertMessagesMatch(recent, [msgs[3]]) # "4444" (4文字) のみ
+        self.assertMessagesMatch(recent, [msgs[3]])
 
-        recent = self.history_manager.get_recent_history(10) # "1" + "22" + "333" + "4444" = 10文字
+        recent = self.history_manager.get_recent_history(10)
         self.assertMessagesMatch(recent, msgs)
 
         recent = self.history_manager.get_recent_history(0)
@@ -191,22 +188,145 @@ class TestHistoryManager(unittest.TestCase):
 
         self.history_manager.save_all()
 
-        # persona_log_pathへの書き込みが呼ばれたことを確認
         self.mock_path_write_text.assert_any_call(
             json.dumps(self.history_manager.messages, ensure_ascii=False),
-            encoding="utf-8"
+            encoding="utf-8",
         )
-        # building_memory_pathsへの書き込みがそれぞれ呼ばれたことを確認
         self.mock_path_write_text.assert_any_call(
             json.dumps(self.history_manager.building_histories["user_room"], ensure_ascii=False),
-            encoding="utf-8"
+            encoding="utf-8",
         )
         self.mock_path_write_text.assert_any_call(
             json.dumps(self.history_manager.building_histories["deep_think_room"], ensure_ascii=False),
-            encoding="utf-8"
+            encoding="utf-8",
         )
-        # ディレクトリ作成が呼ばれたことを確認
         self.mock_path_mkdir.assert_called_with(parents=True, exist_ok=True)
 
-if __name__ == '__main__':
+    def test_get_recent_entrant_events_only_returns_ai_enter_events(self):
+        self.history_manager.building_histories["user_room"] = [
+            {
+                "role": "host",
+                "content": "leave",
+                "metadata": {
+                    "event": {
+                        "type": "occupancy",
+                        "action": "leave",
+                        "entity_id": "persona_leave",
+                        "entity_type": "ai",
+                        "event_key": "leave-1",
+                    }
+                },
+            },
+            {
+                "role": "host",
+                "content": "user enter",
+                "metadata": {
+                    "event": {
+                        "type": "occupancy",
+                        "action": "enter",
+                        "entity_id": "user_1",
+                        "entity_type": "user",
+                        "event_key": "user-enter-1",
+                    }
+                },
+            },
+            {
+                "role": "host",
+                "content": "ai enter",
+                "metadata": {
+                    "event": {
+                        "type": "occupancy",
+                        "action": "enter",
+                        "entity_id": "persona_enter",
+                        "entity_type": "ai",
+                        "event_key": "enter-1",
+                    }
+                },
+            },
+        ]
+
+        entrants = self.history_manager.get_recent_entrant_events("user_room")
+
+        self.assertEqual(
+            entrants,
+            [{"entity_id": "persona_enter", "event_key": "enter-1"}],
+        )
+
+    def test_marked_entrant_event_is_not_recalled_twice(self):
+        self.history_manager.building_histories["user_room"] = [
+            {
+                "role": "host",
+                "content": "ai enter",
+                "metadata": {
+                    "event": {
+                        "type": "occupancy",
+                        "action": "enter",
+                        "entity_id": "persona_enter",
+                        "entity_type": "ai",
+                        "event_key": "enter-1",
+                        "recalled_by": [],
+                    }
+                },
+            }
+        ]
+
+        self.assertTrue(
+            self.history_manager.should_recall_persona(
+                "persona_enter",
+                building_id="user_room",
+                event_key="enter-1",
+            )
+        )
+        self.assertTrue(self.history_manager.mark_entrant_event_recalled("user_room", "enter-1"))
+        self.assertFalse(
+            self.history_manager.should_recall_persona(
+                "persona_enter",
+                building_id="user_room",
+                event_key="enter-1",
+            )
+        )
+
+    def test_should_not_recall_when_target_already_in_recent_context(self):
+        self.history_manager.add_to_persona_only(
+            {
+                "role": "assistant",
+                "content": "recent message",
+                "persona_id": "persona_enter",
+            }
+        )
+
+        self.assertFalse(self.history_manager.should_recall_persona("persona_enter"))
+
+    @patch("sai_memory.memopedia.storage.create_page")
+    @patch("sai_memory.memopedia.storage.get_page")
+    @patch("sai_memory.memopedia.storage.get_page_by_title")
+    @patch("sai_memory.memopedia.storage.get_page_by_persona_id")
+    def test_ensure_persona_page_uses_persona_id_suffix_when_title_conflicts(
+        self,
+        mock_get_page_by_persona_id,
+        mock_get_page_by_title,
+        mock_get_page,
+        mock_create_page,
+    ):
+        memory_adapter = MagicMock()
+        memory_adapter.is_ready.return_value = True
+        memory_adapter.conn = object()
+        self.history_manager.set_memory_adapter(memory_adapter)
+
+        mock_get_page_by_persona_id.return_value = None
+        mock_get_page_by_title.return_value = MagicMock(id="existing-title-page")
+        mock_get_page.return_value = MagicMock(id="root_people")
+        mock_create_page.return_value = MagicMock(id="new-page")
+
+        result = self.history_manager.ensure_persona_page("persona_x", "同名")
+
+        self.assertTrue(result)
+        mock_create_page.assert_called_once()
+        self.assertEqual(
+            mock_create_page.call_args.kwargs["title"],
+            "同名 (persona_x)",
+        )
+
+
+if __name__ == "__main__":
     unittest.main()
