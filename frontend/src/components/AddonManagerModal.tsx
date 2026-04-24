@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { X, Package, ChevronDown, ChevronRight, Trash2 } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
+import MCPSection from './MCPSection';
 import styles from './AddonManagerModal.module.css';
 
 // ---------------------------------------------------------------------------
@@ -607,6 +608,7 @@ function AddonCard({
             {expanded && addon.is_enabled && (
                 <div className={styles.addonCardBody}>
                     <ParamsSection addon={addon} personas={personas} />
+                    <MCPSection addonName={addon.addon_name} defaultCollapsed={true} />
                 </div>
             )}
             {expanded && !addon.is_enabled && (
@@ -679,6 +681,9 @@ export default function AddonManagerModal({ isOpen, onClose }: AddonManagerModal
                 </div>
 
                 <div className={styles.content}>
+                    {!loading && !fetchError && (
+                        <MCPSection defaultCollapsed={true} />
+                    )}
                     {loading && <p className={styles.loadingText}>読み込み中...</p>}
                     {!loading && fetchError && (
                         <div className={styles.errorState}>

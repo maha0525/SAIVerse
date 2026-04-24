@@ -1,0 +1,398 @@
+.section {
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 0.6rem;
+    background: #fafafa;
+    overflow: hidden;
+}
+
+.sectionHeader {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: #334155;
+    font-size: 0.9rem;
+    font-weight: 500;
+    text-align: left;
+    transition: background-color 0.15s;
+}
+
+.sectionHeader:hover {
+    background: rgba(99, 102, 241, 0.04);
+}
+
+.headerLabel {
+    flex: 1;
+}
+
+.failureBadge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.15rem 0.5rem;
+    background: #fee2e2;
+    color: #b91c1c;
+    border-radius: 0.8rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.sectionBody {
+    padding: 0.5rem 1rem 1rem;
+    border-top: 1px solid rgba(0, 0, 0, 0.06);
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.loadingText {
+    color: #94a3b8;
+    text-align: center;
+    padding: 1rem 0;
+    font-size: 0.85rem;
+    margin: 0;
+}
+
+.emptyText {
+    color: #94a3b8;
+    text-align: center;
+    padding: 1rem 0;
+    font-size: 0.85rem;
+    margin: 0;
+}
+
+.errorText {
+    color: #dc2626;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.8rem;
+    margin: 0;
+    background: #fef2f2;
+    border-radius: 0.4rem;
+}
+
+.subHeader {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #b91c1c;
+    margin: 0.5rem 0 0.25rem;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+/* --- Failure cards ---------------------------------------------------- */
+
+.failureList {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.failureCard {
+    border: 1px solid #fecaca;
+    background: #fff5f5;
+    border-radius: 0.5rem;
+    padding: 0.6rem 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.failureHeader {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: #b91c1c;
+    font-size: 0.85rem;
+    flex-wrap: wrap;
+}
+
+.instanceKey {
+    flex: 1;
+    min-width: 0;
+    background: rgba(185, 28, 28, 0.08);
+    padding: 0.1rem 0.4rem;
+    border-radius: 0.3rem;
+    font-size: 0.75rem;
+    word-break: break-all;
+    overflow-wrap: anywhere;
+}
+
+.categoryBadge {
+    padding: 0.1rem 0.4rem;
+    background: #fecaca;
+    color: #7f1d1d;
+    border-radius: 0.3rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+}
+
+.failureMessage {
+    margin: 0;
+    color: #7f1d1d;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.failureFooter {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    color: #991b1b;
+    font-size: 0.75rem;
+    flex-wrap: wrap;
+}
+
+/* --- Server cards ----------------------------------------------------- */
+
+.serverList {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.serverCard {
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    background: white;
+    border-radius: 0.5rem;
+    padding: 0.6rem 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.serverHeader {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.statusDot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.connected {
+    background: #22c55e;
+    box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
+}
+
+.disconnected {
+    background: #94a3b8;
+}
+
+.serverName {
+    flex: 1;
+    min-width: 0;
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: #1e293b;
+    word-break: break-all;
+    overflow-wrap: anywhere;
+}
+
+.scopeBadge {
+    padding: 0.1rem 0.4rem;
+    background: #e0e7ff;
+    color: #4338ca;
+    border-radius: 0.3rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+}
+
+.personaTag {
+    padding: 0.1rem 0.4rem;
+    background: #fef3c7;
+    color: #92400e;
+    border-radius: 0.3rem;
+    font-size: 0.7rem;
+    font-weight: 500;
+}
+
+.serverMeta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 0.75rem;
+    color: #64748b;
+    font-size: 0.75rem;
+}
+
+.serverMeta code {
+    background: rgba(100, 116, 139, 0.08);
+    padding: 0.05rem 0.3rem;
+    border-radius: 0.25rem;
+    word-break: break-all;
+    overflow-wrap: anywhere;
+}
+
+.referrers {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+}
+
+.referrerTag {
+    padding: 0.1rem 0.4rem;
+    background: #f1f5f9;
+    color: #475569;
+    border-radius: 0.3rem;
+    font-size: 0.7rem;
+    font-family: ui-monospace, monospace;
+}
+
+.serverNote {
+    margin: 0;
+    color: #64748b;
+    font-size: 0.75rem;
+    line-height: 1.5;
+    font-style: italic;
+}
+
+.serverActions {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    margin-top: 0.15rem;
+}
+
+.actionButton {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.3rem 0.6rem;
+    background: white;
+    color: #475569;
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    border-radius: 0.4rem;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.actionButton:hover:not(:disabled) {
+    background: #eef2ff;
+    color: #4338ca;
+    border-color: #c7d2fe;
+}
+
+.actionButton:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* --- Dark mode -------------------------------------------------------- */
+
+:global([data-theme="dark"]) .section {
+    background: #1e293b;
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .sectionHeader {
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .sectionHeader:hover {
+    background: rgba(99, 102, 241, 0.12);
+}
+
+:global([data-theme="dark"]) .sectionBody {
+    border-top-color: rgba(255, 255, 255, 0.06);
+}
+
+:global([data-theme="dark"]) .serverCard {
+    background: #0f172a;
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .serverName {
+    color: #e2e8f0;
+}
+
+:global([data-theme="dark"]) .serverMeta {
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .serverMeta code {
+    background: rgba(148, 163, 184, 0.12);
+    color: #cbd5e1;
+}
+
+:global([data-theme="dark"]) .referrerTag {
+    background: rgba(148, 163, 184, 0.15);
+    color: #cbd5e1;
+}
+
+:global([data-theme="dark"]) .actionButton {
+    background: #0f172a;
+    color: #cbd5e1;
+    border-color: rgba(255, 255, 255, 0.12);
+}
+
+:global([data-theme="dark"]) .actionButton:hover:not(:disabled) {
+    background: rgba(99, 102, 241, 0.15);
+    color: #a5b4fc;
+    border-color: rgba(165, 180, 252, 0.3);
+}
+
+:global([data-theme="dark"]) .failureCard {
+    background: rgba(127, 29, 29, 0.18);
+    border-color: rgba(239, 68, 68, 0.25);
+}
+
+:global([data-theme="dark"]) .failureHeader,
+:global([data-theme="dark"]) .failureMessage,
+:global([data-theme="dark"]) .failureFooter {
+    color: #fecaca;
+}
+
+:global([data-theme="dark"]) .errorText {
+    background: rgba(127, 29, 29, 0.25);
+    color: #fca5a5;
+}
+
+:global([data-theme="dark"]) .loadingText,
+:global([data-theme="dark"]) .emptyText {
+    color: #64748b;
+}
+
+:global([data-theme="dark"]) .scopeBadge {
+    background: rgba(99, 102, 241, 0.2);
+    color: #a5b4fc;
+}
+
+:global([data-theme="dark"]) .personaTag {
+    background: rgba(234, 179, 8, 0.15);
+    color: #fcd34d;
+}
+
+/* --- Mobile ----------------------------------------------------------- */
+
+@media (max-width: 600px) {
+    .sectionHeader {
+        padding: 0.7rem 0.85rem;
+        font-size: 0.85rem;
+    }
+
+    .sectionBody {
+        padding: 0.5rem 0.75rem 0.75rem;
+    }
+
+    .serverCard,
+    .failureCard {
+        padding: 0.5rem 0.6rem;
+    }
+
+    .serverMeta {
+        font-size: 0.7rem;
+    }
+}
