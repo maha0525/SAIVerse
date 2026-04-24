@@ -30,6 +30,13 @@ from datetime import timedelta
 from typing import Any, Dict, List, Optional, Set
 
 from tools.core import ToolSchema
+# Bind get_active_persona_id at module-load time. Lazy-importing this inside
+# the per_persona MCP wrapper used to race with saiverse-voice-tts's
+# GPT-SoVITS loader (which temporarily removes 'tools.*' from sys.modules
+# while inserting its own tools/ dir onto sys.path), causing
+# ModuleNotFoundError in the middle of a spell call. See
+# memory/project_tts_import_pollution.md.
+from tools.context import get_active_persona_id
 
 LOGGER = logging.getLogger(__name__)
 
@@ -1102,8 +1109,6 @@ def _make_mcp_tool_wrapper(
     """
     async def _mcp_tool_wrapper(**kwargs: Any) -> str:
         if scope == "per_persona":
-            from tools.context import get_active_persona_id
-
             persona_id = get_active_persona_id()
             if not persona_id:
                 LOGGER.warning(
