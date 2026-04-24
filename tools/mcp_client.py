@@ -171,6 +171,19 @@ def _normalize_spell_config(raw_value: Any) -> Dict[str, Dict[str, Any]]:
     return result
 
 
+def _strip_jsonschema_meta_keys(schema: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove top-level JSON Schema metadata keys that our ToolSchema
+    pydantic model rejects as ``extra_forbidden``.
+
+    MCP servers commonly include ``$schema`` (draft URI) and sometimes
+    ``$id``/``$defs``. These are valid JSON Schema but not meaningful for
+    SAIVerse's runtime tool invocation, so we drop them at the top level.
+    Nested ``$ref``/``$defs`` inside ``properties`` are preserved because
+    they can be load-bearing for referential schemas.
+    """
+    return {k: v for k, v in schema.items() if not k.startswith("$")}
+
+
 def _tool_schema_from_mcp(
     namespaced_name: str,
     qualified_server_name: str,
@@ -182,6 +195,8 @@ def _tool_schema_from_mcp(
     parameters = getattr(tool_def, "inputSchema", None)
     if not isinstance(parameters, dict):
         parameters = {"type": "object", "properties": {}}
+    else:
+        parameters = _strip_jsonschema_meta_keys(parameters)
 
     spell_options = spell_config.get(tool_name, {})
     display_name = spell_options.get("display_name") or spell_options.get("spell_display_name") or ""
@@ -675,6 +690,65 @@ class MCPClientManager:
         if not entry:
             return False
         return time.monotonic() < float(entry.get("next_retry_at", 0))
+
+    def is_tool_available_for_persona(
+        self,
+        tool_name: str,
+        persona_id: Optional[str],
+    ) -> bool:
+        """Whether the registered tool can actually be invoked for this persona.
+
+        For non-MCP tools this always returns True (not our concern — the
+        caller can use this as a general "is this tool visible" filter).
+
+        For MCP tools, we resolve the server's env placeholders in the
+        given persona context and report False if any ``${...}`` remains
+        unresolved (missing api_key etc). This is used to hide tools from
+        the persona-specific spell list so the LLM does not try to call
+        tools that would immediately fail with ``missing_config``.
+
+        Policy notes:
+          * ``scope=global`` servers resolve without persona context.
+            An unresolved placeholder means the tool is broken for
+            everyone (e.g. missing AddonConfig / env var) — hide it.
+          * ``scope=per_persona`` with ``persona_id=None`` is conservative:
+            we cannot evaluate the right context, so we hide the tool.
+          * Server not in ``_server_meta`` (shouldn't happen for a
+            registered tool, but defensive) → True (fail open).
+        """
+        meta_info = self._registered_tools.get(tool_name)
+        if not meta_info:
+            return True
+        qualified = meta_info.get("qualified_server_name")
+        if not qualified:
+            return True
+        server_meta = self._server_meta.get(qualified)
+        if server_meta is None:
+            return True
+
+        from tools.mcp_config import resolve_config_placeholders
+
+        raw_config = server_meta.get("raw_config") or {}
+        scope = meta_info.get("scope", "global")
+        if scope == "per_persona":
+            if persona_id is None:
+                return False
+            try:
+                resolved = resolve_config_placeholders(
+                    raw_config, persona_id=persona_id
+                )
+            except Exception:
+                return False
+        else:
+            try:
+                resolved = resolve_config_placeholders(
+                    raw_config, persona_id=None
+                )
+            except Exception:
+                return False
+
+        unresolved = _find_unresolved_placeholders(resolved)
+        return len(unresolved) == 0
 
     def get_failed_instances(self) -> List[Dict[str, Any]]:
         """Snapshot of all instances currently in backoff state (for UI)."""
@@ -1206,6 +1280,62 @@ async def reconnect_mcp_server(server_name: str) -> bool:
     return await run_on_mcp_loop(manager.reconnect_server(server_name))
 
 
+def _reload_addon_mcp_config(
+    manager: MCPClientManager,
+    addon_name: str,
+) -> List[str]:
+    """Scan ``expansion_data/<addon_name>/mcp_servers.json`` and register
+    any newly-declared servers into ``_server_meta``.
+
+    Idempotent: existing entries with the same qualified_name are kept.
+    Use this on addon enable so that a freshly-installed addon's MCP
+    servers appear without a SAIVerse restart.
+
+    Returns the list of qualified server names newly added.
+    """
+    from saiverse.data_paths import EXPANSION_DATA_DIR
+    from tools.mcp_config import _load_config_file, _interpolate_value
+
+    config_path = EXPANSION_DATA_DIR / addon_name / "mcp_servers.json"
+    if not config_path.exists():
+        return []
+
+    added: List[str] = []
+    raw = _load_config_file(config_path)
+    for server_name, cfg in raw.items():
+        qualified_name = f"{addon_name}__{server_name}"
+        if qualified_name in manager._server_meta:
+            continue
+        if not cfg.get("enabled", True):
+            LOGGER.info(
+                "MCP: server '%s' in addon '%s' is marked disabled, skipping",
+                qualified_name,
+                addon_name,
+            )
+            continue
+
+        cfg_copy = _interpolate_value(cfg)
+        cfg_copy["_source_path"] = str(config_path)
+        cfg_copy["_addon_name"] = addon_name
+        cfg_copy["_original_server_name"] = server_name
+
+        scope = str(cfg_copy.get("scope", "global")).lower()
+        manager._server_meta[qualified_name] = {
+            "scope": scope,
+            "source_path": str(config_path),
+            "addon_name": addon_name,
+            "raw_config": cfg_copy,
+        }
+        added.append(qualified_name)
+        LOGGER.info(
+            "MCP: hot-loaded server '%s' from addon '%s' (scope=%s)",
+            qualified_name,
+            addon_name,
+            scope,
+        )
+    return added
+
+
 async def _apply_addon_toggle(
     manager: MCPClientManager,
     addon_name: str,
@@ -1214,21 +1344,32 @@ async def _apply_addon_toggle(
     """Adjust MCP state to reflect an addon being enabled/disabled.
 
     Enabled:
+      * Hot-load the addon's mcp_servers.json (if any) into _server_meta
+        so newly-installed addons don't need a SAIVerse restart.
       * global servers: add referrer, start if not running
       * per_persona servers: re-run tool discovery (idempotent)
 
     Disabled:
       * global servers: remove referrer (shutdown at refcount=0)
-      * per_persona servers: unregister tools, stop all persona instances,
-        clear the discovery flag so the next enable re-discovers cleanly
+      * per_persona servers: unregister tools, stop all persona instances
+      * Remove _server_meta entries tied to this addon so a subsequent
+        enable re-reads the JSON (picking up any edits).
     """
     referrer = f"addon:{addon_name}"
+
+    if is_enabled:
+        _reload_addon_mcp_config(manager, addon_name)
+
     targets = [
         (qualified, meta)
         for qualified, meta in list(manager._server_meta.items())
         if meta.get("addon_name") == addon_name
     ]
     if not targets:
+        LOGGER.debug(
+            "MCP: addon '%s' has no MCP servers registered (nothing to do)",
+            addon_name,
+        )
         return
 
     for qualified_name, meta in targets:
@@ -1260,6 +1401,18 @@ async def _apply_addon_toggle(
                 is_enabled,
                 exc,
             )
+
+    if not is_enabled:
+        # After shutdown, drop meta entries so the next enable re-reads
+        # mcp_servers.json fresh (picks up edits since the last enable).
+        for qualified_name, meta in list(manager._server_meta.items()):
+            if meta.get("addon_name") == addon_name:
+                manager._server_meta.pop(qualified_name, None)
+                LOGGER.debug(
+                    "MCP: removed meta entry '%s' after addon '%s' disabled",
+                    qualified_name,
+                    addon_name,
+                )
 
 
 async def _shutdown_all_instances_of_server(

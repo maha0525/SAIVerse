@@ -158,7 +158,28 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                         "",
                         "### 利用可能なスペル",
                     ]
+                    # Filter MCP-backed spells that are not invokable for
+                    # this persona (missing api_key etc). See
+                    # docs/intent/mcp_addon_integration.md §F for how
+                    # per_persona spells stay hidden until the required
+                    # AddonPersonaConfig values are filled in.
+                    try:
+                        from tools.mcp_client import get_mcp_manager
+                        _mcp_mgr = get_mcp_manager()
+                    except Exception:
+                        _mcp_mgr = None
+                    _persona_id_for_filter = getattr(persona, "persona_id", None)
+
                     for sname, sschema in SPELL_TOOL_SCHEMAS.items():
+                        if _mcp_mgr is not None and not _mcp_mgr.is_tool_available_for_persona(
+                            sname, _persona_id_for_filter
+                        ):
+                            LOGGER.debug(
+                                "spell: hiding '%s' from persona=%s (required MCP config missing)",
+                                sname,
+                                _persona_id_for_filter,
+                            )
+                            continue
                         display = sschema.spell_display_name or sname
                         spell_lines.append(f"- **{sname}** ({display}): {sschema.description}")
                         props = sschema.parameters.get("properties", {})
