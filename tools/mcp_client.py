@@ -139,17 +139,23 @@ def _build_persona_error_message(
     qualified_name: str,
     tool_name: str,
     category: str,
+    detail: Optional[str] = None,
 ) -> str:
     """Build the short persona/LLM-facing error message.
 
     Kept brief so the LLM recognizes the tool as unavailable and picks an
-    alternative action rather than retrying in a loop.
+    alternative action rather than retrying in a loop. ``detail`` (if given)
+    is appended so the LLM and the user have at least one concrete clue
+    about what went wrong — "不明なエラー" alone is unhelpful.
     """
     category_desc = _CATEGORY_JP.get(category, category)
-    return (
+    base = (
         f"ツール '{qualified_name}__{tool_name}' は現在利用できません"
         f"（原因: {category_desc}）。"
     )
+    if detail:
+        base = base + f" 詳細: {detail}"
+    return base
 
 
 def _normalize_spell_config(raw_value: Any) -> Dict[str, Dict[str, Any]]:
@@ -1125,22 +1131,53 @@ def _make_mcp_tool_wrapper(
             if instance_key not in manager._connections:
                 if manager._is_in_backoff(instance_key):
                     entry = manager._failed_instances[instance_key]
+                    category = str(entry.get("last_category") or ERROR_CATEGORY_UNKNOWN)
+                    detail = str(entry.get("last_message") or entry.get("last_exception") or "")
+                    LOGGER.info(
+                        "MCP per_persona backoff hit: instance=%s category=%s detail=%s",
+                        instance_key,
+                        category,
+                        detail,
+                    )
                     return _build_persona_error_message(
-                        qualified_name,
-                        tool_name,
-                        str(entry.get("last_category") or ERROR_CATEGORY_UNKNOWN),
+                        qualified_name, tool_name, category, detail=detail,
                     )
+                # Launch the instance on the MCP event loop (where stdio
+                # subprocess pipes and SSE connections are managed). Calling
+                # _start_instance directly from the spell thread's loop would
+                # leave stdio clients anchored to the wrong loop and fail
+                # silently in some cases.
+                LOGGER.info(
+                    "MCP per_persona lazy start: instance=%s persona=%s",
+                    instance_key,
+                    persona_id,
+                )
                 try:
-                    await manager._start_instance(
-                        instance_key, qualified_name, persona_id=persona_id
+                    await run_on_mcp_loop(
+                        manager._start_instance(
+                            instance_key, qualified_name, persona_id=persona_id
+                        )
                     )
-                except Exception:
+                except Exception as start_exc:
+                    LOGGER.exception(
+                        "MCP per_persona lazy start failed: instance=%s persona=%s",
+                        instance_key,
+                        persona_id,
+                    )
                     entry = manager._failed_instances.get(instance_key, {})
                     category = str(
-                        entry.get("last_category") or ERROR_CATEGORY_UNKNOWN
+                        entry.get("last_category") or _classify_error(start_exc)
+                    )
+                    # Prefer the user-facing message recorded by _record_failure;
+                    # fall back to the raw exception so the persona/user can see
+                    # at least a class name + message.
+                    detail = str(
+                        entry.get("last_message")
+                        or entry.get("last_exception")
+                        or f"{type(start_exc).__name__}: {start_exc}"
                     )
                     return _build_persona_error_message(
-                        qualified_name, tool_name, category
+                        qualified_name, tool_name, category, detail=detail,
                     )
                 # Self-reference: the instance stays alive while the persona
                 # is actively using it. Shutdown on refcount=0 is handled
