@@ -275,12 +275,38 @@ def set_addon_enabled(addon_name: str, body: SetEnabledRequest, _manager=Depends
         config.is_enabled = body.is_enabled
         db.commit()
         LOGGER.info("addon: %s enabled=%s", addon_name, body.is_enabled)
-        return {"addon_name": addon_name, "is_enabled": body.is_enabled}
     except Exception:
         db.rollback()
         raise
     finally:
         db.close()
+
+    # Notify MCP layer so that any MCP servers declared by this addon get
+    # their refcount / lifecycle updated (start on enable, shutdown on
+    # disable). See docs/intent/mcp_addon_integration.md §3.
+    try:
+        from tools.mcp_client import notify_addon_toggled_sync
+        notify_addon_toggled_sync(addon_name, body.is_enabled)
+    except Exception as exc:
+        LOGGER.warning(
+            "addon: MCP notification failed for '%s' (enabled=%s): %s",
+            addon_name,
+            body.is_enabled,
+            exc,
+        )
+
+    # Broadcast to frontend subscribers as well so UIs can react
+    try:
+        from saiverse.addon_events import emit_addon_event
+        emit_addon_event(
+            "system",
+            "addon_toggled",
+            {"addon_name": addon_name, "is_enabled": body.is_enabled},
+        )
+    except Exception as exc:
+        LOGGER.debug("addon: broadcast failed for '%s': %s", addon_name, exc)
+
+    return {"addon_name": addon_name, "is_enabled": body.is_enabled}
 
 
 @router.get("/{addon_name}/config")
