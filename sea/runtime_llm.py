@@ -15,6 +15,18 @@ from sea.runtime_utils import _format, _is_llm_streaming_enabled
 from saiverse.logging_config import log_sea_trace
 from sea.playbook_models import PlaybookSchema
 from saiverse.usage_tracker import get_usage_tracker
+# Module-level imports for tools registry symbols.
+#
+# Rationale: we previously lazy-imported these inside functions, which worked
+# for the first call (sys.modules cache hit) but broke when certain addons
+# (notably saiverse-voice-tts via its GPT-SoVITS loader) temporarily remove
+# the ``tools`` package from sys.modules. A parallel LLM thread hitting a
+# lazy ``from tools import ...`` during that window resolved to the wrong
+# ``tools`` package elsewhere on sys.path (GPT-SoVITS's own tools/). By
+# binding these names at module import time, we freeze the references to
+# the real SAIVerse ``tools`` package regardless of later sys.modules
+# manipulation. See docs/intent/mcp_addon_integration.md.
+from tools import SPELL_TOOL_NAMES, SPELL_TOOL_SCHEMAS, TOOL_REGISTRY
 
 LOGGER = logging.getLogger(__name__)
 
@@ -188,7 +200,6 @@ def _execute_handy_tool_inline(
     Returns the tool result string. Modifies `messages` in place (appends
     assistant tool_call + tool result messages).
     """
-    from tools import TOOL_REGISTRY
     from tools.context import persona_context
     from pathlib import Path
     from sea.pulse_context import PulseLogEntry
@@ -288,7 +299,6 @@ async def _run_spell_tool_async(
     event_callback: Optional[Callable],
 ) -> str:
     """Execute a single spell tool in a thread executor. Returns result string."""
-    from tools import TOOL_REGISTRY
     from tools.context import persona_context
     from pathlib import Path
 
@@ -346,7 +356,6 @@ async def _run_spell_loop(
     ``details_blocks`` is a list of ``(text_before, html_details)`` pairs where
     only the first entry of each round carries the text_before prefix.
     """
-    from tools import SPELL_TOOL_NAMES, SPELL_TOOL_SCHEMAS
     from sea.pulse_context import PulseLogEntry
 
     if not spell_enabled or not text:
