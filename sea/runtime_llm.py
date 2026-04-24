@@ -20,13 +20,16 @@ from saiverse.usage_tracker import get_usage_tracker
 # Rationale: we previously lazy-imported these inside functions, which worked
 # for the first call (sys.modules cache hit) but broke when certain addons
 # (notably saiverse-voice-tts via its GPT-SoVITS loader) temporarily remove
-# the ``tools`` package from sys.modules. A parallel LLM thread hitting a
-# lazy ``from tools import ...`` during that window resolved to the wrong
-# ``tools`` package elsewhere on sys.path (GPT-SoVITS's own tools/). By
+# the ``tools`` package and its submodules from sys.modules. A parallel LLM
+# thread hitting a lazy ``from tools import ...`` / ``from tools.context
+# import ...`` during that window resolved to the wrong ``tools`` package
+# elsewhere on sys.path (GPT-SoVITS's own tools/) — or to ModuleNotFoundError
+# for submodules like ``tools.context`` that don't exist there at all. By
 # binding these names at module import time, we freeze the references to
 # the real SAIVerse ``tools`` package regardless of later sys.modules
-# manipulation. See docs/intent/mcp_addon_integration.md.
+# manipulation. See memory/project_tts_import_pollution.md.
 from tools import SPELL_TOOL_NAMES, SPELL_TOOL_SCHEMAS, TOOL_REGISTRY
+from tools.context import persona_context
 
 LOGGER = logging.getLogger(__name__)
 
@@ -200,7 +203,6 @@ def _execute_handy_tool_inline(
     Returns the tool result string. Modifies `messages` in place (appends
     assistant tool_call + tool result messages).
     """
-    from tools.context import persona_context
     from pathlib import Path
     from sea.pulse_context import PulseLogEntry
 
@@ -299,7 +301,6 @@ async def _run_spell_tool_async(
     event_callback: Optional[Callable],
 ) -> str:
     """Execute a single spell tool in a thread executor. Returns result string."""
-    from tools.context import persona_context
     from pathlib import Path
 
     tool_func = TOOL_REGISTRY.get(tool_name)
