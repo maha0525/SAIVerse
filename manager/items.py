@@ -840,7 +840,7 @@ class ItemService:
         )
         self.manager._append_building_history_note(building_id, note)
 
-        return item_id
+        return item_id, slot_num
 
     def create_picture_item_for_user(
         self, name: str, description: str, file_path: str, building_id: str,

@@ -52,14 +52,20 @@ class RuntimeEmitters:
         building_msg: Optional[Dict[str, Any]] = None
         if record_history:
             try:
-                from saiverse.content_tags import strip_in_heart
+                from saiverse.content_tags import resolve_item_slot_uris, strip_in_heart
                 heard_by_list = list(occupants)
                 if persona.persona_id not in heard_by_list:
                     heard_by_list.append(persona.persona_id)
-                # SAIMemory: 生のテキスト（<in_heart>タグ含む）を保存
+                # SAIMemory: 生のテキスト（<in_heart>タグ・スロット参照含む）を保存
+                # ペルソナが「b:3と書いた」という記憶をそのまま残す
                 persona.history_manager.add_to_persona_only(msg)
-                # building_histories: <in_heart>を除去したテキストを保存
+                # building_histories / gateway: <in_heart>除去 + スロット参照をUUIDに解決
                 building_content = strip_in_heart(text)
+                item_service = getattr(self.runtime.manager, "item_service", None)
+                if item_service:
+                    building_content = resolve_item_slot_uris(
+                        building_content, item_service, persona.persona_id, building_id
+                    )
                 building_msg_dict = {**msg, "content": building_content}
                 building_msg = persona.history_manager.add_to_building_only(
                     building_id, building_msg_dict, heard_by=heard_by_list
@@ -71,7 +77,7 @@ class RuntimeEmitters:
                 if msg_id:
                     from tools.context import set_active_message_id
                     set_active_message_id(str(msg_id))
-                self.runtime.manager.gateway_handle_ai_replies(building_id, persona, [text])
+                self.runtime.manager.gateway_handle_ai_replies(building_id, persona, [building_content])
             except Exception:
                 LOGGER.exception("Failed to emit speak message")
         self.notify_unity_speak(persona, text)
@@ -112,12 +118,18 @@ class RuntimeEmitters:
             msg["metadata"] = msg_metadata
         building_msg: Optional[Dict[str, Any]] = None
         try:
-            from saiverse.content_tags import strip_in_heart, wrap_spell_blocks
+            from saiverse.content_tags import resolve_item_slot_uris, strip_in_heart, wrap_spell_blocks
             heard_by_list = list(occupants)
             if persona.persona_id not in heard_by_list:
                 heard_by_list.append(persona.persona_id)
             # スペルブロックを <user_only alt="Name"> でラッピング、<in_heart> を除去
             building_content = wrap_spell_blocks(strip_in_heart(text))
+            # スロット参照をUUIDに解決（外向けテキストのみ）
+            item_service = getattr(self.runtime.manager, "item_service", None)
+            if item_service:
+                building_content = resolve_item_slot_uris(
+                    building_content, item_service, persona.persona_id, building_id
+                )
             building_msg_for_hist = {**msg, "content": building_content}
             building_msg = persona.history_manager.add_to_building_only(
                 building_id, building_msg_for_hist, heard_by=heard_by_list
@@ -129,7 +141,7 @@ class RuntimeEmitters:
             if msg_id:
                 from tools.context import set_active_message_id
                 set_active_message_id(str(msg_id))
-            self.runtime.manager.gateway_handle_ai_replies(building_id, persona, [text])
+            self.runtime.manager.gateway_handle_ai_replies(building_id, persona, [building_content])
         except Exception:
             LOGGER.exception("Failed to emit say message")
         self.notify_unity_speak(persona, text)

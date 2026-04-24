@@ -270,7 +270,7 @@ def generate_image_local(
                 {"playbook": playbook_name, "tool": "generate_image_local"}
             )
             item_name = title if title else f"生成画像_{stored_path.stem}"
-            item_id = manager.create_picture_item(
+            item_id, slot_num = manager.create_picture_item(
                 persona_id=persona_id,
                 name=item_name,
                 description=positive_prompt,
@@ -280,7 +280,7 @@ def generate_image_local(
             item_uri = f"saiverse://item/{item_id}/image"
             item_text = (
                 f"\n\n画像をアイテムとして登録しました"
-                f"（アイテムID: {item_id}、URI: {item_uri}）。"
+                f"（アイテムID: {item_id}、スロット番号: b:{slot_num}、URI: {item_uri}）。"
             )
     except Exception as exc:
         logger.warning("Failed to create picture item: %s", exc)

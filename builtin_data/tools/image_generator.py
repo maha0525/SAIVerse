@@ -434,6 +434,7 @@ def _get_model_api_key_env(model: str) -> Optional[str]:
         "nano_banana_2": "GEMINI_API_KEY",
         "nano_banana_pro": "GEMINI_API_KEY",
         "gpt_image_1_5": "OPENAI_API_KEY",
+        "gpt_image_2": "OPENAI_API_KEY",
         "grok_imagine": "XAI_API_KEY",
     }
     return mapping.get(model)
@@ -449,12 +450,12 @@ def _is_image_model_available(model: str) -> bool:
 
 def get_available_image_models() -> List[str]:
     """Return list of image model names whose API keys are configured."""
-    all_models = ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"]
+    all_models = ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "gpt_image_2", "grok_imagine"]
     return [m for m in all_models if _is_image_model_available(m)]
 
 
 # Fallback priority order (most commonly available first)
-_FALLBACK_ORDER = ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "grok_imagine"]
+_FALLBACK_ORDER = ["nano_banana_2", "nano_banana_pro", "gpt_image_1_5", "gpt_image_2", "grok_imagine"]
 
 
 def generate_image(
@@ -629,14 +630,14 @@ def generate_image(
             playbook_name = get_active_playbook_name()
             _source_context = _json.dumps({"playbook": playbook_name, "tool": "generate_image"})
             item_name = title if title else f"生成画像_{stored_path.stem}"
-            item_id = manager.create_picture_item(
+            item_id, slot_num = manager.create_picture_item(
                 persona_id=persona_id,
                 name=item_name,
                 description=prompt,
                 file_path=str(stored_path),
                 source_context=_source_context,
             )
-            item_text = f"\n\n画像をアイテムとして登録しました（アイテムID: {item_id}）。"
+            item_text = f"\n\n画像をアイテムとして登録しました（アイテムID: {item_id}、スロット番号: b:{slot_num}）。"
     except Exception as exc:
         logger.warning(f"Failed to create picture item: {exc}")
         item_text = ""

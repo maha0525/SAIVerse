@@ -28,6 +28,33 @@ SPELL_TOOL_NAMES: set[str] = set()  # Tools available as spells (invoked via /sp
 SPELL_TOOL_SCHEMAS: Dict[str, ToolSchema] = {}  # Spell tool schemas for system prompt generation
 
 
+def _add_registered_tool(name: str, schema: ToolSchema, func: Callable) -> None:
+    """Register a tool into all in-memory registries."""
+    TOOL_REGISTRY[name] = func
+    OPENAI_TOOLS_SPEC.append(oa.to_openai(schema))
+    GEMINI_TOOLS_SPEC.append(gm.to_gemini(schema))
+    TOOL_SCHEMAS.append(schema)
+    if getattr(schema, "spell", False):
+        SPELL_TOOL_NAMES.add(name)
+        SPELL_TOOL_SCHEMAS[name] = schema
+
+
+def _remove_registered_tool(name: str) -> None:
+    """Remove a tool from all in-memory registries."""
+    TOOL_REGISTRY.pop(name, None)
+    OPENAI_TOOLS_SPEC[:] = [
+        spec for spec in OPENAI_TOOLS_SPEC
+        if spec.get("function", {}).get("name") != name
+    ]
+    GEMINI_TOOLS_SPEC[:] = [
+        spec for spec in GEMINI_TOOLS_SPEC
+        if not any(getattr(decl, "name", None) == name for decl in getattr(spec, "function_declarations", []) or [])
+    ]
+    TOOL_SCHEMAS[:] = [schema for schema in TOOL_SCHEMAS if schema.name != name]
+    SPELL_TOOL_NAMES.discard(name)
+    SPELL_TOOL_SCHEMAS.pop(name, None)
+
+
 def _register_multiple_tools(module: Any) -> bool:
     """Register multiple tools from a module with schemas() function.
 
@@ -48,13 +75,7 @@ def _register_multiple_tools(module: Any) -> bool:
                 LOGGER.debug("Tool '%s' already registered, skipping", meta.name)
                 continue
 
-            TOOL_REGISTRY[meta.name] = impl
-            OPENAI_TOOLS_SPEC.append(oa.to_openai(meta))
-            GEMINI_TOOLS_SPEC.append(gm.to_gemini(meta))
-            TOOL_SCHEMAS.append(meta)
-            if getattr(meta, "spell", False):
-                SPELL_TOOL_NAMES.add(meta.name)
-                SPELL_TOOL_SCHEMAS[meta.name] = meta
+            _add_registered_tool(meta.name, meta, impl)
             registered = True
             LOGGER.debug("Registered tool '%s' from schemas() (spell=%s)", meta.name, getattr(meta, "spell", False))
 
@@ -86,13 +107,7 @@ def _register_tool(module: Any) -> bool:
             LOGGER.debug("Tool '%s' already registered, skipping", meta.name)
             return False
         
-        TOOL_REGISTRY[meta.name] = impl
-        OPENAI_TOOLS_SPEC.append(oa.to_openai(meta))
-        GEMINI_TOOLS_SPEC.append(gm.to_gemini(meta))
-        TOOL_SCHEMAS.append(meta)
-        if getattr(meta, "spell", False):
-            SPELL_TOOL_NAMES.add(meta.name)
-            SPELL_TOOL_SCHEMAS[meta.name] = meta
+        _add_registered_tool(meta.name, meta, impl)
 
         # Handle aliases
         alias = getattr(module, "ALIASES", None)
@@ -196,6 +211,36 @@ def _autodiscover_tools() -> None:
                 LOGGER.warning("Failed to load tool from %s: %s", schema_file, e)
     
     LOGGER.info("Autodiscovered %d tools", len(TOOL_REGISTRY))
+
+
+def register_external_tool(
+    name: str,
+    schema: ToolSchema,
+    func: Callable,
+    *,
+    allow_replace: bool = False,
+) -> bool:
+    """Register an externally provided tool (e.g. MCP) at runtime.
+
+    Returns True when the tool was registered, False when it was skipped.
+    """
+    existing = TOOL_REGISTRY.get(name)
+    if existing is not None and not allow_replace:
+        LOGGER.warning("register_external_tool: '%s' already registered, skipping", name)
+        return False
+    if existing is not None and allow_replace:
+        _remove_registered_tool(name)
+    _add_registered_tool(name, schema, func)
+    LOGGER.info("Registered external tool '%s' (spell=%s)", name, getattr(schema, "spell", False))
+    return True
+
+
+def unregister_external_tool(name: str) -> None:
+    """Remove a dynamically registered external tool from all registries."""
+    if name not in TOOL_REGISTRY:
+        return
+    _remove_registered_tool(name)
+    LOGGER.info("Unregistered external tool '%s'", name)
 
 
 if os.getenv("SAIVERSE_SKIP_TOOL_IMPORTS") != "1":

@@ -13,6 +13,7 @@ LOGGER = logging.getLogger(__name__)
 def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, auto_mode: bool = False):
     from tools import TOOL_REGISTRY
     from tools.context import persona_context
+    from tools.mcp_client import maybe_await_tool_result
 
     call_source = getattr(node_def, "call_source", "fc") or "fc"
     output_key = getattr(node_def, "output_key", None)
@@ -60,9 +61,9 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
             _current_msg_id = state.get("_last_message_id")
             if persona_id and persona_dir:
                 with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback, message_id=_current_msg_id):
-                    result = tool_func(**tool_args)
+                    result = await maybe_await_tool_result(tool_func, **tool_args)
             else:
-                result = tool_func(**tool_args)
+                result = await maybe_await_tool_result(tool_func, **tool_args)
             result_str = str(result)
             result_preview = result_str[:500] + "..." if len(result_str) > 500 else result_str
             LOGGER.info("[sea][tool_call] RESULT %s -> %s", tool_name, result_preview)

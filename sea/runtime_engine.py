@@ -10,6 +10,7 @@ from sea.playbook_models import PlaybookSchema
 from sea.runtime_utils import _format, _resolve_template_arg
 from tools import TOOL_REGISTRY
 from tools.context import persona_context
+from tools.mcp_client import maybe_await_tool_result
 
 LOGGER = logging.getLogger(__name__)
 
@@ -81,9 +82,9 @@ class RuntimeEngine:
                 _current_msg_id = state.get("_last_message_id")
                 if persona_id and persona_dir:
                     with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback, message_id=_current_msg_id):
-                        result = tool_func(**kwargs) if callable(tool_func) else None
+                        result = await maybe_await_tool_result(tool_func, **kwargs)
                 else:
-                    result = tool_func(**kwargs) if callable(tool_func) else None
+                    result = await maybe_await_tool_result(tool_func, **kwargs)
 
                 # Log tool result
                 result_str = str(result)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -308,7 +309,13 @@ async def _run_spell_tool_async(
             return tool_func(**tool_args)
 
     try:
-        raw_result = await asyncio.get_event_loop().run_in_executor(None, _run)
+        if inspect.iscoroutinefunction(tool_func):
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=False, event_callback=event_callback):
+                raw_result = await tool_func(**tool_args)
+        else:
+            raw_result = await asyncio.get_event_loop().run_in_executor(None, _run)
+            if inspect.isawaitable(raw_result):
+                raw_result = await raw_result
         result_str = str(raw_result)
         LOGGER.info("[sea][spell] Executed %s → %s", tool_name, result_str[:200])
     except Exception as exc:
@@ -865,16 +872,12 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 output_keys_spec = getattr(node_def, "output_keys", None)
                 text_key = None
                 function_call_key = None
-                thought_key = None
-
                 if output_keys_spec:
                     for mapping in output_keys_spec:
                         if "text" in mapping:
                             text_key = mapping["text"]
                         if "function_call" in mapping:
                             function_call_key = mapping["function_call"]
-                        if "thought" in mapping:
-                            thought_key = mapping["thought"]
 
                 # Debug: log result type and keys
                 LOGGER.info("[DEBUG] LLM result type='%s', has content=%s, has tool_name=%s",

@@ -530,8 +530,8 @@ class SAIVerseManager(
         """Create a new document item and place it in the current building."""
         return self.item_service.create_document_item(persona_id, name, description, content, source_context=source_context)
 
-    def create_picture_item(self, persona_id: str, name: str, description: str, file_path: str, building_id: Optional[str] = None, source_context: Optional[str] = None) -> str:
-        """Create a new picture item and place it in the specified building."""
+    def create_picture_item(self, persona_id: str, name: str, description: str, file_path: str, building_id: Optional[str] = None, source_context: Optional[str] = None) -> tuple:
+        """Create a new picture item and place it in the specified building. Returns (item_id, slot_num)."""
         return self.item_service.create_picture_item(persona_id, name, description, file_path, building_id, source_context=source_context)
 
     def create_picture_item_for_user(self, name: str, description: str, file_path: str, building_id: str, creator_id: Optional[str] = None, source_context: Optional[str] = None) -> str:

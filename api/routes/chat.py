@@ -90,7 +90,7 @@ def get_chat_history(
     # Filter out non-displayable messages before pagination to ensure consistent counts
     raw_history = [
         msg for msg in raw_history
-        if msg.get("content") and '<div class="note-box">' not in str(msg.get("content", ""))
+        if msg.get("content") and '<div class="note-box"' not in str(msg.get("content", ""))
     ]
 
     logging.debug("[CHAT_HISTORY] Found history items (after filter): %d", len(raw_history))
@@ -538,7 +538,7 @@ def send_message(req: SendMessageRequest, manager = Depends(get_manager)):
         for msg in reversed(history):
             if msg.get("role") in ("assistant", "model"):
                 content = msg.get("content", "")
-                if content and not content.startswith('<div class="note-box">'):
+                if content and not content.startswith('<div class="note-box"'):
                     prev_ai_message = content[:500]
                     break
     except Exception:

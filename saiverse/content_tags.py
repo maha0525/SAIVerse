@@ -1,12 +1,19 @@
 """Content tag utilities: <user_only> and <in_heart> processing."""
 from __future__ import annotations
 
+import logging
 import re
-from typing import Optional
+from typing import Any, Optional
+
+LOGGER = logging.getLogger(__name__)
 
 _SPELL_BLOCK_RE = re.compile(r'<details class="spellBlock">.*?</details>', re.DOTALL)
 _USER_ONLY_RE = re.compile(r'<user_only(?:\s[^>]*)?>.*?</user_only>', re.DOTALL)
 _IN_HEART_RE = re.compile(r'<in_heart>.*?</in_heart>', re.DOTALL)
+# Matches saiverse://item/<slot_ref>/<rest> where slot_ref is b:N, i:N, b:N>M, etc. (not UUID)
+_ITEM_SLOT_URI_RE = re.compile(
+    r'(saiverse://item/)([bi]:\d+(?:>\d+)*)(/[^\s\)\]>"\']*)?'
+)
 
 
 def wrap_spell_blocks(text: str) -> str:
@@ -22,6 +29,35 @@ def wrap_spell_blocks(text: str) -> str:
 def strip_in_heart(text: str) -> str:
     """Remove <in_heart>...</in_heart> content entirely (for building_histories and UI)."""
     return _IN_HEART_RE.sub("", text).strip()
+
+
+def resolve_item_slot_uris(
+    text: str,
+    item_service: Any,
+    persona_id: str,
+    building_id: Optional[str],
+) -> str:
+    """Replace slot-based item URI references with UUID equivalents for public text.
+
+    saiverse://item/b:3/image  →  saiverse://item/{UUID}/image
+
+    Applies to b:N (building slot), i:N (inventory slot), and nested b:N>M forms.
+    Unresolvable references are left unchanged to avoid silently breaking links.
+    Only called for outward-facing text (building history, gateway); SAIMemory
+    retains the original slot form so the persona remembers what they wrote.
+    """
+    def _replace(m: re.Match) -> str:
+        prefix = m.group(1)    # "saiverse://item/"
+        slot_ref = m.group(2)  # e.g. "b:3"
+        suffix = m.group(3) or ""  # e.g. "/image"
+        try:
+            uuid = item_service.resolve_slot_ref(slot_ref, persona_id, building_id)
+            return f"{prefix}{uuid}{suffix}"
+        except Exception as exc:
+            LOGGER.debug("Could not resolve item slot URI '%s': %s", slot_ref, exc)
+            return m.group(0)
+
+    return _ITEM_SLOT_URI_RE.sub(_replace, text)
 
 
 def strip_for_other_persona(text: str) -> Optional[str]:
