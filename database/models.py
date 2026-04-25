@@ -1,5 +1,6 @@
 from sqlalchemy import (
     Column,
+    Index,
     Integer,
     String,
     DateTime,
@@ -51,6 +52,12 @@ class AI(Base):
     MEMORY_WEAVE_CONTEXT = Column(Boolean, default=True, nullable=False)  # Per-persona Memory Weave context injection toggle
     SPELL_ENABLED = Column(Boolean, default=False, nullable=False)  # Per-persona spell system toggle
     METABOLISM_ANCHORS = Column(Text, nullable=True)  # JSON: per-model anchor state {"model": {"anchor_id": "...", "updated_at": "..."}}
+    # Cognitive model (Intent A v0.9 / Intent B v0.6)
+    # ACTIVITY_STATE: Stop / Sleep / Idle / Active. Eventually replaces INTERACTION_MODE (kept during transition).
+    ACTIVITY_STATE = Column(String(32), default='Idle', nullable=False)
+    # When TRUE, an Idle persona transitions to Sleep automatically once the heavyweight
+    # model cache TTL has elapsed. Protects against runaway API costs on idle personas.
+    SLEEP_ON_CACHE_EXPIRE = Column(Boolean, default=True, nullable=False)
 
 class Building(Base):
     __tablename__ = "building"
@@ -385,5 +392,124 @@ class AddonMessageMetadata(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     __table_args__ = (
         UniqueConstraint("message_id", "addon_name", "key", name="uq_addon_msg_meta"),
+    )
+
+
+# ============================================================================
+# Cognitive model: Action Tracks and Notes
+# Intent A: docs/intent/persona_cognitive_model.md (v0.9)
+# Intent B: docs/intent/persona_action_tracks.md (v0.6)
+# ============================================================================
+
+class ActionTrack(Base):
+    """行動 Track: ペルソナの行動制御単位。
+
+    Track はペルソナが進行中の作業文脈を表す。同時にアクティブ (running) なものは
+    1 ペルソナにつき 1 本のみ。永続 Track (is_persistent=true) は対ユーザー会話 Track
+    と交流 Track が該当し、completed/aborted への遷移を許さない。
+
+    詳細: docs/intent/persona_action_tracks.md
+    """
+    __tablename__ = "action_track"
+    track_id = Column(String(36), primary_key=True)  # UUID
+    persona_id = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
+    title = Column(String(255), nullable=True)
+    track_type = Column(String(64), nullable=False)
+    # user_conversation / social / autonomous / waiting / external / ...
+    is_persistent = Column(Boolean, default=False, nullable=False)
+    # Output target: 'none' / 'building:current' / 'external:<channel>:<address>'
+    output_target = Column(String(255), default='none', nullable=False)
+    status = Column(String(32), default='unstarted', nullable=False)
+    # running / alert / pending / waiting / unstarted / completed / aborted
+    is_forgotten = Column(Boolean, default=False, nullable=False)
+    intent = Column(Text, nullable=True)
+    track_metadata = Column(Text, nullable=True)
+    # JSON: target identifiers (user_id, persona_id), external refs, etc.
+    pause_summary = Column(Text, nullable=True)
+    pause_summary_updated_at = Column(DateTime, nullable=True)
+    last_active_at = Column(DateTime, nullable=True)
+    waiting_for = Column(Text, nullable=True)
+    # JSON: {"type": "user_response" | "persona_response" | "kitchen_completion" | ...}
+    waiting_timeout_at = Column(DateTime, nullable=True)  # NULL = no timeout
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    completed_at = Column(DateTime, nullable=True)  # always NULL for is_persistent=true
+    aborted_at = Column(DateTime, nullable=True)    # always NULL for is_persistent=true
+    __table_args__ = (
+        Index("idx_action_track_persona_status", "persona_id", "status", "is_forgotten"),
+        Index("idx_action_track_last_active", "persona_id", "last_active_at"),
+        Index("idx_action_track_waiting_timeout", "waiting_timeout_at"),
+        Index("idx_action_track_persistent", "persona_id", "is_persistent", "track_type"),
+    )
+
+
+class Note(Base):
+    """Note: 関心の固まり (恒久的な資産)。
+
+    Memopedia ページとメッセージ群を束ねる「スクラップブック」。
+    type は person / project / vocation の 3 種のみ (Intent A v0.6 で確定)。
+    Track が close されても Note は残り続ける。
+    """
+    __tablename__ = "note"
+    note_id = Column(String(36), primary_key=True)  # UUID
+    persona_id = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
+    title = Column(String(255), nullable=False)
+    note_type = Column(String(32), nullable=False)  # person / project / vocation
+    description = Column(Text, nullable=True)
+    note_metadata = Column(Text, nullable=True)
+    # JSON: target persona_id (for person), deadline (for project), etc.
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    last_opened_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, nullable=True)  # used when project completes
+    __table_args__ = (
+        Index("idx_note_persona_type", "persona_id", "note_type", "is_active"),
+    )
+
+
+class NotePage(Base):
+    """Note と Memopedia ページの関連 (多対多)。
+
+    page_id は SAIMemory 側 (memopedia_pages) に存在するため、メインDBからは
+    外部キー制約をかけない。
+    """
+    __tablename__ = "note_page"
+    note_id = Column(String(36), ForeignKey("note.note_id"), primary_key=True)
+    page_id = Column(String(255), primary_key=True)
+    __table_args__ = (
+        Index("idx_note_page_page", "page_id"),
+    )
+
+
+class NoteMessage(Base):
+    """Note とメッセージの関連 (多対多)。
+
+    message_id は SAIMemory 側に存在するため、メインDBからは外部キー制約を
+    かけない。同一メッセージが複数 Note に属することができ、3 人会話のメッセージ
+    重複問題はこの構造で解決される (Intent B v0.3)。
+    """
+    __tablename__ = "note_message"
+    note_id = Column(String(36), ForeignKey("note.note_id"), primary_key=True)
+    message_id = Column(String(255), primary_key=True)
+    added_at = Column(DateTime, server_default=func.now(), nullable=False)
+    auto_added = Column(Boolean, default=False, nullable=False)
+    # auto: derived from audience metadata; manual: persona explicitly added
+    __table_args__ = (
+        Index("idx_note_message_msg", "message_id"),
+    )
+
+
+class TrackOpenNote(Base):
+    """行動 Track と「開いている Note」の関連 (多対多)。
+
+    Track ごとに複数の Note が開かれる。Track が pending になっても open は維持
+    され、再 active 化時に Note の差分が再開コンテキストに挿入される。
+    """
+    __tablename__ = "track_open_note"
+    track_id = Column(String(36), ForeignKey("action_track.track_id"), primary_key=True)
+    note_id = Column(String(36), ForeignKey("note.note_id"), primary_key=True)
+    opened_at = Column(DateTime, server_default=func.now(), nullable=False)
+    __table_args__ = (
+        Index("idx_track_open_note_track", "track_id"),
+        Index("idx_track_open_note_note", "note_id"),
     )
 
