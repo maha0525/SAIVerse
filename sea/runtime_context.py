@@ -170,6 +170,10 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                         _mcp_mgr = None
                     _persona_id_for_filter = getattr(persona, "persona_id", None)
 
+                    # Classify spells into built-in (no addon) vs addon-namespaced groups
+                    builtin_visible = []
+                    addon_groups = {}  # addon_name -> {"visible": [(name, schema)], "hidden_count": int}
+
                     for sname, sschema in SPELL_TOOL_SCHEMAS.items():
                         if _mcp_mgr is not None and not _mcp_mgr.is_tool_available_for_persona(
                             sname, _persona_id_for_filter
@@ -180,13 +184,76 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                 _persona_id_for_filter,
                             )
                             continue
-                        display = sschema.spell_display_name or sname
-                        spell_lines.append(f"- **{sname}** ({display}): {sschema.description}")
-                        props = sschema.parameters.get("properties", {})
-                        required_list = sschema.parameters.get("required", [])
+                        is_visible = getattr(sschema, "spell_visible", True)
+                        if "__" in sname:
+                            addon_key = sname.split("__", 1)[0]
+                            group = addon_groups.setdefault(
+                                addon_key, {"visible": [], "hidden_count": 0}
+                            )
+                            if is_visible:
+                                group["visible"].append((sname, sschema))
+                            else:
+                                LOGGER.debug(
+                                    "spell: hiding '%s' from persona=%s (spell_visible=False)",
+                                    sname,
+                                    _persona_id_for_filter,
+                                )
+                                group["hidden_count"] += 1
+                        else:
+                            if is_visible:
+                                builtin_visible.append((sname, sschema))
+                            else:
+                                LOGGER.debug(
+                                    "spell: hiding built-in '%s' from persona=%s (spell_visible=False)",
+                                    sname,
+                                    _persona_id_for_filter,
+                                )
+
+                    def _render_spell_entry(lines, entry_name, entry_schema):
+                        display = entry_schema.spell_display_name or entry_name
+                        lines.append(f"- **{entry_name}** ({display}): {entry_schema.description}")
+                        props = entry_schema.parameters.get("properties", {})
+                        required_list = entry_schema.parameters.get("required", [])
                         for pname, pdef in props.items():
                             req_mark = "必須" if pname in required_list else "省略可"
-                            spell_lines.append(f"  - {pname} ({pdef.get('type', '?')}, {req_mark}): {pdef.get('description', '')}")
+                            lines.append(
+                                f"  - {pname} ({pdef.get('type', '?')}, {req_mark}): {pdef.get('description', '')}"
+                            )
+
+                    # Built-in spells (no addon prefix)
+                    for sname, sschema in builtin_visible:
+                        _render_spell_entry(spell_lines, sname, sschema)
+
+                    # Addon sections: header with overview + hidden count, then visible spells
+                    if addon_groups:
+                        import json as _json
+                        from saiverse.data_paths import EXPANSION_DATA_DIR as _EXP_DIR
+
+                        for addon_key, group in addon_groups.items():
+                            if not group["visible"] and group["hidden_count"] == 0:
+                                continue
+                            _manifest = {}
+                            try:
+                                _mp = _EXP_DIR / addon_key / "addon.json"
+                                with open(_mp, encoding="utf-8") as _f:
+                                    _manifest = _json.load(_f)
+                            except Exception:
+                                pass
+                            _display = _manifest.get("display_name") or addon_key
+                            _desc = _manifest.get("spell_description") or _manifest.get("description") or ""
+                            _hidden = group["hidden_count"]
+
+                            header = f"**{_display}**"
+                            if _desc:
+                                header += f" — {_desc}"
+                            if _hidden > 0:
+                                header += f"（追加スペル{_hidden}個あり、`addon_spell_help`で確認）"
+                            spell_lines.append("")
+                            spell_lines.append(header)
+
+                            for sname, sschema in group["visible"]:
+                                _render_spell_entry(spell_lines, sname, sschema)
+
                     system_sections.append("\n".join(spell_lines))
             else:
                 system_sections.append("## スペル\nスペルは現在使用できません。/spell コマンドを使用しないでください。")

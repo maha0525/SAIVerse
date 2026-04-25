@@ -213,6 +213,7 @@ def _tool_schema_from_mcp(
 
     spell_options = spell_config.get(tool_name, {})
     display_name = spell_options.get("display_name") or spell_options.get("spell_display_name") or ""
+    spell_visible = spell_options.get("visible", True)
 
     return ToolSchema(
         name=namespaced_name,
@@ -221,6 +222,7 @@ def _tool_schema_from_mcp(
         result_type="string",
         spell=tool_name in spell_config,
         spell_display_name=str(display_name) if display_name else "",
+        spell_visible=bool(spell_visible),
     )
 
 

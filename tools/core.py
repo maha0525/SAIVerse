@@ -17,6 +17,7 @@ class ToolSchema:
     result_type: str             # "string" / "number" / ...
     spell: bool = False          # If True, tool is available as a spell (invoked via /spell in LLM text output)
     spell_display_name: str = ""  # Japanese display name for spell UI (e.g. "特定時刻のログ取得")
+    spell_visible: bool = True   # If False, spell is executable but hidden from system prompt (revealed via help spell)
 
 
 @dataclass
