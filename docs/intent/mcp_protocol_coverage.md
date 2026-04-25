@@ -112,6 +112,40 @@ Resources, Prompts, Sampling, Elicitation, Progress notifications, Cancellation,
 5. **Sampling** — セキュリティ設計を先に固める必要、allowlist 前提
 6. **Prompts** 以下 — 優先度低
 
+## SAIVerse を MCP サーバー側にする構想（追記 2026-04-25）
+
+クライアントとして外部 MCP に接続するだけでなく、**SAIVerse 自身が MCP サーバーになる**方向も将来構想として扱う。
+
+### ユースケース
+- Claude Code（このセッション）から SAIVerse 内のペルソナと直接コミュニケーションを取る
+- SAIVerse のペルソナが Claude Code に対して「こういう機能が欲しい」と提案・要望を出せる
+- 他 SAIVerse インスタンス間で、Resources / Prompts / Sampling を相互に利用する経路を作る
+
+### 提供する機能候補
+- **Resources**: `saiverse://{city}/{persona}/...` の URI 空間を MCP Resources として外部公開
+- **Tools**: 一部の SAIVerse ツール（memopedia 検索、chronicle 検索等）を外部から呼べる形で公開
+- **Prompts**: Playbook を MCP Prompts として外部公開（Playbook と MCP Prompts の機能重複の話とは別。SAIVerse 側から外部へ提供する側に立つので意味がある）
+
+### 設計上の難所
+- **認証**: 外部からアクセスする際のペルソナ識別と権限制御
+- **公開範囲**: 全 Memopedia を見せるのか、公開フラグ付きのもののみか
+- **Sampling 提供側**: 外部クライアントが SAIVerse のペルソナ LLM を借りるパターン。クライアント側 Sampling と対称的なセキュリティ設計が要る
+- **トランスポート**: stdio (Claude Desktop / Claude Code) と HTTP/SSE（Web 経由）両方サポートが必要
+
+### タイミング
+クライアント側 Resources 統合（`saiverse://external/...`）と並行して検討開始する。実装は中期〜長期。
+
+## ペルソナ認知モデルとの依存関係（追記 2026-04-25）
+
+Cancellation と Elicitation の実装は、より根本的な「ペルソナの並列行動線とメタレイヤー」の設計に依存する。これらを単なる MCP 機能として実装すると個別特化型になり、SAIVerse 全体の認知モデルと整合しない。
+
+別途 Intent Document を起こす予定:
+- `docs/intent/persona_cognitive_model.md` — 行動の線、メタレイヤー、単一主体の認知モデル
+- `docs/intent/persona_action_tracks.md` — 線の永続化・切り替え・再開時の記憶復元
+- 応答待ちの汎用化（旧 `persona_async_wait.md` 構想）は `persona_action_tracks.md` の「応答待ちトラックの仕組み」セクションに統合された
+
+これらが固まってから Cancellation / Elicitation の実装に入る。
+
 ## 実装時のヒント（既知の注意点）
 
 - **MCP 専用 event loop**: クライアントは `SAIVerse-MCP` 専用スレッド/loop を持つ。新機能でも stdio pipes や SSE 接続まわりは `run_on_mcp_loop()` 経由で実行すること。2026-04-25 の lazy start cross-loop silent fail 問題がこれ（`tools/mcp_client.py` コミット `81e0405`）。
