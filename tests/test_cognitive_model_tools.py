@@ -56,6 +56,19 @@ def test_function_is_callable(name):
     assert callable(func)
 
 
+@pytest.mark.parametrize("name", ALL_TOOLS)
+def test_tool_is_spell_with_display_name(name):
+    """All cognitive tools must be spells (Intent A v0.9 line-separation policy).
+
+    メインラインで構造化出力に引きずられた事故を避けるため、ペルソナがネイティブ
+    ツールコールでこれらを叩く構成は採らない。スペル方式で発動させる。
+    """
+    module = load_builtin_tool(name)
+    schema = module.schema()
+    assert schema.spell is True, f"{name} must have spell=True"
+    assert schema.spell_display_name, f"{name} must have non-empty spell_display_name"
+
+
 def test_track_create_schema_required_fields():
     module = load_builtin_tool("track_create")
     schema = module.schema()

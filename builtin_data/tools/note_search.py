@@ -88,4 +88,6 @@ def schema() -> ToolSchema:
             },
         },
         result_type="string",
+        spell=True,
+        spell_display_name="ノート検索",
     )

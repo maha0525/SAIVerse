@@ -106,6 +106,8 @@ def schema() -> ToolSchema:
             "required": ["track_type"],
         },
         result_type="string",
+        spell=True,
+        spell_display_name="トラック作成",
     )
 
 

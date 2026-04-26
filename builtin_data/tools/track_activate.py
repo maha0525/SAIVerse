@@ -62,4 +62,6 @@ def schema() -> ToolSchema:
             "required": ["track_id"],
         },
         result_type="string",
+        spell=True,
+        spell_display_name="トラック起動",
     )

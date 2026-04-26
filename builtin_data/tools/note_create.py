@@ -87,4 +87,6 @@ def schema() -> ToolSchema:
             "required": ["title", "note_type"],
         },
         result_type="string",
+        spell=True,
+        spell_display_name="ノート作成",
     )
