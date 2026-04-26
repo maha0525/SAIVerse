@@ -15,6 +15,14 @@ from pathlib import Path
 
 load_dotenv()
 
+# tqdm の TMonitor バックグラウンドスレッドを無効化する。
+# GPT-SoVITS など tqdm を使うアドオンが起動した状態で Python 終了時、
+# tqdm._monitor.exit() が内部ロックで MainThread と TMonitor の間に
+# デッドロックを起こし、atexit で登録した shutdown_everything に到達
+# できずプロセスが終了しなくなる既知問題の回避。
+from tqdm import tqdm as _tqdm_for_patch
+_tqdm_for_patch.monitor_interval = 0
+
 # Migrate legacy user_data/ to ~/.saiverse/user_data/ if needed
 from saiverse.data_paths import migrate_legacy_user_data
 migrate_legacy_user_data()
@@ -377,10 +385,12 @@ def main():
         if shutdown_called:
             return
         shutdown_called = True
+        logging.info("[shutdown] start")
         try:
             from tools.mcp_client import shutdown_mcp_sync
 
             shutdown_mcp_sync()
+            logging.info("[shutdown] MCP stopped")
         except Exception as e:
             logging.debug(f"Error stopping MCP connections: {e}")
         # Unity Gatewayの停止
@@ -389,11 +399,14 @@ def main():
             try:
                 loop = asyncio.new_event_loop()
                 loop.run_until_complete(manager.unity_gateway.stop())
+                logging.info("[shutdown] Unity Gateway stopped")
             except Exception as e:
                 logging.debug(f"Error stopping Unity Gateway: {e}")
         shutdown_subprocess(api_server_process, "API Server")
+        logging.info("[shutdown] API Server subprocess stopped")
         if manager:
             manager.shutdown()
+        logging.info("[shutdown] complete")
 
     def handle_sigterm(signum, frame):
         """SIGTERMを受け取ったときにクリーンアップを実行してから終了"""

@@ -301,10 +301,12 @@ class BlueprintMixin:
                 "<div class=\"note-box\">✨ Blueprint Spawn:<br>"
                 f"<b>{entity_name}がこの世界に現れました</b></div>"
             )
-            self.building_histories.setdefault(target_building_id, []).append(
-                {"role": "host", "content": arrival_message}
+            self.add_building_event(
+                target_building_id,
+                {"role": "host", "content": arrival_message},
+                heard_by=list(self.occupants.get(target_building_id, [])),
             )
-            self._save_building_histories()
+            self._save_modified_buildings()
 
             db.commit()
             return (

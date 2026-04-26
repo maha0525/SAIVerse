@@ -422,7 +422,7 @@ class RuntimeService(
             self.manager.run_sea_user(persona, building_id, message)
         logging.debug("[runtime] handle_user_input collected %d replies", len(replies))
 
-        self._save_building_histories()
+        self._save_modified_buildings()
         for persona in self.personas.values():
             persona._save_session_metadata()
         return replies
@@ -575,7 +575,7 @@ class RuntimeService(
             # and code after try/finally would never execute in that case.
             bh_sizes = {bid: len(h) for bid, h in self.building_histories.items() if h}
             logging.debug("[runtime] pre-save building_histories sizes: %s", bh_sizes)
-            self._save_building_histories()
+            self._save_modified_buildings()
             for persona in self.personas.values():
                 persona._save_session_metadata()
 
@@ -619,7 +619,7 @@ class RuntimeService(
             if getattr(persona, "interaction_mode", "auto") == "auto":
                 replies.extend(persona.run_scheduled_prompt())
         if replies:
-            self._save_building_histories()
+            self._save_modified_buildings()
             for persona in self.personas.values():
                 persona._save_session_metadata()
         return replies
@@ -831,7 +831,7 @@ class RuntimeService(
             persona.current_building_id,
             heard_by=list(self.occupants.get(persona.current_building_id, [])),
         )
-        self._save_building_histories()
+        self._save_modified_buildings()
 
     # ---- Conversation helpers for mixins ----
 

@@ -13,13 +13,15 @@ LOGGER = logging.getLogger(__name__)
 
 class HistoryManager:
     def __init__(
-        self, 
+        self,
         persona_id: str,
-        persona_log_path: Path, 
+        persona_log_path: Path,
         building_memory_paths: Dict[str, Path],
         initial_persona_history: Optional[List[Dict[str, str]]] = None,
         initial_building_histories: Optional[Dict[str, List[Dict[str, str]]]] = None,
         memory_adapter: Optional["SAIMemoryAdapter"] = None,
+        modified_buildings: Optional[set] = None,
+        quarantined_buildings: Optional[Dict[str, Any]] = None,
     ):
         self.persona_id = persona_id
         self.persona_log_path = persona_log_path
@@ -27,10 +29,50 @@ class HistoryManager:
         self.messages = initial_persona_history if initial_persona_history is not None else []
         self.building_histories = initial_building_histories if initial_building_histories is not None else {}
         self.memory_adapter = memory_adapter
+        # Reference to the manager-level modified_buildings set. When a building
+        # message is added/updated, we mark the building as modified so the
+        # next save call writes only changed buildings.
+        self._modified_buildings = modified_buildings if modified_buildings is not None else set()
+        # Reference to the manager-level quarantined_buildings dict. Used as a
+        # safety net to refuse mutations on quarantined buildings (the primary
+        # defense is at the movement layer, but defense-in-depth).
+        self._quarantined_buildings = quarantined_buildings if quarantined_buildings is not None else {}
         self._building_seq_counter: Dict[str, int] = {}
         self.metabolism_anchor_message_id: Optional[str] = None
 
         self._normalise_building_histories()
+
+    def reset_seq_counter_for_building(self, building_id: str, value: int) -> None:
+        """Reset the in-memory seq counter for a building.
+
+        Called after restore (where ``value = max_seq + 1`` of the restored
+        data) to prevent new messages from getting low seq numbers that
+        collide with restored data — and from being skipped by personas
+        whose pulse_cursor sits above the restored max_seq.
+
+        Without this, a restore that brings back data with seq 1..170 would
+        leave the counter at its old value (often 1, especially after a
+        quarantine init), and the next ``add_to_building_only`` call would
+        compute ``next_candidate = max(1, hist[-1].seq+1)``. If ``hist[-1]``
+        is a host event without a seq field (e.g., from OccupancyManager
+        directly mutating the dict), ``hist[-1].seq`` defaults to 0, giving
+        new messages seq=1, 2, 3... — way below pulse_cursor.
+        """
+        self._building_seq_counter[building_id] = max(1, int(value))
+
+    def _mark_modified(self, building_id: str) -> None:
+        """Mark a building as having pending writes.
+
+        Refuses to mark quarantined buildings — the manager will skip them
+        at save time anyway, but marking would be misleading.
+        """
+        if building_id in self._quarantined_buildings:
+            LOGGER.warning(
+                "Refusing to record modification on quarantined building %s",
+                building_id,
+            )
+            return
+        self._modified_buildings.add(building_id)
 
     def set_memory_adapter(self, adapter: Optional["SAIMemoryAdapter"]) -> None:
         self.memory_adapter = adapter
@@ -229,6 +271,7 @@ class HistoryManager:
         building_msg = self._decorate_building_message(building_id, prepared_msg, heard_by)
         hist.append(building_msg)
         self._ensure_size_limit(hist, self._get_building_memory_path(building_id))
+        self._mark_modified(building_id)
         return building_msg
 
     def _get_building_memory_path(self, building_id: str) -> Path:
@@ -257,6 +300,7 @@ class HistoryManager:
         building_msg = self._decorate_building_message(building_id, prepared_msg, heard_by)
         hist.append(building_msg)
         self._ensure_size_limit(hist, self._get_building_memory_path(building_id))
+        self._mark_modified(building_id)
         return building_msg
 
     def add_to_persona_only(self, msg: Dict[str, str]) -> None:
@@ -762,12 +806,17 @@ class HistoryManager:
             return False
 
     def save_all(self) -> None:
-        """Saves all persona and building histories to their respective files."""
+        """Saves the persona's own log file (persona_log_path).
+
+        **Note**: this method NO LONGER saves building histories. Building
+        histories are saved at the manager level via
+        ``manager._save_modified_buildings()`` which respects the modified
+        set and quarantine state. The previous behavior — iterating ALL
+        ``building_memory_paths`` and writing ``[]`` for missing keys —
+        was the root cause of a 24-building data loss event (see
+        docs/intent/building_log_safety.md).
+        """
         self.persona_log_path.parent.mkdir(parents=True, exist_ok=True)
         self.persona_log_path.write_text(
             json.dumps(self.messages, ensure_ascii=False), encoding="utf-8"
         )
-        for b_id, path in self.building_memory_paths.items():
-            hist = self.building_histories.get(b_id, [])
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(hist, ensure_ascii=False), encoding="utf-8")

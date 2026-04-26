@@ -153,17 +153,185 @@ class InitializationMixin:
         self.user_avatar_data = self.default_avatar
 
     def _init_building_histories(self) -> None:
-        """Step 3: Load Conversation Histories."""
+        """Step 3: Load Conversation Histories.
+
+        Treats 5 file states distinctly (NEVER conflate them):
+          1. **不在** (no file): new building. building_histories[b_id] = [].
+          2. **0バイト** (zero-byte): abnormal — write_text was interrupted.
+             Rescue + quarantine. Key NOT inserted.
+          3. **空配列** (``[]``): valid — building_histories[b_id] = [].
+          4. **正常配列**: valid — building_histories[b_id] = data.
+          5. **破損** (invalid JSON): abnormal. Rescue + quarantine. Key NOT inserted.
+
+        **Quarantine semantics**: a building in ``self.quarantined_buildings``
+        is treated as "no truth available". Save refuses to touch the file,
+        movement refuses entry. The UI shows the user options to restore from
+        backup / reset / handle manually. This guarantees that a corrupted file
+        is NEVER overwritten by the system — only by explicit user action.
+
+        For successfully loaded files, also performs a **startup backup snapshot**
+        (``log.json.backup_<timestamp>.bak``, rotated to keep last N) so users
+        always have a recent known-good state to restore from.
+        """
+        from datetime import datetime
+        from manager.history import (
+            create_log_backup_snapshot,
+            list_log_backups,
+        )
+
         self.building_histories: Dict[str, List[Dict[str, str]]] = {}
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
         for b_id, path in self.building_memory_paths.items():
-            if path.exists():
-                try:
-                    self.building_histories[b_id] = json.loads(path.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    LOGGER.warning("Failed to load building history %s", b_id)
-                    self.building_histories[b_id] = []
-            else:
+            # State 1: 不在
+            if not path.exists():
                 self.building_histories[b_id] = []
+                continue
+
+            # State 2: 0バイト
+            if path.stat().st_size == 0:
+                self._quarantine_building(
+                    b_id, path, timestamp,
+                    reason="zero_byte",
+                    title_suffix="0バイト",
+                    message_extra="ファイルが空（0バイト）になっており、書き込みが途中で中断された痕跡です。",
+                )
+                continue
+
+            # States 3, 4, 5: try to parse
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                # State 5: 破損
+                self._quarantine_building(
+                    b_id, path, timestamp,
+                    reason="corrupted",
+                    title_suffix="破損",
+                    message_extra=f"JSONパース失敗: {exc}",
+                )
+                continue
+
+            if not isinstance(data, list):
+                # 構造異常（dictやnullなど）
+                self._quarantine_building(
+                    b_id, path, timestamp,
+                    reason="invalid_structure",
+                    title_suffix="構造異常",
+                    message_extra=f"配列でなく {type(data).__name__} が格納されていました。",
+                )
+                continue
+
+            # States 3, 4: valid load
+            self.building_histories[b_id] = data
+
+            # 起動成功時バックアップスナップショット
+            try:
+                create_log_backup_snapshot(path, timestamp)
+            except Exception:
+                LOGGER.warning(
+                    "Failed to create startup backup for %s", b_id, exc_info=True,
+                )
+            # 既存のバックアップ一覧をログ（隔離時の選択肢になるため）
+            backups = list_log_backups(path)
+            LOGGER.debug(
+                "Building %s loaded (%d msgs); %d backup(s) available",
+                b_id, len(data), len(backups),
+            )
+
+    def _quarantine_building(
+        self,
+        b_id: str,
+        path: "Path",
+        timestamp: str,
+        *,
+        reason: str,
+        title_suffix: str,
+        message_extra: str,
+    ) -> None:
+        """Move corrupted/invalid file to a backup name and mark building as quarantined.
+
+        Quarantined buildings:
+          - have NO key in self.building_histories (so save skips them)
+          - are listed in self.quarantined_buildings (with restore options)
+          - block movement (handled in OccupancyManager)
+          - are surfaced via self.startup_alerts (banner)
+        """
+        from manager.history import list_log_backups
+
+        backup_path = path.parent / f"{path.name}.corrupted_{timestamp}"
+        rescue_error: Optional[str] = None
+        rescued = False
+        try:
+            path.rename(backup_path)
+            rescued = True
+            LOGGER.error(
+                "Building history for %s is %s; rescued to %s",
+                b_id, reason, backup_path,
+            )
+        except OSError as rename_exc:
+            rescue_error = str(rename_exc)
+            LOGGER.error(
+                "Failed to rescue %s log for %s: %s",
+                reason, b_id, rename_exc,
+            )
+
+        available_backups = [str(p) for p in list_log_backups(path)]
+
+        # 隔離レコード — UI から復旧操作する時のソースオブトゥルース
+        self.quarantined_buildings[b_id] = {
+            "building_id": b_id,
+            "reason": reason,
+            "original_path": str(path),
+            "corrupted_path": str(backup_path) if rescued else None,
+            "rescue_error": rescue_error,
+            "available_backups": available_backups,
+            "detected_at": timestamp,
+        }
+
+        # アラート
+        if rescued:
+            alert = {
+                "id": f"quarantine_{b_id}_{timestamp}",
+                "level": "critical",
+                "title": f"会話履歴ファイルが{title_suffix}: {b_id}",
+                "message": (
+                    f"ビルディング「{b_id}」のチャット履歴ファイルが異常状態でした。"
+                    f"{message_extra} 破損ファイルを安全な場所に退避し、このビルディングは"
+                    "**隔離状態**にしました。新規会話・入室は制限されています。"
+                    f"利用可能なバックアップが{len(available_backups)}個あります。"
+                    "アラート横の「対応する」ボタンから復元・リセット等を選択してください。"
+                ),
+                "details": {
+                    "building_id": b_id,
+                    "reason": reason,
+                    "original_path": str(path),
+                    "corrupted_path": str(backup_path),
+                    "available_backups": available_backups,
+                    "recovery_instructions": (
+                        "1) アラート横の「対応する」ボタンから復元方法を選ぶ、"
+                        "2) または手動で退避ファイルを log.json にリネームして再起動する"
+                    ),
+                },
+            }
+        else:
+            alert = {
+                "id": f"quarantine_rescue_failed_{b_id}_{timestamp}",
+                "level": "critical",
+                "title": f"会話履歴ファイル{title_suffix} + 退避失敗: {b_id}",
+                "message": (
+                    "ビルディングのチャット履歴ファイルが異常で、さらに退避にも失敗しました。"
+                    "**システムは自動上書きを停止しました**ので、安全な場所にファイルをコピーして"
+                    "から手動で対応してください。"
+                ),
+                "details": {
+                    "building_id": b_id,
+                    "reason": reason,
+                    "original_path": str(path),
+                    "rescue_error": rescue_error,
+                    "available_backups": available_backups,
+                },
+            }
+        self.startup_alerts.append(alert)
 
     def _init_model_config(self, model: Optional[str]) -> None:
         """Step 4a: Initialize model configuration."""

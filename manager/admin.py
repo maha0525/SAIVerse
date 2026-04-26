@@ -1065,10 +1065,15 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 f"<b>{event_message}</b></div>"
             )
             for building_id in self.building_map.keys():
-                self.building_histories.setdefault(building_id, []).append(
-                    {"role": "host", "content": formatted_message}
+                # heard_by = current occupants so all present personas perceive
+                # the world event in their auto_ingest. add_building_event
+                # handles quarantine skip and modified_buildings marking.
+                self.add_building_event(
+                    building_id,
+                    {"role": "host", "content": formatted_message},
+                    heard_by=list(self.occupants.get(building_id, [])),
                 )
-            self._save_building_histories()
+            self._save_modified_buildings()
             logging.info("World event successfully broadcasted to all buildings.")
             return "World event triggered successfully."
         except Exception as exc:

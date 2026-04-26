@@ -132,6 +132,12 @@ class PersonaCore(
         # Initialise SAIMemory bridge for long-term recall/summary
         self.sai_memory: Optional[SAIMemoryAdapter] = initialise_memory_adapter(self)
 
+        # Pull manager-level state for building modification tracking and
+        # quarantine awareness so HistoryManager can mark modifications and
+        # refuse mutations on quarantined buildings.
+        _mod_set = getattr(manager_ref, "modified_buildings", None) if manager_ref else None
+        _quar_dict = getattr(manager_ref, "quarantined_buildings", None) if manager_ref else None
+
         # Initialize managers that depend on loaded data
         self.history_manager = HistoryManager(
             persona_id=self.persona_id,
@@ -140,6 +146,8 @@ class PersonaCore(
             initial_persona_history=self.messages,
             initial_building_histories=building_histories,
             memory_adapter=self.sai_memory,
+            modified_buildings=_mod_set,
+            quarantined_buildings=_quar_dict,
         )
 
         # Configure pulse tracking based on loaded histories

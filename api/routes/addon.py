@@ -104,6 +104,48 @@ class AddonUiExtensions(BaseModel):
     client_actions: List[AddonClientAction] = []
 
 
+class AddonOAuthFlow(BaseModel):
+    """アドオンが提供する OAuth 認可フローの宣言。
+
+    1つのアドオンで複数のOAuth接続を持てる（例: 同じアドオンが X と Mastodon
+    両方の接続を提供する場合）。フローは常に per_persona であり、認可結果の
+    トークン類は AddonPersonaConfig に保存される。
+
+    フィールド:
+      - ``key``: アドオン内で一意な識別子。コールバックパス算出などに使う
+      - ``label``: AddonManager UI に表示する見出し
+      - ``description``: UI 補助テキスト
+      - ``provider``: OAuth フレーバー。Phase 1 は ``oauth2_pkce`` のみ対応
+      - ``authorize_url`` / ``token_url``: OAuth エンドポイント
+      - ``scopes``: 要求する scope のリスト
+      - ``client_id_param``: グローバル ``params_schema`` のキー名を参照。
+        ユーザー自身の Developer App credentials を使う設計
+      - ``client_secret_param``: 同上。PKCE のみで secret 不要なケースは省略可
+      - ``callback_path``: 省略時は ``/api/oauth/callback/<addon>/<key>`` が
+        自動算出される。Developer Portal に登録済みのコールバックURLと一致
+        させる必要があるため、外部要請で固定パスを使いたい場合のみ明示
+      - ``result_mapping``: token endpoint レスポンスの各フィールドを
+        ``AddonPersonaConfig.params_json`` のどのキーに保存するかの対応表。
+        例: ``{"access_token": "x_access_token", "refresh_token": "x_refresh_token"}``
+      - ``post_authorize_handler``: 認可成功後のフック。
+        ``"module_name:function_name"`` 形式で ``expansion_data/<addon>/`` 配下の
+        Python ファイルを参照。引数 ``(persona_id, tokens, params)`` を受け、
+        追加で AddonPersonaConfig に保存する dict を返す
+    """
+    key: str
+    label: str
+    description: Optional[str] = None
+    provider: str  # Phase 1: "oauth2_pkce" のみ
+    authorize_url: str
+    token_url: str
+    scopes: List[str] = []
+    client_id_param: str
+    client_secret_param: Optional[str] = None
+    callback_path: Optional[str] = None
+    result_mapping: Dict[str, str]
+    post_authorize_handler: Optional[str] = None
+
+
 class AddonManifest(BaseModel):
     name: str
     display_name: str = ""
@@ -111,6 +153,7 @@ class AddonManifest(BaseModel):
     version: str = ""
     params_schema: List[AddonParamSchema] = []
     ui_extensions: AddonUiExtensions = AddonUiExtensions()
+    oauth_flows: List[AddonOAuthFlow] = []
 
 
 class AddonInfo(BaseModel):
@@ -122,6 +165,7 @@ class AddonInfo(BaseModel):
     params_schema: List[AddonParamSchema]
     params: Dict[str, Any]
     ui_extensions: AddonUiExtensions
+    oauth_flows: List[AddonOAuthFlow] = []
 
 
 class SetEnabledRequest(BaseModel):
@@ -219,6 +263,7 @@ def list_addons(_manager=Depends(get_manager)):
                 params_schema=manifest.params_schema,
                 params=params,
                 ui_extensions=manifest.ui_extensions,
+                oauth_flows=manifest.oauth_flows,
             ))
         return results
     finally:
@@ -257,13 +302,14 @@ def get_addon(addon_name: str, _manager=Depends(get_manager)):
             params_schema=manifest.params_schema,
             params=params,
             ui_extensions=manifest.ui_extensions,
+            oauth_flows=manifest.oauth_flows,
         )
     finally:
         db.close()
 
 
 @router.put("/{addon_name}/enabled")
-def set_addon_enabled(addon_name: str, body: SetEnabledRequest, _manager=Depends(get_manager)):
+def set_addon_enabled(addon_name: str, body: SetEnabledRequest, manager=Depends(get_manager)):
     """アドオンの有効/無効を切り替える。サーバー再起動不要で即時反映。"""
     addon_dir = _get_addon_dir(addon_name)
     if not addon_dir.exists():
@@ -290,6 +336,26 @@ def set_addon_enabled(addon_name: str, body: SetEnabledRequest, _manager=Depends
     except Exception as exc:
         LOGGER.warning(
             "addon: MCP notification failed for '%s' (enabled=%s): %s",
+            addon_name,
+            body.is_enabled,
+            exc,
+        )
+
+    # Notify integration layer so addon-provided BaseIntegration subclasses
+    # are register/unregistered without requiring a restart.
+    # See docs/intent/addon_extension_points.md §C.
+    try:
+        integration_manager = getattr(manager, "integration_manager", None)
+        if integration_manager is not None:
+            if body.is_enabled:
+                from saiverse.addon_loader import register_addon_integrations
+                register_addon_integrations(integration_manager, addon_name)
+            else:
+                from saiverse.addon_loader import unregister_addon_integrations
+                unregister_addon_integrations(integration_manager, addon_name)
+    except Exception as exc:
+        LOGGER.warning(
+            "addon: integration notification failed for '%s' (enabled=%s): %s",
             addon_name,
             body.is_enabled,
             exc,

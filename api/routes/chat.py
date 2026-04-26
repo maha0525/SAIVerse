@@ -48,6 +48,7 @@ class ChatMessage(BaseModel):
 class ChatHistoryResponse(BaseModel):
     history: List[ChatMessage]
     has_more: bool = False  # Whether there are older messages available
+    quarantined: bool = False  # True if this building's log.json is corrupted/quarantined
 
 @router.get("/persona/{persona_id}/avatar")
 def get_persona_avatar(persona_id: str, manager = Depends(get_manager)):
@@ -83,7 +84,14 @@ def get_chat_history(
     
     if not current_bid:
         logging.warning("get_chat_history: No user_current_building_id")
-        return {"history": [], "has_more": False}
+        return {"history": [], "has_more": False, "quarantined": False}
+
+    # Quarantine: building's log.json is corrupted. Return empty history but
+    # signal the UI so it can show the appropriate state instead of pretending
+    # the building is empty.
+    if hasattr(manager, "quarantined_buildings") and current_bid in manager.quarantined_buildings:
+        logging.info("[CHAT_HISTORY] Building %s is quarantined; returning empty history with flag", current_bid)
+        return {"history": [], "has_more": False, "quarantined": True}
 
     raw_history = manager.building_histories.get(current_bid, [])
     

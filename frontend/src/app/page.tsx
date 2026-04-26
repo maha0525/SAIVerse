@@ -27,6 +27,7 @@ import { useActiveClientTab } from '@/hooks/useActiveClientTab';
 import { useClientActions } from '@/hooks/useClientActions';
 import { ActiveClientIndicator } from '@/components/ActiveClientIndicator';
 import AddonBubbleButtons, { BubbleButtonDef } from '@/components/AddonBubbleButtons';
+import SystemAlertBanner from '@/components/SystemAlertBanner';
 
 // Allow className on HTML elements used by thinking blocks (<details>, <div>, <summary>)
 const sanitizeSchema = {
@@ -1773,6 +1774,7 @@ export default function Home() {
             onTouchStart={handleTouchStart}
             onTouchMove={handleTouchMove}
         >
+            <SystemAlertBanner />
             <Sidebar
                 refreshTrigger={backendConnected}
                 onMove={(buildingId?: string) => {

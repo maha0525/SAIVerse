@@ -180,7 +180,14 @@ class TestHistoryManager(unittest.TestCase):
         recent = self.history_manager.get_recent_history(0)
         self.assertEqual(recent, [])
 
-    def test_save_all(self):
+    def test_save_all_writes_only_persona_log(self):
+        """save_all() は persona_log のみ書く。building_histories は書かない。
+
+        旧実装は building_memory_paths を全件 iterate して
+        ``building_histories.get(b_id, [])`` で書いていた。これが
+        24件同時データロス事故の主因だったため削除済み。building 保存は
+        manager._save_modified_buildings() に責務移行している。
+        """
         msg1 = {"role": "user", "content": "Save test 1"}
         msg2 = {"role": "assistant", "content": "Save test 2"}
         self.history_manager.add_message(msg1, "user_room")
@@ -188,19 +195,20 @@ class TestHistoryManager(unittest.TestCase):
 
         self.history_manager.save_all()
 
+        # persona_log は書かれる
         self.mock_path_write_text.assert_any_call(
             json.dumps(self.history_manager.messages, ensure_ascii=False),
             encoding="utf-8",
         )
-        self.mock_path_write_text.assert_any_call(
-            json.dumps(self.history_manager.building_histories["user_room"], ensure_ascii=False),
-            encoding="utf-8",
+        # building_histories は書かれない (responsibility moved to manager)
+        building_history_calls = [
+            c for c in self.mock_path_write_text.call_args_list
+            if "user_room" in str(c) or "deep_think_room" in str(c)
+        ]
+        self.assertEqual(
+            building_history_calls, [],
+            "save_all should NOT write building histories — that's the manager's job now",
         )
-        self.mock_path_write_text.assert_any_call(
-            json.dumps(self.history_manager.building_histories["deep_think_room"], ensure_ascii=False),
-            encoding="utf-8",
-        )
-        self.mock_path_mkdir.assert_called_with(parents=True, exist_ok=True)
 
     def test_get_recent_entrant_events_only_returns_ai_enter_events(self):
         self.history_manager.building_histories["user_room"] = [

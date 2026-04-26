@@ -7,7 +7,7 @@ import requests
 import logging
 from pathlib import Path
 import mimetypes
-from typing import Dict, List, Optional, Tuple, Iterator, Union, Any, Callable
+from typing import Dict, List, Optional, Set, Tuple, Iterator, Union, Any, Callable
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import importlib
@@ -93,6 +93,19 @@ class SAIVerseManager(
         model: Optional[str] = None,
         sds_url: str = os.getenv("SDS_URL", "http://127.0.0.1:8080"),
     ):
+        # --- Critical: startup_alerts and quarantine state must exist before
+        # _init_building_histories so corruption events can be recorded.
+        self.startup_alerts: List[Dict[str, Any]] = []
+        # Buildings whose log.json is corrupted/zero-byte. While quarantined:
+        #   - building_histories does NOT contain the key (treated as "no truth")
+        #   - save_building_histories refuses to write
+        #   - move_entity refuses entry
+        # Quarantine info: {building_id: {"reason", "corrupted_path", "available_backups"}}
+        self.quarantined_buildings: Dict[str, Dict[str, Any]] = {}
+        # Buildings whose in-memory history was modified since last save.
+        # Used to scope explicit save calls so we never iterate the full path map.
+        self.modified_buildings: Set[str] = set()
+
         # --- Phase 1: Data Loading ---
         self._init_database(db_path)
         self._init_city_config(city_name)
@@ -333,12 +346,22 @@ class SAIVerseManager(
 
         Auto-detects available integrations (e.g. X mentions) based on
         whether credentials are configured for any persona.
+
+        Also loads addon-provided integrations from
+        ``expansion_data/<addon>/integrations/*.py`` for any enabled addon.
         """
         try:
             from saiverse.integrations.x_mentions import XMentionIntegration
             self.integration_manager.register(XMentionIntegration())
         except Exception:
             logging.debug("XMentionIntegration not available", exc_info=True)
+
+        # Load integrations declared by enabled addons
+        try:
+            from saiverse.addon_loader import load_addon_integrations
+            load_addon_integrations(self.integration_manager)
+        except Exception:
+            logging.exception("Failed to load addon integrations")
 
     def _emit_trigger(self, trigger_type: TriggerType, data: Dict[str, Any]) -> None:
         """Emit a trigger event to the PhenomenonManager."""
@@ -625,8 +648,12 @@ class SAIVerseManager(
                 if last_building_id and last_building_id in self.building_map:
                     username = user.USERNAME or "ユーザー"
                     logout_message = f'<div class="note-box">🚶 User Action:<br><b>{username}がオフラインになりました</b></div>'
-                    self.building_histories.setdefault(last_building_id, []).append({"role": "host", "content": logout_message})
-                    self._save_building_histories()
+                    self.add_building_event(
+                        last_building_id,
+                        {"role": "host", "content": logout_message},
+                        heard_by=list(self.occupants.get(last_building_id, [])),
+                    )
+                    self._save_modified_buildings()
                     logging.info(f"Logged user logout in building {last_building_id}")
 
                 self._refresh_user_state_cache()
@@ -709,7 +736,7 @@ class SAIVerseManager(
         # Save all persona and building states
         for persona in self.personas.values():
             persona._save_session_metadata()
-        self._save_building_histories()
+        self._save_modified_buildings()
         logging.info("SAIVerseManager shutdown complete.")
 
     def handle_user_input(self, message: str, metadata: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -947,7 +974,7 @@ class SAIVerseManager(
             if getattr(persona, "interaction_mode", "auto") == "auto":
                 replies.extend(persona.run_scheduled_prompt())
         if replies:
-            self._save_building_histories()
+            self._save_modified_buildings()
             for persona in self.personas.values():
                 persona._save_session_metadata()
         return replies

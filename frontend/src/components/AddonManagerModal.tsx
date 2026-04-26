@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { X, Package, ChevronDown, ChevronRight, Trash2 } from 'lucide-react';
 import ModalOverlay from './common/ModalOverlay';
 import MCPSection from './MCPSection';
+import OAuthFlowSection, { OAuthFlow } from './OAuthFlowSection';
 import styles from './AddonManagerModal.module.css';
 
 // ---------------------------------------------------------------------------
@@ -41,6 +42,7 @@ interface AddonInfo {
         bubble_buttons: unknown[];
         input_buttons: unknown[];
     };
+    oauth_flows?: OAuthFlow[];
 }
 
 interface PersonaPersonaConfig {
@@ -608,6 +610,13 @@ function AddonCard({
             {expanded && addon.is_enabled && (
                 <div className={styles.addonCardBody}>
                     <ParamsSection addon={addon} personas={personas} />
+                    {addon.oauth_flows && addon.oauth_flows.length > 0 && (
+                        <OAuthFlowSection
+                            addonName={addon.addon_name}
+                            flows={addon.oauth_flows}
+                            personas={personas}
+                        />
+                    )}
                     <MCPSection addonName={addon.addon_name} defaultCollapsed={true} />
                 </div>
             )}

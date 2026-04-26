@@ -57,6 +57,33 @@ class IntegrationManager:
             integration.poll_interval_seconds,
         )
 
+    def unregister(self, name: str) -> bool:
+        """Unregister an integration by name.
+
+        Used when an addon is disabled at runtime (via addon_loader).
+        The polling loop is thread-safe to read-only iteration over
+        ``self._integrations``; mutation here happens between ticks.
+
+        Args:
+            name: integration.name to remove
+
+        Returns:
+            True if an integration was removed, False if not found
+        """
+        before = len(self._integrations)
+        self._integrations = [i for i in self._integrations if i.name != name]
+        removed = before > len(self._integrations)
+        if removed:
+            self._last_poll.pop(name, None)
+            LOGGER.info(
+                "[IntegrationManager] Unregistered integration '%s'", name
+            )
+        else:
+            LOGGER.debug(
+                "[IntegrationManager] unregister: '%s' not found", name
+            )
+        return removed
+
     def start(self) -> None:
         """Start the background polling thread."""
         if self._thread and self._thread.is_alive():

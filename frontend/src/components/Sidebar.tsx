@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from 'react';
 import styles from './Sidebar.module.css';
-import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, Navigation, Bell, Package } from 'lucide-react';
+import { Settings, Zap, BarChart2, UserPlus, Plus, X, HelpCircle, Navigation, Bell, Package, AlertTriangle } from 'lucide-react';
 import GlobalSettingsModal from './GlobalSettingsModal';
 import UserProfileModal from './UserProfileModal';
 import PersonaWizard from './PersonaWizard';
@@ -44,6 +44,33 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
     const [isTutorialSelectOpen, setIsTutorialSelectOpen] = useState(false);
     const [isAddonManagerOpen, setIsAddonManagerOpen] = useState(false);
     const [developerMode, setDeveloperMode] = useState(false);
+    const [quarantinedIds, setQuarantinedIds] = useState<Set<string>>(new Set());
+
+    useEffect(() => {
+        let cancelled = false;
+        async function fetchQuarantine() {
+            try {
+                const res = await fetch('/api/system/quarantine');
+                if (!res.ok || cancelled) return;
+                const data = await res.json();
+                const ids = new Set<string>(
+                    (data.quarantined || []).map((q: { building_id: string }) => q.building_id)
+                );
+                setQuarantinedIds(ids);
+            } catch {
+                // silent
+            }
+        }
+        fetchQuarantine();
+        // Listen for quarantine resolution events (restore/reset from modal)
+        // so the sidebar warning indicator clears immediately.
+        const handleResolved = () => fetchQuarantine();
+        window.addEventListener('quarantine-resolved', handleResolved);
+        return () => {
+            cancelled = true;
+            window.removeEventListener('quarantine-resolved', handleResolved);
+        };
+    }, [refreshTrigger]);
 
     // Swipe Logic for Control
     const startX = useRef<number | null>(null);
@@ -286,16 +313,24 @@ export default function Sidebar({ onMove, isOpen, onOpen, onClose, refreshTrigge
                     </div>
                 )}
                 <div className={styles.buildingList}>
-                    {buildings.map(b => (
-                        <div
-                            key={b.id}
-                            className={`${styles.buildingItem} ${status?.current_building_id === b.id ? styles.active : ''}`}
-                            onClick={() => handleMove(b.id)}
-                        >
-                            <span>{b.name}</span>
-                            {status?.current_building_id === b.id && <Navigation size={14} style={{ opacity: 0.8 }} />}
-                        </div>
-                    ))}
+                    {buildings.map(b => {
+                        const isQuarantined = quarantinedIds.has(b.id);
+                        return (
+                            <div
+                                key={b.id}
+                                className={`${styles.buildingItem} ${status?.current_building_id === b.id ? styles.active : ''}`}
+                                onClick={() => isQuarantined ? null : handleMove(b.id)}
+                                style={isQuarantined ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}
+                                title={isQuarantined ? 'このビルディングは会話履歴ファイルが破損しているため隔離中です。アラートバナーから対応してください。' : undefined}
+                            >
+                                <span>{b.name}</span>
+                                {isQuarantined && (
+                                    <AlertTriangle size={14} style={{ color: '#ff6666' }} />
+                                )}
+                                {status?.current_building_id === b.id && <Navigation size={14} style={{ opacity: 0.8 }} />}
+                            </div>
+                        );
+                    })}
                 </div>
 
                 {/* System Section */}

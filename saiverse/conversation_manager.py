@@ -129,7 +129,7 @@ class ConversationManager:
             self.saiverse_manager.run_sea_auto(speaker_persona, self.building_id, all_occupants)
 
             # Building履歴をディスクに保存（in-memory → log.json）
-            self.saiverse_manager._save_building_histories()
+            self.saiverse_manager._save_modified_buildings()
             speaker_persona._save_session_metadata()
 
             # 次の発話者のためにインデックスを進める

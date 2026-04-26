@@ -1,0 +1,151 @@
+.banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px;
+    pointer-events: none;
+}
+
+.alert {
+    pointer-events: auto;
+    background: #2a2a2a;
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    overflow: hidden;
+    border-left: 6px solid #888;
+}
+
+.critical {
+    background: #3a1818;
+    border-left-color: #ff4d4d;
+}
+
+.warning {
+    background: #3a2e18;
+    border-left-color: #ffaa33;
+}
+
+.info {
+    background: #18283a;
+    border-left-color: #4d9eff;
+}
+
+.headerRow {
+    display: flex;
+    align-items: stretch;
+    width: 100%;
+}
+
+.header {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    background: transparent;
+    border: none;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: left;
+}
+
+.header:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.actionButton {
+    margin: 8px 12px 8px 0;
+    padding: 6px 14px;
+    border-radius: 4px;
+    background: #c14d4d;
+    color: white;
+    border: none;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    align-self: center;
+}
+
+.actionButton:hover {
+    background: #d15d5d;
+}
+
+.icon {
+    flex-shrink: 0;
+}
+
+.critical .icon {
+    color: #ff6666;
+}
+
+.warning .icon {
+    color: #ffbb55;
+}
+
+.info .icon {
+    color: #66b3ff;
+}
+
+.title {
+    flex: 1;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.chevron {
+    flex-shrink: 0;
+    opacity: 0.7;
+}
+
+.body {
+    padding: 0 16px 14px 40px;
+    color: #ddd;
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+.message {
+    margin: 0 0 12px 0;
+}
+
+.details {
+    margin: 0;
+    padding: 10px 12px;
+    background: rgba(0, 0, 0, 0.25);
+    border-radius: 4px;
+    font-size: 13px;
+}
+
+.detailRow {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-bottom: 8px;
+}
+
+.detailRow:last-child {
+    margin-bottom: 0;
+}
+
+.detailKey {
+    margin: 0;
+    font-weight: 600;
+    color: #aaa;
+    font-size: 12px;
+}
+
+.detailValue {
+    margin: 0;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    word-break: break-all;
+    overflow-wrap: anywhere;
+    color: #fff;
+}

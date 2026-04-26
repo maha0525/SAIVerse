@@ -55,6 +55,20 @@ class OccupancyManager:
             return False, f"移動失敗: 建物 '{to_id}' が見つかりません。"
         if from_id == to_id:
             return True, "同じ場所にいます。"
+        # Quarantine block: refuse entry to buildings whose log.json was
+        # detected as corrupted/zero-byte at startup. The user must resolve
+        # via the UI (restore from backup / reset / handle manually) before
+        # the building accepts new entries.
+        quarantined = getattr(self._manager_ref, "quarantined_buildings", None)
+        if quarantined and to_id in quarantined:
+            logging.warning(
+                "move_entity blocked: destination %s is quarantined (corrupted log.json)",
+                to_id,
+            )
+            return False, (
+                f"移動失敗: 建物 '{self.building_map[to_id].name}' は会話履歴ファイルが"
+                "破損しているため一時的に隔離されています。アラートバナーから対応してください。"
+            )
 
         if entity_type == 'ai':
             capacity_limit = self.capacities.get(to_id, 1)
@@ -127,13 +141,41 @@ class OccupancyManager:
                 }
             }
             left_message = f'<div class="note-box" data-entity-id="{entity_id}">🚶 {action_type}:<br><b>{entity_name}が{to_building_name}へ移動しました</b></div>'
-            self.building_histories.setdefault(from_id, []).append(
-                {"role": "host", "content": left_message, "metadata": left_metadata}
-            )
             entered_message = f'<div class="note-box" data-entity-id="{entity_id}">🚶 {action_type}:<br><b>{entity_name}が{from_building_name}から入室しました</b></div>'
-            self.building_histories.setdefault(to_id, []).append(
-                {"role": "host", "content": entered_message, "metadata": enter_metadata}
-            )
+            # Add events through manager's add_building_event so they get proper
+            # seq / message_id / heard_by — without this, auto_ingest's
+            # ``persona_id in heard_by`` filter excludes them and personas have
+            # no episodic memory of moving (and seq corruption breaks new
+            # message numbering — see manager/history.py:add_building_event).
+            #
+            # heard_by:
+            #  - LEFT in FROM building: occupants AFTER move (= remaining ones who
+            #    "witnessed the leave")
+            #  - ENTER in TO building: occupants AFTER move (= including the moving
+            #    entity, so they have a record of arriving)
+            from_occupants = list(self.occupants.get(from_id, []))
+            to_occupants = list(self.occupants.get(to_id, []))
+            mgr = self._manager_ref
+            if mgr is not None and hasattr(mgr, "add_building_event"):
+                mgr.add_building_event(
+                    from_id,
+                    {"role": "host", "content": left_message, "metadata": left_metadata},
+                    heard_by=from_occupants,
+                )
+                mgr.add_building_event(
+                    to_id,
+                    {"role": "host", "content": entered_message, "metadata": enter_metadata},
+                    heard_by=to_occupants,
+                )
+            else:
+                # Fallback: legacy direct append (manager_ref absent — should not
+                # happen in production, but covered for robustness in tests).
+                self.building_histories.setdefault(from_id, []).append(
+                    {"role": "host", "content": left_message, "metadata": left_metadata}
+                )
+                self.building_histories.setdefault(to_id, []).append(
+                    {"role": "host", "content": entered_message, "metadata": enter_metadata}
+                )
 
             logging.info(f"Moved {entity_type} '{entity_id}' from {from_id} to {to_id}.")
 

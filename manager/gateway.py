@@ -390,6 +390,12 @@ class GatewayMixin:
         runtime.submit(enqueue())
 
     def _append_gateway_history(self, building_id: str, entry: Dict[str, Any]) -> None:
+        if building_id in self.quarantined_buildings:
+            logging.warning(
+                "Gateway entry refused: building %s is quarantined", building_id,
+            )
+            return
         history = self.building_histories.setdefault(building_id, [])
         history.append(entry)
-        self._save_building_histories()
+        self.modified_buildings.add(building_id)
+        self._save_modified_buildings()

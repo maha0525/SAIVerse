@@ -246,10 +246,12 @@ class VisitorMixin:
                     "<div class=\"note-box\">🏢 City Transfer:<br>"
                     f"<b>{pname}が故郷に帰ってきました</b></div>"
                 )
-                self.building_histories.setdefault(target_bid, []).append(
-                    {"role": "host", "content": arrival_message}
+                self.add_building_event(
+                    target_bid,
+                    {"role": "host", "content": arrival_message},
+                    heard_by=list(self.occupants.get(target_bid, [])),
                 )
-                self._save_building_histories()
+                self._save_modified_buildings()
                 return True, f"Welcome home, {pname}!"
 
             if pid in self.personas or pid in self.visiting_personas:
@@ -307,10 +309,12 @@ class VisitorMixin:
                 "<div class=\"note-box\">🏢 City Transfer:<br>"
                 f"<b>{pname}が別のCityからやってきました</b></div>"
             )
-            self.building_histories.setdefault(target_bid, []).append(
-                {"role": "host", "content": arrival_message}
+            self.add_building_event(
+                target_bid,
+                {"role": "host", "content": arrival_message},
+                heard_by=list(self.occupants.get(target_bid, [])),
             )
-            self._save_building_histories()
+            self._save_modified_buildings()
             logging.info(
                 "Successfully placed visiting persona %s in %s",
                 pname,
