@@ -27,6 +27,17 @@ _tqdm_for_patch.monitor_interval = 0
 from saiverse.data_paths import migrate_legacy_user_data
 migrate_legacy_user_data()
 
+# Configure logging EARLY — before importing modules whose import chains
+# trigger side-effects with their own logging (e.g. saiverse_manager →
+# tools.core → tools/__init__.py の autodiscover). Without this, those
+# INFO/DEBUG logs are dropped because the root logger still uses Python's
+# default WARNING level when those side-effects run.
+level_name = os.getenv("SAIVERSE_LOG_LEVEL", "INFO").upper()
+if level_name not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+    level_name = "INFO"
+from saiverse.logging_config import configure_logging
+SESSION_LOG_DIR = configure_logging(level_name)
+
 try:
     import psutil  # type: ignore
 except ImportError:  # pragma: no cover - optional dependency
@@ -50,12 +61,6 @@ except ImportError:
     UnityGatewayServer = None
     UNITY_GATEWAY_AVAILABLE = False
 
-level_name = os.getenv("SAIVERSE_LOG_LEVEL", "INFO").upper()
-if level_name not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
-    level_name = "INFO"
-# Configure logging with terminal mirroring and per-startup log files
-from saiverse.logging_config import configure_logging
-SESSION_LOG_DIR = configure_logging(level_name)
 try:
     _chat_limit_env = int(os.getenv("SAIVERSE_CHAT_HISTORY_LIMIT", "120"))
 except ValueError:
