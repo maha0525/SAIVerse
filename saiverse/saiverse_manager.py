@@ -749,6 +749,48 @@ class SAIVerseManager(
         self._save_modified_buildings()
         logging.info("SAIVerseManager shutdown complete.")
 
+    def _ensure_user_conversation_track(self, persona_id: str, user_id: str) -> str:
+        """対ユーザー Track が未作成なら新規作成 + activate して track_id を返す。
+
+        既に存在する場合は何もしない (他の running な Track を pending に
+        押し出さないため、Phase B-4 の最小実装としては「無ければ作る」だけ)。
+        Intent A v0.9 が定める「ユーザー発言で alert 状態 → メタレイヤー判断」
+        の本来挙動はメタレイヤー実装後 (Phase B-6+) で対応する。
+
+        Args:
+            persona_id: 対象ペルソナ ID。
+            user_id: ユーザー ID (文字列化済)。
+        Returns:
+            track_id (UUID 文字列)。
+        """
+        # 既存検索: track_type=user_conversation かつ metadata.user_id 一致
+        tracks = self.track_manager.list_for_persona(persona_id)
+        for t in tracks:
+            if t.track_type != "user_conversation":
+                continue
+            try:
+                md = json.loads(t.track_metadata) if t.track_metadata else {}
+            except (TypeError, ValueError):
+                md = {}
+            if md.get("user_id") == user_id:
+                return t.track_id
+
+        # 新規作成 + activate
+        track_id = self.track_manager.create(
+            persona_id=persona_id,
+            track_type="user_conversation",
+            title=f"対 user{user_id} 会話",
+            is_persistent=True,
+            output_target="building:current",
+            metadata=json.dumps({"user_id": user_id}, ensure_ascii=False),
+        )
+        self.track_manager.activate(track_id)
+        logging.info(
+            "[track-hook] Created and activated user_conversation track %s for persona=%s user_id=%s",
+            track_id, persona_id, user_id,
+        )
+        return track_id
+
     def handle_user_input(self, message: str, metadata: Optional[Dict[str, Any]] = None) -> List[str]:
         return self.runtime.handle_user_input(message, metadata=metadata)
 

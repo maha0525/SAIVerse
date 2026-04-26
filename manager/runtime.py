@@ -78,6 +78,8 @@ class RuntimeService(
         # passthrough hooks
         self._handle_visitor_arrival = manager._handle_visitor_arrival
         self._save_building_histories = manager._save_building_histories
+        self._save_modified_buildings = manager._save_modified_buildings
+        self.add_building_event = manager.add_building_event
         self._register_with_sds = manager._register_with_sds
         self._update_cities_from_sds = manager._update_cities_from_sds
         self._load_cities_from_db = manager._load_cities_from_db
@@ -391,6 +393,19 @@ class RuntimeService(
             self.occupants.get(building_id, []),
         )
 
+        # 対ユーザー Track の自動作成 (Phase B-4)
+        # 既に存在する場合は何もしない (他 Track の running を保護)。
+        try:
+            user_id_str = str(self.state.user_id)
+            for persona in responding_personas:
+                self.manager._ensure_user_conversation_track(
+                    persona.persona_id, user_id_str
+                )
+        except Exception:
+            logging.exception(
+                "[track-hook] Failed to ensure user_conversation track (handle_user_input)"
+            )
+
         user_entry = {"role": "user", "content": message}
         if metadata:
             user_entry["metadata"] = metadata
@@ -458,6 +473,19 @@ class RuntimeService(
             [p.persona_id for p in responding_personas],
             self.occupants.get(building_id, []),
         )
+
+        # 対ユーザー Track の自動作成 (Phase B-4)
+        # 既に存在する場合は何もしない (他 Track の running を保護)。
+        try:
+            user_id_str = str(self.state.user_id)
+            for persona in responding_personas:
+                self.manager._ensure_user_conversation_track(
+                    persona.persona_id, user_id_str
+                )
+        except Exception:
+            logging.exception(
+                "[track-hook] Failed to ensure user_conversation track (handle_user_input_stream)"
+            )
 
         user_entry = {"role": "user", "content": message}
         if metadata:
