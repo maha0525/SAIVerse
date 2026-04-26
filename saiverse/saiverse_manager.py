@@ -26,6 +26,8 @@ from .occupancy_manager import OccupancyManager
 from .conversation_manager import ConversationManager
 from .schedule_manager import ScheduleManager
 from .integration_manager import IntegrationManager
+from .track_manager import TrackManager
+from .note_manager import NoteManager
 from phenomena.manager import PhenomenonManager
 from phenomena.triggers import TriggerEvent, TriggerType
 from sqlalchemy.orm import sessionmaker
@@ -186,6 +188,14 @@ class SAIVerseManager(
             manager_ref=self,
         )
         logging.info("Initialized OccupancyManager.")
+
+        # --- Initialize cognitive-model managers (Phase B-5) ---
+        # Track / Note の永続化を扱う純粋ロジックレイヤー。
+        # Intent A v0.9 / Intent B v0.6 参照。
+        # 既存ロジックには影響しない (誰も呼ばない状態で待機)。
+        self.track_manager = TrackManager(session_factory=self.SessionLocal)
+        self.note_manager = NoteManager(session_factory=self.SessionLocal)
+        logging.info("Initialized cognitive-model managers (TrackManager, NoteManager).")
 
         # --- Step 5: Load Dynamic States from DB ---
         # データベースから動的な状態（ペルソナ、ユーザー状態、入室状況）を読み込み、
