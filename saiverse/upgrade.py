@@ -58,8 +58,32 @@ class UpgradeHandler:
     description: str = ""
 
 
-# Phase 2 以降で追加していく
+# Phase 2 以降で追加していく。実体は :mod:`saiverse.upgrade_handlers` 側に
+# 定義し、:func:`_load_default_handlers` を経由して登録する。循環参照を避ける
+# ため lazy import している。
 HANDLERS: List[UpgradeHandler] = []
+_handlers_loaded = False
+
+
+def _load_default_handlers() -> None:
+    """``saiverse.upgrade_handlers.HANDLERS`` を :data:`HANDLERS` に取り込む。
+
+    起動シーケンスから1度だけ呼ばれる前提（idempotent）。テストで HANDLERS を
+    上書きしたい場合は、``HANDLERS.clear()`` してから手動で append する。
+    """
+    global _handlers_loaded
+    if _handlers_loaded:
+        return
+    try:
+        from saiverse import upgrade_handlers
+    except ImportError as exc:
+        LOGGER.warning("[upgrade] failed to import upgrade_handlers: %s", exc, exc_info=True)
+        _handlers_loaded = True
+        return
+    registered = list(getattr(upgrade_handlers, "HANDLERS", []))
+    HANDLERS.extend(registered)
+    _handlers_loaded = True
+    LOGGER.debug("[upgrade] loaded %d default handler(s)", len(registered))
 
 
 # ---- バージョン解析 ----
@@ -212,6 +236,8 @@ def run_startup_upgrade(session: "Session") -> bool:
             ENV_SKIP_VERSION_CHECK,
         )
         return True
+
+    _load_default_handlers()
 
     try:
         target = current_version()
