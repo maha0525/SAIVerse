@@ -58,6 +58,9 @@ class AI(Base):
     # When TRUE, an Idle persona transitions to Sleep automatically once the heavyweight
     # model cache TTL has elapsed. Protects against runaway API costs on idle personas.
     SLEEP_ON_CACHE_EXPIRE = Column(Boolean, default=True, nullable=False)
+    # Last SAIVerse version this persona was successfully running on. NULL means
+    # the persona predates the version-aware system (treat as v0.3.0 or earlier).
+    LAST_KNOWN_VERSION = Column(String(64), nullable=True)
 
 class Building(Base):
     __tablename__ = "building"
@@ -86,6 +89,9 @@ class City(Base):
     API_PORT = Column(Integer, nullable=False)
     START_IN_ONLINE_MODE = Column(Boolean, default=False, nullable=False)
     HOST_AVATAR_IMAGE = Column(String(255))
+    # Last SAIVerse version this city was successfully running on. NULL means
+    # the city predates the version-aware system (treat as v0.3.0 or earlier).
+    LAST_KNOWN_VERSION = Column(String(64), nullable=True)
     __table_args__ = (UniqueConstraint('USERID', 'CITYNAME', name='uq_user_city_name'), UniqueConstraint('UI_PORT', name='uq_ui_port'), UniqueConstraint('API_PORT', name='uq_api_port'))
 
 class Tool(Base):

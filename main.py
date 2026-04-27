@@ -313,6 +313,26 @@ def main():
         migrate_database_in_place(str(db_path))
         logging.info("Database migration completed.")
 
+    # Version-aware upgrade: run before SAIVerseManager initialization (= before personas
+    # are loaded). Each City and AI compares its LAST_KNOWN_VERSION against the current
+    # SAIVerse version and runs the necessary upgrade handlers. NULL version is treated
+    # as pre-v0.3.0. See docs/intent/version_aware_world_and_persona.md for details.
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from saiverse.upgrade import run_startup_upgrade
+    _upgrade_engine = create_engine(f"sqlite:///{db_path}")
+    _UpgradeSession = sessionmaker(autocommit=False, autoflush=False, bind=_upgrade_engine)
+    _upgrade_session = _UpgradeSession()
+    try:
+        if not run_startup_upgrade(_upgrade_session):
+            logging.error("Version-aware upgrade failed. Aborting startup. "
+                          "Inspect logs for the failing handler, fix it, and retry. "
+                          "Set SAIVERSE_SKIP_VERSION_CHECK=1 to bypass (dangerous).")
+            sys.exit(1)
+    finally:
+        _upgrade_session.close()
+        _upgrade_engine.dispose()
+
     # Start database backup in background thread
     threading.Thread(target=run_startup_backup, args=(db_path,), daemon=True).start()
 

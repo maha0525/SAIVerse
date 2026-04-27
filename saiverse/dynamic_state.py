@@ -40,7 +40,8 @@ class MemopediaPageEntry:
     page_id: str
     title: str
     created_at: int  # Unix timestamp（新規検出用）
-    updated_at: int  # Unix timestamp（更新検出用）
+    updated_at: int  # Unix timestamp（更新検出用 / 論理削除時刻も兼ねる）
+    is_deleted: bool = False  # True なら削除済み（is_deleted=1）
 
 
 @dataclass
@@ -104,8 +105,16 @@ class DynamicStateManager:
         persona: Any,
         building_id: str,
         manager: Any,
+        *,
+        memopedia_since: float,
     ) -> BuildingStateSnapshot:
-        """現在のWorld状態（C）をin-memoryキャッシュから構築する。"""
+        """現在のWorld状態（C）をin-memoryキャッシュから構築する。
+
+        Memopedia は数百〜数千件規模になりうるため、全件比較ではなく
+        `memopedia_since` 以降の変化分のみを取得する。
+        - baseline 用呼び出し: ``memopedia_since=time.time()`` を渡す（変化分は不要）
+        - diff 用呼び出し: 比較対象 B の ``captured_at`` を渡す
+        """
         building_map = {b.building_id: b for b in manager.buildings}
         building = building_map.get(building_id)
         building_name = building.name if building else building_id
@@ -158,7 +167,7 @@ class DynamicStateManager:
             occupants.append(OccupantEntry(id=oid, name=name, kind=kind))
 
         sai_mem = getattr(persona, "sai_memory", None)
-        memopedia_pages = DynamicStateManager._capture_memopedia(sai_mem)
+        memopedia_pages = DynamicStateManager._capture_memopedia(sai_mem, since=memopedia_since)
         chronicle_entries = DynamicStateManager._capture_chronicle(sai_mem)
 
         return BuildingStateSnapshot(
@@ -244,22 +253,42 @@ class DynamicStateManager:
     # ---- Memopedia / Chronicle スナップショット取得 ----
 
     @staticmethod
-    def _capture_memopedia(sai_mem: Any) -> List[MemopediaPageEntry]:
-        """SAIMemoryのSQLiteからMemopediaページ一覧を取得する。"""
+    def _capture_memopedia(sai_mem: Any, since: float) -> List[MemopediaPageEntry]:
+        """`since` 以降に変化（作成・更新・論理削除）した Memopedia ページのみを返す。
+
+        全件比較を避けるためタイムスタンプベース。LIMIT も is_deleted フィルタも掛けない
+        （論理削除も「変化」として返したいため）。`since=time.time()` を渡せば実質空。
+        """
         if not sai_mem or not getattr(sai_mem, "conn", None):
             return []
+        since_int = int(since)
         try:
             cur = sai_mem.conn.execute(
-                "SELECT id, title, created_at, updated_at FROM memopedia_pages "
-                "WHERE COALESCE(is_deleted, 0) = 0 "
-                "ORDER BY updated_at DESC LIMIT 200"
+                "SELECT id, title, created_at, updated_at, COALESCE(is_deleted, 0) "
+                "FROM memopedia_pages "
+                "WHERE updated_at >= ? OR created_at >= ?",
+                (since_int, since_int),
             )
-            return [
-                MemopediaPageEntry(page_id=row[0], title=row[1], created_at=int(row[2] or 0), updated_at=int(row[3] or 0))
+            entries = [
+                MemopediaPageEntry(
+                    page_id=row[0],
+                    title=row[1],
+                    created_at=int(row[2] or 0),
+                    updated_at=int(row[3] or 0),
+                    is_deleted=bool(row[4]),
+                )
                 for row in cur.fetchall()
             ]
+            LOGGER.debug(
+                "[dynamic_state] _capture_memopedia since=%s -> %d changed pages",
+                since_int, len(entries),
+            )
+            return entries
         except Exception as exc:
-            LOGGER.debug("[dynamic_state] Failed to capture memopedia: %s", exc)
+            LOGGER.warning(
+                "[dynamic_state] Failed to capture memopedia changes since=%s: %s",
+                since_int, exc, exc_info=True,
+            )
             return []
 
     @staticmethod
@@ -334,27 +363,26 @@ class DynamicStateManager:
                 ))
 
         # --- Memopedia差分 ---
-        # タイムスタンプ比較で検出: b.captured_atより新しいcreated_at/updated_atを持つものが変化対象
-        b_mp = {e.page_id: e for e in b.memopedia_pages}
-        c_mp = {e.page_id: e for e in c.memopedia_pages}
-
-        for page_id, c_page in c_mp.items():
-            if c_page.created_at > b.captured_at:
+        # タイムスタンプベース判定。c.memopedia_pages には b.captured_at 以降に
+        # 変化したページのみが入っている前提。B 側のページリストは参照しない
+        # （= 全件比較しない）ので、ページ総数に依存せずスケールする。
+        # 削除イベントは soft delete（is_deleted=1 + updated_at 更新）で検知する。
+        cutoff = b.captured_at
+        for c_page in c.memopedia_pages:
+            if c_page.is_deleted and c_page.updated_at > cutoff:
+                changes.append(StateChange(
+                    kind="memopedia_deleted",
+                    label=f"Memopedia「{c_page.title}」が削除されました",
+                ))
+            elif c_page.created_at > cutoff:
                 changes.append(StateChange(
                     kind="memopedia_created",
                     label=f"Memopedia「{c_page.title}」が作成されました",
                 ))
-            elif c_page.updated_at > b.captured_at:
+            elif c_page.updated_at > cutoff:
                 changes.append(StateChange(
                     kind="memopedia_updated",
                     label=f"Memopedia「{c_page.title}」が更新されました",
-                ))
-
-        for page_id, b_page in b_mp.items():
-            if page_id not in c_mp:
-                changes.append(StateChange(
-                    kind="memopedia_deleted",
-                    label=f"Memopedia「{b_page.title}」が削除されました",
                 ))
 
         # --- Chronicle差分 ---
@@ -403,15 +431,22 @@ class DynamicStateManager:
 
         db = session_factory()
         try:
-            c = DynamicStateManager.capture_current_state(persona, building_id, manager)
             b = DynamicStateManager.get_last_notified(persona_id, building_id, db)
 
             if b is None:
                 # 初回: Bが未設定なのでCをBとAとして保存（イベントメッセージは不要）
-                DynamicStateManager.save_baseline(persona_id, building_id, c, db)
+                # baseline 用 = Memopedia 変化分は不要なので future since で空リスト化
+                c_baseline = DynamicStateManager.capture_current_state(
+                    persona, building_id, manager, memopedia_since=time.time(),
+                )
+                DynamicStateManager.save_baseline(persona_id, building_id, c_baseline, db)
                 LOGGER.debug("[dynamic_state] Initial snapshot saved for %s/%s", persona_id, building_id)
                 return False
 
+            # diff 用 = B.captured_at 以降の Memopedia 変化分のみ取得
+            c = DynamicStateManager.capture_current_state(
+                persona, building_id, manager, memopedia_since=b.captured_at,
+            )
             changes = DynamicStateManager.compute_diff(b, c)
             if not changes:
                 return False
@@ -461,17 +496,23 @@ class DynamicStateManager:
 
         db = session_factory()
         try:
-            c = DynamicStateManager.capture_current_state(persona, building_id, manager)
             existing_b = DynamicStateManager.get_last_notified(persona_id, building_id, db)
             existing_a = DynamicStateManager.get_baseline(persona_id, building_id, db)
 
             if existing_a is None:
                 # 初訪問: フルスナップショットとしてAとBを保存
+                # baseline 用 = Memopedia 変化分は不要なので future since で空リスト化
+                c = DynamicStateManager.capture_current_state(
+                    persona, building_id, manager, memopedia_since=time.time(),
+                )
                 DynamicStateManager.save_baseline(persona_id, building_id, c, db)
                 LOGGER.debug("[dynamic_state] First visit snapshot for %s/%s", persona_id, building_id)
             else:
                 # 再訪問: Aは維持、BとCを比較して到着イベントメッセージを生成
                 b_for_diff = existing_b or existing_a
+                c = DynamicStateManager.capture_current_state(
+                    persona, building_id, manager, memopedia_since=b_for_diff.captured_at,
+                )
                 changes = DynamicStateManager.compute_diff(b_for_diff, c)
                 if changes:
                     msg_text = DynamicStateManager.format_event_message(changes)
@@ -513,7 +554,10 @@ class DynamicStateManager:
 
         db = session_factory()
         try:
-            c = DynamicStateManager.capture_current_state(persona, building_id, manager)
+            # baseline 更新 = Memopedia 変化分は不要
+            c = DynamicStateManager.capture_current_state(
+                persona, building_id, manager, memopedia_since=time.time(),
+            )
             DynamicStateManager.save_baseline(persona_id, building_id, c, db)
             LOGGER.info("[dynamic_state] Metabolism snapshot saved for %s/%s", persona_id, building_id)
 

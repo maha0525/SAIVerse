@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 from sai_memory.memopedia.storage import (
@@ -482,10 +483,12 @@ class Memopedia:
                 edit_source=edit_source,
             )
 
-            # Soft delete: mark as deleted instead of removing
+            # Soft delete: mark as deleted and bump updated_at so external
+            # observers (e.g. dynamic_state diff) can detect the deletion via timestamp.
+            now = int(time.time())
             self.conn.execute(
-                "UPDATE memopedia_pages SET is_deleted = 1 WHERE id = ?",
-                (page_id,),
+                "UPDATE memopedia_pages SET is_deleted = 1, updated_at = ? WHERE id = ?",
+                (now, page_id),
             )
             self.conn.commit()
             return True

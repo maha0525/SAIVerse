@@ -257,6 +257,25 @@ class PersonaMixin:
                         "source": "occupancy_load",
                         "message": msg,
                     })
+
+            # Restore user occupancy from User.CURRENT_BUILDINGID so that
+            # dynamic_state's B/C diff sees the user as present right after
+            # startup (otherwise the next user input would generate a spurious
+            # "user left" event because B was saved with the user inside).
+            user_id = getattr(self.state, "user_id", None) if hasattr(self, "state") else None
+            if user_id is not None:
+                user = db.query(User).filter(User.USERID == user_id).first()
+                if user and user.CURRENT_CITYID == self.city_id:
+                    bid = user.CURRENT_BUILDINGID
+                    if bid and bid in self.building_map:
+                        user_id_str = str(user_id)
+                        if user_id_str not in self.occupants[bid]:
+                            self.occupants[bid].append(user_id_str)
+                            logging.info(
+                                "Restored user %s occupancy: building=%s",
+                                user_id_str, bid,
+                            )
+
             if hasattr(self, "state"):
                 self.state.occupants = self.occupants
             logging.info("Loaded current occupancy from database.")
