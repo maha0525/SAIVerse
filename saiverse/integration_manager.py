@@ -141,24 +141,13 @@ class IntegrationManager:
         last = self._last_poll.get(integration.name, 0.0)
         return (time.time() - last) >= integration.poll_interval_seconds
 
-    def _is_integration_enabled(self, integration: BaseIntegration) -> bool:
-        """Check if the integration is enabled via global settings."""
-        state = getattr(self.manager, "state", None)
-        if state is None:
-            return False
-
-        # Per-integration enable check
-        if integration.name == "x_mentions":
-            return getattr(state, "x_polling_enabled", False)
-
-        # Future integrations can add checks here
-        return True
-
     def _poll_integration(self, integration: BaseIntegration) -> None:
-        """Execute a single poll and emit resulting events."""
-        if not self._is_integration_enabled(integration):
-            return
+        """Execute a single poll and emit resulting events.
 
+        An integration is considered enabled iff it is registered. Addon
+        enable/disable controls registration via ``addon_loader``, so no
+        separate enable check is needed here.
+        """
         LOGGER.debug("[IntegrationManager] Polling '%s'", integration.name)
         self._last_poll[integration.name] = time.time()
 

@@ -184,6 +184,28 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                 _persona_id_for_filter,
                             )
                             continue
+                        # Native Python tools may declare an availability_check
+                        # callable that gates per-persona visibility (e.g. an
+                        # X tool that only shows up after the persona has
+                        # connected its X account via OAuth).
+                        availability_check = getattr(sschema, "availability_check", None)
+                        if availability_check is not None:
+                            try:
+                                if not availability_check(_persona_id_for_filter):
+                                    LOGGER.debug(
+                                        "spell: hiding '%s' from persona=%s (availability_check returned False)",
+                                        sname,
+                                        _persona_id_for_filter,
+                                    )
+                                    continue
+                            except Exception:
+                                LOGGER.warning(
+                                    "spell: availability_check for '%s' raised; hiding from persona=%s",
+                                    sname,
+                                    _persona_id_for_filter,
+                                    exc_info=True,
+                                )
+                                continue
                         is_visible = getattr(sschema, "spell_visible", True)
                         if "__" in sname:
                             addon_key = sname.split("__", 1)[0]

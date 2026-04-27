@@ -6,7 +6,7 @@ tools.core  ― ベンダー非依存ツール実装 + メタスキーマ
 * parse_tool_result: ツール結果のパース関数
 """
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple, Optional
+from typing import Any, Callable, Dict, Tuple, Optional
 
 
 @dataclass
@@ -18,6 +18,15 @@ class ToolSchema:
     spell: bool = False          # If True, tool is available as a spell (invoked via /spell in LLM text output)
     spell_display_name: str = ""  # Japanese display name for spell UI (e.g. "特定時刻のログ取得")
     spell_visible: bool = True   # If False, spell is executable but hidden from system prompt (revealed via help spell)
+    # Optional per-persona gate. When set, the spell is hidden from a
+    # persona's system prompt and addon_spell_help unless the callable
+    # returns True for that persona_id. Mirrors the role MCP plays for
+    # MCP-backed spells (env placeholder resolution); use this for native
+    # Python tools whose availability depends on per-persona state such
+    # as OAuth connection status, license, etc. ``persona_id`` may be
+    # None when the runtime cannot identify the active persona — in that
+    # case, return False to keep the spell hidden conservatively.
+    availability_check: Optional[Callable[[Optional[str]], bool]] = None
 
 
 @dataclass

@@ -3,7 +3,6 @@ import { X, Save, Loader2, Settings } from 'lucide-react';
 import styles from './SettingsModal.module.css';
 import ImageUpload from './common/ImageUpload';
 import ModalOverlay from './common/ModalOverlay';
-import XConnectionSection from './XConnectionSection';
 
 interface SettingsModalProps {
     isOpen: boolean;
@@ -608,14 +607,6 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                 </div>
                             </div>
 
-                            {developerMode && (
-                                <XConnectionSection
-                                    personaId={personaId}
-                                    fieldGroupClass={styles.fieldGroup}
-                                    labelClass={styles.label}
-                                    descriptionClass={styles.description}
-                                />
-                            )}
                         </>
                     )}
                 </div>

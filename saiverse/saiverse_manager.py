@@ -354,19 +354,9 @@ class SAIVerseManager(
     def _register_integrations(self) -> None:
         """Register external integrations with IntegrationManager.
 
-        Auto-detects available integrations (e.g. X mentions) based on
-        whether credentials are configured for any persona.
-
-        Also loads addon-provided integrations from
+        Loads addon-provided integrations from
         ``expansion_data/<addon>/integrations/*.py`` for any enabled addon.
         """
-        try:
-            from saiverse.integrations.x_mentions import XMentionIntegration
-            self.integration_manager.register(XMentionIntegration())
-        except Exception:
-            logging.debug("XMentionIntegration not available", exc_info=True)
-
-        # Load integrations declared by enabled addons
         try:
             from saiverse.addon_loader import load_addon_integrations
             load_addon_integrations(self.integration_manager)

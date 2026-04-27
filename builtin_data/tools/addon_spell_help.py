@@ -80,6 +80,15 @@ def addon_spell_help(addon: str = "") -> str:
             continue
         if mcp_mgr is not None and not mcp_mgr.is_tool_available_for_persona(name, persona_id):
             continue
+        # Honor availability_check (used by native tools that gate on
+        # per-persona connection state).
+        availability_check = getattr(s, "availability_check", None)
+        if availability_check is not None:
+            try:
+                if not availability_check(persona_id):
+                    continue
+            except Exception:
+                continue
 
         # ツール名の先頭セグメントをアドオン名とみなす（例: addon__server__tool → addon）
         addon_key = name.split("__", 1)[0] if "__" in name else ""
