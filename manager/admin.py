@@ -85,6 +85,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         self.occupancy_manager = manager.occupancy_manager
         self.conversation_managers = manager.conversation_managers
         self._save_building_histories = manager._save_building_histories
+        self._save_modified_buildings = manager._save_modified_buildings
         self._update_timezone_cache = manager._update_timezone_cache
         self._load_cities_from_db = manager._load_cities_from_db
 

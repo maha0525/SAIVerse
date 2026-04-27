@@ -141,6 +141,65 @@ def get_building_messages(building_id: Optional[str] = None) -> str:
                 perceived_count += 1
                 speaker_counts[speaker] = speaker_counts.get(speaker, 0) + 1
 
+            # System / movement / world events (role="host"). These come from
+            # OccupancyManager.move_entity, world event broadcasts, etc. They
+            # use note-box HTML for the chat UI. We strip the markup and inject
+            # them as a system notification in the persona's memory so she
+            # perceives her own movements and other building-level events.
+            #
+            # Filter: skip occupancy events for OTHER entities (user / other
+            # AIs). Their state changes (entered/left this building) are
+            # surfaced via DynamicStateManager when the persona's pulse runs,
+            # which fires only on actual presence transitions — not per move.
+            # Without this filter, casual user UI navigation between rooms
+            # would spam the persona with "user entered/left" events.
+            #
+            # Building name is prepended so the notification is self-contained
+            # in the persona's memory: the original event text says "X が Y
+            # から入室しました" (where the destination is implicit = "this
+            # building"). When stored in SAIMemory without that context, the
+            # persona later cannot tell where the event happened.
+            elif role == "host":
+                metadata_obj = m.get("metadata") or {}
+                event_obj = metadata_obj.get("event") or {}
+                # Filter rules:
+                #  - Other-entity occupancy events: dynamic_state surfaces these
+                #    as state-change notifications on actual presence transitions.
+                #  - User-related events (logout/login etc): ditto, presence is
+                #    tracked via dynamic_state's occupant detection.
+                #  - Legacy logout/login messages without metadata: filter by
+                #    content match for backward compat.
+                if (
+                    event_obj.get("type") == "occupancy"
+                    and event_obj.get("entity_id") != persona_id
+                ):
+                    _mark_ingested(m, persona_id)
+                    continue
+                if event_obj.get("entity_type") == "user":
+                    _mark_ingested(m, persona_id)
+                    continue
+                if "オフラインになりました" in content or "オンラインになりました" in content:
+                    _mark_ingested(m, persona_id)
+                    continue
+                import re
+                cleaned = re.sub(r"<[^>]+>", "", content).strip()
+                if not cleaned:
+                    continue
+                building_obj = getattr(persona, "buildings", {}).get(building_id)
+                building_name = getattr(building_obj, "name", building_id) if building_obj else building_id
+                entry = {
+                    "role": "user",
+                    "content": f"<system>[{building_name}] {cleaned}</system>",
+                    "metadata": {"tags": ["internal", "event_message"]},
+                }
+                ts_value = m.get("timestamp")
+                if isinstance(ts_value, str):
+                    entry["timestamp"] = ts_value
+                history_manager.add_to_persona_only(entry)
+                _mark_ingested(m, persona_id)
+                perceived_count += 1
+                speaker_counts["システム"] = speaker_counts.get("システム", 0) + 1
+
             # Ingest user messages directly
             elif role == "user" and (pid is None or pid != persona_id):
                 entry = {
@@ -286,6 +345,44 @@ def auto_ingest_building_messages(persona: Any, manager: Any) -> int:
                 if isinstance(ts_value, str):
                     entry["timestamp"] = ts_value
 
+                history_manager.add_to_persona_only(entry)
+                _mark_ingested(m, persona_id)
+                ingested_count += 1
+                dirty = True
+
+            elif role == "host":
+                # Mirrors filter rules from get_building_messages() above.
+                metadata_obj = m.get("metadata") or {}
+                event_obj = metadata_obj.get("event") or {}
+                if (
+                    event_obj.get("type") == "occupancy"
+                    and event_obj.get("entity_id") != persona_id
+                ):
+                    _mark_ingested(m, persona_id)
+                    dirty = True
+                    continue
+                if event_obj.get("entity_type") == "user":
+                    _mark_ingested(m, persona_id)
+                    dirty = True
+                    continue
+                if "オフラインになりました" in content or "オンラインになりました" in content:
+                    _mark_ingested(m, persona_id)
+                    dirty = True
+                    continue
+                import re
+                cleaned = re.sub(r"<[^>]+>", "", content).strip()
+                if not cleaned:
+                    continue
+                building_obj = getattr(persona, "buildings", {}).get(building_id)
+                building_name = getattr(building_obj, "name", building_id) if building_obj else building_id
+                entry = {
+                    "role": "user",
+                    "content": f"<system>[{building_name}] {cleaned}</system>",
+                    "metadata": {"tags": ["internal", "event_message"]},
+                }
+                ts_value = m.get("timestamp")
+                if isinstance(ts_value, str):
+                    entry["timestamp"] = ts_value
                 history_manager.add_to_persona_only(entry)
                 _mark_ingested(m, persona_id)
                 ingested_count += 1

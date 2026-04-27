@@ -635,9 +635,15 @@ class SAIVerseManager(
         self.runtime.explore_city(persona_id, target_city_id)
 
     def set_user_login_status(self, user_id: int, status: bool) -> str:
-        """ユーザーのログイン状態を更新し、ログアウト時にメッセージを記録する"""
-        # ログアウト処理の場合、先に現在地を記録しておく
+        """ユーザーのログイン状態を更新する。
+
+        occupants 連動: logout 時に user_id を現在の建物の occupants から外す。
+        login 時に DB の CURRENT_BUILDINGID へ戻す。これにより dynamic_state の
+        occupant_entered / occupant_left 検出が自動的に状態変化を各ペルソナへ
+        通知する（オフラインメッセージを建物ログに直接書く必要がなくなる）。
+        """
         last_building_id = self.state.user_current_building_id if not status else None
+        user_id_str = str(user_id)
 
         db = self.SessionLocal()
         try:
@@ -650,21 +656,31 @@ class SAIVerseManager(
                 self.user_is_online = status  # Backward compat
                 self.user_presence_status = self.state.user_presence_status
                 self.user_display_name = self.state.user_display_name
-                self.id_to_name_map[str(self.user_id)] = self.user_display_name
+                self.id_to_name_map[user_id_str] = self.user_display_name
                 status_text = "オンライン" if status else "オフライン"
                 logging.info(f"User {user_id} login status set to: {status_text}")
 
-                # ログアウト時にメッセージを記録
-                if last_building_id and last_building_id in self.building_map:
-                    username = user.USERNAME or "ユーザー"
-                    logout_message = f'<div class="note-box">🚶 User Action:<br><b>{username}がオフラインになりました</b></div>'
-                    self.add_building_event(
-                        last_building_id,
-                        {"role": "host", "content": logout_message},
-                        heard_by=list(self.occupants.get(last_building_id, [])),
-                    )
-                    self._save_modified_buildings()
-                    logging.info(f"Logged user logout in building {last_building_id}")
+                if status:
+                    # Login: ユーザーを CURRENT_BUILDINGID の occupants に追加
+                    target_bid = user.CURRENT_BUILDINGID
+                    if target_bid and target_bid in self.building_map:
+                        occ = self.occupants.setdefault(target_bid, [])
+                        if user_id_str not in occ:
+                            occ.append(user_id_str)
+                            logging.info(
+                                "Added user %s to occupants of %s on login",
+                                user_id_str, target_bid,
+                            )
+                else:
+                    # Logout: ユーザーを現在の建物の occupants から外す
+                    if last_building_id:
+                        occ = self.occupants.get(last_building_id, [])
+                        if user_id_str in occ:
+                            occ.remove(user_id_str)
+                            logging.info(
+                                "Removed user %s from occupants of %s on logout",
+                                user_id_str, last_building_id,
+                            )
 
                 self._refresh_user_state_cache()
                 return status_text

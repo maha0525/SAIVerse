@@ -244,10 +244,12 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                             _hidden = group["hidden_count"]
 
                             header = f"**{_display}**"
+                            if _display != addon_key:
+                                header += f" (`{addon_key}`)"
                             if _desc:
                                 header += f" — {_desc}"
                             if _hidden > 0:
-                                header += f"（追加スペル{_hidden}個あり、`addon_spell_help`で確認）"
+                                header += f"（追加スペル{_hidden}個あり、`addon_spell_help(addon=\"{addon_key}\")`で確認）"
                             spell_lines.append("")
                             spell_lines.append(header)
 

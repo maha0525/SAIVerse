@@ -201,9 +201,33 @@ class PersonaHistoryMixin:
                 # Do not advance pulse_cursors here; auto_ingest will do that.
                 self.entry_markers[building_id] = prior_cursor
             else:
-                # First visit: skip existing history to avoid flooding.
-                self.entry_markers[building_id] = last_seq
-                self.pulse_cursors[building_id] = last_seq
+                # First visit: skip existing history to avoid flooding — BUT make
+                # this persona's own most-recent ENTER event visible. Without this
+                # exception, the entry event (added by OccupancyManager BEFORE
+                # _mark_entry runs) gets swallowed by the cursor snap-up to
+                # last_seq, so the persona has no episodic record of moving.
+                own_enter_seq = 0
+                for msg in reversed(hist):
+                    metadata = msg.get("metadata") or {}
+                    event = metadata.get("event") or {}
+                    if (
+                        event.get("type") == "occupancy"
+                        and event.get("action") == "enter"
+                        and event.get("entity_id") == self.persona_id
+                    ):
+                        try:
+                            own_enter_seq = int(msg.get("seq", 0))
+                        except (TypeError, ValueError):
+                            own_enter_seq = 0
+                        break
+                if own_enter_seq > 0:
+                    # Place marker just before our own enter event so it's visible.
+                    self.entry_markers[building_id] = own_enter_seq - 1
+                    self.pulse_cursors[building_id] = own_enter_seq - 1
+                else:
+                    # No own enter event found (e.g., persona was created here).
+                    self.entry_markers[building_id] = last_seq
+                    self.pulse_cursors[building_id] = last_seq
             logging.debug(
                 "[entry] entry marker set: %s -> %d (prev_cursor=%d last_seq=%d)",
                 building_id,
