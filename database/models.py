@@ -505,3 +505,77 @@ class TrackOpenNote(Base):
         Index("idx_track_open_note_note", "note_id"),
     )
 
+
+# ============================================================================
+# 7-layer storage model (Intent A v0.14, Intent B v0.11): metadata stores
+# ============================================================================
+
+class MetaJudgmentLog(Base):
+    """[1] メタ判断ログ領域: メタ判断の全履歴を独立保存する。
+
+    メタ判断は Track 内メインラインの一瞬の分岐として動く。Track 続行時は分岐
+    ターンを Track のメインキャッシュには残さないが、本テーブルには必ず保存
+    する。次のメタ判断時に「過去にこう判断した」を参考情報として動的注入する
+    ための時系列ログ。
+
+    Track 移動時の分岐は committed_to_main_cache=TRUE になり、メインキャッシュ
+    にも来歴として残る (= ペルソナの自己認識として「移動の理由」が見える)。
+
+    詳細: docs/intent/persona_action_tracks.md (v0.11)
+    """
+    __tablename__ = "meta_judgment_log"
+    judgment_id = Column(String(36), primary_key=True)  # UUID
+    persona_id = Column(String(255), ForeignKey("ai.AIID"), nullable=False)
+    judged_at = Column(DateTime, server_default=func.now(), nullable=False)
+    track_at_judgment_id = Column(String(36), nullable=True)
+    # Active Track at the moment of judgment (NULL if persona was idle)
+    trigger_type = Column(String(32), nullable=False)
+    # 'periodic_tick' / 'alert' / 'pulse_completion' / ...
+    trigger_context = Column(Text, nullable=True)  # JSON: alert track_id, reason, etc.
+    prompt_snapshot = Column(Text, nullable=True)
+    # Summarized prompt used at judgment time (for debugging)
+    judgment_action = Column(String(32), nullable=False)
+    # 'continue' / 'switch' / 'wait' / 'close'
+    judgment_thought = Column(Text, nullable=True)
+    switch_to_track_id = Column(String(36), nullable=True)
+    new_track_spec = Column(Text, nullable=True)  # JSON: spec for newly created Track
+    notify_to_track = Column(Text, nullable=True)
+    raw_response = Column(Text, nullable=True)  # raw LLM response (for debugging)
+    committed_to_main_cache = Column(Boolean, default=False, nullable=False)
+    # TRUE if this judgment was committed to the main cache (= track switch happened)
+    __table_args__ = (
+        Index("idx_meta_judgment_persona_time", "persona_id", "judged_at"),
+        Index("idx_meta_judgment_track", "track_at_judgment_id"),
+    )
+
+
+class TrackLocalLog(Base):
+    """[5] Track ローカルログ: Track 内のイベント・モニタログ・起点サブの中間ステップ。
+
+    Track 内では参照できるが、想起対象 ([6] SAIMemory) には乗らない。Track 種別
+    ごとに固有のイベントを受ける場 (入室イベント → 交流 Track のローカルログ、
+    Chronicle 完了 → 記憶整理 Track のローカルログ、Track 削除通知 → メタ用
+    特殊 Track のローカルログ等)。
+
+    visible_to_other_tracks は将来の Track 越境参照用の予約フィールド (例: ユーザー
+    会話中に「さっきエイドが入室したよね」と話題化する経路)。v0.11 では FALSE
+    固定、運用機構は後送り。
+
+    詳細: docs/intent/persona_action_tracks.md (v0.11)
+    """
+    __tablename__ = "track_local_log"
+    log_id = Column(String(36), primary_key=True)  # UUID
+    track_id = Column(String(36), ForeignKey("action_track.track_id"), nullable=False)
+    occurred_at = Column(DateTime, server_default=func.now(), nullable=False)
+    log_kind = Column(String(64), nullable=False)
+    # 'event_message' / 'monitor_signal' / 'sub_step' / 'tool_trace' / ...
+    payload = Column(Text, nullable=True)  # JSON: event details, monitor values, sub-step info, etc.
+    source_line_id = Column(String(36), nullable=True)
+    # Originating line ID (NULL = Track-level event, not from a specific line)
+    visible_to_other_tracks = Column(Boolean, default=False, nullable=False)
+    # Reserved for future Track-cross-reference mechanism (always FALSE in v0.11)
+    __table_args__ = (
+        Index("idx_track_local_log_track_time", "track_id", "occurred_at"),
+        Index("idx_track_local_log_kind", "track_id", "log_kind", "occurred_at"),
+    )
+

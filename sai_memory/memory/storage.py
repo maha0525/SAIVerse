@@ -98,6 +98,36 @@ def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_resource_created ON messages(resource_id, created_at)")
     _ensure_column(conn, "messages", "metadata", "TEXT")
 
+    # 7-layer storage model (Intent A v0.14, Intent B v0.11) — message metadata
+    # for line/scope-based context construction.
+    #
+    # - origin_track_id: Track active at message creation. Enables Track-scoped
+    #   filtering for sub-line caches ([3]) and Track-cross-reference queries.
+    # - line_role: 'main_line' / 'sub_line' / 'meta_judgment' / 'nested'.
+    #   Identifies which 7-layer the message belongs to.
+    # - line_id: Origin-line UUID. Distinguishes parallel root sub-lines within
+    #   the same Track (multiple [3] caches per Track).
+    # - scope: 'committed' / 'discardable' / 'volatile'.
+    #   * 'committed' = persisted, included in next prompt construction.
+    #   * 'discardable' = meta-judgment branch turn; excluded on continue, promoted
+    #     to 'committed' on switch (kept as the next Track's leading rationale).
+    #   * 'volatile' = Pulse-scoped temp; deleted at Pulse completion.
+    # - paired_action_text: For assistant messages, holds the LLM node's action
+    #   prompt (= action template). Replaces the v0.10 pattern of storing the
+    #   action text as a standalone user message (handoff route C).
+    _ensure_column(conn, "messages", "origin_track_id", "TEXT")
+    _ensure_column(conn, "messages", "line_role", "TEXT")
+    _ensure_column(conn, "messages", "line_id", "TEXT")
+    _ensure_column(conn, "messages", "scope", "TEXT NOT NULL DEFAULT 'committed'")
+    _ensure_column(conn, "messages", "paired_action_text", "TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_track_line "
+        "ON messages(origin_track_id, line_role, line_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_scope ON messages(scope)"
+    )
+
     # Stelis threads table for hierarchical context management
     conn.execute(
         """
