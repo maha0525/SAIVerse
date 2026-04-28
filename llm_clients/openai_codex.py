@@ -25,6 +25,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from curl_cffi import requests as cffi_requests
 
 from .base import LLMClient
+from .openai_message_preparer import prepare_openai_messages
 from .schema_utils import normalize_schema_for_strict_json_output
 
 LOG = logging.getLogger("saiverse.llm_clients.openai_codex")
@@ -90,6 +91,8 @@ class OpenAICodexClient(LLMClient):
         model: str,
         supports_images: bool = False,
         timeout: float = 120.0,
+        max_image_bytes: Optional[int] = None,
+        max_image_embeds: Optional[int] = None,
         **_: Any,
     ) -> None:
         super().__init__(supports_images=supports_images)
@@ -97,6 +100,12 @@ class OpenAICodexClient(LLMClient):
         self._timeout = float(timeout)
         self._params: Dict[str, Any] = {}
         self._session: Optional[Any] = None
+        # Reuse OpenAIClient's defaults: 5 MB cap on image bytes for OpenAI-style
+        # vision endpoints. SAIVerse normally provides image attachments via
+        # `metadata.attachments` rather than expanded content lists, so we run
+        # `prepare_openai_messages` first to materialize them.
+        self._max_image_bytes = max_image_bytes if (max_image_bytes and max_image_bytes > 0) else 5 * 1024 * 1024
+        self._max_image_embeds = max_image_embeds
 
     def configure_parameters(self, parameters: Dict[str, Any] | None) -> None:
         if parameters:
@@ -329,6 +338,34 @@ class OpenAICodexClient(LLMClient):
             return None
         return candidate
 
+    def _expand_attachments(
+        self, messages: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Materialize SAIVerse's `metadata.attachments` image list into OpenAI
+        Chat Completions style `image_url` parts so `_user_content_to_parts`
+        can lower them to Responses API `input_image` parts.
+
+        This mirrors what OpenAIClient does (it calls the same helper before
+        sending). Without it, image attachments dangling on the metadata side
+        are silently dropped by the time the request leaves the client.
+        """
+        try:
+            return prepare_openai_messages(
+                messages=messages,
+                supports_images=self.supports_images,
+                max_image_bytes=self._max_image_bytes,
+                max_image_embeds=self._max_image_embeds,
+                convert_system_to_user=False,
+                reasoning_passback_field=None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning(
+                "prepare_openai_messages failed; falling back to raw messages "
+                "(image attachments may be dropped): %s",
+                exc,
+            )
+            return messages
+
     def _build_body(
         self,
         messages: List[Dict[str, Any]],
@@ -337,7 +374,8 @@ class OpenAICodexClient(LLMClient):
         response_schema: Optional[Dict[str, Any]],
         reasoning_effort: Optional[str],
     ) -> Dict[str, Any]:
-        instructions, input_items = self._build_input(messages)
+        prepared_messages = self._expand_attachments(messages)
+        instructions, input_items = self._build_input(prepared_messages)
         body: Dict[str, Any] = {
             "model": self.model,
             "input": input_items,
@@ -407,6 +445,26 @@ class OpenAICodexClient(LLMClient):
             "text" in body,
             (body.get("reasoning") or {}).get("effort"),
         )
+        # Per-item shape log helps verify whether image attachments survived
+        # SAIVerse's metadata → content expansion. Look for `input_image` in
+        # the content_types list to confirm vision input is being sent.
+        if LOG.isEnabledFor(logging.DEBUG):
+            for idx, item in enumerate(body["input"]):
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "message":
+                    content = item.get("content") or []
+                    types = [
+                        p.get("type") for p in content if isinstance(p, dict)
+                    ]
+                    LOG.debug(
+                        "input[%d] role=%s content_types=%s",
+                        idx,
+                        item.get("role"),
+                        types,
+                    )
+                else:
+                    LOG.debug("input[%d] type=%s", idx, item.get("type"))
         resp = session.post(
             url,
             headers=headers,
