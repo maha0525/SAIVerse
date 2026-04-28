@@ -23,6 +23,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from curl_cffi import requests as cffi_requests
 
 from .base import LLMClient
+from .schema_utils import normalize_schema_for_strict_json_output
 
 LOG = logging.getLogger("saiverse.llm_clients.openai_codex")
 
@@ -158,6 +159,10 @@ class OpenAICodexClient(LLMClient):
         SAIVerse stores tools as `{"type": "function", "function": {name, description, parameters}}`
         (Chat Completions wire format). The Codex backend uses Responses API which
         flattens this into `{"type": "function", "name": ..., "description": ..., "parameters": ..., "strict": false}`.
+
+        Tool `parameters` are JSON Schema and need the same normalization as
+        `response_schema` so playbook-supplied schemas using Python aliases
+        (`int`/`bool`/`float`) don't get rejected by the backend.
         """
         out: List[Dict[str, Any]] = []
         for tool in tools or []:
@@ -166,18 +171,25 @@ class OpenAICodexClient(LLMClient):
             t_type = tool.get("type")
             if t_type == "function" and isinstance(tool.get("function"), dict):
                 fn = tool["function"]
+                params = fn.get("parameters") or {"type": "object", "properties": {}}
                 out.append(
                     {
                         "type": "function",
                         "name": fn.get("name", ""),
                         "description": fn.get("description", "") or "",
-                        "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+                        "parameters": normalize_schema_for_strict_json_output(params),
                         "strict": False,
                     }
                 )
             elif t_type == "function" and "name" in tool:
-                # Already in Responses API shape
-                out.append({**tool, "strict": tool.get("strict", False)})
+                # Already in Responses API shape; still normalize parameters
+                normalized = dict(tool)
+                if isinstance(normalized.get("parameters"), dict):
+                    normalized["parameters"] = normalize_schema_for_strict_json_output(
+                        normalized["parameters"]
+                    )
+                normalized.setdefault("strict", False)
+                out.append(normalized)
             else:
                 LOG.debug("skipping unsupported tool spec: %s", tool)
         return out
@@ -309,7 +321,7 @@ class OpenAICodexClient(LLMClient):
                     "name": schema_name,
                     "type": "json_schema",
                     "strict": True,
-                    "schema": response_schema,
+                    "schema": normalize_schema_for_strict_json_output(response_schema),
                 }
             }
         elif response_schema and responses_tools:
