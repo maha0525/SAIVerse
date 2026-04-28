@@ -17,7 +17,7 @@ import json
 import logging
 import platform
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from curl_cffi import requests as cffi_requests
 
@@ -241,6 +241,33 @@ class OpenAICodexClient(LLMClient):
                 resp.close()
             except Exception:
                 pass
+
+    def generate_stream(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Any] | None = None,
+        response_schema: Dict[str, Any] | None = None,
+        *,
+        temperature: float | None = None,
+        **kwargs: Any,
+    ) -> Iterator[str]:
+        """Phase 1 stub: collect the full response, then yield it as a single chunk.
+
+        The Codex backend already streams via SSE, but `generate` consumes that
+        stream internally and returns the assembled text. SEA's speak path calls
+        `generate_stream(...)` and iterates over the result, so we wrap `generate`
+        to satisfy the iterator contract without surfacing per-token deltas.
+        Real delta passthrough is deferred to Phase 3.
+        """
+        text = self.generate(
+            messages,
+            tools=tools,
+            response_schema=response_schema,
+            temperature=temperature,
+            **kwargs,
+        )
+        if text:
+            yield text
 
     def _consume_sse(self, resp: Any) -> str:
         """Parse a Responses API SSE stream and return the final assistant text."""
