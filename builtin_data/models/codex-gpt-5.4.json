@@ -1,0 +1,9 @@
+{
+  "model": "gpt-5.4",
+  "system_prompt": "現在の使用モデルはGPT-5.4（OpenAI Codex backend / ChatGPTサブスクリプション経由）です。\n\n[Model info]\n- Strong model for everyday coding\n- Codex backend 経由のため context window は 272K\n- temperature / top_p などのサンプリングパラメータは非対応",
+  "display_name": "GPT-5.4 Codex",
+  "provider": "openai_codex",
+  "context_length": 272000,
+  "supports_images": false,
+  "parameters": {}
+}

@@ -10,6 +10,7 @@ from .anthropic import AnthropicClient
 from .gemini import GeminiClient
 from .ollama import OllamaClient
 from .openai import OpenAIClient
+from .openai_codex import OpenAICodexClient
 from .nvidia_nim import NvidiaNIMClient
 from .llama_cpp import LlamaCppClient
 from .xai import XAIClient
@@ -207,10 +208,19 @@ def get_llm_client(model: str, provider: str, context_length: int, config: Dict 
 
         logging.debug("Creating Ollama client for model '%s' with kwargs: %s", api_model, extra_kwargs)
         client = OllamaClient(api_model, context_length, supports_images=supports_images, **extra_kwargs)
+    elif provider == "openai_codex":
+        extra_kwargs: Dict[str, object] = {}
+        if isinstance(config, dict):
+            timeout = config.get("timeout")
+            if isinstance(timeout, (int, float)) and timeout > 0:
+                extra_kwargs["timeout"] = float(timeout)
+
+        logging.debug("Creating OpenAI Codex client for model '%s' with kwargs: %s", api_model, extra_kwargs)
+        client = OpenAICodexClient(api_model, supports_images=supports_images, **extra_kwargs)
     else:
         raise ValueError(
             f"Unknown provider '{provider}' for model '{model}'. "
-            f"Valid providers: openai, nvidia_nim, anthropic, gemini, xai, llama_cpp, ollama"
+            f"Valid providers: openai, openai_codex, nvidia_nim, anthropic, gemini, xai, llama_cpp, ollama"
         )
 
     # Set config_key for pricing lookup (model param is the config key/filename)
