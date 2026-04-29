@@ -207,8 +207,12 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                                 )
                                 continue
                         is_visible = getattr(sschema, "spell_visible", True)
-                        if "__" in sname:
+                        # アドオン所属判定: ToolSchema.addon_name (ネイティブツールが
+                        # ローダーで自動付与) を優先、無ければ `__` 命名規則 (MCP 互換)
+                        addon_key = getattr(sschema, "addon_name", None)
+                        if not addon_key and "__" in sname:
                             addon_key = sname.split("__", 1)[0]
+                        if addon_key:
                             group = addon_groups.setdefault(
                                 addon_key, {"visible": [], "hidden_count": 0}
                             )
@@ -358,6 +362,17 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
             try:
                 # Determine which tags to include
                 # event_message: conversationと同様に常に表示（ただし想起・Chronicle対象外）
+                #
+                # P0-7 (Intent A v0.14, Intent B v0.11): legacy tag-based filter
+                # is kept for backward compatibility while line_role/scope-based
+                # message metadata is being populated by P0-4/P0-5/P0-6. The
+                # commit/discard property of meta-judgment branches is enforced
+                # at the SAIMemory query layer (`scope != 'discardable'` in
+                # storage.get_messages_last / get_messages_paginated), so
+                # discarded meta-judgment turns never reach this filter.
+                # Full migration to a line_role-based filter is deferred until
+                # the new Track machinery (action_tracks switching + meta-judgment
+                # branching) is wired in for live persona runs.
                 required_tags = ["conversation", "event_message"]
                 if reqs.include_internal:
                     required_tags.append("internal")

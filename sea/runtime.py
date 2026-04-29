@@ -223,6 +223,7 @@ class SEARuntime:
         pulse_type: Optional[str] = None,
         initial_params: Optional[Dict[str, Any]] = None,
         isolate_pulse_context: bool = False,
+        line: str = "main",
     ) -> List[str]:
         return run_playbook(
             self,
@@ -238,6 +239,7 @@ class SEARuntime:
             pulse_type=pulse_type,
             initial_params=initial_params,
             isolate_pulse_context=isolate_pulse_context,
+            line=line,
         )
 
     # LangGraph compile wrapper -----------------------------------------
@@ -338,14 +340,19 @@ class SEARuntime:
             }
         return {"enable_cache": True, "cache_ttl": "5m"}
 
-    def _select_llm_client(self, node_def: Any, persona: Any, needs_structured_output: bool = False) -> Any:
+    def _select_llm_client(self, node_def: Any, persona: Any, needs_structured_output: bool = False, state: Optional[Dict[str, Any]] = None) -> Any:
         """Select the appropriate LLM client based on node's model_type and structured output needs.
 
         Args:
             node_def: Node definition from playbook
             persona: Persona object
             needs_structured_output: Whether this node requires structured output
+            state: Current execution state. Used to detect line='sub' (force lightweight) flag
+                   set by run_playbook (Phase C-2a, Intent B v0.9).
         """
+        # サブライン強制フラグ (line='sub' で起動された Playbook は軽量モデルを使う)
+        force_lightweight = bool(state and state.get("_force_lightweight_model"))
+
         # Determine model_type: context_profile takes precedence over explicit model_type
         _profile_name = getattr(node_def, "context_profile", None)
         if _profile_name:
@@ -354,7 +361,16 @@ class SEARuntime:
             model_type = _profile["model_type"] if _profile else (getattr(node_def, "model_type", "normal") or "normal")
         else:
             model_type = getattr(node_def, "model_type", "normal") or "normal"
-        LOGGER.info("[sea] Node model_type: %s (node_id=%s, profile=%s)", model_type, getattr(node_def, "id", "unknown"), _profile_name or "none")
+
+        # サブライン強制: ノード定義の model_type を上書き
+        if force_lightweight and model_type != "lightweight":
+            LOGGER.info(
+                "[sea] line='sub' override: forcing lightweight model (was %s) for node_id=%s",
+                model_type, getattr(node_def, "id", "unknown"),
+            )
+            model_type = "lightweight"
+
+        LOGGER.info("[sea] Node model_type: %s (node_id=%s, profile=%s, force_light=%s)", model_type, getattr(node_def, "id", "unknown"), _profile_name or "none", force_lightweight)
 
         # First, select base client based on model_type
         if model_type == "lightweight":
@@ -1145,8 +1161,27 @@ class SEARuntime:
         pulse_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         playbook_name: Optional[str] = None,
+        pulse_context: Optional[Any] = None,
+        line_role: Optional[str] = None,
+        line_id: Optional[str] = None,
+        origin_track_id: Optional[str] = None,
+        scope: Optional[str] = None,
+        paired_action_text: Optional[str] = None,
     ) -> bool:
-        """Store a message to SAIMemory. Returns True on success, False on failure."""
+        """Store a message to SAIMemory. Returns True on success, False on failure.
+
+        7-layer storage metadata (Intent A v0.14, Intent B v0.11):
+
+        - ``pulse_context``: When supplied (and the explicit ``line_role`` /
+          ``line_id`` / ``origin_track_id`` are not), the active line frame's
+          metadata is read via ``current_line_metadata()`` so callers in the
+          ``sea/runtime_llm.py`` Spell loop and LLM-node memorize paths can
+          omit boilerplate.
+        - Explicit overrides take precedence over the auto-resolved values
+          (used e.g. when a meta-judgment branch turn must be tagged
+          ``scope='discardable'`` regardless of the surrounding line).
+        - ``scope`` defaults to the SQL-level ``'committed'`` when ``None``.
+        """
         if not text:
             return True
         adapter = getattr(persona, "sai_memory", None)
@@ -1168,7 +1203,42 @@ class SEARuntime:
                     adapter.set_active_thread(default_thread)
                     current_thread = default_thread
                     LOGGER.info("[_store_memory] No active thread for %s — initialized default: %s", pid, default_thread)
-                message = {"role": role or "assistant", "content": text}
+
+                # Resolve 7-layer metadata: explicit args win, otherwise read from
+                # the active LineFrame on the supplied PulseContext.
+                resolved_line_role = line_role
+                resolved_line_id = line_id
+                resolved_track_id = origin_track_id
+                if pulse_context is not None and (
+                    resolved_line_role is None
+                    or resolved_line_id is None
+                    or resolved_track_id is None
+                ):
+                    try:
+                        meta = pulse_context.current_line_metadata()
+                    except AttributeError:
+                        meta = {}
+                    if resolved_line_role is None:
+                        resolved_line_role = meta.get("line_role")
+                    if resolved_line_id is None:
+                        resolved_line_id = meta.get("line_id")
+                    if resolved_track_id is None:
+                        resolved_track_id = meta.get("origin_track_id")
+
+                message: Dict[str, Any] = {"role": role or "assistant", "content": text}
+                # Attach 7-layer metadata to the message dict so SAIMemoryAdapter
+                # forwards them as dedicated columns (storage.py add_message).
+                if resolved_line_role is not None:
+                    message["line_role"] = resolved_line_role
+                if resolved_line_id is not None:
+                    message["line_id"] = resolved_line_id
+                if resolved_track_id is not None:
+                    message["origin_track_id"] = resolved_track_id
+                if scope is not None:
+                    message["scope"] = scope
+                if paired_action_text is not None:
+                    message["paired_action_text"] = paired_action_text
+
                 clean_tags = [str(tag) for tag in (tags or []) if tag]
                 # Add pulse:uuid tag
                 if pulse_id:

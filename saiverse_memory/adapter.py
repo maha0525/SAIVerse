@@ -1748,6 +1748,14 @@ class SAIMemoryAdapter:
             metadata = message.get("metadata")
             if not isinstance(metadata, dict):
                 metadata = None
+            # 7-layer storage metadata (Intent A v0.14, Intent B v0.11). Carried
+            # on the message dict by callers that have a PulseContext line frame
+            # available; absent here when called from legacy code paths.
+            origin_track_id = message.get("origin_track_id")
+            line_role = message.get("line_role")
+            line_id = message.get("line_id")
+            scope = message.get("scope")
+            paired_action_text = message.get("paired_action_text")
             embedding_chunks = message.get("embedding_chunks")
             skip_embedding = False
             if embedding_chunks is not None:
@@ -1757,8 +1765,8 @@ class SAIMemoryAdapter:
                     skip_embedding = False
 
             LOGGER.debug(
-                "[_append_message] thread_suffix=%s, building_id=%s, thread_id=%s",
-                thread_suffix, building_id, thread_id
+                "[_append_message] thread_suffix=%s, building_id=%s, thread_id=%s line_role=%s scope=%s",
+                thread_suffix, building_id, thread_id, line_role, scope
             )
 
             with self._db_lock:
@@ -1771,6 +1779,11 @@ class SAIMemoryAdapter:
                     resource_id=resource_id,
                     created_at=created_at,
                     metadata=metadata,
+                    origin_track_id=origin_track_id,
+                    line_role=line_role,
+                    line_id=line_id,
+                    scope=scope,
+                    paired_action_text=paired_action_text,
                 )
                 if (not skip_embedding) and content and content.strip() and self.embedder is not None:
                     chunks = chunk_text(

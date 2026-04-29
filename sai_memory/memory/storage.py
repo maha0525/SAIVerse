@@ -292,14 +292,43 @@ def add_message(
     resource_id: Optional[str] = None,
     created_at: Optional[int] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    *,
+    origin_track_id: Optional[str] = None,
+    line_role: Optional[str] = None,
+    line_id: Optional[str] = None,
+    scope: Optional[str] = None,
+    paired_action_text: Optional[str] = None,
 ) -> str:
+    """Insert a message row.
+
+    The 7-layer storage metadata (Intent A v0.14, Intent B v0.11) is optional:
+    callers that don't supply ``line_role`` / ``line_id`` / ``origin_track_id``
+    / ``scope`` / ``paired_action_text`` produce rows compatible with the
+    pre-v0.11 schema (NULL columns + ``scope='committed'`` from the column
+    default). New callers that pass through ``PulseContext.current_line_metadata()``
+    will populate them.
+    """
     mid = str(uuid.uuid4())
     ts = int(time.time()) if created_at is None else int(created_at)
     meta_json = json.dumps(metadata, ensure_ascii=False) if metadata else None
-    conn.execute(
-        "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (mid, thread_id, role, content, resource_id, ts, meta_json),
-    )
+    # ``scope`` is NOT NULL with DEFAULT 'committed' at the schema level;
+    # passing None here lets the DB apply the default.
+    if scope is None:
+        conn.execute(
+            "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata, "
+            "origin_track_id, line_role, line_id, paired_action_text) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (mid, thread_id, role, content, resource_id, ts, meta_json,
+             origin_track_id, line_role, line_id, paired_action_text),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata, "
+            "origin_track_id, line_role, line_id, scope, paired_action_text) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (mid, thread_id, role, content, resource_id, ts, meta_json,
+             origin_track_id, line_role, line_id, scope, paired_action_text),
+        )
     conn.commit()
     return mid
 
@@ -338,8 +367,16 @@ def get_message(conn: sqlite3.Connection, message_id: str) -> Optional[Message]:
 
 
 def get_messages_last(conn: sqlite3.Connection, thread_id: str, limit: int) -> List[Message]:
+    # Exclude scope='discardable' rows: these are meta-judgment branch turns
+    # that were resolved as "continue" (Intent A v0.14, Intent B v0.11). They
+    # remain in the DB so meta-judgment-log retrieval can still find them, but
+    # they must not appear in line-cache reconstruction (would defeat the
+    # commit/discard property). scope IS NULL covers pre-v0.11 rows.
     cur = conn.execute(
-        "SELECT id, thread_id, role, content, resource_id, created_at, metadata FROM messages WHERE thread_id=? ORDER BY created_at DESC LIMIT ?",
+        "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+        "FROM messages WHERE thread_id=? "
+        "AND (scope IS NULL OR scope != 'discardable') "
+        "ORDER BY created_at DESC LIMIT ?",
         (thread_id, limit),
     )
     rows = cur.fetchall()
@@ -349,7 +386,10 @@ def get_messages_last(conn: sqlite3.Connection, thread_id: str, limit: int) -> L
 def get_messages_paginated(conn: sqlite3.Connection, thread_id: str, page: int, page_size: int) -> List[Message]:
     offset = max(0, page) * max(1, page_size)
     cur = conn.execute(
-        "SELECT id, thread_id, role, content, resource_id, created_at, metadata FROM messages WHERE thread_id=? ORDER BY created_at ASC LIMIT ? OFFSET ?",
+        "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+        "FROM messages WHERE thread_id=? "
+        "AND (scope IS NULL OR scope != 'discardable') "
+        "ORDER BY created_at ASC LIMIT ? OFFSET ?",
         (thread_id, page_size, offset),
     )
     return [_row_to_message(row) for row in cur.fetchall()]

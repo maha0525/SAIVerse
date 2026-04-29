@@ -351,6 +351,7 @@ async def _run_spell_loop(
     messages: list,
     playbook: Any,
     event_callback: Optional[Callable],
+    node_def: Any = None,
 ) -> Tuple[str, List[Tuple[str, str]], int]:
     """Execute the spell loop with parallel spell execution per LLM round.
 
@@ -429,16 +430,36 @@ async def _run_spell_loop(
 
             # Store to SAIMemory as single entries — spell lines (assistant) + all results
             # combined (system). This avoids N separate result entries per round.
+            #
+            # 7-layer storage routing (Intent A v0.14, Intent B v0.11):
+            # - line_role / line_id / origin_track_id come from the active LineFrame
+            #   on PulseContext. This makes the entry land in the layer that
+            #   matches the caller's line (e.g. main_line → [2], sub_line root →
+            #   [3], sub_line nested → [4] when scope='volatile').
+            # - Tags now respect the LLM node's `memorize.tags` config when set;
+            #   falling back to the legacy ["conversation"] default preserves
+            #   prior behavior for nodes that don't declare memorize.
             pulse_id = state.get("_pulse_id")
+            pulse_context = state.get("_pulse_context")
+            memorize_cfg = getattr(node_def, "memorize", None) if node_def is not None else None
+            if isinstance(memorize_cfg, dict):
+                node_memorize_tags = list(memorize_cfg.get("tags") or [])
+            else:
+                node_memorize_tags = []
+            assistant_tags = node_memorize_tags or ["conversation"]
+            spell_tags = (node_memorize_tags + ["spell"]) if node_memorize_tags else ["conversation", "spell"]
+
             if assistant_content:
                 runtime._store_memory(
                     persona, assistant_content, role="assistant",
-                    tags=["conversation"], pulse_id=pulse_id, playbook_name=playbook.name,
+                    tags=assistant_tags, pulse_id=pulse_id, playbook_name=playbook.name,
+                    pulse_context=pulse_context,
                 )
             if combined_results:
                 runtime._store_memory(
                     persona, combined_results, role="system",
-                    tags=["conversation", "spell"], pulse_id=pulse_id, playbook_name=playbook.name,
+                    tags=spell_tags, pulse_id=pulse_id, playbook_name=playbook.name,
+                    pulse_context=pulse_context,
                 )
 
             # Record to activity trace
@@ -612,7 +633,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
 
             # Select LLM client based on model_type and structured output needs
             needs_structured_output = response_schema is not None
-            llm_client = runtime._select_llm_client(node_def, persona, needs_structured_output=needs_structured_output)
+            llm_client = runtime._select_llm_client(node_def, persona, needs_structured_output=needs_structured_output, state=state)
 
             # Inject model-specific system prompt if configured
             _model_config_key = getattr(llm_client, "config_key", None)
@@ -934,52 +955,66 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     messages=messages,
                     playbook=playbook,
                     event_callback=event_callback,
+                    node_def=node_def,
                 )
                 if _spell_loop_count > 0:
                     result = {"type": "text", "content": _spell_text}
 
-                    pulse_id = state.get("_pulse_id")
-                    eff_bid = runtime._effective_building_id(persona, building_id)
+                    # Intent A v0.14 / Intent B v0.11 (handoff route B):
+                    # speak: false nodes are internal-processing nodes. They must
+                    # not flush spell-driven content to the UI or Building history
+                    # — the Spell loop already routed records to the active line's
+                    # storage layer ([2]/[3]/[4]) via PulseContext-aware
+                    # _store_memory in P0-4. Skip bubble1/bubble2 emission here.
+                    _node_speak_flag = getattr(node_def, "speak", True)
+                    if _node_speak_flag is False:
+                        LOGGER.info(
+                            "[sea][spell] speak=false node — skipping bubble1/bubble2 _emit_say "
+                            "(handoff route B); records remain in line storage layer only"
+                        )
+                    else:
+                        pulse_id = state.get("_pulse_id")
+                        eff_bid = runtime._effective_building_id(persona, building_id)
 
-                    # Bubble 1: text before the first spell (no metadata)
-                    _first_text_before = _spell_details_blocks[0][0] if _spell_details_blocks else ""
-                    if _first_text_before.strip():
-                        if event_callback:
-                            event_callback({
-                                "type": "say",
-                                "content": _first_text_before,
-                                "persona_id": getattr(persona, "persona_id", None),
-                            })
-                        runtime._emit_say(persona, eff_bid, _first_text_before, pulse_id=pulse_id)
+                        # Bubble 1: text before the first spell (no metadata)
+                        _first_text_before = _spell_details_blocks[0][0] if _spell_details_blocks else ""
+                        if _first_text_before.strip():
+                            if event_callback:
+                                event_callback({
+                                    "type": "say",
+                                    "content": _first_text_before,
+                                    "persona_id": getattr(persona, "persona_id", None),
+                                })
+                            runtime._emit_say(persona, eff_bid, _first_text_before, pulse_id=pulse_id)
 
-                    # Bubble 2: all details blocks + continuation text (with metadata)
-                    _bubble2_parts: list[str] = []
-                    for _i, (_tb, _db) in enumerate(_spell_details_blocks):
-                        if _i > 0 and _tb:
-                            _bubble2_parts.append(_tb)
-                        _bubble2_parts.append(_db)
-                    if result.get("content"):
-                        _bubble2_parts.append(result["content"])
-                    _spell_bubble2 = "\n".join(_bubble2_parts)
+                        # Bubble 2: all details blocks + continuation text (with metadata)
+                        _bubble2_parts: list[str] = []
+                        for _i, (_tb, _db) in enumerate(_spell_details_blocks):
+                            if _i > 0 and _tb:
+                                _bubble2_parts.append(_tb)
+                            _bubble2_parts.append(_db)
+                        if result.get("content"):
+                            _bubble2_parts.append(result["content"])
+                        _spell_bubble2 = "\n".join(_bubble2_parts)
 
-                    _spell_msg_meta: Dict[str, Any] = {}
-                    _spell_at = state.get("_activity_trace")
-                    if _spell_at:
-                        _spell_msg_meta["activity_trace"] = list(_spell_at)
-
-                    if event_callback:
-                        _say_event: Dict[str, Any] = {
-                            "type": "say",
-                            "content": _spell_bubble2,
-                            "persona_id": getattr(persona, "persona_id", None),
-                        }
+                        _spell_msg_meta: Dict[str, Any] = {}
+                        _spell_at = state.get("_activity_trace")
                         if _spell_at:
-                            _say_event["activity_trace"] = list(_spell_at)
-                        event_callback(_say_event)
+                            _spell_msg_meta["activity_trace"] = list(_spell_at)
 
-                    runtime._emit_say(persona, eff_bid, _spell_bubble2, pulse_id=pulse_id,
-                                      metadata=_spell_msg_meta if _spell_msg_meta else None)
-                    LOGGER.info("[sea][spell] Tool-mode: emitted bubble1 + bubble2 to UI and Building history")
+                        if event_callback:
+                            _say_event: Dict[str, Any] = {
+                                "type": "say",
+                                "content": _spell_bubble2,
+                                "persona_id": getattr(persona, "persona_id", None),
+                            }
+                            if _spell_at:
+                                _say_event["activity_trace"] = list(_spell_at)
+                            event_callback(_say_event)
+
+                        runtime._emit_say(persona, eff_bid, _spell_bubble2, pulse_id=pulse_id,
+                                          metadata=_spell_msg_meta if _spell_msg_meta else None)
+                        LOGGER.info("[sea][spell] Tool-mode: emitted bubble1 + bubble2 to UI and Building history")
 
                 if result["type"] == "tool_call":
                     LOGGER.info("[DEBUG] Entering tool_call branch")
@@ -1249,6 +1284,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         messages=messages,
                         playbook=playbook,
                         event_callback=event_callback,
+                        node_def=node_def,
                     )
 
                     if _spell_loop_count_ns > 0:
@@ -1506,6 +1542,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             messages=messages,
                             playbook=playbook,
                             event_callback=event_callback,
+                            node_def=node_def,
                         )
                     else:
                         # text is dict (from structured output) - skip spell processing
@@ -1684,9 +1721,13 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 if _ts_pc:
                     _tc_entry_pc["thought_signature"] = _ts_pc
                 _tc_list = [_tc_entry_pc]
+            # speak: false ノード (要約ノード等) でも実際の応答テキストはあるので
+            # 空文字列ではなく実テキストを記録する。空にする旧挙動はおそらく過去の手癖で、
+            # 後段で "空 assistant" として messages に流入する原因になっていた
+            # (まはー指摘 2026-04-28)。
             _pulse_ctx.append(PulseLogEntry(
                 role="assistant",
-                content=_msg_content if state.get("has_speak_content") else "",
+                content=_msg_content,
                 node_id=node_id, playbook_name=playbook.name,
                 tool_calls=_tc_list,
                 important=getattr(node_def, "important", False) or False))
@@ -1712,28 +1753,26 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                    getattr(node_def, "id", "?"), memorize_config, type(memorize_config), schema_consumed)
         if memorize_config:
             pulse_id = state.get("_pulse_id")
+            pulse_context = state.get("_pulse_context")
             # Parse memorize config - can be True or {"tags": [...]}
             if isinstance(memorize_config, dict):
                 memorize_tags = memorize_config.get("tags", [])
             else:
                 memorize_tags = []
 
-            # Save prompt (user role) - use the pre-expanded prompt variable
+            # Intent A v0.14 / Intent B v0.11 (handoff route C):
+            # Skip the legacy "save prompt as user role" path. The action template
+            # (`prompt`) used to be persisted as a standalone user message, which
+            # mixed it with real user utterances on the persona's timeline.
+            # Instead, attach it to the assistant response via the
+            # `paired_action_text` column so post-hoc inspection ("why did this
+            # assistant turn happen?") still works without polluting the
+            # conversation log.
             _memorize_ok = True
-            if prompt:
-                if not runtime._store_memory(
-                    persona,
-                    prompt,
-                    role="user",
-                    tags=list(memorize_tags),
-                    pulse_id=pulse_id,
-                    playbook_name=playbook.name,
-                ):
-                    _memorize_ok = False
-                else:
-                    LOGGER.debug("[sea][llm] Memorized prompt (user): %s", prompt)
 
-            # Save response (assistant role)
+            # Save response (assistant role) — paired with the prompt that
+            # produced it, so the action template lives alongside the response
+            # rather than as a separate fake-user turn.
             if text and text != "(error in llm node)":
                 # If structured output was consumed, format as JSON string for memory
                 content_to_save = text
@@ -1758,10 +1797,15 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     pulse_id=pulse_id,
                     metadata=_memorize_metadata if _memorize_metadata else None,
                     playbook_name=playbook.name,
+                    pulse_context=pulse_context,
+                    paired_action_text=prompt,
                 ):
                     _memorize_ok = False
                 else:
-                    LOGGER.debug("[sea][llm] Memorized response (assistant): %s", str(content_to_save))
+                    LOGGER.debug(
+                        "[sea][llm] Memorized response (assistant) with paired_action_text len=%s",
+                        len(prompt) if prompt else 0,
+                    )
 
             if not _memorize_ok and event_callback:
                 event_callback({"type": "warning", "content": "記憶の保存に失敗しました。会話内容が記録されていない可能性があります。", "warning_code": "memorize_failed", "display": "toast"})
