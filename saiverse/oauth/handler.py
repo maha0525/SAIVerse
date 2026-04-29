@@ -34,7 +34,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
@@ -374,15 +374,22 @@ def exchange_code(
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": pending.redirect_uri,
-        "client_id": client_id,
         "code_verifier": pending.code_verifier,
     }
+
+    # Confidential client (client_secret あり) は HTTP Basic Auth ヘッダーで認証する
+    # X (Twitter) や一部プロバイダは body の client_secret では認証されず 401 を返す。
+    # Public client (client_secret 無し) は body に client_id のみ。
+    auth: Optional[Tuple[str, str]] = None
     if client_secret:
-        data["client_secret"] = client_secret
+        auth = (client_id, client_secret)
+    else:
+        data["client_id"] = client_id
 
     LOGGER.info(
-        "oauth: exchanging code addon=%s flow=%s persona=%s",
+        "oauth: exchanging code addon=%s flow=%s persona=%s auth=%s",
         addon_name, flow_key, pending.persona_id,
+        "basic" if auth else "public",
     )
 
     try:
@@ -391,6 +398,7 @@ def exchange_code(
                 flow["token_url"],
                 data=data,
                 headers={"Accept": "application/json"},
+                auth=auth,
             )
     except httpx.HTTPError as exc:
         raise OAuthError(f"Token endpoint request failed: {exc}") from exc
@@ -571,10 +579,14 @@ def get_valid_token(
     data = {
         "grant_type": "refresh_token",
         "refresh_token": str(refresh_token),
-        "client_id": client_id or "",
     }
-    if client_secret:
-        data["client_secret"] = client_secret
+
+    # 認証方式は token exchange と同じ（Confidential client は Basic Auth ヘッダー）
+    auth: Optional[Tuple[str, str]] = None
+    if client_id and client_secret:
+        auth = (client_id, client_secret)
+    elif client_id:
+        data["client_id"] = client_id
 
     try:
         with httpx.Client(timeout=30.0) as client:
@@ -582,6 +594,7 @@ def get_valid_token(
                 flow["token_url"],
                 data=data,
                 headers={"Accept": "application/json"},
+                auth=auth,
             )
     except httpx.HTTPError as exc:
         LOGGER.error("oauth: refresh request failed: %s", exc)
