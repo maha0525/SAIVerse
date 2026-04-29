@@ -29,6 +29,15 @@ import { ActiveClientIndicator } from '@/components/ActiveClientIndicator';
 import AddonBubbleButtons, { BubbleButtonDef } from '@/components/AddonBubbleButtons';
 import SystemAlertBanner from '@/components/SystemAlertBanner';
 
+// Strip <user_only alt="..."> wrapper tags from message content for UI display.
+// These tags are added by the backend (wrap_spell_blocks) so other personas can't read
+// the inner content, but in the user's own chat UI we want the inner content visible
+// without the wrapping tags leaking as raw text.
+const stripUserOnlyTags = (text: string): string => {
+    if (!text) return text;
+    return text.replace(/<user_only(?:\s[^>]*)?>/g, '').replace(/<\/user_only>/g, '');
+};
+
 // Allow className on HTML elements used by thinking blocks (<details>, <div>, <summary>)
 const sanitizeSchema = {
     ...defaultSchema,
@@ -2041,7 +2050,7 @@ export default function Home() {
                                                 components={{
                                                     a: ({ href, children }) => <SaiverseLink href={href} children={children} onOpenItem={handleOpenItemFromLink} />,
                                                 }}
-                                            >{msg.content}</ReactMarkdown>
+                                            >{stripUserOnlyTags(msg.content)}</ReactMarkdown>
                                         </>
                                     )}
                                 </div>
