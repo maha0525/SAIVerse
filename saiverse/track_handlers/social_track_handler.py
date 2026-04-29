@@ -61,6 +61,14 @@ class SocialTrackHandler:
         "- Pulse 完了後の挙動: 相手の応答を待つ。次のイベント (他ペルソナの発話) が来るまで他のことを考えなくて良い。"
     )
 
+    # Phase 1.1: prepare_pulse_root_context 用の Track 種別固有の context 指針。
+    track_specific_guidance: str = (
+        "## Track 種別固有の指針 (交流 Track)\n"
+        "- output_target=building:current のため、現在地を移動すれば配信先も変わる。\n"
+        "- 相手ペルソナとの会話に集中する。複数人居る場合 audience を見て自分宛か判断する。\n"
+        "- 交流 Track は永続 Track。complete / abort には遷移しない。"
+    )
+
     def __init__(self, track_manager: TrackManager):
         self.track_manager = track_manager
 

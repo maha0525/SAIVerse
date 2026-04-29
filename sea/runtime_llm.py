@@ -1787,11 +1787,19 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
         if memorize_config:
             pulse_id = state.get("_pulse_id")
             pulse_context = state.get("_pulse_context")
-            # Parse memorize config - can be True or {"tags": [...]}
+            # Parse memorize config - can be True or {"tags": [...], "scope": ..., "line_role": ...}
             if isinstance(memorize_config, dict):
                 memorize_tags = memorize_config.get("tags", [])
+                # Phase 1.3: meta-judgment ノードが分岐ターンを scope='discardable' で
+                # 保存するための明示指定経路。memorize.scope を渡すと _store_memory に
+                # そのまま転送される (None なら DB の DEFAULT 'committed' に従う)。
+                memorize_scope = memorize_config.get("scope")
+                # 同じく line_role を上書きできるようにする (既定は LineFrame 由来)。
+                memorize_line_role = memorize_config.get("line_role")
             else:
                 memorize_tags = []
+                memorize_scope = None
+                memorize_line_role = None
 
             # Intent A v0.14 / Intent B v0.11 (handoff route C):
             # Skip the legacy "save prompt as user role" path. The action template
@@ -1822,7 +1830,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 if _mem_rd is not None:
                     _memorize_metadata["reasoning_details"] = _mem_rd
 
-                if not runtime._store_memory(
+                stored_message_id = runtime._store_memory(
                     persona,
                     content_to_save,
                     role="assistant",
@@ -1832,13 +1840,22 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     playbook_name=playbook.name,
                     pulse_context=pulse_context,
                     paired_action_text=prompt,
-                ):
+                    scope=memorize_scope,
+                    line_role=memorize_line_role,
+                    return_message_id=True,
+                )
+                if not stored_message_id:
                     _memorize_ok = False
                 else:
                     LOGGER.debug(
-                        "[sea][llm] Memorized response (assistant) with paired_action_text len=%s",
-                        len(prompt) if prompt else 0,
+                        "[sea][llm] Memorized response (assistant) with paired_action_text len=%s scope=%s",
+                        len(prompt) if prompt else 0, memorize_scope,
                     )
+                    # Phase 1.3: discardable 保存時はメッセージ ID を state に記録
+                    # しておき、後続の dispatch ノード (meta_judgment_dispatch ツール)
+                    # が switch 判定時に promote_to_committed を呼べるようにする。
+                    if memorize_scope == "discardable" and isinstance(stored_message_id, str):
+                        state["_meta_judgment_message_id"] = stored_message_id
 
             if not _memorize_ok and event_callback:
                 event_callback({"type": "warning", "content": "記憶の保存に失敗しました。会話内容が記録されていない可能性があります。", "warning_code": "memorize_failed", "display": "toast"})

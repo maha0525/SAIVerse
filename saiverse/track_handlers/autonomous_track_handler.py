@@ -58,6 +58,15 @@ class AutonomousTrackHandler:
         "  作業が一段落したと感じたら track_complete で完了、別の作業に移りたければ track_pause で一時停止できる。"
     )
 
+    # Phase 1.1: prepare_pulse_root_context 用の Track 種別固有の context 指針。
+    # 自律 Track はサブライン起点 + 連続実行型なので、メタ判断との切り分けが重要。
+    track_specific_guidance: str = (
+        "## Track 種別固有の指針 (自律 Track)\n"
+        "- 起点ラインは軽量モデル (sub_line)。重量級判断が必要なら子ラインで呼ぶ。\n"
+        "- Pulse 完了後はメタレイヤー判断に任せる。続行 / 切替 / 完了は無理に決めなくて良い。\n"
+        "- 一段落したら track_pause か track_complete でメインラインに合図できる。"
+    )
+
     available_spells_doc: str = (
         "[使用可能な Track 操作スペル (自律 Track)]\n"
         "発動形式は **行頭が `/spell ` で始まる**こと:\n"

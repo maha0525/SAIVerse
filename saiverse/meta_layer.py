@@ -1,20 +1,28 @@
 """MetaLayer: ペルソナの行動 Track の選択・切り替えを判断する観察視点。
 
-Intent A v0.9 / Intent B v0.6 が定める「メタレイヤー」の最小実装 (Phase C-1)。
+Intent A v0.9 / Intent B v0.6 で導入された Phase C-1 の最小実装に、
+Phase 1.2 (Intent A v0.14, Intent B v0.11) で **Playbook 経由の判断 path** を
+追加した二刀流構成:
+
+- 既定 (legacy path): 重量級モデルへ直接プロンプトを渡しスペル抽出ループ
+- Playbook path: ``meta_judgment.json`` を runtime に投げて構造化判断
+  (continue / switch / wait / close) を `meta_judgment_dispatch` ツールで適用
+
+切り替えは環境変数 ``SAIVERSE_META_LAYER_USE_PLAYBOOK`` で行う:
+
+- ``"1"`` / ``"true"`` (大文字小文字無視): Playbook path
+- それ以外 (未設定含む): legacy path
 
 責務:
 - TrackManager の alert observer として登録され、alert 遷移を契機に起動する
-- 重量級モデルに「現状 + 新着イベント」をプロンプトとして渡し、
-  Track 操作スペル (/track_*, /note_*) を含む自由文応答を得る
-- スペルが含まれていれば既存の TOOL_REGISTRY 経由で実行 → 結果を再びプロンプトに
-  含めて再呼び出し。スペルが含まれない応答が返ってきた時点で自然停止
-- LLM コール時には tools / response_schema を一切渡さない
-  (キャッシュ親和性とコンテキスト汚染回避のため)
+- 上記の path に従って判断を実行
+- LLM コール時は (legacy) tools / response_schema を渡さない
+  Playbook path 側は meta_judgment.json の response_schema に従う
 
 責務外:
 - メインライン応答 (発話生成) の起動。これは呼び出し元 (Handler) が責任を持つ
-- Track の作成 / 状態遷移ロジック (TrackManager に委譲)
-- 中断時 pause_summary 作成 / 再開コンテキスト構築 (Phase C-7/C-8)
+- Track の作成 / 状態遷移ロジック (TrackManager / dispatch ツールに委譲)
+- 中断時 pause_summary 作成 / 再開コンテキスト構築 (Phase 1.3 後段 / Phase 2)
 
 詳細: docs/intent/persona_cognitive_model.md, docs/intent/persona_action_tracks.md
 """
@@ -22,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -84,6 +93,9 @@ class MetaLayer:
         失敗時も例外を上げず WARN ログのみ (observer の障害が呼び出し元の
         状態遷移処理を巻き込まないため、TrackManager 側の _notify_alert で
         も二重に保護されている)。
+
+        Phase 1.2: ``SAIVERSE_META_LAYER_USE_PLAYBOOK`` が真なら ``meta_judgment``
+        Playbook 経由で判断する。それ以外は legacy direct-LLM スペル loop。
         """
         try:
             persona = self._lookup_persona(persona_id)
@@ -93,15 +105,100 @@ class MetaLayer:
                     persona_id, alert_track_id,
                 )
                 return
+            use_playbook = self._use_playbook_path()
             logging.info(
-                "[meta-layer] Judgment starting: persona=%s alert_track=%s trigger=%s",
+                "[meta-layer] Judgment starting: persona=%s alert_track=%s trigger=%s path=%s",
                 persona_id, alert_track_id, context.get("trigger"),
+                "playbook" if use_playbook else "legacy",
             )
-            self._run_judgment(persona, alert_track_id, context)
+            if use_playbook:
+                self._run_judgment_via_playbook(persona, alert_track_id, context)
+            else:
+                self._run_judgment(persona, alert_track_id, context)
         except Exception:
             logging.exception(
                 "[meta-layer] Judgment failed: persona=%s track=%s",
                 persona_id, alert_track_id,
+            )
+
+    @staticmethod
+    def _use_playbook_path() -> bool:
+        """Read the ``SAIVERSE_META_LAYER_USE_PLAYBOOK`` env flag.
+
+        Phase 1.2 introduces Playbook-based meta judgment as opt-in so live
+        personas keep working through the legacy path while the new flow is
+        validated. Phase 1.3+ flips the default once the dispatch tool is
+        battle-tested.
+        """
+        raw = os.environ.get("SAIVERSE_META_LAYER_USE_PLAYBOOK", "").strip().lower()
+        return raw in ("1", "true", "yes", "on")
+
+    # ------------------------------------------------------------------
+    # Phase 1.2: Playbook-based judgment dispatch
+    # ------------------------------------------------------------------
+
+    def _run_judgment_via_playbook(
+        self,
+        persona: Any,
+        alert_track_id: str,
+        context: Dict[str, Any],
+    ) -> None:
+        """Dispatch to the ``meta_judgment`` Playbook through the runtime.
+
+        Resolves the persona's current building (needed by run_meta_user's
+        pulse-root pipeline) and delegates. The Playbook itself records its
+        LLM turn as ``scope='discardable'`` and the dispatch tool promotes
+        the row to ``'committed'`` when the action is ``switch`` (Phase 1.3).
+        """
+        runtime = getattr(self.manager, "sea_runtime", None)
+        if runtime is None:
+            logging.warning(
+                "[meta-layer] No sea_runtime on manager — cannot run meta_judgment Playbook; "
+                "falling back to legacy path"
+            )
+            self._run_judgment(persona, alert_track_id, context)
+            return
+
+        building_id = getattr(persona, "current_building_id", None)
+        if not building_id:
+            logging.warning(
+                "[meta-layer] persona %s has no current_building_id — cannot run meta_judgment Playbook",
+                persona.persona_id,
+            )
+            return
+
+        # Serialize trigger context to JSON so the Playbook input_schema can
+        # consume it as a single string. Drop non-serializable bits defensively.
+        try:
+            trigger_context_json = json.dumps(
+                {k: v for k, v in (context or {}).items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))},
+                ensure_ascii=False,
+            )
+        except (TypeError, ValueError):
+            trigger_context_json = "{}"
+
+        args = {
+            "alert_track_id": alert_track_id or "",
+            "trigger_context": trigger_context_json,
+        }
+
+        try:
+            runtime.run_meta_user(
+                persona,
+                building_id,
+                user_input=None,
+                meta_playbook="meta_judgment",
+                args=args,
+                pulse_type="meta_judgment",
+            )
+            logging.info(
+                "[meta-layer] meta_judgment Playbook completed: persona=%s alert_track=%s",
+                persona.persona_id, alert_track_id,
+            )
+        except Exception:
+            logging.exception(
+                "[meta-layer] meta_judgment Playbook failed: persona=%s alert_track=%s",
+                persona.persona_id, alert_track_id,
             )
 
     # ------------------------------------------------------------------

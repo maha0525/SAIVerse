@@ -1,0 +1,88 @@
+{
+    "name": "meta_judgment",
+    "display_name": "メタ判断 (Phase 1.2)",
+    "description": "メタレイヤーが alert / 定期 tick で起動する判断 Playbook。Track 内メインラインの一瞬の分岐として動き、結果に応じて continue / switch / wait / close を決定する。続行時は分岐ターンを scope='discardable' で残し (= メインキャッシュには載らないが [1] メタ判断ログ領域には保存)、移動時は dispatch ツールが scope='committed' に昇格させて移動先 Track の冒頭来歴とする (Intent A v0.14 / Intent B v0.11)。",
+    "input_schema": [
+        {
+            "name": "alert_track_id",
+            "description": "alert を起こした Track の ID。定期 tick の場合は空文字列も可。",
+            "required": false,
+            "default": ""
+        },
+        {
+            "name": "trigger_context",
+            "description": "alert / tick のトリガー情報 (JSON 文字列)。trigger 種別と event 内容等を含む。",
+            "required": false,
+            "default": "{}"
+        }
+    ],
+    "router_callable": false,
+    "user_selectable": false,
+    "dev_only": true,
+    "nodes": [
+        {
+            "id": "judge",
+            "type": "llm",
+            "action": "あなたは今、自分の行動の線 (Track) を一段引いて見直すメタ判断の瞬間にいます。\n\nアラート対象 Track ID: {alert_track_id}\nトリガー情報: {trigger_context}\n\n現在の Track 一覧と直近の状況は会話履歴で把握できています。これを踏まえ、以下のいずれかを構造化出力で返してください:\n\n- continue: 今の Track を続ける (このターンの判断は履歴には残らないが、次のメタ判断時に参考情報として参照されます)\n- switch: 別の Track に切り替える (switch_to_track_id で既存 Track を指すか、new_track_spec で新規作成)\n- wait: 外部応答を待つ\n- close: 完了して閉じる\n\nthought フィールドにあなたの内的独白を簡潔に書いてください。",
+            "speak": false,
+            "memorize": {
+                "tags": [
+                    "meta_judgment",
+                    "internal"
+                ],
+                "scope": "discardable",
+                "line_role": "meta_judgment"
+            },
+            "response_schema": {
+                "type": "object",
+                "properties": {
+                    "thought": {
+                        "type": "string",
+                        "description": "判断に至った思考"
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["continue", "switch", "wait", "close"],
+                        "description": "アクティブ Track をどうするか"
+                    },
+                    "switch_to_track_id": {
+                        "type": "string",
+                        "description": "switch / wait / close の場合、対象 Track の ID"
+                    },
+                    "notify_to_track": {
+                        "type": "string",
+                        "description": "continue の場合、現アクティブ Track に通知すべき内容"
+                    },
+                    "close_reason": {
+                        "type": "string",
+                        "description": "close の場合の理由"
+                    }
+                },
+                "required": ["thought", "action"]
+            },
+            "output_key": "judgment",
+            "output_mapping": {
+                "judgment.action": "judgment_action",
+                "judgment.switch_to_track_id": "judgment_switch_to_track_id",
+                "judgment.notify_to_track": "judgment_notify_to_track",
+                "judgment.close_reason": "judgment_close_reason"
+            },
+            "next": "dispatch"
+        },
+        {
+            "id": "dispatch",
+            "type": "tool",
+            "action": "meta_judgment_dispatch",
+            "args_input": {
+                "action": "judgment_action",
+                "switch_to_track_id": "judgment_switch_to_track_id",
+                "notify_to_track": "judgment_notify_to_track",
+                "close_reason": "judgment_close_reason",
+                "judgment_message_id": "_meta_judgment_message_id"
+            },
+            "output_key": "dispatch_result",
+            "next": null
+        }
+    ],
+    "start_node": "judge"
+}

@@ -55,6 +55,33 @@ def _get_default_lightweight_model() -> str:
     return os.getenv("SAIVERSE_DEFAULT_LIGHTWEIGHT_MODEL", BUILTIN_DEFAULT_LITE_MODEL)
 
 
+# Phase 1.4 (Intent A v0.14, Intent B v0.11): 旧仕様 (LLMNodeDef.context_profile /
+# model_type) は line 仕様に統合される過程の deprecated フィールド。完全削除前に
+# Playbook 移行を促す警告を出す。同じノード id について警告は 1 回のみ。
+_LEGACY_FIELD_WARNED_NODES: set = set()
+
+
+def _warn_once_legacy_field(
+    node_id: str,
+    context_profile: Optional[str],
+    model_type: Optional[str],
+) -> None:
+    if node_id in _LEGACY_FIELD_WARNED_NODES:
+        return
+    _LEGACY_FIELD_WARNED_NODES.add(node_id)
+    parts = []
+    if context_profile:
+        parts.append(f"context_profile={context_profile!r}")
+    if model_type:
+        parts.append(f"model_type={model_type!r}")
+    LOGGER.warning(
+        "[sea] Playbook node '%s' uses deprecated field(s): %s. "
+        "Migrate to the line-based spec (SubPlayNodeDef.line='main'/'sub'). "
+        "See docs/intent/persona_action_tracks.md §'旧仕様の廃止計画'.",
+        node_id, ", ".join(parts) or "(none)",
+    )
+
+
 
 class SEARuntime:
     """Lightweight executor for meta playbooks until full LangGraph port."""
@@ -403,14 +430,29 @@ class SEARuntime:
         # サブライン強制フラグ (line='sub' で起動された Playbook は軽量モデルを使う)
         force_lightweight = bool(state and state.get("_force_lightweight_model"))
 
-        # Determine model_type: context_profile takes precedence over explicit model_type
+        # Phase 1.4 (Intent A v0.14, Intent B v0.11): context_profile / model_type
+        # は line 仕様に統合されつつあり deprecated。ノードに残っているうちは尊重
+        # するが、警告を 1 回だけ出して移行を促す。完全削除は Phase 1.4c (旧仕様
+        # 削除タイミング) で行う。
+        # 注: model_type のデフォルトは "normal" (= 何も設定していないのと等価) なので、
+        # 警告は context_profile が指定されているか、model_type が "normal" 以外
+        # (実質的に "lightweight") の場合のみ発火させる。
         _profile_name = getattr(node_def, "context_profile", None)
+        _explicit_model_type = getattr(node_def, "model_type", None)
+        _is_legacy_used = bool(_profile_name) or (
+            _explicit_model_type and _explicit_model_type != "normal"
+        )
+        if _is_legacy_used:
+            _node_id = getattr(node_def, "id", "?")
+            _warn_once_legacy_field(_node_id, _profile_name, _explicit_model_type)
+
+        # Determine model_type: context_profile takes precedence over explicit model_type
         if _profile_name:
             from sea.playbook_models import CONTEXT_PROFILES
             _profile = CONTEXT_PROFILES.get(_profile_name)
-            model_type = _profile["model_type"] if _profile else (getattr(node_def, "model_type", "normal") or "normal")
+            model_type = _profile["model_type"] if _profile else (_explicit_model_type or "normal")
         else:
-            model_type = getattr(node_def, "model_type", "normal") or "normal"
+            model_type = _explicit_model_type or "normal"
 
         # サブライン強制: ノード定義の model_type を上書き
         if force_lightweight and model_type != "lightweight":
@@ -1219,7 +1261,8 @@ class SEARuntime:
         origin_track_id: Optional[str] = None,
         scope: Optional[str] = None,
         paired_action_text: Optional[str] = None,
-    ) -> bool:
+        return_message_id: bool = False,
+    ) -> Any:
         """Store a message to SAIMemory. Returns True on success, False on failure.
 
         7-layer storage metadata (Intent A v0.14, Intent B v0.11):
@@ -1233,9 +1276,15 @@ class SEARuntime:
           (used e.g. when a meta-judgment branch turn must be tagged
           ``scope='discardable'`` regardless of the surrounding line).
         - ``scope`` defaults to the SQL-level ``'committed'`` when ``None``.
+        - ``return_message_id``: When True, returns the inserted message id
+          (str) on success, or empty string on no-op / failure. Used by Phase
+          1.3 meta-judgment so the dispatch step can later promote the row
+          from ``scope='discardable'`` to ``'committed'`` when action='switch'.
+          Default False keeps the bool return so existing callers are
+          unchanged.
         """
         if not text:
-            return True
+            return "" if return_message_id else True
         adapter = getattr(persona, "sai_memory", None)
         if not adapter or not adapter.is_ready():
             LOGGER.warning(
@@ -1243,7 +1292,7 @@ class SEARuntime:
                 "Check embedding model setup.",
                 getattr(persona, "persona_id", None),
             )
-            return False
+            return "" if return_message_id else False
         try:
             if adapter and adapter.is_ready():
                 current_thread = adapter.get_current_thread()
@@ -1315,11 +1364,13 @@ class SEARuntime:
                     message["metadata"] = msg_metadata
                 # Pass thread_suffix to ensure message is saved to correct thread
                 thread_suffix = current_thread.split(":", 1)[1] if ":" in current_thread else current_thread
-                adapter.append_persona_message(message, thread_suffix=thread_suffix)
+                inserted_id = adapter.append_persona_message(message, thread_suffix=thread_suffix)
+                if return_message_id:
+                    return inserted_id or ""
             return True
         except Exception:
             LOGGER.warning("memorize node not stored", exc_info=True)
-            return False
+            return "" if return_message_id else False
 
     def _append_tool_result_message(
         self,
