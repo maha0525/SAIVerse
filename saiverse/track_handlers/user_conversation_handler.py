@@ -86,6 +86,15 @@ class UserConversationTrackHandler:
     # → 起点メインライン Pulse として動作し、メインキャッシュに会話履歴が積まれる。
     default_entry_line_role: str = "main_line"
 
+    # Phase 1.1: prepare_pulse_root_context 用の Track 種別固有の context 指針。
+    # 「相手の発話は審判ではなく対話の一部」を明示し、応答待ち姿勢を補強する。
+    track_specific_guidance: str = (
+        "## Track 種別固有の指針 (対ユーザー会話)\n"
+        "- 相手の発話は審判ではなく対話の一部として受け取る。\n"
+        "- 応答後はユーザーの返答を待つだけで良い。次の独白までキャッシュは保たれている。\n"
+        "- 対ユーザー Track は永続 Track。complete / abort には遷移しない。"
+    )
+
     def __init__(
         self,
         track_manager: TrackManager,

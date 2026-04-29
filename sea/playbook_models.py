@@ -47,13 +47,18 @@ class LLMNodeDef(BaseModel):
     )
     context_profile: Optional[str] = Field(
         default=None,
-        description="Context profile name. Overrides playbook-level context_requirements and model_type. "
-                    "Values: 'conversation' (normal model, full context), 'router' (lightweight, full context), "
-                    "'worker' (normal, isolated), 'worker_light' (lightweight, isolated)."
+        description="DEPRECATED (Phase 1.4, Intent A v0.14 / Intent B v0.11). "
+                    "Migrate to the line-based spec (start child playbook with SubPlayNodeDef.line='main'/'sub'). "
+                    "Will be removed once all Playbooks are translated. "
+                    "Legacy values: 'conversation' (normal model, full context), 'router' "
+                    "(lightweight, full context), 'worker' (normal, isolated), 'worker_light' "
+                    "(lightweight, isolated)."
     )
     model_type: Optional[str] = Field(
         default="normal",
-        description="Which model to use: 'normal' (default) or 'lightweight' for faster/cheaper models. "
+        description="DEPRECATED (Phase 1.4, Intent A v0.14 / Intent B v0.11). "
+                    "The line spec (parent's line='sub' for lightweight) replaces this field. "
+                    "Legacy values: 'normal' (default) or 'lightweight'. "
                     "Ignored when context_profile is set (profile determines model)."
     )
     response_schema: Optional[Dict[str, Any]] = Field(

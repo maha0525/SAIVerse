@@ -308,16 +308,16 @@ class SAIMemoryAdapter:
         message: dict,
         *,
         thread_suffix: Optional[str] = None,
-    ) -> None:
-        self._append_message(building_id=building_id, message=message, thread_suffix=thread_suffix)
+    ) -> Optional[str]:
+        return self._append_message(building_id=building_id, message=message, thread_suffix=thread_suffix)
 
     def append_persona_message(
         self,
         message: dict,
         *,
         thread_suffix: Optional[str] = None,
-    ) -> None:
-        self._append_message(building_id=None, message=message, thread_suffix=thread_suffix)
+    ) -> Optional[str]:
+        return self._append_message(building_id=None, message=message, thread_suffix=thread_suffix)
 
     def recent_messages(self, building_id: str, max_chars: int) -> List[dict]:
         if not self._ready:
@@ -1735,9 +1735,16 @@ class SAIMemoryAdapter:
         building_id: Optional[str],
         message: dict,
         thread_suffix: Optional[str] = None,
-    ) -> None:
+    ) -> Optional[str]:
+        """Insert a message and return its newly-assigned id (or None on failure).
+
+        The id return path is used by Phase 1.3 meta-judgment so the dispatch
+        step can later promote the row from ``scope='discardable'`` to
+        ``'committed'`` without re-querying. Legacy callers ignoring the
+        return value are unaffected.
+        """
         if not self._ready:
-            return
+            return None
         try:
             role = message.get("role", "system")
             content = message.get("content", "")
@@ -1798,8 +1805,10 @@ class SAIMemoryAdapter:
             LOGGER.debug(
                 "SAIMemory upserted message=%s thread=%s role=%s", mid, thread_id, role
             )
+            return mid
         except Exception as exc:
             LOGGER.warning("Failed to append message to SAIMemory (building=%s): %s", building_id, exc)
+            return None
 
     @staticmethod
     def _timestamp_to_epoch(value: Optional[str]) -> int:

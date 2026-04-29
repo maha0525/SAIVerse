@@ -294,6 +294,21 @@ class TrackManager:
 
             track.status = STATUS_RUNNING
             track.last_active_at = datetime.now()
+
+            # Phase 1.1: Track が running になったタイミングで cache_built_at を
+            # 削除する。これにより次の Pulse が「初回 Pulse」扱いになり、固定情報
+            # (Track identity / Handler 指針 / pulse_completion_notice) がプロンプト
+            # 先頭に再注入される。pending → running の戻り経路でもキャッシュが
+            # 揮発した可能性を考慮して同じ扱いにする。
+            try:
+                if track.track_metadata:
+                    meta = json.loads(track.track_metadata)
+                    if isinstance(meta, dict) and "cache_built_at" in meta:
+                        meta.pop("cache_built_at", None)
+                        track.track_metadata = json.dumps(meta, ensure_ascii=False)
+            except (TypeError, ValueError):
+                pass
+
             db.commit()
             db.refresh(track)
             db.expunge(track)
