@@ -393,19 +393,6 @@ class RuntimeService(
             self.occupants.get(building_id, []),
         )
 
-        # 対ユーザー Track の自動作成 (Phase B-4)
-        # 既に存在する場合は何もしない (他 Track の running を保護)。
-        try:
-            user_id_str = str(self.state.user_id)
-            for persona in responding_personas:
-                self.manager._ensure_user_conversation_track(
-                    persona.persona_id, user_id_str
-                )
-        except Exception:
-            logging.exception(
-                "[track-hook] Failed to ensure user_conversation track (handle_user_input)"
-            )
-
         user_entry = {"role": "user", "content": message}
         if metadata:
             user_entry["metadata"] = metadata
@@ -430,11 +417,32 @@ class RuntimeService(
             except Exception:
                 logging.exception("[runtime] Failed to pre-add user message to building_histories")
 
-        # SEA runtime handles history recording internally
+        # 対ユーザー Track のイベント受け口 (Phase C-1)
+        # Handler が Track の取得 / 状態判定 / alert 遷移 (→ MetaLayer 起動) を行い、
+        # 最後に invoke_main_line() で SEA を起動する。
+        # 通常会話 (Track が running 継続) では MetaLayer は呼ばれない。
+        user_id_str = str(self.state.user_id)
         replies: List[str] = []
         for persona in responding_personas:
-            # SEA経由でユーザー入力を処理
-            self.manager.run_sea_user(persona, building_id, message)
+            captured_persona = persona
+
+            def _invoke_main_line(p=captured_persona):
+                self.manager.run_sea_user(p, building_id, message)
+
+            try:
+                self.manager.user_conversation_handler.on_user_utterance(
+                    persona_id=captured_persona.persona_id,
+                    user_id=user_id_str,
+                    event=user_entry,
+                    invoke_main_line=_invoke_main_line,
+                )
+            except Exception:
+                logging.exception(
+                    "[runtime] user_conversation_handler failed for persona=%s; falling back to direct main-line",
+                    captured_persona.persona_id,
+                )
+                # フォールバック: Handler が落ちてもユーザー応答は守る
+                _invoke_main_line()
         logging.debug("[runtime] handle_user_input collected %d replies", len(replies))
 
         self._save_modified_buildings()
@@ -474,18 +482,7 @@ class RuntimeService(
             self.occupants.get(building_id, []),
         )
 
-        # 対ユーザー Track の自動作成 (Phase B-4)
-        # 既に存在する場合は何もしない (他 Track の running を保護)。
-        try:
-            user_id_str = str(self.state.user_id)
-            for persona in responding_personas:
-                self.manager._ensure_user_conversation_track(
-                    persona.persona_id, user_id_str
-                )
-        except Exception:
-            logging.exception(
-                "[track-hook] Failed to ensure user_conversation track (handle_user_input_stream)"
-            )
+        user_id_str = str(self.state.user_id)
 
         user_entry = {"role": "user", "content": message}
         if metadata:
@@ -538,14 +535,33 @@ class RuntimeService(
                         logging.info("[runtime] Stop event detected; breaking persona loop for building %s", building_id)
                         response_queue.put({"type": "cancelled", "content": "生成を中止しました。"})
                         break
-                    # SEA実行。イベントはコールバック経由でキューに送る
-                    self.manager.run_sea_user(
-                        persona, building_id, message,
-                        metadata=metadata,
-                        meta_playbook=meta_playbook,
-                        args=args,
-                        event_callback=_enrich_event
-                    )
+
+                    # 対ユーザー Track のイベント受け口 (Phase C-1)
+                    # Handler が Track 状態判定 / alert 遷移 (→ MetaLayer) → invoke_main_line で SEA 起動
+                    captured_persona = persona
+
+                    def _invoke_main_line(p=captured_persona):
+                        self.manager.run_sea_user(
+                            p, building_id, message,
+                            metadata=metadata,
+                            meta_playbook=meta_playbook,
+                            args=args,
+                            event_callback=_enrich_event,
+                        )
+
+                    try:
+                        self.manager.user_conversation_handler.on_user_utterance(
+                            persona_id=captured_persona.persona_id,
+                            user_id=user_id_str,
+                            event=user_entry,
+                            invoke_main_line=_invoke_main_line,
+                        )
+                    except Exception:
+                        logging.exception(
+                            "[runtime] user_conversation_handler failed for persona=%s; falling back to direct main-line",
+                            captured_persona.persona_id,
+                        )
+                        _invoke_main_line()
                     # Check stop event after each persona completes
                     if stop_event.is_set():
                         logging.info("[runtime] Stop event detected after persona %s; breaking loop", persona.persona_id)

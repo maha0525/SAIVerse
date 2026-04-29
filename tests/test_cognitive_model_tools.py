@@ -76,6 +76,18 @@ def test_track_create_schema_required_fields():
     assert "track_type" in required
 
 
+def test_track_create_schema_has_activate_option():
+    """Phase C-1: activate オプションが追加されている。"""
+    module = load_builtin_tool("track_create")
+    schema = module.schema()
+    props = schema.parameters.get("properties", {})
+    assert "activate" in props
+    assert props["activate"].get("type") == "boolean"
+    assert props["activate"].get("default") is False
+    # activate は required ではない (省略時は従来通り unstarted で作成)
+    assert "activate" not in schema.parameters.get("required", [])
+
+
 def test_note_create_schema_required_fields():
     module = load_builtin_tool("note_create")
     schema = module.schema()

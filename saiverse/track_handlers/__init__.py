@@ -9,7 +9,9 @@ Handler クラスを本パッケージに追加して呼び出し元 (handle_use
 """
 
 from .social_track_handler import SocialTrackHandler
+from .user_conversation_handler import UserConversationTrackHandler
 
 __all__ = [
     "SocialTrackHandler",
+    "UserConversationTrackHandler",
 ]

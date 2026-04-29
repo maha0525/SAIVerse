@@ -390,3 +390,110 @@ def test_wait_requires_waiting_for(tm, persona):
     tm.activate(t)
     with pytest.raises(ValueError):
         tm.wait(t, waiting_for="")
+
+
+# ---------------------------------------------------------------------------
+# Alert observer mechanism (Phase C-1)
+# ---------------------------------------------------------------------------
+
+def test_set_alert_notifies_observer(tm, persona):
+    """alert への実遷移時に observer が呼ばれる。"""
+    calls = []
+    tm.add_alert_observer(
+        lambda pid, tid, ctx: calls.append((pid, tid, ctx))
+    )
+    t = tm.create(persona, "autonomous")
+    tm.activate(t)
+    tm.pause(t)  # running -> pending
+    tm.set_alert(t, context={"trigger": "test"})
+    assert len(calls) == 1
+    assert calls[0][0] == persona
+    assert calls[0][1] == t
+    assert calls[0][2] == {"trigger": "test"}
+
+
+def test_set_alert_no_op_when_running_does_not_notify(tm, persona):
+    """running 時の no-op では observer を呼ばない。"""
+    calls = []
+    tm.add_alert_observer(lambda *args: calls.append(args))
+    t = tm.create(persona, "autonomous")
+    tm.activate(t)
+    tm.set_alert(t)
+    assert calls == []
+
+
+def test_set_alert_no_op_when_already_alert_does_not_notify(tm, persona):
+    """既に alert 状態の場合、二重通知しない。"""
+    t = tm.create(persona, "autonomous")
+    tm.activate(t)
+    tm.pause(t)
+    tm.set_alert(t)
+    # 1 回目で通知済みのはずなので、observer はそれ以降の追加分だけ見る
+    calls = []
+    tm.add_alert_observer(lambda *args: calls.append(args))
+    tm.set_alert(t)  # 既に alert なので no-op
+    assert calls == []
+
+
+def test_observer_exception_does_not_break_caller(tm, persona):
+    """observer の例外は呼び出し元に伝播しない。"""
+    def bad_observer(*args):
+        raise RuntimeError("boom")
+    tm.add_alert_observer(bad_observer)
+    t = tm.create(persona, "autonomous")
+    tm.activate(t)
+    tm.pause(t)
+    # 例外が伝播しないことを確認 (raise しなければテスト成功)
+    tm.set_alert(t)
+    assert tm.get(t).status == STATUS_ALERT
+
+
+def test_multiple_observers_all_notified(tm, persona):
+    """複数 observer 登録時、全員に通知される。"""
+    calls_a = []
+    calls_b = []
+    tm.add_alert_observer(lambda *args: calls_a.append(args))
+    tm.add_alert_observer(lambda *args: calls_b.append(args))
+    t = tm.create(persona, "autonomous")
+    tm.activate(t)
+    tm.pause(t)
+    tm.set_alert(t)
+    assert len(calls_a) == 1
+    assert len(calls_b) == 1
+
+
+def test_remove_alert_observer(tm, persona):
+    """remove 後は通知されない。"""
+    calls = []
+    cb = lambda *args: calls.append(args)  # noqa: E731
+    tm.add_alert_observer(cb)
+    tm.remove_alert_observer(cb)
+    t = tm.create(persona, "autonomous")
+    tm.activate(t)
+    tm.pause(t)
+    tm.set_alert(t)
+    assert calls == []
+
+
+def test_add_same_observer_twice_is_idempotent(tm, persona):
+    """同じ observer を二重登録しても 1 回しか呼ばれない。"""
+    calls = []
+    cb = lambda *args: calls.append(args)  # noqa: E731
+    tm.add_alert_observer(cb)
+    tm.add_alert_observer(cb)
+    t = tm.create(persona, "autonomous")
+    tm.activate(t)
+    tm.pause(t)
+    tm.set_alert(t)
+    assert len(calls) == 1
+
+
+def test_set_alert_default_context_is_empty_dict(tm, persona):
+    """context を渡さない場合、observer は空 dict を受け取る。"""
+    calls = []
+    tm.add_alert_observer(lambda pid, tid, ctx: calls.append(ctx))
+    t = tm.create(persona, "autonomous")
+    tm.activate(t)
+    tm.pause(t)
+    tm.set_alert(t)
+    assert calls == [{}]

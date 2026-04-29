@@ -19,6 +19,7 @@ CRUD + 状態遷移を扱う純粋ロジックレイヤー。
 """
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timedelta
@@ -83,6 +84,53 @@ class TrackManager:
 
     def __init__(self, session_factory: Callable[[], Session]):
         self.SessionLocal = session_factory
+        # alert 状態への遷移を購読する observer 群。
+        # signature: (persona_id: str, track_id: str, context: dict) -> None
+        # MetaLayer はここに登録される。TrackManager は観察対象を増やす責務を持たないため、
+        # 「どんな種別の Track の alert に反応するか」のフィルタは observer 側で判断する。
+        self._alert_observers: List[Callable[[str, str, dict], None]] = []
+
+    # ------------------------------------------------------------------
+    # Observer
+    # ------------------------------------------------------------------
+
+    def add_alert_observer(
+        self, callback: Callable[[str, str, dict], None]
+    ) -> None:
+        """alert 状態への遷移時に呼ばれる callback を登録する。
+
+        callback signature: (persona_id, track_id, context) -> None
+        context は遷移を起こした側が任意で添えるメタ情報 (空 dict 可)。
+
+        observer の例外は外に伝播させない (1 つの observer の障害で他の
+        observer や呼び出し元の状態遷移処理を巻き込まないため)。
+        """
+        if callback in self._alert_observers:
+            return
+        self._alert_observers.append(callback)
+
+    def remove_alert_observer(
+        self, callback: Callable[[str, str, dict], None]
+    ) -> None:
+        """登録済みの alert observer を解除する。未登録なら何もしない。"""
+        try:
+            self._alert_observers.remove(callback)
+        except ValueError:
+            pass
+
+    def _notify_alert(
+        self, persona_id: str, track_id: str, context: Optional[dict] = None
+    ) -> None:
+        """alert 遷移を全 observer に通知する。各 observer の例外は握り潰さず WARN ログ。"""
+        ctx = context or {}
+        for cb in list(self._alert_observers):
+            try:
+                cb(persona_id, track_id, ctx)
+            except Exception:
+                logging.exception(
+                    "[track] alert observer raised: cb=%r persona=%s track=%s",
+                    cb, persona_id, track_id,
+                )
 
     # ------------------------------------------------------------------
     # CRUD
@@ -147,6 +195,32 @@ class TrackManager:
             return track
         finally:
             db.close()
+
+    def get_entry_line_role(self, track_id: str) -> str:
+        """Read the Track's entry_line_role from its metadata JSON.
+
+        The entry_line_role determines which model/cache type drives the Track's
+        Pulse: 'main_line' (heavyweight, used for other-talk Tracks) or
+        'sub_line' (lightweight, used for autonomous work). Set at creation
+        time by track_create and immutable thereafter (Intent A v0.14, Intent B
+        v0.11). Defaults to 'main_line' for safety when metadata is missing or
+        malformed — matches Intent A invariant 9 (other-talk is heavyweight).
+        """
+        try:
+            track = self.get(track_id)
+        except TrackNotFoundError:
+            return "main_line"
+        if not track.track_metadata:
+            return "main_line"
+        try:
+            meta = json.loads(track.track_metadata)
+            if isinstance(meta, dict):
+                role = meta.get("entry_line_role")
+                if role in ("main_line", "sub_line"):
+                    return role
+        except (TypeError, ValueError):
+            pass
+        return "main_line"
 
     def list_for_persona(
         self,
@@ -390,13 +464,25 @@ class TrackManager:
         finally:
             db.close()
 
-    def set_alert(self, track_id: str) -> ActionTrack:
+    def set_alert(
+        self, track_id: str, context: Optional[dict] = None
+    ) -> ActionTrack:
         """Track を alert 状態にする。
 
         他者から「すぐ確認してほしい」を伝えるための遷移。
         既に running のものを alert にしても意味が薄いため、running は遷移しない。
         completed/aborted からは不可。
+
+        実遷移 (status が ALERT に変わった場合) のみ alert observer に通知する。
+        既に alert / running の場合や no-op の場合は通知しない。
+
+        Args:
+            track_id: 対象 Track ID。
+            context: observer に渡す任意のメタ情報 (発火源の種別、トリガとなった
+                発話内容のメッセージ ID 等を入れる想定)。
         """
+        notify = False
+        persona_id_for_notify: Optional[str] = None
         db = self.SessionLocal()
         try:
             track = self._fetch_or_raise(db, track_id)
@@ -409,7 +495,14 @@ class TrackManager:
                 logging.debug("[track] set_alert no-op (running) %s", track_id)
                 db.expunge(track)
                 return track
+            if track.status == STATUS_ALERT:
+                # 既に alert (重複通知を避ける)
+                logging.debug("[track] set_alert no-op (already alert) %s", track_id)
+                db.expunge(track)
+                return track
             track.status = STATUS_ALERT
+            persona_id_for_notify = track.persona_id
+            notify = True
             db.commit()
             db.refresh(track)
             db.expunge(track)
@@ -420,6 +513,10 @@ class TrackManager:
             raise
         finally:
             db.close()
+            if notify and persona_id_for_notify is not None:
+                # observer 通知は DB トランザクション完了後に行う
+                # (observer 内で別 DB アクセスがあっても整合する)
+                self._notify_alert(persona_id_for_notify, track_id, context)
 
     # ------------------------------------------------------------------
     # 忘却
