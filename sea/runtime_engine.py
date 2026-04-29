@@ -104,6 +104,7 @@ class RuntimeEngine:
                             "playbook": pb_display, "status": "completed",
                             "persona_id": getattr(persona, "persona_id", None),
                             "persona_name": getattr(persona, "persona_name", None),
+                            "pulse_id": state.get("_pulse_id"),
                         })
 
                 # Handle tuple results with output_keys (for multi-value returns)
@@ -447,6 +448,7 @@ class RuntimeEngine:
                         "playbook": pb_display, "status": "completed",
                         "persona_id": getattr(persona, "persona_id", None),
                         "persona_name": getattr(persona, "persona_name", None),
+                        "pulse_id": state.get("_pulse_id"),
                     })
 
             # Debug: log speak_content at end of memorize node
@@ -482,6 +484,8 @@ class RuntimeEngine:
             outputs.append(text)
         if event_callback:
             say_event: Dict[str, Any] = {"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None)}
+            if pulse_id:
+                say_event["pulse_id"] = pulse_id
             if building_msg and building_msg.get("message_id"):
                 say_event["message_id"] = str(building_msg["message_id"])
             if reasoning_text:

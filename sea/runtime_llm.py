@@ -987,6 +987,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                     "type": "say",
                                     "content": _first_text_before,
                                     "persona_id": getattr(persona, "persona_id", None),
+                                    "pulse_id": pulse_id,
                                 })
                             runtime._emit_say(persona, eff_bid, _first_text_before, pulse_id=pulse_id)
 
@@ -1010,6 +1011,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 "type": "say",
                                 "content": _spell_bubble2,
                                 "persona_id": getattr(persona, "persona_id", None),
+                                "pulse_id": pulse_id,
                             }
                             if _spell_at:
                                 _say_event["activity_trace"] = list(_spell_at)
@@ -1321,6 +1323,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                         "type": "say",
                                         "content": _first_text_before_ns,
                                         "persona_id": getattr(persona, "persona_id", None),
+                                        "pulse_id": pulse_id,
                                     })
                                 runtime._emit_say(persona, eff_bid, _first_text_before_ns, pulse_id=pulse_id)
 
@@ -1349,6 +1352,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                     "type": "say",
                                     "content": _spell_bubble2_ns,
                                     "persona_id": getattr(persona, "persona_id", None),
+                                    "pulse_id": pulse_id,
                                 }
                                 if _spell_at_ns:
                                     _say_event_ns["activity_trace"] = list(_spell_at_ns)
@@ -1578,6 +1582,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                     "type": "say",
                                     "content": _first_text_before_sync,
                                     "persona_id": getattr(persona, "persona_id", None),
+                                    "pulse_id": pulse_id,
                                 })
 
                         # Bubble 2: all details blocks + continuation
@@ -1629,6 +1634,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 "type": "say",
                                 "content": text,
                                 "persona_id": getattr(persona, "persona_id", None),
+                                "pulse_id": pulse_id,
                             }
                             if reasoning_text:
                                 say_event["reasoning"] = reasoning_text
@@ -1839,6 +1845,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         "playbook": pb_display, "status": "completed",
                         "persona_id": getattr(persona, "persona_id", None),
                         "persona_name": getattr(persona, "persona_name", None),
+                        "pulse_id": state.get("_pulse_id"),
                     })
 
         # Important flag: dual-write to messages (long-term memory) if not already memorized

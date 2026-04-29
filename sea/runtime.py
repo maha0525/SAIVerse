@@ -847,6 +847,8 @@ class SEARuntime:
                 outputs.append(text)
             if event_callback:
                 say_event: Dict[str, Any] = {"type": "say", "content": text, "persona_id": getattr(persona, "persona_id", None), "metadata": msg_metadata if msg_metadata else None}
+                if pulse_id:
+                    say_event["pulse_id"] = pulse_id
                 if building_msg and building_msg.get("message_id"):
                     say_event["message_id"] = str(building_msg["message_id"])
                 if reasoning_text:

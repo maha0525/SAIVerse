@@ -108,6 +108,8 @@ interface Message {
     _streaming?: boolean;
     _streamingThinking?: string;
     _activities?: ActivityEntry[];
+    // Pulse identifier — groups say + activity events from the same pulse together
+    _pulse_id?: string;
 }
 
 interface ActivityEntry {
@@ -1267,32 +1269,52 @@ export default function Home() {
                         } else if (event.type === 'activity') {
                             // Activity trace: accumulate tool/memorize steps
                             const entry: ActivityEntry = { action: event.action, name: event.name, ...(event.playbook && { playbook: event.playbook }), status: event.status };
-                            setMessages(prev => {
-                                const last = prev[prev.length - 1];
-                                if (last && last.role === 'assistant' && last._streaming) {
-                                    const activities = [...(last._activities || [])];
-                                    if (event.status === 'completed' || event.status === 'error') {
-                                        const idx = activities.findIndex(
-                                            a => a.action === entry.action && a.name === entry.name && a.status === 'started'
-                                        );
-                                        if (idx >= 0) {
-                                            activities[idx] = { ...activities[idx], status: event.status };
-                                        } else {
-                                            activities.push(entry);
-                                        }
+                            const evtPulseId: string | undefined = event.pulse_id || undefined;
+                            const mergeActivity = (existing: ActivityEntry[] | undefined): ActivityEntry[] => {
+                                const activities = [...(existing || [])];
+                                if (event.status === 'completed' || event.status === 'error') {
+                                    const idx = activities.findIndex(
+                                        a => a.action === entry.action && a.name === entry.name && a.status === 'started'
+                                    );
+                                    if (idx >= 0) {
+                                        activities[idx] = { ...activities[idx], status: event.status };
                                     } else {
                                         activities.push(entry);
                                     }
-                                    return [...prev.slice(0, -1), { ...last, _activities: activities }];
                                 } else {
-                                    const actAvatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
-                                    return [...prev, {
-                                        role: 'assistant' as const, content: '', _streaming: true,
-                                        sender: event.persona_name || undefined,
-                                        avatar: actAvatarUrl,
-                                        _activities: [entry], timestamp: new Date().toISOString()
+                                    activities.push(entry);
+                                }
+                                return activities;
+                            };
+                            setMessages(prev => {
+                                const last = prev[prev.length - 1];
+                                if (last && last.role === 'assistant' && last._streaming) {
+                                    return [...prev.slice(0, -1), {
+                                        ...last,
+                                        _activities: mergeActivity(last._activities),
+                                        ...(evtPulseId && !last._pulse_id && { _pulse_id: evtPulseId }),
                                     }];
                                 }
+                                // Finalized message with the same pulse_id: append to its activity_trace
+                                if (evtPulseId) {
+                                    for (let i = prev.length - 1; i >= 0; i--) {
+                                        const m = prev[i];
+                                        if (m.role !== 'assistant') continue;
+                                        if (m._pulse_id !== evtPulseId) continue;
+                                        const merged = mergeActivity(m.activity_trace || m._activities);
+                                        const updated = [...prev];
+                                        updated[i] = { ...m, activity_trace: merged, _activities: undefined };
+                                        return updated;
+                                    }
+                                }
+                                const actAvatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
+                                return [...prev, {
+                                    role: 'assistant' as const, content: '', _streaming: true,
+                                    sender: event.persona_name || undefined,
+                                    avatar: actAvatarUrl,
+                                    _activities: [entry], timestamp: new Date().toISOString(),
+                                    ...(evtPulseId && { _pulse_id: evtPulseId }),
+                                }];
                             });
                             setLoadingStatus(event.status === 'started' ? `Running ${event.name}...` : event.name);
                         } else if (event.type === 'streaming_thinking') {
@@ -1436,6 +1458,7 @@ export default function Home() {
 
                             const sayReasoning = event.reasoning || undefined;
                             const sayActivityTrace = event.activity_trace || undefined;
+                            const sayPulseId: string | undefined = event.pulse_id || undefined;
                             setMessages(prev => {
                                 // Check if last message already has this content (from streaming completion)
                                 const last = prev[prev.length - 1];
@@ -1450,6 +1473,7 @@ export default function Home() {
                                         ...(sayUsageTotal && { llm_usage_total: sayUsageTotal }),
                                         ...(sayReasoning && { reasoning: sayReasoning }),
                                         ...(sayActivityTrace && { activity_trace: sayActivityTrace }),
+                                        ...(sayPulseId && { _pulse_id: sayPulseId }),
                                     }];
                                 }
                                 return [...prev, {
@@ -1463,6 +1487,7 @@ export default function Home() {
                                     ...(sayUsageTotal && { llm_usage_total: sayUsageTotal }),
                                     ...(sayReasoning && { reasoning: sayReasoning }),
                                     ...(sayActivityTrace && { activity_trace: sayActivityTrace }),
+                                    ...(sayPulseId && { _pulse_id: sayPulseId }),
                                 }];
                             });
                             setLoadingStatus('Thinking...');
