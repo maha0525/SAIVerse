@@ -117,6 +117,13 @@ class MetaLayer:
         """重量級モデルでメタ判断 LLM を呼ぶ → スペル実行 → ループ。
 
         スペルなし応答で自然停止。
+
+        判断中に発火された Track 操作スペルは Pulse 完了時に一括適用される
+        (Intent A v0.14 / Intent B v0.11 の deferred 機構)。MetaLayer は
+        通常の Playbook ランタイムを通らないため、ここで PulseContext を
+        手動で生成してスペルに渡し、判断ループ終了時に
+        ``_apply_deferred_track_ops`` を呼ぶ必要がある。Phase 1 で
+        MetaLayer を Playbook 化した時点でこの手動配線は不要になる。
         """
         llm_client = self._get_heavyweight_client(persona)
         if llm_client is None:
@@ -126,53 +133,81 @@ class MetaLayer:
             )
             return
 
-        system_prompt = self._build_system_prompt(persona)
-        user_message = self._build_state_message(
-            persona.persona_id, alert_track_id, context
-        )
-        messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ]
+        # Track-mutating spells を deferred 化するために PulseContext を発行する。
+        # 通常の Playbook ランタイムが作るものとは別経路 (= runtime._pulse_contexts
+        # キャッシュには登録しない、flush_pulse_logs もしない短命なもの)。
+        import uuid
 
-        for loop in range(_MAX_SPELL_LOOPS):
-            # tools / response_schema は意図的に渡さない (Intent A v0.9 / 設計議論 2026-04-28)
+        from sea.pulse_context import PulseContext
+
+        adapter = getattr(persona, "sai_memory", None)
+        thread_id = adapter.get_current_thread() if adapter else None
+        pulse_ctx = PulseContext(
+            pulse_id=str(uuid.uuid4()), thread_id=thread_id or ""
+        )
+
+        try:
+            system_prompt = self._build_system_prompt(persona)
+            user_message = self._build_state_message(
+                persona.persona_id, alert_track_id, context
+            )
+            messages: List[Dict[str, Any]] = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ]
+
+            for loop in range(_MAX_SPELL_LOOPS):
+                # tools / response_schema は意図的に渡さない (Intent A v0.9 / 設計議論 2026-04-28)
+                try:
+                    response = llm_client.generate(messages)
+                except Exception:
+                    logging.exception(
+                        "[meta-layer] LLM generate failed at loop=%d persona=%s",
+                        loop, persona.persona_id,
+                    )
+                    return
+
+                text = response if isinstance(response, str) else str(response)
+                logging.info(
+                    "[meta-layer] LLM response (loop=%d, persona=%s): %s",
+                    loop, persona.persona_id, text[:300],
+                )
+
+                spells = self._extract_spells(text)
+                if not spells:
+                    # スペルなし → 自然停止。最終応答テキストはペルソナの「思考」として残す
+                    logging.info(
+                        "[meta-layer] Natural stop after %d loop(s) persona=%s",
+                        loop, persona.persona_id,
+                    )
+                    return
+
+                # スペル実行 (PulseContext を渡して Track 操作スペルを deferred 化する)
+                results = self._execute_spells(persona, spells, pulse_ctx)
+
+                # 次ターンに向けて assistant 応答 + ツール結果を append
+                messages.append({"role": "assistant", "content": text})
+                results_text = self._format_spell_results(results)
+                messages.append({"role": "user", "content": results_text})
+
+            logging.warning(
+                "[meta-layer] Hit max spell loops (%d) without natural stop persona=%s",
+                _MAX_SPELL_LOOPS, persona.persona_id,
+            )
+        finally:
+            # 判断ループ終了時 (例外含む) に deferred Track 操作を apply する。
+            # _apply_deferred_track_ops は同じ helper を runtime_graph.py が
+            # 通常 Pulse 完了時に呼んでおり、MetaLayer もこれを共有する。
             try:
-                response = llm_client.generate(messages)
+                from sea.runtime_runner import _apply_deferred_track_ops
+                _apply_deferred_track_ops(
+                    {"_pulse_context": pulse_ctx}, persona
+                )
             except Exception:
                 logging.exception(
-                    "[meta-layer] LLM generate failed at loop=%d persona=%s",
-                    loop, persona.persona_id,
+                    "[meta-layer] Failed to apply deferred track ops for persona=%s",
+                    persona.persona_id,
                 )
-                return
-
-            text = response if isinstance(response, str) else str(response)
-            logging.info(
-                "[meta-layer] LLM response (loop=%d, persona=%s): %s",
-                loop, persona.persona_id, text[:300],
-            )
-
-            spells = self._extract_spells(text)
-            if not spells:
-                # スペルなし → 自然停止。最終応答テキストはペルソナの「思考」として残す
-                logging.info(
-                    "[meta-layer] Natural stop after %d loop(s) persona=%s",
-                    loop, persona.persona_id,
-                )
-                return
-
-            # スペル実行
-            results = self._execute_spells(persona, spells)
-
-            # 次ターンに向けて assistant 応答 + ツール結果を append
-            messages.append({"role": "assistant", "content": text})
-            results_text = self._format_spell_results(results)
-            messages.append({"role": "user", "content": results_text})
-
-        logging.warning(
-            "[meta-layer] Hit max spell loops (%d) without natural stop persona=%s",
-            _MAX_SPELL_LOOPS, persona.persona_id,
-        )
 
     # ------------------------------------------------------------------
     # スペル抽出と実行
@@ -200,9 +235,17 @@ class MetaLayer:
         return result
 
     def _execute_spells(
-        self, persona: Any, spells: List[Tuple[str, Dict[str, Any]]]
+        self,
+        persona: Any,
+        spells: List[Tuple[str, Dict[str, Any]]],
+        pulse_ctx: Optional[Any] = None,
     ) -> List[Tuple[str, str]]:
-        """各スペルを順次実行。結果を (name, result_str) のリストで返す。"""
+        """各スペルを順次実行。結果を (name, result_str) のリストで返す。
+
+        ``pulse_ctx`` を渡すと persona_context() で contextvar として伝播し、
+        Track 操作スペルがそこに deferred ops を enqueue する (Intent A v0.14 /
+        Intent B v0.11 の deferred 機構)。None の場合は即時実行 (旧挙動)。
+        """
         from tools import TOOL_REGISTRY
         from tools.context import persona_context
 
@@ -227,6 +270,7 @@ class MetaLayer:
                     playbook_name="meta_layer",
                     auto_mode=False,
                     event_callback=None,
+                    pulse_context=pulse_ctx,
                 ):
                     raw = tool_func(**args)
                 result_str = str(raw) if raw is not None else "(no result)"

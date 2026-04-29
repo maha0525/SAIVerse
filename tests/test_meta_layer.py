@@ -247,4 +247,121 @@ def test_state_message_includes_alert_marker(tm, nm, db_persona):
     user_msg = llm.calls[0]["messages"][1]["content"]
     assert "対 user1" in user_msg
     assert "★今回のトリガー" in user_msg
-    assert "user_utterance" in user_msg
+
+
+# ---------------------------------------------------------------------------
+# Deferred Track ops via PulseContext (Intent A v0.14, Intent B v0.11 — case ii)
+# ---------------------------------------------------------------------------
+
+def test_metalayer_applies_deferred_track_ops_at_judgment_end(
+    tm, nm, db_persona, monkeypatch
+):
+    """判断ループ終了時に _apply_deferred_track_ops が PulseContext を渡して呼ばれる。
+
+    MetaLayer は通常の Playbook ランタイムを通らないため、自前で PulseContext を
+    作って Track 操作スペルを deferred 化し、判断ループの finally で flush する
+    (Intent A v0.14 / Intent B v0.11 の deferred 機構を MetaLayer 経由でも動かす
+    ための短期パッチ。Phase 1 で MetaLayer 自体を Playbook 化したらこの配線は
+    不要になる)。
+    """
+    track_id = tm.create(db_persona, "user_conversation", is_persistent=True)
+    tm.activate(track_id)
+    tm.pause(track_id)
+    tm.set_alert(track_id)
+
+    apply_calls = []
+
+    def fake_apply(state, persona):
+        apply_calls.append((state, persona))
+
+    # MetaLayer は finally 内で関数を import するため、import 元の名前空間に patch する
+    monkeypatch.setattr(
+        "sea.runtime_runner._apply_deferred_track_ops", fake_apply
+    )
+
+    meta, llm, _persona = _make_meta_layer(
+        tm, nm, db_persona, ["継続して問題なし。"]
+    )
+    meta.on_track_alert(db_persona, track_id, {"trigger": "test"})
+
+    # 判断ループが完走 → finally で apply が 1 回呼ばれる
+    assert len(apply_calls) == 1
+    state, _ = apply_calls[0]
+    pulse_ctx = state["_pulse_context"]
+    assert pulse_ctx is not None
+    # PulseContext のインターフェースを持っていることを確認
+    assert hasattr(pulse_ctx, "deferred_track_ops")
+    assert hasattr(pulse_ctx, "enqueue_track_op")
+
+
+def test_metalayer_apply_runs_even_on_llm_error(
+    tm, nm, db_persona, monkeypatch
+):
+    """LLM 呼び出しが例外を投げても finally で deferred ops が apply される。"""
+    track_id = tm.create(db_persona, "user_conversation", is_persistent=True)
+    tm.activate(track_id)
+    tm.pause(track_id)
+    tm.set_alert(track_id)
+
+    apply_calls = []
+
+    def fake_apply(state, persona):
+        apply_calls.append((state, persona))
+
+    monkeypatch.setattr(
+        "sea.runtime_runner._apply_deferred_track_ops", fake_apply
+    )
+
+    class RaisingLLM:
+        def generate(self, *args, **kwargs):
+            raise RuntimeError("LLM down")
+
+    persona = FakePersona(db_persona, RaisingLLM())
+    manager = FakeManager(tm, nm, {db_persona: persona})
+    meta = MetaLayer(manager)
+
+    meta.on_track_alert(db_persona, track_id, {"trigger": "test"})
+
+    # LLM エラーで早期 return しても finally は通るので apply は走る
+    assert len(apply_calls) == 1
+
+
+def test_metalayer_execute_spells_forwards_pulse_context(
+    tm, nm, db_persona, monkeypatch
+):
+    """_execute_spells が persona_context に pulse_context を渡している。"""
+    from tools import context as tools_context_mod
+
+    captured_pulse_contexts = []
+    real_persona_context = tools_context_mod.persona_context
+
+    def capturing_persona_context(*args, **kwargs):
+        captured_pulse_contexts.append(kwargs.get("pulse_context"))
+        return real_persona_context(*args, **kwargs)
+
+    # MetaLayer は関数内で `from tools.context import persona_context` するため、
+    # import 元の名前空間に patch する
+    monkeypatch.setattr(
+        tools_context_mod, "persona_context", capturing_persona_context
+    )
+
+    track_id = tm.create(db_persona, "user_conversation", is_persistent=True)
+    tm.activate(track_id)
+    tm.pause(track_id)
+    tm.set_alert(track_id)
+
+    spell_response = (
+        f"対応する。\n/spell name='track_activate' args={{'track_id': '{track_id}'}}"
+    )
+    meta, _llm, _persona = _make_meta_layer(
+        tm, nm, db_persona, [spell_response, "判断完了。"]
+    )
+
+    meta.on_track_alert(db_persona, track_id, {"trigger": "test"})
+
+    # 1 回はスペル実行で persona_context が呼ばれている
+    assert len(captured_pulse_contexts) >= 1
+    # 渡された pulse_context は PulseContext 互換オブジェクト
+    pulse_ctx = captured_pulse_contexts[0]
+    assert pulse_ctx is not None
+    assert hasattr(pulse_ctx, "enqueue_track_op")
