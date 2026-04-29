@@ -2,12 +2,21 @@
 
 既存の running Track があれば自動的に pending 状態に押し出される
 (同時 running は 1 本という不変条件を保証)。
+
+Intent A v0.14 / Intent B v0.11 以降、この操作は Pulse 完了時に適用される
+(deferred)。同じ Pulse 内でペルソナが「切替後の Track でやる予定の作業」を
+連発しないよう、戻り値で明示的に指示する。
 """
 from __future__ import annotations
 
 import json
 from typing import Tuple
 
+from _track_common import (
+    DEFERRED_NOTICE,
+    enqueue_or_warn,
+    get_pulse_context,
+)
 from database.session import SessionLocal
 from saiverse.track_manager import (
     InvalidTrackStateError,
@@ -21,11 +30,33 @@ _track_manager = TrackManager(session_factory=SessionLocal)
 
 
 def track_activate(track_id: str) -> Tuple[str, ToolResult, None]:
-    """Activate a track. Pushes any currently-running track to 'pending'."""
+    """Activate a track. Pushes any currently-running track to 'pending'.
+
+    Within a Pulse: enqueued onto PulseContext.deferred_track_ops; runtime
+    applies it at Pulse completion.
+    Outside a Pulse (CLI / tests): runs immediately for backward compatibility.
+    """
     if not get_active_persona_id():
         raise RuntimeError(
             "Active persona context is not set. Use tools.context.persona_context()."
         )
+
+    pulse_ctx = get_pulse_context()
+    if enqueue_or_warn(pulse_ctx, "activate", track_id=track_id):
+        snippet = ToolResult(
+            history_snippet=json.dumps(
+                {"track_id": track_id, "queued": "activate"},
+                ensure_ascii=False,
+            )
+        )
+        return (
+            f"Track activate scheduled for end of Pulse (track_id={track_id[:8]}…). "
+            f"{DEFERRED_NOTICE}",
+            snippet,
+            None,
+        )
+
+    # Fallback: no PulseContext (CLI / direct test) — immediate execution.
     try:
         track = _track_manager.activate(track_id)
     except TrackNotFoundError as exc:

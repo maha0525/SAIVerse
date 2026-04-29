@@ -319,13 +319,16 @@ async def _run_spell_tool_async(
         persona_dir = getattr(persona_obj, "persona_log_path", None)
         persona_dir = persona_dir.parent if persona_dir else Path.cwd()
         manager_ref = getattr(persona_obj, "manager_ref", None)
+        # Forward the active PulseContext so Track-mutating spells can enqueue
+        # their effect onto deferred_track_ops (Intent A v0.14 / Intent B v0.11).
+        pulse_ctx = state.get("_pulse_context")
 
         def _run():
-            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=False, event_callback=event_callback):
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=False, event_callback=event_callback, pulse_context=pulse_ctx):
                 return tool_func(**tool_args)
 
         if inspect.iscoroutinefunction(tool_func):
-            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=False, event_callback=event_callback):
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=False, event_callback=event_callback, pulse_context=pulse_ctx):
                 raw_result = await tool_func(**tool_args)
         else:
             raw_result = await asyncio.get_event_loop().run_in_executor(None, _run)
@@ -1288,61 +1291,74 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                     )
 
                     if _spell_loop_count_ns > 0:
-                        pulse_id = state.get("_pulse_id")
-                        eff_bid = runtime._effective_building_id(persona, building_id)
+                        # Intent A v0.14 / Intent B v0.11 (handoff route B):
+                        # speak: false nodes skip the bubble1/bubble2 _emit_say
+                        # path here too. The Spell loop already routed records
+                        # to the active line's storage layer; emitting a "say"
+                        # event would surface internal-processing content as a
+                        # persona utterance.
+                        _node_speak_flag_ns = getattr(node_def, "speak", True)
+                        if _node_speak_flag_ns is False:
+                            LOGGER.info(
+                                "[sea][spell] speak=false node — skipping Normal-stream bubble1/bubble2 _emit_say "
+                                "(handoff route B); records remain in line storage layer only"
+                            )
+                        else:
+                            pulse_id = state.get("_pulse_id")
+                            eff_bid = runtime._effective_building_id(persona, building_id)
 
-                        # Bubble 1: discard streamed content, re-emit just text_before clean
-                        _first_text_before_ns = _spell_details_blocks_ns[0][0] if _spell_details_blocks_ns else ""
-                        if event_callback:
-                            event_callback({
-                                "type": "streaming_discard",
-                                "persona_id": getattr(persona, "persona_id", None),
-                                "node_id": getattr(node_def, "id", "llm"),
-                            })
-                        if _first_text_before_ns.strip():
+                            # Bubble 1: discard streamed content, re-emit just text_before clean
+                            _first_text_before_ns = _spell_details_blocks_ns[0][0] if _spell_details_blocks_ns else ""
                             if event_callback:
                                 event_callback({
-                                    "type": "say",
-                                    "content": _first_text_before_ns,
+                                    "type": "streaming_discard",
                                     "persona_id": getattr(persona, "persona_id", None),
+                                    "node_id": getattr(node_def, "id", "llm"),
                                 })
-                            runtime._emit_say(persona, eff_bid, _first_text_before_ns, pulse_id=pulse_id)
+                            if _first_text_before_ns.strip():
+                                if event_callback:
+                                    event_callback({
+                                        "type": "say",
+                                        "content": _first_text_before_ns,
+                                        "persona_id": getattr(persona, "persona_id", None),
+                                    })
+                                runtime._emit_say(persona, eff_bid, _first_text_before_ns, pulse_id=pulse_id)
 
-                        # Bubble 2: all details blocks + continuation (with metadata)
-                        _bubble2_parts: list[str] = []
-                        for _i_ns, (_tb_ns, _db_ns) in enumerate(_spell_details_blocks_ns):
-                            if _i_ns > 0 and _tb_ns:
-                                _bubble2_parts.append(_tb_ns)
-                            _bubble2_parts.append(_db_ns)
-                        if text:
-                            _bubble2_parts.append(text)
-                        _spell_bubble2_ns = "\n".join(_bubble2_parts)
+                            # Bubble 2: all details blocks + continuation (with metadata)
+                            _bubble2_parts: list[str] = []
+                            for _i_ns, (_tb_ns, _db_ns) in enumerate(_spell_details_blocks_ns):
+                                if _i_ns > 0 and _tb_ns:
+                                    _bubble2_parts.append(_tb_ns)
+                                _bubble2_parts.append(_db_ns)
+                            if text:
+                                _bubble2_parts.append(text)
+                            _spell_bubble2_ns = "\n".join(_bubble2_parts)
 
-                        _spell_msg_meta_ns: Dict[str, Any] = {}
-                        if llm_usage_metadata:
-                            _spell_msg_meta_ns["llm_usage"] = llm_usage_metadata
-                        _spell_at_ns = state.get("_activity_trace")
-                        if _spell_at_ns:
-                            _spell_msg_meta_ns["activity_trace"] = list(_spell_at_ns)
-                        accumulator = state.get("_pulse_usage_accumulator")
-                        if accumulator:
-                            _spell_msg_meta_ns["llm_usage_total"] = dict(accumulator)
-
-                        if event_callback:
-                            _say_event_ns: Dict[str, Any] = {
-                                "type": "say",
-                                "content": _spell_bubble2_ns,
-                                "persona_id": getattr(persona, "persona_id", None),
-                            }
+                            _spell_msg_meta_ns: Dict[str, Any] = {}
+                            if llm_usage_metadata:
+                                _spell_msg_meta_ns["llm_usage"] = llm_usage_metadata
+                            _spell_at_ns = state.get("_activity_trace")
                             if _spell_at_ns:
-                                _say_event_ns["activity_trace"] = list(_spell_at_ns)
-                            if _spell_msg_meta_ns:
-                                _say_event_ns["metadata"] = _spell_msg_meta_ns
-                            event_callback(_say_event_ns)
+                                _spell_msg_meta_ns["activity_trace"] = list(_spell_at_ns)
+                            accumulator = state.get("_pulse_usage_accumulator")
+                            if accumulator:
+                                _spell_msg_meta_ns["llm_usage_total"] = dict(accumulator)
 
-                        runtime._emit_say(persona, eff_bid, _spell_bubble2_ns, pulse_id=pulse_id,
-                                          metadata=_spell_msg_meta_ns if _spell_msg_meta_ns else None)
-                        LOGGER.info("[sea][spell] Normal-stream: emitted bubble1 + bubble2 (len=%d)", len(_spell_bubble2_ns))
+                            if event_callback:
+                                _say_event_ns: Dict[str, Any] = {
+                                    "type": "say",
+                                    "content": _spell_bubble2_ns,
+                                    "persona_id": getattr(persona, "persona_id", None),
+                                }
+                                if _spell_at_ns:
+                                    _say_event_ns["activity_trace"] = list(_spell_at_ns)
+                                if _spell_msg_meta_ns:
+                                    _say_event_ns["metadata"] = _spell_msg_meta_ns
+                                event_callback(_say_event_ns)
+
+                            runtime._emit_say(persona, eff_bid, _spell_bubble2_ns, pulse_id=pulse_id,
+                                              metadata=_spell_msg_meta_ns if _spell_msg_meta_ns else None)
+                            LOGGER.info("[sea][spell] Normal-stream: emitted bubble1 + bubble2 (len=%d)", len(_spell_bubble2_ns))
 
                         # text = continuation only (for state["last"] / memorize — no duplication)
                     else:

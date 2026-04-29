@@ -140,6 +140,10 @@ def compile_with_langgraph(
         "_activity_trace": activity_trace,  # Shared trace of exec/tool activities
         "_pulse_context": pulse_ctx,  # Pulse-level log context (replaces _intermediate_msgs)
         "_spell_enabled": _spell_enabled,  # Per-persona spell system toggle
+        # ライン強制フラグ (parent から継承、Phase C-2a)。
+        # サブライン子 Playbook は run_playbook で _force_lightweight_model を立てる。
+        # 子の中の LLM ノードがこれを見て軽量モデルを選ぶ。
+        "_force_lightweight_model": parent.get("_force_lightweight_model", False),
         # Playbook variables (no prefix)
         "last": user_input or "",
         "input": user_input or "",
@@ -207,6 +211,21 @@ def compile_with_langgraph(
             _final_pulse_ctx = _source_state.get("_pulse_context")
             if _final_pulse_ctx:
                 runtime._flush_pulse_logs(persona, _final_pulse_ctx)
+                # Apply deferred Track operations queued by spells during this Pulse.
+                # Same pulse-root condition as _flush_pulse_logs above — Track switches
+                # land at Pulse boundaries (Intent A v0.14, Intent B v0.11). Done here
+                # (rather than in runtime_runner.run_playbook) because the
+                # PulseContext only lives in LangGraph state, not in `parent`.
+                try:
+                    from sea.runtime_runner import _apply_deferred_track_ops
+                    _apply_deferred_track_ops(
+                        {"_pulse_context": _final_pulse_ctx},
+                        persona,
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "[runtime_graph] Failed to apply deferred Track ops at Pulse-root completion"
+                    )
 
     # Write back state variables to parent_state based on output_schema
     if parent_state is not None and isinstance(final_state, dict) and playbook.output_schema:

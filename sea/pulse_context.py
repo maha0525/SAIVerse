@@ -12,10 +12,13 @@ source for ``pulse_logs`` DB persistence.
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+LOGGER = logging.getLogger("saiverse.pulse_context")
 
 
 @dataclass
@@ -94,6 +97,34 @@ class LineFrame:
 
 
 @dataclass
+class DeferredTrackOp:
+    """A Track operation queued during a Pulse, applied when the Pulse completes.
+
+    Direct in-Pulse Track switching causes the LLM to keep emitting "next-Track
+    work" within the current Pulse's main cache, because the cache already
+    contains the persona's stated decision to switch (Intent A v0.14, Intent B
+    v0.11). Deferring all Track-status-changing operations until Pulse
+    completion guarantees that Track switches happen at Pulse boundaries —
+    the persona's current Pulse winds down naturally, then the next Pulse
+    starts under the new active Track.
+
+    Last-wins resolution applies only between competing ``activate`` ops in the
+    same Pulse (multiple "set running Track" requests). Other op types stack
+    in order so a sequence like ``pause(A) → create(B) → activate(B)`` applies
+    cleanly at flush time.
+    """
+
+    op_type: str
+    # 'create_post_activate' / 'activate' / 'pause' / 'complete' / 'abort'
+    # Note: track_create itself runs immediately so the persona can read the
+    # new track_id in the same round; only the optional activate-after-create
+    # path is enqueued, recorded as 'activate' with the new track_id.
+    track_id: Optional[str]
+    args: Dict[str, Any] = field(default_factory=dict)
+    requested_at: int = field(default_factory=lambda: int(time.time()))
+
+
+@dataclass
 class PulseContext:
     """Shared mutable log list for a single Pulse execution.
 
@@ -104,12 +135,17 @@ class PulseContext:
     The ``_line_stack`` field tracks the currently-running line hierarchy
     (Intent A v0.14, Intent B v0.11). Push when entering a new line, pop when
     it completes. The topmost frame is the active line at any point.
+
+    The ``deferred_track_ops`` queue holds Track operations issued by spell
+    invocations during the Pulse; the runtime applies them at Pulse completion
+    so Track switches never interrupt the current Pulse's content generation.
     """
 
     pulse_id: str
     thread_id: str
     logs: List[PulseLogEntry] = field(default_factory=list)
     _line_stack: List[LineFrame] = field(default_factory=list)
+    deferred_track_ops: List[DeferredTrackOp] = field(default_factory=list)
 
     def append(self, entry: PulseLogEntry) -> None:
         """Append a log entry to this Pulse's log list."""
@@ -186,6 +222,52 @@ class PulseContext:
             "line_id": current.line_id,
             "origin_track_id": current.track_id,
         }
+
+    # ------------------------------------------------------------------
+    # Deferred Track operations (Intent A v0.14, Intent B v0.11)
+    # ------------------------------------------------------------------
+
+    def enqueue_track_op(
+        self,
+        op_type: str,
+        track_id: Optional[str] = None,
+        **args: Any,
+    ) -> DeferredTrackOp:
+        """Queue a Track operation to be applied at Pulse completion.
+
+        For ``activate`` ops, last-wins resolution is applied: if the queue
+        already contains an activate op, the older one is dropped with a
+        warning before the new one is appended. This handles spell-loop rounds
+        where the LLM tries to set multiple "next active" Tracks at once.
+
+        Other op types (``pause`` / ``complete`` / ``abort``) preserve order so
+        sequences like ``pause(A) → activate(B)`` produce the expected final
+        state.
+        """
+        if op_type == "activate":
+            existing = [op for op in self.deferred_track_ops if op.op_type == "activate"]
+            if existing:
+                LOGGER.warning(
+                    "[pulse_context] Replacing %d earlier activate op(s) with new track_id=%s "
+                    "(last-wins; earlier targets: %s)",
+                    len(existing), track_id,
+                    [op.track_id for op in existing],
+                )
+                self.deferred_track_ops = [
+                    op for op in self.deferred_track_ops if op.op_type != "activate"
+                ]
+
+        op = DeferredTrackOp(op_type=op_type, track_id=track_id, args=dict(args))
+        self.deferred_track_ops.append(op)
+        LOGGER.debug(
+            "[pulse_context] Enqueued deferred track op: type=%s track_id=%s args=%s",
+            op_type, track_id, args,
+        )
+        return op
+
+    def has_deferred_track_ops(self) -> bool:
+        """True when at least one Track op is queued for Pulse completion."""
+        return bool(self.deferred_track_ops)
 
     def get_protocol_messages(self) -> List[Dict[str, Any]]:
         """Reconstruct LLM API-compatible message list from logged entries.

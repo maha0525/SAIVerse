@@ -12,6 +12,12 @@ _PLAYBOOK_NAME: ContextVar[Optional[str]] = ContextVar("saiverse_playbook_name",
 _AUTO_MODE: ContextVar[bool] = ContextVar("saiverse_auto_mode", default=False)
 _EVENT_CALLBACK: ContextVar[Optional[Any]] = ContextVar("saiverse_event_callback", default=None)
 _MESSAGE_ID: ContextVar[Optional[str]] = ContextVar("saiverse_message_id", default=None)
+# Active PulseContext for the running spell/tool. Track-mutating spells
+# (track_create / track_activate / track_pause / track_complete / track_abort)
+# read this and enqueue their effect onto ``deferred_track_ops`` so the
+# operation lands at Pulse completion, not mid-Pulse (Intent A v0.14, Intent B
+# v0.11). Tools that don't touch Tracks ignore it.
+_PULSE_CONTEXT: ContextVar[Optional[Any]] = ContextVar("saiverse_pulse_context", default=None)
 
 
 def get_active_persona_id() -> Optional[str]:
@@ -43,6 +49,16 @@ def get_active_message_id() -> Optional[str]:
     return _MESSAGE_ID.get()
 
 
+def get_active_pulse_context() -> Optional[Any]:
+    """Return the active PulseContext for the currently running spell/tool.
+
+    Returns ``None`` outside of a Pulse (e.g. CLI scripts that exercise tools
+    directly). Track-mutating spells degrade to immediate execution in that
+    case, since there's no Pulse boundary at which to flush.
+    """
+    return _PULSE_CONTEXT.get()
+
+
 def set_active_message_id(message_id: Optional[str]) -> None:
     """BuildingHistory保存後にmessage_idを確定させるために使用する。
 
@@ -62,6 +78,7 @@ def persona_context(
     auto_mode: bool = False,
     event_callback: Optional[Any] = None,
     message_id: Optional[str] = None,
+    pulse_context: Optional[Any] = None,
 ) -> Iterator[None]:
     """Temporarily set the active persona identity for tool execution."""
     token_id = _PERSONA_ID.set(persona_id)
@@ -71,6 +88,7 @@ def persona_context(
     token_auto = _AUTO_MODE.set(auto_mode)
     token_event_cb = _EVENT_CALLBACK.set(event_callback)
     token_msg_id = _MESSAGE_ID.set(message_id)
+    token_pulse_ctx = _PULSE_CONTEXT.set(pulse_context)
     try:
         yield
     finally:
@@ -81,3 +99,4 @@ def persona_context(
         _AUTO_MODE.reset(token_auto)
         _EVENT_CALLBACK.reset(token_event_cb)
         _MESSAGE_ID.reset(token_msg_id)
+        _PULSE_CONTEXT.reset(token_pulse_ctx)
