@@ -54,10 +54,15 @@ def addon_spell_help(addon: str = "") -> str:
 
     # 全スペルから addon_key 候補を抽出（表示・非表示両方）。
     # ファジーマッチの候補一覧と「利用可能なアドオン」リストの両方に使う。
+    # ToolSchema.addon_name (ネイティブツール用、ローダーで自動付与) を優先、
+    # 無ければ `__` 命名規則 (MCP 互換) で判定する。
     all_addon_keys: set[str] = set()
-    for sname in SPELL_TOOL_SCHEMAS:
-        if "__" in sname:
-            all_addon_keys.add(sname.split("__", 1)[0])
+    for sname, s in SPELL_TOOL_SCHEMAS.items():
+        key = getattr(s, "addon_name", None)
+        if not key and "__" in sname:
+            key = sname.split("__", 1)[0]
+        if key:
+            all_addon_keys.add(key)
 
     # addon が指定されていて完全一致しないなら、ファジー補完を試みる。
     fuzzy_hint: str = ""
@@ -90,8 +95,10 @@ def addon_spell_help(addon: str = "") -> str:
             except Exception:
                 continue
 
-        # ツール名の先頭セグメントをアドオン名とみなす（例: addon__server__tool → addon）
-        addon_key = name.split("__", 1)[0] if "__" in name else ""
+        # ToolSchema.addon_name 優先、無ければ `__` 命名規則 (MCP 互換)
+        addon_key = getattr(s, "addon_name", None) or (
+            name.split("__", 1)[0] if "__" in name else ""
+        )
         if not addon_key:
             continue
         if addon and addon_key != addon:

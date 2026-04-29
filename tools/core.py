@@ -27,6 +27,10 @@ class ToolSchema:
     # None when the runtime cannot identify the active persona — in that
     # case, return False to keep the spell hidden conservatively.
     availability_check: Optional[Callable[[Optional[str]], bool]] = None
+    # アドオン所属の識別子。`expansion_data/<addon_name>/tools/` 配下のネイティブ
+    # ツールはローダーが自動でセットする。MCP 由来のスペルは `<addon_name>__<spell>`
+    # 命名規則が別ルートで判定される。明示的に None なら built-in 扱い。
+    addon_name: Optional[str] = None
 
 
 @dataclass

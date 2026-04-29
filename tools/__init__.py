@@ -13,7 +13,7 @@ import logging
 import os
 import pkgutil
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from tools.core import ToolSchema
 from tools.adapters import openai as oa, gemini as gm
@@ -55,11 +55,14 @@ def _remove_registered_tool(name: str) -> None:
     SPELL_TOOL_SCHEMAS.pop(name, None)
 
 
-def _register_multiple_tools(module: Any) -> bool:
+def _register_multiple_tools(module: Any, addon_name: Optional[str] = None) -> bool:
     """Register multiple tools from a module with schemas() function.
 
     This supports tool packages that export multiple tools from a single module,
     such as user_data/discord/tools/schema.py.
+
+    addon_name: Loader 側で expansion_data/<addon>/tools/ から推定した値。
+    スキーマ側で明示してなければここで注入する。
     """
     try:
         tool_schemas: List[ToolSchema] = module.schemas()
@@ -75,9 +78,13 @@ def _register_multiple_tools(module: Any) -> bool:
                 LOGGER.debug("Tool '%s' already registered, skipping", meta.name)
                 continue
 
+            if addon_name and not getattr(meta, "addon_name", None):
+                meta.addon_name = addon_name
+
             _add_registered_tool(meta.name, meta, impl)
             registered = True
-            LOGGER.debug("Registered tool '%s' from schemas() (spell=%s)", meta.name, getattr(meta, "spell", False))
+            LOGGER.debug("Registered tool '%s' from schemas() (spell=%s addon=%s)",
+                         meta.name, getattr(meta, "spell", False), meta.addon_name)
 
         return registered
     except Exception as e:
@@ -85,11 +92,15 @@ def _register_multiple_tools(module: Any) -> bool:
         return False
 
 
-def _register_tool(module: Any) -> bool:
-    """Register a tool from a module if it has schema() or schemas() function."""
+def _register_tool(module: Any, addon_name: Optional[str] = None) -> bool:
+    """Register a tool from a module if it has schema() or schemas() function.
+
+    addon_name: Loader 側で expansion_data/<addon>/tools/ から推定した値。
+    スキーマ側で明示してなければここで注入する。
+    """
     # Multiple tools support: schemas() takes priority
     if hasattr(module, "schemas") and callable(module.schemas):
-        return _register_multiple_tools(module)
+        return _register_multiple_tools(module, addon_name=addon_name)
 
     # Single tool: schema() function
     if not hasattr(module, "schema") or not callable(module.schema):
@@ -101,12 +112,15 @@ def _register_tool(module: Any) -> bool:
         if not impl or not callable(impl):
             LOGGER.warning("Tool '%s' has schema but no implementation function", meta.name)
             return False
-        
+
         # Skip if already registered (user_data takes priority)
         if meta.name in TOOL_REGISTRY:
             LOGGER.debug("Tool '%s' already registered, skipping", meta.name)
             return False
-        
+
+        if addon_name and not getattr(meta, "addon_name", None):
+            meta.addon_name = addon_name
+
         _add_registered_tool(meta.name, meta, impl)
 
         # Handle aliases
@@ -128,33 +142,46 @@ def _load_module_from_path(module_name: str, file_path: Path) -> Any:
     
     For subdirectory modules (schema.py), the parent directory is temporarily
     added to sys.path to allow local imports (e.g., from .helper import ...).
+
+    NOTE: parent_dir は sys.path に **永続追加** する。schema() 内で隣接ライブラリ
+    (例: `from x_lib.credentials import ...`) を呼ぶケースがあるため、
+    exec_module 完了後の register 段階でも sys.path にパスが残っている必要がある。
+    以前は finally で削除していたが、それだと register 時の動的 import が失敗していた。
+    アドオンごとに tools/ ディレクトリは一意なので衝突リスクは低い。
     """
     import sys
-    
+
     parent_dir = str(file_path.parent)
-    added_to_path = False
-    
-    # Add parent directory to sys.path for local imports
     if parent_dir not in sys.path:
         sys.path.insert(0, parent_dir)
-        added_to_path = True
-    
+
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        file_path,
+        submodule_search_locations=[parent_dir]
+    )
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module  # Register module for relative imports
+    spec.loader.exec_module(module)
+    return module
+
+
+def _infer_addon_name(tools_path: Path) -> Optional[str]:
+    """tools_path が ``expansion_data/<addon>/tools/`` の形なら ``<addon>`` を返す。
+
+    user_data/builtin_data 配下や legacy `tools/defs/` の場合は None。
+    親ディレクトリ名を addon 識別子として使うことで、ツール側のコードを変えずに
+    addon 所属を runtime に伝えられる。
+    """
+    from saiverse.data_paths import EXPANSION_DATA_DIR
     try:
-        spec = importlib.util.spec_from_file_location(
-            module_name, 
-            file_path,
-            submodule_search_locations=[parent_dir]
-        )
-        if spec is None or spec.loader is None:
-            return None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module  # Register module for relative imports
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        # Clean up sys.path if we added to it
-        if added_to_path and parent_dir in sys.path:
-            sys.path.remove(parent_dir)
+        if tools_path.parent.parent.resolve() == EXPANSION_DATA_DIR.resolve():
+            return tools_path.parent.name
+    except Exception:
+        pass
+    return None
 
 
 def _autodiscover_tools() -> None:
@@ -171,45 +198,47 @@ def _autodiscover_tools() -> None:
     legacy_defs = Path(__file__).parent / "defs"
     if legacy_defs.exists() and legacy_defs not in tool_dirs:
         tool_dirs.append(legacy_defs)
-    
+
     for tools_path in tool_dirs:
         if not tools_path.exists():
             continue
-        
+
+        addon_name = _infer_addon_name(tools_path)
+
         # 1. Direct .py files in the directory
         for modinfo in pkgutil.iter_modules([str(tools_path)]):
             if modinfo.name.startswith("_"):
                 continue
-            
+
             py_file = tools_path / f"{modinfo.name}.py"
             if not py_file.exists():
                 continue
-            
+
             try:
                 module = _load_module_from_path(f"tools._loaded.{modinfo.name}", py_file)
-                if module and _register_tool(module):
+                if module and _register_tool(module, addon_name=addon_name):
                     registered_names.add(modinfo.name)
-                    LOGGER.debug("Registered tool from %s", py_file)
+                    LOGGER.debug("Registered tool from %s (addon=%s)", py_file, addon_name)
             except Exception as e:
                 LOGGER.warning("Failed to load tool from %s: %s", py_file, e)
-        
+
         # 2. Subdirectories with schema.py (for git-cloned tool repos)
         for subdir in tools_path.iterdir():
             if not subdir.is_dir() or subdir.name.startswith("_"):
                 continue
-            
+
             schema_file = subdir / "schema.py"
             if not schema_file.exists():
                 continue
-            
+
             try:
                 module = _load_module_from_path(f"tools._loaded.{subdir.name}", schema_file)
-                if module and _register_tool(module):
+                if module and _register_tool(module, addon_name=addon_name):
                     registered_names.add(subdir.name)
-                    LOGGER.debug("Registered tool from %s", schema_file)
+                    LOGGER.debug("Registered tool from %s (addon=%s)", schema_file, addon_name)
             except Exception as e:
                 LOGGER.warning("Failed to load tool from %s: %s", schema_file, e)
-    
+
     LOGGER.info("Autodiscovered %d tools", len(TOOL_REGISTRY))
 
 
