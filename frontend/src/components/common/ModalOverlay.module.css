@@ -7,7 +7,10 @@
     background: rgba(0, 0, 0, 0.6);
     backdrop-filter: blur(4px);
     display: flex;
-    align-items: center;
+    /* "safe center": 子がコンテナより大きい時は align-items: start にフォールバック
+       する CSS の安全モード。普通の center だとオーバーフロー時に上端が画面外に
+       はみ出してスクロールで戻れなくなる事象が起きるため必須。 */
+    align-items: safe center;
     justify-content: center;
     z-index: 1000;
     padding: 1rem;

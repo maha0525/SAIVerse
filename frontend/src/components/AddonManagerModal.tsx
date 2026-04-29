@@ -15,7 +15,7 @@ interface AddonParamSchema {
     key: string;
     label: string;
     description?: string;
-    type: 'toggle' | 'text' | 'number' | 'dropdown' | 'slider' | 'file';
+    type: 'toggle' | 'text' | 'password' | 'number' | 'dropdown' | 'slider' | 'file';
     default: unknown;
     persona_configurable: boolean;
     placeholder?: string;
@@ -96,6 +96,18 @@ function ParamControl({
                     className={styles.textInput}
                     value={String(current ?? '')}
                     placeholder={schema.placeholder ?? ''}
+                    onChange={(e) => onChange(schema.key, e.target.value)}
+                />
+            );
+
+        case 'password':
+            return (
+                <input
+                    type="password"
+                    className={styles.textInput}
+                    value={String(current ?? '')}
+                    placeholder={schema.placeholder ?? ''}
+                    autoComplete="off"
                     onChange={(e) => onChange(schema.key, e.target.value)}
                 />
             );
@@ -401,6 +413,9 @@ function ParamsSection({
 
     const configurableSchemas = addon.params_schema.filter((s) => !s.persona_configurable);
     const personaConfigurableSchemas = addon.params_schema.filter((s) => s.persona_configurable);
+    const oauthFlows = addon.oauth_flows ?? [];
+    const hasOAuthFlows = oauthFlows.length > 0;
+    const hasPersonaSection = personaConfigurableSchemas.length > 0 || hasOAuthFlows;
 
     // 保存（グローバル）
     const saveGlobal = useCallback(async (params: Record<string, unknown>) => {
@@ -422,10 +437,9 @@ function ParamsSection({
         saveGlobal(next);
     };
 
-    // ペルソナ設定のロード
+    // ペルソナ設定のロード（per-persona params がある時だけ取得）
     useEffect(() => {
         if (personaConfigurableSchemas.length === 0) return;
-        // 全ペルソナの設定を並行取得
         Promise.all(
             personas.map((p) =>
                 fetch(`/api/addon/${addon.addon_name}/config/persona/${p.id}`)
@@ -433,69 +447,70 @@ function ParamsSection({
                     .then((data) => ({ persona_id: p.id, persona_name: p.name, params: data.params ?? {} }))
             )
         ).then((configs) => {
-            // 設定がある（空でない）ペルソナのみ表示
-            setPersonaConfigs(configs.filter((c) => Object.keys(c.params).length > 0));
+            // 全 persona 分を保持。空なら defaults でレンダーされるので filter しない
+            setPersonaConfigs(configs);
         });
     }, [addon.addon_name, personas, personaConfigurableSchemas.length]);
 
-    const savePersona = async (personaId: string, params: Record<string, unknown>) => {
+    /**
+     * 1キー単位で merge 保存する。API 側は merge セマンティクスなので、
+     * 既存の他キー (OAuth トークン等) は破壊されない。
+     */
+    const savePersona = async (personaId: string, partial: Record<string, unknown>) => {
         await fetch(`/api/addon/${addon.addon_name}/config/persona/${personaId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ params }),
+            body: JSON.stringify({ params: partial }),
         });
     };
 
     const handlePersonaChange = (personaId: string, key: string, val: unknown) => {
         setPersonaConfigs((prev) => {
-            const next = prev.map((c) =>
-                c.persona_id === personaId ? { ...c, params: { ...c.params, [key]: val } } : c
-            );
-            const config = next.find((c) => c.persona_id === personaId);
-            if (config) savePersona(personaId, config.params);
-            return next;
+            const idx = prev.findIndex((c) => c.persona_id === personaId);
+            if (idx >= 0) {
+                return prev.map((c) =>
+                    c.persona_id === personaId ? { ...c, params: { ...c.params, [key]: val } } : c
+                );
+            }
+            // まだ personaConfigs に居なければ新規エントリ
+            const personaName = personas.find((p) => p.id === personaId)?.name ?? personaId;
+            return [...prev, { persona_id: personaId, persona_name: personaName, params: { [key]: val } }];
         });
+        // merge 保存: 変更したキーだけ送る
+        savePersona(personaId, { [key]: val });
     };
 
-    const addPersonaConfig = (personaId: string, personaName: string) => {
-        if (personaConfigs.find((c) => c.persona_id === personaId)) return;
-        const defaultParams: Record<string, unknown> = {};
-        personaConfigurableSchemas.forEach((s) => {
-            defaultParams[s.key] = s.default;
-        });
-        const newConfig: PersonaPersonaConfig = { persona_id: personaId, persona_name: personaName, params: defaultParams };
-        setPersonaConfigs((prev) => [...prev, newConfig]);
-        savePersona(personaId, defaultParams);
-    };
-
-    if (configurableSchemas.length === 0 && personaConfigurableSchemas.length === 0) {
+    if (configurableSchemas.length === 0 && !hasPersonaSection) {
         return <p className={styles.noParams}>設定項目はありません</p>;
     }
 
-    const selectedConfig = personaConfigs.find((c) => c.persona_id === selectedPersonaId);
-    const selectedPersona = personas.find((p) => p.id === selectedPersonaId);
+    // 選択中ペルソナの params。未保存ペルソナでは空 dict を使い、各 ParamControl が default にフォールバックする
+    const selectedPersonaParams: Record<string, unknown> =
+        personaConfigs.find((c) => c.persona_id === selectedPersonaId)?.params ?? {};
 
     return (
         <div className={styles.paramsSection}>
             {/* Global params */}
-            <div className={styles.paramsGroup}>
-                <div className={styles.paramsGroupLabel}>デフォルト（全ペルソナ共通）</div>
-                {configurableSchemas.map((schema) => (
-                    <div key={schema.key} className={styles.paramRow}>
-                        <span className={styles.paramLabel}>{schema.label}</span>
-                        <ParamControl
-                            schema={schema}
-                            value={globalParams[schema.key]}
-                            onChange={handleGlobalChange}
-                            addonName={addon.addon_name}
-                        />
-                    </div>
-                ))}
-                {saving && <span className={styles.savingHint}>保存中...</span>}
-            </div>
+            {configurableSchemas.length > 0 && (
+                <div className={styles.paramsGroup}>
+                    <div className={styles.paramsGroupLabel}>デフォルト（全ペルソナ共通）</div>
+                    {configurableSchemas.map((schema) => (
+                        <div key={schema.key} className={styles.paramRow}>
+                            <span className={styles.paramLabel}>{schema.label}</span>
+                            <ParamControl
+                                schema={schema}
+                                value={globalParams[schema.key]}
+                                onChange={handleGlobalChange}
+                                addonName={addon.addon_name}
+                            />
+                        </div>
+                    ))}
+                    {saving && <span className={styles.savingHint}>保存中...</span>}
+                </div>
+            )}
 
-            {/* Per-persona params */}
-            {personaConfigurableSchemas.length > 0 && (
+            {/* Per-persona section: per-persona params + OAuth flows are aligned to the same selected persona */}
+            {hasPersonaSection && (
                 <div className={styles.personaSection}>
                     <div className={styles.personaSectionHeader}>
                         <span className={styles.paramsGroupLabel}>ペルソナ別設定</span>
@@ -507,43 +522,40 @@ function ParamsSection({
                         onChange={(e) => setSelectedPersonaId(e.target.value)}
                     >
                         <option value="">-- ペルソナを選択 --</option>
-                        {personas.map((p) => {
-                            const isConfigured = personaConfigs.some((c) => c.persona_id === p.id);
-                            return (
-                                <option key={p.id} value={p.id}>
-                                    {p.name}{isConfigured ? '' : '（未設定）'}
-                                </option>
-                            );
-                        })}
+                        {personas.map((p) => (
+                            <option key={p.id} value={p.id}>{p.name}</option>
+                        ))}
                     </select>
 
-                    {selectedPersonaId && !selectedConfig && selectedPersona && (
-                        <div className={styles.personaUnconfiguredHint}>
-                            <span>このペルソナには個別設定がありません。</span>
-                            <button
-                                className={styles.createPersonaConfigBtn}
-                                onClick={() => addPersonaConfig(selectedPersona.id, selectedPersona.name)}
-                            >
-                                個別設定を作成
-                            </button>
-                        </div>
-                    )}
-
-                    {selectedConfig && (
-                        <div className={styles.personaConfigBlock}>
-                            {personaConfigurableSchemas.map((schema) => (
-                                <div key={schema.key} className={styles.paramRow}>
-                                    <span className={styles.paramLabel}>{schema.label}</span>
-                                    <ParamControl
-                                        schema={schema}
-                                        value={selectedConfig.params[schema.key]}
-                                        onChange={(key, val) => handlePersonaChange(selectedConfig.persona_id, key, val)}
-                                        addonName={addon.addon_name}
-                                        personaId={selectedConfig.persona_id}
-                                    />
+                    {selectedPersonaId && (
+                        <>
+                            {/* Per-persona params: 未保存でも default 値で編集可能 */}
+                            {personaConfigurableSchemas.length > 0 && (
+                                <div className={styles.personaConfigBlock}>
+                                    {personaConfigurableSchemas.map((schema) => (
+                                        <div key={schema.key} className={styles.paramRow}>
+                                            <span className={styles.paramLabel}>{schema.label}</span>
+                                            <ParamControl
+                                                schema={schema}
+                                                value={selectedPersonaParams[schema.key]}
+                                                onChange={(key, val) => handlePersonaChange(selectedPersonaId, key, val)}
+                                                addonName={addon.addon_name}
+                                                personaId={selectedPersonaId}
+                                            />
+                                        </div>
+                                    ))}
                                 </div>
-                            ))}
-                        </div>
+                            )}
+
+                            {/* OAuth flows: 選択中ペルソナに紐付く外部サービス連携 */}
+                            {hasOAuthFlows && (
+                                <OAuthFlowSection
+                                    addonName={addon.addon_name}
+                                    flows={oauthFlows}
+                                    personaId={selectedPersonaId}
+                                />
+                            )}
+                        </>
                     )}
                 </div>
             )}
@@ -610,13 +622,6 @@ function AddonCard({
             {expanded && addon.is_enabled && (
                 <div className={styles.addonCardBody}>
                     <ParamsSection addon={addon} personas={personas} />
-                    {addon.oauth_flows && addon.oauth_flows.length > 0 && (
-                        <OAuthFlowSection
-                            addonName={addon.addon_name}
-                            flows={addon.oauth_flows}
-                            personas={personas}
-                        />
-                    )}
                     <MCPSection addonName={addon.addon_name} defaultCollapsed={true} />
                 </div>
             )}

@@ -76,6 +76,14 @@
     gap: 0.6rem;
 }
 
+/* flex-direction: column 内で子の AddonCard はデフォルト flex-shrink:1 で
+   縮められる。AddonCard を展開した時に内部が高くても親の content height に
+   合わせて潰され、scrollHeight = clientHeight になり overflow が発生せず
+   スクロールできない事象が起きる。flex-shrink:0 で本来の高さを保たせる。 */
+.content > * {
+    flex-shrink: 0;
+}
+
 /* --- Loading / Empty --- */
 
 .loadingText {
@@ -508,33 +516,6 @@
     box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
 }
 
-.personaUnconfiguredHint {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    padding: 0.6rem 0.75rem;
-    border: 1px dashed #cbd5e1;
-    border-radius: 0.5rem;
-    font-size: 0.85rem;
-    color: #64748b;
-}
-
-.createPersonaConfigBtn {
-    background: #6366f1;
-    color: #ffffff;
-    border: none;
-    border-radius: 0.4rem;
-    padding: 0.35rem 0.7rem;
-    font-size: 0.82rem;
-    cursor: pointer;
-    transition: background 0.15s;
-}
-
-.createPersonaConfigBtn:hover {
-    background: #4f46e5;
-}
-
 .personaConfigBlock {
     border: 1px solid #e2e8f0;
     border-radius: 0.5rem;
@@ -661,11 +642,6 @@
 
 :global([data-theme="dark"]) .personaSelector:hover {
     border-color: #6366f1;
-}
-
-:global([data-theme="dark"]) .personaUnconfiguredHint {
-    border-color: #334155;
-    color: #94a3b8;
 }
 
 :global([data-theme="dark"]) .personaConfigBlock {

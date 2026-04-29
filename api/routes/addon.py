@@ -32,7 +32,7 @@ class AddonParamSchema(BaseModel):
     key: str
     label: str
     description: Optional[str] = None
-    type: str  # "toggle" | "text" | "number" | "file" | "dropdown" | "slider"
+    type: str  # "toggle" | "text" | "password" | "number" | "file" | "dropdown" | "slider"
     default: Any = None
     persona_configurable: bool = False
     placeholder: Optional[str] = None  # text / number 用の placeholder
@@ -442,24 +442,61 @@ def update_addon_persona_config(
     body: UpdateParamsRequest,
     _manager=Depends(get_manager),
 ):
-    """ペルソナ固有のアドオンパラメータを更新する。"""
+    """ペルソナ固有のアドオンパラメータを **merge** で更新する。
+
+    完全上書きではなく既存 params_json に body.params をマージして保存する。
+    これは OAuth handler 側の `_merge_persona_params` のセマンティクスに合わせるため。
+    完全上書きにすると例えば「個別設定を作成」UI が default 値だけ送った時に
+    OAuth トークン (x_access_token 等) を破壊する事故が起きる。
+
+    body.params に値 ``None`` を渡すとそのキーは削除される。
+    """
     from database.models import AddonPersonaConfig
-    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
     db = _get_session()
     try:
-        stmt = sqlite_insert(AddonPersonaConfig).values(
-            addon_name=addon_name,
-            persona_id=persona_id,
-            params_json=json.dumps(body.params, ensure_ascii=False),
-        ).on_conflict_do_update(
-            index_elements=["addon_name", "persona_id"],
-            set_={"params_json": json.dumps(body.params, ensure_ascii=False)},
+        row = (
+            db.query(AddonPersonaConfig)
+            .filter(
+                AddonPersonaConfig.addon_name == addon_name,
+                AddonPersonaConfig.persona_id == persona_id,
+            )
+            .first()
         )
-        db.execute(stmt)
+        existing: Dict[str, Any] = {}
+        if row and row.params_json:
+            try:
+                existing = json.loads(row.params_json)
+            except (json.JSONDecodeError, TypeError):
+                LOGGER.warning(
+                    "addon: invalid params_json for %s/%s, treating as empty",
+                    addon_name, persona_id,
+                )
+
+        merged = dict(existing)
+        for k, v in body.params.items():
+            if v is None:
+                merged.pop(k, None)
+            else:
+                merged[k] = v
+        params_json = json.dumps(merged, ensure_ascii=False)
+
+        if row is None:
+            row = AddonPersonaConfig(
+                addon_name=addon_name,
+                persona_id=persona_id,
+                params_json=params_json,
+            )
+            db.add(row)
+        else:
+            row.params_json = params_json
+
         db.commit()
-        LOGGER.info("addon: updated persona config for %s / %s", addon_name, persona_id)
-        return {"addon_name": addon_name, "persona_id": persona_id, "params": body.params}
+        LOGGER.info(
+            "addon: merged persona config for %s/%s (keys=%s)",
+            addon_name, persona_id, list(body.params.keys()),
+        )
+        return {"addon_name": addon_name, "persona_id": persona_id, "params": merged}
     except Exception:
         db.rollback()
         raise

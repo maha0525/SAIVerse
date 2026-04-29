@@ -23,7 +23,8 @@ export interface OAuthFlow {
 interface OAuthFlowSectionProps {
     addonName: string;
     flows: OAuthFlow[];
-    personas: { id: string; name: string }[];
+    /** 親から渡される選択中ペルソナID。未指定時はステータス表示なし。 */
+    personaId: string;
 }
 
 interface OAuthStatus {
@@ -34,7 +35,7 @@ interface OAuthStatus {
 export default function OAuthFlowSection({
     addonName,
     flows,
-    personas,
+    personaId,
 }: OAuthFlowSectionProps) {
     if (!flows || flows.length === 0) return null;
 
@@ -45,7 +46,7 @@ export default function OAuthFlowSection({
                     key={flow.key}
                     addonName={addonName}
                     flow={flow}
-                    personas={personas}
+                    personaId={personaId}
                 />
             ))}
         </div>
@@ -55,15 +56,13 @@ export default function OAuthFlowSection({
 function FlowRow({
     addonName,
     flow,
-    personas,
+    personaId,
 }: {
     addonName: string;
     flow: OAuthFlow;
-    personas: { id: string; name: string }[];
+    personaId: string;
 }) {
-    const [selectedPersonaId, setSelectedPersonaId] = useState<string>(
-        personas[0]?.id ?? ''
-    );
+    const selectedPersonaId = personaId;
     const [status, setStatus] = useState<OAuthStatus | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -156,28 +155,14 @@ function FlowRow({
         }
     }, [addonName, flow.key, flow.label, selectedPersonaId, fetchStatus]);
 
+    if (!selectedPersonaId) return null;
+
     return (
         <div className={styles.flow}>
             <div className={styles.label}>{flow.label}</div>
             {flow.description && (
                 <div className={styles.description}>{flow.description}</div>
             )}
-
-            <div className={styles.personaRow}>
-                <span className={styles.personaLabel}>ペルソナ:</span>
-                <select
-                    className={styles.personaSelect}
-                    value={selectedPersonaId}
-                    onChange={(e) => setSelectedPersonaId(e.target.value)}
-                >
-                    {personas.length === 0 && <option value="">（ペルソナなし）</option>}
-                    {personas.map((p) => (
-                        <option key={p.id} value={p.id}>
-                            {p.name}
-                        </option>
-                    ))}
-                </select>
-            </div>
 
             {status?.connected ? (
                 <div className={styles.statusRow}>

@@ -32,29 +32,6 @@
     line-height: 1.4;
 }
 
-.personaRow {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-}
-
-.personaLabel {
-    font-size: 0.8rem;
-    color: #9ca3af;
-}
-
-.personaSelect {
-    flex: 1;
-    min-width: 140px;
-    background: #1f2937;
-    color: #e5e7eb;
-    border: 1px solid #4b5563;
-    padding: 0.35rem 0.5rem;
-    border-radius: 6px;
-    font-size: 0.85rem;
-}
-
 .statusRow {
     display: flex;
     align-items: center;
@@ -154,16 +131,6 @@
 
 :global([data-theme="light"]) .description {
     color: #64748b;
-}
-
-:global([data-theme="light"]) .personaLabel {
-    color: #64748b;
-}
-
-:global([data-theme="light"]) .personaSelect {
-    background: #fff;
-    color: #1f2937;
-    border-color: #e2e8f0;
 }
 
 :global([data-theme="light"]) .statusParam {
