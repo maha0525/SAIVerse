@@ -1,5 +1,16 @@
 /* Storage Layers Viewer — 7-layer storage debug view (Intent A v0.14, Intent B v0.11) */
 
+/* ---- Root container ---- */
+/* Vertical-stack layout: filter bar + summary (固定高さ) + items list (flex: 1
+   でスクロール可能領域)。MemoryModal の content (height: 100%) 内に収まる。 */
+.rootContainer {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+}
+
 /* ---- Filter bar ---- */
 .filterBar {
     display: flex;

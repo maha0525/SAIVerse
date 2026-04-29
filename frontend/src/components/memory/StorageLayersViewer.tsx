@@ -1,7 +1,6 @@
 'use client';
 import React, { useState, useEffect, useCallback } from 'react';
 import { Loader2, Layers, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react';
-import styles from './MemoryBrowser.module.css';
 import slStyles from './StorageLayersViewer.module.css';
 
 interface StorageLayerStat {
@@ -135,7 +134,7 @@ export default function StorageLayersViewer({ personaId }: Props) {
     };
 
     return (
-        <div className={styles.browserRoot}>
+        <div className={slStyles.rootContainer}>
             {/* Filter bar */}
             <div className={slStyles.filterBar}>
                 <div className={slStyles.filterGroup}>
