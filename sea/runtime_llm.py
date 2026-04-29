@@ -710,6 +710,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                         "content": chunk["content"],
                                         "persona_id": getattr(persona, "persona_id", None),
                                         "node_id": getattr(node_def, "id", "llm"),
+                                        "pulse_id": state.get("_pulse_id"),
                                     })
                                     continue
                                 text_chunks.append(chunk)
@@ -718,6 +719,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                     "content": chunk,
                                     "persona_id": getattr(persona, "persona_id", None),
                                     "node_id": getattr(node_def, "id", "llm"),
+                                    "pulse_id": state.get("_pulse_id"),
                                 })
                         finally:
                             if hasattr(stream_iter, 'close'):
@@ -808,6 +810,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 "type": "streaming_complete",
                                 "persona_id": getattr(persona, "persona_id", None),
                                 "node_id": getattr(node_def, "id", "llm"),
+                                "pulse_id": state.get("_pulse_id"),
                             }
                             if _tool_reasoning_text:
                                 completion_event["reasoning"] = _tool_reasoning_text
@@ -842,6 +845,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                 "type": "streaming_discard",
                                 "persona_id": getattr(persona, "persona_id", None),
                                 "node_id": getattr(node_def, "id", "llm"),
+                                "pulse_id": state.get("_pulse_id"),
                             })
                             LOGGER.info("[sea] Streaming text discarded — tool_call only (no speak content)")
                     else:
@@ -856,6 +860,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             "type": "streaming_complete",
                             "persona_id": getattr(persona, "persona_id", None),
                             "node_id": getattr(node_def, "id", "llm"),
+                            "pulse_id": state.get("_pulse_id"),
                         }
                         if _tool_reasoning_text:
                             completion_event["reasoning"] = _tool_reasoning_text
@@ -1179,6 +1184,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                         "content": chunk["content"],
                                         "persona_id": getattr(persona, "persona_id", None),
                                         "node_id": getattr(node_def, "id", "llm"),
+                                        "pulse_id": state.get("_pulse_id"),
                                     })
                                     continue
                                 text_chunks.append(chunk)
@@ -1188,6 +1194,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                     "content": chunk,
                                     "persona_id": getattr(persona, "persona_id", None),
                                     "node_id": getattr(node_def, "id", "llm"),
+                                    "pulse_id": state.get("_pulse_id"),
                                 })
                         finally:
                             # Explicitly close to disconnect HTTP streaming from LLM API
@@ -1316,6 +1323,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                     "type": "streaming_discard",
                                     "persona_id": getattr(persona, "persona_id", None),
                                     "node_id": getattr(node_def, "id", "llm"),
+                                    "pulse_id": pulse_id,
                                 })
                             if _first_text_before_ns.strip():
                                 if event_callback:
@@ -1376,6 +1384,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                             "type": "streaming_complete",
                             "persona_id": getattr(persona, "persona_id", None),
                             "node_id": getattr(node_def, "id", "llm"),
+                            "pulse_id": state.get("_pulse_id"),
                         }
                         if reasoning_text:
                             completion_event["reasoning"] = reasoning_text
@@ -1469,6 +1478,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                             "content": _cont_chunk,
                                             "persona_id": getattr(persona, "persona_id", None),
                                             "node_id": getattr(node_def, "id", "llm"),
+                                            "pulse_id": state.get("_pulse_id"),
                                         })
                             finally:
                                 if hasattr(_cont_iter, "close"):
@@ -1483,6 +1493,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                                         "type": "streaming_complete",
                                         "persona_id": getattr(persona, "persona_id", None),
                                         "node_id": getattr(node_def, "id", "llm"),
+                                        "pulse_id": state.get("_pulse_id"),
                                     })
                                 # Store continuation to building history
                                 runtime._emit_say(persona, eff_bid, _cont_text, pulse_id=pulse_id)
