@@ -1320,12 +1320,14 @@ export default function Home() {
                         } else if (event.type === 'streaming_thinking') {
                             // Streaming thinking: accumulate into _streamingThinking
                             const avatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
+                            const evtPulseId: string | undefined = event.pulse_id || undefined;
                             setMessages(prev => {
                                 const last = prev[prev.length - 1];
                                 if (last && last.role === 'assistant' && last._streaming) {
                                     return [...prev.slice(0, -1), {
                                         ...last,
-                                        _streamingThinking: (last._streamingThinking || '') + event.content
+                                        _streamingThinking: (last._streamingThinking || '') + event.content,
+                                        ...(evtPulseId && !last._pulse_id && { _pulse_id: evtPulseId }),
                                     }];
                                 } else {
                                     return [...prev, {
@@ -1335,7 +1337,8 @@ export default function Home() {
                                         avatar: avatarUrl,
                                         timestamp: new Date().toISOString(),
                                         _streaming: true,
-                                        _streamingThinking: event.content
+                                        _streamingThinking: event.content,
+                                        ...(evtPulseId && { _pulse_id: evtPulseId }),
                                     }];
                                 }
                             });
@@ -1343,12 +1346,14 @@ export default function Home() {
                         } else if (event.type === 'streaming_chunk') {
                             // Streaming: append chunk to last message or create new one
                             const avatarUrl = event.persona_avatar || (event.persona_id ? `/api/chat/persona/${event.persona_id}/avatar` : undefined);
+                            const evtPulseId: string | undefined = event.pulse_id || undefined;
                             setMessages(prev => {
                                 const last = prev[prev.length - 1];
                                 if (last && last.role === 'assistant' && last._streaming) {
                                     return [...prev.slice(0, -1), {
                                         ...last,
-                                        content: last.content + event.content
+                                        content: last.content + event.content,
+                                        ...(evtPulseId && !last._pulse_id && { _pulse_id: evtPulseId }),
                                     }];
                                 } else {
                                     return [...prev, {
@@ -1357,7 +1362,8 @@ export default function Home() {
                                         sender: event.persona_name || 'Assistant',
                                         avatar: avatarUrl,
                                         timestamp: new Date().toISOString(),
-                                        _streaming: true
+                                        _streaming: true,
+                                        ...(evtPulseId && { _pulse_id: evtPulseId })
                                     }];
                                 }
                             });
