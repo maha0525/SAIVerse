@@ -222,12 +222,43 @@ def _get_session():
 # Endpoints
 # ---------------------------------------------------------------------------
 
+def _resolve_effective_params(
+    manifest: "AddonManifest",
+    params_json: Optional[str],
+) -> Dict[str, Any]:
+    """params_schema のデフォルト値とユーザー保存値を merge して返す。
+
+    フロントエンド側 (`useClientActions` の ``requires_enabled_param`` 等) は
+    ``addon.params[key]`` を truthy 判定で参照するため、ユーザーが UI で
+    一度もトグルを操作していないキーが ``undefined`` 扱いになって
+    ``client_actions`` がサイレント skip される事故が起きる。
+
+    バックエンド側の ``saiverse.addon_config.get_params`` は同様の merge を
+    既に行っているため、HTTP レスポンス側との整合を取るためここでも
+    同じ振る舞いをさせる。
+    """
+    params: Dict[str, Any] = {}
+    for schema_item in manifest.params_schema:
+        if schema_item.default is not None:
+            params[schema_item.key] = schema_item.default
+    if params_json:
+        try:
+            user_overrides = json.loads(params_json)
+            if isinstance(user_overrides, dict):
+                params.update(user_overrides)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return params
+
+
 @router.get("/", response_model=List[AddonInfo])
 @router.get("", response_model=List[AddonInfo], include_in_schema=False)
 def list_addons(_manager=Depends(get_manager)):
     """expansion_data/ 下のアドオン一覧を返す。
 
     addon.json が存在するディレクトリのみをアドオンとして認識する。
+    各エントリの ``params`` には params_schema のデフォルト値とユーザー
+    保存値をマージした値が含まれる。
     """
     exp_dir = _get_expansion_data_dir()
     if not exp_dir.exists():
@@ -247,12 +278,7 @@ def list_addons(_manager=Depends(get_manager)):
             config = _get_or_create_config(db, addon_name)
             db.commit()
 
-            params: Dict[str, Any] = {}
-            if config.params_json:
-                try:
-                    params = json.loads(config.params_json)
-                except (json.JSONDecodeError, TypeError):
-                    pass
+            params = _resolve_effective_params(manifest, config.params_json)
 
             results.append(AddonInfo(
                 addon_name=addon_name,
@@ -286,12 +312,7 @@ def get_addon(addon_name: str, _manager=Depends(get_manager)):
         config = _get_or_create_config(db, addon_name)
         db.commit()
 
-        params: Dict[str, Any] = {}
-        if config.params_json:
-            try:
-                params = json.loads(config.params_json)
-            except (json.JSONDecodeError, TypeError):
-                pass
+        params = _resolve_effective_params(manifest, config.params_json)
 
         return AddonInfo(
             addon_name=addon_name,
