@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, MessageSquare, Download, Book, Bug, Layers, Activity, StickyNote, Brain } from 'lucide-react';
+import { X, MessageSquare, Download, Book, Bug, Layers, Activity, Boxes } from 'lucide-react';
 import styles from './MemoryModal.module.css';
 import MemoryBrowser from './memory/MemoryBrowser';
 import MemoryImport from './memory/MemoryImport';
@@ -7,8 +7,7 @@ import MemopediaViewer from './memory/MemopediaViewer';
 import MemoryRecall from './memory/MemoryRecall';
 import ArasujiViewer from './memory/ArasujiViewer';
 import PulseLogsViewer from './memory/PulseLogsViewer';
-import MemoryNotesViewer from './memory/MemoryNotesViewer';
-import WorkingMemoryViewer from './memory/WorkingMemoryViewer';
+import StorageLayersViewer from './memory/StorageLayersViewer';
 import ModalOverlay from './common/ModalOverlay';
 
 interface MemoryModalProps {
@@ -18,7 +17,7 @@ interface MemoryModalProps {
     personaName?: string;
 }
 
-type Tab = 'browser' | 'arasuji' | 'memopedia' | 'memory_notes' | 'working_memory' | 'pulse_logs' | 'import' | 'debug';
+type Tab = 'browser' | 'arasuji' | 'memopedia' | 'storage_layers' | 'pulse_logs' | 'import' | 'debug';
 
 export default function MemoryModal({ isOpen, onClose, personaId, personaName }: MemoryModalProps) {
     const [activeTab, setActiveTab] = useState<Tab>('browser');
@@ -58,18 +57,11 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
                         Memopedia
                     </button>
                     <button
-                        className={`${styles.tab} ${activeTab === 'memory_notes' ? styles.activeTab : ''}`}
-                        onClick={() => setActiveTab('memory_notes')}
+                        className={`${styles.tab} ${activeTab === 'storage_layers' ? styles.activeTab : ''}`}
+                        onClick={() => setActiveTab('storage_layers')}
                     >
-                        <StickyNote size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
-                        メモ帳
-                    </button>
-                    <button
-                        className={`${styles.tab} ${activeTab === 'working_memory' ? styles.activeTab : ''}`}
-                        onClick={() => setActiveTab('working_memory')}
-                    >
-                        <Brain size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
-                        WM
+                        <Boxes size={16} style={{ display: 'inline', marginRight: 8, verticalAlign: 'text-bottom' }} />
+                        7層ストレージ
                     </button>
                     <button
                         className={`${styles.tab} ${activeTab === 'pulse_logs' ? styles.activeTab : ''}`}
@@ -98,8 +90,7 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
                     {activeTab === 'browser' && <MemoryBrowser personaId={personaId} />}
                     {activeTab === 'arasuji' && <ArasujiViewer personaId={personaId} />}
                     {activeTab === 'memopedia' && <MemopediaViewer personaId={personaId} />}
-                    {activeTab === 'memory_notes' && <MemoryNotesViewer personaId={personaId} />}
-                    {activeTab === 'working_memory' && <WorkingMemoryViewer personaId={personaId} />}
+                    {activeTab === 'storage_layers' && <StorageLayersViewer personaId={personaId} />}
                     {activeTab === 'pulse_logs' && <PulseLogsViewer personaId={personaId} />}
                     {activeTab === 'import' && <MemoryImport personaId={personaId} />}
                     {activeTab === 'debug' && <MemoryRecall personaId={personaId} />}
@@ -108,4 +99,3 @@ export default function MemoryModal({ isOpen, onClose, personaId, personaName }:
         </ModalOverlay>
     );
 }
-

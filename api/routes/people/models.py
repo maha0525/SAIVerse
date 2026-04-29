@@ -489,3 +489,56 @@ class PulseLogsResponse(BaseModel):
     items: List[PulseLogEntry]
     pulse_id: str
     total: int
+
+
+# -----------------------------------------------------------------------------
+# Storage Layers Models (Intent A v0.14, Intent B v0.11 — 7-layer storage view)
+# -----------------------------------------------------------------------------
+
+class StorageLayerStat(BaseModel):
+    """Per-layer summary: count + latest timestamp + freeform note."""
+    layer: str  # 'meta_judgment' / 'main_cache' / 'sub_cache' / 'nested_temp' / 'track_local' / 'saimemory_core' / 'archive'
+    layer_index: int  # 1..7
+    label: str  # human-readable name e.g. "[1] メタ判断ログ"
+    count: int
+    latest_at: Optional[float] = None  # unix epoch
+    note: Optional[str] = None  # e.g. "未実装", "揮発のため表示できません"
+
+
+class StorageLayerEntry(BaseModel):
+    """One row from any of the storage layers, normalized for the unified list view."""
+    layer: str  # same vocabulary as StorageLayerStat.layer
+    entry_id: str
+    created_at: Optional[float] = None  # unix epoch
+
+    # SAIMemory message fields (used when layer in {main_cache, sub_cache})
+    role: Optional[str] = None  # user / assistant / system / ...
+    content: Optional[str] = None
+    line_role: Optional[str] = None  # main_line / sub_line / meta_judgment / nested
+    line_id: Optional[str] = None
+    origin_track_id: Optional[str] = None
+    scope: Optional[str] = None  # committed / discardable / volatile
+    paired_action_text: Optional[str] = None
+
+    # meta_judgment_log fields (used when layer == meta_judgment)
+    judgment_action: Optional[str] = None  # continue / switch / wait / close
+    judgment_thought: Optional[str] = None
+    switch_to_track_id: Optional[str] = None
+    trigger_type: Optional[str] = None
+    trigger_context: Optional[str] = None
+    notify_to_track: Optional[str] = None
+    committed_to_main_cache: Optional[bool] = None
+    track_at_judgment_id: Optional[str] = None
+
+    # track_local_log fields (used when layer == track_local)
+    log_kind: Optional[str] = None
+    payload: Optional[str] = None
+    source_line_id: Optional[str] = None
+    track_id: Optional[str] = None  # track_local_log の track_id
+
+
+class StorageLayersResponse(BaseModel):
+    summary: List[StorageLayerStat]
+    items: List[StorageLayerEntry]
+    total_returned: int
+    truncated: bool  # true when limit was reached
