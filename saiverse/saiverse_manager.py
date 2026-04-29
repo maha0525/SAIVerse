@@ -28,6 +28,7 @@ from .schedule_manager import ScheduleManager
 from .integration_manager import IntegrationManager
 from .track_manager import TrackManager
 from .note_manager import NoteManager
+from .track_handlers import SocialTrackHandler
 from phenomena.manager import PhenomenonManager
 from phenomena.triggers import TriggerEvent, TriggerType
 from sqlalchemy.orm import sessionmaker
@@ -192,16 +193,26 @@ class SAIVerseManager(
         # --- Initialize cognitive-model managers (Phase B-5) ---
         # Track / Note の永続化を扱う純粋ロジックレイヤー。
         # Intent A v0.9 / Intent B v0.6 参照。
-        # 既存ロジックには影響しない (誰も呼ばない状態で待機)。
         self.track_manager = TrackManager(session_factory=self.SessionLocal)
         self.note_manager = NoteManager(session_factory=self.SessionLocal)
         logging.info("Initialized cognitive-model managers (TrackManager, NoteManager).")
+
+        # --- Initialize social Track handler (Phase B-X) ---
+        # 交流 Track はペルソナ作成 hook で自動作成される。起動時 sweep でも保証する。
+        self.social_track_handler = SocialTrackHandler(
+            track_manager=self.track_manager,
+        )
 
         # --- Step 5: Load Dynamic States from DB ---
         # データベースから動的な状態（ペルソナ、ユーザー状態、入室状況）を読み込み、
         # メモリ上のオブジェクトに反映させます。
         self._load_personas_from_db()
         self._load_user_state_from_db()
+
+        # --- Phase B-X: 既存ペルソナへの social Track migration sweep ---
+        # 起動時、ロード済みペルソナ全員に交流 Track が存在することを保証する。
+        # 既存 Track がある場合は何もしない (冪等性は SocialTrackHandler 側で担保)。
+        self._ensure_social_tracks_for_all_personas()
 
         # Load saved meta playbook preference from DB
         try:
@@ -754,6 +765,41 @@ class SAIVerseManager(
             persona._save_session_metadata()
         self._save_modified_buildings()
         logging.info("SAIVerseManager shutdown complete.")
+
+    def _ensure_social_tracks_for_all_personas(self) -> None:
+        """起動時 migration: ロード済み全ペルソナに交流 Track を確保する。
+
+        Phase B-X 導入以前に作られたペルソナは交流 Track を持たないため、
+        起動時に一度なめて未作成のものを作る。冪等なので何度走っても安全。
+
+        個別ペルソナの hook 失敗で他ペルソナの初期化を巻き込まないよう
+        try/except で囲む。
+        """
+        if not self.personas:
+            return
+        created_count = 0
+        existed_count = 0
+        for persona_id in list(self.personas.keys()):
+            try:
+                # ensure_track は既存があれば無作成で返すため、ログだけ追跡する
+                # 簡便のため戻り値の status で「今作ったか / もとからあったか」を判別。
+                # 厳密な区別が必要なら handler に作成フックを追加することも可能だが、
+                # migration 用途では集計ログで十分。
+                track_before = self.social_track_handler._find_existing(persona_id)
+                self.social_track_handler.ensure_track(persona_id)
+                if track_before is None:
+                    created_count += 1
+                else:
+                    existed_count += 1
+            except Exception:
+                logging.exception(
+                    "[social-handler] migration sweep failed for persona=%s",
+                    persona_id,
+                )
+        logging.info(
+            "[social-handler] migration sweep done: created=%d existed=%d total=%d",
+            created_count, existed_count, len(self.personas),
+        )
 
     def _ensure_user_conversation_track(self, persona_id: str, user_id: str) -> str:
         """対ユーザー Track が未作成なら新規作成 + activate して track_id を返す。

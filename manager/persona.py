@@ -466,6 +466,16 @@ class PersonaMixin:
             self.id_to_name_map[new_ai_id] = name
             self.persona_map[name] = new_ai_id
 
+            # Phase B-X: 交流 Track の自動作成 hook
+            # 失敗してもペルソナ作成自体は成功させる (起動時 migration sweep で復旧可能)
+            try:
+                self.social_track_handler.ensure_track(new_ai_id)
+            except Exception:
+                logging.exception(
+                    "[social-handler] Failed to ensure social track on persona creation: %s",
+                    new_ai_id,
+                )
+
             return True, f"Persona '{name}' created successfully.", new_ai_id, new_building_id
         except Exception as exc:
             db.rollback()
