@@ -17,6 +17,7 @@ from _track_common import (
     DEFERRED_NOTICE,
     enqueue_or_warn,
     get_pulse_context,
+    resolve_default_entry_line_role,
 )
 from database.session import SessionLocal
 from saiverse.track_manager import TrackManager
@@ -34,6 +35,7 @@ def track_create(
     is_persistent: bool = False,
     metadata: Optional[str] = None,
     activate: bool = False,
+    entry_line_role: Optional[str] = None,
 ) -> Tuple[str, ToolResult, None]:
     """Create a new action track for the active persona.
 
@@ -46,6 +48,13 @@ def track_create(
     create が失敗すれば activate も走らない (immediate / deferred いずれも)。
     """
     persona_id = _require_persona_id()
+
+    # Resolve entry_line_role: explicit arg > Handler default > 'main_line' fallback.
+    # Inject into metadata JSON so the runtime can read it at Pulse start time
+    # (Intent A v0.14, Intent B v0.11). Track-lifetime fixed value.
+    resolved_entry_line_role = entry_line_role or resolve_default_entry_line_role(track_type)
+    metadata = _inject_entry_line_role_into_metadata(metadata, resolved_entry_line_role)
+
     try:
         track_id = _track_manager.create(
             persona_id=persona_id,
@@ -166,6 +175,18 @@ def schema() -> ToolSchema:
                     ),
                     "default": False,
                 },
+                "entry_line_role": {
+                    "type": "string",
+                    "description": (
+                        "Which model/cache type drives the Track's pulse: 'main_line' "
+                        "(heavyweight model, for tracks that talk to others — user, "
+                        "social, external) or 'sub_line' (lightweight model, for "
+                        "autonomous work that runs many short steps). "
+                        "Defaults to the Handler's preset for the given track_type, "
+                        "so explicit override is only needed for unusual cases."
+                    ),
+                    "enum": ["main_line", "sub_line"],
+                },
             },
             "required": ["track_type"],
         },
@@ -182,3 +203,26 @@ def _require_persona_id() -> str:
             "Active persona context is not set. Use tools.context.persona_context()."
         )
     return persona_id
+
+
+def _inject_entry_line_role_into_metadata(
+    metadata: Optional[str],
+    entry_line_role: str,
+) -> str:
+    """Merge ``entry_line_role`` into the metadata JSON string.
+
+    The Track's entry-line role is fixed at create time and read by the
+    runtime at Pulse start (Intent A v0.14, Intent B v0.11). It lives inside
+    track_metadata JSON to avoid early schema normalization (Intent B v0.7).
+    """
+    if metadata:
+        try:
+            data = json.loads(metadata)
+            if not isinstance(data, dict):
+                data = {"_invalid_existing_metadata": data}
+        except (TypeError, ValueError):
+            data = {"_invalid_existing_metadata": metadata}
+    else:
+        data = {}
+    data["entry_line_role"] = entry_line_role
+    return json.dumps(data, ensure_ascii=False)

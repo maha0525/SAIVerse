@@ -20,6 +20,47 @@ from tools.context import get_active_pulse_context
 
 LOGGER = logging.getLogger("saiverse.tools.track_common")
 
+# track_type → entry_line_role default lookup (Intent A v0.14, Intent B v0.11).
+# Resolution goes through the corresponding Handler's `default_entry_line_role`
+# class attribute so the source of truth stays in saiverse/track_handlers/.
+# Keep this map narrow — unknown types fall back to 'main_line' which is the
+# safer default (= other-talk per Intent A invariant 9).
+_HANDLER_MODULE_BY_TRACK_TYPE = {
+    "autonomous": ("saiverse.track_handlers.autonomous_track_handler", "AutonomousTrackHandler"),
+    "user_conversation": ("saiverse.track_handlers.user_conversation_handler", "UserConversationTrackHandler"),
+    "social": ("saiverse.track_handlers.social_track_handler", "SocialTrackHandler"),
+}
+
+
+def resolve_default_entry_line_role(track_type: str) -> str:
+    """Return the default entry-line role for a Track type.
+
+    Looks up the Handler class registered for the type and reads its
+    ``default_entry_line_role`` attribute. Falls back to ``"main_line"`` for
+    unknown types (other-talk default — safer than silently picking sub).
+    """
+    mapping = _HANDLER_MODULE_BY_TRACK_TYPE.get(track_type)
+    if not mapping:
+        LOGGER.debug(
+            "[track_common] No handler registered for track_type=%s; "
+            "defaulting entry_line_role='main_line'",
+            track_type,
+        )
+        return "main_line"
+    module_path, class_name = mapping
+    try:
+        import importlib
+        module = importlib.import_module(module_path)
+        handler_cls = getattr(module, class_name)
+        return getattr(handler_cls, "default_entry_line_role", "main_line")
+    except Exception as exc:
+        LOGGER.warning(
+            "[track_common] Failed to resolve handler for track_type=%s "
+            "(%s.%s): %s — falling back to main_line",
+            track_type, module_path, class_name, exc,
+        )
+        return "main_line"
+
 # Persona-facing notice attached to every deferred Track op response. Keep it
 # direct: the LLM treats the spell result as ground truth and we want it to
 # (a) understand the op WILL happen, (b) stop emitting more spells in the

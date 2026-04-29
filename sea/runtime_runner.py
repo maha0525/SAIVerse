@@ -101,6 +101,8 @@ def run_playbook(
     initial_params: Optional[Dict[str, Any]] = None,
     isolate_pulse_context: bool = False,
     line: str = "main",
+    pulse_line_role: Optional[str] = None,
+    pulse_line_track_id: Optional[str] = None,
 ) -> List[str]:
     if cancellation_token:
         cancellation_token.raise_if_cancelled()
@@ -193,6 +195,8 @@ def run_playbook(
         cancellation_token=cancellation_token,
         pulse_type=pulse_type,
         isolate_pulse_context=isolate_pulse_context,
+        pulse_line_role=pulse_line_role,
+        pulse_line_track_id=pulse_line_track_id,
     )
     if compiled_ok is None:
         LOGGER.error(

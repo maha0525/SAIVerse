@@ -203,5 +203,85 @@ class ApplyDeferredOpsTests(unittest.TestCase):
         self.assertEqual(ctx.deferred_track_ops, [])
 
 
+class EntryLineRoleTests(unittest.TestCase):
+    """Verify entry_line_role flows: Handler defaults → track_create → metadata → TrackManager."""
+
+    def test_handler_default_entry_line_role(self):
+        from saiverse.track_handlers.autonomous_track_handler import AutonomousTrackHandler
+        from saiverse.track_handlers.social_track_handler import SocialTrackHandler
+        from saiverse.track_handlers.user_conversation_handler import UserConversationTrackHandler
+
+        self.assertEqual(AutonomousTrackHandler.default_entry_line_role, "sub_line")
+        self.assertEqual(UserConversationTrackHandler.default_entry_line_role, "main_line")
+        self.assertEqual(SocialTrackHandler.default_entry_line_role, "main_line")
+
+    def test_resolve_default_entry_line_role(self):
+        from _track_common import resolve_default_entry_line_role
+        self.assertEqual(resolve_default_entry_line_role("autonomous"), "sub_line")
+        self.assertEqual(resolve_default_entry_line_role("user_conversation"), "main_line")
+        self.assertEqual(resolve_default_entry_line_role("social"), "main_line")
+        # Unknown type → safe default (Intent A invariant 9: other-talk = heavyweight)
+        self.assertEqual(resolve_default_entry_line_role("nonexistent_type"), "main_line")
+
+    def test_inject_entry_line_role_into_metadata(self):
+        from builtin_data.tools.track_create import _inject_entry_line_role_into_metadata
+        # Empty metadata → just entry_line_role
+        result = _inject_entry_line_role_into_metadata(None, "sub_line")
+        self.assertEqual(json.loads(result), {"entry_line_role": "sub_line"})
+        # Existing metadata is preserved + entry_line_role added
+        result = _inject_entry_line_role_into_metadata(
+            json.dumps({"foo": "bar"}), "main_line"
+        )
+        self.assertEqual(json.loads(result), {"foo": "bar", "entry_line_role": "main_line"})
+        # Malformed metadata is salvaged (don't lose original blob)
+        result = _inject_entry_line_role_into_metadata("not_json", "main_line")
+        data = json.loads(result)
+        self.assertEqual(data["entry_line_role"], "main_line")
+        self.assertEqual(data["_invalid_existing_metadata"], "not_json")
+
+    def test_trackmanager_get_entry_line_role(self):
+        """TrackManager.get_entry_line_role reads metadata and falls back safely."""
+        import os
+        import tempfile
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from database.models import Base
+        from saiverse.track_manager import TrackManager
+
+        with tempfile.TemporaryDirectory() as td:
+            db_path = os.path.join(td, "test.db")
+            engine = create_engine(f"sqlite:///{db_path}")
+            Base.metadata.create_all(engine)
+            SessionLocal = sessionmaker(bind=engine)
+            tm = TrackManager(session_factory=SessionLocal)
+
+            # Track with explicit entry_line_role in metadata
+            track_id = tm.create(
+                persona_id="p1",
+                track_type="autonomous",
+                title="t",
+                metadata=json.dumps({"entry_line_role": "sub_line"}),
+            )
+            self.assertEqual(tm.get_entry_line_role(track_id), "sub_line")
+
+            # Track without metadata → default 'main_line'
+            track_id2 = tm.create(persona_id="p1", track_type="autonomous", title="t2")
+            self.assertEqual(tm.get_entry_line_role(track_id2), "main_line")
+
+            # Unknown track_id → safe default
+            self.assertEqual(tm.get_entry_line_role("nonexistent-uuid"), "main_line")
+
+            # Invalid role value in metadata → safe default
+            track_id3 = tm.create(
+                persona_id="p1",
+                track_type="autonomous",
+                title="t3",
+                metadata=json.dumps({"entry_line_role": "garbage_value"}),
+            )
+            self.assertEqual(tm.get_entry_line_role(track_id3), "main_line")
+
+            engine.dispose()
+
+
 if __name__ == "__main__":
     unittest.main()

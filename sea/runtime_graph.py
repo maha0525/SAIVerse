@@ -25,6 +25,8 @@ def compile_with_langgraph(
     cancellation_token: Optional[CancellationToken] = None,
     pulse_type: Optional[str] = None,
     isolate_pulse_context: bool = False,
+    pulse_line_role: Optional[str] = None,
+    pulse_line_track_id: Optional[str] = None,
 ) -> Optional[List[str]]:
     _lg_outputs: List[str] = []
     temperature = runtime._default_temperature(persona)
@@ -124,6 +126,19 @@ def compile_with_langgraph(
         _thread_id = _adapter.get_current_thread() if _adapter else None
         pulse_ctx = runtime._get_or_create_pulse_context(pulse_id, _thread_id or "")
 
+    # Pulse-root only: push the entry-line frame onto the line stack so messages
+    # produced during this Pulse get the right line_role / line_id / origin_track_id
+    # in their SAIMemory metadata (Intent A v0.14, Intent B v0.11). The pop runs in
+    # the finally block alongside _flush_pulse_logs.
+    _pushed_root_line = False
+    if parent_pulse_ctx is None and pulse_line_role:
+        pulse_ctx.push_line(role=pulse_line_role, track_id=pulse_line_track_id)
+        _pushed_root_line = True
+        LOGGER.debug(
+            "[runtime_graph] Pushed Pulse-root line: role=%s track_id=%s pulse_id=%s",
+            pulse_line_role, pulse_line_track_id, pulse_id,
+        )
+
     # Check spell toggle for this persona
     _spell_enabled = runtime._is_spell_enabled_for_persona(persona)
 
@@ -201,6 +216,20 @@ def compile_with_langgraph(
             user_message=f"プレイブックの実行中にエラーが発生しました: {exc}",
         ) from exc
     finally:
+        # Pop the Pulse-root line frame we pushed before LangGraph execution.
+        # Done before flush so the PulseContext.deferred_track_ops apply step
+        # below sees a clean stack — though current ops don't read line state
+        # at apply time, keeping this order matches a reader's expectation
+        # ("the Pulse is done, the line is closed, then we settle the books").
+        if _pushed_root_line:
+            try:
+                pulse_ctx.pop_line()
+            except Exception:
+                LOGGER.exception(
+                    "[runtime_graph] Failed to pop Pulse-root line for pulse_id=%s",
+                    pulse_id,
+                )
+
         # Flush PulseContext to DB if this is the top-level playbook (not a sub-playbook).
         # Using finally ensures logs are preserved even when LLM errors or other
         # exceptions abort execution — otherwise all accumulated entries are lost.

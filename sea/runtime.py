@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from datetime import timezone as dt_timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from database.models import Playbook as PlaybookModel
 from llm_clients.exceptions import LLMError
@@ -141,11 +141,17 @@ class SEARuntime:
         effective_args = dict(args or {})
         if user_input and "input" not in effective_args:
             effective_args["input"] = user_input
+        # Resolve Pulse-root entry-line from the persona's currently-running Track
+        # (Intent A v0.14, Intent B v0.11). Same-Persona invariant 1 guarantees
+        # at most one running Track, so this maps unambiguously.
+        _root_role, _root_track_id = self._resolve_pulse_root_line(persona)
         result = self._run_playbook(
             playbook, persona, building_id, user_input,
             auto_mode=False, record_history=True, event_callback=event_callback,
             cancellation_token=cancellation_token, pulse_type=pulse_type,
             initial_params=effective_args if effective_args else None,
+            pulse_line_role=_root_role,
+            pulse_line_track_id=_root_track_id,
         )
 
         # Post-response metabolism check
@@ -196,10 +202,15 @@ class SEARuntime:
         # Update last pulse time for get_situation_snapshot
         persona._last_conscious_prompt_time_utc = datetime.now(dt_timezone.utc)
         playbook = self._choose_playbook(kind="auto", persona=persona, building_id=building_id)
+        # Resolve Pulse-root entry-line from the running Track (typically the
+        # autonomous Track that SubLineScheduler just activated).
+        _root_role, _root_track_id = self._resolve_pulse_root_line(persona)
         self._run_playbook(
             playbook, persona, building_id, user_input=None,
             auto_mode=True, record_history=True,
             cancellation_token=cancellation_token, pulse_type=pulse_type,
+            pulse_line_role=_root_role,
+            pulse_line_track_id=_root_track_id,
         )
 
         # Post-auto metabolism check (no event_callback for auto pulses)
@@ -207,6 +218,37 @@ class SEARuntime:
             self._maybe_run_metabolism(persona, building_id)
         except Exception:
             LOGGER.exception("[metabolism] Post-auto metabolism failed")
+
+    # ---------------- helpers -----------------
+    def _resolve_pulse_root_line(self, persona: Any) -> Tuple[Optional[str], Optional[str]]:
+        """Resolve (entry_line_role, track_id) for the persona's current Pulse root.
+
+        Reads the running Track via TrackManager.get_running (Intent A invariant
+        1: at most one running Track per persona) and looks up its
+        entry_line_role from track_metadata. Returns (None, None) when there's
+        no TrackManager wired up, no persona_id, no running Track, or the
+        lookup fails — the runtime falls back to "no push_line" in that case
+        (line_role stays NULL on stored messages, which matches pre-v0.11
+        behavior).
+        """
+        try:
+            track_manager = getattr(self.manager, "track_manager", None)
+            if track_manager is None:
+                return None, None
+            persona_id = getattr(persona, "persona_id", None)
+            if not persona_id:
+                return None, None
+            running = track_manager.get_running(persona_id)
+            if running is None:
+                return None, None
+            role = track_manager.get_entry_line_role(running.track_id)
+            return role, running.track_id
+        except Exception:
+            LOGGER.exception(
+                "[runtime] Failed to resolve Pulse-root line for persona=%s",
+                getattr(persona, "persona_id", None),
+            )
+            return None, None
 
     # ---------------- core runner -----------------
     def _run_playbook(
@@ -224,6 +266,8 @@ class SEARuntime:
         initial_params: Optional[Dict[str, Any]] = None,
         isolate_pulse_context: bool = False,
         line: str = "main",
+        pulse_line_role: Optional[str] = None,
+        pulse_line_track_id: Optional[str] = None,
     ) -> List[str]:
         return run_playbook(
             self,
@@ -240,6 +284,8 @@ class SEARuntime:
             initial_params=initial_params,
             isolate_pulse_context=isolate_pulse_context,
             line=line,
+            pulse_line_role=pulse_line_role,
+            pulse_line_track_id=pulse_line_track_id,
         )
 
     # LangGraph compile wrapper -----------------------------------------
@@ -257,6 +303,8 @@ class SEARuntime:
         cancellation_token: Optional[CancellationToken] = None,
         pulse_type: Optional[str] = None,
         isolate_pulse_context: bool = False,
+        pulse_line_role: Optional[str] = None,
+        pulse_line_track_id: Optional[str] = None,
     ) -> Optional[List[str]]:
         return compile_with_langgraph_impl(
             self,
@@ -272,6 +320,8 @@ class SEARuntime:
             cancellation_token=cancellation_token,
             pulse_type=pulse_type,
             isolate_pulse_context=isolate_pulse_context,
+            pulse_line_role=pulse_line_role,
+            pulse_line_track_id=pulse_line_track_id,
         )
 
     def _lg_llm_node(self, node_def: Any, persona: Any, building_id: str, playbook: PlaybookSchema, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
