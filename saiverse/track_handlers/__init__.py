@@ -8,10 +8,12 @@ Handler クラスを本パッケージに追加して呼び出し元 (handle_use
 相当の入口) から呼び出す形で拡張する。
 """
 
+from .autonomous_track_handler import AutonomousTrackHandler
 from .social_track_handler import SocialTrackHandler
 from .user_conversation_handler import UserConversationTrackHandler
 
 __all__ = [
+    "AutonomousTrackHandler",
     "SocialTrackHandler",
     "UserConversationTrackHandler",
 ]

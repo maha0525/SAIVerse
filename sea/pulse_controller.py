@@ -477,12 +477,24 @@ class PulseController:
         self,
         persona_id: str,
         building_id: str,
+        meta_playbook: Optional[str] = None,
+        args: Optional[Dict[str, Any]] = None,
     ) -> Optional[List[str]]:
-        """Submit an autonomous pulse request."""
+        """Submit an autonomous pulse request.
+
+        Args:
+            persona_id, building_id: 対象。
+            meta_playbook: 指定された場合、_do_execute は run_meta_user 経路を
+                使ってこの Playbook を起動する (例: track_autonomous)。None の
+                場合は従来通り run_meta_auto (meta_auto playbook) を使う。
+            args: meta_playbook に渡す引数。
+        """
         request = ExecutionRequest(
             type="auto",
             persona_id=persona_id,
             building_id=building_id,
+            meta_playbook=meta_playbook,
+            args=args,
         )
         return self.submit(request)
 

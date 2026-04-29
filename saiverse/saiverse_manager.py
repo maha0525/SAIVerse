@@ -29,7 +29,9 @@ from .integration_manager import IntegrationManager
 from .track_manager import TrackManager
 from .note_manager import NoteManager
 from .meta_layer import MetaLayer
+from .pulse_scheduler import SubLineScheduler, is_subline_scheduler_enabled
 from .track_handlers import (
+    AutonomousTrackHandler,
     SocialTrackHandler,
     UserConversationTrackHandler,
 )
@@ -214,10 +216,18 @@ class SAIVerseManager(
         self.social_track_handler = SocialTrackHandler(
             track_manager=self.track_manager,
         )
+        self.autonomous_track_handler = AutonomousTrackHandler(
+            track_manager=self.track_manager,
+        )
+        # Phase C-3b: SubLineScheduler を生成 (start は startup 内で行う)。
+        # これにより running な連続実行型 Track のサブライン Pulse が定期的に
+        # 起動される (Intent A v0.13 / Intent B v0.10)。
+        self.subline_scheduler = SubLineScheduler(self)
         logging.info(
             "Initialized cognitive-model runtime layers "
             "(MetaLayer registered as alert observer, "
-            "UserConversationTrackHandler / SocialTrackHandler ready)."
+            "UserConversationTrackHandler / SocialTrackHandler / AutonomousTrackHandler ready, "
+            "SubLineScheduler instantiated [will start at startup])."
         )
 
         # --- Step 5: Load Dynamic States from DB ---
@@ -287,6 +297,19 @@ class SAIVerseManager(
         self._register_integrations()
         self.integration_manager.start()
         logging.info("Initialized and started IntegrationManager.")
+
+        # --- Phase C-3b: Start SubLineScheduler ---
+        # 全ペルソナのインメモリ状態が揃った後に起動する (personas dict が利用可能)。
+        # SAIVERSE_SUBLINE_SCHEDULER_ENABLED=false で起動を抑止できる
+        # (動き出した自律行動を一時的に止めたい時の安全弁)。
+        if is_subline_scheduler_enabled():
+            self.subline_scheduler.start()
+            logging.info("Started SubLineScheduler.")
+        else:
+            logging.warning(
+                "SubLineScheduler is disabled by SAIVERSE_SUBLINE_SCHEDULER_ENABLED=false. "
+                "Autonomous tracks will not run pulses until re-enabled and restarted."
+            )
 
         # --- Step 7: Register with SDS and start background tasks ---
         self.sds_url = sds_url
@@ -402,8 +425,21 @@ class SAIVerseManager(
             logging.error("Failed to emit trigger %s: %s", trigger_type, exc, exc_info=True)
 
     # SEA integration helpers -------------------------------------------------
-    def run_sea_auto(self, persona, building_id: str, occupants: List[str]) -> None:
+    def run_sea_auto(
+        self,
+        persona,
+        building_id: str,
+        occupants: List[str],
+        meta_playbook: Optional[str] = None,
+        args: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Run autonomous pulse via PulseController.
+
+        Args:
+            meta_playbook: 指定された場合、その Playbook を auto pulse として起動
+                する (例: SubLineScheduler から track_autonomous を回す用途)。
+                None の場合は従来の meta_auto playbook が使われる。
+            args: Playbook 起動時に渡す引数。
 
         Discord visitors (DiscordVisitorStub) are handled by DiscordConnector,
         not by the local PulseController.
@@ -421,6 +457,8 @@ class SAIVerseManager(
             self.pulse_controller.submit_auto(
                 persona_id=persona.persona_id,
                 building_id=building_id,
+                meta_playbook=meta_playbook,
+                args=args,
             )
         except Exception as exc:
             logging.exception("SEA auto run failed: %s", exc)
@@ -771,6 +809,13 @@ class SAIVerseManager(
             TriggerType.SERVER_STOP,
             {"city_id": self.city_id, "city_name": self.city_name},
         )
+
+        # Phase C-3b: Stop SubLineScheduler before saving persona state
+        if hasattr(self, "subline_scheduler") and self.subline_scheduler:
+            try:
+                self.subline_scheduler.stop()
+            except Exception:
+                logging.exception("Failed to stop SubLineScheduler")
 
         # Stop phenomenon manager
         if hasattr(self, "phenomenon_manager") and self.phenomenon_manager:
