@@ -1,0 +1,307 @@
+/* Tracks Viewer — action_track 一覧表示 (Intent A v0.14, Intent B v0.11) */
+
+.rootContainer {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+}
+
+/* ---- Filter bar ---- */
+.filterBar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 10px 12px;
+    background: var(--surface-secondary, #1f2937);
+    border-bottom: 1px solid var(--border-subtle, #374151);
+    align-items: center;
+}
+
+.filterGroup {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.filterLabel {
+    font-size: 0.75rem;
+    color: var(--text-muted, #9ca3af);
+    margin-right: 4px;
+    white-space: nowrap;
+}
+
+.toggleLabel {
+    font-size: 0.75rem;
+    color: var(--text-default, #e5e7eb);
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+}
+
+.chip {
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border-subtle, #374151);
+    background: var(--surface-primary, #111827);
+    color: var(--text-default, #e5e7eb);
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+    white-space: nowrap;
+}
+
+.chip:hover {
+    background: var(--surface-hover, #1f2937);
+    border-color: var(--accent, #60a5fa);
+}
+
+.chipActive {
+    background: var(--accent, #60a5fa);
+    color: #fff;
+    border-color: var(--accent, #60a5fa);
+}
+
+.refreshBtn {
+    margin-left: 8px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border-subtle, #374151);
+    background: var(--surface-primary, #111827);
+    color: var(--text-default, #e5e7eb);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.refreshBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+/* ---- Status counts summary ---- */
+.summary {
+    padding: 10px 12px;
+    background: var(--surface-secondary, #1f2937);
+    border-bottom: 1px solid var(--border-subtle, #374151);
+}
+
+.summaryHeader {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.8rem;
+    color: var(--text-muted, #9ca3af);
+    margin-bottom: 8px;
+}
+
+.summaryRow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.statusPill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border-subtle, #374151);
+    background: var(--surface-primary, #111827);
+    cursor: pointer;
+    transition: transform 0.1s;
+}
+
+.statusPill:hover {
+    transform: translateY(-1px);
+    border-color: var(--accent, #60a5fa);
+}
+
+.statusPillLabel {
+    font-size: 0.7rem;
+    color: var(--text-default, #e5e7eb);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.statusPillCount {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-strong, #f3f4f6);
+}
+
+/* ---- Items list ---- */
+.itemsContainer {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px 12px;
+}
+
+.itemsHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.75rem;
+    color: var(--text-muted, #9ca3af);
+    margin-bottom: 8px;
+}
+
+.filterHint {
+    color: #fbbf24;
+    font-family: monospace;
+}
+
+.errorBox {
+    padding: 12px;
+    border: 1px solid #b91c1c;
+    background: rgba(185, 28, 28, 0.15);
+    color: #fca5a5;
+    border-radius: 6px;
+    font-size: 0.85rem;
+}
+
+.emptyBox {
+    padding: 24px;
+    text-align: center;
+    color: var(--text-muted, #9ca3af);
+    font-size: 0.85rem;
+    border: 1px dashed var(--border-subtle, #374151);
+    border-radius: 6px;
+}
+
+.itemsList {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+/* ---- Track card ---- */
+.trackCard {
+    background: var(--surface-primary, #111827);
+    border: 1px solid var(--border-subtle, #374151);
+    border-radius: 6px;
+    overflow: hidden;
+}
+
+.trackHeader {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--surface-secondary, #1f2937);
+    cursor: pointer;
+    flex-wrap: wrap;
+}
+
+.trackHeader:hover { background: var(--surface-hover, #2a3441); }
+
+.statusBadge,
+.typeBadge,
+.persistentBadge,
+.forgottenBadge,
+.entryLineBadge {
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: #374151;
+    color: #e5e7eb;
+}
+
+.typeBadge { background: #4b5563; }
+.persistentBadge { background: #047857; color: #fff; }
+.forgottenBadge { background: #6b7280; color: #fff; opacity: 0.85; }
+
+.entryLineBadge { background: #4b5563; color: #fff; }
+.line_main_line { background: #2563eb; }
+.line_sub_line  { background: #059669; }
+
+/* Status colors (badges + pills share these) */
+.status_running   { background: #16a34a; color: #fff; }
+.status_alert     { background: #dc2626; color: #fff; }
+.status_pending   { background: #f59e0b; color: #1f2937; }
+.status_waiting   { background: #8b5cf6; color: #fff; }
+.status_unstarted { background: #6b7280; color: #fff; }
+.status_completed { background: #2563eb; color: #fff; }
+.status_aborted   { background: #4b5563; color: #fff; opacity: 0.7; }
+
+.trackTitle {
+    font-size: 0.85rem;
+    color: var(--text-default, #e5e7eb);
+    font-weight: 500;
+    flex: 1;
+    min-width: 100px;
+}
+
+.trackId {
+    font-family: monospace;
+    font-size: 0.7rem;
+    color: var(--text-muted, #9ca3af);
+}
+
+.trackTime {
+    font-family: monospace;
+    font-size: 0.7rem;
+    color: var(--text-muted, #9ca3af);
+}
+
+.expandIcon { color: var(--text-muted, #9ca3af); }
+
+.trackDetails {
+    padding: 8px 10px;
+    border-top: 1px dashed var(--border-subtle, #374151);
+    background: rgba(0, 0, 0, 0.2);
+    font-size: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.detailRow {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+}
+
+.detailLabel {
+    color: var(--text-muted, #9ca3af);
+    font-family: monospace;
+    min-width: 140px;
+    flex-shrink: 0;
+}
+
+.detailValue {
+    color: var(--text-default, #e5e7eb);
+    font-family: monospace;
+    word-break: break-all;
+    overflow-wrap: anywhere;
+    flex: 1;
+    min-width: 0;
+}
+
+.detailValuePre {
+    color: var(--text-default, #e5e7eb);
+    font-family: monospace;
+    background: rgba(0, 0, 0, 0.3);
+    padding: 6px 8px;
+    border-radius: 4px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    margin: 0;
+    flex: 1;
+    min-width: 0;
+    max-height: 300px;
+    overflow-y: auto;
+    font-size: 0.7rem;
+}
