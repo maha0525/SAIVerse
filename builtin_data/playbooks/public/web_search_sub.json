@@ -1,0 +1,50 @@
+{
+    "name": "web_search_sub",
+    "display_name": "ウェブ検索（サブライン）",
+    "description": "メインラインから line:'sub' で呼ばれることを想定した、サブライン専用のウェブ検索 Playbook。SearXNG で検索し、結果を要約して report_to_main としてメインラインに返す。Phase C-2b の動作確認サンプル。",
+    "input_schema": [
+        {
+            "name": "query",
+            "description": "検索したいトピック・質問。親メインラインが args で渡す。"
+        },
+        {
+            "name": "purpose",
+            "description": "なぜこの検索をするか。要約時の方向付けに使う。",
+            "required": false
+        }
+    ],
+    "output_schema": [
+        "report_to_main",
+        "raw_results"
+    ],
+    "router_callable": false,
+    "nodes": [
+        {
+            "id": "search",
+            "type": "tool",
+            "action": "searxng_search",
+            "args_input": {
+                "query": "query",
+                "max_results": 5
+            },
+            "output_keys": [
+                "raw_results",
+                "_search_snippet"
+            ],
+            "next": "summarize_for_main"
+        },
+        {
+            "id": "summarize_for_main",
+            "type": "llm",
+            "action": "あなたはサブラインで web 検索を実行しました。検索結果を、メインラインのあなた自身に伝える形で要約してください。\n\n検索クエリ: {query}\n検索の目的: {purpose}\n\n検索結果:\n{raw_results}\n\n要約は以下の点を意識してください:\n- 何が分かったかを 1〜3 段落で\n- 取得した URL のうち重要なものを最大 3 つまで併記\n- 元の目的に対して結果が十分か / 追加検索が必要そうかも一言添える",
+            "output_key": "report_to_main",
+            "memorize": {
+                "tags": [
+                    "internal",
+                    "web_search_sub"
+                ]
+            }
+        }
+    ],
+    "start_node": "search"
+}

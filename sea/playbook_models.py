@@ -279,6 +279,18 @@ class SubPlayNodeDef(BaseModel):
         description="If true, run sub-playbook with a fresh PulseContext instead of sharing the parent's. "
                     "Useful when the sub-playbook should not see prior pulse log entries (e.g., router I/O)."
     )
+    line: Literal["main", "sub"] = Field(
+        default="main",
+        description=(
+            "Which line to run the sub-playbook on. "
+            "'main' (default): inherits parent state['_messages'] reference and uses parent model "
+            "(continues main-line cache). "
+            "'sub': forks parent state['_messages'] by COPY (not reference share) and uses persona's "
+            "lightweight model. On completion, the sub-playbook's output_schema['report_to_main'] "
+            "is appended to parent state['_messages'] as a system-tagged user message. "
+            "See docs/intent/persona_action_tracks.md (v0.9) for the full spec."
+        ),
+    )
     next: Optional[str] = None
     conditional_next: Optional[ConditionalNext] = Field(
         default=None,

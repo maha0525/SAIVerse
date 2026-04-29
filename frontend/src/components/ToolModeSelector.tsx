@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback, ReactNode } from 'react';
-import { ChevronDown, Wrench, Cog, Unplug, Hammer } from 'lucide-react';
+import { ChevronDown, Wrench, Cog, Unplug, Hammer, FlaskConical, MessageSquare } from 'lucide-react';
 import styles from './ToolModeSelector.module.css';
 
 interface ToolMode {
@@ -37,6 +37,21 @@ const TOOL_MODES: ToolMode[] = [
         shortLabel: 'ツール指定',
         icon: <Hammer size={ICON_SIZE} />,
         description: 'ユーザーが選んだツールを必ず使います',
+    },
+    // TODO: TOOL_MODES のハードコード列挙はやめて /api/config/playbooks の動的列挙に切り替えたい。
+    //       Phase C-2 では meta_websearch_demo の動作確認のために 1 行追加で済ませた (まはー指示 2026-04-28)。
+    //       この TODO が増えていくのが「動的列挙化が必要」の証拠になるので、増えたら直すこと。
+    {
+        id: 'meta_websearch_demo',
+        shortLabel: 'Web検索デモ',
+        icon: <FlaskConical size={ICON_SIZE} />,
+        description: '[Phase C-2] サブラインで web 検索 → メインラインで応答するライン仕様検証用',
+    },
+    {
+        id: 'track_user_conversation',
+        shortLabel: '対ユーザー Track',
+        icon: <MessageSquare size={ICON_SIZE} />,
+        description: '[Phase C-2d] 対ユーザー会話 Track メインライン (応答 + Track 操作スペル)',
     },
 ];
 
