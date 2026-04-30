@@ -208,6 +208,26 @@ def _increment_timestamps(
         msg.timestamp = start_time + timedelta(seconds=i * interval_seconds)
 
 
+def _enforce_monotonic_timestamps(messages: List[ExporterMessage]) -> None:
+    """Force timestamps to follow the file's message order.
+
+    Some exporters occasionally emit a Response timestamp earlier than its
+    paired Prompt (apparently a bug on their side). When a message's timestamp
+    is *strictly* older than the previous one's, bump it to ``previous + 1s``.
+    Equal timestamps are left untouched: exporter timestamps are second-
+    resolution, so adjacent messages legitimately sharing the same second
+    must not be rewritten.
+    """
+    prev: Optional[datetime] = None
+    for msg in messages:
+        if msg.timestamp is None:
+            prev = None
+            continue
+        if prev is not None and msg.timestamp < prev:
+            msg.timestamp = prev + timedelta(seconds=1)
+        prev = msg.timestamp
+
+
 def _apply_timestamp_strategy(
     messages: List[ExporterMessage],
     *,
@@ -295,6 +315,10 @@ def _parse_json_format(
 
     # Deduplicate messages
     messages = _deduplicate_messages(messages)
+
+    # Some exporters emit a Response timestamp earlier than its Prompt; bump
+    # any out-of-order timestamps so the final timeline matches file order.
+    _enforce_monotonic_timestamps(messages)
 
     # Newer ChatGPT Exporter mis-reports Updated as the thread's last open time;
     # prefer the final per-message timestamp when available.
@@ -409,6 +433,10 @@ def _parse_markdown_format(
 
     # Deduplicate messages
     messages = _deduplicate_messages(messages)
+
+    # Some exporters emit a Response timestamp earlier than its Prompt; bump
+    # any out-of-order timestamps so the final timeline matches file order.
+    _enforce_monotonic_timestamps(messages)
 
     # The Updated header in newer ChatGPT Exporter records the last time the
     # thread was opened rather than the last message's time, so prefer the
