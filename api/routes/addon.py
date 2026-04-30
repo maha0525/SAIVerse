@@ -32,7 +32,7 @@ class AddonParamSchema(BaseModel):
     key: str
     label: str
     description: Optional[str] = None
-    type: str  # "toggle" | "text" | "password" | "number" | "file" | "dropdown" | "slider"
+    type: str  # "toggle" | "text" | "password" | "number" | "file" | "dropdown" | "slider" | "dict"
     default: Any = None
     persona_configurable: bool = False
     placeholder: Optional[str] = None  # text / number 用の placeholder
