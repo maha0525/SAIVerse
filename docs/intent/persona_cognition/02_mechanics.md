@@ -170,6 +170,41 @@ v0.12〜v0.13 で構造化出力 + 4 値 enum (`continue`/`switch`/`wait`/`close
 - running が無いという状況も普通に判断材料の 1 つ
 - 専用入口を増やすと責務分散が起き、状況に応じた重み付けが難しくなる
 
+### 自律先制と外部 alert のレース (Phase 2.6, v0.18)
+
+**問題**: ペルソナが自律メタ判断で「対 user1 会話を pending → running に上げよう」と先制起動した直後、ユーザーがその Track 宛に発話するとレースが発生する:
+
+1. 対 user1 Track が `pending → running` (自律先制)
+2. ユーザーが対 user1 Track 宛に発話 → `set_alert(対 user1)` が呼ばれる
+3. でも対 user1 はもう `running` なので状態遷移は no-op (これ自体は仕様通り)
+4. 旧実装は no-op パスで observer 通知も止めていたため、メタ判断が起動するも `alert_track_id=""` になる、または起動契機を見失う
+
+メタ判断者が「なぜ自分が起動したのか分からない」状態になり、Phase 2 で導入した動的注入も意味を持てなくなる。
+
+**解決方針 (A 案)**: `set_alert` の **状態遷移と observer 通知を分離する**。
+
+- 既 running の Track への `set_alert`: 状態遷移は no-op のまま (仕様通り) だが、observer 通知は走らせる。context に `target_already_running=True` フラグを乗せて、メタ判断者が「自律先制 + 外部イベントの衝突」を識別できるようにする
+- 既 alert の Track への `set_alert`: 重複通知を避けるため observer 通知しない (これは従来通り)
+- 通常の状態遷移 (`pending/waiting/unstarted → alert`): 従来通り通知。context に `target_track_title` / `target_track_type` も追加して、メタ判断者がトラック識別を JSON UUID 経由でなく自然言語で行えるようにする
+
+**メタ判断者の認識**:
+
+`meta_judgment.json` の judge prompt で `{trigger_context}` (JSON) を読み、`target_already_running=True` を識別する:
+
+```
+[ペルソナの独白]
+ユーザーから声を掛けられた。対 user1 会話 Track はちょうど直前に
+自分で起動済みだ。状態遷移は要らない、このままメインラインで応答に
+集中すればいい。
+```
+
+→ スペル発動なし (継続判断) → メインライン側で auto_ingest 経由のユーザー発話を読んで応答が走る。
+
+**実装**:
+- `saiverse/track_manager.py` の `set_alert`: no-op (running) パスで observer 通知 + context enrich
+- `saiverse/meta_layer.py` の `_build_state_message`: target_already_running フラグを自然言語化
+- `builtin_data/playbooks/public/meta_judgment.json` の judge prompt: 「target_already_running=true なら継続判断で OK」のガイダンス + 例を追加
+
 ### メタ判断 Pulse は同時 1 本 (per-persona 直列化)
 
 不変条件 11 ("メタ判断はペルソナの自分の思考の流れ") を実装側で守るため、**同一ペルソナのメタ判断 Pulse は同時に 1 本しか走らない**。

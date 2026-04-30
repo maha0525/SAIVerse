@@ -874,6 +874,25 @@ class MetaLayer:
             if content:
                 lines.append(f"event_content: {content}")
 
+        # Phase 2.6: 自律先制と外部 alert のレース対応 (intent A v0.18)。
+        # 既 running の Track に対して set_alert が来たケースを自然言語で示す。
+        # (set_alert が no-op パスでも observer 通知するようになったため、
+        # メタ判断者がこの状況を識別できるようにする)
+        if context.get("target_already_running"):
+            target_title = context.get("target_track_title") or "(無題)"
+            lines.append("")
+            lines.append(
+                f"※ 対象 Track「{target_title}」は既に running 状態 "
+                "(直前のメタ判断などで先制起動済み)。"
+            )
+            lines.append(
+                "  状態遷移は発生しなかったが、外部からのイベントが Track に届いた。"
+            )
+            lines.append(
+                "  メインライン側で応答処理が自然に走るため、"
+                "通常は track_activate / track_pause を発動せず継続判断で良い。"
+            )
+
         lines.append(
             "\n上記を踏まえて、Track をどう扱うか判断してください。"
         )

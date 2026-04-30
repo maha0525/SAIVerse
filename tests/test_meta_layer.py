@@ -370,6 +370,82 @@ def test_metalayer_execute_spells_forwards_pulse_context(
 
 
 # ---------------------------------------------------------------------------
+# 自律先制と外部 alert のレース (Phase 2.6, 2026-05-01)
+# ---------------------------------------------------------------------------
+
+def test_set_alert_on_running_track_still_notifies_observer(tm, db_persona):
+    """既 running の Track に set_alert したとき、状態は no-op だが
+    observer には target_already_running=True 付きで通知される。"""
+    track_id = tm.create(db_persona, "user_conversation", title="対 user1", is_persistent=True)
+    tm.activate(track_id)  # running に
+
+    captured = []
+    tm.add_alert_observer(lambda pid, tid, ctx: captured.append((pid, tid, ctx)))
+
+    tm.set_alert(track_id, context={"trigger": "user_utterance"})
+
+    assert len(captured) == 1
+    pid, tid, ctx = captured[0]
+    assert pid == db_persona
+    assert tid == track_id
+    assert ctx.get("target_already_running") is True
+    assert ctx.get("target_track_title") == "対 user1"
+    assert ctx.get("target_track_type") == "user_conversation"
+    assert ctx.get("trigger") == "user_utterance"  # 元の context は維持
+
+
+def test_set_alert_on_already_alert_does_not_notify(tm, db_persona):
+    """既 alert の Track に set_alert しても重複通知は走らない。"""
+    track_id = tm.create(db_persona, "user_conversation", is_persistent=True)
+    tm.activate(track_id)
+    tm.pause(track_id)
+    tm.set_alert(track_id)  # alert に遷移、ここで 1 回通知
+
+    captured = []
+    tm.add_alert_observer(lambda pid, tid, ctx: captured.append(ctx))
+
+    tm.set_alert(track_id)  # 既に alert なので no-op
+
+    assert captured == []  # 重複通知なし
+
+
+def test_state_message_explains_target_already_running(tm, nm, db_persona):
+    """_build_state_message は target_already_running を自然言語で説明する。"""
+    track_id = tm.create(db_persona, "user_conversation", title="対 user1", is_persistent=True)
+    tm.activate(track_id)
+    tm.pause(track_id)
+    tm.set_alert(track_id)
+
+    meta, _llm, _persona = _make_meta_layer(tm, nm, db_persona, [])
+
+    msg = meta._build_state_message(
+        db_persona, track_id,
+        context={
+            "trigger": "user_utterance",
+            "target_already_running": True,
+            "target_track_title": "対 user1",
+        },
+    )
+    assert "既に running 状態" in msg
+    assert "対 user1" in msg
+    assert "継続判断" in msg
+
+
+def test_state_message_omits_race_block_when_not_already_running(tm, nm, db_persona):
+    """通常の alert (state 遷移ありの場合) は target_already_running 説明を出さない。"""
+    track_id = tm.create(db_persona, "user_conversation", is_persistent=True)
+    tm.activate(track_id)
+    tm.pause(track_id)
+    tm.set_alert(track_id)
+
+    meta, _llm, _persona = _make_meta_layer(tm, nm, db_persona, [])
+    msg = meta._build_state_message(
+        db_persona, track_id, context={"trigger": "user_utterance"}
+    )
+    assert "既に running 状態" not in msg
+
+
+# ---------------------------------------------------------------------------
 # Per-persona 直列化 Lock (handoff_2026-04-30 Part 1)
 # ---------------------------------------------------------------------------
 

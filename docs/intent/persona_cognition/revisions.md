@@ -10,6 +10,23 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.18 (2026-05-01) — 自律先制と外部 alert のレース解消 (Phase 2.6)
+
+**確定事項**:
+
+- `set_alert` の状態遷移と observer 通知を分離。既 running の Track への set_alert は状態 no-op のまま、observer には `target_already_running=True` フラグ付きで通知する
+- context に `target_track_title` / `target_track_type` も常に乗せて、メタ判断者が UUID でなく自然言語で対象を識別できるようにする
+- `meta_judgment.json` judge prompt に「target_already_running=true は自律先制と外部イベントの衝突 → 通常は継続判断で OK」のガイダンスと独白例を追加
+- `MetaLayer._build_state_message` (legacy path) もフラグを自然言語化
+
+**改訂理由**:
+
+実機検証 (2026-05-01) で Pulse A (自律メタ判断で対 user1 を pending→running に先制起動) の直後に Pulse B (ユーザー発話起因のメタ判断) が起動したが、context に alert 情報が乗っていないことを発見。Pulse A のエアは「自分が pending→running にした」と認識し、Pulse B のエアは「特に理由なくメタ判断が走った」と認識する不整合が起きていた。
+
+原因は `set_alert` が既 running の Track に対して状態遷移と observer 通知を**両方** no-op にしていたため。仕様としては状態遷移 no-op は正しいが、外部イベント (ユーザー発話) の事実そのものはメタ判断者に届けるべきだった。状態遷移と通知の責務を分離することで、ペルソナの自律先制と外部イベントが時間的に衝突しても、メタ判断者がきちんと認識できるようになる。
+
+不変条件 11 ("メタ判断 = ペルソナ自身の思考の流れ") の延長として、「思考の連続性」が外部イベントとの衝突で断絶しないための基盤整備。
+
 ### v0.17 (2026-05-01) — SAIMemory `messages.pulse_id` カラム化 (Phase 2.5)
 
 **確定事項**:

@@ -558,8 +558,15 @@ class TrackManager:
         既に running のものを alert にしても意味が薄いため、running は遷移しない。
         completed/aborted からは不可。
 
-        実遷移 (status が ALERT に変わった場合) のみ alert observer に通知する。
-        既に alert / running の場合や no-op の場合は通知しない。
+        Observer 通知の挙動 (Phase 2.6, 2026-05-01):
+
+        - **状態遷移あり** (pending/waiting/unstarted → alert): 通常の alert として
+          observer に通知。context は呼び出し元が渡したものをそのまま転送。
+        - **既 running** (state は no-op): observer に **`target_already_running=True`**
+          を付けて通知する。これがないとペルソナの自律先制と外部 alert イベント
+          が衝突した時に、メタ判断者が起動理由を認識できない (intent docs
+          §"自律先制と外部 alert のレース"参照)。
+        - **既 alert** (state は no-op): 重複通知を避けるため observer 通知しない。
 
         Args:
             track_id: 対象 Track ID。
@@ -567,7 +574,10 @@ class TrackManager:
                 発話内容のメッセージ ID 等を入れる想定)。
         """
         notify = False
+        notify_already_running = False  # Phase 2.6: 自律先制と外部 alert の衝突
         persona_id_for_notify: Optional[str] = None
+        track_title_for_notify: Optional[str] = None
+        track_type_for_notify: Optional[str] = None
         db = self.SessionLocal()
         try:
             track = self._fetch_or_raise(db, track_id)
@@ -576,17 +586,25 @@ class TrackManager:
                     f"cannot alert terminal track: {track_id}"
                 )
             if track.status == STATUS_RUNNING:
-                # 既にアクティブなのでそのまま (no-op)
+                # 既にアクティブ (no-op だが observer には通知する)。
+                # ペルソナが直前に自律判断で running 化していたケース等で、
+                # ユーザー発話のような外部イベントが「埋もれない」よう観察者へ届ける。
                 logging.debug("[track] set_alert no-op (running) %s", track_id)
+                persona_id_for_notify = track.persona_id
+                track_title_for_notify = track.title
+                track_type_for_notify = track.track_type
+                notify_already_running = True
                 db.expunge(track)
                 return track
             if track.status == STATUS_ALERT:
-                # 既に alert (重複通知を避ける)
+                # 既に alert (重複通知を避けるため observer 通知しない)
                 logging.debug("[track] set_alert no-op (already alert) %s", track_id)
                 db.expunge(track)
                 return track
             track.status = STATUS_ALERT
             persona_id_for_notify = track.persona_id
+            track_title_for_notify = track.title
+            track_type_for_notify = track.track_type
             notify = True
             db.commit()
             db.refresh(track)
@@ -598,10 +616,18 @@ class TrackManager:
             raise
         finally:
             db.close()
-            if notify and persona_id_for_notify is not None:
+            if (notify or notify_already_running) and persona_id_for_notify is not None:
                 # observer 通知は DB トランザクション完了後に行う
                 # (observer 内で別 DB アクセスがあっても整合する)
-                self._notify_alert(persona_id_for_notify, track_id, context)
+                # Phase 2.6: context を拡張 (target_already_running フラグ + Track 識別情報)
+                enriched_context = dict(context or {})
+                if notify_already_running:
+                    enriched_context["target_already_running"] = True
+                if track_title_for_notify:
+                    enriched_context.setdefault("target_track_title", track_title_for_notify)
+                if track_type_for_notify:
+                    enriched_context.setdefault("target_track_type", track_type_for_notify)
+                self._notify_alert(persona_id_for_notify, track_id, enriched_context)
 
     # ------------------------------------------------------------------
     # 忘却

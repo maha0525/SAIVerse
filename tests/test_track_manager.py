@@ -402,24 +402,40 @@ def test_set_alert_notifies_observer(tm, persona):
     tm.add_alert_observer(
         lambda pid, tid, ctx: calls.append((pid, tid, ctx))
     )
-    t = tm.create(persona, "autonomous")
+    t = tm.create(persona, "autonomous", title="test track")
     tm.activate(t)
     tm.pause(t)  # running -> pending
     tm.set_alert(t, context={"trigger": "test"})
     assert len(calls) == 1
     assert calls[0][0] == persona
     assert calls[0][1] == t
-    assert calls[0][2] == {"trigger": "test"}
+    # Phase 2.6: context は元値 + Track 識別情報で enrich される
+    ctx = calls[0][2]
+    assert ctx["trigger"] == "test"
+    assert ctx["target_track_title"] == "test track"
+    assert ctx["target_track_type"] == "autonomous"
+    assert "target_already_running" not in ctx  # 通常の遷移ではフラグなし
 
 
-def test_set_alert_no_op_when_running_does_not_notify(tm, persona):
-    """running 時の no-op では observer を呼ばない。"""
+def test_set_alert_no_op_when_running_still_notifies_with_flag(tm, persona):
+    """Phase 2.6: running 時は state は no-op だが observer には
+    target_already_running=True 付きで通知する。
+
+    自律先制と外部 alert の衝突を観察者が認識できるようにするため。
+    """
     calls = []
-    tm.add_alert_observer(lambda *args: calls.append(args))
-    t = tm.create(persona, "autonomous")
+    tm.add_alert_observer(lambda pid, tid, ctx: calls.append((pid, tid, ctx)))
+    t = tm.create(persona, "autonomous", title="auto track")
     tm.activate(t)
-    tm.set_alert(t)
-    assert calls == []
+    tm.set_alert(t, context={"trigger": "test"})
+    assert len(calls) == 1
+    pid, tid, ctx = calls[0]
+    assert pid == persona
+    assert tid == t
+    assert ctx["target_already_running"] is True
+    assert ctx["target_track_title"] == "auto track"
+    assert ctx["target_track_type"] == "autonomous"
+    assert ctx["trigger"] == "test"
 
 
 def test_set_alert_no_op_when_already_alert_does_not_notify(tm, persona):
@@ -488,12 +504,19 @@ def test_add_same_observer_twice_is_idempotent(tm, persona):
     assert len(calls) == 1
 
 
-def test_set_alert_default_context_is_empty_dict(tm, persona):
-    """context を渡さない場合、observer は空 dict を受け取る。"""
+def test_set_alert_default_context_includes_track_metadata(tm, persona):
+    """Phase 2.6: context を渡さなくても observer は Track 識別情報を含む dict を受け取る。
+
+    target_track_title / target_track_type が常に乗る (None でなければ)。
+    """
     calls = []
     tm.add_alert_observer(lambda pid, tid, ctx: calls.append(ctx))
-    t = tm.create(persona, "autonomous")
+    t = tm.create(persona, "autonomous", title="auto")
     tm.activate(t)
     tm.pause(t)
     tm.set_alert(t)
-    assert calls == [{}]
+    assert len(calls) == 1
+    ctx = calls[0]
+    assert ctx["target_track_title"] == "auto"
+    assert ctx["target_track_type"] == "autonomous"
+    assert "target_already_running" not in ctx  # 通常遷移ではフラグなし
