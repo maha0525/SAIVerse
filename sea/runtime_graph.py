@@ -240,6 +240,20 @@ def compile_with_langgraph(
             _final_pulse_ctx = _source_state.get("_pulse_context")
             if _final_pulse_ctx:
                 runtime._flush_pulse_logs(persona, _final_pulse_ctx)
+
+                # CRITICAL ORDER: deferred_track_ops の中身は
+                # _apply_deferred_track_ops 完了時に clear される (runtime_runner.py:81)。
+                # そのため、メタ判断 Pulse の committed_to_main_cache (= activate op
+                # が発動したかの派生フラグ) は **apply の前に** 評価する必要がある。
+                # apply 後に見ると常に空 = False になる (実機 2026-05-01 で観測済み)。
+                _meta_buffer = getattr(_final_pulse_ctx, "meta_judgment_buffer", None)
+                _committed_for_meta_log = False
+                if _meta_buffer is not None:
+                    _committed_for_meta_log = any(
+                        op.op_type == "activate"
+                        for op in _final_pulse_ctx.deferred_track_ops
+                    )
+
                 # Apply deferred Track operations queued by spells during this Pulse.
                 # Same pulse-root condition as _flush_pulse_logs above — Track switches
                 # land at Pulse boundaries (Intent A v0.14, Intent B v0.11). Done here
@@ -260,8 +274,7 @@ def compile_with_langgraph(
                 # (Phase 2 / handoff Part 2). pulse_type == 'meta_judgment' の Pulse
                 # でのみ buffer が populate されている。MetaLayer 経由で書き込み、
                 # 次回メタ判断時の judge プロンプトに動的注入される。
-                # Track 切替系 spell が発動した場合は committed_to_main_cache=True。
-                _meta_buffer = getattr(_final_pulse_ctx, "meta_judgment_buffer", None)
+                # committed_to_main_cache は **上で apply 前に評価済み** の値を渡す。
                 if _meta_buffer is not None:
                     try:
                         meta_layer = getattr(runtime.manager, "meta_layer", None)
@@ -280,10 +293,6 @@ def compile_with_langgraph(
                             except (ValueError, TypeError):
                                 pass
                             _alert_track_id = _source_state.get("alert_track_id") or None
-                            _committed = any(
-                                op.op_type == "activate"
-                                for op in _final_pulse_ctx.deferred_track_ops
-                            )
                             meta_layer._record_judgment_log(
                                 persona_id=getattr(persona, "persona_id", None),
                                 trigger_type=_trigger_type,
@@ -291,7 +300,7 @@ def compile_with_langgraph(
                                 track_at_judgment_id=_alert_track_id,
                                 thought_parts=_meta_buffer.get("thought_parts") or [],
                                 spells=_meta_buffer.get("spells") or [],
-                                committed_to_main_cache=_committed,
+                                committed_to_main_cache=_committed_for_meta_log,
                                 prompt_snapshot=None,
                             )
                     except Exception:
