@@ -19,6 +19,34 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Union
 LOGGER = logging.getLogger(__name__)
 
 
+# Per-message timestamp line (YYYY/M/D H:MM:SS, allows 1-2 digit month/day/hour)
+_MESSAGE_TIMESTAMP_RE = re.compile(
+    r"^(\d{4}/\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}:\d{2})\s*$"
+)
+
+# Markdown image reference whose URL is a data: URI (typically a huge inline
+# base64 payload from Claude Exporter). Use non-greedy match plus DOTALL to
+# handle payloads that may contain newlines.
+_DATA_URL_IMAGE_RE = re.compile(
+    r"!\[[^\]]*\]\(\s*data:[^)]+\)",
+    re.DOTALL,
+)
+
+_IMAGE_PLACEHOLDER = "(image)"
+
+
+def _strip_inline_base64_images(content: str) -> str:
+    """Replace inline base64 image data references with a short placeholder.
+
+    Some exporters (notably Claude Exporter) embed full image payloads as
+    ``![name](data:image/...;base64,<huge>)`` in message bodies. Importing the
+    raw payload bloats SAIMemory, so we collapse such references to ``(image)``.
+    """
+    if not content or "data:" not in content:
+        return content
+    return _DATA_URL_IMAGE_RE.sub(_IMAGE_PLACEHOLDER, content)
+
+
 @dataclass
 class ExporterMessage:
     """A single message from an exported conversation."""
@@ -180,6 +208,43 @@ def _increment_timestamps(
         msg.timestamp = start_time + timedelta(seconds=i * interval_seconds)
 
 
+def _apply_timestamp_strategy(
+    messages: List[ExporterMessage],
+    *,
+    source: str,
+    created_at: Optional[datetime],
+    updated_at: Optional[datetime],
+    gemini_start_time: Optional[datetime] = None,
+) -> None:
+    """Fill in missing message timestamps based on the export source.
+
+    If every message already carries its own timestamp (newer ChatGPT/Claude
+    exports), no synthesis is performed. Otherwise we fall back to the legacy
+    behaviour: linear interpolation for ChatGPT, sequential offsets for Gemini.
+    """
+    if not messages:
+        return
+
+    if all(m.timestamp is not None for m in messages):
+        return
+
+    if source == "chatgpt":
+        if created_at and updated_at:
+            _interpolate_timestamps(messages, created_at, updated_at)
+        elif created_at:
+            _increment_timestamps(messages, created_at)
+    elif source == "gemini":
+        start = gemini_start_time or created_at or datetime.now(tz=timezone.utc)
+        _increment_timestamps(messages, start)
+    elif source == "claude":
+        # Claude has always relied on per-message timestamps; if some are
+        # missing fall back to interpolation between the available endpoints.
+        if created_at and updated_at:
+            _interpolate_timestamps(messages, created_at, updated_at)
+        elif created_at:
+            _increment_timestamps(messages, created_at)
+
+
 def _detect_source(metadata: Dict[str, Any]) -> str:
     """Detect the source (chatgpt, gemini, claude) from metadata."""
     powered_by = metadata.get("powered_by", "").lower()
@@ -213,7 +278,7 @@ def _parse_json_format(
 
     for raw_msg in raw_messages:
         raw_role = raw_msg.get("role", "")
-        content = raw_msg.get("say", "")
+        content = _strip_inline_base64_images(raw_msg.get("say", "") or "")
 
         # Normalize role names
         if raw_role.lower() in ("prompt", "user"):
@@ -223,7 +288,7 @@ def _parse_json_format(
         else:
             role = raw_role.lower()
 
-        # Check for per-message timestamp (Claude format)
+        # Per-message timestamp (Claude format and newer ChatGPT exports).
         msg_time = _parse_datetime_flexible(raw_msg.get("time"))
 
         messages.append(ExporterMessage(role=role, content=content, timestamp=msg_time))
@@ -231,21 +296,18 @@ def _parse_json_format(
     # Deduplicate messages
     messages = _deduplicate_messages(messages)
 
-    # Apply timestamp logic based on source
-    if source == "claude":
-        # Claude has per-message timestamps, already parsed
-        pass
-    elif source == "chatgpt":
-        # Interpolate between created and updated
-        if created_at and updated_at and messages:
-            _interpolate_timestamps(messages, created_at, updated_at)
-        elif created_at and messages:
-            _increment_timestamps(messages, created_at)
-    elif source == "gemini":
-        # Use provided start time or fallback
-        start = gemini_start_time or created_at or datetime.now(tz=timezone.utc)
-        if messages:
-            _increment_timestamps(messages, start)
+    # Newer ChatGPT Exporter mis-reports Updated as the thread's last open time;
+    # prefer the final per-message timestamp when available.
+    if messages and messages[-1].timestamp is not None:
+        updated_at = messages[-1].timestamp
+
+    _apply_timestamp_strategy(
+        messages,
+        source=source,
+        created_at=created_at,
+        updated_at=updated_at,
+        gemini_start_time=gemini_start_time,
+    )
 
     return ExporterConversation(
         title=title,
@@ -309,67 +371,58 @@ def _parse_markdown_format(
     current_content: List[str] = []
     current_timestamp: Optional[datetime] = None
 
+    def _flush() -> None:
+        if current_role and current_content:
+            body = _strip_inline_base64_images("\n".join(current_content).strip())
+            messages.append(
+                ExporterMessage(
+                    role=current_role,
+                    content=body,
+                    timestamp=current_timestamp,
+                )
+            )
+
     for line in lines:
         if line.strip() == "## Prompt:":
-            # Save previous message if exists
-            if current_role and current_content:
-                messages.append(
-                    ExporterMessage(
-                        role=current_role,
-                        content="\n".join(current_content).strip(),
-                        timestamp=current_timestamp,
-                    )
-                )
+            _flush()
             current_role = "user"
             current_content = []
             current_timestamp = None
         elif line.strip() == "## Response:":
-            if current_role and current_content:
-                messages.append(
-                    ExporterMessage(
-                        role=current_role,
-                        content="\n".join(current_content).strip(),
-                        timestamp=current_timestamp,
-                    )
-                )
+            _flush()
             current_role = "assistant"
             current_content = []
             current_timestamp = None
         elif current_role:
-            # Check for Claude-style timestamp line at start of message
-            if not current_content:
-                ts_match = re.match(r"^(\d{4}/\d{2}/\d{2}\s+\d{1,2}:\d{2}:\d{2})\s*$", line.strip())
+            # Per-message timestamp line right after the role heading.
+            # Older exports only emitted this for Claude; newer ChatGPT Exporter
+            # adds it too. The blank line that follows is consumed naturally by
+            # the trailing strip when we join the content below.
+            if not current_content and current_timestamp is None:
+                ts_match = _MESSAGE_TIMESTAMP_RE.match(line.strip())
                 if ts_match:
                     current_timestamp = _parse_datetime_flexible(ts_match.group(1))
                     continue
             current_content.append(line)
 
-    # Save last message
-    if current_role and current_content:
-        messages.append(
-            ExporterMessage(
-                role=current_role,
-                content="\n".join(current_content).strip(),
-                timestamp=current_timestamp,
-            )
-        )
+    _flush()
 
     # Deduplicate messages
     messages = _deduplicate_messages(messages)
 
-    # Apply timestamp logic
-    if source == "claude":
-        # Claude MD format has per-message timestamps
-        pass
-    elif source == "chatgpt":
-        if created_at and updated_at and messages:
-            _interpolate_timestamps(messages, created_at, updated_at)
-        elif created_at and messages:
-            _increment_timestamps(messages, created_at)
-    elif source == "gemini":
-        start = gemini_start_time or created_at or datetime.now(tz=timezone.utc)
-        if messages:
-            _increment_timestamps(messages, start)
+    # The Updated header in newer ChatGPT Exporter records the last time the
+    # thread was opened rather than the last message's time, so prefer the
+    # final message's per-message timestamp when present.
+    if messages and messages[-1].timestamp is not None:
+        updated_at = messages[-1].timestamp
+
+    _apply_timestamp_strategy(
+        messages,
+        source=source,
+        created_at=created_at,
+        updated_at=updated_at,
+        gemini_start_time=gemini_start_time,
+    )
 
     return ExporterConversation(
         title=title,
