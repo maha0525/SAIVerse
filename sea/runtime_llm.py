@@ -54,18 +54,28 @@ _KV_PATTERN = re.compile(
 )
 
 
-def _parse_spell_args(args_raw: str) -> Optional[dict]:
-    """Parse spell args string (Python dict or JSON). Returns dict or None."""
+def _parse_spell_args(args_raw: str, *, silent: bool = False) -> Optional[dict]:
+    """Parse spell args string (Python dict or JSON). Returns dict or None.
+
+    When ``silent=True``, parse failures are downgraded to DEBUG (used by the
+    fuzzy parser which routinely tries this strict path first and recovers via
+    the KV pattern). Without ``silent``, failures are logged at WARNING since
+    they indicate the LLM produced a canonical-form spell with malformed args.
+    """
     try:
         result = ast.literal_eval(args_raw)
     except (ValueError, SyntaxError):
         try:
             result = json.loads(args_raw)
         except json.JSONDecodeError:
-            LOGGER.warning("[sea][spell] Failed to parse args: %s", args_raw)
+            (LOGGER.debug if silent else LOGGER.warning)(
+                "[sea][spell] Failed to parse args: %s", args_raw
+            )
             return None
     if not isinstance(result, dict):
-        LOGGER.warning("[sea][spell] Args is not a dict: %s", type(result))
+        (LOGGER.debug if silent else LOGGER.warning)(
+            "[sea][spell] Args is not a dict: %s", type(result)
+        )
         return None
     return result
 
@@ -74,9 +84,12 @@ def _parse_fuzzy_spell_args(args_raw: str) -> Optional[dict]:
     """Parse informal key=value... spell args into a dict.
 
     Handles single/double-quoted values, dict literals, and bare words.
-    Falls back to _parse_spell_args for standard dict/JSON forms.
+    Falls back to _parse_spell_args for standard dict/JSON forms. The strict
+    fallback is invoked with ``silent=True`` so its failure (the common case
+    when the LLM uses fuzzy syntax like ``track_id='...'``) does not pollute
+    the log — fuzzy KV parsing recovers without user-visible noise.
     """
-    result = _parse_spell_args(args_raw)
+    result = _parse_spell_args(args_raw, silent=True)
     if result is not None:
         return result
     pairs = {}

@@ -1154,15 +1154,28 @@ class SAIVerseManager(
             )
             return
 
+        # SAIMemory の messages テーブルには pulse_id 専用カラムは存在せず、
+        # `_store_memory` が `metadata.tags` の JSON 配列に `pulse:{uuid}` の形で
+        # 紐付けている (sea/runtime.py の _store_memory)。同 DB の他の検索 SQL と
+        # 同じ json_each(metadata, '$.tags') idiom で当該 Pulse のメタ判断行を
+        # 特定して scope を昇格する。
         import sqlite3
+        pulse_tag = f"pulse:{pulse_id}"
         try:
             conn = sqlite3.connect(str(db_path))
             try:
                 cur = conn.execute(
-                    "UPDATE messages SET scope = 'committed' "
-                    "WHERE pulse_id = ? AND line_role = 'meta_judgment' "
-                    "AND scope = 'discardable'",
-                    (pulse_id,),
+                    """
+                    UPDATE messages SET scope = 'committed'
+                    WHERE line_role = 'meta_judgment'
+                      AND scope = 'discardable'
+                      AND metadata IS NOT NULL
+                      AND EXISTS (
+                          SELECT 1 FROM json_each(metadata, '$.tags')
+                          WHERE json_each.value = ?
+                      )
+                    """,
+                    (pulse_tag,),
                 )
                 if cur.rowcount > 0:
                     logging.info(
