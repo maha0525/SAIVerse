@@ -694,20 +694,19 @@ class HistoryManager:
                 )
 
             # Part 2: Memopedia page content
-            if self.memory_adapter.memopedia_adapter:
-                try:
-                    from sai_memory.memopedia.storage import get_page_by_persona_id
-                    page = get_page_by_persona_id(self.memory_adapter.conn, target_persona_id)
-                    if page and page.content:
-                        memopedia_section = f"[想起: {target_persona_id}についてのMemopedia記録]\n{page.content}"
-                        recall_parts.append(memopedia_section)
-                        LOGGER.debug(
-                            "Added Memopedia content for persona=%s (%d chars)",
-                            target_persona_id,
-                            len(page.content)
-                        )
-                except Exception:
-                    LOGGER.exception("Failed to load Memopedia page for persona=%s", target_persona_id)
+            try:
+                from sai_memory.memopedia.storage import get_page_by_persona_id
+                page = get_page_by_persona_id(self.memory_adapter.conn, target_persona_id)
+                if page and page.content:
+                    memopedia_section = f"[想起: {target_persona_id}についてのMemopedia記録]\n{page.content}"
+                    recall_parts.append(memopedia_section)
+                    LOGGER.debug(
+                        "Added Memopedia content for persona=%s (%d chars)",
+                        target_persona_id,
+                        len(page.content)
+                    )
+            except Exception:
+                LOGGER.exception("Failed to load Memopedia page for persona=%s", target_persona_id)
 
             if not recall_parts:
                 LOGGER.debug(

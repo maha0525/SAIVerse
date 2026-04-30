@@ -115,6 +115,13 @@ class SAIMemoryAdapter:
                 )
             """)
             self.conn.commit()
+
+            # Initialize Memopedia tables (idempotent; runs migrations for older DBs).
+            # Memopedia tables share this connection's memory.db, so any code that
+            # accesses self.conn directly (e.g. persona.history_manager) can rely on
+            # the schema being migrated without first instantiating Memopedia(conn).
+            from sai_memory.memopedia.storage import init_memopedia_tables
+            init_memopedia_tables(self.conn)
         except Exception as exc:
             LOGGER.exception("Failed to initialise SAIMemory DB at %s", self.settings.db_path)
             self.conn = None
