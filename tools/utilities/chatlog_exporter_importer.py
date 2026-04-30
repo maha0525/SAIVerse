@@ -213,15 +213,17 @@ def _enforce_monotonic_timestamps(messages: List[ExporterMessage]) -> None:
 
     Some exporters occasionally emit a Response timestamp earlier than its
     paired Prompt (apparently a bug on their side). When a message's timestamp
-    is older than the previous one's, bump it to ``previous + 1s`` so the
-    chronology always matches the document order.
+    is *strictly* older than the previous one's, bump it to ``previous + 1s``.
+    Equal timestamps are left untouched: exporter timestamps are second-
+    resolution, so adjacent messages legitimately sharing the same second
+    must not be rewritten.
     """
     prev: Optional[datetime] = None
     for msg in messages:
         if msg.timestamp is None:
             prev = None
             continue
-        if prev is not None and msg.timestamp <= prev:
+        if prev is not None and msg.timestamp < prev:
             msg.timestamp = prev + timedelta(seconds=1)
         prev = msg.timestamp
 
