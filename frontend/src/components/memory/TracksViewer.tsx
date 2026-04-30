@@ -1,6 +1,6 @@
 'use client';
 import React, { useState, useEffect, useCallback } from 'react';
-import { Loader2, GitBranch, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react';
+import { Loader2, GitBranch, ChevronDown, ChevronUp, RefreshCw, PauseCircle } from 'lucide-react';
 import slStyles from './TracksViewer.module.css';
 
 interface TrackItem {
@@ -182,9 +182,11 @@ export default function TracksViewer({ personaId }: Props) {
                             {data.items.map(t => (
                                 <TrackCard
                                     key={t.track_id}
+                                    personaId={personaId}
                                     track={t}
                                     expanded={expanded.has(t.track_id)}
                                     onToggle={() => toggleExpand(t.track_id)}
+                                    onChanged={load}
                                 />
                             ))}
                         </div>
@@ -196,14 +198,44 @@ export default function TracksViewer({ personaId }: Props) {
 }
 
 interface TrackCardProps {
+    personaId: string;
     track: TrackItem;
     expanded: boolean;
     onToggle: () => void;
+    onChanged: () => void;
 }
 
-function TrackCard({ track, expanded, onToggle }: TrackCardProps) {
+function TrackCard({ personaId, track, expanded, onToggle, onChanged }: TrackCardProps) {
     const meta = track.track_metadata || {};
     const entryLineRole = (meta.entry_line_role as string | undefined) || null;
+    const [actionLoading, setActionLoading] = useState(false);
+    const [actionError, setActionError] = useState<string | null>(null);
+
+    const canPause = track.status === 'running' || track.status === 'alert';
+
+    const pauseTrack = async () => {
+        setActionLoading(true);
+        setActionError(null);
+        try {
+            const res = await fetch(
+                `/api/people/${personaId}/tracks/${track.track_id}/pause`,
+                { method: 'POST' },
+            );
+            if (!res.ok) {
+                const detail = await res.json().catch(() => null);
+                throw new Error(
+                    (detail && typeof detail.detail === 'string')
+                        ? detail.detail
+                        : `HTTP ${res.status}`,
+                );
+            }
+            onChanged();
+        } catch (e) {
+            setActionError(e instanceof Error ? e.message : String(e));
+        } finally {
+            setActionLoading(false);
+        }
+    };
 
     return (
         <div className={slStyles.trackCard}>
@@ -269,6 +301,31 @@ function TrackCard({ track, expanded, onToggle }: TrackCardProps) {
                             pre
                         />
                     )}
+                    <div className={slStyles.actionsRow}>
+                        <span className={slStyles.actionsLabel}>actions:</span>
+                        <button
+                            className={slStyles.actionBtn}
+                            onClick={pauseTrack}
+                            disabled={!canPause || actionLoading}
+                            title={
+                                canPause
+                                    ? 'この Track を pending に戻す (running/alert → pending)'
+                                    : `pause は running/alert からのみ可能 (現在: ${track.status})`
+                            }
+                        >
+                            {actionLoading ? (
+                                <Loader2 size={12} className={slStyles.spin} />
+                            ) : (
+                                <PauseCircle size={12} />
+                            )}
+                            <span>pending に戻す</span>
+                        </button>
+                        {actionError && (
+                            <span className={slStyles.actionError}>
+                                {actionError}
+                            </span>
+                        )}
+                    </div>
                 </div>
             )}
         </div>

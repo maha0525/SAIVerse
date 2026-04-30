@@ -1147,7 +1147,7 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                 speak_flag = getattr(node_def, "speak", None)
                 streaming_enabled = _is_llm_streaming_enabled()
                 LOGGER.info("[DEBUG] Streaming check: speak_flag=%s, response_schema=%s, streaming_enabled=%s, event_callback=%s",
-                           speak_flag, response_schema is None, streaming_enabled, event_callback is not None)
+                           speak_flag, response_schema is not None, streaming_enabled, event_callback is not None)
                 use_streaming = (
                     speak_flag is True
                     and response_schema is None

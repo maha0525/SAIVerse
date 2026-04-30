@@ -1,0 +1,50 @@
+{
+    "name": "track_waiting",
+    "display_name": "待機 Track 再開 (Phase C-2)",
+    "description": "応答待ち (waiting) 状態だった Track が外部応答到達 / タイムアウトで再開する時のメインライン Playbook。重量級 LLM で応答内容を踏まえた次の動きを決定 (続行 / 切り替え / 完了) し、必要なら track_* スペル発火。Pulse 完了後挙動は再開条件次第 (Handler が pulse_completion_notice として伝える)。intent B v0.7 §'メタレイヤーのトラック管理ツール群'。",
+    "input_schema": [
+        {
+            "name": "input",
+            "description": "Resume trigger: incoming response payload / timeout marker / external event"
+        },
+        {
+            "name": "metadata",
+            "description": "Optional metadata (waiting_for context, timeout flag 等)",
+            "required": false
+        }
+    ],
+    "router_callable": false,
+    "user_selectable": false,
+    "nodes": [
+        {
+            "id": "main_line_response",
+            "type": "llm",
+            "context_profile": "conversation",
+            "action": null,
+            "speak": true,
+            "metadata_key": "metadata",
+            "memorize": {
+                "tags": [
+                    "conversation"
+                ]
+            },
+            "output_keys": [
+                {
+                    "text": "speak_content"
+                }
+            ],
+            "next": "process_body"
+        },
+        {
+            "id": "process_body",
+            "type": "tool",
+            "action": "control_body",
+            "args_input": {
+                "message": "speak_content"
+            },
+            "output_key": null,
+            "next": null
+        }
+    ],
+    "start_node": "main_line_response"
+}

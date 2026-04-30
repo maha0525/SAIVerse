@@ -223,11 +223,15 @@ class SAIVerseManager(
         # これにより running な連続実行型 Track のサブライン Pulse が定期的に
         # 起動される (Intent A v0.13 / Intent B v0.10)。
         self.subline_scheduler = SubLineScheduler(self)
+        # Phase C-2: 内部 alert ポーラ (intent B v0.7 §"内部 alert ポーラ機構")
+        # Track パラメータの閾値超過 + Handler.tick() を定期駆動する。
+        from saiverse.internal_alert_poller import InternalAlertPoller
+        self.internal_alert_poller = InternalAlertPoller(self)
         logging.info(
             "Initialized cognitive-model runtime layers "
             "(MetaLayer registered as alert observer, "
             "UserConversationTrackHandler / SocialTrackHandler / AutonomousTrackHandler ready, "
-            "SubLineScheduler instantiated [will start at startup])."
+            "SubLineScheduler + InternalAlertPoller instantiated [will start at startup])."
         )
 
         # --- Step 5: Load Dynamic States from DB ---
@@ -311,6 +315,9 @@ class SAIVerseManager(
                 "Autonomous tracks will not run pulses until re-enabled and restarted."
             )
 
+        # Phase C-2: Internal alert poller (intent B v0.7 §"内部 alert ポーラ機構")
+        self.internal_alert_poller.start()
+
         # --- Step 7: Register with SDS and start background tasks ---
         self.sds_url = sds_url
         self.sds_session = requests.Session()
@@ -380,6 +387,12 @@ class SAIVerseManager(
         # Auto-start autonomous conversation managers for personas with mode=auto
         logging.info("Auto-starting autonomous conversation managers...")
         self.start_autonomous_conversations()
+
+        # Phase C-2 (intent A v0.9 §"ペルソナのアクティビティ状態"):
+        # ACTIVITY_STATE='Active' のペルソナで AutonomyManager を自動起動する。
+        # Active 以外 (Stop/Sleep/Idle) は起動しない (定期 tick OFF と整合)。
+        logging.info("Auto-starting autonomy managers for Active personas...")
+        self._ensure_autonomy_for_active_personas()
 
         # Emit server_start trigger
         self._emit_trigger(
@@ -1048,6 +1061,56 @@ class SAIVerseManager(
         for persona in self.personas.values():
             persona.apply_parameter_overrides(self.model_parameter_overrides)
 
+    # ------------------------------------------------------------------
+    # AutonomyManager <-> ACTIVITY_STATE 同期 (Phase C-2)
+    # ------------------------------------------------------------------
+
+    def ensure_autonomy_for(self, persona_id: str) -> None:
+        """指定ペルソナの AutonomyManager を ACTIVITY_STATE に同期する。
+
+        intent A v0.9: Active のみ定期発火 ON。それ以外 (Stop/Sleep/Idle) は
+        起動しない。既に起動中で Active 以外になった場合は停止する。
+        """
+        from saiverse.autonomy_manager import AutonomyManager
+
+        if not hasattr(self, "_autonomy_managers"):
+            self._autonomy_managers = {}
+
+        persona = self.personas.get(persona_id)
+        if persona is None:
+            return
+
+        state = getattr(persona, "activity_state", "Idle")
+        am = self._autonomy_managers.get(persona_id)
+
+        if state == "Active":
+            if am is None:
+                am = AutonomyManager(persona_id=persona_id, manager=self)
+                self._autonomy_managers[persona_id] = am
+            if not am.is_running:
+                am.start()
+                logging.info(
+                    "[autonomy-sync] Started AutonomyManager for active persona '%s'",
+                    persona_id,
+                )
+        else:
+            if am is not None and am.is_running:
+                am.stop()
+                logging.info(
+                    "[autonomy-sync] Stopped AutonomyManager for non-active persona '%s' (state=%s)",
+                    persona_id, state,
+                )
+
+    def _ensure_autonomy_for_active_personas(self) -> None:
+        """全ペルソナの AutonomyManager 状態を ACTIVITY_STATE に同期する (起動時用)。"""
+        for persona_id in list(self.personas.keys()):
+            try:
+                self.ensure_autonomy_for(persona_id)
+            except Exception:
+                logging.exception(
+                    "Failed to ensure autonomy for persona '%s'", persona_id,
+                )
+
     def start_autonomous_conversations(self):
         """Start all autonomous conversation managers."""
         if getattr(self, "runtime", None):
@@ -1095,7 +1158,7 @@ class SAIVerseManager(
 
         replies: List[str] = []
         for persona in self.personas.values():
-            if getattr(persona, "interaction_mode", "auto") == "auto":
+            if getattr(persona, "activity_state", "Idle") == "Active":
                 replies.extend(persona.run_scheduled_prompt())
         if replies:
             self._save_modified_buildings()
@@ -1341,7 +1404,7 @@ class SAIVerseManager(
         home_city_id: int,
         default_model: Optional[str],
         lightweight_model: Optional[str],
-        interaction_mode: str,
+        activity_state: str,
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
         appearance_image_path: Optional[str] = None,
@@ -1358,7 +1421,7 @@ class SAIVerseManager(
             home_city_id,
             default_model,
             lightweight_model,
-            interaction_mode,
+            activity_state,
             avatar_path,
             avatar_upload,
             appearance_image_path,

@@ -149,6 +149,12 @@ def migrate_database_in_place(db_path: str):
 
         logging.info("すべてのテーブルのデータ移行が正常に完了しました。")
 
+        # Post-migration: convert legacy INTERACTION_MODE values to ACTIVITY_STATE.
+        # The column-copy phase above only carries over columns that exist in the
+        # new schema, so when INTERACTION_MODE is dropped its values are lost
+        # without an explicit translation step.
+        _migrate_interaction_mode_to_activity_state(source_engine, target_engine)
+
         # Post-migration: assign slot numbers to existing items (in order of CREATED_AT)
         _assign_initial_slot_numbers(target_engine)
 
@@ -166,6 +172,59 @@ def migrate_database_in_place(db_path: str):
                 logging.info("ロールバックが完了しました。元のデータベースが復元されました。")
         except Exception as rb_e:
             logging.error(f"ロールバックに失敗しました: {rb_e}", exc_info=True)
+
+def _migrate_interaction_mode_to_activity_state(source_engine, target_engine) -> None:
+    """Map legacy AI.INTERACTION_MODE values to AI.ACTIVITY_STATE.
+
+    Mapping (Intent A v0.9 / Intent B v0.6):
+    - 'auto'   -> 'Active' (自律行動含めて全動作)
+    - 'user'   -> 'Idle'   (起きてるが自発的には行動しない)
+    - 'manual' -> 'Idle'   (実装上の "auto OFF" 状態。Idle と同義)
+    - 'sleep'  -> 'Sleep'  (寝てる、ユーザー発言で起きる)
+    - その他    -> 'Idle'   (フォールバック)
+
+    Runs only when the source DB still has INTERACTION_MODE; otherwise no-op.
+    Existing ACTIVITY_STATE values from rows that already had a non-default
+    state are overwritten — INTERACTION_MODE is the prior source of truth so
+    we honor it during the one-shot migration.
+    """
+    try:
+        source_inspector = inspect(source_engine)
+        if not source_inspector.has_table("AI"):
+            return
+        source_cols = {c["name"] for c in source_inspector.get_columns("AI")}
+        if "INTERACTION_MODE" not in source_cols:
+            logging.info("INTERACTION_MODE が source DB に存在しないため、変換をスキップします。")
+            return
+
+        with source_engine.connect() as src:
+            rows = src.execute(text('SELECT AIID, INTERACTION_MODE FROM "AI"')).fetchall()
+
+        if not rows:
+            return
+
+        mapping = {
+            "auto": "Active",
+            "user": "Idle",
+            "manual": "Idle",
+            "sleep": "Sleep",
+        }
+        with target_engine.begin() as tgt:
+            converted = 0
+            for ai_id, legacy_mode in rows:
+                new_state = mapping.get((legacy_mode or "").strip(), "Idle")
+                tgt.execute(
+                    text('UPDATE "AI" SET ACTIVITY_STATE = :state WHERE AIID = :id'),
+                    {"state": new_state, "id": ai_id},
+                )
+                converted += 1
+        logging.info(
+            "INTERACTION_MODE -> ACTIVITY_STATE 変換完了: %d 件のレコードを更新しました。",
+            converted,
+        )
+    except Exception as exc:
+        logging.warning("INTERACTION_MODE -> ACTIVITY_STATE 変換に失敗しました: %s", exc, exc_info=True)
+
 
 def _assign_initial_slot_numbers(engine) -> None:
     """既存アイテムに作成日時順でスロット番号を割り当てる。"""

@@ -207,7 +207,7 @@ class PersonaMixin:
             context_length=persona_context_length,
             user_room_id=self.user_room_id,
             provider=persona_provider,
-            interaction_mode=(db_ai.INTERACTION_MODE or "auto"),
+            activity_state=(db_ai.ACTIVITY_STATE or "Idle"),
             is_dispatched=db_ai.IS_DISPATCHED,
             timezone_info=self.timezone_info,
             timezone_name=self.timezone_name,
@@ -342,7 +342,7 @@ class PersonaMixin:
                 SYSTEMPROMPT=system_prompt,
                 DESCRIPTION=f"A new persona named {name}.",
                 AUTO_COUNT=0,
-                INTERACTION_MODE="manual",
+                ACTIVITY_STATE="Idle",
                 IS_DISPATCHED=False,
                 DEFAULT_MODEL=self.model,
                 CHRONICLE_ENABLED=False,
@@ -502,7 +502,7 @@ class PersonaMixin:
                 "AVATAR_IMAGE": ai.AVATAR_IMAGE,
                 "IS_DISPATCHED": ai.IS_DISPATCHED,
                 "DEFAULT_MODEL": ai.DEFAULT_MODEL,
-                "INTERACTION_MODE": ai.INTERACTION_MODE,
+                "ACTIVITY_STATE": ai.ACTIVITY_STATE,
                 "SPELL_ENABLED": ai.SPELL_ENABLED,
             }
         finally:
@@ -526,7 +526,7 @@ class PersonaMixin:
         system_prompt: str,
         home_city_id: int,
         default_model: Optional[str],
-        interaction_mode: str,
+        activity_state: str,
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
         chronicle_enabled: Optional[bool] = None,
@@ -555,66 +555,66 @@ class PersonaMixin:
                     )
                     return f"Error: Failed to process avatar upload: {exc}"
 
-            original_mode = ai.INTERACTION_MODE
-            mode_changed = original_mode != interaction_mode
+            original_state = ai.ACTIVITY_STATE
+            state_changed = original_state != activity_state
             move_feedback = ""
 
-            if mode_changed:
-                if interaction_mode == "sleep":
-                    ai.INTERACTION_MODE = "sleep"
-                    logging.info(
-                        "AI '%s' mode changed to 'sleep'. Attempting to move to private room.",
-                        name,
-                    )
-
-                    private_room_id = ai.PRIVATE_ROOM_ID
-                    if not private_room_id or private_room_id not in self.building_map:
-                        move_feedback = (
-                            " Note: Could not move to private room because it is not "
-                            "configured or invalid."
-                        )
-                        logging.warning(
-                            "Cannot move AI '%s' to sleep. Private room ID '%s' is invalid.",
-                            name,
-                            private_room_id,
-                        )
-                    else:
-                        current_building_id = self.personas[ai_id].current_building_id
-                        if current_building_id != private_room_id:
-                            success, reason = self._move_persona(
-                                ai_id,
-                                current_building_id,
-                                private_room_id,
-                                db_session=db,
-                            )
-                            if success:
-                                self.personas[ai_id].current_building_id = private_room_id
-                                move_feedback = (
-                                    " Moved to private room "
-                                    f"'{self.building_map[private_room_id].name}'."
-                                )
-                                logging.info(
-                                    "Successfully moved AI '%s' to their private room '%s'.",
-                                    name,
-                                    private_room_id,
-                                )
-                            else:
-                                move_feedback = (
-                                    f" Note: Failed to move to private room: {reason}."
-                                )
-                                logging.error(
-                                    "Failed to move AI '%s' to private room: %s",
-                                    name,
-                                    reason,
-                                )
-                elif interaction_mode in ("auto", "manual"):
-                    ai.INTERACTION_MODE = interaction_mode
-                else:
+            VALID_STATES = {"Stop", "Sleep", "Idle", "Active"}
+            if state_changed:
+                if activity_state not in VALID_STATES:
                     logging.warning(
-                        "Invalid interaction mode '%s' requested for AI '%s'. No change made.",
-                        interaction_mode,
+                        "Invalid activity_state '%s' requested for AI '%s'. No change made.",
+                        activity_state,
                         name,
                     )
+                else:
+                    ai.ACTIVITY_STATE = activity_state
+                    if activity_state == "Sleep":
+                        logging.info(
+                            "AI '%s' state changed to 'Sleep'. Attempting to move to private room.",
+                            name,
+                        )
+
+                        private_room_id = ai.PRIVATE_ROOM_ID
+                        if not private_room_id or private_room_id not in self.building_map:
+                            move_feedback = (
+                                " Note: Could not move to private room because it is not "
+                                "configured or invalid."
+                            )
+                            logging.warning(
+                                "Cannot move AI '%s' to sleep. Private room ID '%s' is invalid.",
+                                name,
+                                private_room_id,
+                            )
+                        else:
+                            current_building_id = self.personas[ai_id].current_building_id
+                            if current_building_id != private_room_id:
+                                success, reason = self._move_persona(
+                                    ai_id,
+                                    current_building_id,
+                                    private_room_id,
+                                    db_session=db,
+                                )
+                                if success:
+                                    self.personas[ai_id].current_building_id = private_room_id
+                                    move_feedback = (
+                                        " Moved to private room "
+                                        f"'{self.building_map[private_room_id].name}'."
+                                    )
+                                    logging.info(
+                                        "Successfully moved AI '%s' to their private room '%s'.",
+                                        name,
+                                        private_room_id,
+                                    )
+                                else:
+                                    move_feedback = (
+                                        f" Note: Failed to move to private room: {reason}."
+                                    )
+                                    logging.error(
+                                        "Failed to move AI '%s' to private room: %s",
+                                        name,
+                                        reason,
+                                    )
 
             ai.AINAME = name
             ai.DESCRIPTION = description
@@ -628,14 +628,14 @@ class PersonaMixin:
                 persona = self.personas[ai_id]
                 persona.persona_name = name
                 persona.persona_system_instruction = system_prompt
-                persona.interaction_mode = ai.INTERACTION_MODE
+                persona.activity_state = ai.ACTIVITY_STATE
                 logging.info("Updated in-memory persona '%s' with new settings.", name)
             self._set_persona_avatar(ai_id, avatar_value)
 
             status_message = f"AI '{name}' updated successfully."
-            if mode_changed:
+            if state_changed:
                 status_message += (
-                    f" Mode changed from '{original_mode}' to '{interaction_mode}'."
+                    f" State changed from '{original_state}' to '{activity_state}'."
                 )
             return status_message + move_feedback
         except Exception as exc:

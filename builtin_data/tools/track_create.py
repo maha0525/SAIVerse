@@ -15,7 +15,7 @@ from typing import Optional, Tuple
 
 from _track_common import (
     DEFERRED_NOTICE,
-    enqueue_or_warn,
+    apply_track_op,
     get_pulse_context,
     resolve_default_entry_line_role,
 )
@@ -73,17 +73,19 @@ def track_create(
     activate_queued = False
 
     if activate:
-        pulse_ctx = get_pulse_context()
-        if enqueue_or_warn(pulse_ctx, "activate", track_id=track_id):
-            activate_queued = True
-            # final_status stays 'unstarted'; runtime will set 'running' at flush
+        try:
+            activate_result = apply_track_op(
+                get_pulse_context(), "activate",
+                track_id=track_id, track_manager=_track_manager,
+            )
+        except Exception as exc:
+            activate_error = f"{type(exc).__name__}: {exc}"
         else:
-            # No PulseContext: fall back to immediate activate (CLI / test path).
-            try:
-                _track_manager.activate(track_id)
-                final_status = "running"
-            except Exception as exc:
-                activate_error = f"{type(exc).__name__}: {exc}"
+            if activate_result.deferred:
+                activate_queued = True
+                # final_status stays 'unstarted'; runtime will set 'running' at flush
+            elif activate_result.track is not None:
+                final_status = activate_result.track.status
 
     snippet = ToolResult(
         history_snippet=json.dumps(

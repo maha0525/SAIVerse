@@ -3,9 +3,14 @@
 Phase 1.2 / 1.3 (Intent A v0.14, Intent B v0.11). The meta-judgment Playbook
 emits a structured response of the form::
 
-    { "thought": "...", "action": "continue"|"switch"|"wait"|"close",
+    { "thought": "...", "action": "continue"|"switch",
       "switch_to_track_id": "...", "new_track_spec": {...},
+      "current_disposition": "pause"|"complete"|"abort",
       "notify_to_track": "...", "close_reason": "..." }
+
+The action set was reduced to **continue / switch** (旧 wait/close は switch
+のサブセットに整理 — wait = switch + target なし + disposition=pause、
+close = switch + disposition=complete)。
 
 The LLM-node memorize step records this turn with ``scope='discardable'``
 and stashes the inserted message id on ``state['_meta_judgment_message_id']``.
@@ -14,18 +19,18 @@ This dispatcher reads the structured output + that message id and:
 - ``continue``: leave the discardable row untouched (it stays in the DB so
   meta-judgment-log retrieval can find it, but it's filtered out of regular
   context retrieval — that's the "branch turn discarded" property).
-- ``switch``: enqueue the deferred Track ops (pause current running, then
-  activate the target — possibly creating a new Track first), AND promote
-  the discardable row to ``scope='committed'`` so it lives on as the "Track
-  move 来歴" inside the destination Track's main cache.
-- ``wait`` / ``close``: enqueue the appropriate Track op. (Track row stays
-  discardable for now — when ``waiting`` resolves into a switch, the next
-  meta-judgment turn carries the move-history; when closed, the persona's
-  conscious flow continues without that turn in cache.)
+- ``switch``:
+    1. Apply ``current_disposition`` to the currently-running Track (pause /
+       complete / abort, default pause).
+    2. If ``switch_to_track_id`` or ``new_track_spec`` is given, activate
+       the target. If both are omitted, the persona ends up with no
+       running Track (= 旧 wait に相当)。
+    3. Promote the discardable row to ``scope='committed'`` so it lives on
+       as the "Track move 来歴" inside the destination Track's main cache.
 
-The tool always returns a short result string the LLM can read in the same
-Pulse. Track ops themselves are deferred (Intent A v0.14 / Intent B v0.11)
-so the actual switch happens at Pulse completion.
+Track ops are applied through ``apply_track_op`` so they get deferred onto
+``PulseContext.deferred_track_ops`` when called inside a Pulse, and run
+immediately otherwise (CLI / test / MetaLayer-spawned Playbook).
 """
 from __future__ import annotations
 
@@ -35,7 +40,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from _track_common import (
     DEFERRED_NOTICE,
-    enqueue_or_warn,
+    apply_track_op,
     get_pulse_context,
     resolve_default_entry_line_role,
 )
@@ -46,6 +51,8 @@ from tools.core import ToolResult, ToolSchema
 
 LOGGER = logging.getLogger("saiverse.tools.meta_judgment_dispatch")
 _track_manager = TrackManager(session_factory=SessionLocal)
+
+_VALID_DISPOSITIONS = {"pause", "complete", "abort"}
 
 
 def _promote_message_to_committed(message_id: str) -> bool:
@@ -103,12 +110,11 @@ def _promote_message_to_committed(message_id: str) -> bool:
         return False
 
 
-def _create_and_activate(spec: Dict[str, Any]) -> Optional[str]:
-    """Create a new Track from new_track_spec and queue an activate op.
+def _create_track_from_spec(spec: Dict[str, Any]) -> Optional[str]:
+    """Create a new Track from new_track_spec and return its id.
 
-    Track creation runs immediately (so the new track_id can be referenced
-    by the queued activate). The activate itself is enqueued like any other
-    Track op so the switch lands at Pulse completion.
+    The activate step is enqueued separately by the caller so the switch
+    lands at Pulse completion alongside any disposition op.
     """
     persona_id = get_active_persona_id()
     if not persona_id:
@@ -148,6 +154,7 @@ def meta_judgment_dispatch(
     *,
     switch_to_track_id: Optional[str] = None,
     new_track_spec: Optional[Dict[str, Any]] = None,
+    current_disposition: Optional[str] = None,
     notify_to_track: Optional[str] = None,
     close_reason: Optional[str] = None,
     judgment_message_id: Optional[str] = None,
@@ -158,7 +165,8 @@ def meta_judgment_dispatch(
     ``judgment_message_id`` is the discardable row id captured by the LLM
     node — required for ``switch`` to promote the row to committed.
     """
-    if not get_active_persona_id():
+    persona_id = get_active_persona_id()
+    if not persona_id:
         raise RuntimeError(
             "Active persona context is not set. Use tools.context.persona_context()."
         )
@@ -185,76 +193,90 @@ def meta_judgment_dispatch(
             None,
         )
 
-    if action == "switch":
-        target_id = switch_to_track_id
-        if not target_id and isinstance(new_track_spec, dict):
-            target_id = _create_and_activate(new_track_spec)
-        if not target_id:
-            raise RuntimeError(
-                "meta_judgment_dispatch action='switch' requires switch_to_track_id "
-                "or new_track_spec"
+    if action != "switch":
+        raise RuntimeError(
+            f"meta_judgment_dispatch: unknown action '{action}'. "
+            "Expected one of: continue, switch."
+        )
+
+    # ---- action == "switch" ----
+    disposition = (current_disposition or "pause").strip().lower()
+    if disposition not in _VALID_DISPOSITIONS:
+        raise RuntimeError(
+            f"meta_judgment_dispatch: invalid current_disposition "
+            f"'{current_disposition}'. Expected one of: pause, complete, abort."
+        )
+
+    # Resolve target: either an existing track_id or a new one from the spec.
+    target_id: Optional[str] = (switch_to_track_id or "").strip() or None
+    if target_id is None and isinstance(new_track_spec, dict) and new_track_spec:
+        target_id = _create_track_from_spec(new_track_spec)
+
+    # Resolve the currently-running Track (None if persona has no running Track).
+    running = _track_manager.get_running(persona_id)
+    running_id = running.track_id if running is not None else None
+
+    deferred_any = False
+    applied: list[str] = []
+
+    # 1. Apply current_disposition to running Track.
+    #    Skip if there is no running Track. When disposition=pause AND we are
+    #    going to activate a target, TrackManager.activate auto-pauses the
+    #    running one — we skip the explicit pause op to avoid a double-pause.
+    if running_id is not None:
+        skip_pause = (disposition == "pause" and target_id is not None)
+        if not skip_pause:
+            op_result = apply_track_op(
+                pulse_ctx, disposition,
+                track_id=running_id, track_manager=_track_manager,
             )
-        # Promote the discardable row to committed (Phase 1.3) so the move
-        # history shows up in the destination Track's main cache.
-        promoted = _promote_message_to_committed(judgment_message_id) \
-            if judgment_message_id else False
+            deferred_any = deferred_any or op_result.deferred
+            applied.append(f"{disposition}({running_id[:8]}…)")
 
-        # Auto-pause whatever is running, then activate the target.
-        # TrackManager.activate already does the auto-pause atomically — we
-        # don't need a separate 'pause' op. Enqueueing both would risk the
-        # current running being paused twice.
-        enqueue_or_warn(pulse_ctx, "activate", track_id=target_id)
-
-        result = {
-            "action": "switch",
-            "target_track_id": target_id,
-            "promoted": promoted,
-            "judgment_message_id": judgment_message_id,
-        }
-        return (
-            f"Meta judgment: switch to track {target_id[:8]}…. {DEFERRED_NOTICE}",
-            ToolResult(history_snippet=json.dumps(result, ensure_ascii=False)),
-            None,
+    # 2. Activate target if we have one.
+    if target_id is not None:
+        op_result = apply_track_op(
+            pulse_ctx, "activate",
+            track_id=target_id, track_manager=_track_manager,
         )
+        deferred_any = deferred_any or op_result.deferred
+        applied.append(f"activate({target_id[:8]}…)")
 
-    if action == "wait":
-        # The current running Track moves to waiting at Pulse completion.
-        # We use 'pause' here as the deferred-op vocabulary doesn't yet
-        # include 'wait' — Phase 1.3 keeps wait routing minimal: pause
-        # the current Track and let the next meta-judgment iteration pick
-        # up the waiting decision once external events arrive.
-        if pulse_ctx and switch_to_track_id:
-            enqueue_or_warn(pulse_ctx, "pause", track_id=switch_to_track_id)
-        return (
-            f"Meta judgment: wait. Current Track will pause. {DEFERRED_NOTICE}",
-            ToolResult(history_snippet=json.dumps(
-                {"action": "wait", "target": switch_to_track_id},
-                ensure_ascii=False,
-            )),
-            None,
-        )
+    # 3. Promote the discardable row to committed (Phase 1.3) so the move
+    #    history shows up in the destination Track's main cache.
+    promoted = (
+        _promote_message_to_committed(judgment_message_id)
+        if judgment_message_id else False
+    )
 
-    if action == "close":
-        target_id = switch_to_track_id
-        if not target_id:
-            raise RuntimeError(
-                "meta_judgment_dispatch action='close' requires switch_to_track_id "
-                "(the track to close)"
-            )
-        enqueue_or_warn(pulse_ctx, "complete", track_id=target_id)
-        return (
-            f"Meta judgment: close track {target_id[:8]}…. "
-            f"reason={close_reason or '(unspecified)'}. {DEFERRED_NOTICE}",
-            ToolResult(history_snippet=json.dumps(
-                {"action": "close", "target": target_id, "reason": close_reason},
-                ensure_ascii=False,
-            )),
-            None,
-        )
+    summary_parts = [f"disposition={disposition}"]
+    if target_id:
+        summary_parts.append(f"target={target_id[:8]}…")
+    else:
+        summary_parts.append("target=(no active track)")
+    if disposition == "complete" and close_reason:
+        summary_parts.append(f"reason={close_reason}")
 
-    raise RuntimeError(
-        f"meta_judgment_dispatch: unknown action '{action}'. "
-        f"Expected one of: continue, switch, wait, close."
+    notice = DEFERRED_NOTICE if deferred_any else "Applied immediately."
+    summary = "Meta judgment: switch [" + ", ".join(summary_parts) + f"]. {notice}"
+
+    result_payload = {
+        "action": "switch",
+        "current_disposition": disposition,
+        "target_track_id": target_id,
+        "running_track_id": running_id,
+        "applied_ops": applied,
+        "promoted": promoted,
+        "judgment_message_id": judgment_message_id,
+        "deferred": deferred_any,
+    }
+    if disposition == "complete" and close_reason:
+        result_payload["close_reason"] = close_reason
+
+    return (
+        summary,
+        ToolResult(history_snippet=json.dumps(result_payload, ensure_ascii=False)),
+        None,
     )
 
 
@@ -263,23 +285,31 @@ def schema() -> ToolSchema:
         name="meta_judgment_dispatch",
         description=(
             "Apply the structured decision emitted by the meta-judgment LLM "
-            "(continue / switch / wait / close). Phase 1.2/1.3."
+            "(continue / switch). On switch, the currently-running Track is "
+            "disposed of via current_disposition (pause/complete/abort), then "
+            "switch_to_track_id or new_track_spec activates the next Track "
+            "(both omitted = land on no active Track)."
         ),
         parameters={
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["continue", "switch", "wait", "close"],
+                    "enum": ["continue", "switch"],
                     "description": "Decision from the meta-judgment node.",
                 },
                 "switch_to_track_id": {
                     "type": "string",
-                    "description": "Target Track id (switch / wait / close).",
+                    "description": "Existing Track id to activate on switch (omit for new spec or no-target switch).",
                 },
                 "new_track_spec": {
                     "type": "object",
                     "description": "Spec for creating a new Track when switching.",
+                },
+                "current_disposition": {
+                    "type": "string",
+                    "enum": ["pause", "complete", "abort"],
+                    "description": "How to dispose of the currently-running Track on switch (default pause).",
                 },
                 "notify_to_track": {
                     "type": "string",
@@ -287,7 +317,7 @@ def schema() -> ToolSchema:
                 },
                 "close_reason": {
                     "type": "string",
-                    "description": "Optional reason text when action='close'.",
+                    "description": "Optional reason text when current_disposition='complete'.",
                 },
                 "judgment_message_id": {
                     "type": "string",

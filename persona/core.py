@@ -53,7 +53,7 @@ class PersonaCore(
         session_factory: Callable,
         is_visitor: bool = False,
         home_city_id: Optional[str] = None, # ★ 故郷のCity ID
-        interaction_mode: str = "auto", # ★ 現在の対話モード
+        activity_state: str = "Idle", # ★ ペルソナのアクティビティ状態 (Stop/Sleep/Idle/Active)
         is_dispatched: bool = False, # ★ このペルソナが他のCityに派遣中かどうかのフラグ
         emotion_prompt_path: Optional[Path] = None,
         action_priority_path: Path = Path("builtin_data/action_priority.json"),
@@ -83,7 +83,7 @@ class PersonaCore(
         self.linked_user_name = linked_user_name
         self.is_visitor = is_visitor
         self.is_dispatched = is_dispatched
-        self.interaction_mode = interaction_mode
+        self.activity_state = activity_state
         self.home_city_id = home_city_id # ★ 故郷の情報を記憶
         self.SessionLocal = session_factory
         self.buildings: Dict[str, Building] = {b.building_id: b for b in buildings}

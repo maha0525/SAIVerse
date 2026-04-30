@@ -186,8 +186,8 @@ def test_personas():
 
         for p in found_personas:
             model = p.get("DEFAULT_MODEL", "default")
-            mode = p.get("INTERACTION_MODE", "unknown")
-            print(f"  Found: {p.get('AINAME')} (ID: {p.get('AIID')}, model: {model}, mode: {mode})")
+            state = p.get("ACTIVITY_STATE", "unknown")
+            print(f"  Found: {p.get('AINAME')} (ID: {p.get('AIID')}, model: {model}, state: {state})")
 
         if missing_personas:
             print(f"  FAIL: Missing personas: {missing_personas}")

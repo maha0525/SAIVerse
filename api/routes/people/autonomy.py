@@ -13,9 +13,8 @@ class AutonomyStatusResponse(BaseModel):
     persona_id: str
     state: str
     interval_minutes: float
-    decision_model: Optional[str] = None
-    execution_model: Optional[str] = None
-    stelis_thread_id: Optional[str] = None
+    decision_model: Optional[str] = None  # Phase C-2 移行で no-op (互換のため残存)
+    execution_model: Optional[str] = None  # Phase C-2 移行で no-op (互換のため残存)
     current_cycle_id: Optional[str] = None
     last_report: Optional[dict] = None
 

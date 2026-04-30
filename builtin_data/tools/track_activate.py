@@ -14,7 +14,7 @@ from typing import Tuple
 
 from _track_common import (
     DEFERRED_NOTICE,
-    enqueue_or_warn,
+    apply_track_op,
     get_pulse_context,
 )
 from database.session import SessionLocal
@@ -34,15 +34,24 @@ def track_activate(track_id: str) -> Tuple[str, ToolResult, None]:
 
     Within a Pulse: enqueued onto PulseContext.deferred_track_ops; runtime
     applies it at Pulse completion.
-    Outside a Pulse (CLI / tests): runs immediately for backward compatibility.
+    Outside a Pulse (CLI / tests / MetaLayer-spawned Playbook): immediate.
     """
     if not get_active_persona_id():
         raise RuntimeError(
             "Active persona context is not set. Use tools.context.persona_context()."
         )
 
-    pulse_ctx = get_pulse_context()
-    if enqueue_or_warn(pulse_ctx, "activate", track_id=track_id):
+    try:
+        result = apply_track_op(
+            get_pulse_context(), "activate",
+            track_id=track_id, track_manager=_track_manager,
+        )
+    except TrackNotFoundError as exc:
+        raise RuntimeError(str(exc)) from exc
+    except InvalidTrackStateError as exc:
+        raise RuntimeError(f"track_activate failed: {exc}") from exc
+
+    if result.deferred:
         snippet = ToolResult(
             history_snippet=json.dumps(
                 {"track_id": track_id, "queued": "activate"},
@@ -56,14 +65,7 @@ def track_activate(track_id: str) -> Tuple[str, ToolResult, None]:
             None,
         )
 
-    # Fallback: no PulseContext (CLI / direct test) — immediate execution.
-    try:
-        track = _track_manager.activate(track_id)
-    except TrackNotFoundError as exc:
-        raise RuntimeError(str(exc)) from exc
-    except InvalidTrackStateError as exc:
-        raise RuntimeError(f"track_activate failed: {exc}") from exc
-
+    track = result.track
     snippet = ToolResult(
         history_snippet=json.dumps(
             {"track_id": track.track_id, "status": track.status, "title": track.title},

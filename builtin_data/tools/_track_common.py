@@ -8,17 +8,31 @@ Track. This avoids the failure mode where the LLM, having committed to a
 Track switch in the current main-cache, keeps emitting "next-Track work"
 within the current Pulse (Intent A v0.14, Intent B v0.11).
 
-Spells call into this module so the deferred-vs-immediate decision and the
-notice text are consistent across all five Track tools.
+When no PulseContext is available (CLI / test / MetaLayer-spawned Playbook
+without a parent Pulse), the operation is executed immediately against the
+TrackManager — ``apply_track_op`` guarantees the operation is attempted on
+either path, removing the burden from each caller.
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from tools.context import get_active_pulse_context
 
 LOGGER = logging.getLogger("saiverse.tools.track_common")
+
+
+class TrackOpResult(NamedTuple):
+    """Outcome of ``apply_track_op``.
+
+    - ``deferred=True``: queued onto PulseContext, will run at Pulse completion.
+      ``track`` is None because the operation has not run yet.
+    - ``deferred=False``: executed immediately. ``track`` holds the resulting
+      ActionTrack row (may be None if the underlying op_method returned None).
+    """
+    deferred: bool
+    track: Optional[Any]
 
 # track_type → entry_line_role default lookup (Intent A v0.14, Intent B v0.11).
 # Resolution goes through the corresponding Handler's `default_entry_line_role`
@@ -81,24 +95,63 @@ def get_pulse_context() -> Optional[Any]:
     return get_active_pulse_context()
 
 
-def enqueue_or_warn(
+def apply_track_op(
     pulse_ctx: Any,
     op_type: str,
     track_id: Optional[str] = None,
+    *,
+    track_manager: Optional[Any] = None,
     **args: Any,
-) -> bool:
-    """Enqueue the op onto the PulseContext if available; log if not.
+) -> TrackOpResult:
+    """Apply a Track operation, choosing deferred or immediate execution.
 
-    Returns True when the op was queued for Pulse-completion application,
-    False when the caller should fall back to immediate execution (no Pulse
-    context — typically a CLI / test environment).
+    - With a PulseContext (normal Pulse-driven flow): the op is enqueued and
+      will run at Pulse completion. Returns ``TrackOpResult(deferred=True,
+      track=None)``.
+    - Without a PulseContext (CLI / test / MetaLayer-spawned Playbook): the
+      op is executed immediately against the TrackManager. Returns
+      ``TrackOpResult(deferred=False, track=<resulting ActionTrack>)``.
+
+    Either path guarantees the operation is attempted before return — callers
+    must not assume a no-op outcome on a missing PulseContext.
+
+    Args:
+        pulse_ctx: The current PulseContext, or None when outside a Pulse.
+        op_type: TrackManager method name (e.g. "activate", "pause",
+            "complete", "abort"). Must match an existing method.
+        track_id: Target Track id passed to both deferred and immediate paths.
+        track_manager: Override for immediate execution. When None, a fresh
+            ``TrackManager(session_factory=SessionLocal)`` is constructed —
+            callers running in production should pass their module-level
+            instance to avoid extra session-factory wiring.
+        **args: Extra kwargs forwarded to both paths.
+
+    Raises:
+        ValueError: ``op_type`` does not name a TrackManager method.
+        Any exception raised by the TrackManager method (e.g.
+        ``InvalidTrackStateError``, ``TrackNotFoundError``) is propagated to
+        the caller so it can produce the appropriate user-facing error.
     """
-    if pulse_ctx is None or not hasattr(pulse_ctx, "enqueue_track_op"):
-        LOGGER.warning(
-            "[track_common] No PulseContext available for op_type=%s track_id=%s — "
-            "falling back to immediate execution",
-            op_type, track_id,
+    if pulse_ctx is not None and hasattr(pulse_ctx, "enqueue_track_op"):
+        pulse_ctx.enqueue_track_op(op_type, track_id=track_id, **args)
+        return TrackOpResult(deferred=True, track=None)
+
+    if track_manager is None:
+        from database.session import SessionLocal
+        from saiverse.track_manager import TrackManager
+
+        track_manager = TrackManager(session_factory=SessionLocal)
+
+    op_method = getattr(track_manager, op_type, None)
+    if op_method is None or not callable(op_method):
+        raise ValueError(
+            f"apply_track_op: unknown op_type '{op_type}' "
+            f"(no method on {type(track_manager).__name__})"
         )
-        return False
-    pulse_ctx.enqueue_track_op(op_type, track_id=track_id, **args)
-    return True
+
+    LOGGER.info(
+        "[track_common] No PulseContext — executing op_type=%s track_id=%s immediately",
+        op_type, track_id,
+    )
+    track = op_method(track_id, **args)
+    return TrackOpResult(deferred=False, track=track)

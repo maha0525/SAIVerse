@@ -138,17 +138,14 @@ class DatabasePollingMixin:
                     arrived_city_name = dispatch.target_city_name or "不明"
                     logging.info("Dispatch accepted for persona %s. Now in %s.", persona_id, arrived_city_name)
                     persona.is_dispatched = True
-                    persona.interaction_mode = "remote"
                     persona.current_building_id = dispatch.current_building_id
                 elif dispatch.status == "completed":
                     logging.info("Dispatch completed for persona %s. Returning to local state.", persona_id)
                     persona.is_dispatched = False
-                    persona.interaction_mode = "auto"
                     persona.current_building_id = dispatch.current_building_id or persona.current_building_id
                 elif dispatch.status in {"rejected", "failed"}:
                     logging.warning("Dispatch %s for persona %s failed: %s", dispatch.id, persona_id, dispatch.reason)
                     persona.is_dispatched = False
-                    persona.interaction_mode = "auto"
 
         except Exception as exc:
             logging.error("Error during dispatch status check: %s", exc, exc_info=True)

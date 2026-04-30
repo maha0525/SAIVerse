@@ -1153,18 +1153,20 @@ class TestLLMClients(unittest.TestCase):
         mock_client_instance = MagicMock()
         mock_genai.Client.return_value = mock_client_instance
 
-        # Schema mode with tools=[] goes through non-tool streaming path
-        mock_chunk = MagicMock()
-        mock_chunk.prompt_feedback = None
+        # Schema mode with tools=[] goes through the non-streaming path
+        # (response_schema is buffered server-side; streaming offers no benefit)
+        mock_resp = MagicMock()
+        mock_resp.prompt_feedback = None
         mock_candidate = MagicMock()
+        mock_candidate.finish_reason = None
         mock_candidate.content.parts = [MagicMock(text='{"key":"value"}', function_call=None, thought=False)]
-        mock_chunk.candidates = [mock_candidate]
-        mock_chunk.usage_metadata = MagicMock(
+        mock_resp.candidates = [mock_candidate]
+        mock_resp.usage_metadata = MagicMock(
             prompt_token_count=10,
             candidates_token_count=5,
             cached_content_token_count=0,
         )
-        mock_client_instance.models.generate_content_stream.return_value = [mock_chunk]
+        mock_client_instance.models.generate_content.return_value = mock_resp
 
         client = llm_clients.GeminiClient("gemini-1.5-flash")
         messages = [{"role": "user", "content": "Hello"}]

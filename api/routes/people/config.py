@@ -30,7 +30,7 @@ def get_persona_config(persona_id: str, manager = Depends(get_manager)):
         system_prompt=details["SYSTEMPROMPT"] or "",
         default_model=details["DEFAULT_MODEL"],
         lightweight_model=details.get("LIGHTWEIGHT_MODEL"),
-        interaction_mode=details["INTERACTION_MODE"],
+        activity_state=details["ACTIVITY_STATE"],
         chronicle_enabled=details.get("CHRONICLE_ENABLED", True),
         memory_weave_context=details.get("MEMORY_WEAVE_CONTEXT", True),
         spell_enabled=details.get("SPELL_ENABLED", False),
@@ -59,7 +59,7 @@ def update_persona_config(
     new_model = (req.default_model or None) if req.default_model is not None else current["DEFAULT_MODEL"]
     
     new_lightweight_model = (req.lightweight_model or None) if req.lightweight_model is not None else current.get("LIGHTWEIGHT_MODEL")
-    new_mode = req.interaction_mode if req.interaction_mode is not None else current["INTERACTION_MODE"]
+    new_state = req.activity_state if req.activity_state is not None else current["ACTIVITY_STATE"]
     new_avatar = req.avatar_path if req.avatar_path is not None else current.get("AVATAR_IMAGE")
     new_appearance = req.appearance_image_path if req.appearance_image_path is not None else current.get("APPEARANCE_IMAGE_PATH")
     
@@ -75,7 +75,7 @@ def update_persona_config(
         home_city_id=current["HOME_CITYID"],
         default_model=new_model,
         lightweight_model=new_lightweight_model,
-        interaction_mode=new_mode,
+        activity_state=new_state,
         avatar_path=new_avatar,
         avatar_upload=None,
         appearance_image_path=new_appearance,

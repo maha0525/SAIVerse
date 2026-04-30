@@ -1817,8 +1817,15 @@ class SEARuntime:
         unprocessed_count = qualifying_batches * batch_size_for_estimate
         estimated_llm_calls = qualifying_batches
 
-        # Request user confirmation before generating
-        if event_callback:
+        # Request user confirmation before generating.
+        # Only valid when the current Pulse is a user-driven request — only
+        # then is there a frontend listening for chronicle_confirm and a user
+        # actually positioned to answer the dialog. Pulses spawned by
+        # MetaLayer / autonomy / schedule pass an event_callback (for internal
+        # event capture / progress notifications) but no UI is attached, so
+        # waiting on confirm_event would just stall for the full timeout.
+        pulse_type = getattr(persona, "_current_pulse_type", None)
+        if event_callback and pulse_type == "user":
             import threading as _threading
 
             request_id = str(uuid.uuid4())
@@ -1860,8 +1867,13 @@ class SEARuntime:
                 return
             LOGGER.info("[metabolism] Chronicle generation approved by user")
         else:
-            # No event_callback (e.g. auto pulse without UI) — skip generation
-            LOGGER.info("[metabolism] No event_callback — skipping Chronicle generation confirmation (%d unprocessed)", unprocessed_count)
+            # No interactive route available — skip without waiting.
+            # (auto / schedule / meta_judgment pulses, or pure CLI runs)
+            LOGGER.info(
+                "[metabolism] Skipping Chronicle generation confirmation "
+                "(pulse_type=%s, event_callback=%s, %d unprocessed)",
+                pulse_type, event_callback is not None, unprocessed_count,
+            )
             return
 
         # Notify frontend that generation is starting

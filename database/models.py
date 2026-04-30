@@ -40,20 +40,19 @@ class AI(Base):
     EMOTION = Column(String(1024))  # JSON形式で保存
     AUTO_COUNT = Column(Integer, default=0, nullable=False)
     LAST_AUTO_PROMPT_TIMES = Column(String(2048)) # JSON形式で保存
-    INTERACTION_MODE = Column(String(32), default='auto', nullable=False) # auto / user
     IS_DISPATCHED = Column(Boolean, default=False, nullable=False)
     DEFAULT_MODEL = Column(String(255), nullable=True)
     LIGHTWEIGHT_MODEL = Column(String(255), nullable=True)
     LIGHTWEIGHT_VISION_MODEL = Column(String(255), nullable=True)
     VISION_MODEL = Column(String(255), nullable=True)
     PRIVATE_ROOM_ID = Column(String(255), ForeignKey("building.BUILDINGID"), nullable=True)
-    PREVIOUS_INTERACTION_MODE = Column(String(32), default='auto', nullable=False)
     CHRONICLE_ENABLED = Column(Boolean, default=True, nullable=False)  # Per-persona Chronicle auto-generation toggle
     MEMORY_WEAVE_CONTEXT = Column(Boolean, default=True, nullable=False)  # Per-persona Memory Weave context injection toggle
     SPELL_ENABLED = Column(Boolean, default=False, nullable=False)  # Per-persona spell system toggle
     METABOLISM_ANCHORS = Column(Text, nullable=True)  # JSON: per-model anchor state {"model": {"anchor_id": "...", "updated_at": "..."}}
-    # Cognitive model (Intent A v0.9 / Intent B v0.6)
-    # ACTIVITY_STATE: Stop / Sleep / Idle / Active. Eventually replaces INTERACTION_MODE (kept during transition).
+    # Cognitive model (Intent A v0.9 / Intent B v0.6): ACTIVITY_STATE 4-state
+    # 'Stop' (機能停止) / 'Sleep' (寝てる、ユーザー発言で起きる) /
+    # 'Idle' (起きてるが自発的には行動しない) / 'Active' (活発に自律稼働)
     ACTIVITY_STATE = Column(String(32), default='Idle', nullable=False)
     # When TRUE, an Idle persona transitions to Sleep automatically once the heavyweight
     # model cache TTL has elapsed. Protects against runaway API costs on idle personas.

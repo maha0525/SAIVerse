@@ -546,6 +546,55 @@ class TrackManager:
         return self._set_forgotten(track_id, False)
 
     # ------------------------------------------------------------------
+    # Phase C-2: Track パラメータ機構 (intent B v0.7 §"Track パラメータ機構の実装方針")
+    # ------------------------------------------------------------------
+
+    def set_parameter(
+        self, track_id: str, parameter_name: str, value: float
+    ) -> ActionTrack:
+        """``action_tracks.metadata.parameters[name] = value`` を更新する。
+
+        Track パラメータは連続値 (0.0〜1.0 推奨) で、メタレイヤー判断時に
+        プロンプトに含められる + 内部 alert ポーラの閾値判定に使われる。
+        intent B v0.7 §"Track パラメータ機構".
+        """
+        if not parameter_name:
+            raise ValueError("parameter_name is required")
+        try:
+            float_value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"value must be numeric, got {value!r}") from exc
+
+        db = self.SessionLocal()
+        try:
+            track = self._fetch_or_raise(db, track_id)
+            try:
+                metadata = json.loads(track.track_metadata) if track.track_metadata else {}
+            except (TypeError, ValueError):
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            params = metadata.get("parameters")
+            if not isinstance(params, dict):
+                params = {}
+            params[parameter_name] = float_value
+            metadata["parameters"] = params
+            track.track_metadata = json.dumps(metadata, ensure_ascii=False)
+            db.commit()
+            db.refresh(track)
+            db.expunge(track)
+            logging.info(
+                "[track] parameter set: %s.parameters[%s]=%s",
+                track_id, parameter_name, float_value,
+            )
+            return track
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    # ------------------------------------------------------------------
     # 内部ヘルパ
     # ------------------------------------------------------------------
 

@@ -717,7 +717,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 "IS_DISPATCHED": ai.IS_DISPATCHED,
                 "DEFAULT_MODEL": ai.DEFAULT_MODEL,
                 "LIGHTWEIGHT_MODEL": ai.LIGHTWEIGHT_MODEL,
-                "INTERACTION_MODE": ai.INTERACTION_MODE,
+                "ACTIVITY_STATE": ai.ACTIVITY_STATE,
                 "CHRONICLE_ENABLED": ai.CHRONICLE_ENABLED,
                 "MEMORY_WEAVE_CONTEXT": ai.MEMORY_WEAVE_CONTEXT,
                 "SPELL_ENABLED": ai.SPELL_ENABLED,
@@ -756,7 +756,7 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
         home_city_id: int,
         default_model: Optional[str],
         lightweight_model: Optional[str],
-        interaction_mode: str,
+        activity_state: str,
         avatar_path: Optional[str],
         avatar_upload: Optional[str],
         appearance_image_path: Optional[str] = None,
@@ -790,66 +790,66 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                     )
                     return f"Error: Failed to process avatar upload: {exc}"
 
-            original_mode = ai.INTERACTION_MODE
-            mode_changed = original_mode != interaction_mode
+            original_state = ai.ACTIVITY_STATE
+            state_changed = original_state != activity_state
             move_feedback = ""
 
-            if mode_changed:
-                if interaction_mode == "sleep":
-                    ai.INTERACTION_MODE = "sleep"
-                    logging.info(
-                        "AI '%s' mode changed to 'sleep'. Attempting to move to private room.",
-                        name,
-                    )
-
-                    private_room_id = ai.PRIVATE_ROOM_ID
-                    if not private_room_id or private_room_id not in self.building_map:
-                        move_feedback = (
-                            " Note: Could not move to private room because it is not "
-                            "configured or invalid."
-                        )
-                        logging.warning(
-                            "Cannot move AI '%s' to sleep. Private room ID '%s' is invalid.",
-                            name,
-                            private_room_id,
-                        )
-                    else:
-                        current_building_id = self.personas[ai_id].current_building_id
-                        if current_building_id != private_room_id:
-                            success, reason = self._move_persona(
-                                ai_id,
-                                current_building_id,
-                                private_room_id,
-                                db_session=db,
-                            )
-                            if success:
-                                self.personas[ai_id].current_building_id = private_room_id
-                                move_feedback = (
-                                    " Moved to private room "
-                                    f"'{self.building_map[private_room_id].name}'."
-                                )
-                                logging.info(
-                                    "Successfully moved AI '%s' to their private room '%s'.",
-                                    name,
-                                    private_room_id,
-                                )
-                            else:
-                                move_feedback = (
-                                    f" Note: Failed to move to private room: {reason}."
-                                )
-                                logging.error(
-                                    "Failed to move AI '%s' to private room: %s",
-                                    name,
-                                    reason,
-                                )
-                elif interaction_mode in ("auto", "manual"):
-                    ai.INTERACTION_MODE = interaction_mode
-                else:
+            VALID_STATES = {"Stop", "Sleep", "Idle", "Active"}
+            if state_changed:
+                if activity_state not in VALID_STATES:
                     logging.warning(
-                        "Invalid interaction mode '%s' requested for AI '%s'. No change made.",
-                        interaction_mode,
+                        "Invalid activity_state '%s' requested for AI '%s'. No change made.",
+                        activity_state,
                         name,
                     )
+                else:
+                    ai.ACTIVITY_STATE = activity_state
+                    if activity_state == "Sleep":
+                        logging.info(
+                            "AI '%s' state changed to 'Sleep'. Attempting to move to private room.",
+                            name,
+                        )
+
+                        private_room_id = ai.PRIVATE_ROOM_ID
+                        if not private_room_id or private_room_id not in self.building_map:
+                            move_feedback = (
+                                " Note: Could not move to private room because it is not "
+                                "configured or invalid."
+                            )
+                            logging.warning(
+                                "Cannot move AI '%s' to sleep. Private room ID '%s' is invalid.",
+                                name,
+                                private_room_id,
+                            )
+                        else:
+                            current_building_id = self.personas[ai_id].current_building_id
+                            if current_building_id != private_room_id:
+                                success, reason = self._move_persona(
+                                    ai_id,
+                                    current_building_id,
+                                    private_room_id,
+                                    db_session=db,
+                                )
+                                if success:
+                                    self.personas[ai_id].current_building_id = private_room_id
+                                    move_feedback = (
+                                        " Moved to private room "
+                                        f"'{self.building_map[private_room_id].name}'."
+                                    )
+                                    logging.info(
+                                        "Successfully moved AI '%s' to their private room '%s'.",
+                                        name,
+                                        private_room_id,
+                                    )
+                                else:
+                                    move_feedback = (
+                                        f" Note: Failed to move to private room: {reason}."
+                                    )
+                                    logging.error(
+                                        "Failed to move AI '%s' to private room: %s",
+                                        name,
+                                        reason,
+                                    )
 
             ai.AINAME = name
             ai.DESCRIPTION = description
@@ -877,8 +877,25 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
                 persona = self.personas[ai_id]
                 persona.persona_name = name
                 persona.persona_system_instruction = system_prompt
-                persona.interaction_mode = ai.INTERACTION_MODE
+                persona.activity_state = ai.ACTIVITY_STATE
                 persona.lightweight_model = lightweight_model
+
+                # Phase C-2: ACTIVITY_STATE 変更を AutonomyManager に反映
+                # (Active なら起動、Active 以外なら停止)。
+                # ``ensure_autonomy_for`` は SAIVerseManager のメソッドのため、
+                # AdminService からは ``self.manager`` 経由で呼び出す。
+                if state_changed:
+                    try:
+                        ensure_autonomy = getattr(
+                            self.manager, "ensure_autonomy_for", None
+                        )
+                        if callable(ensure_autonomy):
+                            ensure_autonomy(ai_id)
+                    except Exception:
+                        logging.warning(
+                            "Failed to sync AutonomyManager state for '%s'",
+                            ai_id, exc_info=True,
+                        )
 
                 # Update default model and recreate LLM client if model changed
                 # If a global chat-option override is active, preserve it;
@@ -945,9 +962,9 @@ class AdminService(BlueprintMixin, HistoryMixin, PersonaMixin):
             status_message = f"AI '{name}' updated successfully."
             if llm_warnings:
                 status_message += " [WARNING:LLM] " + "; ".join(llm_warnings)
-            if mode_changed:
+            if state_changed:
                 status_message += (
-                    f" Mode changed from '{original_mode}' to '{interaction_mode}'."
+                    f" State changed from '{original_state}' to '{activity_state}'."
                 )
             return status_message + move_feedback
         except Exception as exc:

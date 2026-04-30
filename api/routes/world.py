@@ -75,7 +75,7 @@ class AIUpdate(BaseModel):
     home_city_id: int
     default_model: Optional[str]
     lightweight_model: Optional[str]
-    interaction_mode: str
+    activity_state: str  # 'Stop' / 'Sleep' / 'Idle' / 'Active'
     avatar_path: Optional[str]
     appearance_image_path: Optional[str] = None  # Persona appearance image for LLM visual context
     chronicle_enabled: Optional[bool] = None
@@ -168,7 +168,7 @@ def create_ai(ai: AICreate, manager: SAIVerseManager = Depends(get_manager)):
 
 @router.put("/ais/{ai_id}")
 def update_ai(ai_id: str, ai: AIUpdate, manager: SAIVerseManager = Depends(get_manager)):
-    return _check_result(manager.update_ai(ai_id, ai.name, ai.description, ai.system_prompt, ai.home_city_id, ai.default_model, ai.lightweight_model, ai.interaction_mode, ai.avatar_path, None, ai.appearance_image_path, chronicle_enabled=ai.chronicle_enabled, spell_enabled=ai.spell_enabled))
+    return _check_result(manager.update_ai(ai_id, ai.name, ai.description, ai.system_prompt, ai.home_city_id, ai.default_model, ai.lightweight_model, ai.activity_state, ai.avatar_path, None, ai.appearance_image_path, chronicle_enabled=ai.chronicle_enabled, spell_enabled=ai.spell_enabled))
 
 @router.delete("/ais/{ai_id}")
 def delete_ai(ai_id: str, manager: SAIVerseManager = Depends(get_manager)):

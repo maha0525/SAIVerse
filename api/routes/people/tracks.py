@@ -1,8 +1,8 @@
 """Tracks viewer API (Intent A v0.14, Intent B v0.11 — action_track 一覧表示).
 
 Phase 0 で Track 機構が実運用に乗り始めたので、ペルソナの Track 状態を UI から
-覗くデバッグ・検証用エンドポイント。読み取り専用 (= 中止 / 削除等の操作機能は
-別案件)。
+覗くデバッグ・検証用エンドポイント。検証目的に限り、最小限の状態遷移操作
+(running/alert → pending) も提供する。
 """
 import json
 from collections import Counter
@@ -12,6 +12,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from api.deps import get_manager
 from database.models import ActionTrack
+from saiverse.track_manager import (
+    InvalidTrackStateError,
+    PersistentTrackError,
+    TrackNotFoundError,
+)
 
 from .models import TrackItem, TracksResponse, TracksStatusCount
 
@@ -127,3 +132,38 @@ def get_tracks(
         )
     finally:
         db.close()
+
+
+@router.post("/{persona_id}/tracks/{track_id}/pause", response_model=TrackItem)
+def pause_track(
+    persona_id: str,
+    track_id: str,
+    manager=Depends(get_manager),
+):
+    """Pause a running/alert Track (→ pending).
+
+    検証用: メタ判断 alert からの遷移を手動で再現するため、UI から running の
+    対ユーザー Track を pending に戻す操作を提供する。Track が他ペルソナのもの
+    だった場合は 404、状態遷移が許可されない場合は 409 を返す。
+    """
+    track_manager = getattr(manager, "track_manager", None)
+    if track_manager is None:
+        raise HTTPException(status_code=503, detail="track_manager not initialized")
+    try:
+        existing = track_manager.get(track_id)
+    except TrackNotFoundError:
+        raise HTTPException(status_code=404, detail=f"track not found: {track_id}")
+    if existing.persona_id != persona_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"track {track_id} does not belong to persona {persona_id}",
+        )
+    try:
+        track = track_manager.pause(track_id)
+    except TrackNotFoundError:
+        raise HTTPException(status_code=404, detail=f"track not found: {track_id}")
+    except InvalidTrackStateError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except PersistentTrackError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return _to_item(track)

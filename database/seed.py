@@ -165,7 +165,7 @@ def _create_city_data(db, city_name: str, city_id: int, city_config: dict, usern
             SYSTEMPROMPT=p_def.get("system_prompt", ""),
             DESCRIPTION=p_def.get("description", ""),
             AUTO_COUNT=0,
-            INTERACTION_MODE=p_def.get("interaction_mode", "auto"),
+            ACTIVITY_STATE=p_def.get("activity_state", "Idle"),
             DEFAULT_MODEL=p_def.get("default_model"),
         )
         ai_objects.append((ai, p_def))

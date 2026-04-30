@@ -2,16 +2,17 @@
 
 Intent A v0.9 / Intent B v0.6 で導入された Phase C-1 の最小実装に、
 Phase 1.2 (Intent A v0.14, Intent B v0.11) で **Playbook 経由の判断 path** を
-追加した二刀流構成:
+追加した二刀流構成。Phase C-2 完成 (2026-04-30) で Playbook path を既定に昇格:
 
-- 既定 (legacy path): 重量級モデルへ直接プロンプトを渡しスペル抽出ループ
-- Playbook path: ``meta_judgment.json`` を runtime に投げて構造化判断
-  (continue / switch / wait / close) を `meta_judgment_dispatch` ツールで適用
+- 既定 (Playbook path): ``meta_judgment.json`` を runtime に投げて構造化判断
+  (continue / switch) を `meta_judgment_dispatch` ツールで適用。switch 時の
+  現 Track 処遇は current_disposition (pause / complete / abort) で指定する。
+- 緊急避難 (legacy path): 重量級モデルへ直接プロンプトを渡しスペル抽出ループ
 
 切り替えは環境変数 ``SAIVERSE_META_LAYER_USE_PLAYBOOK`` で行う:
 
-- ``"1"`` / ``"true"`` (大文字小文字無視): Playbook path
-- それ以外 (未設定含む): legacy path
+- 未設定 / ``"1"`` / ``"true"`` / ``"yes"`` / ``"on"``: Playbook path (既定)
+- ``"0"`` / ``"false"`` / ``"no"`` / ``"off"``: legacy path (緊急避難)
 
 責務:
 - TrackManager の alert observer として登録され、alert 遷移を契機に起動する
@@ -125,13 +126,108 @@ class MetaLayer:
     def _use_playbook_path() -> bool:
         """Read the ``SAIVERSE_META_LAYER_USE_PLAYBOOK`` env flag.
 
-        Phase 1.2 introduces Playbook-based meta judgment as opt-in so live
-        personas keep working through the legacy path while the new flow is
-        validated. Phase 1.3+ flips the default once the dispatch tool is
-        battle-tested.
+        Phase C-2 完成 (2026-04-30) で Playbook 経路を既定に昇格。
+        legacy direct-LLM スペル loop は緊急避難用に残し、明示的に
+        ``SAIVERSE_META_LAYER_USE_PLAYBOOK=0/false/no/off`` を指定したときだけ
+        切り替わる。
         """
         raw = os.environ.get("SAIVERSE_META_LAYER_USE_PLAYBOOK", "").strip().lower()
-        return raw in ("1", "true", "yes", "on")
+        if raw in ("0", "false", "no", "off"):
+            return False
+        return True
+
+    # ------------------------------------------------------------------
+    # Phase C-2: 定期 tick エントリ (intent A v0.10 / intent B v0.7 §"メタレイヤーの定期実行入口")
+    # ------------------------------------------------------------------
+
+    def on_periodic_tick(
+        self,
+        persona_id: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """定期実行で呼ばれる入口。alert と同じ判断ループを共有する。
+
+        違いは context のみ:
+        - alert 入口: ``context = {"trigger": "user_utterance", ...}`` 等
+        - 定期入口:  ``context = {"trigger": "periodic_tick", ...}``
+
+        intent A v0.9 の ACTIVITY_STATE 表に従い、Active 以外のペルソナでは
+        発火しない。加えて、現在 running の Track の Handler が
+        ``post_complete_behavior == 'wait_response'`` を持つ場合、相手の応答待ち
+        中にメタ判断を割り込ませると自然な対話を壊すため、抑止する
+        (intent B v0.8 §"post_complete_behavior 列挙")。
+        """
+        try:
+            persona = self._lookup_persona(persona_id)
+            if persona is None:
+                return
+
+            # ACTIVITY_STATE 抑止: Active のみ定期発火 (intent A v0.9 表)
+            activity_state = getattr(persona, "activity_state", "Idle")
+            if activity_state != "Active":
+                logging.debug(
+                    "[meta-layer] periodic tick skipped (activity_state=%s != Active): persona=%s",
+                    activity_state, persona_id,
+                )
+                return
+
+            # post_complete_behavior 抑止: 応答待ち型の Track は割り込まない
+            running_track = self._get_running_track(persona_id)
+            if running_track is not None:
+                handler = self._get_handler_for_track(running_track)
+                behavior = getattr(handler, "post_complete_behavior", None) if handler else None
+                if behavior == "wait_response":
+                    logging.debug(
+                        "[meta-layer] periodic tick skipped (running Track wait_response): persona=%s track=%s",
+                        persona_id, getattr(running_track, "track_id", "?"),
+                    )
+                    return
+
+            merged_context = {"trigger": "periodic_tick"}
+            if context:
+                merged_context.update(context)
+
+            use_playbook = self._use_playbook_path()
+            logging.info(
+                "[meta-layer] Periodic tick starting: persona=%s path=%s context=%s",
+                persona_id,
+                "playbook" if use_playbook else "legacy",
+                merged_context.get("trigger"),
+            )
+            # alert_track_id="" は intent B 通り (定期 tick の場合は空文字列も可)
+            if use_playbook:
+                self._run_judgment_via_playbook(persona, "", merged_context)
+            else:
+                self._run_judgment(persona, "", merged_context)
+        except Exception:
+            logging.exception(
+                "[meta-layer] Periodic tick failed: persona=%s", persona_id,
+            )
+
+    def _get_running_track(self, persona_id: str) -> Optional[Any]:
+        """Return the persona's currently-running ActionTrack, or None."""
+        try:
+            from database.models import ActionTrack
+            db = self.manager.SessionLocal()
+            try:
+                return (
+                    db.query(ActionTrack)
+                    .filter(
+                        ActionTrack.persona_id == persona_id,
+                        ActionTrack.status == "running",
+                    )
+                    .first()
+                )
+            finally:
+                db.close()
+        except Exception:
+            logging.exception("[meta-layer] Failed to read running track for %s", persona_id)
+            return None
+
+    def _get_handler_for_track(self, track: Any) -> Optional[Any]:
+        """Resolve the Handler instance responsible for the given Track."""
+        from sea.pulse_root_context import get_handler_for_track
+        return get_handler_for_track(self.manager, track)
 
     # ------------------------------------------------------------------
     # Phase 1.2: Playbook-based judgment dispatch
@@ -182,24 +278,41 @@ class MetaLayer:
             "trigger_context": trigger_context_json,
         }
 
+        captured_errors: List[Dict[str, Any]] = []
+
+        def _capture_event(ev: Dict[str, Any]) -> None:
+            if isinstance(ev, dict) and ev.get("type") == "error":
+                captured_errors.append(ev)
+
         try:
             runtime.run_meta_user(
                 persona,
-                building_id,
                 user_input=None,
+                building_id=building_id,
                 meta_playbook="meta_judgment",
                 args=args,
+                event_callback=_capture_event,
                 pulse_type="meta_judgment",
-            )
-            logging.info(
-                "[meta-layer] meta_judgment Playbook completed: persona=%s alert_track=%s",
-                persona.persona_id, alert_track_id,
             )
         except Exception:
             logging.exception(
                 "[meta-layer] meta_judgment Playbook failed: persona=%s alert_track=%s",
                 persona.persona_id, alert_track_id,
             )
+            return
+
+        if captured_errors:
+            for err in captured_errors:
+                logging.error(
+                    "[meta-layer] meta_judgment Playbook emitted error: persona=%s alert_track=%s error=%s",
+                    persona.persona_id, alert_track_id, err,
+                )
+            return
+
+        logging.info(
+            "[meta-layer] meta_judgment Playbook completed: persona=%s alert_track=%s",
+            persona.persona_id, alert_track_id,
+        )
 
     # ------------------------------------------------------------------
     # 判断ループ (LLM + スペル)

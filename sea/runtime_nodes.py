@@ -59,8 +59,10 @@ def lg_tool_call_node(runtime: Any, node_def: Any, persona: Any, playbook: Any, 
             LOGGER.info("[sea][tool_call] CALL %s (persona=%s) args=%s", tool_name, persona_id, tool_args)
             # 直前の LLM speak ノードが保存した message_id を後続ツールに引き継ぐ。
             _current_msg_id = state.get("_last_message_id")
+            # PulseContext も state 経由で受け渡す (Intent A v0.14 deferred Track ops)。
+            _pulse_ctx = state.get("_pulse_context")
             if persona_id and persona_dir:
-                with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback, message_id=_current_msg_id):
+                with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback, message_id=_current_msg_id, pulse_context=_pulse_ctx):
                     result = await maybe_await_tool_result(tool_func, **tool_args)
             else:
                 result = await maybe_await_tool_result(tool_func, **tool_args)

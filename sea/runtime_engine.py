@@ -80,8 +80,11 @@ class RuntimeEngine:
                 # 引き継ぐ。persona_context は毎回 _MESSAGE_ID を強制的に書き換える
                 # ため、state 経由で明示的に渡さないとアドオン連携が切れる。
                 _current_msg_id = state.get("_last_message_id")
+                # PulseContext も同様に state 経由で受け渡す。track_*/meta_judgment_dispatch
+                # 等が「Pulse 完了時に deferred 適用」するために必須 (Intent A v0.14)。
+                _pulse_ctx = state.get("_pulse_context")
                 if persona_id and persona_dir:
-                    with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback, message_id=_current_msg_id):
+                    with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook.name, auto_mode=auto_mode, event_callback=event_callback, message_id=_current_msg_id, pulse_context=_pulse_ctx):
                         result = await maybe_await_tool_result(tool_func, **kwargs)
                 else:
                     result = await maybe_await_tool_result(tool_func, **kwargs)

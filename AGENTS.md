@@ -371,7 +371,7 @@ User data is stored outside the repository in `~/.saiverse/` (or `SAIVERSE_HOME`
 - **User**: login state, current location
 - **City**: UI_PORT, API_PORT, online mode flag
 - **Building**: capacity, system prompt, auto pulse interval
-- **AI**: home city, system prompt, emotion state, INTERACTION_MODE (auto/user/sleep), IS_DISPATCHED flag, DEFAULT_MODEL
+- **AI**: home city, system prompt, emotion state, ACTIVITY_STATE (Stop/Sleep/Idle/Active), IS_DISPATCHED flag, DEFAULT_MODEL
 - **BuildingOccupancyLog**: tracks entry/exit timestamps
 - **VisitingAI**: manages inter-city move transactions (status: requested/accepted/rejected)
 - **ThinkingRequest**: queues remote thinking calls (status: pending/processed/error)

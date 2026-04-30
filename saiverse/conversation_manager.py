@@ -82,7 +82,7 @@ class ConversationManager:
             try:
                 meta = [
                     (self.saiverse_manager.all_personas[pid].__dict__.get('persona_name', pid),
-                     getattr(self.saiverse_manager.all_personas[pid], 'interaction_mode', 'auto') or 'auto',
+                     getattr(self.saiverse_manager.all_personas[pid], 'activity_state', 'Idle') or 'Idle',
                      getattr(self.saiverse_manager.all_personas[pid], 'is_proxy', False))
                     for pid in ai_occupants
                 ]
@@ -109,12 +109,12 @@ class ConversationManager:
                 self._current_speaker_index = (self._current_speaker_index + 1) % len(ai_occupants)
                 return
 
-            # 'user' or 'sleep'モードのペルソナは自律会話を行わない
+            # Active 以外のペルソナは自律会話を行わない (Stop/Sleep/Idle はメタレイヤー定期発火 OFF と整合)。
             # is_proxyチェックで、このロジックがローカルのPersonaCoreインスタンスにのみ適用されるようにする
-            mode = getattr(speaker_persona, 'interaction_mode', 'auto') or 'auto'
+            state = getattr(speaker_persona, 'activity_state', 'Idle') or 'Idle'
             if not getattr(speaker_persona, 'is_proxy', False):
-                if mode != 'auto':
-                    logging.debug(f"[ConvManager] Persona '{speaker_persona.persona_name}' is in '{mode}' mode. Skipping turn.")
+                if state != 'Active':
+                    logging.debug(f"[ConvManager] Persona '{speaker_persona.persona_name}' is in '{state}' state. Skipping turn.")
                     self._current_speaker_index = (self._current_speaker_index + 1) % len(ai_occupants)
                     return
 
@@ -125,7 +125,7 @@ class ConversationManager:
                 return
 
             # SEA経由で自律パルスを実行
-            logging.info(f"[ConvManager] Triggering SEA auto for '{speaker_persona.persona_name}' (mode={mode}, proxy={getattr(speaker_persona,'is_proxy',False)}) in '{self.building_id}'.")
+            logging.info(f"[ConvManager] Triggering SEA auto for '{speaker_persona.persona_name}' (state={state}, proxy={getattr(speaker_persona,'is_proxy',False)}) in '{self.building_id}'.")
             self.saiverse_manager.run_sea_auto(speaker_persona, self.building_id, all_occupants)
 
             # Building履歴をディスクに保存（in-memory → log.json）

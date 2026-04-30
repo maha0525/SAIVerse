@@ -118,7 +118,7 @@ class AIConfigResponse(BaseModel):
     system_prompt: str
     default_model: Optional[str]
     lightweight_model: Optional[str] = None
-    interaction_mode: str
+    activity_state: str  # 'Stop' / 'Sleep' / 'Idle' / 'Active'
     chronicle_enabled: bool = True
     memory_weave_context: bool = True
     spell_enabled: bool = False
@@ -132,7 +132,7 @@ class UpdateAIConfigRequest(BaseModel):
     system_prompt: Optional[str] = None
     default_model: Optional[str] = None
     lightweight_model: Optional[str] = None
-    interaction_mode: Optional[str] = None
+    activity_state: Optional[str] = None  # 'Stop' / 'Sleep' / 'Idle' / 'Active'
     chronicle_enabled: Optional[bool] = None
     memory_weave_context: Optional[bool] = None
     spell_enabled: Optional[bool] = None
@@ -147,7 +147,7 @@ class UpdateAIConfigRequest(BaseModel):
 
 class AutonomousStatusResponse(BaseModel):
     persona_id: str
-    interaction_mode: str
+    activity_state: str  # 'Stop' / 'Sleep' / 'Idle' / 'Active'
     system_running: bool
     is_active: bool  # True if actually doing autonomous conversation
 

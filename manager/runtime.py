@@ -660,7 +660,7 @@ class RuntimeService(
     def run_scheduled_prompts(self) -> List[str]:
         replies: List[str] = []
         for persona in self.personas.values():
-            if getattr(persona, "interaction_mode", "auto") == "auto":
+            if getattr(persona, "activity_state", "Idle") == "Active":
                 replies.extend(persona.run_scheduled_prompt())
         if replies:
             self._save_modified_buildings()

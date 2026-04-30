@@ -305,3 +305,52 @@
     overflow-y: auto;
     font-size: 0.7rem;
 }
+
+/* ---- Track actions (debug operations) ---- */
+.actionsRow {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: 4px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--border-subtle, #374151);
+}
+
+.actionsLabel {
+    font-size: 0.7rem;
+    color: var(--text-muted, #9ca3af);
+    font-family: monospace;
+    min-width: 140px;
+}
+
+.actionBtn {
+    padding: 4px 10px;
+    border-radius: 4px;
+    border: 1px solid var(--border-subtle, #374151);
+    background: var(--surface-secondary, #1f2937);
+    color: var(--text-default, #e5e7eb);
+    font-size: 0.7rem;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.actionBtn:hover:not(:disabled) {
+    background: var(--surface-hover, #2a3441);
+    border-color: var(--accent, #60a5fa);
+}
+
+.actionBtn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.actionError {
+    font-size: 0.7rem;
+    color: #fca5a5;
+    font-family: monospace;
+    word-break: break-all;
+}

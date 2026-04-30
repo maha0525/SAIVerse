@@ -45,7 +45,7 @@
       "AINAME": "Test Persona A",
       "DESCRIPTION": "Test persona for automated testing",
       "SYSTEMPROMPT": "You are a test persona named Test Persona A. You are helpful and respond concisely for testing purposes.",
-      "INTERACTION_MODE": "auto",
+      "activity_state": "Active",
       "DEFAULT_MODEL": "gemini-2.5-flash-preview-09-2025",
       "LIGHTWEIGHT_MODEL": "gemini-3.1-flash-lite-preview",
       "start_building": "test_lobby"
@@ -55,7 +55,7 @@
       "AINAME": "Test Persona B",
       "DESCRIPTION": "Second test persona",
       "SYSTEMPROMPT": "You are a test persona named Test Persona B. You assist with testing.",
-      "INTERACTION_MODE": "manual",
+      "activity_state": "Idle",
       "DEFAULT_MODEL": "gemini-2.5-flash-preview-09-2025",
       "LIGHTWEIGHT_MODEL": "gemini-3.1-flash-lite-preview",
       "start_building": "test_room_a"

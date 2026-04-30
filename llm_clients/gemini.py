@@ -211,13 +211,6 @@ from saiverse.logging_config import log_timeout_event
 from .utils import content_to_text, is_truthy_flag, merge_reasoning_strings
 
 
-class ChunkTimeoutError(RuntimeError):
-    """Raised when no chunks are received within the timeout period (socket stall)."""
-
-
-# Timeout for receiving chunks during streaming (detects socket stalls)
-CHUNK_TIMEOUT_SECONDS = int(os.getenv("GEMINI_CHUNK_TIMEOUT_SECONDS", "60"))
-
 # Default safety settings (can be overridden via configure_parameters)
 GEMINI_DEFAULT_SAFETY_SETTINGS = {
     "HARM_CATEGORY_HATE_SPEECH": "BLOCK_ONLY_HIGH",
@@ -503,7 +496,7 @@ class GeminiClient(LLMClient):
     @staticmethod
     def _is_timeout_error(err: Exception) -> bool:
         """Check if the error is a timeout that should be retried."""
-        return isinstance(err, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.WriteTimeout, ChunkTimeoutError))
+        return isinstance(err, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.WriteTimeout))
 
     @staticmethod
     def _is_server_error(err: Exception) -> bool:
@@ -873,24 +866,25 @@ class GeminiClient(LLMClient):
         model_id = self.model
         last_retry_exc: Optional[Exception] = None
 
+        # Structured output (response_schema) is buffered server-side by Gemini
+        # — no chunks arrive until the full JSON is ready, so streaming offers
+        # no latency benefit and previously triggered spurious timeouts.
+        use_non_streaming = use_tools or response_schema is not None
         for attempt in range(max_retries):
             try:
-                if use_tools:
-                    # Non-streaming for tool detection
+                if use_non_streaming:
                     resp = active_client.models.generate_content(
                         model=model_id,
                         contents=contents,
                         config=types.GenerateContentConfig(**cfg_kwargs),
                     )
                 else:
-                    # Streaming with chunk timeout for text-only
                     stream = active_client.models.generate_content_stream(
                         model=model_id,
                         contents=contents,
                         config=types.GenerateContentConfig(**cfg_kwargs),
                     )
                     all_parts: List[Any] = []
-                    last_chunk_time = time.time()
                     saw_any_chunk = False
                     last_chunk = None
                     last_finish_reason = None
@@ -899,12 +893,6 @@ class GeminiClient(LLMClient):
 
                     for chunk in stream:
                         last_chunk = chunk
-                        now = time.time()
-                        if now - last_chunk_time > CHUNK_TIMEOUT_SECONDS and not saw_any_chunk:
-                            raise ChunkTimeoutError(
-                                f"No response received within {CHUNK_TIMEOUT_SECONDS} seconds"
-                            )
-                        last_chunk_time = now
                         saw_any_chunk = True
                         get_llm_logger().debug("Gemini stream chunk:\n%s", chunk)
 
@@ -1142,6 +1130,32 @@ class GeminiClient(LLMClient):
 
                 text = "".join(text_parts)
                 self._store_reasoning(reasoning_entries)
+
+                if response_schema:
+                    logging.info("[gemini] Structured output (non-stream): text=%r, len=%d", text if text else "(empty)", len(text))
+                    if not text.strip():
+                        logging.warning(
+                            "[gemini] Empty structured output response (attempt %d/%d). finish_reason=%s",
+                            attempt + 1, max_retries, finish_reason,
+                        )
+                        continue
+                    try:
+                        parsed = json.loads(text)
+                    except json.JSONDecodeError as e:
+                        logging.warning("[gemini] Failed to parse structured output: %s", e)
+                        from .exceptions import InvalidRequestError
+                        raise InvalidRequestError(
+                            "Failed to parse JSON response from structured output",
+                            e,
+                            user_message="LLMからの応答を解析できませんでした。再度お試しください。"
+                        ) from e
+                    if not isinstance(parsed, dict):
+                        from .exceptions import InvalidRequestError
+                        raise InvalidRequestError(
+                            f"Structured output returned non-dict JSON: {type(parsed).__name__}",
+                            user_message="LLMからの構造化出力が想定の形式ではありません。"
+                        )
+                    return parsed
 
                 # Check candidate-level function_call for backwards compatibility
                 if not function_call_part:
