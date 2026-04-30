@@ -10,6 +10,26 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.15 (2026-04-30) — メタ判断を独白 + /spell 方式に回帰
+
+**確定事項**:
+
+- メタ判断 LLM は **構造化出力 (response_schema) を使わない**。自然言語の独白の中に `/spell <name> ...` を埋め込んで Track 操作を発動する形式に統一
+- 旧 4 値 enum (`continue`/`switch`/`wait`/`close`) と `meta_judgment_dispatch` ツールを廃止
+- scope 昇格 (`'discardable'` → `'committed'`) は Track 切替系スペル発動時に `_track_common._maybe_promote_meta_judgment` が実施。ツール経由ではなく「Track 切替スペル発動 = 判断確定」と解釈
+- 「アクティブ Track なし状態に遷移」は `/spell track_pause` のみ発動 (新規 activate しない) で表現
+- `02_mechanics.md` から response_schema セクションを削除し、独白 + スペル方式の応答形式 + scope 昇格機構の説明に差し替え
+
+**改訂理由**:
+
+v0.12〜v0.14 で構造化出力ベースに走った結果、以下 3 つの問題が顕在化:
+
+1. **JSON 混入によるメインキャッシュ汚染** (不変条件 11 違反): メタ判断ターンは [B] 移動時にメインキャッシュに乗る。一度 JSON が混入したキャッシュ末尾を持つ会話は、以降のメインライン発話も JSON 化する副作用が出る。intent A の「メタ判断 = ペルソナ自身の思考の流れ」と矛盾していた
+2. **マルチプロバイダ互換性の制約**: Gemini SDK は `any_of` のみ、OpenAI strict は anyOf 非対応、Anthropic は anyOf 16 個制限と、プロバイダ毎の差が大きい。構造化出力依存だとペルソナのモデル選択が制約される
+3. **wait/close enum の冗長**: 4 値構造は wait/close が switch のサブセットでしかなく、「アクティブなし状態へ遷移」の選択肢が enum で表現されていなかった
+
+intent docs 自身に矛盾が含まれていた (本文は「独白 + スペル」原則、response_schema セクションは構造化出力) ことを 2026-04-30 のデバッグセッションで発見し、本来の設計に戻すと同時に response_schema 関連の記述を撤去した。実装上、SEA runtime のスペルループ機構 (`_run_spell_loop`) が既に Playbook の自然言語 LLM ノードに対して動くため、Playbook 側の変更だけで切り替え可能だった。
+
 ### v0.14 (2026-04-29) — ライン 3 軸独立化 + 7 層ストレージモデル
 
 **確定事項**:

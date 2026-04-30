@@ -240,6 +240,9 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
             if report:
                 report_text = str(report).strip()
                 if report_text:
+                    # user role + <system> タグ統一形式 (詳細: sea/runtime_llm.py
+                    # の同様の自動ラップ箇所のコメント参照)。Gemini 等が messages
+                    # 中途の system role を受け付けないため、user role でラップする。
                     formatted = (
                         f"<system>サブ Playbook '{sub_name}' の実行結果:\n{report_text}</system>"
                     )

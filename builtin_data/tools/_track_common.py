@@ -12,6 +12,12 @@ When no PulseContext is available (CLI / test / MetaLayer-spawned Playbook
 without a parent Pulse), the operation is executed immediately against the
 TrackManager — ``apply_track_op`` guarantees the operation is attempted on
 either path, removing the burden from each caller.
+
+メタ判断ターンの scope='discardable' → 'committed' 昇格 (Intent A v0.14
+「[B] 移動: 分岐ターンをそのまま残す」) は本モジュールでは行わない。
+TrackManager の状態遷移 hook 経由で、SAIVerseManager 起動時に登録された
+昇格ハンドラが実施する (saiverse/saiverse_manager.py 参照)。本ファイルの
+責務は Track 操作 op を deferred / 即時で apply する一点に絞る。
 """
 from __future__ import annotations
 

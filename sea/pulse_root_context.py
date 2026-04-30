@@ -339,6 +339,10 @@ def prepare_pulse_root_context(
     fixed_text = build_fixed_section(track, handler, line_role) if first_pulse else ""
     dynamic_text = build_dynamic_section(track, handler, new_events=new_events)
 
+    # user role + <system> タグ統一形式 (詳細: sea/runtime_llm.py の同様の
+    # 自動ラップ箇所のコメント参照)。Gemini 等が messages 中途の system role
+    # を受け付けないため、role='user' + <system>...</system> で送る。
+    # system role 化への変更は Gemini 互換が壊れるため不可。
     appended = []
     if fixed_text:
         appended.append({"role": "user", "content": f"<system>{fixed_text}</system>"})

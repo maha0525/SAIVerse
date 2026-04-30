@@ -148,10 +148,12 @@ class ApplyDeferredOpsTests(unittest.TestCase):
 
         _apply_deferred_track_ops({"_pulse_context": ctx}, persona)
 
-        # Each op invokes the matching TrackManager method
-        track_manager.pause.assert_called_once_with("A")
-        track_manager.activate.assert_called_once_with("B")
-        track_manager.complete.assert_called_once_with("C")
+        # Each op invokes the matching TrackManager method.
+        # pulse_id は Track 状態遷移 hook 経由で「メタ判断ターン昇格」に
+        # 使われるため、deferred apply 経路から必ず渡される (Intent A v0.14)。
+        track_manager.pause.assert_called_once_with("A", pulse_id="p1")
+        track_manager.activate.assert_called_once_with("B", pulse_id="p1")
+        track_manager.complete.assert_called_once_with("C", pulse_id="p1")
         # Queue is drained
         self.assertEqual(ctx.deferred_track_ops, [])
 
@@ -199,7 +201,7 @@ class ApplyDeferredOpsTests(unittest.TestCase):
         _apply_deferred_track_ops({"_pulse_context": ctx}, persona)
 
         # Second op must still run despite the first failure
-        track_manager.activate.assert_called_once_with("B")
+        track_manager.activate.assert_called_once_with("B", pulse_id="p1")
         self.assertEqual(ctx.deferred_track_ops, [])
 
 

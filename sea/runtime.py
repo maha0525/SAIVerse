@@ -2135,7 +2135,11 @@ class SEARuntime:
         if not sections:
             return None
 
-        # Format as user message with <system> wrapper (compatible with all LLM providers)
+        # user role + <system> タグ統一形式 (詳細: sea/runtime_llm.py の同様の
+        # 自動ラップ箇所のコメント参照)。Gemini 等が messages 中途の system role
+        # を受け付けないため、role='user' + <system>...</system> で全プロバイダ
+        # 共通の「指示扱いブロック」として送る。system role に直すと Gemini
+        # 互換が壊れる — 「system っぽいから system role にしたい」直感は誤り。
         content = "<system>\n## リアルタイム情報\n" + "\n".join(f"- {s}" for s in sections) + "\n</system>"
         return {
             "role": "user",

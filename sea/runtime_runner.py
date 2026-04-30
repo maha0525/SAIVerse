@@ -44,18 +44,24 @@ def _apply_deferred_track_ops(parent_state: Dict[str, Any], persona: Any) -> Non
         op_count, getattr(persona, "persona_id", "?"),
     )
 
+    # pulse_id を TrackManager メソッドに渡すと、状態遷移 hook がメタ判断ターン
+    # (line_role='meta_judgment', scope='discardable') を pulse 内で検索して
+    # 'committed' に昇格できる (Intent A v0.14 [B] 移動)。Pulse 外 / 古い呼び出し
+    # 経路では pulse_id=None になり、その場合 hook 側で skip される。
+    pulse_id = getattr(pulse_ctx, "pulse_id", None)
+
     activated_track_id: Optional[str] = None
     for op in pulse_ctx.deferred_track_ops:
         try:
             if op.op_type == "activate":
-                track_manager.activate(op.track_id)
+                track_manager.activate(op.track_id, pulse_id=pulse_id)
                 activated_track_id = op.track_id
             elif op.op_type == "pause":
-                track_manager.pause(op.track_id)
+                track_manager.pause(op.track_id, pulse_id=pulse_id)
             elif op.op_type == "complete":
-                track_manager.complete(op.track_id)
+                track_manager.complete(op.track_id, pulse_id=pulse_id)
             elif op.op_type == "abort":
-                track_manager.abort(op.track_id)
+                track_manager.abort(op.track_id, pulse_id=pulse_id)
             else:
                 LOGGER.warning(
                     "[deferred-track-ops] Unknown op_type=%s (track_id=%s) — skipped",

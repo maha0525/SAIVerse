@@ -4,10 +4,12 @@ Intent A v0.9 / Intent B v0.6 で導入された Phase C-1 の最小実装に、
 Phase 1.2 (Intent A v0.14, Intent B v0.11) で **Playbook 経由の判断 path** を
 追加した二刀流構成。Phase C-2 完成 (2026-04-30) で Playbook path を既定に昇格:
 
-- 既定 (Playbook path): ``meta_judgment.json`` を runtime に投げて構造化判断
-  (continue / switch) を `meta_judgment_dispatch` ツールで適用。switch 時の
-  現 Track 処遇は current_disposition (pause / complete / abort) で指定する。
+- 既定 (Playbook path): ``meta_judgment.json`` を runtime に投げ、ペルソナが
+  内的独白の中で /spell track_pause / track_activate / track_create 等を発動
+  することで Track 操作を行う。重量級モデルのメインキャッシュに JSON を混入
+  させないため、構造化出力 (response_schema) は使わない (Intent A v0.9 不変条件 11)。
 - 緊急避難 (legacy path): 重量級モデルへ直接プロンプトを渡しスペル抽出ループ
+  (Playbook path と同じスペル方式だが、Playbook 化されていない短命経路)
 
 切り替えは環境変数 ``SAIVERSE_META_LAYER_USE_PLAYBOOK`` で行う:
 

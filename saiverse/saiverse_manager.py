@@ -209,6 +209,12 @@ class SAIVerseManager(
         # handle_user_input から呼ばれる (Track 状態判定 → 必要なら alert 遷移)。
         self.meta_layer = MetaLayer(self)
         self.track_manager.add_alert_observer(self.meta_layer.on_track_alert)
+        # Intent A v0.14 [B] 移動: Track 状態遷移の起点でメタ判断ターン
+        # (line_role='meta_judgment', scope='discardable') を 'committed' に昇格する。
+        # メタ判断 Playbook が独白 + /spell 方式で /spell track_activate 等を発動 →
+        # Pulse 完了時に TrackManager.activate(...) が呼ばれる → このルートで pulse_id
+        # ベースに当該 pulse 内のメタ判断ターンを committed 化する。
+        self.track_manager.add_status_change_observer(self._promote_meta_judgment_in_pulse)
         self.user_conversation_handler = UserConversationTrackHandler(
             track_manager=self.track_manager,
             manager=self,
@@ -1110,6 +1116,68 @@ class SAIVerseManager(
                 logging.exception(
                     "Failed to ensure autonomy for persona '%s'", persona_id,
                 )
+
+    # ------------------------------------------------------------------
+    # メタ判断ターン scope 昇格 hook (Intent A v0.14 [B] 移動)
+    # ------------------------------------------------------------------
+
+    def _promote_meta_judgment_in_pulse(
+        self, persona_id: str, pulse_id: Optional[str]
+    ) -> None:
+        """TrackManager の状態遷移 hook で呼ばれる。
+
+        当該 pulse_id 内の ``line_role='meta_judgment' AND scope='discardable'``
+        なメッセージを ``scope='committed'`` に昇格する。これにより独白 + /spell
+        方式のメタ判断でも Intent A v0.14 [B] 移動の「分岐ターンをそのまま残す」
+        を実現する (Track 切替 = メタ判断の確定 → 移動先 Track の冒頭来歴として
+        メインキャッシュに残るべき)。
+
+        - ``pulse_id`` が None (CLI / テスト) の場合は何もしない (該当 Pulse 不在)。
+        - ペルソナがメモリにロードされていない場合も skip。
+        - メッセージが見つからなくても (= 通常会話の中で /spell track_pause を
+          発動した等、メタ判断 Playbook を経由していない場合) 静かに 0 件 UPDATE
+          で終わる。これは正しい挙動 (continue 相当のため昇格不要)。
+        """
+        if not pulse_id:
+            return
+        persona = self.personas.get(persona_id)
+        if persona is None:
+            return
+        persona_log_path = getattr(persona, "persona_log_path", None)
+        if persona_log_path is None:
+            return
+        db_path = persona_log_path.parent / "memory.db"
+        if not db_path.exists():
+            logging.warning(
+                "[meta-judgment-promote] memory.db not found at %s for persona=%s",
+                db_path, persona_id,
+            )
+            return
+
+        import sqlite3
+        try:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                cur = conn.execute(
+                    "UPDATE messages SET scope = 'committed' "
+                    "WHERE pulse_id = ? AND line_role = 'meta_judgment' "
+                    "AND scope = 'discardable'",
+                    (pulse_id,),
+                )
+                if cur.rowcount > 0:
+                    logging.info(
+                        "[meta-judgment-promote] Promoted %d meta_judgment row(s) "
+                        "to 'committed' (pulse_id=%s persona=%s)",
+                        cur.rowcount, pulse_id, persona_id,
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            logging.exception(
+                "[meta-judgment-promote] Failed to promote (pulse_id=%s persona=%s)",
+                pulse_id, persona_id,
+            )
 
     def start_autonomous_conversations(self):
         """Start all autonomous conversation managers."""

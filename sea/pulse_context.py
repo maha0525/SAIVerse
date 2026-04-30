@@ -296,8 +296,10 @@ class PulseContext:
                 }
             elif entry.role == "tool" and not entry.tool_call_id:
                 # Playbook-defined TOOL node result (no function-calling pair).
-                # Emit as user message so LLM APIs accept it (tool role requires
-                # tool_call_id).  Wrap in <system> tag for context.
+                # tool role は tool_call_id が必須なのでここでは使えず、また
+                # role='system' を messages 中途に挿入すると Gemini 等で互換性
+                # 問題が出る。そのため user role + <system> タグの統一形式で
+                # 送る (詳細: sea/runtime_llm.py の同様の自動ラップ箇所のコメント参照)。
                 tool_label = entry.tool_name or "tool"
                 msg = {
                     "role": "user",

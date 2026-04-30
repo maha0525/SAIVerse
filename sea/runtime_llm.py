@@ -522,6 +522,23 @@ async def _run_spell_loop(
             else:
                 text = ""
 
+            # Spell-loop retry の I/O も llm_io.log に記録する。これがないと
+            # メタ判断や spell 入りの応答ラウンドの全数を観測できない (送信時の
+            # messages と応答 text のペアが、メインの _dump_llm_io 1 件分しか
+            # 残らないため、デバッグでログを追っても "retry が起きたかどうか"
+            # を確定できない)。round ごとに source は LLM ノードと同じものを
+            # 使い、node_id だけを spell_round_<N> に変える。
+            try:
+                runtime._dump_llm_io(
+                    playbook.name,
+                    f"spell_round_{loop_count}",
+                    persona,
+                    messages,
+                    text,
+                )
+            except Exception:
+                LOGGER.warning("[sea][spell] failed to dump spell-loop retry I/O", exc_info=True)
+
             LOGGER.info("[sea][spell] After round %d: has_more_spells=%s",
                         loop_count, bool(_SPELL_PATTERN.search(text)))
 
@@ -622,7 +639,37 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
             action_template = getattr(node_def, "action", None)
             if action_template:
                 prompt = _format(action_template, variables)
-                # Auto-wrap in <system> tags to distinguish from user messages
+                # ============================================================
+                # 設計上の重要判断 — user role + <system> タグの理由
+                # (変更を検討する前に必ず読むこと。「system っぽい指示なのに
+                #  role='system' じゃないのはおかしい」という直感だけで直すと
+                #  プロバイダ互換性が壊れる)
+                #
+                # Playbook の action テキストは LLM への指示で、本来なら
+                # role='system' で送りたい。が、各プロバイダの差異により
+                # 共通形式で system role を「途中に挿入」することができない:
+                #
+                #   - Gemini: system role は context 先頭でしか受け付けない。
+                #     messages の中途で role='system' を出すと無視されるか
+                #     エラーになる。
+                #   - Anthropic: system は messages の外側に別フィールドで
+                #     渡す仕様 (messages 配列の途中に role='system' を含め
+                #     ても効果が限定的)。
+                #   - OpenAI / NIM 等: 受け付けはするが、複数 system が並ぶ
+                #     と挙動が安定しない / 後段で吸い込まれることがある。
+                #
+                # 全プロバイダで共通の挙動を保つため、本プロジェクトでは
+                # 「指示系メッセージは user role + content を <system>...</system>
+                # で囲む」形式に統一している。llm_clients/* も <system>
+                # タグを「LLM が指示として認識すべき高優先度ブロック」として
+                # 扱うよう調整済み。
+                #
+                # 「直すべき」ではなく「対策済み」。 system role に変えると
+                # Gemini 互換が壊れる。同様の <system>…</system> 投入箇所が
+                # sea/runtime.py / sea/pulse_root_context.py /
+                # sea/pulse_context.py / sea/runtime_nodes.py 等にもあるが、
+                # 全て同じ理由でこの形になっている。
+                # ============================================================
                 if not prompt.lstrip().startswith("<system>"):
                     prompt = f"<system>{prompt}</system>"
                 messages = list(base_msgs) + [{"role": "user", "content": prompt}]
@@ -1851,11 +1898,12 @@ def lg_llm_node(runtime, node_def: Any, persona: Any, building_id: str, playbook
                         "[sea][llm] Memorized response (assistant) with paired_action_text len=%s scope=%s",
                         len(prompt) if prompt else 0, memorize_scope,
                     )
-                    # Phase 1.3: discardable 保存時はメッセージ ID を state に記録
-                    # しておき、後続の dispatch ノード (meta_judgment_dispatch ツール)
-                    # が switch 判定時に promote_to_committed を呼べるようにする。
-                    if memorize_scope == "discardable" and isinstance(stored_message_id, str):
-                        state["_meta_judgment_message_id"] = stored_message_id
+                    # メタ判断ターンの scope='discardable' → 'committed' 昇格は
+                    # TrackManager の状態遷移 hook 経由で行う (saiverse_manager.py
+                    # 内の hook が pulse_id ベースで pulse 内の line_role='meta_judgment'
+                    # AND scope='discardable' を検索して UPDATE する)。
+                    # ここでは何もしない: 保存は scope='discardable' のままで完了し、
+                    # その Pulse 内で Track 状態遷移が起きれば後で hook が拾う。
 
             if not _memorize_ok and event_callback:
                 event_callback({"type": "warning", "content": "記憶の保存に失敗しました。会話内容が記録されていない可能性があります。", "warning_code": "memorize_failed", "display": "toast"})

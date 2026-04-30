@@ -89,6 +89,13 @@ class TrackManager:
         # MetaLayer はここに登録される。TrackManager は観察対象を増やす責務を持たないため、
         # 「どんな種別の Track の alert に反応するか」のフィルタは observer 側で判断する。
         self._alert_observers: List[Callable[[str, str, dict], None]] = []
+        # 状態遷移 (alert 以外) を購読する observer 群。
+        # signature: (persona_id: str, pulse_id: Optional[str]) -> None
+        # 用途: メタ判断ターン (line_role='meta_judgment', scope='discardable')
+        # を Track 切替起点で 'committed' に昇格する hook 等 (Intent A v0.14
+        # 「[B] 移動: 分岐ターンをそのまま残す」)。
+        # set_alert は alert 観察ルートが別にあるためこの hook では発火しない。
+        self._status_change_observers: List[Callable[[str, Optional[str]], None]] = []
 
     # ------------------------------------------------------------------
     # Observer
@@ -130,6 +137,44 @@ class TrackManager:
                 logging.exception(
                     "[track] alert observer raised: cb=%r persona=%s track=%s",
                     cb, persona_id, track_id,
+                )
+
+    def add_status_change_observer(
+        self, callback: Callable[[str, Optional[str]], None]
+    ) -> None:
+        """alert 以外の状態遷移 (activate/pause/wait/complete/abort/resume) を購読する。
+
+        callback signature: (persona_id, pulse_id) -> None
+        pulse_id は当該遷移を起こした Pulse の ID。Pulse 外で呼ばれた場合 (CLI /
+        テスト) は None。observer 側は None ならスキップして良い。
+
+        SAIVerseManager 起動時に「メタ判断ターン昇格 hook」を登録するために
+        使う (Intent A v0.14 [B] 移動)。observer の例外は握り潰さず WARN ログ。
+        """
+        if callback in self._status_change_observers:
+            return
+        self._status_change_observers.append(callback)
+
+    def remove_status_change_observer(
+        self, callback: Callable[[str, Optional[str]], None]
+    ) -> None:
+        """登録済みの status_change observer を解除する。未登録なら何もしない。"""
+        try:
+            self._status_change_observers.remove(callback)
+        except ValueError:
+            pass
+
+    def _notify_status_change(
+        self, persona_id: str, pulse_id: Optional[str]
+    ) -> None:
+        """状態遷移 (alert 以外) を全 observer に通知する。"""
+        for cb in list(self._status_change_observers):
+            try:
+                cb(persona_id, pulse_id)
+            except Exception:
+                logging.exception(
+                    "[track] status_change observer raised: cb=%r persona=%s pulse=%s",
+                    cb, persona_id, pulse_id,
                 )
 
     # ------------------------------------------------------------------
@@ -262,11 +307,15 @@ class TrackManager:
     # 状態遷移
     # ------------------------------------------------------------------
 
-    def activate(self, track_id: str) -> ActionTrack:
+    def activate(self, track_id: str, *, pulse_id: Optional[str] = None) -> ActionTrack:
         """Track をアクティブ化する。
 
         - 同一ペルソナの既存 running が居れば pending に押し出す
         - 自身が completed/aborted なら InvalidTrackStateError
+
+        ``pulse_id`` は呼び出し元の Pulse 識別子。Pulse 完了時の deferred apply
+        ルートから渡される。観察者 (status_change observer) が pulse_id ベースで
+        メタ判断ターンを昇格する用途。Pulse 外 (CLI/テスト) では None で OK。
         """
         db = self.SessionLocal()
         try:
@@ -313,20 +362,32 @@ class TrackManager:
             db.refresh(track)
             db.expunge(track)
             logging.info("[track] activated %s persona=%s", track_id, track.persona_id)
-            return track
         except Exception:
             db.rollback()
             raise
         finally:
             db.close()
+        # Notify status change observers (commit/close 完了後、別 session 不要なため)
+        self._notify_status_change(track.persona_id, pulse_id)
+        return track
 
-    def pause(self, track_id: str) -> ActionTrack:
-        """running -> pending。"""
+    def pause(self, track_id: str, *, pulse_id: Optional[str] = None) -> ActionTrack:
+        """running -> pending。
+
+        alert からの pause は **禁止** (Intent A v0.9 の 03_data_model.md §
+        "メタレイヤーのトラック管理ツール群" で `running → pending` と定義
+        されているため、alert は含めない)。alert は「即応すべき状況」を表す
+        中間状態で、pause で pending に戻せてしまうと「目覚ましアラームを
+        止めて寝続ける」現象が起きる: メタ判断レイヤーが alert に対して何も
+        対応せず無視できてしまう。alert の解消は実際に対応 (activate / wait /
+        complete / abort) を取った時のみ許される。
+        """
         return self._set_status(
             track_id,
             new_status=STATUS_PENDING,
-            allowed_from={STATUS_RUNNING, STATUS_ALERT},
+            allowed_from={STATUS_RUNNING},
             log_label="paused",
+            pulse_id=pulse_id,
         )
 
     def wait(
@@ -334,6 +395,8 @@ class TrackManager:
         track_id: str,
         waiting_for: str,
         timeout_seconds: Optional[int] = None,
+        *,
+        pulse_id: Optional[str] = None,
     ) -> ActionTrack:
         """running -> waiting。
 
@@ -364,14 +427,17 @@ class TrackManager:
                 "[track] waiting %s timeout=%s",
                 track_id, track.waiting_timeout_at,
             )
-            return track
         except Exception:
             db.rollback()
             raise
         finally:
             db.close()
+        self._notify_status_change(track.persona_id, pulse_id)
+        return track
 
-    def resume_from_wait(self, track_id: str, mode: str) -> ActionTrack:
+    def resume_from_wait(
+        self, track_id: str, mode: str, *, pulse_id: Optional[str] = None
+    ) -> ActionTrack:
         """waiting からの取り下げ。
 
         mode = 'activate' / 'pause' / 'abort'
@@ -387,7 +453,7 @@ class TrackManager:
                 raise InvalidTrackStateError(
                     f"resume_from_wait requires waiting status, got {current.status}"
                 )
-            return self.activate(track_id)
+            return self.activate(track_id, pulse_id=pulse_id)
 
         if mode == RESUME_MODE_PAUSE:
             return self._set_status(
@@ -396,6 +462,7 @@ class TrackManager:
                 allowed_from={STATUS_WAITING},
                 log_label="resume_from_wait->pending",
                 clear_waiting_fields=True,
+                pulse_id=pulse_id,
             )
 
         # RESUME_MODE_ABORT
@@ -418,14 +485,15 @@ class TrackManager:
             db.refresh(track)
             db.expunge(track)
             logging.info("[track] aborted-from-wait %s", track_id)
-            return track
         except Exception:
             db.rollback()
             raise
         finally:
             db.close()
+        self._notify_status_change(track.persona_id, pulse_id)
+        return track
 
-    def complete(self, track_id: str) -> ActionTrack:
+    def complete(self, track_id: str, *, pulse_id: Optional[str] = None) -> ActionTrack:
         """running -> completed。永続 Track は不可。"""
         db = self.SessionLocal()
         try:
@@ -444,14 +512,15 @@ class TrackManager:
             db.refresh(track)
             db.expunge(track)
             logging.info("[track] completed %s", track_id)
-            return track
         except Exception:
             db.rollback()
             raise
         finally:
             db.close()
+        self._notify_status_change(track.persona_id, pulse_id)
+        return track
 
-    def abort(self, track_id: str) -> ActionTrack:
+    def abort(self, track_id: str, *, pulse_id: Optional[str] = None) -> ActionTrack:
         """任意の非終了状態 -> aborted。永続 Track は不可。"""
         db = self.SessionLocal()
         try:
@@ -472,12 +541,13 @@ class TrackManager:
             db.refresh(track)
             db.expunge(track)
             logging.info("[track] aborted %s", track_id)
-            return track
         except Exception:
             db.rollback()
             raise
         finally:
             db.close()
+        self._notify_status_change(track.persona_id, pulse_id)
+        return track
 
     def set_alert(
         self, track_id: str, context: Optional[dict] = None
@@ -611,6 +681,8 @@ class TrackManager:
         allowed_from: Iterable[str],
         log_label: str,
         clear_waiting_fields: bool = False,
+        *,
+        pulse_id: Optional[str] = None,
     ) -> ActionTrack:
         allowed_set = set(allowed_from)
         db = self.SessionLocal()
@@ -628,12 +700,13 @@ class TrackManager:
             db.refresh(track)
             db.expunge(track)
             logging.info("[track] %s %s", log_label, track_id)
-            return track
         except Exception:
             db.rollback()
             raise
         finally:
             db.close()
+        self._notify_status_change(track.persona_id, pulse_id)
+        return track
 
     def _set_forgotten(self, track_id: str, value: bool) -> ActionTrack:
         db = self.SessionLocal()
