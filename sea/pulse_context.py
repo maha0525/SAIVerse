@@ -146,6 +146,12 @@ class PulseContext:
     logs: List[PulseLogEntry] = field(default_factory=list)
     _line_stack: List[LineFrame] = field(default_factory=list)
     deferred_track_ops: List[DeferredTrackOp] = field(default_factory=list)
+    # メタ判断 Pulse 用バッファ (Intent A v0.15 + Phase 2)。
+    # pulse_type == 'meta_judgment' の Pulse でのみ populate される。
+    # spell loop が判断 LLM 応答 + 発動 spell + 各 spell の結果を蓄積し、
+    # Pulse 完了時に MetaLayer が meta_judgment_log テーブルへ flush する。
+    # 形式: {"thought_parts": List[str], "spells": List[{name, args, result}]}
+    meta_judgment_buffer: Optional[Dict[str, Any]] = None
 
     def append(self, entry: PulseLogEntry) -> None:
         """Append a log entry to this Pulse's log list."""
@@ -268,6 +274,43 @@ class PulseContext:
     def has_deferred_track_ops(self) -> bool:
         """True when at least one Track op is queued for Pulse completion."""
         return bool(self.deferred_track_ops)
+
+    # ------------------------------------------------------------------
+    # Meta judgment buffer (Phase 2 — handoff_2026-04-30 Part 2)
+    # ------------------------------------------------------------------
+
+    def init_meta_judgment_buffer(self) -> Dict[str, Any]:
+        """メタ判断バッファを初期化し、参照を返す。
+
+        既に初期化済みなら既存バッファをそのまま返す。
+        ``pulse_type == 'meta_judgment'`` の Pulse の最初の spell loop 入口で
+        呼び出され、判断 LLM の独白テキストと発動 spell をここに蓄積する。
+        """
+        if self.meta_judgment_buffer is None:
+            self.meta_judgment_buffer = {
+                "thought_parts": [],
+                "spells": [],
+            }
+        return self.meta_judgment_buffer
+
+    def append_meta_judgment_thought(self, text: str) -> None:
+        """メタ判断バッファに独白テキストを追記する (バッファ未初期化時は no-op)。"""
+        if self.meta_judgment_buffer is None:
+            return
+        if text:
+            self.meta_judgment_buffer["thought_parts"].append(text)
+
+    def append_meta_judgment_spell(
+        self, name: str, args: Dict[str, Any], result: str
+    ) -> None:
+        """メタ判断バッファに発動 spell + 結果を追記する (バッファ未初期化時は no-op)。"""
+        if self.meta_judgment_buffer is None:
+            return
+        self.meta_judgment_buffer["spells"].append({
+            "name": name,
+            "args": dict(args),
+            "result": result,
+        })
 
     def get_protocol_messages(self) -> List[Dict[str, Any]]:
         """Reconstruct LLM API-compatible message list from logged entries.

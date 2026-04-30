@@ -256,6 +256,49 @@ def compile_with_langgraph(
                         "[runtime_graph] Failed to apply deferred Track ops at Pulse-root completion"
                     )
 
+                # Flush meta judgment buffer to meta_judgment_log table
+                # (Phase 2 / handoff Part 2). pulse_type == 'meta_judgment' の Pulse
+                # でのみ buffer が populate されている。MetaLayer 経由で書き込み、
+                # 次回メタ判断時の judge プロンプトに動的注入される。
+                # Track 切替系 spell が発動した場合は committed_to_main_cache=True。
+                _meta_buffer = getattr(_final_pulse_ctx, "meta_judgment_buffer", None)
+                if _meta_buffer is not None:
+                    try:
+                        meta_layer = getattr(runtime.manager, "meta_layer", None)
+                        if meta_layer is not None:
+                            # trigger_type / trigger_context / track_at_judgment_id を
+                            # state から抽出。MetaLayer の入口で initial_params 経由で
+                            # state に乗せている。trigger_type は trigger_context JSON
+                            # の "trigger" キーから取り出す。
+                            import json as _json
+                            _trigger_context_str = _source_state.get("trigger_context") or ""
+                            _trigger_type = "unknown"
+                            try:
+                                _ctx_obj = _json.loads(_trigger_context_str) if _trigger_context_str else {}
+                                if isinstance(_ctx_obj, dict):
+                                    _trigger_type = str(_ctx_obj.get("trigger") or "unknown")
+                            except (ValueError, TypeError):
+                                pass
+                            _alert_track_id = _source_state.get("alert_track_id") or None
+                            _committed = any(
+                                op.op_type == "activate"
+                                for op in _final_pulse_ctx.deferred_track_ops
+                            )
+                            meta_layer._record_judgment_log(
+                                persona_id=getattr(persona, "persona_id", None),
+                                trigger_type=_trigger_type,
+                                trigger_context=_trigger_context_str or None,
+                                track_at_judgment_id=_alert_track_id,
+                                thought_parts=_meta_buffer.get("thought_parts") or [],
+                                spells=_meta_buffer.get("spells") or [],
+                                committed_to_main_cache=_committed,
+                                prompt_snapshot=None,
+                            )
+                    except Exception:
+                        LOGGER.exception(
+                            "[runtime_graph] Failed to flush meta_judgment buffer to log"
+                        )
+
     # Write back state variables to parent_state based on output_schema
     if parent_state is not None and isinstance(final_state, dict) and playbook.output_schema:
         for key in playbook.output_schema:

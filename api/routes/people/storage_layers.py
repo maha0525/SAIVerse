@@ -174,14 +174,13 @@ def _fetch_meta_judgment(
             layer="meta_judgment",
             entry_id=row.judgment_id,
             created_at=_epoch(row.judged_at),
-            judgment_action=row.judgment_action,
             judgment_thought=row.judgment_thought,
-            switch_to_track_id=row.switch_to_track_id,
+            spells_emitted=row.spells_emitted,
             trigger_type=row.trigger_type,
             trigger_context=row.trigger_context,
-            notify_to_track=row.notify_to_track,
             committed_to_main_cache=row.committed_to_main_cache,
             track_at_judgment_id=row.track_at_judgment_id,
+            prompt_snapshot=row.prompt_snapshot,
         )
         for row in rows
     ]

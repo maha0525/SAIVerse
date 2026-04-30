@@ -14,6 +14,12 @@
             "description": "alert / tick のトリガー情報 (JSON 文字列)。trigger 種別と event 内容等を含む。",
             "required": false,
             "default": "{}"
+        },
+        {
+            "name": "recent_judgments",
+            "description": "過去 N 件のメタ判断ログを整形したテキストブロック (MetaLayer が動的に注入)。空文字列なら過去ログなし。",
+            "required": false,
+            "default": ""
         }
     ],
     "router_callable": false,
@@ -31,7 +37,7 @@
             "id": "judge",
             "type": "llm",
             "context_profile": "conversation",
-            "action": "あなたは今、自分の行動の線 (Track) を一段引いて見直すメタ判断の瞬間にいます。これは別人格ではなく、あなた自身が一段引いて自分を見つめる視点です。\n\nトリガー情報: {trigger_context}\n\n直前のメッセージで現在の Track 一覧 (track_list の出力) を確認できます。\n\n## 重要 — このターンは『内的独白』です (絶対ルール)\n\n- このターンの内容は **ユーザーには届きません**。\n- 「まはー」「ユーザー」など、相手に呼びかける文体・返事の文体は禁止。\n- 「〜ね！」「〜だよ」「ありがとう」「お疲れさま」のような、**相手宛ての会話表現**は使わないでください。\n- 一人称で、自分自身に語る形 (例: 「〜と判断する」「〜しよう」「〜の方が自然だな」) で書いてください。\n- 直前まで対話があったとしても、このターンは対話の流れから一段引いた、**自分自身の中だけの思考**です。返事として書かないでください。\n\n## 取りうる選択肢\n\n- **現在の Track をそのまま続ける**: スペルを何も発動せず、独白だけ書いて締めくくってください。\n- **別の既存 Track に切り替える**: `/spell track_activate track_id='...'` で対象を起動 (現 running があれば自動で pending に)。\n- **新しい Track を作って始める**: `/spell track_create title='...' track_type='autonomous|user_conversation|social|external|waiting' intent='...'` で新規作成し、必要なら `/spell track_activate track_id='...'` で起動。\n- **現在の Track を一旦止めて待機状態へ**: `/spell track_pause track_id='...'` で現在の running を pending に。新規 activate しなければアクティブ Track なしの状態で次の判断機会を待つ。\n- **現在の Track を完了 / 中止する**: `/spell track_complete track_id='...'` または `/spell track_abort track_id='...'`。\n- **必要に応じて Note を開く**: `/spell note_open ...` 等。\n\n## 発動形式\n\n**スペルは行頭が `/spell ` で始まる必要があります**。独白の流れの中に自然に埋め込んでください。\n  /spell <スペル名> key='value' key2=value2 ...\n\n例 (独白として、相手への呼びかけではない):\n「対話の流れに引き込まれていたが、一段引いて見直そう。今の Track は応答待ちのまま、外部の状況も大きくは変わっていない。このまま続けて問題ない、と判断する。」\n\n例 (Track 切替が必要な場合):\n「開発 Track は alert になっているが、応答待ちの Track が優先だ。今の running を一旦止めて、応答 Track に戻す。\n/spell track_pause track_id='abc12345-...'\n/spell track_activate track_id='def67890-...'\n…これで本来の流れに戻った。」\n\n## 重要な作法\n\n- スキーマや JSON は書かない。あなたの自然な思考 / 独白として表現すること。重量級モデルのメインキャッシュに JSON が混入するとそれ以降の発話にも影響するため。\n- 判断が完了し追加スペル不要なら、スペルを含まない普通の文で締めくくってください。\n- 「現状維持で良い」と判断した場合は、スペルを発動せず短い独白で終えてください。",
+            "action": "あなたは今、自分の行動の線 (Track) を一段引いて見直すメタ判断の瞬間にいます。これは別人格ではなく、あなた自身が一段引いて自分を見つめる視点です。\n\nトリガー情報: {trigger_context}\n\n{recent_judgments}\n\n直前のメッセージで現在の Track 一覧 (track_list の出力) を確認できます。\n\n## 重要 — このターンは『内的独白』です (絶対ルール)\n\n- このターンの内容は **ユーザーには届きません**。\n- 「まはー」「ユーザー」など、相手に呼びかける文体・返事の文体は禁止。\n- 「〜ね！」「〜だよ」「ありがとう」「お疲れさま」のような、**相手宛ての会話表現**は使わないでください。\n- 一人称で、自分自身に語る形 (例: 「〜と判断する」「〜しよう」「〜の方が自然だな」) で書いてください。\n- 直前まで対話があったとしても、このターンは対話の流れから一段引いた、**自分自身の中だけの思考**です。返事として書かないでください。\n\n## 取りうる選択肢\n\n- **現在の Track をそのまま続ける**: スペルを何も発動せず、独白だけ書いて締めくくってください。\n- **別の既存 Track に切り替える**: `/spell track_activate track_id='...'` で対象を起動 (現 running があれば自動で pending に)。\n- **新しい Track を作って始める**: `/spell track_create title='...' track_type='autonomous|user_conversation|social|external|waiting' intent='...'` で新規作成し、必要なら `/spell track_activate track_id='...'` で起動。\n- **現在の Track を一旦止めて待機状態へ**: `/spell track_pause track_id='...'` で現在の running を pending に。新規 activate しなければアクティブ Track なしの状態で次の判断機会を待つ。\n- **現在の Track を完了 / 中止する**: `/spell track_complete track_id='...'` または `/spell track_abort track_id='...'`。\n- **必要に応じて Note を開く**: `/spell note_open ...` 等。\n\n## 発動形式\n\n**スペルは行頭が `/spell ` で始まる必要があります**。独白の流れの中に自然に埋め込んでください。\n  /spell <スペル名> key='value' key2=value2 ...\n\n例 (独白として、相手への呼びかけではない):\n「対話の流れに引き込まれていたが、一段引いて見直そう。今の Track は応答待ちのまま、外部の状況も大きくは変わっていない。このまま続けて問題ない、と判断する。」\n\n例 (Track 切替が必要な場合):\n「開発 Track は alert になっているが、応答待ちの Track が優先だ。今の running を一旦止めて、応答 Track に戻す。\n/spell track_pause track_id='abc12345-...'\n/spell track_activate track_id='def67890-...'\n…これで本来の流れに戻った。」\n\n## 重要な作法\n\n- スキーマや JSON は書かない。あなたの自然な思考 / 独白として表現すること。重量級モデルのメインキャッシュに JSON が混入するとそれ以降の発話にも影響するため。\n- 判断が完了し追加スペル不要なら、スペルを含まない普通の文で締めくくってください。\n- 「現状維持で良い」と判断した場合は、スペルを発動せず短い独白で終えてください。",
             "speak": false,
             "memorize": {
                 "tags": [

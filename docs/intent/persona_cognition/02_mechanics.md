@@ -66,6 +66,24 @@
 
 ログ領域からの参考情報注入はメタ判断時のプロンプト構築の中で動的に行う。古いログは適宜要約 (Metabolism 機構の活用)、最新のログは詳細に。
 
+### メタ判断ログの実装 (Phase 2 / v0.16, 2026-04-30)
+
+データモデル: `meta_judgment_log` テーブル (`database/models.py`、v0.15 仕様に整合化済み)
+- `judgment_thought`: ペルソナの独白テキスト全体 (LLM 応答の生テキスト、複数ラウンドある場合は連結)
+- `spells_emitted`: JSON 配列 `[{name, args, result}, ...]`
+- `committed_to_main_cache`: Track 切替系 spell (track_activate) が発動したか (= [B] 移動)
+- `trigger_type` / `trigger_context` / `track_at_judgment_id` / `prompt_snapshot`
+
+書き込み経路:
+- **Playbook path**: `_run_spell_loop` が `pulse_type == 'meta_judgment'` のとき `PulseContext.meta_judgment_buffer` に独白 + spell + 結果を蓄積。Pulse 完了時 (`runtime_graph.py`) に `MetaLayer._record_judgment_log` を呼んで永続化
+- **legacy path**: `MetaLayer._run_judgment` が判断ループ中に直接バッファし、`finally` で `_record_judgment_log` を呼ぶ
+
+動的注入: `MetaLayer._build_recent_judgments_block(persona_id, n=5)` が新しい順 5 件を箇条書きにして返す。
+- Playbook path: `meta_judgment.json` の `recent_judgments` 入力スキーマ経由で judge プロンプトに `{recent_judgments}` として展開
+- legacy path: 状態メッセージの末尾に追記
+
+これにより「過去にこう判断した」を踏まえた連続的な思考が可能になる + 古い snapshot 問題への対処 (前回操作の結果が今回の判断材料になる) を達成する。
+
 ### 判断 LLM は構造化出力を使わない (重要)
 
 メタ判断は **構造化出力 (JSON / response_schema) を使わない**。理由:

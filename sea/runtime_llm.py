@@ -373,6 +373,16 @@ async def _run_spell_loop(
     loop_count = 0
     details_blocks: List[Tuple[str, str]] = []
 
+    # メタ判断 Pulse のとき、判断 LLM の独白 + 発動 spell + 結果を
+    # PulseContext.meta_judgment_buffer に蓄積する (Phase 2 / handoff Part 2)。
+    # Pulse 完了時に MetaLayer がここから meta_judgment_log を書く。
+    _is_meta_judgment_pulse = state.get("_pulse_type") == "meta_judgment"
+    if _is_meta_judgment_pulse:
+        _meta_pulse_ctx = state.get("_pulse_context")
+        if _meta_pulse_ctx is not None:
+            _meta_pulse_ctx.init_meta_judgment_buffer()
+            _meta_pulse_ctx.append_meta_judgment_thought(text)
+
     # Wrap the entire loop so any failure (unknown import state, LLM retry
     # failure, tool result serialization crash, etc.) is downgraded and the
     # persona's original utterance ``text`` is preserved. The caller saves
@@ -411,6 +421,13 @@ async def _run_spell_loop(
                 _run_spell_tool_async(name, args, persona, state, playbook.name, event_callback)
                 for name, args, _, _ in valid_spells
             ]))
+
+            # メタ判断 Pulse の発動 spell + 結果をバッファに記録
+            if _is_meta_judgment_pulse:
+                _meta_pulse_ctx = state.get("_pulse_context")
+                if _meta_pulse_ctx is not None:
+                    for (name, args, _, _), result in zip(valid_spells, results):
+                        _meta_pulse_ctx.append_meta_judgment_spell(name, args, result)
 
             # All spell results in one user message (reduces per-result message overhead)
             combined_results = "\n".join(
@@ -521,6 +538,12 @@ async def _run_spell_loop(
                 text = retry_result
             else:
                 text = ""
+
+            # メタ判断 Pulse の retry text もバッファに追記
+            if _is_meta_judgment_pulse:
+                _meta_pulse_ctx = state.get("_pulse_context")
+                if _meta_pulse_ctx is not None:
+                    _meta_pulse_ctx.append_meta_judgment_thought(text)
 
             # Spell-loop retry の I/O も llm_io.log に記録する。これがないと
             # メタ判断や spell 入りの応答ラウンドの全数を観測できない (送信時の

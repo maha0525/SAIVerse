@@ -10,9 +10,9 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
-### v0.16 (2026-04-30) — メタ判断 Pulse の per-persona 直列化
+### v0.16 (2026-04-30) — メタ判断 Pulse の per-persona 直列化 + メタ判断ログ機構の運用
 
-**確定事項**:
+**確定事項 (Part 1: 直列化)**:
 
 - 同一ペルソナのメタ判断 Pulse は同時 1 本に制限する。`MetaLayer` が persona_id ごとの `threading.Lock` を保持し、`on_track_alert` / `on_periodic_tick` の両入口で取得待ちする
 - 競合時は **wait** で確定 (skip しない)。理由: alert を skip すると即応イベントを取りこぼし、定期 tick を skip するとメインキャッシュ TTL 切れを誘発する
@@ -20,11 +20,20 @@
 - chat thread のブロックは一時的に許容。将来「安全な中断機構」を作る意思は持つ
 - `02_mechanics.md` §"メタ判断 Pulse は同時 1 本 (per-persona 直列化)" を追加
 
+**確定事項 (Part 2: ログ機構の運用)**:
+
+- `meta_judgment_log` スキーマを v0.15 (独白 + /spell 方式) に整合化。旧 4 値 enum (`judgment_action`) と関連カラム (`switch_to_track_id` / `new_track_spec` / `notify_to_track` / `raw_response`) を廃止し、`spells_emitted` (JSON 配列) を新設
+- 書き込み機構を実装:
+  - **Playbook path**: `_run_spell_loop` が `pulse_type == 'meta_judgment'` のとき `PulseContext.meta_judgment_buffer` に独白 + spell + 結果を蓄積。Pulse 完了時 (`runtime_graph.py`) に `MetaLayer._record_judgment_log` を呼んで永続化
+  - **legacy path**: `MetaLayer._run_judgment` が判断ループ中に直接バッファし、`finally` で `_record_judgment_log` を呼ぶ
+- 動的注入: `MetaLayer._build_recent_judgments_block(persona_id, n=5)` で過去 5 件を箇条書きにし、Playbook path は `meta_judgment.json` の `recent_judgments` 入力経由で `{recent_judgments}` 展開、legacy path は状態メッセージ末尾に追記
+- これで: (a) 過去のメタ判断を踏まえた連続性 (Intent A v0.14 メタ判断ログ領域の本来意図)、(b) 古い snapshot 問題への対処 (前回操作の結果が今回の判断材料になる) を達成
+
 **改訂理由**:
 
-Phase C-2 のテスト中に「pending と思って pause したら裏で alert になっていた」現象を観測。原因: alert observer (chat thread 経由) と AutonomyManager 定期 tick (background thread 経由) が別 thread で同じ persona に対するメタ判断 Playbook を起動し、それぞれが独立した snapshot を見て Track 操作を発動していた。
+Part 1: Phase C-2 のテスト中に「pending と思って pause したら裏で alert になっていた」現象を観測。原因: alert observer (chat thread 経由) と AutonomyManager 定期 tick (background thread 経由) が別 thread で同じ persona に対するメタ判断 Playbook を起動し、それぞれが独立した snapshot を見て Track 操作を発動していた。不変条件 11 ("メタ判断 = ペルソナ自身の思考の流れ 1 本") を構造で守るには、入口での直列化が必要だった。
 
-不変条件 11 ("メタ判断 = ペルソナ自身の思考の流れ 1 本") を構造で守るには、入口での直列化が必要だった。
+Part 2: `meta_judgment_log` テーブルは Phase 1 で新設したが、書き込み・読み込み・動的注入は Phase 2 以降で運用予定 (`phase_1_base.md`) と明記されていた。Part 1 で並列実行を抑止しても、過去の判断結果を参照できないと: (1) 別 Track からアラートが連続して来た時に毎回独立判断になり判断が劣化、(2) 古い snapshot 問題 (前回 pause したのに「pending と思って pause」をまた書く等) が残る。Part 2 でログ機構を実運用に乗せることで両者を解消。
 
 ### v0.15 (2026-04-30) — メタ判断を独白 + /spell 方式に回帰
 

@@ -512,15 +512,15 @@ class TrackOpenNote(Base):
 class MetaJudgmentLog(Base):
     """[1] メタ判断ログ領域: メタ判断の全履歴を独立保存する。
 
-    メタ判断は Track 内メインラインの一瞬の分岐として動く。Track 続行時は分岐
-    ターンを Track のメインキャッシュには残さないが、本テーブルには必ず保存
-    する。次のメタ判断時に「過去にこう判断した」を参考情報として動的注入する
-    ための時系列ログ。
+    メタ判断は Track 内メインラインの一瞬の分岐として動く (Intent A v0.15
+    独白 + /spell 方式)。Track 続行時は分岐ターンをメインキャッシュには残さない
+    が、本テーブルには必ず保存する。次のメタ判断時に「過去にこう判断した」を
+    参考情報として動的注入する時系列ログ。
 
     Track 移動時の分岐は committed_to_main_cache=TRUE になり、メインキャッシュ
     にも来歴として残る (= ペルソナの自己認識として「移動の理由」が見える)。
 
-    詳細: docs/intent/persona_action_tracks.md (v0.11)
+    詳細: docs/intent/persona_cognition/02_mechanics.md
     """
     __tablename__ = "meta_judgment_log"
     judgment_id = Column(String(36), primary_key=True)  # UUID
@@ -533,13 +533,11 @@ class MetaJudgmentLog(Base):
     trigger_context = Column(Text, nullable=True)  # JSON: alert track_id, reason, etc.
     prompt_snapshot = Column(Text, nullable=True)
     # Summarized prompt used at judgment time (for debugging)
-    judgment_action = Column(String(32), nullable=False)
-    # 'continue' / 'switch' / 'wait' / 'close'
     judgment_thought = Column(Text, nullable=True)
-    switch_to_track_id = Column(String(36), nullable=True)
-    new_track_spec = Column(Text, nullable=True)  # JSON: spec for newly created Track
-    notify_to_track = Column(Text, nullable=True)
-    raw_response = Column(Text, nullable=True)  # raw LLM response (for debugging)
+    # ペルソナの独白テキスト (LLM 応答全体の生テキスト、複数ラウンドある場合は連結)
+    spells_emitted = Column(Text, nullable=True)
+    # JSON array of {"name": str, "args": dict, "result": str}.
+    # 判断ループ中に発動された /spell とその実行結果をまとめて保存。
     committed_to_main_cache = Column(Boolean, default=False, nullable=False)
     # TRUE if this judgment was committed to the main cache (= track switch happened)
     __table_args__ = (

@@ -26,15 +26,14 @@ interface StorageLayerEntry {
     scope?: string | null;
     paired_action_text?: string | null;
 
-    // meta_judgment fields
-    judgment_action?: string | null;
+    // meta_judgment fields (v0.15 独白 + /spell 方式)
     judgment_thought?: string | null;
-    switch_to_track_id?: string | null;
+    spells_emitted?: string | null;  // JSON array of {name, args, result}
     trigger_type?: string | null;
     trigger_context?: string | null;
-    notify_to_track?: string | null;
     committed_to_main_cache?: boolean | null;
     track_at_judgment_id?: string | null;
+    prompt_snapshot?: string | null;
 
     // track_local fields
     log_kind?: string | null;
@@ -274,8 +273,8 @@ function EntryCard({ entry, expanded, onToggle }: EntryCardProps) {
                         {entry.scope}
                     </span>
                 )}
-                {entry.judgment_action && (
-                    <span className={slStyles.actionBadge}>{entry.judgment_action}</span>
+                {entry.committed_to_main_cache && (
+                    <span className={slStyles.actionBadge}>switch</span>
                 )}
                 {entry.log_kind && (
                     <span className={slStyles.logKindBadge}>{entry.log_kind}</span>
@@ -293,11 +292,6 @@ function EntryCard({ entry, expanded, onToggle }: EntryCardProps) {
                         {entry.judgment_thought
                             ? entry.judgment_thought.slice(0, 200)
                             : '(no thought)'}
-                        {entry.switch_to_track_id && (
-                            <span className={slStyles.inlineMeta}>
-                                {' → switch to '}{shortId(entry.switch_to_track_id)}
-                            </span>
-                        )}
                     </span>
                 )}
                 {(entry.layer === 'main_cache' || entry.layer === 'sub_cache') && (
@@ -334,24 +328,18 @@ function EntryCard({ entry, expanded, onToggle }: EntryCardProps) {
                         />
                     )}
 
-                    {/* meta_judgment */}
-                    {entry.judgment_action && (
-                        <DetailRow label="judgment_action" value={entry.judgment_action} />
-                    )}
+                    {/* meta_judgment (v0.15 独白 + /spell 方式) */}
                     {entry.judgment_thought && (
                         <DetailRow label="judgment_thought" value={entry.judgment_thought} pre />
                     )}
-                    {entry.switch_to_track_id && (
-                        <DetailRow label="switch_to_track_id" value={entry.switch_to_track_id} />
+                    {entry.spells_emitted && (
+                        <DetailRow label="spells_emitted" value={entry.spells_emitted} pre />
                     )}
                     {entry.trigger_type && (
                         <DetailRow label="trigger_type" value={entry.trigger_type} />
                     )}
                     {entry.trigger_context && (
                         <DetailRow label="trigger_context" value={entry.trigger_context} pre />
-                    )}
-                    {entry.notify_to_track && (
-                        <DetailRow label="notify_to_track" value={entry.notify_to_track} pre />
                     )}
                     {entry.committed_to_main_cache !== null && entry.committed_to_main_cache !== undefined && (
                         <DetailRow
@@ -361,6 +349,9 @@ function EntryCard({ entry, expanded, onToggle }: EntryCardProps) {
                     )}
                     {entry.track_at_judgment_id && (
                         <DetailRow label="track_at_judgment_id" value={entry.track_at_judgment_id} />
+                    )}
+                    {entry.prompt_snapshot && (
+                        <DetailRow label="prompt_snapshot" value={entry.prompt_snapshot} pre />
                     )}
 
                     {/* track_local */}

@@ -145,31 +145,32 @@ CREATE INDEX idx_track_open_notes_note ON track_open_notes(note_id);
 
 7 層 [1] の実体。メタ判断の全履歴を保存する。Track のメインキャッシュからは分離された独立領域で、次のメタ判断時に参考情報として動的注入される。
 
+v0.15 (独白 + /spell 方式) に整合化済みのスキーマ:
+
 ```sql
 CREATE TABLE meta_judgment_log (
     judgment_id TEXT PRIMARY KEY,                -- UUID
     persona_id TEXT NOT NULL,
     judged_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     track_at_judgment_id TEXT,                   -- 判断時点のアクティブ Track (NULL = idle 状態)
-    trigger_type TEXT NOT NULL,                  -- 'periodic_tick' / 'alert' / 'pulse_completion' / ...
-    trigger_context TEXT,                        -- JSON: alert track_id, alert reason, etc
+    trigger_type TEXT NOT NULL,                  -- 'periodic_tick' / 'user_utterance' / 'alert' / ...
+    trigger_context TEXT,                        -- JSON: alert track_id, event content, etc
     prompt_snapshot TEXT,                        -- 動的注入された参考情報含む、判断時のプロンプト要約 (デバッグ用)
-    judgment_action TEXT NOT NULL,               -- 'continue' / 'switch' / 'wait' / 'close'
-    judgment_thought TEXT,                       -- 判断に至った思考
-    switch_to_track_id TEXT,                     -- switch の場合の移動先
-    new_track_spec TEXT,                         -- JSON: 新規 Track 作成スペック
-    notify_to_track TEXT,                        -- continue の場合の通知内容
-    raw_response TEXT,                           -- LLM の生レスポンス (デバッグ用)
-    committed_to_main_cache BOOLEAN NOT NULL DEFAULT FALSE  -- このターンがメインキャッシュにも commit されたか
+    judgment_thought TEXT,                       -- ペルソナの独白テキスト (LLM 応答全体の生テキスト、複数ラウンドある場合は連結)
+    spells_emitted TEXT,                         -- JSON: [{name, args, result}, ...] 発動された /spell 群
+    committed_to_main_cache BOOLEAN NOT NULL DEFAULT FALSE  -- このターンがメインキャッシュにも commit されたか (= Track 切替が起きたか)
 );
-CREATE INDEX idx_meta_judgment_persona ON meta_judgment_log(persona_id, judged_at DESC);
+CREATE INDEX idx_meta_judgment_persona_time ON meta_judgment_log(persona_id, judged_at DESC);
 CREATE INDEX idx_meta_judgment_track ON meta_judgment_log(track_at_judgment_id);
 ```
 
-**設計ポイント**:
+**設計ポイント** (v0.15 改訂):
 
-- `judged_at` で時系列降順に並べて、参考情報注入時に新しい順から取得
-- `committed_to_main_cache=TRUE` のレコードは Track 移動の来歴として既にメインキャッシュに乗っている (= 重複注入を避けるための識別子)
+- 旧 `judgment_action` enum (`continue`/`switch`/`wait`/`close`) は v0.15 で廃止。「Track 切替系 spell が発動したか」 = `committed_to_main_cache` で表現
+- 旧 `switch_to_track_id` / `new_track_spec` / `notify_to_track` は `spells_emitted` JSON 内の各 spell の `args` に統合
+- 旧 `raw_response` は `judgment_thought` と同義のため廃止 (独白 + /spell 方式では LLM 応答 = 思考そのもの)
+- `judged_at` で時系列降順に並べて、`MetaLayer._build_recent_judgments_block` が新しい順から取得して judge プロンプトに動的注入
+- `committed_to_main_cache=TRUE` のレコードは Track 移動の来歴として既にメインキャッシュに乗っている (= 表示上 [switch] マーカーを付ける)
 - `prompt_snapshot` は判断時のプロンプト全文を要約保存。後追いで「なぜそう判断したか」を追える
 - 古い判断は Metabolism 的に要約していく機構が将来必要 (現状は生データ保持、最新 N 件を参考情報注入する単純運用)
 

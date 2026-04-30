@@ -334,9 +334,13 @@ class MetaLayer:
         except (TypeError, ValueError):
             trigger_context_json = "{}"
 
+        # 過去 N 件の判断ログを注入 (Phase 2)。空文字列ならプロンプトでも空に展開される。
+        recent_judgments_block = self._build_recent_judgments_block(persona.persona_id)
+
         args = {
             "alert_track_id": alert_track_id or "",
             "trigger_context": trigger_context_json,
+            "recent_judgments": recent_judgments_block,
         }
 
         captured_errors: List[Dict[str, Any]] = []
@@ -417,11 +421,23 @@ class MetaLayer:
             pulse_id=str(uuid.uuid4()), thread_id=thread_id or ""
         )
 
+        # Phase 2: meta_judgment_log への書き込み用の蓄積バッファ。
+        # legacy path は runtime を経由しないため、ここで自前で集める。
+        thought_parts: List[str] = []
+        spells_record: List[Dict[str, Any]] = []
+        prompt_snapshot_text: Optional[str] = None
         try:
             system_prompt = self._build_system_prompt(persona)
             user_message = self._build_state_message(
                 persona.persona_id, alert_track_id, context
             )
+            recent_judgments_block = self._build_recent_judgments_block(
+                persona.persona_id
+            )
+            if recent_judgments_block:
+                # 過去ログは現状状態の隣に並べる (judge は両方を踏まえて判断する)
+                user_message = f"{user_message}\n\n{recent_judgments_block}"
+            prompt_snapshot_text = user_message[:2000]  # 先頭 2K でデバッグ用に十分
             messages: List[Dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
@@ -439,6 +455,7 @@ class MetaLayer:
                     return
 
                 text = response if isinstance(response, str) else str(response)
+                thought_parts.append(text)
                 logging.info(
                     "[meta-layer] LLM response (loop=%d, persona=%s): %s",
                     loop, persona.persona_id, text[:300],
@@ -455,6 +472,13 @@ class MetaLayer:
 
                 # スペル実行 (PulseContext を渡して Track 操作スペルを deferred 化する)
                 results = self._execute_spells(persona, spells, pulse_ctx)
+                # results は List[Tuple[str, str]] = (name, result_str)
+                for (spell_name, spell_args), (_result_name, result_str) in zip(spells, results):
+                    spells_record.append({
+                        "name": spell_name,
+                        "args": dict(spell_args),
+                        "result": result_str,
+                    })
 
                 # 次ターンに向けて assistant 応答 + ツール結果を append
                 messages.append({"role": "assistant", "content": text})
@@ -469,8 +493,12 @@ class MetaLayer:
             # 判断ループ終了時 (例外含む) に deferred Track 操作を apply する。
             # _apply_deferred_track_ops は同じ helper を runtime_graph.py が
             # 通常 Pulse 完了時に呼んでおり、MetaLayer もこれを共有する。
+            committed_to_main = False
             try:
                 from sea.runtime_runner import _apply_deferred_track_ops
+                committed_to_main = any(
+                    op.op_type == "activate" for op in pulse_ctx.deferred_track_ops
+                )
                 _apply_deferred_track_ops(
                     {"_pulse_context": pulse_ctx}, persona
                 )
@@ -479,6 +507,184 @@ class MetaLayer:
                     "[meta-layer] Failed to apply deferred track ops for persona=%s",
                     persona.persona_id,
                 )
+
+            # Phase 2: meta_judgment_log に判断ターンを永続化する。
+            # 例外で握り潰さない (この記録が次回判断の参考情報になるため、
+            # 失敗が分かるよう WARN 以上で残す)。
+            try:
+                self._record_judgment_log(
+                    persona_id=persona.persona_id,
+                    trigger_type=str(context.get("trigger") or "unknown"),
+                    trigger_context=json.dumps(
+                        {
+                            k: v for k, v in (context or {}).items()
+                            if isinstance(v, (str, int, float, bool, list, dict, type(None)))
+                        },
+                        ensure_ascii=False,
+                    ),
+                    track_at_judgment_id=alert_track_id or None,
+                    thought_parts=thought_parts,
+                    spells=spells_record,
+                    committed_to_main_cache=committed_to_main,
+                    prompt_snapshot=prompt_snapshot_text,
+                )
+            except Exception:
+                logging.exception(
+                    "[meta-layer] Failed to record judgment log for persona=%s",
+                    persona.persona_id,
+                )
+
+    # ------------------------------------------------------------------
+    # 最近の判断履歴の動的注入 (Phase 2 / handoff Part 2)
+    # ------------------------------------------------------------------
+
+    # judge プロンプトに含める過去の判断履歴の件数 (新しい順)
+    _RECENT_JUDGMENTS_N = 5
+
+    def _build_recent_judgments_block(
+        self, persona_id: str, n: int = _RECENT_JUDGMENTS_N
+    ) -> str:
+        """過去 N 件のメタ判断ログを judge プロンプト用のテキストブロックに整形する。
+
+        次のメタ判断時に「過去にこう判断した」を踏まえて連続的な思考ができる
+        ようにする (Intent A v0.14 メタ判断ログ領域の活用)。古い判断結果を
+        snapshot 古さの補正にも使う ("前は pause したけど、その後の操作で状況が
+        変わってる") 。
+
+        フォーマットは独白の流れに馴染むよう、構造化を最小限に留めた箇条書き。
+        該当データなしのときは空文字列を返す (呼び出し側がそのまま埋め込んで OK)。
+        """
+        SessionLocal = getattr(self.manager, "SessionLocal", None)
+        if SessionLocal is None:
+            return ""
+
+        from database.models import MetaJudgmentLog
+
+        db = SessionLocal()
+        try:
+            rows = (
+                db.query(MetaJudgmentLog)
+                .filter(MetaJudgmentLog.persona_id == persona_id)
+                .order_by(MetaJudgmentLog.judged_at.desc())
+                .limit(n)
+                .all()
+            )
+        except Exception:
+            logging.exception(
+                "[meta-layer] Failed to read recent meta_judgment_log persona=%s",
+                persona_id,
+            )
+            return ""
+        finally:
+            db.close()
+
+        if not rows:
+            return ""
+
+        lines: List[str] = ["[最近のメタ判断ログ (新しい順)]"]
+        for r in rows:
+            # 独白テキストは長くなりがちなので 200 字に丸める
+            thought = (r.judgment_thought or "").strip().replace("\n", " ")
+            if len(thought) > 200:
+                thought = thought[:200] + "…"
+            spells_summary = ""
+            if r.spells_emitted:
+                try:
+                    spells = json.loads(r.spells_emitted)
+                    if isinstance(spells, list) and spells:
+                        names = [s.get("name", "?") for s in spells if isinstance(s, dict)]
+                        spells_summary = f" | spells={','.join(names)}"
+                except (ValueError, TypeError):
+                    pass
+            committed_marker = " [switch]" if r.committed_to_main_cache else ""
+            lines.append(
+                f"- {r.judged_at.isoformat() if r.judged_at else '?'} "
+                f"({r.trigger_type}){committed_marker}{spells_summary}\n  独白: {thought}"
+            )
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # meta_judgment_log への書き込み (Phase 2 / handoff Part 2)
+    # ------------------------------------------------------------------
+
+    def _record_judgment_log(
+        self,
+        *,
+        persona_id: Optional[str],
+        trigger_type: str,
+        trigger_context: Optional[str],
+        track_at_judgment_id: Optional[str],
+        thought_parts: List[str],
+        spells: List[Dict[str, Any]],
+        committed_to_main_cache: bool,
+        prompt_snapshot: Optional[str] = None,
+    ) -> None:
+        """1 判断ターン分のレコードを ``meta_judgment_log`` テーブルに書き込む。
+
+        Phase 2 の中核ヘルパ。Playbook path / legacy path の両方から呼び出される。
+        次回メタ判断時の judge プロンプトに動的注入される時系列ログとして使う。
+        失敗は WARN ログ + 続行 (記録できなくても判断自体は完了させる)。
+        """
+        if not persona_id:
+            logging.warning(
+                "[meta-layer] _record_judgment_log skipped: persona_id is empty"
+            )
+            return
+
+        thought_text = "\n\n---\n\n".join(p.strip() for p in thought_parts if p and p.strip())
+        if not thought_text and not spells:
+            logging.debug(
+                "[meta-layer] _record_judgment_log skipped: no thought or spells (persona=%s)",
+                persona_id,
+            )
+            return
+
+        try:
+            spells_json = json.dumps(spells, ensure_ascii=False) if spells else None
+        except (TypeError, ValueError):
+            logging.exception(
+                "[meta-layer] Failed to serialize spells; saving as empty array"
+            )
+            spells_json = "[]"
+
+        SessionLocal = getattr(self.manager, "SessionLocal", None)
+        if SessionLocal is None:
+            logging.warning(
+                "[meta-layer] No SessionLocal on manager; cannot persist meta_judgment_log"
+            )
+            return
+
+        import uuid as _uuid
+
+        from database.models import MetaJudgmentLog
+
+        db = SessionLocal()
+        try:
+            row = MetaJudgmentLog(
+                judgment_id=str(_uuid.uuid4()),
+                persona_id=persona_id,
+                track_at_judgment_id=track_at_judgment_id,
+                trigger_type=trigger_type or "unknown",
+                trigger_context=trigger_context,
+                prompt_snapshot=prompt_snapshot,
+                judgment_thought=thought_text or None,
+                spells_emitted=spells_json,
+                committed_to_main_cache=bool(committed_to_main_cache),
+            )
+            db.add(row)
+            db.commit()
+            logging.info(
+                "[meta-layer] Recorded meta_judgment_log: persona=%s trigger=%s spells=%d committed=%s",
+                persona_id, trigger_type, len(spells), committed_to_main_cache,
+            )
+        except Exception:
+            db.rollback()
+            logging.exception(
+                "[meta-layer] Failed to insert meta_judgment_log row persona=%s",
+                persona_id,
+            )
+        finally:
+            db.close()
 
     # ------------------------------------------------------------------
     # スペル抽出と実行

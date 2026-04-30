@@ -521,14 +521,14 @@ class StorageLayerEntry(BaseModel):
     paired_action_text: Optional[str] = None
 
     # meta_judgment_log fields (used when layer == meta_judgment)
-    judgment_action: Optional[str] = None  # continue / switch / wait / close
+    # v0.15 独白 + /spell 方式に整合化済み (旧 judgment_action enum は廃止)
     judgment_thought: Optional[str] = None
-    switch_to_track_id: Optional[str] = None
+    spells_emitted: Optional[str] = None  # JSON array of {name, args, result}
     trigger_type: Optional[str] = None
     trigger_context: Optional[str] = None
-    notify_to_track: Optional[str] = None
     committed_to_main_cache: Optional[bool] = None
     track_at_judgment_id: Optional[str] = None
+    prompt_snapshot: Optional[str] = None
 
     # track_local_log fields (used when layer == track_local)
     log_kind: Optional[str] = None
