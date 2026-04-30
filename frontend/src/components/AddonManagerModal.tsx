@@ -28,6 +28,10 @@ interface AddonParamSchema {
     accept?: string;
     max_size_mb?: number;
     preview?: 'audio' | 'image';
+    // 任意: true でこの行をアコーディオン (折り畳み可能) として描画する。
+    // 大きな入力 UI (dict など) や上級者向け項目を普段は折り畳んでおきたい用途で使う。
+    collapsible?: boolean;
+    default_collapsed?: boolean;  // 初期状態 (collapsible=true 時のみ意味がある)。既定 true。
 }
 
 interface AddonInfo {
@@ -517,6 +521,52 @@ function FileParamControl({
 }
 
 // ---------------------------------------------------------------------------
+// ParamRow — paramLabel + control の 1 行。schema.collapsible が true のとき
+// アコーディオン (折り畳み可能なヘッダ + ボディ) として描画する。
+// ---------------------------------------------------------------------------
+
+function ParamRow({
+    schema,
+    children,
+}: {
+    schema: AddonParamSchema;
+    children: React.ReactNode;
+}) {
+    const isCollapsible = !!schema.collapsible;
+    const [collapsed, setCollapsed] = useState<boolean>(
+        isCollapsible ? (schema.default_collapsed ?? true) : false
+    );
+
+    if (isCollapsible) {
+        return (
+            <div className={styles.paramRowAccordion}>
+                <button
+                    type="button"
+                    className={styles.paramRowAccordionHeader}
+                    onClick={() => setCollapsed((v) => !v)}
+                    aria-expanded={!collapsed}
+                >
+                    {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                    <span className={styles.paramLabel}>{schema.label}</span>
+                </button>
+                {!collapsed && (
+                    <div className={styles.paramRowAccordionBody}>
+                        {children}
+                    </div>
+                )}
+            </div>
+        );
+    }
+
+    return (
+        <div className={`${styles.paramRow} ${schema.type === 'dict' ? styles.paramRowStacked : ''}`}>
+            <span className={styles.paramLabel}>{schema.label}</span>
+            {children}
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
 // ParamsSection — list of parameters with global + per-persona sections
 // ---------------------------------------------------------------------------
 
@@ -616,18 +666,14 @@ function ParamsSection({
                 <div className={styles.paramsGroup}>
                     <div className={styles.paramsGroupLabel}>デフォルト（全ペルソナ共通）</div>
                     {configurableSchemas.map((schema) => (
-                        <div
-                            key={schema.key}
-                            className={`${styles.paramRow} ${schema.type === 'dict' ? styles.paramRowStacked : ''}`}
-                        >
-                            <span className={styles.paramLabel}>{schema.label}</span>
+                        <ParamRow key={schema.key} schema={schema}>
                             <ParamControl
                                 schema={schema}
                                 value={globalParams[schema.key]}
                                 onChange={handleGlobalChange}
                                 addonName={addon.addon_name}
                             />
-                        </div>
+                        </ParamRow>
                     ))}
                     {saving && <span className={styles.savingHint}>保存中...</span>}
                 </div>
@@ -657,11 +703,7 @@ function ParamsSection({
                             {personaConfigurableSchemas.length > 0 && (
                                 <div className={styles.personaConfigBlock}>
                                     {personaConfigurableSchemas.map((schema) => (
-                                        <div
-                                            key={schema.key}
-                                            className={`${styles.paramRow} ${schema.type === 'dict' ? styles.paramRowStacked : ''}`}
-                                        >
-                                            <span className={styles.paramLabel}>{schema.label}</span>
+                                        <ParamRow key={schema.key} schema={schema}>
                                             <ParamControl
                                                 schema={schema}
                                                 value={selectedPersonaParams[schema.key]}
@@ -669,7 +711,7 @@ function ParamsSection({
                                                 addonName={addon.addon_name}
                                                 personaId={selectedPersonaId}
                                             />
-                                        </div>
+                                        </ParamRow>
                                     ))}
                                 </div>
                             )}

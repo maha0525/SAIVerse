@@ -51,6 +51,10 @@ class AddonParamSchema(BaseModel):
     accept: Optional[str] = None  # MIME type CSV: "audio/wav,audio/mpeg,video/mp4"
     max_size_mb: Optional[float] = None  # デフォルト 500MB。本体上限 1GB
     preview: Optional[str] = None  # "audio" | "image" | None
+    # アコーディオン (折り畳み可能な行) として描画するか。dict など大きな
+    # 入力 UI を普段は折り畳んでおきたい場合に使う。
+    collapsible: Optional[bool] = None
+    default_collapsed: Optional[bool] = None  # collapsible=true 時の初期状態 (既定 true)
 
 
 class AddonUiBubbleButton(BaseModel):

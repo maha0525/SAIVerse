@@ -415,6 +415,47 @@
     color: #94a3b8;
 }
 
+/* --- Accordion paramRow (schema.collapsible) --- */
+
+.paramRowAccordion {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    border-radius: 0.5rem;
+    padding: 0.4rem 0.5rem;
+}
+
+.paramRowAccordionHeader {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: none;
+    border: none;
+    padding: 0.15rem 0.1rem;
+    cursor: pointer;
+    color: #475569;
+    width: 100%;
+    text-align: left;
+}
+
+.paramRowAccordionHeader:hover {
+    color: #1e293b;
+}
+
+.paramRowAccordionHeader .paramLabel {
+    flex: 1;
+    font-size: 0.88rem;
+    color: inherit;
+}
+
+.paramRowAccordionBody {
+    padding: 0.1rem 0.1rem 0.2rem 1.4rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
 /* --- Dict (key/value table) --- */
 
 /* dict 型は通常の行レイアウトでは横幅が足りないため、ラベルを上、コントロールを下の縦積みに切替える */
@@ -779,6 +820,18 @@
 :global([data-theme="dark"]) .dictAddBtn:hover {
     border-color: #6366f1;
     color: #6366f1;
+}
+
+:global([data-theme="dark"]) .paramRowAccordion {
+    border-color: rgba(255, 255, 255, 0.08);
+}
+
+:global([data-theme="dark"]) .paramRowAccordionHeader {
+    color: #94a3b8;
+}
+
+:global([data-theme="dark"]) .paramRowAccordionHeader:hover {
+    color: #e2e8f0;
 }
 
 /* --- Mobile (narrow viewport) --- */
