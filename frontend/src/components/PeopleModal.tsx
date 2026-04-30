@@ -18,9 +18,14 @@ interface Occupant {
 interface PeopleModalProps {
     isOpen: boolean;
     onClose: () => void;
+    /** 親 (ChatPage) が把握している現在 Building ID。
+     * 省略すると server-global の user_current_building_id にフォールバックし、
+     * マルチデバイス間で他クライアントの操作に details が汚染される (エリス上書き事故の遠因)。
+     */
+    currentBuildingId?: string | null;
 }
 
-export default function PeopleModal({ isOpen, onClose }: PeopleModalProps) {
+export default function PeopleModal({ isOpen, onClose, currentBuildingId }: PeopleModalProps) {
     const [personas, setPersonas] = useState<Persona[]>([]);
     const [occupants, setOccupants] = useState<Occupant[]>([]);
     const [loading, setLoading] = useState(false);
@@ -35,11 +40,18 @@ export default function PeopleModal({ isOpen, onClose }: PeopleModalProps) {
     }, [isOpen]);
 
     const fetchData = async () => {
+        if (!currentBuildingId) {
+            // 親 (ChatPage) が currentBuildingId を渡し忘れた場合の安全策。
+            // server-global にフォールバックすると、マルチデバイスで他クライアントの
+            // building が見える事故 (エリス上書き事故の遠因) になるため即 return。
+            console.warn('[PeopleModal] fetchData skipped: currentBuildingId not provided');
+            return;
+        }
         setLoading(true);
         try {
             const [summonableRes, detailsRes] = await Promise.all([
                 fetch('/api/people/summonable'),
-                fetch('/api/info/details')
+                fetch(`/api/info/details?building_id=${encodeURIComponent(currentBuildingId)}`)
             ]);
             if (summonableRes.ok) {
                 const data = await summonableRes.json();

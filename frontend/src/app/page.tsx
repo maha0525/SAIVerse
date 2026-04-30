@@ -718,8 +718,13 @@ export default function Home() {
     const fetchBuildingInfo = async (overrideBuildingId?: string) => {
         try {
             const bid = overrideBuildingId || currentBuildingIdRef.current;
-            const url = bid ? `/api/info/details?building_id=${bid}` : '/api/info/details';
-            const res = await fetch(url);
+            if (!bid) {
+                // 起動直後の /api/user/status 完了前に呼ばれた場合は何もしない。
+                // 引数なしで叩くと server-global の user_current_building_id に
+                // 汚染されうる (エリス上書き事故の遠因)。
+                return;
+            }
+            const res = await fetch(`/api/info/details?building_id=${encodeURIComponent(bid)}`);
             if (res.ok) {
                 const data = await res.json();
                 setCurrentBuildingName(data.name || 'SAIVerse');
@@ -2303,6 +2308,7 @@ export default function Home() {
                 isOpen={isInfoOpen}
                 onClose={() => setIsInfoOpen(false)}
                 refreshTrigger={moveTrigger}
+                currentBuildingId={currentBuildingId}
             />
 
             <ChatOptions
@@ -2320,12 +2326,14 @@ export default function Home() {
             <PeopleModal
                 isOpen={isPeopleModalOpen}
                 onClose={() => setIsPeopleModalOpen(false)}
+                currentBuildingId={currentBuildingId}
             />
 
             <ItemModal
                 isOpen={!!linkItemModalItem}
                 onClose={() => setLinkItemModalItem(null)}
                 item={linkItemModalItem}
+                currentBuildingId={currentBuildingId}
             />
 
             <ContextPreviewModal

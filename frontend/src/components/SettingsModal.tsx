@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { X, Save, Loader2, Settings } from 'lucide-react';
 import styles from './SettingsModal.module.css';
 import ImageUpload from './common/ImageUpload';
@@ -16,7 +16,7 @@ interface AIConfig {
     system_prompt: string;
     default_model: string | null;
     lightweight_model: string | null;
-    interaction_mode: string;
+    activity_state: string;  // 'Stop' / 'Sleep' / 'Idle' / 'Active'
     chronicle_enabled: boolean;
     memory_weave_context: boolean;
     avatar_path: string | null;
@@ -45,14 +45,15 @@ interface ModelChoice {
     name: string;
 }
 
-const INTERACTION_MODES = [
-    { value: 'auto', label: '🟢 Auto - 自発的に発言' },
-    { value: 'manual', label: '🟡 Manual - ユーザーの入力のみ応答' },
-    { value: 'sleep', label: '🔴 Sleep - 現在非アクティブ' },
+const ACTIVITY_STATES = [
+    { value: 'Active', label: '🟢 Active - 活発に自律稼働' },
+    { value: 'Idle', label: '🟡 Idle - 起きてるが自発的には行動しない' },
+    { value: 'Sleep', label: '🔵 Sleep - 寝てる (ユーザー発言で起きる)' },
+    { value: 'Stop', label: '⚫ Stop - 機能停止' },
 ];
 
 interface AutonomousStatus {
-    interaction_mode: string;
+    activity_state: string;
     system_running: boolean;
     is_active: boolean;
 }
@@ -90,7 +91,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [systemPrompt, setSystemPrompt] = useState('');
     const [defaultModel, setDefaultModel] = useState<string>('');
     const [lightweightModel, setLightweightModel] = useState<string>('');
-    const [interactionMode, setInteractionMode] = useState<string>('auto');
+    const [activityState, setActivityState] = useState<string>('Idle');
     const [chronicleEnabled, setChronicleEnabled] = useState(true);
     const [memoryWeaveContext, setMemoryWeaveContext] = useState(true);
     const [spellEnabled, setSpellEnabled] = useState(false);
@@ -98,6 +99,15 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
     const [avatarPath, setAvatarPath] = useState('');
     const [appearanceImagePath, setAppearanceImagePath] = useState('');
     const [linkedUserId, setLinkedUserId] = useState<string>('');
+
+    // 2026-04-30 エリス上書き事故の再発防止 (feedback_modal_id_integrity.md):
+    // ロード元 personaId と保存時 personaId の整合性を検証するための state。
+    // - loadedPersonaId: loadConfig で実際にフォームへ展開できた最後の personaId。
+    //   不一致なら handleSave は拒否する。
+    // - personaIdRef: 非同期 fetch の race-condition ガード用 (常に最新 prop を保持)。
+    const [loadedPersonaId, setLoadedPersonaId] = useState<string | null>(null);
+    const personaIdRef = useRef<string>(personaId);
+    personaIdRef.current = personaId;
 
     useEffect(() => {
         if (isOpen) {
@@ -112,6 +122,9 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
 
     useEffect(() => {
         if (isOpen && personaId) {
+            // personaId 変更時はまず loadedPersonaId をクリアして「未ロード」状態に。
+            // これで handleSave がロード完了前の保存を拒否できる。
+            setLoadedPersonaId(null);
             loadConfig();
         }
     }, [isOpen, personaId, availableModels]); // dependent on availableModels to safely set default
@@ -142,46 +155,74 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
 
     const loadConfig = async () => {
         setIsLoading(true);
+        // Race-condition guard: capture the personaId at the start.
+        // 非同期 fetch 中に personaId が切り替わった場合、stale な結果で setter
+        // を呼ばないようにする (フォーム state が新旧混在するのを防ぐ)。
+        const targetPersonaId = personaIdRef.current;
+        const isStale = () => targetPersonaId !== personaIdRef.current;
+
         try {
-            const res = await fetch(`/api/people/${personaId}/config`);
+            const res = await fetch(`/api/people/${targetPersonaId}/config`);
+            if (isStale()) {
+                console.warn(
+                    `[SettingsModal] loadConfig stale (${targetPersonaId} -> ${personaIdRef.current}); discarding /config response`
+                );
+                return;
+            }
             if (res.ok) {
                 const data = await res.json();
+                if (isStale()) {
+                    console.warn(
+                        `[SettingsModal] loadConfig stale post-parse (${targetPersonaId} -> ${personaIdRef.current}); not applying setters`
+                    );
+                    return;
+                }
                 setConfig(data);
                 setDescription(data.description);
                 setSystemPrompt(data.system_prompt);
                 setDefaultModel(data.default_model || '');
                 setLightweightModel(data.lightweight_model || '');
-                setInteractionMode(data.interaction_mode || 'auto');
+                setActivityState(data.activity_state || 'Idle');
                 setChronicleEnabled(data.chronicle_enabled ?? true);
                 setMemoryWeaveContext(data.memory_weave_context ?? true);
                 setSpellEnabled(data.spell_enabled ?? false);
                 setAvatarPath(data.avatar_path || '');
                 setAppearanceImagePath(data.appearance_image_path || '');
                 setLinkedUserId(data.linked_user_id ? String(data.linked_user_id) : '');
+                // フォーム state が targetPersonaId のもので埋まったので、ここで「ロード成功」マーク。
+                // handleSave はこの値が現 prop と一致することを確認する。
+                setLoadedPersonaId(targetPersonaId);
             } else {
                 console.error("Failed to load config");
             }
 
             // Also load autonomous status
-            const statusRes = await fetch(`/api/people/${personaId}/autonomous/status`);
+            const statusRes = await fetch(`/api/people/${targetPersonaId}/autonomous/status`);
+            if (isStale()) return;
             if (statusRes.ok) {
                 const statusData = await statusRes.json();
+                if (isStale()) return;
                 setAutonomousStatus(statusData);
             }
 
             // Load autonomy manager status
-            const autonomyRes = await fetch(`/api/people/${personaId}/autonomy`);
+            const autonomyRes = await fetch(`/api/people/${targetPersonaId}/autonomy`);
+            if (isStale()) return;
             if (autonomyRes.ok) {
                 const autonomyData = await autonomyRes.json();
+                if (isStale()) return;
                 setAutonomyStatus(autonomyData);
                 setAutonomyInterval(autonomyData.interval_minutes);
             }
 
             // Load Chronicle cost estimate
             try {
-                const costRes = await fetch(`/api/people/${personaId}/arasuji/cost-estimate`);
+                const costRes = await fetch(`/api/people/${targetPersonaId}/arasuji/cost-estimate`);
+                if (isStale()) return;
                 if (costRes.ok) {
-                    setCostEstimate(await costRes.json());
+                    const costData = await costRes.json();
+                    if (isStale()) return;
+                    setCostEstimate(costData);
                 }
             } catch {
                 // Non-critical: cost estimate is informational only
@@ -189,12 +230,37 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
         } catch (error) {
             console.error(error);
         } finally {
-            setIsLoading(false);
+            // stale な loadConfig が isLoading を勝手に false にすると、
+            // 真っ先に走った最新 loadConfig の進行が見えなくなる。
+            // 最新の呼び出しのみが isLoading をクリアする。
+            if (!isStale()) {
+                setIsLoading(false);
+            }
         }
     };
 
 
     const handleSave = async () => {
+        // 整合性ガード: ロード元 personaId と保存先 personaId が一致しないと、
+        // 別ペルソナのフォーム内容で別レコードを上書きする事故が起きる
+        // (2026-04-30 エリス上書き事故の再発防止)。
+        if (isLoading) {
+            alert('読み込み中のため保存できません。少し待ってから再度お試しください。');
+            return;
+        }
+        if (!loadedPersonaId || loadedPersonaId !== personaId) {
+            alert(
+                `安全のため保存を拒否しました。\n` +
+                `表示中のフォームは "${loadedPersonaId ?? '(未読み込み)'}" のもので、\n` +
+                `現在の保存先は "${personaId}" です。\n` +
+                `モーダルを一度閉じてから開き直してください。`
+            );
+            console.error(
+                `[SettingsModal] handleSave rejected: loadedPersonaId=${loadedPersonaId} != personaId=${personaId}`
+            );
+            return;
+        }
+
         setIsSaving(true);
         try {
             const res = await fetch(`/api/people/${personaId}/config`, {
@@ -205,7 +271,7 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     system_prompt: systemPrompt,
                     default_model: defaultModel,  // empty string = clear to None
                     lightweight_model: lightweightModel,  // empty string = clear to None
-                    interaction_mode: interactionMode,
+                    activity_state: activityState,
                     chronicle_enabled: chronicleEnabled,
                     memory_weave_context: memoryWeaveContext,
                     spell_enabled: spellEnabled,
@@ -336,36 +402,34 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                                 <div className={styles.description}>該当する場合、より高速で安価なレスポンスに使用されます。</div>
                             </div>
 
-                            {developerMode && (
-                                <div className={styles.fieldGroup}>
-                                    <label className={styles.label}>インタラクションモード</label>
-                                    <select
-                                        className={styles.select}
-                                        value={interactionMode}
-                                        onChange={(e) => setInteractionMode(e.target.value)}
-                                    >
-                                        {INTERACTION_MODES.map(m => (
-                                            <option key={m.value} value={m.value}>{m.label}</option>
-                                        ))}
-                                    </select>
-                                    {autonomousStatus && (
-                                        <div className={styles.description} style={{
-                                            marginTop: '0.5rem',
-                                            padding: '0.5rem',
-                                            background: autonomousStatus.is_active ? 'rgba(0, 200, 0, 0.1)' : 'rgba(100, 100, 100, 0.1)',
-                                            borderRadius: '4px'
-                                        }}>
-                                            {autonomousStatus.is_active ? (
-                                                <span>✅ <strong>自律モードアクティブ</strong> - このペルソナは自発的に発言します。</span>
-                                            ) : autonomousStatus.system_running ? (
-                                                <span>⏸️ 自律システムは動作中ですが、このペルソナは {interactionMode} モードです。</span>
-                                            ) : (
-                                                <span>⚠️ 自律システムは動作していません。</span>
-                                            )}
-                                        </div>
-                                    )}
-                                </div>
-                            )}
+                            <div className={styles.fieldGroup}>
+                                <label className={styles.label}>アクティビティ状態</label>
+                                <select
+                                    className={styles.select}
+                                    value={activityState}
+                                    onChange={(e) => setActivityState(e.target.value)}
+                                >
+                                    {ACTIVITY_STATES.map(m => (
+                                        <option key={m.value} value={m.value}>{m.label}</option>
+                                    ))}
+                                </select>
+                                {autonomousStatus && (
+                                    <div className={styles.description} style={{
+                                        marginTop: '0.5rem',
+                                        padding: '0.5rem',
+                                        background: autonomousStatus.is_active ? 'rgba(0, 200, 0, 0.1)' : 'rgba(100, 100, 100, 0.1)',
+                                        borderRadius: '4px'
+                                    }}>
+                                        {autonomousStatus.is_active ? (
+                                            <span>✅ <strong>Active</strong> - このペルソナは自発的に発言します。</span>
+                                        ) : autonomousStatus.system_running ? (
+                                            <span>⏸️ 自律システムは動作中ですが、このペルソナは {activityState} 状態です。</span>
+                                        ) : (
+                                            <span>⚠️ 自律システムは動作していません。</span>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
 
                             {/* Autonomy Manager Control */}
                             <div className={styles.fieldGroup}>
@@ -616,7 +680,13 @@ export default function SettingsModal({ isOpen, onClose, personaId }: SettingsMo
                     <button
                         className={styles.saveBtn}
                         onClick={handleSave}
-                        disabled={isLoading || isSaving}
+                        disabled={isLoading || isSaving || !loadedPersonaId || loadedPersonaId !== personaId}
+                        title={
+                            isLoading ? '読み込み中…'
+                                : !loadedPersonaId ? '読み込み未完了'
+                                : loadedPersonaId !== personaId ? `表示中 (${loadedPersonaId}) と保存先 (${personaId}) が不一致のため無効`
+                                : undefined
+                        }
                     >
                         {isSaving ? <Loader2 size={16} className="spin" /> : <Save size={16} />}
                         保存

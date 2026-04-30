@@ -51,9 +51,14 @@ interface ItemModalProps {
     onClose: () => void;
     item: Item | null;
     onItemUpdated?: () => void;  // Callback when item is updated
+    /** 親が把握している現在 Building ID。バッグ一覧取得用。
+     * 省略すると server-global の user_current_building_id にフォールバックし、
+     * マルチデバイス間で他クライアントの操作に汚染される (エリス上書き事故の遠因)。
+     */
+    currentBuildingId?: string | null;
 }
 
-export default function ItemModal({ isOpen, onClose, item, onItemUpdated }: ItemModalProps) {
+export default function ItemModal({ isOpen, onClose, item, onItemUpdated, currentBuildingId }: ItemModalProps) {
     const [content, setContent] = useState<string | null>(null);
     const [editContent, setEditContent] = useState<string>('');
     const [isLoading, setIsLoading] = useState(false);
@@ -209,8 +214,14 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated }: Item
 
     // Meta editing handlers
     const loadBagItemsInBuilding = useCallback(async () => {
+        if (!currentBuildingId) {
+            // 親が currentBuildingId を渡し忘れた場合の安全策。
+            // server-global にフォールバックするとマルチデバイス汚染リスクがあるため即 return。
+            console.warn('[ItemModal] loadBagItemsInBuilding skipped: currentBuildingId not provided');
+            return;
+        }
         try {
-            const res = await fetch('/api/info/details');
+            const res = await fetch(`/api/info/details?building_id=${encodeURIComponent(currentBuildingId)}`);
             if (res.ok) {
                 const data = await res.json();
                 const bags = (data.items || []).filter(
@@ -221,7 +232,7 @@ export default function ItemModal({ isOpen, onClose, item, onItemUpdated }: Item
         } catch (err) {
             console.error('Failed to load bag items:', err);
         }
-    }, [item?.id]);
+    }, [item?.id, currentBuildingId]);
 
     const handleStartMetaEdit = async () => {
         if (!item) return;

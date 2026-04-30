@@ -23,6 +23,11 @@ interface RightSidebarProps {
     isOpen: boolean;
     onClose?: () => void;
     refreshTrigger?: number;
+    /** 親 (ChatPage) が把握している現在 Building ID。fetch 時に必須で渡す。
+     * これを省略するとバックエンドが server-global の user_current_building_id にフォールバックし、
+     * マルチデバイスで他クライアントの操作に汚染される (2026-04-30 エリス上書き事故の遠因)。
+     */
+    currentBuildingId?: string | null;
 }
 
 interface Occupant {
@@ -50,7 +55,7 @@ interface BuildingDetails {
     items: Item[];
 }
 
-export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightSidebarProps) {
+export default function RightSidebar({ isOpen, onClose, refreshTrigger, currentBuildingId }: RightSidebarProps) {
     const [details, setDetails] = useState<BuildingDetails | null>(null);
     const [selectedItem, setSelectedItem] = useState<Item | null>(null);
     const [selectedPersona, setSelectedPersona] = useState<Occupant | null>(null);
@@ -69,6 +74,13 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
     const [activeModalPersonaId, setActiveModalPersonaId] = useState<string | null>(null);
     const [activeModalPersonaName, setActiveModalPersonaName] = useState<string | null>(null);
 
+    // 2026-04-30 のエリス上書き事故 (feedback_modal_id_integrity.md) の再発防止:
+    // サーバ side global の user_current_building_id が他デバイスの操作で変動すると、
+    // 当タブの details が別 building の occupants に切り替わる現象が起こりうる。
+    // その状態でモーダル / PersonaMenu が開いたままだと、新コンテキストの occupant ID
+    // で操作が走ってしまうため、building 変更を検知したらすべて閉じる。
+    const previousBuildingIdRef = useRef<string | null>(null);
+
     const startX = useRef<number | null>(null);
     const startY = useRef<number | null>(null);
     const startTime = useRef<number | null>(null);
@@ -76,8 +88,14 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
 
 
     const fetchDetails = async () => {
+        // currentBuildingId 未指定だと server-global の user_current_building_id に
+        // 汚染される (エリス上書き事故の遠因)。明示指定がない間は fetch しない。
+        if (!currentBuildingId) {
+            console.warn('[RightSidebar] fetchDetails skipped: currentBuildingId not provided yet');
+            return;
+        }
         try {
-            const res = await fetch('/api/info/details');
+            const res = await fetch(`/api/info/details?building_id=${encodeURIComponent(currentBuildingId)}`);
             if (res.ok) {
                 const data = await res.json();
                 setDetails(data);
@@ -104,7 +122,29 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
 
     useEffect(() => {
         fetchDetails();
-    }, [refreshTrigger, isOpen]);
+        // currentBuildingId が変われば自動で再 fetch (deps に含める)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [refreshTrigger, isOpen, currentBuildingId]);
+
+    // Building 変化検知: 開いているモーダル / メニューを強制クローズする。
+    // - selectedPersona (PersonaMenu の表示元): 旧 building の occupant への参照
+    // - 各モーダル: 古い personaId のまま開いていると、ユーザの誤操作で新 context に
+    //   引きずられた誤書き込みが起こりうる
+    useEffect(() => {
+        const newId = details?.id ?? null;
+        const prev = previousBuildingIdRef.current;
+        previousBuildingIdRef.current = newId;
+        if (prev === null || prev === newId) return;
+        // Building 変化 → 安全のため全部閉じる
+        console.log(`[RightSidebar] Building context changed (${prev} -> ${newId}); closing menus/modals`);
+        setSelectedPersona(null);
+        setShowMemory(false);
+        setShowSchedule(false);
+        setShowTasks(false);
+        setShowSettings(false);
+        setShowInventory(false);
+        setShowBuildingSettings(false);
+    }, [details?.id]);
 
     // Polling for real-time updates when sidebar is open
     useEffect(() => {
@@ -154,18 +194,47 @@ export default function RightSidebar({ isOpen, onClose, refreshTrigger }: RightS
     };
 
     // Helper to open specific modal
+    // 2026-04-30 のエリス上書き事故 (feedback_modal_id_integrity.md) の再発防止:
+    // 既にどれかのモーダルが別 personaId で開いている状態で再度 openModal が呼ばれると、
+    // activeModalPersonaId だけが上書きされ、対象モーダルは開いたまま personaId プロパティ
+    // だけが切り替わる現象が起きる。このとき「フォームの中身は古いまま、保存先 ID だけ新しい」
+    // という極めて危険な状態になりうるため、いったんすべてのモーダルを閉じてから開き直す。
     const openModal = (type: 'memory' | 'schedule' | 'tasks' | 'settings' | 'inventory') => {
-        if (selectedPersona) {
-            setActiveModalPersonaId(selectedPersona.id);
-            setActiveModalPersonaName(selectedPersona.name);
+        if (!selectedPersona) return;
+        const newId = selectedPersona.id;
+        const newName = selectedPersona.name;
+
+        const anyOpen = showMemory || showSchedule || showTasks || showSettings || showInventory;
+        const sameTarget = anyOpen && activeModalPersonaId === newId;
+
+        const applyOpen = () => {
+            setActiveModalPersonaId(newId);
+            setActiveModalPersonaName(newName);
             if (type === 'memory') setShowMemory(true);
             if (type === 'schedule') setShowSchedule(true);
             if (type === 'tasks') setShowTasks(true);
             if (type === 'settings') setShowSettings(true);
             if (type === 'inventory') setShowInventory(true);
-            // Close the menu
-            setSelectedPersona(null);
+        };
+
+        // Close the menu in either branch.
+        setSelectedPersona(null);
+
+        if (anyOpen && !sameTarget) {
+            // 別ペルソナでモーダルが開いている → 完全に閉じてから次 tick で開き直す。
+            // モーダル内コンポーネントは isOpen=false の間に internal state をリセットし、
+            // 再度 isOpen=true になったとき新しい personaId で loadConfig をやり直す。
+            setShowMemory(false);
+            setShowSchedule(false);
+            setShowTasks(false);
+            setShowSettings(false);
+            setShowInventory(false);
+            // 次の tick で開く: state 反映と useEffect cleanup を間に挟むため
+            setTimeout(applyOpen, 0);
+            return;
         }
+
+        applyOpen();
     };
 
     return (

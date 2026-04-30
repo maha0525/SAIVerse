@@ -58,8 +58,23 @@ def _build_item_info(data: dict, manager: Any = None) -> dict:
 
 @router.get("/details", response_model=BuildingDetailsResponse)
 def get_building_details(building_id: Optional[str] = None, manager = Depends(get_manager)):
-    """Get detailed info about current building: occupants, items."""
-    building_id = building_id or manager.user_current_building_id
+    """Get detailed info about a building: occupants, items.
+
+    ``building_id`` を必ず引数で渡すこと。省略した場合は server-global の
+    ``manager.user_current_building_id`` にフォールバックするが、これは
+    マルチデバイス / マルチタブで他クライアントの操作に汚染される
+    (2026-04-30 のエリス上書き事故の遠因)。フォールバック時は WARN ログを残し、
+    将来的に省略呼び出しを 400 で拒否できるよう移行を進める。
+    """
+    if not building_id:
+        import logging
+        logging.warning(
+            "[deprecation] /api/info/details called without building_id; "
+            "falling back to server-global user_current_building_id (=%s). "
+            "This is unsafe for multi-device usage — pass ?building_id=<id> explicitly.",
+            manager.user_current_building_id,
+        )
+        building_id = manager.user_current_building_id
     if not building_id or building_id not in manager.building_map:
         return {
             "id": "unknown", 

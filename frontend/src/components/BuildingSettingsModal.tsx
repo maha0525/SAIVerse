@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import styles from './BuildingSettingsModal.module.css';
 import { X, Save, Loader2 } from 'lucide-react';
 import ImageUpload from './common/ImageUpload';
@@ -43,8 +43,15 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
     const [cities, setCities] = useState<City[]>([]);
     const [availablePrompts, setAvailablePrompts] = useState<string[]>([]);
 
+    // 2026-04-30 のエリス上書き事故と同じ脆弱性を持つため、整合性ガードを追加。
+    // (feedback_modal_id_integrity.md)
+    const [loadedBuildingId, setLoadedBuildingId] = useState<string | null>(null);
+    const buildingIdRef = useRef<string>(buildingId);
+    buildingIdRef.current = buildingId;
+
     useEffect(() => {
         if (isOpen && buildingId) {
+            setLoadedBuildingId(null);
             loadData();
         }
     }, [isOpen, buildingId]);
@@ -52,6 +59,10 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
     const loadData = async () => {
         setLoading(true);
         setError(null);
+        // Race-condition guard: 非同期 fetch 中に buildingId が切り替わったら setter を打ち切る
+        const targetBuildingId = buildingIdRef.current;
+        const isStale = () => targetBuildingId !== buildingIdRef.current;
+
         try {
             // Load building data, tools, cities, and prompts in parallel
             const [buildingsRes, toolsRes, citiesRes, promptsRes, linksRes] = await Promise.all([
@@ -61,10 +72,18 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                 fetch('/api/world/prompts/available'),
                 fetch('/api/db/tables/building_tool_link')
             ]);
+            if (isStale()) {
+                console.warn(
+                    `[BuildingSettingsModal] loadData stale (${targetBuildingId} -> ${buildingIdRef.current}); discarding`
+                );
+                return;
+            }
 
+            let buildingApplied = false;
             if (buildingsRes.ok) {
                 const buildings = await buildingsRes.json();
-                const building = buildings.find((b: any) => b.BUILDINGID === buildingId);
+                if (isStale()) return;
+                const building = buildings.find((b: any) => b.BUILDINGID === targetBuildingId);
                 if (building) {
                     setName(building.BUILDINGNAME || '');
                     setDescription(building.DESCRIPTION || '');
@@ -85,38 +104,71 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                     } else {
                         setExtraPromptFiles([]);
                     }
+                    buildingApplied = true;
                 }
             }
 
             if (toolsRes.ok) {
-                setTools(await toolsRes.json());
+                const t = await toolsRes.json();
+                if (isStale()) return;
+                setTools(t);
             }
 
             if (citiesRes.ok) {
-                setCities(await citiesRes.json());
+                const c = await citiesRes.json();
+                if (isStale()) return;
+                setCities(c);
             }
 
             if (promptsRes.ok) {
-                setAvailablePrompts(await promptsRes.json());
+                const p = await promptsRes.json();
+                if (isStale()) return;
+                setAvailablePrompts(p);
             }
 
             if (linksRes.ok) {
                 const links = await linksRes.json();
+                if (isStale()) return;
                 const ids = links
-                    .filter((l: any) => l.BUILDINGID === buildingId)
+                    .filter((l: any) => l.BUILDINGID === targetBuildingId)
                     .map((l: any) => l.TOOLID);
                 setToolIds(ids);
+            }
+
+            // building レコードが見つかった場合のみロード成功とみなす。
+            if (buildingApplied) {
+                setLoadedBuildingId(targetBuildingId);
             }
 
         } catch (err) {
             setError('Building データの読み込みに失敗しました');
             console.error(err);
         } finally {
-            setLoading(false);
+            if (!isStale()) {
+                setLoading(false);
+            }
         }
     };
 
     const handleSave = async () => {
+        // 整合性ガード (feedback_modal_id_integrity.md / エリス上書き事故 2026-04-30)
+        if (loading) {
+            alert('読み込み中のため保存できません。少し待ってから再度お試しください。');
+            return;
+        }
+        if (!loadedBuildingId || loadedBuildingId !== buildingId) {
+            alert(
+                `安全のため保存を拒否しました。\n` +
+                `表示中のフォームは "${loadedBuildingId ?? '(未読み込み)'}" のもので、\n` +
+                `現在の保存先は "${buildingId}" です。\n` +
+                `モーダルを一度閉じてから開き直してください。`
+            );
+            console.error(
+                `[BuildingSettingsModal] handleSave rejected: loadedBuildingId=${loadedBuildingId} != buildingId=${buildingId}`
+            );
+            return;
+        }
+
         setSaving(true);
         setError(null);
         try {
@@ -325,7 +377,13 @@ export default function BuildingSettingsModal({ isOpen, onClose, buildingId, onS
                             <button
                                 className={styles.saveBtn}
                                 onClick={handleSave}
-                                disabled={saving}
+                                disabled={saving || loading || !loadedBuildingId || loadedBuildingId !== buildingId}
+                                title={
+                                    loading ? '読み込み中…'
+                                        : !loadedBuildingId ? '読み込み未完了'
+                                        : loadedBuildingId !== buildingId ? `表示中 (${loadedBuildingId}) と保存先 (${buildingId}) が不一致のため無効`
+                                        : undefined
+                                }
                             >
                                 {saving ? (
                                     <>
