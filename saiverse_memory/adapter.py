@@ -1770,6 +1770,9 @@ class SAIMemoryAdapter:
             line_id = message.get("line_id")
             scope = message.get("scope")
             paired_action_text = message.get("paired_action_text")
+            # Phase 2.5: pulse_id 専用カラム (旧 metadata.tags の "pulse:{uuid}" を置換)。
+            # _store_memory が message dict にセットする。タグも当面併存。
+            pulse_id_val = message.get("pulse_id")
             embedding_chunks = message.get("embedding_chunks")
             skip_embedding = False
             if embedding_chunks is not None:
@@ -1798,6 +1801,7 @@ class SAIMemoryAdapter:
                     line_id=line_id,
                     scope=scope,
                     paired_action_text=paired_action_text,
+                    pulse_id=pulse_id_val,
                 )
                 if (not skip_embedding) and content and content.strip() and self.embedder is not None:
                     chunks = chunk_text(

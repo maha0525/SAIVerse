@@ -1154,28 +1154,21 @@ class SAIVerseManager(
             )
             return
 
-        # SAIMemory の messages テーブルには pulse_id 専用カラムは存在せず、
-        # `_store_memory` が `metadata.tags` の JSON 配列に `pulse:{uuid}` の形で
-        # 紐付けている (sea/runtime.py の _store_memory)。同 DB の他の検索 SQL と
-        # 同じ json_each(metadata, '$.tags') idiom で当該 Pulse のメタ判断行を
-        # 特定して scope を昇格する。
+        # Phase 2.5 (2026-05-01): messages.pulse_id 専用カラムに対する INDEX 付き
+        # 直接 WHERE で昇格を行う。旧実装は metadata.tags の "pulse:{uuid}" を
+        # json_each で参照していたが INDEX が効かず線形スキャンになっていた。
         import sqlite3
-        pulse_tag = f"pulse:{pulse_id}"
         try:
             conn = sqlite3.connect(str(db_path))
             try:
                 cur = conn.execute(
                     """
                     UPDATE messages SET scope = 'committed'
-                    WHERE line_role = 'meta_judgment'
+                    WHERE pulse_id = ?
+                      AND line_role = 'meta_judgment'
                       AND scope = 'discardable'
-                      AND metadata IS NOT NULL
-                      AND EXISTS (
-                          SELECT 1 FROM json_each(metadata, '$.tags')
-                          WHERE json_each.value = ?
-                      )
                     """,
-                    (pulse_tag,),
+                    (pulse_id,),
                 )
                 if cur.rowcount > 0:
                     logging.info(

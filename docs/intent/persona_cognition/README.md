@@ -181,6 +181,7 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | `MetaLayer.on_periodic_tick` (定期実行入口) | 🔲 | 未着手 | C-3 |
 | `MetaLayer` の per-persona 直列化 Lock (`on_track_alert` / `on_periodic_tick`) | ✅ | `saiverse/meta_layer.py:__init__`, `_get_lock` (v0.16, 2026-04-30) | handoff Part 1 |
 | `meta_judgment_log` スキーマ v0.15 整合化 + 書き込み + 動的注入 | ✅ | `database/models.py`, `saiverse/meta_layer.py`, `sea/runtime_graph.py`, `sea/runtime_llm.py`, `sea/pulse_context.py` (v0.16, 2026-04-30) | handoff Part 2 |
+| SAIMemory `messages.pulse_id` カラム化 (Phase 2.5) | ✅ | `sai_memory/memory/storage.py`, `saiverse_memory/adapter.py`, `sea/runtime.py` (v0.17, 2026-05-01) | Phase 2.5 |
 | `AutonomyManager` の `MainLineScheduler` への移管 | 🔲 | 旧 `autonomy_manager.py` は現存 (レガシー残置) | C-3c |
 | 環境別デフォルト値の自動推定 (Pattern A/B/C) | 🔲 | 未着手 | C-3 |
 | 7 制御点の実装場所明確化 (action_tracks.metadata + 環境変数 + Handler 属性 + モデル設定) | 🔲 | 部分的に Handler 属性のみ実装、残りは未着手 | C-3 |

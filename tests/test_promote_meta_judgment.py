@@ -26,7 +26,11 @@ from saiverse.saiverse_manager import SAIVerseManager
 
 
 def _make_messages_db(db_path: Path, rows: list[dict]) -> None:
-    """テスト用に最小スキーマの messages テーブルを作って rows を流し込む。"""
+    """テスト用に最小スキーマの messages テーブルを作って rows を流し込む。
+
+    Phase 2.5 (2026-05-01) で pulse_id 専用カラムが追加された。本テストは新
+    スキーマ前提で組む。
+    """
     conn = sqlite3.connect(str(db_path))
     try:
         conn.execute(
@@ -36,19 +40,21 @@ def _make_messages_db(db_path: Path, rows: list[dict]) -> None:
                 content TEXT,
                 line_role TEXT,
                 scope TEXT NOT NULL DEFAULT 'committed',
-                metadata TEXT
+                metadata TEXT,
+                pulse_id TEXT
             )
             """
         )
         for r in rows:
             conn.execute(
-                "INSERT INTO messages(content, line_role, scope, metadata) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO messages(content, line_role, scope, metadata, pulse_id) "
+                "VALUES (?, ?, ?, ?, ?)",
                 (
                     r.get("content", ""),
                     r.get("line_role"),
                     r.get("scope", "committed"),
                     json.dumps(r["metadata"]) if r.get("metadata") else None,
+                    r.get("pulse_id"),
                 ),
             )
         conn.commit()
@@ -84,7 +90,7 @@ def manager_with_persona(tmp_path):
     return manager, db_path
 
 
-def test_promotes_matching_pulse_tag_only(manager_with_persona):
+def test_promotes_matching_pulse_id_only(manager_with_persona):
     manager, db_path = manager_with_persona
     target_pulse = "pulse-a"
     other_pulse = "pulse-b"
@@ -96,28 +102,28 @@ def test_promotes_matching_pulse_tag_only(manager_with_persona):
                 "content": "judge turn (target)",
                 "line_role": "meta_judgment",
                 "scope": "discardable",
-                "metadata": {"tags": [f"pulse:{target_pulse}", "meta_judgment"]},
+                "pulse_id": target_pulse,
             },
             # 2: 別 Pulse の判断ターン (other_pulse) — 影響なし
             {
                 "content": "judge turn (other)",
                 "line_role": "meta_judgment",
                 "scope": "discardable",
-                "metadata": {"tags": [f"pulse:{other_pulse}", "meta_judgment"]},
+                "pulse_id": other_pulse,
             },
             # 3: target_pulse の main_line — line_role 違いで対象外
             {
                 "content": "main line turn",
                 "line_role": "main_line",
                 "scope": "committed",
-                "metadata": {"tags": [f"pulse:{target_pulse}", "conversation"]},
+                "pulse_id": target_pulse,
             },
             # 4: target_pulse の判断ターンだが既に committed — 対象外
             {
                 "content": "already committed",
                 "line_role": "meta_judgment",
                 "scope": "committed",
-                "metadata": {"tags": [f"pulse:{target_pulse}"]},
+                "pulse_id": target_pulse,
             },
         ],
     )
@@ -141,7 +147,7 @@ def test_no_matching_rows_does_not_raise(manager_with_persona):
                 "content": "main line",
                 "line_role": "main_line",
                 "scope": "committed",
-                "metadata": {"tags": ["pulse:other"]},
+                "pulse_id": "other",
             },
         ],
     )
@@ -161,7 +167,7 @@ def test_pulse_id_none_is_noop(manager_with_persona):
                 "content": "judge",
                 "line_role": "meta_judgment",
                 "scope": "discardable",
-                "metadata": {"tags": ["pulse:p1"]},
+                "pulse_id": "p1",
             },
         ],
     )
@@ -180,7 +186,7 @@ def test_unknown_persona_is_noop(manager_with_persona):
                 "content": "judge",
                 "line_role": "meta_judgment",
                 "scope": "discardable",
-                "metadata": {"tags": ["pulse:p1"]},
+                "pulse_id": "p1",
             },
         ],
     )
@@ -188,28 +194,28 @@ def test_unknown_persona_is_noop(manager_with_persona):
     assert _read_scopes(db_path) == [("judge", "discardable")]
 
 
-def test_metadata_null_row_is_skipped(manager_with_persona):
-    """metadata が NULL のレガシー行は条件で弾かれて例外も出ない。"""
+def test_pulse_id_null_row_is_skipped(manager_with_persona):
+    """pulse_id が NULL の行 (Phase 2.5 以前 + バックフィル対象外) は弾かれる。"""
     manager, db_path = manager_with_persona
     target = "p-target"
     _make_messages_db(
         db_path,
         [
             {
-                "content": "no metadata row",
+                "content": "no pulse_id row",
                 "line_role": "meta_judgment",
                 "scope": "discardable",
-                "metadata": None,
+                "pulse_id": None,
             },
             {
                 "content": "tagged target",
                 "line_role": "meta_judgment",
                 "scope": "discardable",
-                "metadata": {"tags": [f"pulse:{target}"]},
+                "pulse_id": target,
             },
         ],
     )
     manager._promote_meta_judgment_in_pulse("alice", target)
     rows = _read_scopes(db_path)
-    assert rows[0] == ("no metadata row", "discardable")
+    assert rows[0] == ("no pulse_id row", "discardable")
     assert rows[1] == ("tagged target", "committed")

@@ -1339,6 +1339,12 @@ class SEARuntime:
                     message["scope"] = scope
                 if paired_action_text is not None:
                     message["paired_action_text"] = paired_action_text
+                # Phase 2.5 (2026-05-01): pulse_id を専用カラムに渡す。同時に
+                # 下の clean_tags で "pulse:{uuid}" タグも追加し続ける (移行期間中の
+                # 互換性確保)。タグ依存の読み出し経路が全部カラム参照に移行したら
+                # タグ書き込みは廃止可能。
+                if pulse_id:
+                    message["pulse_id"] = pulse_id
 
                 clean_tags = [str(tag) for tag in (tags or []) if tag]
                 # Add pulse:uuid tag

@@ -174,6 +174,22 @@ CREATE INDEX idx_meta_judgment_track ON meta_judgment_log(track_at_judgment_id);
 - `prompt_snapshot` は判断時のプロンプト全文を要約保存。後追いで「なぜそう判断したか」を追える
 - 古い判断は Metabolism 的に要約していく機構が将来必要 (現状は生データ保持、最新 N 件を参考情報注入する単純運用)
 
+### Phase 2.5: SAIMemory `messages.pulse_id` カラム化 (2026-05-01)
+
+per-persona の `memory.db` の messages テーブルに `pulse_id TEXT` 専用カラム + INDEX (`idx_messages_pulse_id`) を追加。これは meta_judgment_log とは別の話だが、メタ判断の scope 昇格処理 (`_promote_meta_judgment_in_pulse`) が pulse_id ベースで messages を引くために必要。
+
+**経緯**:
+- v0.11 時点では `_store_memory` が pulse_id を `metadata.tags` の `"pulse:{uuid}"` 文字列として保存していた
+- Phase 2 実装中に発覚した OperationalError (`no such column: pulse_id`) を一旦 `json_each(metadata, '$.tags')` 経由で回避したが、INDEX が効かず線形スキャンになる
+- Phase 2.5 で専用カラム化 + INDEX。`_store_memory` は当面、列とタグの両方に書き込む (互換維持)
+
+**バックフィル**: `sai_memory/memory/storage.py` の `_backfill_messages_pulse_id` が起動時 (init_db → 既存 DB 検出時の `_ensure_column` 後) に走る。`pulse_id IS NULL AND metadata.tags に "pulse:..." を含む` 行を json_each で抜いて埋めるべき等処理。
+
+**段階的タグ廃止**:
+- 移行期間: `_store_memory` が列とタグの両方を書く (現在)
+- 全読み出し経路 (`recent_persona_messages` の `pulse_tag` フィルタ等) がカラム参照に移行したら、タグ書き込みは廃止
+- タグ廃止後も既存行のタグは残るが、情報重複なので `metadata.tags` 全体の整理時に外す
+
 ### `track_local_logs` — Track ローカルログ [5]
 
 7 層 [5] の実体。Track 内のイベント・モニタログ・起点サブラインの中間ステップトレース等を保管する。Track 内では参照できるが、想起対象 ([6] SAIMemory) には乗らない。

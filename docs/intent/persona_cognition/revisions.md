@@ -10,6 +10,24 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.17 (2026-05-01) — SAIMemory `messages.pulse_id` カラム化 (Phase 2.5)
+
+**確定事項**:
+
+- per-persona memory.db の messages テーブルに `pulse_id TEXT` 専用カラム + INDEX (`idx_messages_pulse_id`) を追加
+- `_store_memory` (sea/runtime.py) は当面、列とタグ (`metadata.tags` の `"pulse:{uuid}"`) の両方に書き込む (互換維持)。読み出し経路が全部カラム参照に移行したらタグ書き込みは廃止予定
+- `add_message` (sai_memory/memory/storage.py) と `_append_message` (saiverse_memory/adapter.py) に `pulse_id` 引数を追加
+- `_promote_meta_judgment_in_pulse` の SQL を `pulse_id = ?` の INDEX 付き直接 WHERE に書き換え (旧 json_each 線形スキャンから O(log N) へ)
+- `_backfill_messages_pulse_id` で既存行の pulse_id をタグから抽出して埋める (起動時 1 回、べき等)
+
+**改訂理由**:
+
+Phase 2 実装直後の実機検証で `_promote_meta_judgment_in_pulse` が `OperationalError: no such column: pulse_id` で落ちることが発覚。前セッション (0cfe61c) の SQL 設計が SAIMemory の保存実装 (タグ経由) と整合していなかった。
+
+応急処置として一旦 json_each(metadata, '$.tags') 経由に書き換えたが、本質的にはタグ照会は (1) INDEX が効かず将来スケールに対応できない (2) `pulse:` プレフィックス命名規則が暗黙の前提で脆い (3) `pulse_logs` テーブルとの JOIN や Pulse 単位集計を素直に書けない、という 3 つの不満があった。Phase 2 で pulse_id ベースの参照経路を入れたばかりで関連箇所の記憶も新しいうちに、専用カラム化を済ませた。
+
+メタ判断ログ機構 (Phase 2) が動き始める前に基盤を固める判断。`pulse_logs` テーブルが既に pulse_id カラムを持っているため、整合性も同時に取れた。
+
 ### v0.16 (2026-04-30) — メタ判断 Pulse の per-persona 直列化 + メタ判断ログ機構の運用
 
 **確定事項 (Part 1: 直列化)**:

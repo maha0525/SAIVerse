@@ -120,6 +120,11 @@ def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     _ensure_column(conn, "messages", "line_id", "TEXT")
     _ensure_column(conn, "messages", "scope", "TEXT NOT NULL DEFAULT 'committed'")
     _ensure_column(conn, "messages", "paired_action_text", "TEXT")
+    # pulse_id: 当該メッセージを生成した Pulse の UUID (Phase 2.5, 2026-05-01)。
+    # 過去は metadata.tags の "pulse:{uuid}" タグで識別していたが、json_each で
+    # しか引けず INDEX が貼れないため、専用カラム化。バックフィルは下記
+    # _backfill_messages_pulse_id でタグから pulse_id を一回限り抽出する。
+    _ensure_column(conn, "messages", "pulse_id", "TEXT")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_track_line "
         "ON messages(origin_track_id, line_role, line_id)"
@@ -127,6 +132,10 @@ def init_db(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_scope ON messages(scope)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_pulse_id ON messages(pulse_id)"
+    )
+    _backfill_messages_pulse_id(conn)
 
     # Stelis threads table for hierarchical context management
     conn.execute(
@@ -220,6 +229,51 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition
         conn.commit()
 
 
+def _backfill_messages_pulse_id(conn: sqlite3.Connection) -> None:
+    """metadata.tags の ``pulse:{uuid}`` タグから messages.pulse_id を埋める一回限りの移行。
+
+    Phase 2.5 (2026-05-01) 以前に保存されたメッセージは pulse_id 列が NULL の
+    まま。`_store_memory` (sea/runtime.py) が `pulse:{uuid}` タグを metadata.tags
+    に書いていたため、そこから抜き出して列を埋める。
+
+    べき等。pulse_id IS NULL の行のみを対象にするので、新規保存されたカラム値は
+    上書きしない。pulse: タグが見つからない行 (= Pulse 外の保存、例えばデフォルト
+    起動時のシステムメッセージ等) はそのまま NULL で残る。
+    """
+    try:
+        cur = conn.execute(
+            """
+            UPDATE messages
+            SET pulse_id = (
+                SELECT substr(json_each.value, 7)
+                FROM json_each(metadata, '$.tags')
+                WHERE json_each.value LIKE 'pulse:%'
+                LIMIT 1
+            )
+            WHERE pulse_id IS NULL
+              AND metadata IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM json_each(metadata, '$.tags')
+                  WHERE json_each.value LIKE 'pulse:%'
+              )
+            """
+        )
+        if cur.rowcount > 0:
+            import logging
+            logging.getLogger(__name__).info(
+                "[storage] Backfilled pulse_id on %d existing message(s) from metadata.tags",
+                cur.rowcount,
+            )
+        conn.commit()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "[storage] Failed to backfill messages.pulse_id from metadata.tags",
+            exc_info=True,
+        )
+        conn.rollback()
+
+
 def get_or_create_thread(conn: sqlite3.Connection, thread_id: str, resource_id: Optional[str] = None) -> None:
     cur = conn.execute("SELECT id FROM threads WHERE id=?", (thread_id,))
     if cur.fetchone() is None:
@@ -298,6 +352,7 @@ def add_message(
     line_id: Optional[str] = None,
     scope: Optional[str] = None,
     paired_action_text: Optional[str] = None,
+    pulse_id: Optional[str] = None,
 ) -> str:
     """Insert a message row.
 
@@ -307,6 +362,12 @@ def add_message(
     pre-v0.11 schema (NULL columns + ``scope='committed'`` from the column
     default). New callers that pass through ``PulseContext.current_line_metadata()``
     will populate them.
+
+    ``pulse_id`` (Phase 2.5, 2026-05-01) is the dedicated column replacing the
+    legacy ``metadata.tags`` "pulse:{uuid}" pattern. Both are written for the
+    transition period — the tag is still appended by ``_store_memory`` (read
+    paths that only know the tag still work), and the column lets indexed
+    queries scope by Pulse without a json_each scan.
     """
     mid = str(uuid.uuid4())
     ts = int(time.time()) if created_at is None else int(created_at)
@@ -316,18 +377,18 @@ def add_message(
     if scope is None:
         conn.execute(
             "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata, "
-            "origin_track_id, line_role, line_id, paired_action_text) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "origin_track_id, line_role, line_id, paired_action_text, pulse_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (mid, thread_id, role, content, resource_id, ts, meta_json,
-             origin_track_id, line_role, line_id, paired_action_text),
+             origin_track_id, line_role, line_id, paired_action_text, pulse_id),
         )
     else:
         conn.execute(
             "INSERT INTO messages(id, thread_id, role, content, resource_id, created_at, metadata, "
-            "origin_track_id, line_role, line_id, scope, paired_action_text) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "origin_track_id, line_role, line_id, scope, paired_action_text, pulse_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (mid, thread_id, role, content, resource_id, ts, meta_json,
-             origin_track_id, line_role, line_id, scope, paired_action_text),
+             origin_track_id, line_role, line_id, scope, paired_action_text, pulse_id),
         )
     conn.commit()
     return mid
