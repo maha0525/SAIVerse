@@ -32,6 +32,9 @@ xai-sdk>=1.6.0
 # MCP (Model Context Protocol) client
 mcp>=1.10.0
 
+# Codex 系クライアント (llm_clients/openai_codex.py が利用)
+curl-cffi>=0.10.0
+
 # ローカルLLM (llama.cpp) を使う場合:
 #   pip install -r requirements-local-llm.txt
 
