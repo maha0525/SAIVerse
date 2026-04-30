@@ -34,6 +34,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -84,6 +86,39 @@ class MetaLayer:
         self.manager = manager
         self.track_manager: TrackManager = manager.track_manager
 
+        # ペルソナごとの直列化 Lock (Intent A v0.9 不変条件 11: メタ判断は
+        # ペルソナの「思考の流れ」1 本)。
+        #
+        # メタ判断は 2 経路で起動される:
+        #   - alert observer (chat thread 等から `on_track_alert`)
+        #   - 定期 tick (AutonomyManager background thread から `on_periodic_tick`)
+        #
+        # 両者が別 thread で同時に起動すると、それぞれが独立した snapshot を見て
+        # Track 操作を発動するため、「pending と思って pause したら裏で alert に
+        # なっていた」のような事故が発生する。1 ペルソナにつきメタ判断 Pulse は
+        # 同時 1 本のため、入口で per-persona Lock を取って直列化する。
+        #
+        # 競合時は **wait** で正しい (skip しない):
+        #   - alert を skip すると即応すべき外部イベントを取りこぼす
+        #   - 定期 tick を skip するとメインキャッシュ TTL 切れを誘発する
+        # 別ペルソナ同士は並行できる (ペルソナごとに独立した Lock)。
+        #
+        # `_persona_locks` の dict 自体への並行アクセスは `_locks_guard` で保護する。
+        # set_alert は judgment ループ中の deferred ops からは発火しない (UI / chat /
+        # internal_alert_poller など外部経路のみ) ため、再入の現実的リスクはなし。
+        # 素の `threading.Lock` で十分。
+        self._persona_locks: Dict[str, threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def _get_lock(self, persona_id: str) -> threading.Lock:
+        """persona_id の Lock を返す (なければ作成)。"""
+        with self._locks_guard:
+            lock = self._persona_locks.get(persona_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._persona_locks[persona_id] = lock
+            return lock
+
     # ------------------------------------------------------------------
     # alert observer エントリ
     # ------------------------------------------------------------------
@@ -99,30 +134,42 @@ class MetaLayer:
 
         Phase 1.2: ``SAIVERSE_META_LAYER_USE_PLAYBOOK`` が真なら ``meta_judgment``
         Playbook 経由で判断する。それ以外は legacy direct-LLM スペル loop。
+
+        per-persona Lock で直列化する (`__init__` 参照)。同ペルソナの判断 Pulse
+        が走行中なら完了まで wait する。
         """
-        try:
-            persona = self._lookup_persona(persona_id)
-            if persona is None:
-                logging.warning(
-                    "[meta-layer] persona not found for alert: persona_id=%s track=%s",
+        lock = self._get_lock(persona_id)
+        wait_started = time.monotonic()
+        with lock:
+            wait_elapsed = time.monotonic() - wait_started
+            if wait_elapsed >= 0.5:
+                logging.info(
+                    "[meta-layer] Lock acquired after %.1fs wait: persona=%s alert_track=%s trigger=%s",
+                    wait_elapsed, persona_id, alert_track_id, context.get("trigger"),
+                )
+            try:
+                persona = self._lookup_persona(persona_id)
+                if persona is None:
+                    logging.warning(
+                        "[meta-layer] persona not found for alert: persona_id=%s track=%s",
+                        persona_id, alert_track_id,
+                    )
+                    return
+                use_playbook = self._use_playbook_path()
+                logging.info(
+                    "[meta-layer] Judgment starting: persona=%s alert_track=%s trigger=%s path=%s",
+                    persona_id, alert_track_id, context.get("trigger"),
+                    "playbook" if use_playbook else "legacy",
+                )
+                if use_playbook:
+                    self._run_judgment_via_playbook(persona, alert_track_id, context)
+                else:
+                    self._run_judgment(persona, alert_track_id, context)
+            except Exception:
+                logging.exception(
+                    "[meta-layer] Judgment failed: persona=%s track=%s",
                     persona_id, alert_track_id,
                 )
-                return
-            use_playbook = self._use_playbook_path()
-            logging.info(
-                "[meta-layer] Judgment starting: persona=%s alert_track=%s trigger=%s path=%s",
-                persona_id, alert_track_id, context.get("trigger"),
-                "playbook" if use_playbook else "legacy",
-            )
-            if use_playbook:
-                self._run_judgment_via_playbook(persona, alert_track_id, context)
-            else:
-                self._run_judgment(persona, alert_track_id, context)
-        except Exception:
-            logging.exception(
-                "[meta-layer] Judgment failed: persona=%s track=%s",
-                persona_id, alert_track_id,
-            )
 
     @staticmethod
     def _use_playbook_path() -> bool:
@@ -158,53 +205,65 @@ class MetaLayer:
         ``post_complete_behavior == 'wait_response'`` を持つ場合、相手の応答待ち
         中にメタ判断を割り込ませると自然な対話を壊すため、抑止する
         (intent B v0.8 §"post_complete_behavior 列挙")。
+
+        per-persona Lock で `on_track_alert` と直列化する。alert 経由判断が
+        走行中なら完了まで wait する (skip しない: TTL 切れを避けるため)。
         """
-        try:
-            persona = self._lookup_persona(persona_id)
-            if persona is None:
-                return
-
-            # ACTIVITY_STATE 抑止: Active のみ定期発火 (intent A v0.9 表)
-            activity_state = getattr(persona, "activity_state", "Idle")
-            if activity_state != "Active":
-                logging.debug(
-                    "[meta-layer] periodic tick skipped (activity_state=%s != Active): persona=%s",
-                    activity_state, persona_id,
+        lock = self._get_lock(persona_id)
+        wait_started = time.monotonic()
+        with lock:
+            wait_elapsed = time.monotonic() - wait_started
+            if wait_elapsed >= 0.5:
+                logging.info(
+                    "[meta-layer] Lock acquired after %.1fs wait: persona=%s trigger=periodic_tick",
+                    wait_elapsed, persona_id,
                 )
-                return
+            try:
+                persona = self._lookup_persona(persona_id)
+                if persona is None:
+                    return
 
-            # post_complete_behavior 抑止: 応答待ち型の Track は割り込まない
-            running_track = self._get_running_track(persona_id)
-            if running_track is not None:
-                handler = self._get_handler_for_track(running_track)
-                behavior = getattr(handler, "post_complete_behavior", None) if handler else None
-                if behavior == "wait_response":
+                # ACTIVITY_STATE 抑止: Active のみ定期発火 (intent A v0.9 表)
+                activity_state = getattr(persona, "activity_state", "Idle")
+                if activity_state != "Active":
                     logging.debug(
-                        "[meta-layer] periodic tick skipped (running Track wait_response): persona=%s track=%s",
-                        persona_id, getattr(running_track, "track_id", "?"),
+                        "[meta-layer] periodic tick skipped (activity_state=%s != Active): persona=%s",
+                        activity_state, persona_id,
                     )
                     return
 
-            merged_context = {"trigger": "periodic_tick"}
-            if context:
-                merged_context.update(context)
+                # post_complete_behavior 抑止: 応答待ち型の Track は割り込まない
+                running_track = self._get_running_track(persona_id)
+                if running_track is not None:
+                    handler = self._get_handler_for_track(running_track)
+                    behavior = getattr(handler, "post_complete_behavior", None) if handler else None
+                    if behavior == "wait_response":
+                        logging.debug(
+                            "[meta-layer] periodic tick skipped (running Track wait_response): persona=%s track=%s",
+                            persona_id, getattr(running_track, "track_id", "?"),
+                        )
+                        return
 
-            use_playbook = self._use_playbook_path()
-            logging.info(
-                "[meta-layer] Periodic tick starting: persona=%s path=%s context=%s",
-                persona_id,
-                "playbook" if use_playbook else "legacy",
-                merged_context.get("trigger"),
-            )
-            # alert_track_id="" は intent B 通り (定期 tick の場合は空文字列も可)
-            if use_playbook:
-                self._run_judgment_via_playbook(persona, "", merged_context)
-            else:
-                self._run_judgment(persona, "", merged_context)
-        except Exception:
-            logging.exception(
-                "[meta-layer] Periodic tick failed: persona=%s", persona_id,
-            )
+                merged_context = {"trigger": "periodic_tick"}
+                if context:
+                    merged_context.update(context)
+
+                use_playbook = self._use_playbook_path()
+                logging.info(
+                    "[meta-layer] Periodic tick starting: persona=%s path=%s context=%s",
+                    persona_id,
+                    "playbook" if use_playbook else "legacy",
+                    merged_context.get("trigger"),
+                )
+                # alert_track_id="" は intent B 通り (定期 tick の場合は空文字列も可)
+                if use_playbook:
+                    self._run_judgment_via_playbook(persona, "", merged_context)
+                else:
+                    self._run_judgment(persona, "", merged_context)
+            except Exception:
+                logging.exception(
+                    "[meta-layer] Periodic tick failed: persona=%s", persona_id,
+                )
 
     def _get_running_track(self, persona_id: str) -> Optional[Any]:
         """Return the persona's currently-running ActionTrack, or None."""

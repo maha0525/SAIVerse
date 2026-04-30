@@ -179,6 +179,7 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | `SubLineScheduler` クラス | ✅ | `saiverse/pulse_scheduler.py:76-127` | C-3b |
 | `MainLineScheduler` クラス | 🔲 | コメント `Phase C-3c で別途実装予定` (`pulse_scheduler.py:18`) | C-3c |
 | `MetaLayer.on_periodic_tick` (定期実行入口) | 🔲 | 未着手 | C-3 |
+| `MetaLayer` の per-persona 直列化 Lock (`on_track_alert` / `on_periodic_tick`) | ✅ | `saiverse/meta_layer.py:__init__`, `_get_lock` (v0.16, 2026-04-30) | handoff Part 1 |
 | `AutonomyManager` の `MainLineScheduler` への移管 | 🔲 | 旧 `autonomy_manager.py` は現存 (レガシー残置) | C-3c |
 | 環境別デフォルト値の自動推定 (Pattern A/B/C) | 🔲 | 未着手 | C-3 |
 | 7 制御点の実装場所明確化 (action_tracks.metadata + 環境変数 + Handler 属性 + モデル設定) | 🔲 | 部分的に Handler 属性のみ実装、残りは未着手 | C-3 |

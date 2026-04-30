@@ -365,3 +365,134 @@ def test_metalayer_execute_spells_forwards_pulse_context(
     pulse_ctx = captured_pulse_contexts[0]
     assert pulse_ctx is not None
     assert hasattr(pulse_ctx, "enqueue_track_op")
+
+
+# ---------------------------------------------------------------------------
+# Per-persona 直列化 Lock (handoff_2026-04-30 Part 1)
+# ---------------------------------------------------------------------------
+
+def test_alert_and_periodic_tick_are_serialized_per_persona(
+    tm, nm, db_persona, monkeypatch
+):
+    """同一ペルソナへの alert と periodic_tick が重ならず直列実行される。
+
+    Intent A v0.9 不変条件 11 ("メタ判断 = ペルソナ自身の思考の流れ 1 本") の保証。
+    両入口は別 thread から呼ばれうる:
+      - alert: chat thread から `on_track_alert`
+      - 定期: AutonomyManager background thread から `on_periodic_tick`
+    入口で per-persona Lock を取って直列化する。
+    """
+    import threading
+    import time as time_mod
+
+    track_id = tm.create(db_persona, "user_conversation", is_persistent=True)
+    tm.activate(track_id)
+    tm.pause(track_id)
+    tm.set_alert(track_id)
+
+    # 判断本体 (`_run_judgment_via_playbook`) を「100ms 寝るだけ」のスタブに置換し、
+    # 重なりが起きるかを実時間で観察する。playbook 経路は default。
+    in_progress = []
+    overlaps_observed = []
+    body_lock = threading.Lock()
+
+    def stub_judgment(persona, alert_track_id, context):
+        with body_lock:
+            in_progress.append(context.get("trigger", "?"))
+            if len(in_progress) > 1:
+                overlaps_observed.append(list(in_progress))
+        time_mod.sleep(0.1)
+        with body_lock:
+            in_progress.remove(context.get("trigger", "?"))
+
+    # ACTIVITY_STATE が 'Active' でないと periodic_tick は skip される。
+    # 判断本体スタブがその先で動くよう FakePersona に属性を生やす。
+    persona = FakePersona(db_persona, FakeLLMClient(["dummy"]))
+    persona.activity_state = "Active"
+    manager = FakeManager(tm, nm, {db_persona: persona})
+    meta = MetaLayer(manager)
+
+    monkeypatch.setattr(meta, "_run_judgment_via_playbook", stub_judgment)
+    # 走行中 Track 取得は不要 (running は pause 済み): None を返すので wait_response 抑止は走らない
+
+    t1 = threading.Thread(
+        target=meta.on_track_alert,
+        args=(db_persona, track_id, {"trigger": "user_utterance"}),
+    )
+    t2 = threading.Thread(
+        target=meta.on_periodic_tick,
+        args=(db_persona, {"cycle_id": "x"}),
+    )
+
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    # 重なりが一度も観測されない (= 直列化されている)
+    assert overlaps_observed == [], (
+        f"Meta judgment ran in parallel for the same persona: {overlaps_observed}"
+    )
+
+
+def test_locks_are_independent_per_persona(tm, nm, session_factory, monkeypatch):
+    """別ペルソナの判断は並行できる (Lock は persona ごと独立)。"""
+    import threading
+    import time as time_mod
+
+    # 2 ペルソナをセットアップ
+    db = session_factory()
+    try:
+        db.add(User(USERID=1, PASSWORD="x", USERNAME="tester"))
+        db.flush()
+        city = City(USERID=1, CITYNAME="test_city", UI_PORT=3001, API_PORT=8001)
+        db.add(city)
+        db.flush()
+        db.add(AI(AIID="alice", HOME_CITYID=city.CITYID, AINAME="Alice"))
+        db.add(AI(AIID="bob", HOME_CITYID=city.CITYID, AINAME="Bob"))
+        db.commit()
+    finally:
+        db.close()
+
+    track_a = tm.create("alice", "user_conversation", is_persistent=True)
+    tm.activate(track_a)
+    tm.pause(track_a)
+    tm.set_alert(track_a)
+
+    track_b = tm.create("bob", "user_conversation", is_persistent=True)
+    tm.activate(track_b)
+    tm.pause(track_b)
+    tm.set_alert(track_b)
+
+    in_progress = []
+    parallel_seen = []
+    body_lock = threading.Lock()
+
+    def stub_judgment(persona, alert_track_id, context):
+        with body_lock:
+            in_progress.append(persona.persona_id)
+            if len(in_progress) >= 2:
+                parallel_seen.append(list(in_progress))
+        time_mod.sleep(0.15)
+        with body_lock:
+            in_progress.remove(persona.persona_id)
+
+    alice = FakePersona("alice", FakeLLMClient(["dummy"]))
+    bob = FakePersona("bob", FakeLLMClient(["dummy"]))
+    manager = FakeManager(tm, nm, {"alice": alice, "bob": bob})
+    meta = MetaLayer(manager)
+    monkeypatch.setattr(meta, "_run_judgment_via_playbook", stub_judgment)
+
+    t1 = threading.Thread(
+        target=meta.on_track_alert, args=("alice", track_a, {"trigger": "test"})
+    )
+    t2 = threading.Thread(
+        target=meta.on_track_alert, args=("bob", track_b, {"trigger": "test"})
+    )
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    # 別ペルソナなので並行実行が観測されている
+    assert parallel_seen, "別ペルソナ同士は並行できるはず"

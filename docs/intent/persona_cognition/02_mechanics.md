@@ -152,6 +152,21 @@ v0.12〜v0.13 で構造化出力 + 4 値 enum (`continue`/`switch`/`wait`/`close
 - running が無いという状況も普通に判断材料の 1 つ
 - 専用入口を増やすと責務分散が起き、状況に応じた重み付けが難しくなる
 
+### メタ判断 Pulse は同時 1 本 (per-persona 直列化)
+
+不変条件 11 ("メタ判断はペルソナの自分の思考の流れ") を実装側で守るため、**同一ペルソナのメタ判断 Pulse は同時に 1 本しか走らない**。
+
+問題: alert observer (chat thread 経由) と定期 tick (AutonomyManager background thread) は別 thread から `on_track_alert` / `on_periodic_tick` を呼ぶ。直列化しないと両者が独立した snapshot を見て Track 操作を発動し、「pending と思って pause したら裏で alert になっていた」のような事故が起きる。
+
+実装: `MetaLayer` が persona_id ごとの `threading.Lock` を保持し、両入口 (`on_track_alert` / `on_periodic_tick`) で取得待ちする (`saiverse/meta_layer.py:__init__` + `_get_lock`)。
+
+競合時の挙動は **wait** で確定 (skip しない):
+- alert を skip すると即応すべき外部イベントを取りこぼす
+- 定期 tick を skip するとメインキャッシュ TTL 切れを誘発する
+- 結果として chat thread のブロックは一時的に許容する。最悪レイテンシは「定期 tick + alert 判断」両方の所要時間の和。将来「安全な中断機構」を作る意思は持つ
+
+別ペルソナ同士は Lock が独立しているため並列に判断できる。
+
 ---
 
 ## Pulse の階層構造

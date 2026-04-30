@@ -10,6 +10,22 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.16 (2026-04-30) — メタ判断 Pulse の per-persona 直列化
+
+**確定事項**:
+
+- 同一ペルソナのメタ判断 Pulse は同時 1 本に制限する。`MetaLayer` が persona_id ごとの `threading.Lock` を保持し、`on_track_alert` / `on_periodic_tick` の両入口で取得待ちする
+- 競合時は **wait** で確定 (skip しない)。理由: alert を skip すると即応イベントを取りこぼし、定期 tick を skip するとメインキャッシュ TTL 切れを誘発する
+- 別ペルソナ同士は Lock が独立しているため並列実行可能 (per-persona 粒度)
+- chat thread のブロックは一時的に許容。将来「安全な中断機構」を作る意思は持つ
+- `02_mechanics.md` §"メタ判断 Pulse は同時 1 本 (per-persona 直列化)" を追加
+
+**改訂理由**:
+
+Phase C-2 のテスト中に「pending と思って pause したら裏で alert になっていた」現象を観測。原因: alert observer (chat thread 経由) と AutonomyManager 定期 tick (background thread 経由) が別 thread で同じ persona に対するメタ判断 Playbook を起動し、それぞれが独立した snapshot を見て Track 操作を発動していた。
+
+不変条件 11 ("メタ判断 = ペルソナ自身の思考の流れ 1 本") を構造で守るには、入口での直列化が必要だった。
+
 ### v0.15 (2026-04-30) — メタ判断を独白 + /spell 方式に回帰
 
 **確定事項**:
