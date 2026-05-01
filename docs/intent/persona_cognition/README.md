@@ -164,6 +164,8 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | Phase 3 翻訳前段の Playbook 整理 (旧プロトタイプ削除 + Spell 化) | ✅ | DB 67 → 43 件、`run_meta_auto` 関数削除、`ConversationManager` no-op 化、`playbook_sync` に prune 追加 (v0.19, 2026-05-01) | Phase 3 整理 |
 | **line vs タグの責務分離整理** (context 構築を line ベースに統一、タグはレガシー除去) | 🟡 | intent doc (v0.1) + 4-A (v0.21) + 4-B (v0.22) + **4-C 完了** (`migrate_playbooks_to_lines.py` で 33 件一括翻訳、v0.23、2026-05-01)。残: 4-D (`/run_playbook` Spell 実装後) | Phase 3 新規 |
 | 入れ子サブライン Spell (`/run_playbook` + 深さ 4 階層 + `report_to_parent`) | 🟡 | コア機構実装完了 (`builtin_data/tools/run_playbook.py` + 単体テスト 10 件、v0.24, 2026-05-01)。残: system prompt の Playbook 一覧注入、router_callable 運用整理、track_user_conversation の Spell 構成書き換え (実機検証必須) | Phase 3 新規 |
+| 親 LLM messages のサブライン流入 (snapshot 経路) | ✅ | `tools/context.py` に `_LLM_MESSAGES` ContextVar + `persona_context(llm_messages=...)` 引数追加。spell loop が呼び出し時に snapshot 渡し、`run_playbook` が `parent_state["_messages"]` に展開。入れ子も自動で正しく動く (context manager の入れ子 reset)。実機検証 OK (v0.25, 2026-05-01) | Phase 3 新規 |
+| `report_template` フィールドによる機械的 report 生成 | ✅ | `PlaybookSchema.report_template` 追加。子 Playbook 完了時に template を `{key}` / `{key.subkey}` で展開し `parent_state["report_to_parent"]` に書き込み。LLM コール不要で機械的サマリを返せる (例: `generate_image_playbook.json`)。実機検証 OK (v0.25, 2026-05-01) | Phase 3 新規 |
 | 既存 Playbook の `context_profile` → `line` 翻訳 + `memorize.tags` 整理 (`migrate_playbooks_to_lines.py`) | ✅ | 33 件翻訳完了 (`context_profile` 75 / `internal` → `sub_line` 66 / `conversation` → `main_line` 5)。`model_type=lightweight` は Y 案で 4-D 持ち越し (v0.23, 2026-05-01) | C-2 残件 |
 | `context_profile` / `model_type` / `exclude_pulse_id` / 旧タグ参照 の完全削除 | 🔲 | 段階 4-D、`/run_playbook` Spell 実装後 | C-2 残件 |
 

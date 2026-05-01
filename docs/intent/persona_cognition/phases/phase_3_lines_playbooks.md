@@ -65,6 +65,8 @@
 | 入れ子深さ制限 (上限 4 階層) | ✅ | `pulse_ctx._line_stack` の長さで判定、stack length 5 (depth 4) まで許容、6+ は拒否 (v0.24) |
 | `report_to_main` → `report_to_parent` リネーム | ✅ | 段階 4-B と一体実施 (v0.22, 2026-05-01) |
 | `report_to_parent` のスタック昇り経路 | ✅ | sub_play 経路と統一: parent_state["report_to_parent"] を string で返却 (v0.24) |
+| 親 LLM messages のサブライン流入 (snapshot 経路) | ✅ | `tools/context.py` に `_LLM_MESSAGES` ContextVar + `persona_context(llm_messages=...)` 引数追加。spell loop が呼び出し時に snapshot 渡し、`run_playbook` が `parent_state["_messages"]` に展開。入れ子も自動で正しく動く (context manager の入れ子 reset)。実機検証 OK (v0.25, 2026-05-01) |
+| `report_template` フィールドによる機械的 report 生成 | ✅ | `PlaybookSchema.report_template: Optional[str]` 追加。子 Playbook 完了時に template を `{key}` / `{key.subkey}` で展開し `parent_state["report_to_parent"]` に書き込み。LLM コール不要で機械的サマリを返せる。`generate_image_playbook.json` で実例追加。実機検証 OK (v0.25, 2026-05-01) |
 | line_id の親子関係 + cancellation 伝搬 | 🟡 | parent_state 経由で `_pulse_context` 共有。cancellation 伝搬は実機検証で確認予定 |
 | Playbook 一覧のシステムプロンプト注入 | 🔲 | 浅い階層に独立セクション、router_callable=true なものを列挙 (実機検証と一体) |
 | `router_callable` 運用整理 | 🔲 | 既存 Playbook を見直して true/false を再設定 (現状: 18 件 true、25 件 false) |
@@ -146,6 +148,21 @@
 - `waiting_for` の type に応じて応答内容を解釈
 - メインライン Pulse として起動し、応答内容を踏まえた次のアクションを判断
 - MCP Elicitation 等の構造化応答にも対応
+
+### `report_template` (機械的レポート生成、2026-05-01 実装済)
+
+LLM コール不要で `report_to_parent` を機械的に生成する経路。`PlaybookSchema.report_template: Optional[str]` フィールドを Playbook トップレベルに置き、子 Playbook 完了時に runtime が `{key}` / `{key.subkey}` プレースホルダを最終 state で展開して `parent_state["report_to_parent"]` に書き込む。
+
+例 (`generate_image_playbook.json`):
+```json
+{
+  "report_template": "画像「{gen_params.title}」の生成が完了しました。\n\n{text}"
+}
+```
+
+- 機械的に決まる成果物 (画像生成、ファイル作成、ツール戻り値の整形等) は LLM ノードを挟まず即返せる
+- 動的サマリが要る場合は従来どおり LLM/memorize ノードで `state["report_to_parent"]` に書く経路も維持
+- output_schema への `report_to_parent` 明記は不要 (template 経路は parent_state に直接書き込む)
 
 ### `report_to_parent` 厳密バリデーション
 

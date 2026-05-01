@@ -10,6 +10,51 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.25 (2026-05-01) — `/run_playbook` Spell の親履歴流入 + `report_template` 機構
+
+v0.24 で起動した `/run_playbook` Spell の MVP 制約 2 つを解消する補完実装。実機 (air_city_a で `generate_image` 起動) で問題が表面化したため独立改修。
+
+**確定事項**:
+
+- 親メインライン (or 親サブライン) の LLM messages を、`/run_playbook` で起動するサブラインに **snapshot コピーで引き継ぐ**経路を新設
+- 子 Playbook トップレベルに `report_template: Optional[str]` フィールドを新設し、**LLM コール無しで機械的に `report_to_parent` を組み立てる**経路を追加
+
+**実装スコープ**:
+
+1. **親 LLM messages の流入 (snapshot 経路)**
+   - `tools/context.py` に `_LLM_MESSAGES: ContextVar` 追加
+   - `persona_context()` に `llm_messages: Optional[List[Dict]] = None` 引数追加
+   - `get_active_llm_messages()` getter 追加
+   - `sea/runtime_llm.py` の spell loop が `_run_spell_tool_async(... messages=messages)` を渡す。handy tool 経路 + spell 同期/async 3 箇所で `persona_context(... llm_messages=messages)` に
+   - `builtin_data/tools/run_playbook.py` で `parent_state["_messages"] = list(get_active_llm_messages() or [])`
+   - 入れ子は context manager の入れ子 reset で自動的に正しく動く (孫サブラインは親サブラインの messages を、ひ孫は孫の messages を、それぞれ正しく snapshot)
+
+2. **`report_template` フィールド**
+   - `sea/playbook_models.py` の `PlaybookSchema` に `report_template: Optional[str]` 追加
+   - `sea/runtime_graph.py` の `compile_with_langgraph` 完了処理で、`report_template` 指定時に `{key}` / `{key.subkey}` プレースホルダを最終 state で展開し、`parent_state["report_to_parent"]` に書き込み
+   - dict 値は dot-notation で展開 (例: `gen_params.title` で gen_params dict 内の title を参照)
+   - 内部 `_` プレフィックス state キーは展開対象外
+   - 既存の output_schema 経路 (state 内に `report_to_parent` を書いて伝播) も維持。template と並走する場合は template の値で上書き
+   - `generate_image_playbook.json` で実例追加 (`"report_template": "画像「{gen_params.title}」の生成が完了しました。\n\n{text}"`)
+
+**設計判断**:
+
+- **contextvar を選んだ理由**: PulseContext に「親 LLM messages」を持たせるとロギング目的の同オブジェクトの責務が肥大化する。spell 実行時の context をまとめる `persona_context` (= contextvar 群) と同じ仕組みに乗せる方が自然
+- **snapshot コピー**: 参照ではなく `list(...)` で copy して渡す。サブライン処理中に親 messages が変動しても影響を受けない (race-free)
+- **template は output_schema 不要**: `parent_state["report_to_parent"]` に runtime が直接書き込む。output_schema 経由の従来経路と並存可能 (動的サマリが要る Playbook は LLM/memorize ノードで書く経路、機械的でよい Playbook は template 経路)
+- **template の優先度**: state["report_to_parent"] と template 両方ある場合、template が後勝ちで上書き。Playbook 作者が「これが正規の report 形」と宣言したものとして扱う
+
+**実機検証**:
+
+- `generate_image_playbook.json` を `report_template` 付きで保存し、`/run_playbook(name="generate_image")` 経由で起動
+- 結果: 親メインライン履歴 (エアの「新緑の未来」会話) がサブライン `decide_prompt` ノードに流入し、文脈に即した英語プロンプトが組み立てられた (旧: 親 messages 空 → サンプルプロンプトに引っ張られてサイバーパンク出力)
+- `report_to_parent` も template 通り「画像「Air and Maha's Future Horizon」の生成が完了しました。\n\n（生成詳細）」が親に返る (旧: "completed but produced no report_to_parent" 警告で空返り)
+
+**残課題 (本 commit スコープ外)**:
+
+- `report_to_parent` 厳密バリデーション: `can_run_as_child=true` の Playbook で `report_to_parent` が出ないと例外化 (現状は警告ログ)。`report_template` で機械的に保証できるようになったため、今後は「template 指定 OR LLM ノードで明示的に書く」のどちらかを必須にする方向で整理可能
+- 他の機械的 sub Playbook (例: 各種 source_* Playbook) への `report_template` 適用 — Playbook ごとに作者が判断して導入
+
 ### v0.24 (2026-05-01) — `/run_playbook` Spell 新設: 入れ子サブライン機構の中核
 
 **確定事項**:
