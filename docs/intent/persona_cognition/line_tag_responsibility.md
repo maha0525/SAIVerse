@@ -209,10 +209,21 @@
   - `tests/test_payload_context_filter.py` 新規 28 件で `_payload_passes_context_filter` の網羅検証 (line_role / scope / pulse_id override / legacy 互換 / required_tags 互換 / 防御的処理)
   - 実機経路は `/run_playbook` Spell 実装後に再活性化するため、現状 `line='sub'` を使う Playbook 皆無 (`web_search_sub` は v0.19 で削除)。Phase 3 後段で end-to-end 検証する
 
-### 段階 4-C 完了基準
+### 段階 4-C 完了基準 (✅ 達成 — v0.23, 2026-05-01)
 
-- [ ] すべての builtin Playbook で `memorize.tags` に `internal` / `conversation` / `event_message` が含まれない
-- [ ] line_role / scope が memorize ノードで明示的に指定されている (or 妥当なデフォルト)
+- [x] すべての builtin Playbook で `memorize.tags` に `internal` / `conversation` が含まれない (`event_message` は現状未使用)
+  - `scripts/migrate_playbooks_to_lines.py` で 33 / 38 件を機械翻訳。残 5 件は対象タグなしで unchanged (basic_chat / meta_user / meta_user_manual / meta_simple_speak / meta_exec_speak)
+  - `internal` 66 件 → `line_role: "sub_line"` + `scope: "volatile"` に置換 (LLM ノード 45 + memorize ノード 21)
+  - `conversation` 5 件 → `line_role: "main_line"` + `scope: "committed"` に置換 (LLM ノード 5)
+  - `context_profile` 75 ノードから完全削除 (4-A で無効化済みの記述を整理)
+- [x] line_role / scope が memorize ノードで明示的に指定されている (or 妥当なデフォルト)
+  - `MemorizeNodeDef` に `line_role` / `scope` フィールドを Pydantic に追加
+  - `lg_memorize_node` (`sea/runtime_engine.py`) で `_store_memory` に渡す経路を追加
+  - 未指定時は `_store_memory` 内で `pulse_context.current_line_metadata()` から自動解決 (= 現在のライン階層に従う)
+- [x] Y 案で保留: `model_type=lightweight` (23 ノード) は触らず、`/run_playbook` Spell 実装と一体で 4-D で整理
+- [x] DB 反映: `python scripts/import_all_playbooks.py --force` で 44 件 update 成功
+- [x] 関連 7 ファイル合計: 134 件テスト pass / 0 新規回帰
+  - 実機検証は次セッション以降 (まはー側で 3 シナリオ確認: ユーザー会話 / 自律 Pulse / メタ判断)
 
 ### 段階 4-D 完了基準
 

@@ -10,6 +10,54 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.23 (2026-05-01) — 段階 4-C 完了: 既存 Playbook を line メタデータベースに一括翻訳
+
+**確定事項**:
+
+- 既存 builtin Playbook 33 件 (38 件中、5 件は対象タグなしで unchanged) を `scripts/migrate_playbooks_to_lines.py` で半自動翻訳
+- `MemorizeNodeDef` に `line_role` / `scope` フィールドを追加 (Pydantic Optional[str])
+- `lg_memorize_node` (`sea/runtime_engine.py`) で `node_def.line_role` / `node_def.scope` を `_store_memory` に渡す経路を追加。未指定時は `pulse_context.current_line_metadata()` から自動解決
+- Y 案により `model_type=lightweight` (23 ノード) は **保留** (4-D で `/run_playbook` Spell 実装と一体で整理予定)
+
+**変換ルール (確定版)**:
+
+| 旧 | 新 | 件数 |
+|---|---|---|
+| LLM ノードの `context_profile` (4 種値: `conversation` / `worker_light` / `worker` / `router`) | 削除 (4-A 後は無効化済み、記述として残ってるだけ) | 75 ノード |
+| `memorize.tags` の `internal` | `line_role: "sub_line"` + `scope: "volatile"` に置換 | 66 件 (LLM 45 + memorize ノード 21) |
+| `memorize.tags` の `conversation` | `line_role: "main_line"` + `scope: "committed"` に置換 | 5 件 (LLM 5 + memorize ノード 0) |
+| `memorize.tags` の `event_message` | 意味分類として残置 + `line_role: "main_line"` + `scope: "committed"` を併記 (Chronicle 連携のため) | 0 件 (現状未使用) |
+| 残りの意味分類タグ (`creation` / `memory_research` / `web_research` / `playbook_result` / `tool_result` / `novel_writing` / `schedule_management` 等) | そのまま保持 | — |
+| `model_type=lightweight` | **保留** (Y 案、4-D で整理) | 23 ノード残存 |
+
+**設計判断**:
+
+- **複数タグ混在時の優先順位**: `internal` が含まれる場合は sub_line/volatile を採用 (より制約が強い)。次に `conversation`、最後に `event_message`
+- **意味分類タグの保持**: handoff §段階 4-C の「ハマりどころ」に従い、`creation` / `web_research` 等は純粋な意味分類タグなのでそのまま残す。Chronicle / Memopedia / recall 経路で参照される
+- **Y 案で `model_type=lightweight` を保留**: `/run_playbook` Spell 実装で「メインライン判断 + 発話統合」が完成すると model_type 機能は不要 (= 自然に廃止できる)。それまでに削除すると router 系が重量級モデルで動いてコスト増 + 応答速度低下 → 段階的安全性のため保留
+- **machine-translation の妥当性**: dry-run で全 33 件の差分を目視確認、機械翻訳できないイレギュラーパターン無し
+- **互換性**: `_store_memory` は既に `line_role` / `scope` 引数対応済 (Phase 1.3 メタ判断 scope='discardable' 対応の流用)、Pydantic 側のフィールド追加で完成
+
+**実装ファイル**:
+
+- `scripts/migrate_playbooks_to_lines.py` 新規 — 半自動翻訳スクリプト (`--dry-run` / `--apply` / `--filter` / `--no-diff`)
+- `sea/playbook_models.py` — `MemorizeNodeDef.line_role` / `scope` フィールド追加 + `tags` の description 更新
+- `sea/runtime_engine.py` — `lg_memorize_node` で line_role / scope を `_store_memory` に渡す経路 + sea_trace ログ強化
+- `builtin_data/playbooks/public/*.json` — 33 ファイルの一括翻訳結果
+
+**DB 反映**:
+
+- `python scripts/import_all_playbooks.py --force`: Updated 44 / Imported 0 / Pruned 0
+- DB 内の Playbook 数: 43 件、`router_callable=true` 18 件 (`/run_playbook` Spell の対象)
+
+**検証**:
+
+- ruff check: All checks passed
+- 関連 7 ファイル合計: 134 件 pass / 0 新規回帰
+- 実機検証は次セッション以降 (まはー側で 3 シナリオ: ユーザー会話 / 自律 Pulse / メタ判断 の context 維持確認)
+
+**次の段階**: `/run_playbook` Spell 実装 (`nested_subline_spell.md` v0.1 の段階移行 7 ステップ)。Spell 実装後に 4-D で旧仕様コード完全削除 (`include_internal` / `pulse:{uuid}` タグ併行記録 / `model_type` / `LLMNodeDef.context_profile` Pydantic フィールド)。
+
 ### v0.22 (2026-05-01) — 段階 4-B 完了: sub_play の親伝搬を line ベースに統一 + report_to_parent リネーム
 
 **確定事項**:

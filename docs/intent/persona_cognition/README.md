@@ -162,10 +162,10 @@ action_tracks / notes テーブル + alert ベースのメタレイヤー + Hand
 | `report_to_parent` 必須バリデーション (`can_run_as_child=true` 用) | 🟡 | runtime ルーティングは実装、厳密化は警告ログのみ | C-2 残件 |
 | `exclude_pulse_id` 廃止 | 🔲 | 旧仕様コードは現存 | C-2 残件 |
 | Phase 3 翻訳前段の Playbook 整理 (旧プロトタイプ削除 + Spell 化) | ✅ | DB 67 → 43 件、`run_meta_auto` 関数削除、`ConversationManager` no-op 化、`playbook_sync` に prune 追加 (v0.19, 2026-05-01) | Phase 3 整理 |
-| **line vs タグの責務分離整理** (context 構築を line ベースに統一、タグはレガシー除去) | 🟡 | intent doc 起草 (v0.1) + 段階 4-A 完了 (v0.21) + 段階 4-B 完了 (`sub_play` の親伝搬を line ベース化 + `report_to_parent` リネーム、v0.22、2026-05-01)。残: 4-C/4-D | Phase 3 新規 |
+| **line vs タグの責務分離整理** (context 構築を line ベースに統一、タグはレガシー除去) | 🟡 | intent doc (v0.1) + 4-A (v0.21) + 4-B (v0.22) + **4-C 完了** (`migrate_playbooks_to_lines.py` で 33 件一括翻訳、v0.23、2026-05-01)。残: 4-D (`/run_playbook` Spell 実装後) | Phase 3 新規 |
 | 入れ子サブライン Spell (`/run_playbook` + 深さ 4 階層 + `report_to_parent`) | 🔲 | intent doc 起草済み (v0.1)、line vs タグ整理が前提 | Phase 3 新規 |
-| 既存 Playbook の `context_profile` → `line` 翻訳 + `memorize.tags` 整理 (`migrate_playbooks_to_lines.py`) | 🔲 | 未着手 (対象: cp 33 件, mt 12 件 + tags 整理 10〜15 件) | C-2 残件 |
-| `context_profile` / `model_type` / `exclude_pulse_id` / 旧タグ参照 の完全削除 | 🔲 | 全 Playbook 翻訳後 | C-2 残件 |
+| 既存 Playbook の `context_profile` → `line` 翻訳 + `memorize.tags` 整理 (`migrate_playbooks_to_lines.py`) | ✅ | 33 件翻訳完了 (`context_profile` 75 / `internal` → `sub_line` 66 / `conversation` → `main_line` 5)。`model_type=lightweight` は Y 案で 4-D 持ち越し (v0.23, 2026-05-01) | C-2 残件 |
+| `context_profile` / `model_type` / `exclude_pulse_id` / 旧タグ参照 の完全削除 | 🔲 | 段階 4-D、`/run_playbook` Spell 実装後 | C-2 残件 |
 
 **詳細**: `phases/phase_3_lines_playbooks.md`
 

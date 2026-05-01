@@ -46,8 +46,8 @@
 | intent doc 起草 | ✅ | `line_tag_responsibility.md` v0.1 |
 | 段階 4-A: context 構築を line ベースに切替 (`required_tags` 廃止) | ✅ | `sea/runtime_context.py`, `saiverse_memory/adapter.py`, `persona/history_manager.py`, `sai_memory/memory/storage.py`, `sea/runtime.py:1559`, `persona/mixins/generation.py:170` (v0.21, 2026-05-01) |
 | 段階 4-B: `sub_play` の `report_to_main` を line ベースに統一 + `report_to_parent` リネーム | ✅ | `sea/runtime_nodes.py`, `sea/playbook_models.py`, `tests/test_subplay_line.py` 更新 + `tests/test_payload_context_filter.py` 新規 28 件追加 (v0.22, 2026-05-01) |
-| 段階 4-C: 既存 Playbook の `memorize.tags` 整理 | 🔲 | `migrate_playbooks_to_lines.py` で一括変換 |
-| 段階 4-D: 旧 DEPRECATED コードの削除 (`include_internal` / `pulse:{uuid}` タグ併行記録) | 🔲 | runtime + storage |
+| 段階 4-C: 既存 Playbook の `memorize.tags` 整理 + `context_profile` 削除 | ✅ | `scripts/migrate_playbooks_to_lines.py` 新規 (Y 案、`model_type=lightweight` 保留) で 33 件一括翻訳: `context_profile` 75 ノード削除 / `internal` → `sub_line`+`volatile` 66 件 / `conversation` → `main_line`+`committed` 5 件。`MemorizeNodeDef` に line_role/scope フィールド追加、`lg_memorize_node` で `_store_memory` に渡す経路追加 (v0.23, 2026-05-01) |
+| 段階 4-D: 旧 DEPRECATED コードの削除 (`include_internal` / `pulse:{uuid}` タグ併行記録 / `model_type` / `LLMNodeDef.context_profile` Pydantic フィールド) | 🔲 | runtime + storage、`/run_playbook` Spell 実装後 |
 
 **位置付け**: 入れ子サブライン Spell 実装の**前段**。タグレガシーが残ったまま新機構を入れると二重制御が深まるため、本整理を先に完遂する。
 
@@ -79,8 +79,8 @@
 | 項目 | 状態 |
 |------|------|
 | 翻訳前段の Playbook 整理 (旧プロトタイプ削除 + Spell 化) | ✅ (v0.19, 2026-05-01) |
-| 既存 Playbook の `context_profile` → `line` 翻訳 (`migrate_playbooks_to_lines.py`) | 🔲 |
-| `context_profile` / `model_type` / `exclude_pulse_id` の完全削除 | 🔲 (全 Playbook 翻訳後) |
+| 既存 Playbook の `context_profile` → `line` 翻訳 (`migrate_playbooks_to_lines.py`) | ✅ (v0.23, 2026-05-01)、`model_type=lightweight` は Y 案で保留 |
+| `context_profile` / `model_type` / `exclude_pulse_id` の完全削除 | 🔲 段階 4-D で実施 (`/run_playbook` Spell 実装後) |
 
 #### 整理結果 (2026-05-01)
 
@@ -202,8 +202,8 @@ def validate_child_playbook(playbook: PlaybookSchema) -> None:
 | サブ Phase | 内容 | 状態 |
 |-----------|------|------|
 | 3-a (旧 C-2a) | 新仕様の追加 (旧仕様と共存) | ✅ 完了 |
-| 3-b (旧 C-2b) | 既存 Playbook の改修 (`migrate_playbooks_to_lines.py`) | 🔲 未着手 |
-| 3-c (旧 C-2c) | 旧仕様の削除 | 🔲 (3-b 完了後) |
+| 3-b (旧 C-2b) | 既存 Playbook の改修 (`migrate_playbooks_to_lines.py`) | ✅ 完了 (v0.23、Y 案で `model_type=lightweight` 23 ノードのみ保留) |
+| 3-c (旧 C-2c) | 旧仕様の削除 | 🔲 段階 4-D で実施 (`/run_playbook` Spell 実装後) |
 
 ---
 
