@@ -67,6 +67,7 @@
 | `report_to_parent` のスタック昇り経路 | ✅ | sub_play 経路と統一: parent_state["report_to_parent"] を string で返却 (v0.24) |
 | 親 LLM messages のサブライン流入 (snapshot 経路) | ✅ | `tools/context.py` に `_LLM_MESSAGES` ContextVar + `persona_context(llm_messages=...)` 引数追加。spell loop が呼び出し時に snapshot 渡し、`run_playbook` が `parent_state["_messages"]` に展開。入れ子も自動で正しく動く (context manager の入れ子 reset)。実機検証 OK (v0.25, 2026-05-01) |
 | `report_template` フィールドによる機械的 report 生成 | ✅ | `PlaybookSchema.report_template: Optional[str]` 追加。子 Playbook 完了時に template を `{key}` / `{key.subkey}` で展開し `parent_state["report_to_parent"]` に書き込み。LLM コール不要で機械的サマリを返せる。`generate_image_playbook.json` で実例追加。実機検証 OK (v0.25, 2026-05-01) |
+| Spell 結果の media を親 LLM ラウンドに attachment 転送 | ✅ | spell 戻り値を `Tuple[str, Optional[Dict]]` に拡張 (str 戻り値も互換)。spell loop が全 spell の `metadata.media` を集約し、次の LLM ラウンドの user message の `metadata.media` に lift。`run_playbook` が `parent_state["metadata"].media` を転送。複数 spell × 複数 media 合算対応。`generate_image_playbook.json` の `report_template` に Markdown リンク (`saiverse://item/<id>/content`) リマインドも追記 (v0.26, 2026-05-01) |
 | line_id の親子関係 + cancellation 伝搬 | 🟡 | parent_state 経由で `_pulse_context` 共有。cancellation 伝搬は実機検証で確認予定 |
 | Playbook 一覧のシステムプロンプト注入 | 🔲 | 浅い階層に独立セクション、router_callable=true なものを列挙 (実機検証と一体) |
 | `router_callable` 運用整理 | 🔲 | 既存 Playbook を見直して true/false を再設定 (現状: 18 件 true、25 件 false) |

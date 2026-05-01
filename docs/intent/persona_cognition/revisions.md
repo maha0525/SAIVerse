@@ -10,6 +10,52 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.26 (2026-05-01) — Spell 結果に media attachment を載せる経路 + UI リマインド
+
+`/run_playbook` Spell 経由で起動したサブ Playbook (主に `generate_image`) の生成物 (画像等) が、親メインラインの「次の LLM ラウンド」で attachment として届かない問題への対応。v0.25 の実機検証で「ペルソナが画像を見るには item_view スペルを別途呼ぶ必要がある」という UX 制約が見えたため独立改修。
+
+**確定事項**:
+
+- Spell の戻り値型を `str` から `Tuple[str, Optional[Dict[str, Any]]]` (text, metadata) に拡張 — 既存の str 戻り値 spell は `(str, None)` に正規化されて互換維持
+- spell loop が全 spell の `metadata.media` を集約し、次の LLM ラウンドの user message の `metadata.media` に lift。LLM client の `iter_image_media()` 経路で attachment 化される
+- `run_playbook` Spell が `parent_state["metadata"].media` を取り出して上記の媒体経路に流す。サブ Playbook の `output_schema` に "metadata" が含まれていれば自動で伝わる (v0.24 で実装済の output_schema 伝播経路を流用)
+- `generate_image_playbook.json` の `report_template` に Markdown リンク (`[タイトル](saiverse://item/<id>/content)`) リマインドを追記。ペルソナが発言中に URI を含めればチャット UI が画像を直接表示する仕組みを思い出させる
+
+**実装スコープ**:
+
+1. **媒体経路 (multimodal forwarding)**
+   - `sea/runtime_llm.py` `_run_spell_tool_async` を `Tuple[str, Optional[Dict]]` 戻り値に拡張
+     - 既存 spell の str 戻り値 → `(str(result), None)`
+     - 新仕様 spell の `(str, dict)` tuple → そのまま
+     - その他 → `(str(x), None)` (legacy 互換)
+   - `_run_spell_loop` で全 spell の `metadata.media` (list) を `aggregated_media` に合算
+   - `messages.append({"role": "user", "content": ..., "metadata": {"media": [...]}})` の形で attachment を載せる
+   - 複数 spell × 複数 media (例: 1 spell が 4 枚返す将来のローカル画像生成) も合算で対応
+   - `builtin_data/tools/run_playbook.py` の戻り値を `(report_text, metadata)` に変更。`parent_state["metadata"].media` を `metadata` に転送
+   - 既存 spell tools (track_*, note_*, memory_recall_unified 等) は無修正で互換 (str 戻り値のまま)
+
+2. **UI リマインド**
+   - `generate_image_playbook.json` の `report_template` 末尾に追記:
+     `💡 発言の中に [画像タイトル](saiverse://item/<アイテムID>/content) の形で Markdown リンクを書くと、チャット UI で画像が直接表示されます (アイテム閲覧スペル不要)。<アイテムID> は上記の「アイテムID: ...」をそのまま使ってください。`
+   - `<アイテムID>` placeholder は意図的にリテラル (現在の `image_generator` が item_id を独立フィールドで返さず text 文字列内のみ持つため。template 側からの dot-notation 展開で解決するには image_generator 戻り値拡張が別途必要、本 commit ではスコープ外)
+
+**設計判断**:
+
+- **spell 戻り値の Tuple 拡張 vs PulseContext buffer**: 後者 (PulseContext に媒体 buffer を持たせる) も検討したが、PulseContext のロギング目的責務を肥大化させる。spell tool の戻り値型を素直に拡張する方が責務分離がきれい
+- **既存 spell の互換**: str OR Tuple の両対応にしたので、既存 spell tools は触らずに済む。新 spell が media を返したい時だけ Tuple にすればよい
+- **複数 media 合算**: 並列 spell 実行 (spell loop が同ラウンドで複数 spell を `asyncio.gather` で並列実行) でも、各 spell が media を返せば合算される。将来「ローカル画像生成で 4 枚一気に」のようなケースも自動対応
+- **リマインドの位置**: メインラインに伝わる report に書く方針 (template の末尾)。Playbook 内のシステムプロンプトに恒久指示を入れる方法もあるが、毎回 system 領域で消費されるのは無駄。「画像生成した直後だけ思い出す」がリマインドの本来の機能
+
+**実機検証**:
+
+- (まはー報告) `/run_playbook(name="generate_image")` 経由で生成 → 親メインラインの次ラウンドで画像が attachment として LLM に届くことを確認
+- ペルソナが報告メッセージの内容を踏まえて発話に Markdown リンクを含めるかは、リマインド文言で導線が引けたかどうか継続観察
+
+**残課題 (本 commit スコープ外)**:
+
+- `image_generator` tool の戻り値を 5要素 tuple に拡張して `item_id` を独立フィールド化 → `report_template` で `{item_id}` を直接展開可能にする。リマインド文言から `<アイテムID>` placeholder を消せて UX 向上。次回 image_generator を触るときに同梱
+- 他の媒体生成系 spell (今後のローカル画像 4枚生成等) で同じ media 戻し方パターンを採用するための contributor doc 起草
+
 ### v0.25 (2026-05-01) — `/run_playbook` Spell の親履歴流入 + `report_template` 機構
 
 v0.24 で起動した `/run_playbook` Spell の MVP 制約 2 つを解消する補完実装。実機 (air_city_a で `generate_image` 起動) で問題が表面化したため独立改修。
