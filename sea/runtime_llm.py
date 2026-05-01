@@ -249,7 +249,9 @@ def _execute_handy_tool_inline(
         persona_dir = persona_dir.parent if persona_dir else Path.cwd()
         manager_ref = getattr(persona_obj, "manager_ref", None)
         try:
-            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=False, event_callback=event_callback):
+            # ``llm_messages=messages`` snapshot lets spells like ``run_playbook``
+            # fork their sub-line from the parent LLM node's actual messages.
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=False, event_callback=event_callback, llm_messages=messages):
                 raw_result = tool_func(**tool_args)
             result_str = str(raw_result)
             LOGGER.info("[sea][handy] Executed %s → %s", tool_name, result_str[:200])
@@ -312,6 +314,7 @@ async def _run_spell_tool_async(
     state: dict,
     playbook_name: str,
     event_callback: Optional[Callable],
+    messages: Optional[list] = None,
 ) -> str:
     """Execute a single spell tool in a thread executor. Returns result string."""
     from pathlib import Path
@@ -337,11 +340,13 @@ async def _run_spell_tool_async(
         pulse_ctx = state.get("_pulse_context")
 
         def _run():
-            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=False, event_callback=event_callback, pulse_context=pulse_ctx):
+            # ``llm_messages=messages`` snapshot lets spells like ``run_playbook``
+            # fork their sub-line from the parent LLM node's actual messages.
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=False, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages):
                 return tool_func(**tool_args)
 
         if inspect.iscoroutinefunction(tool_func):
-            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=False, event_callback=event_callback, pulse_context=pulse_ctx):
+            with persona_context(persona_id, persona_dir, manager_ref, playbook_name=playbook_name, auto_mode=False, event_callback=event_callback, pulse_context=pulse_ctx, llm_messages=messages):
                 raw_result = await tool_func(**tool_args)
         else:
             raw_result = await asyncio.get_event_loop().run_in_executor(None, _run)
@@ -429,9 +434,12 @@ async def _run_spell_loop(
             assistant_content = (text_before + "\n" + all_spell_lines_normalized).strip()
             messages.append({"role": "assistant", "content": assistant_content})
 
-            # Execute all spells in parallel
+            # Execute all spells in parallel.
+            # ``messages`` is snapshotted into a contextvar via persona_context so
+            # spells like run_playbook can fork their sub-line from the parent
+            # LLM node's actual conversation context (intent A v0.14).
             results: List[str] = list(await asyncio.gather(*[
-                _run_spell_tool_async(name, args, persona, state, playbook.name, event_callback)
+                _run_spell_tool_async(name, args, persona, state, playbook.name, event_callback, messages=messages)
                 for name, args, _, _ in valid_spells
             ]))
 

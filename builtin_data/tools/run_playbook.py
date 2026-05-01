@@ -26,6 +26,7 @@ import logging
 from typing import Optional
 
 from tools.context import (
+    get_active_llm_messages,
     get_active_manager,
     get_active_persona_id,
     get_active_pulse_context,
@@ -111,16 +112,19 @@ def run_playbook(name: str) -> str:
         )
 
     # Build a minimal parent_state. Sub-line execution will:
-    # - copy parent_state["_messages"] (= [] here, an empty list) as base_messages
+    # - copy parent_state["_messages"] as base_messages (= snapshot of caller's
+    #   LLM messages, captured by spell loop via persona_context(llm_messages=...))
     # - share parent_state["_pulse_context"] reference for line stack management
     # - write `report_to_parent` into parent_state on completion (output_schema-driven)
     #
-    # NOTE: メインラインの会話履歴をサブラインに引き継ぐ MVP 経路はまだない。
-    # 必要であれば spell loop 側に messages を contextvar 経由で渡す機構を追加する
-    # が、現状は Playbook 内で必要な情報は input_schema 経由 / SAIMemory recall /
-    # state.input から取得できる前提。
+    # The snapshot lets the sub-line inherit the parent line's actual
+    # conversation context (intent A v0.14 §"子ラインは分岐であって独立ではない").
+    # When invoked outside a spell loop (CLI / direct call), ``parent_messages``
+    # is None — fall back to an empty list so the sub-line still runs but
+    # without parent context.
+    parent_messages = get_active_llm_messages() or []
     parent_state: dict = {
-        "_messages": [],
+        "_messages": list(parent_messages),  # snapshot copy, never share reference
         "_pulse_context": pulse_ctx,
         "_pulse_id": pulse_ctx.pulse_id,
     }

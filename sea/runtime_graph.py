@@ -29,7 +29,6 @@ def compile_with_langgraph(
     pulse_line_track_id: Optional[str] = None,
 ) -> Optional[List[str]]:
     _lg_outputs: List[str] = []
-    temperature = runtime._default_temperature(persona)
     parent = parent_state or {}
 
     # Update execution state: playbook started (LangGraph path)
@@ -320,6 +319,40 @@ def compile_with_langgraph(
                 else:
                     parent_state[key] = value
                 LOGGER.debug("[sea][LangGraph] Propagated %s to parent_state: %s", key, str(value))
+
+    # Phase C-2: Render report_template into parent_state['report_to_parent'].
+    # Lets mechanical sub-playbooks (image generation, tool wrappers, etc.) emit
+    # a deterministic report without spending an extra LLM call. Output_schema-based
+    # writes still take priority — if a node already set state['report_to_parent']
+    # explicitly, the template result overrides it (template is the playbook's
+    # author-declared canonical report shape).
+    if (
+        parent_state is not None
+        and isinstance(final_state, dict)
+        and getattr(playbook, "report_template", None)
+    ):
+        try:
+            from sea.runtime_utils import _format
+
+            template_vars: Dict[str, Any] = {}
+            for state_key, state_value in final_state.items():
+                if state_key.startswith("_"):
+                    continue
+                template_vars[state_key] = state_value
+                if isinstance(state_value, dict):
+                    for sub_k, sub_v in state_value.items():
+                        template_vars[f"{state_key}.{sub_k}"] = sub_v
+            rendered = _format(playbook.report_template, template_vars)
+            parent_state["report_to_parent"] = rendered
+            LOGGER.info(
+                "[sea][LangGraph] Rendered report_template -> parent_state['report_to_parent'] (%d chars)",
+                len(rendered),
+            )
+        except Exception:
+            LOGGER.exception(
+                "[sea][LangGraph] Failed to render report_template for playbook '%s'",
+                playbook.name,
+            )
 
     # Update execution state: playbook completed (LangGraph path)
     if hasattr(persona, "execution_state"):

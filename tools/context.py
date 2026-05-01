@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 _PERSONA_ID: ContextVar[Optional[str]] = ContextVar("saiverse_persona_id", default=None)
 _PERSONA_PATH: ContextVar[Optional[str]] = ContextVar("saiverse_persona_path", default=None)
@@ -18,6 +18,15 @@ _MESSAGE_ID: ContextVar[Optional[str]] = ContextVar("saiverse_message_id", defau
 # operation lands at Pulse completion, not mid-Pulse (Intent A v0.14, Intent B
 # v0.11). Tools that don't touch Tracks ignore it.
 _PULSE_CONTEXT: ContextVar[Optional[Any]] = ContextVar("saiverse_pulse_context", default=None)
+# Snapshot of the currently-running LLM node's messages list. Spell loops set
+# this when invoking a spell so spells like ``run_playbook`` can fork a sub-line
+# from the parent line's actual conversation context (intent A v0.14 §"子ライン
+# は分岐であって独立ではない"). Other spells / tools that don't need parent
+# messages can ignore it. Nesting works naturally via context manager — the
+# inner persona_context call shadows the outer value and reset() restores it.
+_LLM_MESSAGES: ContextVar[Optional[List[Dict[str, Any]]]] = ContextVar(
+    "saiverse_llm_messages", default=None
+)
 
 
 def get_active_persona_id() -> Optional[str]:
@@ -59,6 +68,19 @@ def get_active_pulse_context() -> Optional[Any]:
     return _PULSE_CONTEXT.get()
 
 
+def get_active_llm_messages() -> Optional[List[Dict[str, Any]]]:
+    """Return a snapshot of the calling LLM node's messages list, or None.
+
+    Spell loops populate this just before invoking a spell so the spell can
+    inspect the parent line's conversation context. ``run_playbook`` uses it
+    to fork its sub-line from the actual parent messages instead of an empty
+    list (intent A v0.14 §"子ラインは分岐であって独立ではない"). Spells that
+    don't need parent context ignore the return value. Returns None outside
+    of a spell-invoking LLM call (tool nodes, CLI runs, etc.).
+    """
+    return _LLM_MESSAGES.get()
+
+
 def set_active_message_id(message_id: Optional[str]) -> None:
     """BuildingHistory保存後にmessage_idを確定させるために使用する。
 
@@ -79,8 +101,14 @@ def persona_context(
     event_callback: Optional[Any] = None,
     message_id: Optional[str] = None,
     pulse_context: Optional[Any] = None,
+    llm_messages: Optional[List[Dict[str, Any]]] = None,
 ) -> Iterator[None]:
-    """Temporarily set the active persona identity for tool execution."""
+    """Temporarily set the active persona identity for tool execution.
+
+    ``llm_messages`` is a snapshot of the caller's LLM messages list; spell
+    loops pass it so spells like ``run_playbook`` can inspect the parent
+    line's context. Pass None for tool-node / CLI paths that don't need it.
+    """
     token_id = _PERSONA_ID.set(persona_id)
     token_path = _PERSONA_PATH.set(str(persona_path))
     token_manager = _MANAGER.set(manager)
@@ -89,6 +117,7 @@ def persona_context(
     token_event_cb = _EVENT_CALLBACK.set(event_callback)
     token_msg_id = _MESSAGE_ID.set(message_id)
     token_pulse_ctx = _PULSE_CONTEXT.set(pulse_context)
+    token_llm_msgs = _LLM_MESSAGES.set(llm_messages)
     try:
         yield
     finally:
@@ -100,3 +129,4 @@ def persona_context(
         _EVENT_CALLBACK.reset(token_event_cb)
         _MESSAGE_ID.reset(token_msg_id)
         _PULSE_CONTEXT.reset(token_pulse_ctx)
+        _LLM_MESSAGES.reset(token_llm_msgs)

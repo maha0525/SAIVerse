@@ -575,6 +575,19 @@ class PlaybookSchema(BaseModel):
         default=None,
         description="List of state keys to propagate to parent playbook when this sub-playbook completes."
     )
+    report_template: Optional[str] = Field(
+        default=None,
+        description=(
+            "Template string for the sub-playbook's report_to_parent. Rendered after all "
+            "nodes complete, with {key} / {key.subkey} placeholders resolved against the "
+            "final state (top-level + dot-notation flattening for dict values). "
+            "When set, the rendered text is written to parent_state['report_to_parent'] "
+            "without requiring an extra LLM call. Use this for mechanical reports "
+            "(image generation results, tool outputs, etc.). For dynamic summaries "
+            "that need narrative reasoning, fall back to an LLM/memorize node that "
+            "writes report_to_parent into the state directly."
+        ),
+    )
     context_requirements: Optional[ContextRequirements] = Field(
         default=None,
         description="Context requirements for this playbook. If not specified, uses full context (backward compatible)."
