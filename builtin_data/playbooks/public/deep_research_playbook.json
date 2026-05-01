@@ -1,210 +1,219 @@
 {
-    "name": "deep_research",
-    "display_name": "ディープリサーチ",
-    "description": "トピックについて深く調査し、複数の情報源から情報を収集してレポートドキュメントを作成する。ペルソナの知識を活用して調査計画を立て、Web検索ループをサブエージェントで実行し、構造化された調査結果からレポートを生成する。",
-    "input_schema": [
-        {
-            "name": "input",
-            "description": "調査したいトピックや質問"
-        }
-    ],
-    "router_callable": true,
-    "nodes": [
-        {
-            "id": "init",
-            "type": "set",
-            "assignments": {
-                "research_topic": "{input}"
+  "name": "deep_research",
+  "display_name": "ディープリサーチ",
+  "description": "トピックについて深く調査し、複数の情報源から情報を収集してレポートドキュメントを作成する。ペルソナの知識を活用して調査計画を立て、Web検索ループをサブエージェントで実行し、構造化された調査結果からレポートを生成する。",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "調査したいトピックや質問"
+    }
+  ],
+  "router_callable": true,
+  "nodes": [
+    {
+      "id": "init",
+      "type": "set",
+      "assignments": {
+        "research_topic": "{input}"
+      },
+      "next": "plan_research"
+    },
+    {
+      "id": "plan_research",
+      "type": "llm",
+      "action": "調査計画を立ててください。回答はサブエージェントへの指示とURI解決に使われます。\n\n## 指示\n- directives: 調査の方向性、重点的に調べるべきポイント、注意すべき観点を具体的に記述してください。会話の文脈から、本当に知りたいことを汲み取ってください。\n- reference_uris: 関連知識（Memopediaのページ、過去に作成したドキュメントなど）があれば、そのsaiverse:// URIを指定してください。関連するものがなければ空配列で構いません。\n- search_hints: Web検索で使うべきキーワード、検索の観点、言語（日本語/英語どちらで検索すべきか）などのヒントを記述してください。",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "directives": {
+            "type": "string",
+            "description": "調査の方向性、重点ポイント、注意事項"
+          },
+          "reference_uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
             },
-            "next": "plan_research"
+            "description": "参考にすべき saiverse:// URI（なければ空配列）"
+          },
+          "search_hints": {
+            "type": "string",
+            "description": "Web検索で使うべきキーワードや観点"
+          }
         },
-        {
-            "id": "plan_research",
-            "type": "llm",
-            "context_profile": "conversation",
-            "action": "調査計画を立ててください。回答はサブエージェントへの指示とURI解決に使われます。\n\n## 指示\n- directives: 調査の方向性、重点的に調べるべきポイント、注意すべき観点を具体的に記述してください。会話の文脈から、本当に知りたいことを汲み取ってください。\n- reference_uris: 関連知識（Memopediaのページ、過去に作成したドキュメントなど）があれば、そのsaiverse:// URIを指定してください。関連するものがなければ空配列で構いません。\n- search_hints: Web検索で使うべきキーワード、検索の観点、言語（日本語/英語どちらで検索すべきか）などのヒントを記述してください。",
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "directives": {
-                        "type": "string",
-                        "description": "調査の方向性、重点ポイント、注意事項"
-                    },
-                    "reference_uris": {
-                        "type": "array",
-                        "items": {
-                            "type": "string"
-                        },
-                        "description": "参考にすべき saiverse:// URI（なければ空配列）"
-                    },
-                    "search_hints": {
-                        "type": "string",
-                        "description": "Web検索で使うべきキーワードや観点"
-                    }
-                },
-                "required": [
-                    "directives",
-                    "reference_uris",
-                    "search_hints"
-                ]
-            },
-            "output_key": "research_plan",
-            "memorize": {
-                "tags": [
-                    "internal",
-                    "deep_research"
-                ]
-            },
-            "next": "resolve_references"
+        "required": [
+          "directives",
+          "reference_uris",
+          "search_hints"
+        ]
+      },
+      "output_key": "research_plan",
+      "memorize": {
+        "tags": [
+          "deep_research"
+        ],
+        "line_role": "sub_line",
+        "scope": "volatile"
+      },
+      "next": "resolve_references"
+    },
+    {
+      "id": "resolve_references",
+      "type": "tool",
+      "action": "resolve_uri",
+      "args_input": {
+        "uris": "research_plan.reference_uris"
+      },
+      "output_key": "reference_content",
+      "next": "exec_search"
+    },
+    {
+      "id": "exec_search",
+      "type": "subplay",
+      "playbook": "source_web",
+      "args": {
+        "objective": "{research_topic}",
+        "context_text": "## 調査指示\n{research_plan.directives}\n\n## 検索のヒント\n{research_plan.search_hints}\n\n## 参考資料\n{reference_content}",
+        "depth": "deep",
+        "max_iterations": 4
+      },
+      "propagate_output": true,
+      "execution": "subagent",
+      "subagent_chronicle": true,
+      "next": "generate_report"
+    },
+    {
+      "id": "generate_report",
+      "type": "llm",
+      "action": "収集した調査結果を基に包括的なレポートを作成してください。結果はdocument_createツールでドキュメント化されます。\n\n## 調査計画（方針）\n{research_plan.directives}\n\n## 調査結果サマリー\n{research_result.summary}\n\n## 調査結果ステータス\n{research_result.status} (信頼度: {research_result.confidence})\n\n## 各発見の詳細\n{research_result.findings}\n\nレポート要件:\n- 明確な構成（概要、本文、結論）\n- 各情報の出典URL明記（findingsのsource_refを参照）\n- 事実と数字を優先した客観的な記述\n- 読みやすいMarkdown形式\n- 調査で得られた全ての重要事実を漏れなく含めること\n- 調査計画の方針に沿った構成にすること",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "レポートのタイトル"
+          },
+          "content": {
+            "type": "string",
+            "description": "レポート本文（Markdown形式）"
+          },
+          "summary": {
+            "type": "string",
+            "description": "レポートの要約（1-2文）"
+          }
         },
-        {
-            "id": "resolve_references",
-            "type": "tool",
-            "action": "resolve_uri",
-            "args_input": {
-                "uris": "research_plan.reference_uris"
-            },
-            "output_key": "reference_content",
-            "next": "exec_search"
-        },
-        {
-            "id": "exec_search",
-            "type": "subplay",
-            "playbook": "source_web",
-            "args": {
-                "objective": "{research_topic}",
-                "context_text": "## 調査指示\n{research_plan.directives}\n\n## 検索のヒント\n{research_plan.search_hints}\n\n## 参考資料\n{reference_content}",
-                "depth": "deep",
-                "max_iterations": 4
-            },
-            "propagate_output": true,
-            "execution": "subagent",
-            "subagent_chronicle": true,
-            "next": "generate_report"
-        },
-        {
-            "id": "generate_report",
-            "type": "llm",
-            "context_profile": "conversation",
-            "action": "収集した調査結果を基に包括的なレポートを作成してください。結果はdocument_createツールでドキュメント化されます。\n\n## 調査計画（方針）\n{research_plan.directives}\n\n## 調査結果サマリー\n{research_result.summary}\n\n## 調査結果ステータス\n{research_result.status} (信頼度: {research_result.confidence})\n\n## 各発見の詳細\n{research_result.findings}\n\nレポート要件:\n- 明確な構成（概要、本文、結論）\n- 各情報の出典URL明記（findingsのsource_refを参照）\n- 事実と数字を優先した客観的な記述\n- 読みやすいMarkdown形式\n- 調査で得られた全ての重要事実を漏れなく含めること\n- 調査計画の方針に沿った構成にすること",
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "レポートのタイトル"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "レポート本文（Markdown形式）"
-                    },
-                    "summary": {
-                        "type": "string",
-                        "description": "レポートの要約（1-2文）"
-                    }
-                },
-                "required": [
-                    "title",
-                    "content",
-                    "summary"
-                ]
-            },
-            "memorize": {
-                "tags": [
-                    "internal",
-                    "deep_research"
-                ]
-            },
-            "output_key": "report",
-            "next": "create_document"
-        },
-        {
-            "id": "create_document",
-            "type": "tool",
-            "action": "document_create",
-            "args_input": {
-                "name": "report.title",
-                "description": "report.summary",
-                "content": "report.content"
-            },
-            "output_key": "doc_result",
-            "next": "consider_writeback"
-        },
-        {
-            "id": "consider_writeback",
-            "type": "llm",
-            "model_type": "lightweight",
-            "context_profile": "worker_light",
-            "action": "このリサーチレポートの中から、Memopediaに記録すべき知識を抽出してください。\n\n## レポートタイトル\n{report.title}\n\n## レポート要約\n{report.summary}\n\n## レポート内容\n{report.content}\n\n## 判断基準\n- 今後のやり取りで参照する価値がある知識か\n- 人物、概念、技術、計画に関する定義的・百科事典的な情報か\n- 一時的な調査結果ではなく、持続的に有用な知識か\n\n記録すべき知識がある場合、Memopediaに保存するパラメータを生成してください。\nレポート全体を記録するのではなく、本質的な知識を凝縮してください。",
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "should_save": {
-                        "type": "string",
-                        "enum": ["true", "false"],
-                        "description": "Memopediaに記録すべきか"
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "ページタイトル（保存する場合）"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "記録する知識（Markdown形式、保存する場合）"
-                    },
-                    "summary": {
-                        "type": "string",
-                        "description": "1-2文の概要（保存する場合）"
-                    },
-                    "category": {
-                        "type": "string",
-                        "enum": ["people", "terms", "plans"],
-                        "description": "カテゴリ（保存する場合）"
-                    }
-                },
-                "required": ["should_save"]
-            },
-            "output_key": "writeback",
-            "next": "route_writeback"
-        },
-        {
-            "id": "route_writeback",
-            "type": "pass",
-            "next": "notify_complete",
-            "conditional_next": {
-                "field": "writeback.should_save",
-                "operator": "eq",
-                "cases": {
-                    "true": "exec_writeback",
-                    "default": "notify_complete"
-                }
-            }
-        },
-        {
-            "id": "exec_writeback",
-            "type": "tool",
-            "action": "memopedia_note",
-            "args_input": {
-                "content": "writeback.content",
-                "title": "writeback.title",
-                "summary": "writeback.summary",
-                "category": "writeback.category"
-            },
-            "output_key": "writeback_result",
-            "next": "notify_complete"
-        },
-        {
-            "id": "notify_complete",
-            "type": "memorize",
-            "action": "ディープリサーチ完了\n\nトピック: {research_topic}\nドキュメント: 「{report.title}」を作成しました。\n\n結果: {doc_result}",
-            "role": "user",
-            "tags": [
-                "internal",
-                "deep_research",
-                "playbook_result"
+        "required": [
+          "title",
+          "content",
+          "summary"
+        ]
+      },
+      "memorize": {
+        "tags": [
+          "deep_research"
+        ],
+        "line_role": "sub_line",
+        "scope": "volatile"
+      },
+      "output_key": "report",
+      "next": "create_document"
+    },
+    {
+      "id": "create_document",
+      "type": "tool",
+      "action": "document_create",
+      "args_input": {
+        "name": "report.title",
+        "description": "report.summary",
+        "content": "report.content"
+      },
+      "output_key": "doc_result",
+      "next": "consider_writeback"
+    },
+    {
+      "id": "consider_writeback",
+      "type": "llm",
+      "model_type": "lightweight",
+      "action": "このリサーチレポートの中から、Memopediaに記録すべき知識を抽出してください。\n\n## レポートタイトル\n{report.title}\n\n## レポート要約\n{report.summary}\n\n## レポート内容\n{report.content}\n\n## 判断基準\n- 今後のやり取りで参照する価値がある知識か\n- 人物、概念、技術、計画に関する定義的・百科事典的な情報か\n- 一時的な調査結果ではなく、持続的に有用な知識か\n\n記録すべき知識がある場合、Memopediaに保存するパラメータを生成してください。\nレポート全体を記録するのではなく、本質的な知識を凝縮してください。",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "should_save": {
+            "type": "string",
+            "enum": [
+              "true",
+              "false"
             ],
-            "next": null
+            "description": "Memopediaに記録すべきか"
+          },
+          "title": {
+            "type": "string",
+            "description": "ページタイトル（保存する場合）"
+          },
+          "content": {
+            "type": "string",
+            "description": "記録する知識（Markdown形式、保存する場合）"
+          },
+          "summary": {
+            "type": "string",
+            "description": "1-2文の概要（保存する場合）"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "people",
+              "terms",
+              "plans"
+            ],
+            "description": "カテゴリ（保存する場合）"
+          }
+        },
+        "required": [
+          "should_save"
+        ]
+      },
+      "output_key": "writeback",
+      "next": "route_writeback"
+    },
+    {
+      "id": "route_writeback",
+      "type": "pass",
+      "next": "notify_complete",
+      "conditional_next": {
+        "field": "writeback.should_save",
+        "operator": "eq",
+        "cases": {
+          "true": "exec_writeback",
+          "default": "notify_complete"
         }
-    ],
-    "start_node": "init"
+      }
+    },
+    {
+      "id": "exec_writeback",
+      "type": "tool",
+      "action": "memopedia_note",
+      "args_input": {
+        "content": "writeback.content",
+        "title": "writeback.title",
+        "summary": "writeback.summary",
+        "category": "writeback.category"
+      },
+      "output_key": "writeback_result",
+      "next": "notify_complete"
+    },
+    {
+      "id": "notify_complete",
+      "type": "memorize",
+      "action": "ディープリサーチ完了\n\nトピック: {research_topic}\nドキュメント: 「{report.title}」を作成しました。\n\n結果: {doc_result}",
+      "role": "user",
+      "tags": [
+        "deep_research",
+        "playbook_result"
+      ],
+      "next": null,
+      "line_role": "sub_line",
+      "scope": "volatile"
+    }
+  ],
+  "start_node": "init"
 }

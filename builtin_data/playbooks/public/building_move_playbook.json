@@ -1,71 +1,72 @@
 {
-    "name": "building_move",
-    "display_name": "Building間の移動",
-    "description": "List buildings in the city, choose a destination, and move there.",
-    "input_schema": [
-        {
-            "name": "input",
-            "description": "Optional note or hint about where to go"
-        }
-    ],
-    "router_callable": true,
-    "nodes": [
-        {
-            "id": "list_buildings",
-            "type": "tool",
-            "action": "list_city_buildings",
-            "args_input": {},
-            "output_key": "buildings_json",
-            "next": "decide_destination"
+  "name": "building_move",
+  "display_name": "Building間の移動",
+  "description": "List buildings in the city, choose a destination, and move there.",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "Optional note or hint about where to go"
+    }
+  ],
+  "router_callable": true,
+  "nodes": [
+    {
+      "id": "list_buildings",
+      "type": "tool",
+      "action": "list_city_buildings",
+      "args_input": {},
+      "output_key": "buildings_json",
+      "next": "decide_destination"
+    },
+    {
+      "id": "decide_destination",
+      "type": "llm",
+      "action": "以下の建物一覧から移動先の building_id を1つ選んでください。結果はmove_personaツールに渡されます。\n\n建物一覧:\n{buildings_json}\n\n必ず存在する building_id を選んでください。",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "building_id": {
+            "type": "string",
+            "description": "ID of the building to move to"
+          }
         },
-        {
-            "id": "decide_destination",
-            "type": "llm",
-            "context_profile": "router",
-            "action": "以下の建物一覧から移動先の building_id を1つ選んでください。結果はmove_personaツールに渡されます。\n\n建物一覧:\n{buildings_json}\n\n必ず存在する building_id を選んでください。",
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "building_id": {
-                        "type": "string",
-                        "description": "ID of the building to move to"
-                    }
-                },
-                "required": [
-                    "building_id"
-                ]
-            },
-            "output_key": "move_choice",
-            "memorize": {
-                "tags": [
-                    "internal",
-                    "building_move"
-                ]
-            },
-            "next": "move"
-        },
-        {
-            "id": "move",
-            "type": "tool",
-            "action": "move_persona",
-            "args_input": {
-                "building_id": "move_choice.building_id"
-            },
-            "output_key": "move_result",
-            "next": "record"
-        },
-        {
-            "id": "record",
-            "type": "memorize",
-            "action": "{last}",
-            "role": "user",
-            "tags": [
-                "internal",
-                "building_move",
-                "playbook_result"
-            ],
-            "next": null
-        }
-    ],
-    "start_node": "list_buildings"
+        "required": [
+          "building_id"
+        ]
+      },
+      "output_key": "move_choice",
+      "memorize": {
+        "tags": [
+          "building_move"
+        ],
+        "line_role": "sub_line",
+        "scope": "volatile"
+      },
+      "next": "move"
+    },
+    {
+      "id": "move",
+      "type": "tool",
+      "action": "move_persona",
+      "args_input": {
+        "building_id": "move_choice.building_id"
+      },
+      "output_key": "move_result",
+      "next": "record"
+    },
+    {
+      "id": "record",
+      "type": "memorize",
+      "action": "{last}",
+      "role": "user",
+      "tags": [
+        "building_move",
+        "playbook_result"
+      ],
+      "next": null,
+      "line_role": "sub_line",
+      "scope": "volatile"
+    }
+  ],
+  "start_node": "list_buildings"
 }

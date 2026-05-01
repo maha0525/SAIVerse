@@ -1,81 +1,89 @@
 {
-    "name": "generate_image_local",
-    "display_name": "ローカル画像生成",
-    "description": "Generate an image using the local ComfyUI server with Anima model",
-    "input_schema": [
-        {
-            "name": "input",
-            "description": "User request about what image to generate"
-        }
-    ],
-    "output_schema": [
-        "metadata",
-        "file_path",
+  "name": "generate_image_local",
+  "display_name": "ローカル画像生成",
+  "description": "Generate an image using the local ComfyUI server with Anima model",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "User request about what image to generate"
+    }
+  ],
+  "output_schema": [
+    "metadata",
+    "file_path",
+    "snippet",
+    "text"
+  ],
+  "router_callable": true,
+  "nodes": [
+    {
+      "id": "decide_prompt",
+      "type": "llm",
+      "action": "ローカル画像生成用のプロンプトを作成してください。Animaモデルは自然言語の英語プロンプトを受け付けます。Stable Diffusionスタイルのタグ構文（カンマ区切りの単語列）ではなく、詳細で具体的な自然言語の描写文を英語で書いてください。\n\n## Prompt Writing Guidelines\n- Write in natural English sentences, NOT comma-separated tags\n- Be specific about composition, lighting, colors, mood, and art style\n- Include details about the subject, their pose, expression, and clothing\n- Describe the setting/background and atmosphere\n- Specify the art style (e.g., \"anime-style digital painting\", \"photorealistic\", \"watercolor illustration\")\n\n## Good Example\n\"An exquisite masterpiece illustration of a young woman sitting by a window in a cozy cafe. She has long flowing silver hair and gentle blue eyes. She is wearing a soft cream-colored sweater and reading a leather-bound book. The scene is illuminated by warm afternoon sunlight streaming through the window, casting golden highlights on her hair. Art style: High-quality anime-style digital painting with soft cinematic lighting and a warm, peaceful atmosphere.\"\n\n## Bad Example (DO NOT write like this)\n\"1girl, silver hair, blue eyes, cafe, window, reading, sweater, masterpiece, best quality\"\n\nAlso provide a concise Japanese title for the generated image.",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "画像の題名（日本語、アイテム名として使用）"
+          },
+          "prompt": {
+            "type": "string",
+            "description": "Detailed image generation prompt in natural English (NOT SD-style tags)"
+          }
+        },
+        "required": [
+          "title",
+          "prompt"
+        ]
+      },
+      "output_key": "gen_params",
+      "memorize": {
+        "tags": [
+          "generate_image_local"
+        ],
+        "line_role": "sub_line",
+        "scope": "volatile"
+      },
+      "next": "generate"
+    },
+    {
+      "id": "generate",
+      "type": "tool",
+      "action": "generate_image_local",
+      "args_input": {
+        "title": "gen_params.title",
+        "positive_prompt": "gen_params.prompt",
+        "negative_prompt": {
+          "$literal": "worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, sepia"
+        },
+        "workflow_file": {
+          "$literal": "Anima.json"
+        },
+        "batch_count": 1
+      },
+      "output_keys": [
+        "text",
         "snippet",
-        "text"
-    ],
-    "router_callable": true,
-    "nodes": [
-        {
-            "id": "decide_prompt",
-            "type": "llm",
-            "context_profile": "conversation",
-            "action": "ローカル画像生成用のプロンプトを作成してください。Animaモデルは自然言語の英語プロンプトを受け付けます。Stable Diffusionスタイルのタグ構文（カンマ区切りの単語列）ではなく、詳細で具体的な自然言語の描写文を英語で書いてください。\n\n## Prompt Writing Guidelines\n- Write in natural English sentences, NOT comma-separated tags\n- Be specific about composition, lighting, colors, mood, and art style\n- Include details about the subject, their pose, expression, and clothing\n- Describe the setting/background and atmosphere\n- Specify the art style (e.g., \"anime-style digital painting\", \"photorealistic\", \"watercolor illustration\")\n\n## Good Example\n\"An exquisite masterpiece illustration of a young woman sitting by a window in a cozy cafe. She has long flowing silver hair and gentle blue eyes. She is wearing a soft cream-colored sweater and reading a leather-bound book. The scene is illuminated by warm afternoon sunlight streaming through the window, casting golden highlights on her hair. Art style: High-quality anime-style digital painting with soft cinematic lighting and a warm, peaceful atmosphere.\"\n\n## Bad Example (DO NOT write like this)\n\"1girl, silver hair, blue eyes, cafe, window, reading, sweater, masterpiece, best quality\"\n\nAlso provide a concise Japanese title for the generated image.",
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "画像の題名（日本語、アイテム名として使用）"
-                    },
-                    "prompt": {
-                        "type": "string",
-                        "description": "Detailed image generation prompt in natural English (NOT SD-style tags)"
-                    }
-                },
-                "required": [
-                    "title",
-                    "prompt"
-                ]
-            },
-            "output_key": "gen_params",
-            "memorize": {
-                "tags": ["internal", "generate_image_local"]
-            },
-            "next": "generate"
-        },
-        {
-            "id": "generate",
-            "type": "tool",
-            "action": "generate_image_local",
-            "args_input": {
-                "title": "gen_params.title",
-                "positive_prompt": "gen_params.prompt",
-                "negative_prompt": {"$literal": "worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, sepia"},
-                "workflow_file": {"$literal": "Anima.json"},
-                "batch_count": 1
-            },
-            "output_keys": [
-                "text",
-                "snippet",
-                "file_path",
-                "metadata"
-            ],
-            "next": "record"
-        },
-        {
-            "id": "record",
-            "type": "memorize",
-            "action": "{text}",
-            "role": "user",
-            "tags": [
-                "internal",
-                "generate_image_local",
-                "playbook_result"
-            ],
-            "metadata_key": "metadata",
-            "next": null
-        }
-    ],
-    "start_node": "decide_prompt"
+        "file_path",
+        "metadata"
+      ],
+      "next": "record"
+    },
+    {
+      "id": "record",
+      "type": "memorize",
+      "action": "{text}",
+      "role": "user",
+      "tags": [
+        "generate_image_local",
+        "playbook_result"
+      ],
+      "metadata_key": "metadata",
+      "next": null,
+      "line_role": "sub_line",
+      "scope": "volatile"
+    }
+  ],
+  "start_node": "decide_prompt"
 }

@@ -241,7 +241,28 @@ class MemorizeNodeDef(BaseModel):
         default=None, description="Template for the text to store. Defaults to last message content."
     )
     role: str = Field(default="assistant", description="Role name to store in SAIMemory.")
-    tags: Optional[List[str]] = Field(default=None, description="Optional tags for SAIMemory metadata.")
+    tags: Optional[List[str]] = Field(
+        default=None,
+        description="Optional semantic-classification tags for SAIMemory metadata "
+                    "(used for search/recall/Chronicle filtering). "
+                    "Phase 3 段階 4-C 以降は context 制御用タグ (`internal` / `conversation` / "
+                    "`event_message` 等) を含めず、純粋な意味分類タグのみ書く。"
+                    "context 制御は line_role / scope フィールドで行う。"
+    )
+    line_role: Optional[str] = Field(
+        default=None,
+        description="Phase 3 段階 4-C: ライン階層属性。'main_line' / 'sub_line' / "
+                    "'meta_judgment' / 'nested' のいずれか。指定時は _store_memory に "
+                    "明示渡しされ、context 構築時に required_line_roles で参照される。"
+                    "未指定時は PulseContext の現在の LineFrame から自動解決。"
+    )
+    scope: Optional[str] = Field(
+        default=None,
+        description="Phase 3 段階 4-C: メッセージの永続性。'committed' / 'discardable' / "
+                    "'volatile' のいずれか。'committed' は通常の永続化、'discardable' は "
+                    "メタ判断の試行錯誤ターン (continue で消える)、'volatile' は Pulse 内のみ "
+                    "(サブラインの中間処理向け)。未指定時は DB の DEFAULT 'committed' に従う。"
+    )
     metadata_key: Optional[str] = Field(
         default=None, description="State key containing metadata dict to attach to the message."
     )

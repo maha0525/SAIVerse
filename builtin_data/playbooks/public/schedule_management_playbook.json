@@ -1,237 +1,237 @@
 {
-    "name": "schedule_management",
-    "display_name": "スケジュール管理",
-    "description": "自分のスケジュールを管理（一覧表示、追加、削除）できます",
-    "input_schema": [
-        {
-            "name": "input",
-            "description": "スケジュール管理のリクエスト（例: スケジュールを追加して、明日の朝9時にリマインドしてほしい）"
+  "name": "schedule_management",
+  "display_name": "スケジュール管理",
+  "description": "自分のスケジュールを管理（一覧表示、追加、削除）できます",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "スケジュール管理のリクエスト（例: スケジュールを追加して、明日の朝9時にリマインドしてほしい）"
+    }
+  ],
+  "router_callable": true,
+  "nodes": [
+    {
+      "id": "list_schedules",
+      "type": "tool",
+      "action": "schedule_list",
+      "args_input": {},
+      "next": "record_list_result"
+    },
+    {
+      "id": "record_list_result",
+      "type": "memorize",
+      "action": "<system>{last}</system>",
+      "role": "user",
+      "tags": [
+        "tool",
+        "schedule_management"
+      ],
+      "next": "determine_action"
+    },
+    {
+      "id": "determine_action",
+      "type": "llm",
+      "action": "現在のスケジュール一覧をふまえて、どのスケジュール操作を行うか判断してください。\n\n選択肢：\n- add: 新しいスケジュールを追加する\n- delete: 既存のスケジュールを削除する\n- none: 何もしない（一覧表示のみで終了）",
+      "next": null,
+      "conditional_next": {
+        "field": "action_decision.action",
+        "cases": {
+          "add": "prepare_add",
+          "delete": "prepare_delete",
+          "none": null
         }
-    ],
-    "router_callable": true,
-    "nodes": [
-        {
-            "id": "list_schedules",
-            "type": "tool",
-            "action": "schedule_list",
-            "args_input": {},
-            "next": "record_list_result"
-        },
-        {
-            "id": "record_list_result",
-            "type": "memorize",
-            "action": "<system>{last}</system>",
-            "role": "user",
-            "tags": [
-                "tool",
-                "schedule_management"
+      },
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "add",
+              "delete",
+              "none"
             ],
-            "next": "determine_action"
+            "description": "実行するアクション"
+          }
         },
-        {
-            "id": "determine_action",
-            "type": "llm",
-            "context_profile": "router",
-            "action": "現在のスケジュール一覧をふまえて、どのスケジュール操作を行うか判断してください。\n\n選択肢：\n- add: 新しいスケジュールを追加する\n- delete: 既存のスケジュールを削除する\n- none: 何もしない（一覧表示のみで終了）",
-            "next": null,
-            "conditional_next": {
-                "field": "action_decision.action",
-                "cases": {
-                    "add": "prepare_add",
-                    "delete": "prepare_delete",
-                    "none": null
-                }
-            },
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": [
-                            "add",
-                            "delete",
-                            "none"
-                        ],
-                        "description": "実行するアクション"
-                    }
-                },
-                "required": [
-                    "action"
-                ]
-            },
-            "memorize": {
-                "tags": [
-                    "internal",
-                    "schedule_management"
-                ]
-            },
-            "output_key": "action_decision"
-        },
-        {
-            "id": "prepare_add",
-            "type": "llm",
-            "context_profile": "conversation",
-            "action": "schedule_addツールの引数を決定してください。\n\n### スケジュールタイプ：\n- periodic: 定期実行（曜日と時刻を指定）\n- oneshot: 単発実行（日時を指定）\n- interval: 一定間隔実行（秒数を指定）\n\n### メタプレイブック：\n- 通常は「meta_user」を指定してください。\n- 特定のPlaybookを直接実行したい場合は「meta_user_manual」を指定し、argsでselected_playbookを設定してください。\n  例: meta_playbook=\"meta_user_manual\", args={\"selected_playbook\": \"send_email_to_user\"}\n\n### 現在の日時：\nリアルタイム情報（会話コンテキスト内）に記載されている現在時刻を参照してください。\n\n### 注意：\n- 日時や時刻はペルソナのタイムゾーンで指定してください\n- descriptionフィールドには、実行時にAIに伝えたい内容を書いてください（例：「まはーさんに今日のタスクを報告して」）",
-            "next": "record_add_params",
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "schedule_type": {
-                        "type": "string",
-                        "enum": [
-                            "periodic",
-                            "oneshot",
-                            "interval"
-                        ],
-                        "description": "スケジュールタイプ"
-                    },
-                    "meta_playbook": {
-                        "type": "string",
-                        "description": "実行するメタプレイブック名（通常は meta_user、特定のPlaybook指定時は meta_user_manual）"
-                    },
-                    "args": {
-                        "type": "object",
-                        "description": "Playbook引数。meta_user_manual使用時にselected_playbookで実行するサブPlaybookを指定",
-                        "properties": {
-                            "selected_playbook": {
-                                "type": "string",
-                                "description": "meta_user_manual使用時に実行するサブPlaybook名（例: send_email_to_user）"
-                            }
-                        }
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "スケジュールの説明（実行時にAIに渡される）"
-                    },
-                    "days_of_week": {
-                        "type": "array",
-                        "items": {
-                            "type": "integer"
-                        },
-                        "description": "曜日リスト（periodic用、0=月曜日、6=日曜日）"
-                    },
-                    "time_of_day": {
-                        "type": "string",
-                        "description": "実行時刻（periodic用、HH:MM形式）"
-                    },
-                    "scheduled_datetime": {
-                        "type": "string",
-                        "description": "実行日時（oneshot用、YYYY-MM-DD HH:MM形式）"
-                    },
-                    "interval_seconds": {
-                        "type": "integer",
-                        "description": "実行間隔（interval用、秒単位）"
-                    }
-                },
-                "required": [
-                    "schedule_type",
-                    "meta_playbook",
-                    "description"
-                ]
-            },
-            "memorize": {
-                "tags": [
-                    "internal",
-                    "schedule_management"
-                ]
-            },
-            "output_key": "add_params"
-        },
-        {
-            "id": "record_add_params",
-            "type": "memorize",
-            "action": "{add_params}",
-            "role": "assistant",
-            "tags": [
-                "tool",
-                "schedule_management"
+        "required": [
+          "action"
+        ]
+      },
+      "memorize": {
+        "tags": [
+          "schedule_management"
+        ],
+        "line_role": "sub_line",
+        "scope": "volatile"
+      },
+      "output_key": "action_decision"
+    },
+    {
+      "id": "prepare_add",
+      "type": "llm",
+      "action": "schedule_addツールの引数を決定してください。\n\n### スケジュールタイプ：\n- periodic: 定期実行（曜日と時刻を指定）\n- oneshot: 単発実行（日時を指定）\n- interval: 一定間隔実行（秒数を指定）\n\n### メタプレイブック：\n- 通常は「meta_user」を指定してください。\n- 特定のPlaybookを直接実行したい場合は「meta_user_manual」を指定し、argsでselected_playbookを設定してください。\n  例: meta_playbook=\"meta_user_manual\", args={\"selected_playbook\": \"send_email_to_user\"}\n\n### 現在の日時：\nリアルタイム情報（会話コンテキスト内）に記載されている現在時刻を参照してください。\n\n### 注意：\n- 日時や時刻はペルソナのタイムゾーンで指定してください\n- descriptionフィールドには、実行時にAIに伝えたい内容を書いてください（例：「まはーさんに今日のタスクを報告して」）",
+      "next": "record_add_params",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "schedule_type": {
+            "type": "string",
+            "enum": [
+              "periodic",
+              "oneshot",
+              "interval"
             ],
-            "next": "add_schedule"
-        },
-        {
-            "id": "add_schedule",
-            "type": "tool",
-            "action": "schedule_add",
-            "args_input": {
-                "schedule_type": "add_params.schedule_type",
-                "meta_playbook": "add_params.meta_playbook",
-                "args": "add_params.args",
-                "description": "add_params.description",
-                "days_of_week": "add_params.days_of_week",
-                "time_of_day": "add_params.time_of_day",
-                "scheduled_datetime": "add_params.scheduled_datetime",
-                "interval_seconds": "add_params.interval_seconds"
+            "description": "スケジュールタイプ"
+          },
+          "meta_playbook": {
+            "type": "string",
+            "description": "実行するメタプレイブック名（通常は meta_user、特定のPlaybook指定時は meta_user_manual）"
+          },
+          "args": {
+            "type": "object",
+            "description": "Playbook引数。meta_user_manual使用時にselected_playbookで実行するサブPlaybookを指定",
+            "properties": {
+              "selected_playbook": {
+                "type": "string",
+                "description": "meta_user_manual使用時に実行するサブPlaybook名（例: send_email_to_user）"
+              }
+            }
+          },
+          "description": {
+            "type": "string",
+            "description": "スケジュールの説明（実行時にAIに渡される）"
+          },
+          "days_of_week": {
+            "type": "array",
+            "items": {
+              "type": "integer"
             },
-            "next": "record_add_result"
+            "description": "曜日リスト（periodic用、0=月曜日、6=日曜日）"
+          },
+          "time_of_day": {
+            "type": "string",
+            "description": "実行時刻（periodic用、HH:MM形式）"
+          },
+          "scheduled_datetime": {
+            "type": "string",
+            "description": "実行日時（oneshot用、YYYY-MM-DD HH:MM形式）"
+          },
+          "interval_seconds": {
+            "type": "integer",
+            "description": "実行間隔（interval用、秒単位）"
+          }
         },
-        {
-            "id": "record_add_result",
-            "type": "memorize",
-            "action": "<system>{last}</system>",
-            "role": "user",
-            "tags": [
-                "tool",
-                "schedule_add"
-            ],
-            "next": null
+        "required": [
+          "schedule_type",
+          "meta_playbook",
+          "description"
+        ]
+      },
+      "memorize": {
+        "tags": [
+          "schedule_management"
+        ],
+        "line_role": "sub_line",
+        "scope": "volatile"
+      },
+      "output_key": "add_params"
+    },
+    {
+      "id": "record_add_params",
+      "type": "memorize",
+      "action": "{add_params}",
+      "role": "assistant",
+      "tags": [
+        "tool",
+        "schedule_management"
+      ],
+      "next": "add_schedule"
+    },
+    {
+      "id": "add_schedule",
+      "type": "tool",
+      "action": "schedule_add",
+      "args_input": {
+        "schedule_type": "add_params.schedule_type",
+        "meta_playbook": "add_params.meta_playbook",
+        "args": "add_params.args",
+        "description": "add_params.description",
+        "days_of_week": "add_params.days_of_week",
+        "time_of_day": "add_params.time_of_day",
+        "scheduled_datetime": "add_params.scheduled_datetime",
+        "interval_seconds": "add_params.interval_seconds"
+      },
+      "next": "record_add_result"
+    },
+    {
+      "id": "record_add_result",
+      "type": "memorize",
+      "action": "<system>{last}</system>",
+      "role": "user",
+      "tags": [
+        "tool",
+        "schedule_add"
+      ],
+      "next": null
+    },
+    {
+      "id": "prepare_delete",
+      "type": "llm",
+      "action": "schedule_deleteツールの引数を決定してください。先ほど取得したスケジュール一覧を参照して、削除対象のスケジュールIDを特定してください。",
+      "next": "record_delete_params",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "schedule_id": {
+            "type": "integer",
+            "description": "削除するスケジュールのID"
+          }
         },
-        {
-            "id": "prepare_delete",
-            "type": "llm",
-            "context_profile": "router",
-            "action": "schedule_deleteツールの引数を決定してください。先ほど取得したスケジュール一覧を参照して、削除対象のスケジュールIDを特定してください。",
-            "next": "record_delete_params",
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "schedule_id": {
-                        "type": "integer",
-                        "description": "削除するスケジュールのID"
-                    }
-                },
-                "required": [
-                    "schedule_id"
-                ]
-            },
-            "memorize": {
-                "tags": [
-                    "internal",
-                    "schedule_management"
-                ]
-            },
-            "output_key": "delete_params"
-        },
-        {
-            "id": "record_delete_params",
-            "type": "memorize",
-            "action": "{delete_params}",
-            "role": "assistant",
-            "tags": [
-                "tool",
-                "schedule_management"
-            ],
-            "next": "delete_schedule"
-        },
-        {
-            "id": "delete_schedule",
-            "type": "tool",
-            "action": "schedule_delete",
-            "args_input": {
-                "schedule_id": "delete_params.schedule_id"
-            },
-            "next": "record_delete_result"
-        },
-        {
-            "id": "record_delete_result",
-            "type": "memorize",
-            "action": "<system>{last}</system>",
-            "role": "user",
-            "tags": [
-                "tool",
-                "schedule_management"
-            ],
-            "next": null
-        }
-    ],
-    "start_node": "list_schedules"
+        "required": [
+          "schedule_id"
+        ]
+      },
+      "memorize": {
+        "tags": [
+          "schedule_management"
+        ],
+        "line_role": "sub_line",
+        "scope": "volatile"
+      },
+      "output_key": "delete_params"
+    },
+    {
+      "id": "record_delete_params",
+      "type": "memorize",
+      "action": "{delete_params}",
+      "role": "assistant",
+      "tags": [
+        "tool",
+        "schedule_management"
+      ],
+      "next": "delete_schedule"
+    },
+    {
+      "id": "delete_schedule",
+      "type": "tool",
+      "action": "schedule_delete",
+      "args_input": {
+        "schedule_id": "delete_params.schedule_id"
+      },
+      "next": "record_delete_result"
+    },
+    {
+      "id": "record_delete_result",
+      "type": "memorize",
+      "action": "<system>{last}</system>",
+      "role": "user",
+      "tags": [
+        "tool",
+        "schedule_management"
+      ],
+      "next": null
+    }
+  ],
+  "start_node": "list_schedules"
 }

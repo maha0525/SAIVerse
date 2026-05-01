@@ -1,119 +1,121 @@
 {
-    "name": "document_search",
-    "display_name": "ドキュメント内検索",
-    "description": "Search within a document item for specific content using pattern matching or line navigation",
-    "input_schema": [
-        {
-            "name": "input",
-            "description": "User request about document search or read"
-        }
-    ],
-    "router_callable": true,
-    "nodes": [
-        {
-            "id": "analyze_request",
-            "type": "llm",
-            "context_profile": "router",
-            "action": "ドキュメント操作のタイプとパラメータを決定してください。結果はdocument_searchまたはdocument_readツールに渡されます。\n\n## Operation Types\n- search: Search within document using pattern matching (regex supported)\n- read: Read specific line range from document\n\n## Notes\n- Select a document item from building items or inventory (type='document')\n- For search: Specify the search pattern (regex supported)\n- For read: Specify start_line and end_line (1-based line numbers)\n- If the whole document or a large portion is needed, use read with appropriate line range",
-            "next": null,
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": [
-                            "search",
-                            "read"
-                        ],
-                        "description": "Type of document operation"
-                    },
-                    "item_id": {
-                        "type": "string",
-                        "description": "ID of the document item"
-                    },
-                    "pattern": {
-                        "type": "string",
-                        "description": "Search pattern for search action"
-                    },
-                    "start_line": {
-                        "type": "integer",
-                        "description": "Starting line number for read action (1-based)"
-                    },
-                    "end_line": {
-                        "type": "integer",
-                        "description": "Ending line number for read action (1-based)"
-                    }
-                },
-                "required": [
-                    "action",
-                    "item_id"
-                ]
-            },
-            "output_key": "params",
-            "memorize": {
-                "tags": [
-                    "internal",
-                    "document_search"
-                ]
-            },
-            "conditional_next": {
-                "field": "params.action",
-                "cases": {
-                    "search": "do_search",
-                    "read": "do_read"
-                }
-            }
-        },
-        {
-            "id": "do_search",
-            "type": "tool",
-            "action": "document_search",
-            "args_input": {
-                "item_id": "params.item_id",
-                "pattern": "params.pattern",
-                "context_lines": 2,
-                "max_matches": 10
-            },
-            "output_key": "search_result",
-            "next": "record_search"
-        },
-        {
-            "id": "record_search",
-            "type": "memorize",
-            "action": "{last}",
-            "role": "user",
-            "tags": [
-                "internal",
-                "document_search",
-                "playbook_result"
+  "name": "document_search",
+  "display_name": "ドキュメント内検索",
+  "description": "Search within a document item for specific content using pattern matching or line navigation",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "User request about document search or read"
+    }
+  ],
+  "router_callable": true,
+  "nodes": [
+    {
+      "id": "analyze_request",
+      "type": "llm",
+      "action": "ドキュメント操作のタイプとパラメータを決定してください。結果はdocument_searchまたはdocument_readツールに渡されます。\n\n## Operation Types\n- search: Search within document using pattern matching (regex supported)\n- read: Read specific line range from document\n\n## Notes\n- Select a document item from building items or inventory (type='document')\n- For search: Specify the search pattern (regex supported)\n- For read: Specify start_line and end_line (1-based line numbers)\n- If the whole document or a large portion is needed, use read with appropriate line range",
+      "next": null,
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "search",
+              "read"
             ],
-            "next": null
+            "description": "Type of document operation"
+          },
+          "item_id": {
+            "type": "string",
+            "description": "ID of the document item"
+          },
+          "pattern": {
+            "type": "string",
+            "description": "Search pattern for search action"
+          },
+          "start_line": {
+            "type": "integer",
+            "description": "Starting line number for read action (1-based)"
+          },
+          "end_line": {
+            "type": "integer",
+            "description": "Ending line number for read action (1-based)"
+          }
         },
-        {
-            "id": "do_read",
-            "type": "tool",
-            "action": "document_read",
-            "args_input": {
-                "item_id": "params.item_id",
-                "start_line": "params.start_line",
-                "end_line": "params.end_line",
-                "limit": 100
-            },
-            "output_key": "read_result",
-            "next": "record_read"
-        },
-        {
-            "id": "record_read",
-            "type": "memorize",
-            "action": "{last}",
-            "role": "user",
-            "tags": [
-                "internal",
-                "document_search",
-                "playbook_result"
-            ],
-            "next": null
+        "required": [
+          "action",
+          "item_id"
+        ]
+      },
+      "output_key": "params",
+      "memorize": {
+        "tags": [
+          "document_search"
+        ],
+        "line_role": "sub_line",
+        "scope": "volatile"
+      },
+      "conditional_next": {
+        "field": "params.action",
+        "cases": {
+          "search": "do_search",
+          "read": "do_read"
         }
-    ],
-    "start_node": "analyze_request"
+      }
+    },
+    {
+      "id": "do_search",
+      "type": "tool",
+      "action": "document_search",
+      "args_input": {
+        "item_id": "params.item_id",
+        "pattern": "params.pattern",
+        "context_lines": 2,
+        "max_matches": 10
+      },
+      "output_key": "search_result",
+      "next": "record_search"
+    },
+    {
+      "id": "record_search",
+      "type": "memorize",
+      "action": "{last}",
+      "role": "user",
+      "tags": [
+        "document_search",
+        "playbook_result"
+      ],
+      "next": null,
+      "line_role": "sub_line",
+      "scope": "volatile"
+    },
+    {
+      "id": "do_read",
+      "type": "tool",
+      "action": "document_read",
+      "args_input": {
+        "item_id": "params.item_id",
+        "start_line": "params.start_line",
+        "end_line": "params.end_line",
+        "limit": 100
+      },
+      "output_key": "read_result",
+      "next": "record_read"
+    },
+    {
+      "id": "record_read",
+      "type": "memorize",
+      "action": "{last}",
+      "role": "user",
+      "tags": [
+        "document_search",
+        "playbook_result"
+      ],
+      "next": null,
+      "line_role": "sub_line",
+      "scope": "volatile"
+    }
+  ],
+  "start_node": "analyze_request"
 }

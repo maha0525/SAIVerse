@@ -1,71 +1,75 @@
 {
-    "name": "document_create",
-    "display_name": "ドキュメント作成",
-    "description": "Create a new document item with text content",
-    "input_schema": [
-        {
-            "name": "input",
-            "description": "Request to create a document"
-        }
-    ],
-    "router_callable": true,
-    "nodes": [
-        {
-            "id": "generate_content",
-            "type": "llm",
-            "context_profile": "conversation",
-            "action": "document_createツールの引数を決定します。文書の名前、説明、内容を生成してください。",
-            "response_schema": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Name of the document (e.g., '私の日記', 'SAIVerse使い方ガイド')"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Brief description of the document"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "Full text content of the document"
-                    }
-                },
-                "required": [
-                    "name",
-                    "description",
-                    "content"
-                ]
-            },
-            "output_key": "document_data",
-            "memorize": {
-                "tags": ["internal", "document_create"]
-            },
-            "next": "create"
+  "name": "document_create",
+  "display_name": "ドキュメント作成",
+  "description": "Create a new document item with text content",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "Request to create a document"
+    }
+  ],
+  "router_callable": true,
+  "nodes": [
+    {
+      "id": "generate_content",
+      "type": "llm",
+      "action": "document_createツールの引数を決定します。文書の名前、説明、内容を生成してください。",
+      "response_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name of the document (e.g., '私の日記', 'SAIVerse使い方ガイド')"
+          },
+          "description": {
+            "type": "string",
+            "description": "Brief description of the document"
+          },
+          "content": {
+            "type": "string",
+            "description": "Full text content of the document"
+          }
         },
-        {
-            "id": "create",
-            "type": "tool",
-            "action": "document_create",
-            "args_input": {
-                "name": "document_data.name",
-                "description": "document_data.description",
-                "content": "document_data.content"
-            },
-            "next": "record"
-        },
-        {
-            "id": "record",
-            "type": "memorize",
-            "action": "{last}",
-            "role": "user",
-            "tags": [
-                "internal",
-                "document_create",
-                "playbook_result"
-            ],
-            "next": null
-        }
-    ],
-    "start_node": "generate_content"
+        "required": [
+          "name",
+          "description",
+          "content"
+        ]
+      },
+      "output_key": "document_data",
+      "memorize": {
+        "tags": [
+          "document_create"
+        ],
+        "line_role": "sub_line",
+        "scope": "volatile"
+      },
+      "next": "create"
+    },
+    {
+      "id": "create",
+      "type": "tool",
+      "action": "document_create",
+      "args_input": {
+        "name": "document_data.name",
+        "description": "document_data.description",
+        "content": "document_data.content"
+      },
+      "next": "record"
+    },
+    {
+      "id": "record",
+      "type": "memorize",
+      "action": "{last}",
+      "role": "user",
+      "tags": [
+        "document_create",
+        "playbook_result"
+      ],
+      "next": null,
+      "line_role": "sub_line",
+      "scope": "volatile"
+    }
+  ],
+  "start_node": "generate_content"
 }

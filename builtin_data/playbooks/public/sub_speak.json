@@ -1,48 +1,46 @@
 {
-    "name": "sub_speak",
-    "description": "Compose final response and speak (unified speak playbook)",
-    "input_schema": [
+  "name": "sub_speak",
+  "description": "Compose final response and speak (unified speak playbook)",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "Composite prompt containing user request and context"
+    },
+    {
+      "name": "metadata",
+      "description": "Optional metadata from tool execution (e.g., media attachments)"
+    }
+  ],
+  "router_callable": false,
+  "nodes": [
+    {
+      "id": "compose",
+      "type": "llm",
+      "action": null,
+      "speak": true,
+      "metadata_key": "metadata",
+      "memorize": {
+        "line_role": "main_line",
+        "scope": "committed"
+      },
+      "output_keys": [
         {
-            "name": "input",
-            "description": "Composite prompt containing user request and context"
-        },
-        {
-            "name": "metadata",
-            "description": "Optional metadata from tool execution (e.g., media attachments)"
+          "text": "speak_content"
         }
-    ],
-    "router_callable": false,
-    "nodes": [
-        {
-            "id": "compose",
-            "type": "llm",
-            "context_profile": "conversation",
-            "action": null,
-            "speak": true,
-            "metadata_key": "metadata",
-            "memorize": {
-                "tags": [
-                    "conversation"
-                ]
-            },
-            "output_keys": [
-                {
-                    "text": "speak_content"
-                }
-            ],
-            "next": "process_body",
-            "conditional_next": null
-        },
-        {
-            "id": "process_body",
-            "type": "tool",
-            "action": "control_body",
-            "args_input": {
-                "message": "speak_content"
-            },
-            "output_key": null,
-            "next": null
-        }
-    ],
-    "start_node": "compose"
+      ],
+      "next": "process_body",
+      "conditional_next": null
+    },
+    {
+      "id": "process_body",
+      "type": "tool",
+      "action": "control_body",
+      "args_input": {
+        "message": "speak_content"
+      },
+      "output_key": null,
+      "next": null
+    }
+  ],
+  "start_node": "compose"
 }

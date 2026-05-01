@@ -1,126 +1,154 @@
 {
-    "name": "autonomy_creation",
-    "display_name": "自律行動: 創作活動",
-    "description": "ドキュメント執筆、画像生成などの創作活動を自由に行う自律行動Playbook。",
-    "input_schema": [
+  "name": "autonomy_creation",
+  "display_name": "自律行動: 創作活動",
+  "description": "ドキュメント執筆、画像生成などの創作活動を自由に行う自律行動Playbook。",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "創作の目的・テーマ（意思決定フェイズのintent）"
+    }
+  ],
+  "output_schema": null,
+  "router_callable": false,
+  "user_selectable": false,
+  "nodes": [
+    {
+      "id": "init",
+      "type": "set",
+      "assignments": {
+        "loop_count": 0
+      },
+      "next": "first_prompt"
+    },
+    {
+      "id": "first_prompt",
+      "type": "llm",
+      "model_type": "lightweight",
+      "action": "あなたは自律的に創作活動を行います。\n\n## 創作テーマ\n{input}\n\n## 利用可能なツール\n### 執筆\n- **document_create**: 新しいドキュメントを作成\n- **document_read**: 既存ドキュメントを読み返す（行番号付き）\n- **document_edit**: ドキュメントを編集（全文置換 or 行範囲の部分置換）\n- **document_search**: キーワードでドキュメントを検索\n\n### 画像\n- **generate_image**: テキストプロンプトから画像を生成\n\n### 調査\n- **searxng_search**: Web検索で参考情報を取得\n- **read_url_content**: URLからページ内容を取得\n- **memopedia_search**: 自分の知識ベースを検索\n\n## 進め方\n- まず構想を練ってから作り始めましょう\n- ドキュメントを作成したら、読み返して推敲・編集してOKです\n- 満足できる出来になったら、ツールを使わずにテキストで感想を述べると終了します\n\nまず最初のアクションを選んでください。",
+      "available_tools": [
+        "document_create",
+        "document_read",
+        "document_edit",
+        "document_search",
+        "generate_image",
+        "searxng_search",
+        "read_url_content",
+        "memopedia_search"
+      ],
+      "output_keys": [
         {
-            "name": "input",
-            "description": "創作の目的・テーマ（意思決定フェイズのintent）"
+          "text": "response_text"
+        },
+        {
+          "function_call": "fc"
         }
-    ],
-    "output_schema": null,
-    "router_callable": false,
-    "user_selectable": false,
-    "nodes": [
-        {
-            "id": "init",
-            "type": "set",
-            "assignments": {
-                "loop_count": 0
-            },
-            "next": "first_prompt"
-        },
-        {
-            "id": "first_prompt",
-            "type": "llm",
-            "context_profile": "conversation",
-            "model_type": "lightweight",
-            "action": "あなたは自律的に創作活動を行います。\n\n## 創作テーマ\n{input}\n\n## 利用可能なツール\n### 執筆\n- **document_create**: 新しいドキュメントを作成\n- **document_read**: 既存ドキュメントを読み返す（行番号付き）\n- **document_edit**: ドキュメントを編集（全文置換 or 行範囲の部分置換）\n- **document_search**: キーワードでドキュメントを検索\n\n### 画像\n- **generate_image**: テキストプロンプトから画像を生成\n\n### 調査\n- **searxng_search**: Web検索で参考情報を取得\n- **read_url_content**: URLからページ内容を取得\n- **memopedia_search**: 自分の知識ベースを検索\n\n## 進め方\n- まず構想を練ってから作り始めましょう\n- ドキュメントを作成したら、読み返して推敲・編集してOKです\n- 満足できる出来になったら、ツールを使わずにテキストで感想を述べると終了します\n\nまず最初のアクションを選んでください。",
-            "available_tools": [
-                "document_create",
-                "document_read",
-                "document_edit",
-                "document_search",
-                "generate_image",
-                "searxng_search",
-                "read_url_content",
-                "memopedia_search"
-            ],
-            "output_keys": [
-                {"text": "response_text"},
-                {"function_call": "fc"}
-            ],
-            "memorize": {"tags": ["internal", "creation"]},
-            "next": "check_tool_call"
-        },
-        {
-            "id": "check_tool_call",
-            "type": "pass",
-            "conditional_next": {
-                "field": "tool_called",
-                "operator": "eq",
-                "cases": {
-                    "True": "exec_tool",
-                    "default": "finalize"
-                }
-            }
-        },
-        {
-            "id": "exec_tool",
-            "type": "tool_call",
-            "call_source": "fc",
-            "output_key": "tool_result",
-            "next": "record_result"
-        },
-        {
-            "id": "record_result",
-            "type": "memorize",
-            "action": "[{fc.name}の結果]\n{tool_result}",
-            "role": "user",
-            "tags": ["internal", "creation", "tool_result"],
-            "next": "increment"
-        },
-        {
-            "id": "increment",
-            "type": "set",
-            "assignments": {
-                "loop_count": "={loop_count} + 1"
-            },
-            "next": "check_loop_limit"
-        },
-        {
-            "id": "check_loop_limit",
-            "type": "pass",
-            "conditional_next": {
-                "field": "loop_count",
-                "operator": "gte",
-                "cases": {
-                    "15": "finalize",
-                    "default": "continue_loop"
-                }
-            }
-        },
-        {
-            "id": "continue_loop",
-            "type": "llm",
-            "context_profile": "conversation",
-            "model_type": "lightweight",
-            "action": "結果を確認しました。次のアクションを選んでください。ツールを使わず返答すると作業を終了します。",
-            "available_tools": [
-                "document_create",
-                "document_read",
-                "document_edit",
-                "document_search",
-                "generate_image",
-                "searxng_search",
-                "read_url_content",
-                "memopedia_search"
-            ],
-            "output_keys": [
-                {"text": "response_text"},
-                {"function_call": "fc"}
-            ],
-            "memorize": {"tags": ["internal", "creation"]},
-            "next": "check_tool_call"
-        },
-        {
-            "id": "finalize",
-            "type": "memorize",
-            "action": "創作活動完了: {input}",
-            "role": "assistant",
-            "tags": ["internal", "creation", "completed"],
-            "next": null
+      ],
+      "memorize": {
+        "tags": [
+          "creation"
+        ],
+        "line_role": "sub_line",
+        "scope": "volatile"
+      },
+      "next": "check_tool_call"
+    },
+    {
+      "id": "check_tool_call",
+      "type": "pass",
+      "conditional_next": {
+        "field": "tool_called",
+        "operator": "eq",
+        "cases": {
+          "True": "exec_tool",
+          "default": "finalize"
         }
-    ],
-    "start_node": "init"
+      }
+    },
+    {
+      "id": "exec_tool",
+      "type": "tool_call",
+      "call_source": "fc",
+      "output_key": "tool_result",
+      "next": "record_result"
+    },
+    {
+      "id": "record_result",
+      "type": "memorize",
+      "action": "[{fc.name}の結果]\n{tool_result}",
+      "role": "user",
+      "tags": [
+        "creation",
+        "tool_result"
+      ],
+      "next": "increment",
+      "line_role": "sub_line",
+      "scope": "volatile"
+    },
+    {
+      "id": "increment",
+      "type": "set",
+      "assignments": {
+        "loop_count": "={loop_count} + 1"
+      },
+      "next": "check_loop_limit"
+    },
+    {
+      "id": "check_loop_limit",
+      "type": "pass",
+      "conditional_next": {
+        "field": "loop_count",
+        "operator": "gte",
+        "cases": {
+          "15": "finalize",
+          "default": "continue_loop"
+        }
+      }
+    },
+    {
+      "id": "continue_loop",
+      "type": "llm",
+      "model_type": "lightweight",
+      "action": "結果を確認しました。次のアクションを選んでください。ツールを使わず返答すると作業を終了します。",
+      "available_tools": [
+        "document_create",
+        "document_read",
+        "document_edit",
+        "document_search",
+        "generate_image",
+        "searxng_search",
+        "read_url_content",
+        "memopedia_search"
+      ],
+      "output_keys": [
+        {
+          "text": "response_text"
+        },
+        {
+          "function_call": "fc"
+        }
+      ],
+      "memorize": {
+        "tags": [
+          "creation"
+        ],
+        "line_role": "sub_line",
+        "scope": "volatile"
+      },
+      "next": "check_tool_call"
+    },
+    {
+      "id": "finalize",
+      "type": "memorize",
+      "action": "創作活動完了: {input}",
+      "role": "assistant",
+      "tags": [
+        "creation",
+        "completed"
+      ],
+      "next": null,
+      "line_role": "sub_line",
+      "scope": "volatile"
+    }
+  ],
+  "start_node": "init"
 }

@@ -421,10 +421,25 @@ class RuntimeEngine:
             LOGGER.debug("[memorize] memo_text=%s", memo_text)
             role = getattr(node_def, "role", "assistant") or "assistant"
             tags = getattr(node_def, "tags", None)
+            # Phase 3 段階 4-C: MemorizeNodeDef に line_role / scope フィールドが追加された。
+            # 未指定時は _store_memory が PulseContext の current_line_metadata() から
+            # 自動解決する (= 現在のライン階層に従う)。明示指定したい場合 (例: 親ラインに
+            # 明示記録、サブラインを volatile で揮発、メタ判断ターンを discardable で保存)
+            # のみ Playbook 側でフィールドを書く。
+            line_role = getattr(node_def, "line_role", None)
+            scope = getattr(node_def, "scope", None)
             pulse_id = state.get("_pulse_id")
+            pulse_context = state.get("_pulse_context")
             metadata_key = getattr(node_def, "metadata_key", None)
             metadata = state.get(metadata_key) if metadata_key else None
-            if not self.runtime._store_memory(persona, memo_text, role=role, tags=tags, pulse_id=pulse_id, metadata=metadata):
+            if not self.runtime._store_memory(
+                persona, memo_text,
+                role=role, tags=tags,
+                pulse_id=pulse_id, metadata=metadata,
+                line_role=line_role, scope=scope,
+                pulse_context=pulse_context,
+                playbook_name=playbook.name,
+            ):
                 LOGGER.warning("Failed to store memory in MEMORIZE node %s", node_id)
                 if event_callback:
                     event_callback({
@@ -433,7 +448,10 @@ class RuntimeEngine:
                         "warning_code": "memorize_failed",
                         "display": "toast",
                     })
-            log_sea_trace(playbook.name, node_id, "MEMORIZE", f"role={role} tags={tags} text=\"{memo_text}\"")
+            log_sea_trace(
+                playbook.name, node_id, "MEMORIZE",
+                f"role={role} line_role={line_role} scope={scope} tags={tags} text=\"{memo_text}\"",
+            )
             state["last"] = memo_text
             if outputs is not None:
                 outputs.append(memo_text)

@@ -1,122 +1,150 @@
 {
-    "name": "autonomy_memory_organization",
-    "display_name": "自律行動: 記憶整理",
-    "description": "Memopediaページの分割、概要生成、不要情報の削除など、知識ベースの整理を行う自律行動Playbook。",
-    "input_schema": [
+  "name": "autonomy_memory_organization",
+  "display_name": "自律行動: 記憶整理",
+  "description": "Memopediaページの分割、概要生成、不要情報の削除など、知識ベースの整理を行う自律行動Playbook。",
+  "input_schema": [
+    {
+      "name": "input",
+      "description": "整理の目的・対象（意思決定フェイズのintent）"
+    }
+  ],
+  "output_schema": null,
+  "router_callable": false,
+  "user_selectable": false,
+  "nodes": [
+    {
+      "id": "init",
+      "type": "set",
+      "assignments": {
+        "loop_count": 0
+      },
+      "next": "first_prompt"
+    },
+    {
+      "id": "first_prompt",
+      "type": "llm",
+      "model_type": "lightweight",
+      "action": "あなたは自律的にMemopedia（知識ベース）の整理を行います。\n\n## 整理の目的\n{input}\n\n## 利用可能なツール\n- **memopedia_get_tree**: ページ一覧を確認\n- **memopedia_get_page**: 特定ページの内容を読む\n- **memopedia_save_page**: ページの作成・更新（分割後の子ページ作成、内容の編集など）\n- **memopedia_search**: キーワードでページを検索\n- **memopedia_health**: ページサイズや健康状態の確認\n- **memopedia_manage**: ページの削除、移動（親ページ変更）、鮮明度変更、重要フラグの設定\n\n## 整理の指針\n- 3000字を超えるページは子ページに分割する（親ページに概要、子ページに詳細）\n- 概要（summary）がないページには概要を設定する\n- 重複する情報があれば統合する\n- 古くなった情報や価値の低い情報は鮮明度を下げる（faint/buried）\n- 特に重要なページは重要フラグを設定する（rough以下に減衰しなくなる）\n\n## 終了方法\nツールを使わずにテキストだけ返すと作業は終了します。\n\nまず最初のアクションを選んでください。",
+      "available_tools": [
+        "memopedia_get_tree",
+        "memopedia_get_page",
+        "memopedia_save_page",
+        "memopedia_search",
+        "memopedia_health",
+        "memopedia_manage"
+      ],
+      "output_keys": [
         {
-            "name": "input",
-            "description": "整理の目的・対象（意思決定フェイズのintent）"
+          "text": "response_text"
+        },
+        {
+          "function_call": "fc"
         }
-    ],
-    "output_schema": null,
-    "router_callable": false,
-    "user_selectable": false,
-    "nodes": [
-        {
-            "id": "init",
-            "type": "set",
-            "assignments": {
-                "loop_count": 0
-            },
-            "next": "first_prompt"
-        },
-        {
-            "id": "first_prompt",
-            "type": "llm",
-            "context_profile": "conversation",
-            "model_type": "lightweight",
-            "action": "あなたは自律的にMemopedia（知識ベース）の整理を行います。\n\n## 整理の目的\n{input}\n\n## 利用可能なツール\n- **memopedia_get_tree**: ページ一覧を確認\n- **memopedia_get_page**: 特定ページの内容を読む\n- **memopedia_save_page**: ページの作成・更新（分割後の子ページ作成、内容の編集など）\n- **memopedia_search**: キーワードでページを検索\n- **memopedia_health**: ページサイズや健康状態の確認\n- **memopedia_manage**: ページの削除、移動（親ページ変更）、鮮明度変更、重要フラグの設定\n\n## 整理の指針\n- 3000字を超えるページは子ページに分割する（親ページに概要、子ページに詳細）\n- 概要（summary）がないページには概要を設定する\n- 重複する情報があれば統合する\n- 古くなった情報や価値の低い情報は鮮明度を下げる（faint/buried）\n- 特に重要なページは重要フラグを設定する（rough以下に減衰しなくなる）\n\n## 終了方法\nツールを使わずにテキストだけ返すと作業は終了します。\n\nまず最初のアクションを選んでください。",
-            "available_tools": [
-                "memopedia_get_tree",
-                "memopedia_get_page",
-                "memopedia_save_page",
-                "memopedia_search",
-                "memopedia_health",
-                "memopedia_manage"
-            ],
-            "output_keys": [
-                {"text": "response_text"},
-                {"function_call": "fc"}
-            ],
-            "memorize": {"tags": ["internal", "memory_organization"]},
-            "next": "check_tool_call"
-        },
-        {
-            "id": "check_tool_call",
-            "type": "pass",
-            "conditional_next": {
-                "field": "tool_called",
-                "operator": "eq",
-                "cases": {
-                    "True": "exec_tool",
-                    "default": "finalize"
-                }
-            }
-        },
-        {
-            "id": "exec_tool",
-            "type": "tool_call",
-            "call_source": "fc",
-            "output_key": "tool_result",
-            "next": "record_result"
-        },
-        {
-            "id": "record_result",
-            "type": "memorize",
-            "action": "[{fc.name}の結果]\n{tool_result}",
-            "role": "user",
-            "tags": ["internal", "memory_organization", "tool_result"],
-            "next": "increment"
-        },
-        {
-            "id": "increment",
-            "type": "set",
-            "assignments": {
-                "loop_count": "={loop_count} + 1"
-            },
-            "next": "check_loop_limit"
-        },
-        {
-            "id": "check_loop_limit",
-            "type": "pass",
-            "conditional_next": {
-                "field": "loop_count",
-                "operator": "gte",
-                "cases": {
-                    "10": "finalize",
-                    "default": "continue_loop"
-                }
-            }
-        },
-        {
-            "id": "continue_loop",
-            "type": "llm",
-            "context_profile": "conversation",
-            "model_type": "lightweight",
-            "action": "結果を確認しました。次のアクションを選んでください。ツールを使わず返答すると作業を終了します。",
-            "available_tools": [
-                "memopedia_get_tree",
-                "memopedia_get_page",
-                "memopedia_save_page",
-                "memopedia_search",
-                "memopedia_health",
-                "memopedia_manage"
-            ],
-            "output_keys": [
-                {"text": "response_text"},
-                {"function_call": "fc"}
-            ],
-            "memorize": {"tags": ["internal", "memory_organization"]},
-            "next": "check_tool_call"
-        },
-        {
-            "id": "finalize",
-            "type": "memorize",
-            "action": "記憶整理完了: {input}",
-            "role": "assistant",
-            "tags": ["internal", "memory_organization", "completed"],
-            "next": null
+      ],
+      "memorize": {
+        "tags": [
+          "memory_organization"
+        ],
+        "line_role": "sub_line",
+        "scope": "volatile"
+      },
+      "next": "check_tool_call"
+    },
+    {
+      "id": "check_tool_call",
+      "type": "pass",
+      "conditional_next": {
+        "field": "tool_called",
+        "operator": "eq",
+        "cases": {
+          "True": "exec_tool",
+          "default": "finalize"
         }
-    ],
-    "start_node": "init"
+      }
+    },
+    {
+      "id": "exec_tool",
+      "type": "tool_call",
+      "call_source": "fc",
+      "output_key": "tool_result",
+      "next": "record_result"
+    },
+    {
+      "id": "record_result",
+      "type": "memorize",
+      "action": "[{fc.name}の結果]\n{tool_result}",
+      "role": "user",
+      "tags": [
+        "memory_organization",
+        "tool_result"
+      ],
+      "next": "increment",
+      "line_role": "sub_line",
+      "scope": "volatile"
+    },
+    {
+      "id": "increment",
+      "type": "set",
+      "assignments": {
+        "loop_count": "={loop_count} + 1"
+      },
+      "next": "check_loop_limit"
+    },
+    {
+      "id": "check_loop_limit",
+      "type": "pass",
+      "conditional_next": {
+        "field": "loop_count",
+        "operator": "gte",
+        "cases": {
+          "10": "finalize",
+          "default": "continue_loop"
+        }
+      }
+    },
+    {
+      "id": "continue_loop",
+      "type": "llm",
+      "model_type": "lightweight",
+      "action": "結果を確認しました。次のアクションを選んでください。ツールを使わず返答すると作業を終了します。",
+      "available_tools": [
+        "memopedia_get_tree",
+        "memopedia_get_page",
+        "memopedia_save_page",
+        "memopedia_search",
+        "memopedia_health",
+        "memopedia_manage"
+      ],
+      "output_keys": [
+        {
+          "text": "response_text"
+        },
+        {
+          "function_call": "fc"
+        }
+      ],
+      "memorize": {
+        "tags": [
+          "memory_organization"
+        ],
+        "line_role": "sub_line",
+        "scope": "volatile"
+      },
+      "next": "check_tool_call"
+    },
+    {
+      "id": "finalize",
+      "type": "memorize",
+      "action": "記憶整理完了: {input}",
+      "role": "assistant",
+      "tags": [
+        "memory_organization",
+        "completed"
+      ],
+      "next": null,
+      "line_role": "sub_line",
+      "scope": "volatile"
+    }
+  ],
+  "start_node": "init"
 }
