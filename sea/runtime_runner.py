@@ -4,7 +4,7 @@ import logging
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
-from sea.playbook_models import PlaybookSchema
+from sea.playbook_models import PlaybookSchema, _FULL_CONTEXT_REQUIREMENTS
 
 LOGGER = logging.getLogger(__name__)
 
@@ -165,17 +165,27 @@ def run_playbook(
         # サブラインで動かすときは軽量モデルを強制 (LLM ノードの model_type 指定を上書き)
         parent["_force_lightweight_model"] = True
     else:
+        # Playbook が context_requirements を指定していない場合は
+        # _FULL_CONTEXT_REQUIREMENTS にフォールバックする (memory_weave /
+        # visual_context / available_playbooks 等が全て True)。
+        # SAIVerse のメインライン Playbook はすべて「全部入りで喋る」前提のため、
+        # 未指定 = "Full" として扱うのが現在のスタンダード。コンテキストなしで
+        # LLM をツール的に呼びたい worker 系 Playbook が将来登場した際は、
+        # 明示的に context_requirements を絞る (history_depth=0 等) こと。
+        effective_requirements = playbook.context_requirements or _FULL_CONTEXT_REQUIREMENTS
         LOGGER.info(
-            "[sea][run-playbook] %s: calling _prepare_context with history_depth=%s, pulse_id=%s",
+            "[sea][run-playbook] %s: calling _prepare_context with history_depth=%s, pulse_id=%s, "
+            "requirements=%s",
             playbook.name,
-            playbook.context_requirements.history_depth if playbook.context_requirements else "None",
+            effective_requirements.history_depth,
             pulse_id,
+            "playbook-defined" if playbook.context_requirements else "FULL (default)",
         )
         base_messages = runtime._prepare_context(
             persona,
             building_id,
             user_input,
-            playbook.context_requirements,
+            effective_requirements,
             pulse_id=pulse_id,
             warnings=context_warnings,
             event_callback=wrapped_event_callback,
