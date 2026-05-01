@@ -28,7 +28,7 @@ class TestImageGenerator(unittest.TestCase):
              patch.object(_mod, 'get_active_manager', return_value=None, create=True), \
              patch('tools.context.get_active_persona_id', return_value=None), \
              patch('tools.context.get_active_manager', return_value=None):
-            text, info, path, metadata = generate_image('a cat')
+            text, info, path, metadata, item_id = generate_image('a cat')
 
         self.assertIsInstance(info, ToolResult)
         self.assertIn('a cat', text)
@@ -36,6 +36,8 @@ class TestImageGenerator(unittest.TestCase):
         self.assertEqual(Path(path), temp_path)
         self.assertIsInstance(metadata, dict)
         self.assertIn("media", metadata)
+        # persona_id/manager が None の場合 item は作成されないので item_id は None
+        self.assertIsNone(item_id)
         mock_gen.assert_called_once()
         temp_path.unlink(missing_ok=True)
 
@@ -47,11 +49,12 @@ class TestImageGenerator(unittest.TestCase):
         # When all backends fail, should return error text without raising
         with patch('tools.context.get_active_persona_id', return_value=None), \
              patch('tools.context.get_active_manager', return_value=None):
-            text, info, path, metadata = generate_image('nothing')
+            text, info, path, metadata, item_id = generate_image('nothing')
 
         self.assertIn('失敗', text)
         self.assertIsNone(path)
         self.assertIsNone(metadata)
+        self.assertIsNone(item_id)
 
     def test_tool_registration(self):
         from tools import TOOL_REGISTRY

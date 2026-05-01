@@ -610,7 +610,7 @@ def generate_image(
             f"プロンプト:\n{prompt}\n\n"
             f"エラー: {last_error}"
         )
-        return error_text, ToolResult(None), None, None
+        return error_text, ToolResult(None), None, None, None
 
     # Store the generated image
     metadata_entry, stored_path = store_image_bytes(
@@ -620,6 +620,7 @@ def generate_image(
     metadata = {"media": [metadata_entry]}
 
     # Create picture item
+    item_id: Optional[str] = None
     try:
         persona_id = get_active_persona_id()
         manager = get_active_manager()
@@ -641,6 +642,7 @@ def generate_image(
     except Exception as exc:
         logger.warning(f"Failed to create picture item: {exc}")
         item_text = ""
+        item_id = None
 
     text = (
         f"画像が生成されました。\n\n"
@@ -650,7 +652,10 @@ def generate_image(
         f"{fallback_note}"
     )
 
-    return text, ToolResult(snippet), stored_path.as_posix(), metadata
+    # 5要素 tuple: text, snippet, file_path, metadata, item_id
+    # item_id は report_template の {item_id} 展開で URI 組み立てに使う
+    # (saiverse://item/{item_id}/content)
+    return text, ToolResult(snippet), stored_path.as_posix(), metadata, item_id
 
 
 def schema() -> ToolSchema:
