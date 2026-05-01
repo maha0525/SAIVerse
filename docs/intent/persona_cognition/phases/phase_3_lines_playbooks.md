@@ -71,7 +71,7 @@
 #### 残課題 (Phase 3 翻訳作業外で対応)
 
 - `ConversationManager` クラスごと削除 (saiverse_manager.py / manager/runtime.py / manager/admin.py の参照整理を伴う)
-- DB に残った別セッション削除済み Playbook の残骸 (`read_url_content`, `searxng_search`, `sub_speak_meta`, `sub_speak_simple`) の整理
+- ~~DB 残骸の整理~~ → 起動時 prune を `playbook_sync.py` に追加して解決 (revisions v0.19 追補)
 
 ---
 

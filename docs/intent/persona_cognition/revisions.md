@@ -37,6 +37,21 @@ DB 上の Playbook は 67 → 48 件。翻訳対象 (`context_profile` / `model_
 
 不変条件としての変更はなし。あくまで Phase 3 翻訳前のクリーンアップ。
 
+**追補 (同日)**:
+
+整理直後の動作確認で「Disk から消した Playbook が DB に残り、`router_callable=1` のものがシステムプロンプトに乗ってペルソナが Spell として呼ぼうとして警告 (`Unknown spell 'read_url_content'` 等) が出る」事象が発覚。
+
+原因は起動時の `sync_playbooks_from_files` (`saiverse/playbook_sync.py`) が import 専用で orphan prune を行わない設計だったため。`scripts/import_all_playbooks.py` 側には `prune_orphan_playbooks` が実装済みだったが、これは手動実行 / バージョンアップフロー経由でしか走らない。
+
+修正:
+- `sync_playbooks_from_files` 内に `_prune_orphan_playbooks` を実装し、毎起動時に Disk と DB の整合性を取る
+- 対象は scope='public' AND source_file IS NOT NULL かつソースファイルが disk に無い Playbook
+- `save_playbook` ツール経由 (source_file IS NULL) は保護される
+- addon 関連は expansion ファイルが存在する限り保護され、addon を一時的に外すと対応 Playbook も削除されるが、addon 再追加で復元される
+- DB 残骸の即時クリーンアップとして `read_url_content` / `searxng_search` / `x_reply` (旧 builtin → expansion 移行残骸) は新 prune で削除、`sub_speak_meta` / `sub_speak_simple` (source_file IS NULL の旧 meta layer 残骸) は手動削除
+
+DB 上の Playbook は 48 → 43 件。
+
 ### v0.18 (2026-05-01) — 自律先制と外部 alert のレース解消 (Phase 2.6)
 
 **確定事項**:

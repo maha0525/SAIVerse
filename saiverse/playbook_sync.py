@@ -14,6 +14,14 @@
 
 save_playbook ツール経由で DB を直接編集した場合は source_file / source_hash が
 クリアされるため、次回起動時にファイル版で上書きされない（設計上のユーザー優先）。
+
+Orphan の自動削除:
+    sync 終了時に scope='public' AND source_file IS NOT NULL でかつ
+    source_file が指すファイルが disk に無いレコードを削除する
+    (PlaybookPermission の対応行も削除)。
+    save_playbook ツール経由で作った Playbook は source_file IS NULL なので
+    保護される。addon を一時的に外した場合は対応するファイルが消えて該当
+    Playbook も削除されるが、addon を再追加すれば再 import される。
 """
 from __future__ import annotations
 
@@ -113,6 +121,57 @@ def _build_db_record(
     }
 
 
+def _prune_orphan_playbooks(db) -> int:
+    """source_file が指すファイルが disk に無い public Playbook を削除する。
+
+    対象:
+        scope='public' AND source_file IS NOT NULL AND ファイルが disk に無い
+
+    保護:
+        - save_playbook ツール経由で作った Playbook (source_file IS NULL)
+        - personal/building scope の Playbook
+
+    PlaybookPermission の対応行も削除する。
+
+    Args:
+        db: 呼び出し側で管理する DB セッション (commit はここでは行わない)
+
+    Returns:
+        削除件数
+    """
+    from database.models import Playbook, PlaybookPermission
+
+    pruned_count = 0
+    candidates = (
+        db.query(Playbook)
+        .filter(Playbook.scope == "public")
+        .filter(Playbook.source_file.isnot(None))
+        .all()
+    )
+
+    for pb in candidates:
+        src_path = Path(pb.source_file)
+        if not src_path.is_absolute():
+            src_path = _PROJECT_ROOT / src_path
+
+        if src_path.exists():
+            continue
+
+        perms_deleted = (
+            db.query(PlaybookPermission)
+            .filter(PlaybookPermission.playbook_name == pb.name)
+            .delete(synchronize_session=False)
+        )
+        db.delete(pb)
+        LOGGER.info(
+            "playbook_sync: pruned orphan '%s' (missing source: %s, permissions removed: %d)",
+            pb.name, pb.source_file, perms_deleted,
+        )
+        pruned_count += 1
+
+    return pruned_count
+
+
 def sync_playbooks_from_files(session_factory=None) -> Dict[str, int]:
     """ファイルベースのプレイブックを DB に差分同期する。
 
@@ -120,7 +179,7 @@ def sync_playbooks_from_files(session_factory=None) -> Dict[str, int]:
         session_factory: DB セッションファクトリ（省略時は database.session.SessionLocal を使用）
 
     Returns:
-        {"imported": int, "updated": int, "skipped": int, "errors": int}
+        {"imported": int, "updated": int, "skipped": int, "errors": int, "pruned": int}
     """
     from database.models import Playbook
 
@@ -128,16 +187,12 @@ def sync_playbooks_from_files(session_factory=None) -> Dict[str, int]:
         from database.session import SessionLocal
         session_factory = SessionLocal
 
-    counts = {"imported": 0, "updated": 0, "skipped": 0, "errors": 0}
+    counts = {"imported": 0, "updated": 0, "skipped": 0, "errors": 0, "pruned": 0}
 
     try:
         file_playbooks = _collect_file_playbooks()
     except Exception:
         LOGGER.exception("playbook_sync: failed to collect file playbooks")
-        return counts
-
-    if not file_playbooks:
-        LOGGER.debug("playbook_sync: no file-based playbooks found")
         return counts
 
     LOGGER.debug("playbook_sync: found %d file-based playbook(s)", len(file_playbooks))
@@ -187,6 +242,13 @@ def sync_playbooks_from_files(session_factory=None) -> Dict[str, int]:
                 LOGGER.exception("playbook_sync: error processing playbook '%s'", name)
                 counts["errors"] += 1
 
+        # Disk から消えた public プレイブックを DB からも削除
+        try:
+            counts["pruned"] = _prune_orphan_playbooks(db)
+        except Exception:
+            LOGGER.exception("playbook_sync: error during orphan prune")
+            counts["errors"] += 1
+
         db.commit()
 
     except Exception:
@@ -196,7 +258,7 @@ def sync_playbooks_from_files(session_factory=None) -> Dict[str, int]:
         db.close()
 
     LOGGER.info(
-        "playbook_sync: done — imported=%d updated=%d skipped=%d errors=%d",
-        counts["imported"], counts["updated"], counts["skipped"], counts["errors"],
+        "playbook_sync: done — imported=%d updated=%d skipped=%d pruned=%d errors=%d",
+        counts["imported"], counts["updated"], counts["skipped"], counts["pruned"], counts["errors"],
     )
     return counts
