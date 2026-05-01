@@ -41,18 +41,24 @@
 
 メインライン (or 親サブライン) の Playbook から `/run_playbook` Spell 経由で別 Playbook をサブラインとして起動できるようにする。Playbook グラフ内の `sub_play` ノードでなく、**Spell loop の中から動的に Playbook を呼び出す**経路を新設する。
 
+**設計詳細**: [../nested_subline_spell.md](../nested_subline_spell.md) (v0.1, 2026-05-01 起草)
+
 | 項目 | 状態 | 備考 |
 |------|------|------|
-| `/run_playbook` Spell 仕様確定 | 🔲 | 引数は Playbook 名のみ。Playbook 引数は呼ばれた側で構造化出力で決める (旧 router 踏襲) |
+| intent doc 起草 | ✅ | `nested_subline_spell.md` v0.1 (2026-05-01) |
+| `/run_playbook` Spell 仕様確定 | ✅ | 引数は Playbook 名のみ。Playbook 引数は呼ばれた側で構造化出力で決める (旧 router 踏襲) |
 | Spell loop → Playbook 起動の橋渡し runtime | 🔲 | sub_play ノード経路と共通化できる部分を切り出す |
 | 入れ子深さ制限 (上限 4 階層) | 🔲 | `_line_stack` の深さで判定、超過時は ERROR + skip |
-| `report_to_main` のスタック昇り経路 | 🔲 | 子サブラインの結果を親サブライン → さらに上位 → 最終的にメインラインまで集約 |
+| `report_to_main` → `report_to_parent` リネーム | 🔲 | 親に直接上がる方が正確な名前 |
+| `report_to_parent` のスタック昇り経路 | 🔲 | 各層で子 report を解釈する LLM ノード必要 |
 | line_id の親子関係 + cancellation 伝搬 | 🔲 | 親キャンセル時に子サブラインも止める |
-| intent doc 起草 | 🔲 | 設計を先に固める (handoff_2026-05-01 後) |
+| Playbook 一覧のシステムプロンプト注入 | 🔲 | 浅い階層に独立セクション、router_callable=true なものを列挙 |
+| `router_callable` 運用整理 | 🔲 | 既存 Playbook を見直して true/false を再設定 |
+| `track_user_conversation` を 1-LLM + Spell 構成に書き換え | 🔲 | meta_user / sub_router_user の統合廃止と一体 |
 
-**動機**: `track_user_conversation` 等のメインライン Playbook が `meta_user` から各種サブ Playbook を呼んでいた経路を、Spell + 入れ子サブラインで再構築する。これにより `sub_router_user` のような分岐 Playbook が不要になり、ペルソナの意思決定 (どの Playbook を呼ぶか) が Playbook グラフではなくメインライン LLM 側に乗る。
+**動機**: 従来 `meta_user` で router → 通常発話と 2 回 LLM を呼んでいた構造を、スペルで Playbook を呼べる通常発話ノード一個に統一する。判断と発話の合体。
 
-**Phase 4 着手前に必須**: MainLineScheduler が Playbook を呼ぶ際の入口がここに依存する可能性が高い。
+**Phase 4 着手前に必須**: MainLineScheduler 系の判断にも影響する可能性が高い。
 
 ### 旧 Playbook の翻訳
 
