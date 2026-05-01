@@ -10,6 +10,39 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.20 (2026-05-01) — line と memorize タグの責務分離 + 入れ子サブライン Spell の Intent 起草
+
+**確定事項**:
+
+- `line_role` / `line_id` / `scope` カラム (Phase 1 実装済) と `metadata.tags` の責務を明確に分離
+  - **Line**: メッセージの階層属性と永続性 (= context 構築の主軸)
+  - **タグ**: 意味分類のみ (= 検索・recall・連携用、context 構築には関与しない)
+- 二重制御 5 件を特定し、移行プラン (段階 4-A〜4-D) を策定
+- `/run_playbook` Spell 機構の Intent を起草 (`nested_subline_spell.md` v0.1)
+- 揮発設計を line ベースに乗せ直し (旧 `internal` タグでの揮発表現を廃止前提)
+- Phase 3 残作業の依存グラフを確定:
+  ```
+  [line vs タグ整理] → [migrate_playbooks_to_lines.py] → [/run_playbook 実装]
+  → [track_user_conversation 書き換え] → [meta_user 廃止] → [実機検証]
+  ```
+
+**追加 Intent doc**:
+
+- `nested_subline_spell.md` v0.1 — `/run_playbook` Spell 機構の設計
+- `line_tag_responsibility.md` v0.1 — line と memorize タグの責務分離
+
+**改訂理由**:
+
+入れ子サブライン Spell (`/run_playbook`) を実装する前に、まはー指摘で「`line` と `memorize` タグの両方が context 制御に関与している二重制御の問題」が判明。Phase 1 で line_role / scope カラムを追加した時点で「タグ参照を捨てて line 制御に統一する」つもりだったが、移行が中途半端で残っていた。
+
+このまま入れ子サブライン Spell を実装すると「二重制御の上に新機構を積む」ことになり、設計上の負債が増える。先に整理を済ませる判断。
+
+工数見積:
+- 完全 line ベース統一案 (タグ全廃): 4 ファイル + 5+ Playbook、2000+ LOC、Phase 3 全翻訳と同規模 → 重すぎる
+- 責務分離案 (採用): タグは search / recall 用に残す、context 構築だけ line ベースに統一 → Phase 3 翻訳と一体化で 2〜3 セッション
+
+不変条件 2 (単一主体の記憶), 7 (キャッシュヒット継続), 11 (メタ判断はペルソナ自身の思考) の保証がより厳密になる副作用あり。
+
 ### v0.19 (2026-05-01) — Phase 3 翻訳前段の Playbook 整理
 
 **確定事項**:

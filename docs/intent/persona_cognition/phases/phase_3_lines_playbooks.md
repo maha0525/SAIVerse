@@ -37,6 +37,20 @@
 | `track_external.json` | 🔲 | 未着手 |
 | `track_waiting.json` | 🔲 | 未着手 |
 
+### line vs タグの責務分離整理 (Phase 3 新規)
+
+`line_role` / `line_id` / `scope` カラム (Phase 1 で実装済) と `metadata.tags` が context 構築で二重制御になっている問題を整理する。詳細は [../line_tag_responsibility.md](../line_tag_responsibility.md) (v0.1, 2026-05-01)。
+
+| 項目 | 状態 | 備考 |
+|------|------|------|
+| intent doc 起草 | ✅ | `line_tag_responsibility.md` v0.1 |
+| 段階 4-A: context 構築を line ベースに切替 (`required_tags` 廃止) | 🔲 | `sea/runtime_context.py` |
+| 段階 4-B: `sub_play` の `report_to_main` を line ベースに統一 | 🔲 | `sea/runtime_nodes.py:265-281`、`report_to_parent` リネームと一体 |
+| 段階 4-C: 既存 Playbook の `memorize.tags` 整理 | 🔲 | `migrate_playbooks_to_lines.py` で一括変換 |
+| 段階 4-D: 旧 DEPRECATED コードの削除 (`include_internal` / `pulse:{uuid}` タグ併行記録) | 🔲 | runtime + storage |
+
+**位置付け**: 入れ子サブライン Spell 実装の**前段**。タグレガシーが残ったまま新機構を入れると二重制御が深まるため、本整理を先に完遂する。
+
 ### 入れ子サブライン Spell 機構 (Phase 3 新規)
 
 メインライン (or 親サブライン) の Playbook から `/run_playbook` Spell 経由で別 Playbook をサブラインとして起動できるようにする。Playbook グラフ内の `sub_play` ノードでなく、**Spell loop の中から動的に Playbook を呼び出す**経路を新設する。

@@ -284,25 +284,44 @@ Playbook 数が増えた場合、以下の対応:
 
 ---
 
-## 8. 揮発設計
+## 8. 揮発設計 (line ベース)
+
+### 前提: line と memorize タグの責務分離
+
+詳細は [line_tag_responsibility.md](line_tag_responsibility.md) を参照。要点:
+
+- **Line** (`line_role` / `line_id` / `scope`) が「次の Pulse のプロンプトに載るか・サブラインに閉じるか・このターン限りか」を決める
+- **タグ** (`metadata.tags`) は意味分類のみで、context 構築には**関与しない**
+
+`/run_playbook` 経由のサブラインも、上記責務分離の上に立つ。タグでサブライン的な揮発を表現する旧来のやり方 (`memorize.tags=["internal"]`) は本機構実装時点で廃止前提。
 
 ### 基本ルール
 
-- サブライン内のメッセージは原則 `internal` タグで揮発する (= 次回のメインライン Pulse のシステムプロンプトには載らない)
-- 親に渡るのは `report_to_parent` のみ
-- これによりペルソナ本体への影響を最小化し、コンテキスト圧迫も防ぐ
+- **サブライン内のメッセージ**: `line_role="sub_line"` + 適切な `scope` で記録される
+  - LLM ノードや tool ノードの I/O は自動で `sub_line` line_role が付く (PulseContext がライン階層を管理)
+  - 親メインラインの context 構築では `line_role IN ('main_line')` でフィルタされるため、自動的に親プロンプトに載らない
+  - SAIMemory には残るので recall や Chronicle / Memopedia 連携には使える
+- **`report_to_parent`**: `line_role="main_line"` + `scope="committed"` で記録される
+  - 親メインラインの「会話の一部」として次の Pulse から自動的にプロンプトに載る
+  - `<system>` タグ付き user メッセージとして注入される (既存 sub_play 挙動を踏襲)
 
 ### サブライン内の `<system>` タグ命令や構造化出力応答
 
-これらが直接ペルソナの会話履歴に流れ込むと「いつもと違う指示で動かされた」感じになって人格が乱れるリスクがある。サブラインに閉じ込めることでこのリスクを排除する。
-
-### 例外: `report_to_parent` の取り扱い
-
-親メインラインから見ると、`report_to_parent` は `<system>` タグ付きの user メッセージとして注入される (既存の subplay node の挙動)。これは「ツール実行結果」と同じ位置付けで、ペルソナ自身の発話ではない。
+これらが直接ペルソナの会話履歴に流れ込むと「いつもと違う指示で動かされた」感じになって人格が乱れるリスクがある。**`line_role="sub_line"`** で記録されることでメインライン context から自動除外され、リスクを排除する。
 
 ### 永続化
 
-サブライン内のメッセージは SAIMemory には記録される (`internal` タグ付き)。後から振り返りたい場合 (デバッグや「あの時何を調べたっけ」) は recall 経由で取り出せる。揮発は「次回のシステムプロンプトに自動では載せない」という意味。
+サブライン内のメッセージは SAIMemory には記録される (`line_role="sub_line"`)。後から振り返りたい場合 (デバッグや「あの時何を調べたっけ」) は recall 経由で取り出せる。揮発は「次回のメインライン Pulse のプロンプトに自動で載せない」という意味で、データそのものは保持される。
+
+### スコープの使い分け (サブライン内)
+
+| 用途 | scope |
+|------|-------|
+| サブライン内の中間処理 (LLM 呼び出し、tool 呼び出しの記録) | `volatile` (Pulse スコープのみ) |
+| サブライン内で確定した中間成果物 (次のサブライン Pulse でも使いたい) | `committed` |
+| メタ判断系の試行錯誤 (continue ならば消す) | `discardable` |
+
+`/run_playbook` 経由のサブラインは、原則 `volatile` で書く (Pulse 内で完結するため)。例外があれば Playbook 設計時に明示する。
 
 ---
 
