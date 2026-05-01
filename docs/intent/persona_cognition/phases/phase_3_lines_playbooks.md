@@ -61,14 +61,14 @@
 |------|------|------|
 | intent doc 起草 | ✅ | `nested_subline_spell.md` v0.1 (2026-05-01) |
 | `/run_playbook` Spell 仕様確定 | ✅ | 引数は Playbook 名のみ。Playbook 引数は呼ばれた側で構造化出力で決める (旧 router 踏襲) |
-| Spell loop → Playbook 起動の橋渡し runtime | 🔲 | sub_play ノード経路と共通化できる部分を切り出す |
-| 入れ子深さ制限 (上限 4 階層) | 🔲 | `_line_stack` の深さで判定、超過時は ERROR + skip |
+| Spell loop → Playbook 起動の橋渡し runtime | ✅ | `builtin_data/tools/run_playbook.py` 新規。Spell 自動登録、内部で `sea_runtime._run_playbook(line="sub")` を呼ぶ (v0.24, 2026-05-01) |
+| 入れ子深さ制限 (上限 4 階層) | ✅ | `pulse_ctx._line_stack` の長さで判定、stack length 5 (depth 4) まで許容、6+ は拒否 (v0.24) |
 | `report_to_main` → `report_to_parent` リネーム | ✅ | 段階 4-B と一体実施 (v0.22, 2026-05-01) |
-| `report_to_parent` のスタック昇り経路 | 🔲 | 各層で子 report を解釈する LLM ノード必要 |
-| line_id の親子関係 + cancellation 伝搬 | 🔲 | 親キャンセル時に子サブラインも止める |
-| Playbook 一覧のシステムプロンプト注入 | 🔲 | 浅い階層に独立セクション、router_callable=true なものを列挙 |
-| `router_callable` 運用整理 | 🔲 | 既存 Playbook を見直して true/false を再設定 |
-| `track_user_conversation` を 1-LLM + Spell 構成に書き換え | 🔲 | meta_user / sub_router_user の統合廃止と一体 |
+| `report_to_parent` のスタック昇り経路 | ✅ | sub_play 経路と統一: parent_state["report_to_parent"] を string で返却 (v0.24) |
+| line_id の親子関係 + cancellation 伝搬 | 🟡 | parent_state 経由で `_pulse_context` 共有。cancellation 伝搬は実機検証で確認予定 |
+| Playbook 一覧のシステムプロンプト注入 | 🔲 | 浅い階層に独立セクション、router_callable=true なものを列挙 (実機検証と一体) |
+| `router_callable` 運用整理 | 🔲 | 既存 Playbook を見直して true/false を再設定 (現状: 18 件 true、25 件 false) |
+| `track_user_conversation` を 1-LLM + Spell 構成に書き換え | 🔲 | meta_user / sub_router_user の統合廃止と一体、実機検証必須 |
 
 **動機**: 従来 `meta_user` で router → 通常発話と 2 回 LLM を呼んでいた構造を、スペルで Playbook を呼べる通常発話ノード一個に統一する。判断と発話の合体。
 

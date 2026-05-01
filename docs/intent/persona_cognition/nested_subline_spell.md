@@ -425,13 +425,13 @@ sqlite3 saiverse.db "SELECT NAME FROM playbooks WHERE ROUTER_CALLABLE=1"
 
 ### 段階移行ステップ
 
-1. **`/run_playbook` Spell 実装 + 深さ制限**: ツール側に Spell 追加。runtime に深さ判定。
-2. **`report_to_main` → `report_to_parent` リネーム**: コード + 既存 Playbook 修正。
-3. **Playbook 一覧をシステムプロンプトに注入する機構**: prompt builder 改修。
-4. **`router_callable` の運用整理**: 既存 Playbook を見直して true/false を再設定。
-5. **`track_user_conversation.json` を 1-LLM + Spell 構成に書き換え**: メインライン Playbook の整備。
-6. **既存 `meta_user.json` / `sub_router_user.json` を deprecated に**。実機で動作確認後に削除。
-7. **動作検証**: 軽い (Spell のみ) / 重い (run_playbook 1 段) / 入れ子 (run_playbook 内で run_playbook) のシナリオで動作確認。
+1. ✅ **`/run_playbook` Spell 実装 + 深さ制限** (v0.24, 2026-05-01): `builtin_data/tools/run_playbook.py` 新規。Spell として登録。`pulse_ctx._line_stack` の長さで深さ判定 (上限 4 階層 = stack length 5)。テスト 10 件追加。
+2. ✅ **`report_to_main` → `report_to_parent` リネーム** (v0.22, 2026-05-01): 段階 4-B と一体実施。コード全箇所と既存テストを更新。
+3. 🔲 **Playbook 一覧をシステムプロンプトに注入する機構**: prompt builder 改修。実機検証と一体で実施予定。
+4. 🔲 **`router_callable` の運用整理**: 既存 Playbook を見直して true/false を再設定 (現状 18 件 true / 25 件 false)。
+5. 🔲 **`track_user_conversation.json` を 1-LLM + Spell 構成に書き換え**: メインライン Playbook の整備。
+6. 🔲 **既存 `meta_user.json` / `sub_router_user.json` を deprecated に**。実機で動作確認後に削除。
+7. 🔲 **動作検証**: 軽い (Spell のみ) / 重い (run_playbook 1 段) / 入れ子 (run_playbook 内で run_playbook) のシナリオで動作確認。
 
 ---
 

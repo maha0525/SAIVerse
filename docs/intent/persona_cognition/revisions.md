@@ -10,6 +10,63 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.24 (2026-05-01) — `/run_playbook` Spell 新設: 入れ子サブライン機構の中核
+
+**確定事項**:
+
+- `builtin_data/tools/run_playbook.py` 新規 — Spell として登録 (spell=True)
+- メインライン (or 親サブライン) LLM が通常発話の中で `/run_playbook(name="...")` と書くと、指定された Playbook がサブラインとして起動され、完了時に `report_to_parent` (string) が親に返る
+- 詳細仕様: `nested_subline_spell.md` v0.1 (2026-05-01) を実装
+
+**実装スコープ (このコミットでカバー)**:
+
+- 引数: `name` のみ (Playbook 名)。引数値は呼ばれた側の最初の LLM ノードが構造化出力で決める (旧 router 方式の踏襲)
+- 戻り値: `report_to_parent` を string で返却。`output_schema` に `report_to_parent` が含まれていない場合は警告メッセージを返す (例外は出さず Spell loop 継続を保証)
+- 起動経路: `sea_runtime._run_playbook(line="sub", isolate_pulse_context=False)` 経由
+  - `line="sub"` → 親 `_messages` のコピーをベースに軽量モデルで実行
+  - `isolate_pulse_context=False` → 親 PulseContext を共有 (line_stack 管理のため)
+- `router_callable=true` チェック: false の Playbook は外部から呼べない (内部 sub_play 専用)。エラー文字列を返す
+- 深さ制限: 4 階層。`PulseContext._line_stack` の長さで判定 (メインライン Pulse 起動時 = 1 frame、各 `/run_playbook` で +1 frame、stack length 5 まで許容、6+ は拒否)
+- エラーパスは全て文字列で返す (Spell loop の継続を保証):
+  - persona_id / manager / pulse_context が無い: 各エラーメッセージ
+  - 深さ超過: `"Subline depth limit (4) exceeded; cannot run playbook 'X'."`
+  - Playbook not found: 利用可能な router_callable Playbook 一覧を表示
+  - router_callable=false: `"Playbook 'X' is not callable from spell."`
+  - sub-line 実行例外: `"Sub-line failed for 'X': <error>"`
+
+**設計判断**:
+
+- **Spell として実装し、Spell loop の特別分岐は追加しない**: Spell ツール内で `sea_runtime._run_playbook` を直接呼ぶ MVP 設計。Spell loop は通常通り並列実行する (複数の `/run_playbook` を 1 ターンで呼ぶことも可能)
+- **メインライン会話の引き継ぎは MVP でしない**: spell ツール内では state 引数にアクセスできないため、`parent_state["_messages"] = []` の minimal state を渡す。Playbook 内で必要な情報は input_schema 経由 / SAIMemory recall / state.input から取得できる前提。end-to-end で不足が出たら spell loop に messages contextvar を追加する経路を検討
+- **PulseContext は共有 (`isolate_pulse_context=False`)**: line_stack 管理のため。sub_play ノード経由 (line='sub') では isolate_pulse_context=True がデフォルトだが、`/run_playbook` Spell では line_stack の親子関係が必要なので共有する
+
+**テスト追加**:
+
+- `tests/test_run_playbook_spell.py` 新規 +10 件:
+  - エラーパス 3 件: persona_id / manager / pulse_context 欠落
+  - 深さ制限 2 件: stack length 上限到達 / 上限未達
+  - router_callable チェック 1 件: false の Playbook を拒否
+  - Playbook 名不正 1 件: "not found" エラー
+  - 正常系 1 件: line="sub", parent_state, pulse_context 共有を確認
+  - report_to_parent 欠落時の警告 1 件
+  - sub-line 実行例外時のエラーメッセージ 1 件
+- importlib で動的ロード (Phase 3 の他の builtin_data ツールテストと同じパターン)
+
+**残作業 (Spell 実機定着の段階移行)**:
+
+- ステップ 3: メインライン LLM のシステムプロンプトに「Playbook 一覧」セクション注入 (`router_callable=true` Playbook を列挙)
+- ステップ 4: `router_callable` の運用整理 (現状 18 件 true / 25 件 false、見直し必要)
+- ステップ 5: `track_user_conversation` を 1-LLM + Spell 構成に書き換え (旧 `meta_user` / `sub_router_user` 統合廃止と一体)
+- ステップ 6: `meta_user` / `sub_router_user` の deprecated 化 → 削除
+- ステップ 7: end-to-end 動作検証 (軽い Spell のみ / 重い `/run_playbook` 1 段 / 入れ子)
+
+これらは実機 air_city_a での挙動確認が必須なので、本 commit ではコア機構のみ提供。
+
+**旧 `call_playbook` ツールとの関係**:
+
+- 旧 `call_playbook` (meta_exec_speak 経由の間接実行) は当面残置
+- `/run_playbook` が実機定着して既存 Playbook の Spell 利用が広まったら廃止検討
+
 ### v0.23 (2026-05-01) — 段階 4-C 完了: 既存 Playbook を line メタデータベースに一括翻訳
 
 **確定事項**:
