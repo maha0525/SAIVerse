@@ -164,8 +164,24 @@ def get_system_prompt(
                 if playbooks_json:
                     playbooks_list = json.loads(playbooks_json)
                     if playbooks_list:
-                        playbooks_formatted = json.dumps(playbooks_list, ensure_ascii=False, indent=2)
-                        system_sections.append(f"## 利用可能な能力\n以下のPlaybookを実行できます：\n```json\n{playbooks_formatted}\n```")
+                        # bullet list 形式: `- name — description`
+                        # JSON ダンプより人間/LLM 双方に読みやすく、トークン消費も少ない。
+                        lines = [
+                            "## 利用可能な能力",
+                            "",
+                            "`run_playbook` スペルの `playbook` 引数に以下の名前を渡すと実行できる:",
+                            "",
+                        ]
+                        for pb in playbooks_list:
+                            name = (pb.get("name") or "").strip()
+                            desc = (pb.get("description") or "").strip()
+                            if not name:
+                                continue
+                            if desc:
+                                lines.append(f"- **{name}**: {desc}")
+                            else:
+                                lines.append(f"- **{name}**")
+                        system_sections.append("\n".join(lines))
         except Exception as exc:
             LOGGER.debug("Failed to add available playbooks section: %s", exc)
 
