@@ -15,7 +15,7 @@
     "text",
     "item_id"
   ],
-  "report_template": "画像「{gen_params.title}」の生成が完了しました。\n\n{text}\n\n💡 発言の中に `[画像タイトル](saiverse://item/{item_id}/content)` の形で Markdown リンクを書けば、チャット UI で画像が直接表示されます (アイテム閲覧スペル不要)。",
+  "report_template": "画像「{gen_params.title}」の生成が完了しました。\n\n{text}\n\n💡 発言の中に `![画像タイトル](saiverse://item/{item_id}/content)` の形で Markdown 画像構文 (先頭の `!` を忘れずに) を書けば、チャット UI で画像が直接インライン表示されます。先頭の `!` を付け忘れると、画像ではなくクリック式リンクになるので注意してください。",
   "router_callable": true,
   "nodes": [
     {

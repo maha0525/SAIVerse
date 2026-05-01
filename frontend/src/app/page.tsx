@@ -55,8 +55,29 @@ const sanitizeSchema = {
     protocols: {
         ...defaultSchema.protocols,
         href: [...(defaultSchema.protocols?.href || []), 'saiverse'],
+        src: [...(defaultSchema.protocols?.src || []), 'saiverse'],
     },
 };
+
+/**
+ * Convert a saiverse:// URI to an actual API URL for <img src>.
+ * - saiverse://item/<id>/content → /api/info/item/<id>  (FileResponse for picture items)
+ * - saiverse://image/<filename>  → /api/static/uploads/<filename>
+ * - other (https://, etc.) → returned as-is
+ */
+function resolveSaiverseImageSrc(src: string): string {
+    if (!src) return src;
+    const itemMatch = src.match(/^saiverse:\/\/item\/([^/]+)/);
+    if (itemMatch) {
+        return `/api/info/item/${itemMatch[1]}`;
+    }
+    if (src.startsWith('saiverse://image/')) {
+        const remainder = src.replace('saiverse://image/', '');
+        const filename = remainder.split('/').pop() || remainder.split('\\').pop() || remainder;
+        return `/api/static/uploads/${filename}`;
+    }
+    return src;
+}
 
 interface MessageImage {
     url: string;
@@ -2085,6 +2106,18 @@ export default function Home() {
                                                 urlTransform={(url) => url.startsWith('saiverse://') ? url : defaultUrlTransform(url)}
                                                 components={{
                                                     a: ({ href, children }) => <SaiverseLink href={href} children={children} onOpenItem={handleOpenItemFromLink} />,
+                                                    img: ({ src, alt }) => {
+                                                        const resolved = typeof src === 'string' ? resolveSaiverseImageSrc(src) : src;
+                                                        // eslint-disable-next-line @next/next/no-img-element
+                                                        return (
+                                                            <img
+                                                                src={resolved as string}
+                                                                alt={alt || ''}
+                                                                className={styles.markdownImage}
+                                                                onClick={() => typeof resolved === 'string' && window.open(resolved, '_blank')}
+                                                            />
+                                                        );
+                                                    },
                                                 }}
                                             >{stripUserOnlyTags(msg.content)}</ReactMarkdown>
                                         </>
