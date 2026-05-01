@@ -315,15 +315,30 @@ async def _run_spell_tool_async(
     playbook_name: str,
     event_callback: Optional[Callable],
     messages: Optional[list] = None,
-) -> str:
-    """Execute a single spell tool in a thread executor. Returns result string."""
+) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """Execute a single spell tool. Returns ``(result_string, metadata)``.
+
+    Tool return value handling:
+    - ``str`` (legacy spells): returned as ``(str(result), None)``
+    - ``(str, dict)`` tuple: returned as-is (the dict carries ``{"media": [...]}``
+      etc. and is later attached to the spell-result message so the LLM sees
+      images / files / other multimodal content). ``run_playbook`` uses this
+      form to forward sub-playbook media (image generation, etc.) up to the
+      parent line.
+    - ``(str, ...)`` tuples with non-dict 2nd element: 2nd element ignored,
+      treated as legacy str-only return.
+    - Anything else: ``(str(result), None)``.
+
+    Errors become ``(error_message, None)`` so the spell loop can continue
+    and the persona's original utterance still reaches Building/SAIMemory.
+    """
     from pathlib import Path
 
     tool_func = TOOL_REGISTRY.get(tool_name)
     if not tool_func:
         result_str = f"Spell '{tool_name}' not found in registry"
         LOGGER.error("[sea][spell] %s", result_str)
-        return result_str
+        return result_str, None
 
     # Wide try: covers persona_context setup, executor dispatch, tool
     # invocation. Any failure becomes a string result so the outer spell
@@ -352,13 +367,23 @@ async def _run_spell_tool_async(
             raw_result = await asyncio.get_event_loop().run_in_executor(None, _run)
             if inspect.isawaitable(raw_result):
                 raw_result = await raw_result
-        result_str = str(raw_result)
+
+        # Normalize to (text, metadata). Tools may return:
+        # - str → (str, None)
+        # - (str, dict) → as-is
+        # - other → (str(x), None)
+        if isinstance(raw_result, tuple) and len(raw_result) >= 2 and isinstance(raw_result[1], dict):
+            result_str = str(raw_result[0])
+            result_metadata: Optional[Dict[str, Any]] = raw_result[1]
+        else:
+            result_str = str(raw_result)
+            result_metadata = None
         LOGGER.info("[sea][spell] Executed %s → %s", tool_name, result_str[:200])
+        return result_str, result_metadata
     except Exception as exc:
         result_str = f"Spell error ({tool_name}): {type(exc).__name__}: {exc}"
         LOGGER.exception("[sea][spell] %s failed", tool_name)
-
-    return result_str
+        return result_str, None
 
 
 async def _run_spell_loop(
@@ -438,7 +463,11 @@ async def _run_spell_loop(
             # ``messages`` is snapshotted into a contextvar via persona_context so
             # spells like run_playbook can fork their sub-line from the parent
             # LLM node's actual conversation context (intent A v0.14).
-            results: List[str] = list(await asyncio.gather(*[
+            # Each entry is (text, optional metadata dict). Spells like
+            # run_playbook use the metadata to forward sub-playbook media
+            # (image generation results, etc.) up to the parent line so the
+            # next LLM round can attach them as multimodal content.
+            results: List[Tuple[str, Optional[Dict[str, Any]]]] = list(await asyncio.gather(*[
                 _run_spell_tool_async(name, args, persona, state, playbook.name, event_callback, messages=messages)
                 for name, args, _, _ in valid_spells
             ]))
@@ -447,15 +476,34 @@ async def _run_spell_loop(
             if _is_meta_judgment_pulse:
                 _meta_pulse_ctx = state.get("_pulse_context")
                 if _meta_pulse_ctx is not None:
-                    for (name, args, _, _), result in zip(valid_spells, results):
-                        _meta_pulse_ctx.append_meta_judgment_spell(name, args, result)
+                    for (name, args, _, _), (result_text, _) in zip(valid_spells, results):
+                        _meta_pulse_ctx.append_meta_judgment_spell(name, args, result_text)
 
             # All spell results in one user message (reduces per-result message overhead)
             combined_results = "\n".join(
-                f"[Spell Result: {name}]\n{result}"
-                for (name, _, _, _), result in zip(valid_spells, results)
+                f"[Spell Result: {name}]\n{result_text}"
+                for (name, _, _, _), (result_text, _) in zip(valid_spells, results)
             )
-            messages.append({"role": "user", "content": f"<system>{combined_results}</system>"})
+            # Aggregate media from all spell results so the next LLM round can
+            # see images / files etc. as attachments. iter_image_media() in each
+            # LLM client picks this up via message["metadata"]["media"].
+            aggregated_media: List[Dict[str, Any]] = []
+            for _, result_meta in results:
+                if isinstance(result_meta, dict):
+                    media_list = result_meta.get("media")
+                    if isinstance(media_list, list):
+                        aggregated_media.extend(media_list)
+            spell_result_msg: Dict[str, Any] = {
+                "role": "user",
+                "content": f"<system>{combined_results}</system>",
+            }
+            if aggregated_media:
+                spell_result_msg["metadata"] = {"media": aggregated_media}
+                LOGGER.info(
+                    "[sea][spell] Round %d: attached %d media item(s) from spell results",
+                    loop_count, len(aggregated_media),
+                )
+            messages.append(spell_result_msg)
 
             # Record to PulseContext
             pulse_ctx = state.get("_pulse_context")
@@ -510,12 +558,12 @@ async def _run_spell_loop(
                     _at.append({"action": "spell", "name": name, "playbook": playbook.name})
 
             # Build UI details blocks (first spell carries text_before; others get "")
-            for i, ((name, args, _, _), result) in enumerate(zip(valid_spells, results)):
+            for i, ((name, args, _, _), (result_text, _)) in enumerate(zip(valid_spells, results)):
                 schema = SPELL_TOOL_SCHEMAS.get(name)
                 display = (schema.spell_display_name if schema else "") or name
                 details_blocks.append((
                     text_before if i == 0 else "",
-                    _build_spell_details_html(name, args, display, result),
+                    _build_spell_details_html(name, args, display, result_text),
                 ))
 
             # Re-invoke LLM once for the entire round

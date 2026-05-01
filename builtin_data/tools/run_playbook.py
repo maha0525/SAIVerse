@@ -23,7 +23,7 @@ Phase 3 段階 4-C 後の中核 Spell。メインライン (or 親サブライ�
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from tools.context import (
     get_active_llm_messages,
@@ -43,7 +43,7 @@ LOGGER = logging.getLogger(__name__)
 _MAX_LINE_STACK_DEPTH = 5
 
 
-def run_playbook(name: str) -> str:
+def run_playbook(name: str) -> Union[str, Tuple[str, Dict[str, Any]]]:
     """Run a Playbook as a sub-line and return its `report_to_parent`.
 
     Args:
@@ -51,7 +51,14 @@ def run_playbook(name: str) -> str:
               and present in the system prompt's "Playbook 一覧" section.
 
     Returns:
-        The `report_to_parent` string produced by the sub-line Playbook.
+        Normal case: ``(report_text, metadata)`` tuple — the
+        ``report_to_parent`` string plus a metadata dict that may carry
+        ``{"media": [...]}`` so the parent line's next LLM round can attach
+        sub-playbook media (image generation results, generated documents,
+        etc.) as multimodal content.
+        When the sub-playbook produced no media, the metadata dict is empty
+        ``{}`` (still a tuple form for consistency).
+
         Error cases (Playbook not found, not callable, depth exceeded,
         sub-line failure) return an error message string so the parent
         line can continue execution.
@@ -162,7 +169,23 @@ def run_playbook(name: str) -> str:
             f"(Hint: include 'report_to_parent' in the playbook's output_schema.)"
         )
 
-    return str(report).strip()
+    # Forward sub-playbook media (image / file / etc.) to the parent line so
+    # the spell loop can attach them to the next LLM round's messages.
+    # The sub-playbook surfaces media via its tool nodes' metadata output_keys
+    # (e.g. generate_image returns metadata={"media": [...]} which propagates
+    # to parent_state["metadata"] via the playbook's output_schema).
+    forwarded_metadata: Dict[str, Any] = {}
+    sub_metadata = parent_state.get("metadata")
+    if isinstance(sub_metadata, dict):
+        sub_media = sub_metadata.get("media")
+        if isinstance(sub_media, list) and sub_media:
+            forwarded_metadata["media"] = list(sub_media)
+            LOGGER.info(
+                "[run_playbook] Forwarding %d media item(s) from sub-playbook '%s' to parent line",
+                len(sub_media), name,
+            )
+
+    return str(report).strip(), forwarded_metadata
 
 
 def _is_router_callable(playbook: object) -> bool:

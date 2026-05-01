@@ -99,7 +99,9 @@ def test_run_playbook_allows_when_line_stack_below_max():
          patch.object(run_playbook_module, "get_active_manager", return_value=manager), \
          patch.object(run_playbook_module, "get_active_pulse_context", return_value=pulse_ctx):
         result = run_playbook(name="memory_research")
-    assert result == "ok"
+    # New return shape: (report_text, metadata). No sub-playbook media here so
+    # metadata is empty {}.
+    assert result == ("ok", {})
     sea_runtime._run_playbook.assert_called_once()
 
 
@@ -179,7 +181,9 @@ def test_run_playbook_invokes_sub_line_with_correct_arguments():
          patch.object(run_playbook_module, "get_active_manager", return_value=manager), \
          patch.object(run_playbook_module, "get_active_pulse_context", return_value=pulse_ctx):
         result = run_playbook(name="memory_research")
-    assert result == "Search complete: found 3 entries"
+    # New return shape: (report_text, metadata). No sub-playbook media here so
+    # metadata is empty {}.
+    assert result == ("Search complete: found 3 entries", {})
     # line='sub' / pulse_context 共有 / parent_state に _pulse_id / _messages 空
     kwargs = captured["kwargs"]
     assert kwargs["line"] == "sub"
