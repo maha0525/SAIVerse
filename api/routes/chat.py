@@ -39,6 +39,7 @@ class ChatMessage(BaseModel):
     timestamp: Optional[str] = None
     sender: Optional[str] = None
     avatar: Optional[str] = None
+    persona_id: Optional[str] = None  # assistant メッセージで発話ペルソナを識別 (アドオン bubble button の context 等で使用)
     images: Optional[List[ChatMessageImage]] = None
     reasoning: Optional[str] = None
     activity_trace: Optional[List[dict]] = None
@@ -282,6 +283,7 @@ def get_chat_history(
             timestamp=timestamp,
             sender=sender,
             avatar=avatar,
+            persona_id=msg.get("persona_id") if role == "assistant" else None,
             images=images_list,
             reasoning=reasoning_data,
             activity_trace=activity_trace_data,

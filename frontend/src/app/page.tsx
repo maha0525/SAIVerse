@@ -109,6 +109,7 @@ interface Message {
     timestamp?: string; // ISO string
     avatar?: string;
     sender?: string;
+    persona_id?: string; // assistant メッセージで発話ペルソナを識別 (アドオン bubble button context 等で使用)
     images?: MessageImage[];
     llm_usage?: MessageLLMUsage;
     llm_usage_total?: MessageLLMUsageTotal;
@@ -2172,6 +2173,8 @@ export default function Home() {
                                     {msg.role === 'assistant' && addonBubbleButtons.length > 0 && (
                                         <AddonBubbleButtons
                                             messageId={msg.id || `msg-${idx}`}
+                                            messageText={msg.content}
+                                            personaId={msg.persona_id}
                                             addonMetadata={addonMetadata[msg.id || `msg-${idx}`] ?? {}}
                                             buttons={addonBubbleButtons}
                                         />
