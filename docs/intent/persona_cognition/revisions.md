@@ -10,6 +10,57 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.22 (2026-05-01) — 段階 4-B 完了: sub_play の親伝搬を line ベースに統一 + report_to_parent リネーム
+
+**確定事項**:
+
+- `sea/runtime_nodes.py` の sub_play ノード完了処理で、サブラインからの結果を親ラインに記録する `_store_memory` 呼び出しを line メタデータベースに移行
+  - 旧: `runtime._store_memory(tags=["conversation"], ...)` (context 包含目的でメインライン用タグを付けていた、4-A 前のフィルタ仕様の名残)
+  - 新: `runtime._store_memory(line_role="main_line", scope="committed", ...)` + 意味分類タグなし
+- `report_to_main` → `report_to_parent` への全面リネーム
+  - state キー (`state["report_to_main"]` → `state["report_to_parent"]`)
+  - ログ・コメント
+  - `sea/playbook_models.py` の SubPlayNodeDef.line docstring
+  - `tests/test_subplay_line.py` の関数名・assertion 11 件
+  - `docs/intent/persona_cognition/phases/sub_line_playbook_sample.md`
+- 旧名 `report_to_main` はコード側から完全消去 (経緯記録のドキュメントのみ残置)
+
+**設計判断**:
+
+- **3 経路の親伝搬は維持**: (1) `state["_messages"]` (2) 親 PulseContext (3) SAIMemory。目的・順序ともに 4-B 前と同じ
+- **意味分類タグは渡さず**: `_store_memory` 内で自動付与される `playbook:{name}` のみ metadata.tags に残る。recall/search 用途には Playbook 名で絞れる
+- **記録先は親ライン側のメタデータ**: サブラインからの report_to_parent は「親ラインの会話の一部として」SAIMemory に記録するので `line_role="main_line"` が正しい (4-B スコープ確認時にまはー指摘あり、私の初期説明が雑だった点を修正)
+- **リネーム理由**: 入れ子サブライン (深さ 2 以上) では親が必ずメインラインとは限らない。「親ラインに上がる」という挙動を正確に表す `report_to_parent` に改名
+
+**実装ファイル**:
+
+- `sea/runtime_nodes.py` — sub_play ノード完了処理の line ベース化 + リネーム
+- `sea/playbook_models.py` — docstring 更新
+- `docs/intent/persona_cognition/phases/sub_line_playbook_sample.md` — サンプル更新
+
+**テスト追加 (4-B 検証 + 4-A 後追い)**:
+
+- `tests/test_subplay_line.py`: 11 件の assertion を line メタデータ仕様に更新
+- `tests/test_sai_memory_storage.py` +4 件:
+  - `add_message → get_messages_paginated` の line metadata round-trip
+  - `scope='discardable'` 除外維持 (Phase 1.3 挙動)
+  - legacy 行 (line metadata 未指定) の DB 上の挙動
+  - `get_messages_from_id` (anchor 経路) の line metadata 取り回し
+- `tests/test_payload_context_filter.py` 新規 +28 件:
+  - 4-A で adapter.py に新設した `_payload_passes_context_filter` ヘルパの網羅単体テスト
+  - line_role / scope / pulse_id override / legacy 互換 (NULL→main_line, NULL→committed, "pulse:{uuid}" タグ経由) / required_tags 互換 / 防御的処理を全カバー
+
+**検証**:
+
+- ruff check: All checks passed
+- tests/test_subplay_line.py: 11 passed
+- tests/test_payload_context_filter.py: 28 passed
+- 関連 6 ファイル合計: 126 passed / 0 新規 failed
+
+**実機検証は省略**: 現状 `line='sub'` で sub_play する Playbook は皆無 (`web_search_sub` は v0.19 で削除済み)。`/run_playbook` Spell 実装でサブラインが再活性化したときに end-to-end が走る。今回は単体テスト 28+11+4 件で line メタデータ経路を網羅検証する判断。
+
+**次の段階**: 4-C (`memorize.tags` 整理 + `migrate_playbooks_to_lines.py`)、4-D (`include_internal` / `pulse:{uuid}` タグ併行記録 など DEPRECATED コードの完全削除) を継続実施。
+
 ### v0.21 (2026-05-01) — 段階 4-A 完了: context 構築を line_role/scope ベースに切替
 
 **確定事項**:

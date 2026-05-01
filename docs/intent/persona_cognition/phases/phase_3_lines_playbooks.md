@@ -45,7 +45,7 @@
 |------|------|------|
 | intent doc 起草 | ✅ | `line_tag_responsibility.md` v0.1 |
 | 段階 4-A: context 構築を line ベースに切替 (`required_tags` 廃止) | ✅ | `sea/runtime_context.py`, `saiverse_memory/adapter.py`, `persona/history_manager.py`, `sai_memory/memory/storage.py`, `sea/runtime.py:1559`, `persona/mixins/generation.py:170` (v0.21, 2026-05-01) |
-| 段階 4-B: `sub_play` の `report_to_main` を line ベースに統一 | 🔲 | `sea/runtime_nodes.py:265-281`、`report_to_parent` リネームと一体 |
+| 段階 4-B: `sub_play` の `report_to_main` を line ベースに統一 + `report_to_parent` リネーム | ✅ | `sea/runtime_nodes.py`, `sea/playbook_models.py`, `tests/test_subplay_line.py` 更新 + `tests/test_payload_context_filter.py` 新規 28 件追加 (v0.22, 2026-05-01) |
 | 段階 4-C: 既存 Playbook の `memorize.tags` 整理 | 🔲 | `migrate_playbooks_to_lines.py` で一括変換 |
 | 段階 4-D: 旧 DEPRECATED コードの削除 (`include_internal` / `pulse:{uuid}` タグ併行記録) | 🔲 | runtime + storage |
 
@@ -63,7 +63,7 @@
 | `/run_playbook` Spell 仕様確定 | ✅ | 引数は Playbook 名のみ。Playbook 引数は呼ばれた側で構造化出力で決める (旧 router 踏襲) |
 | Spell loop → Playbook 起動の橋渡し runtime | 🔲 | sub_play ノード経路と共通化できる部分を切り出す |
 | 入れ子深さ制限 (上限 4 階層) | 🔲 | `_line_stack` の深さで判定、超過時は ERROR + skip |
-| `report_to_main` → `report_to_parent` リネーム | 🔲 | 親に直接上がる方が正確な名前 |
+| `report_to_main` → `report_to_parent` リネーム | ✅ | 段階 4-B と一体実施 (v0.22, 2026-05-01) |
 | `report_to_parent` のスタック昇り経路 | 🔲 | 各層で子 report を解釈する LLM ノード必要 |
 | line_id の親子関係 + cancellation 伝搬 | 🔲 | 親キャンセル時に子サブラインも止める |
 | Playbook 一覧のシステムプロンプト注入 | 🔲 | 浅い階層に独立セクション、router_callable=true なものを列挙 |

@@ -199,10 +199,15 @@
   - tests: subplay_line 11 / meta_layer + track_manager + storage 70 / context + history 42 件パス、629 passed / 5 既存 failed (本変更前から)
   - 実機 air_city_a: `[sea][prepare-context] Fetching history: ... line_roles=['main_line'], scopes=['committed']` ログで置換動作確認、`Got 60 history messages` で legacy 互換 (line_role IS NULL → main_line) も確認
 
-### 段階 4-B 完了基準
+### 段階 4-B 完了基準 (✅ 達成 — v0.22, 2026-05-01)
 
-- [ ] `sub_play` の report_to_main 渡しがタグハードコードを使っていない
-- [ ] サブラインから親への伝搬が line メタデータ経由で動作することを実機確認
+- [x] `sub_play` の `report_to_parent` 渡しがタグハードコードを使っていない
+  - `sea/runtime_nodes.py`: `_store_memory(line_role="main_line", scope="committed", ...)` に置換、`tags=["conversation"]` 廃止。`report_to_main` → `report_to_parent` 全面リネーム (state キー、ログ、コメント、サンプル Playbook ドキュメント)
+- [x] サブラインから親への伝搬が line メタデータ経由で動作することを単体検証
+  - `tests/test_subplay_line.py` の `test_subplay_line_sub_stores_report_to_saimemory_with_main_line_metadata` で `_store_memory` が `line_role="main_line"` + `scope="committed"` で呼ばれることを確認
+  - `tests/test_sai_memory_storage.py` で `add_message → get_messages_paginated` の line metadata round-trip と legacy 互換を 4 件追加検証
+  - `tests/test_payload_context_filter.py` 新規 28 件で `_payload_passes_context_filter` の網羅検証 (line_role / scope / pulse_id override / legacy 互換 / required_tags 互換 / 防御的処理)
+  - 実機経路は `/run_playbook` Spell 実装後に再活性化するため、現状 `line='sub'` を使う Playbook 皆無 (`web_search_sub` は v0.19 で削除)。Phase 3 後段で end-to-end 検証する
 
 ### 段階 4-C 完了基準
 
