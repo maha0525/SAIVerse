@@ -276,4 +276,6 @@ def schema() -> ToolSchema:
             "required": ["query"],
         },
         result_type="string",
+        spell=True,
+        spell_display_name="ウェブ検索",
     )
