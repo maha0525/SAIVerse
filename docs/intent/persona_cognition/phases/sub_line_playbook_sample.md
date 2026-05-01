@@ -9,16 +9,16 @@ Phase 3-a (旧 Phase C-2b) の動作確認用に作成された web_search_sub.j
 ## 用途
 
 - メインラインから `sub_play` ノードで `line: "sub"` 指定で呼び出されることを想定
-- SearXNG で検索した結果を要約し、`report_to_main` としてメインラインに返す
+- SearXNG で検索した結果を要約し、`report_to_parent` としてメインラインに返す
 - サブラインで実行されることでメインラインのキャッシュを汚さない
 
 ---
 
 ## ポイント
 
-- **`output_schema`** に `report_to_main` を含める (`can_run_as_child=true` 子 Playbook の必須要件)
+- **`output_schema`** に `report_to_parent` を含める (`can_run_as_child=true` 子 Playbook の必須要件)
 - **`output_keys`** で tool ノードの戻り値を複数の state 変数に展開 (`raw_results`, `_search_snippet`)
-- **`output_key: "report_to_main"`** で LLM ノードの出力を `report_to_main` に格納し、ライン runtime が親メッセージに append できるようにする
+- **`output_key: "report_to_parent"`** で LLM ノードの出力を `report_to_parent` に格納し、ライン runtime が親メッセージに append できるようにする
 
 ---
 
@@ -28,7 +28,7 @@ Phase 3-a (旧 Phase C-2b) の動作確認用に作成された web_search_sub.j
 {
     "name": "web_search_sub",
     "display_name": "ウェブ検索（サブライン）",
-    "description": "メインラインから line:'sub' で呼ばれることを想定した、サブライン専用のウェブ検索 Playbook。SearXNG で検索し、結果を要約して report_to_main としてメインラインに返す。Phase C-2b の動作確認サンプル。",
+    "description": "メインラインから line:'sub' で呼ばれることを想定した、サブライン専用のウェブ検索 Playbook。SearXNG で検索し、結果を要約して report_to_parent としてメインラインに返す。Phase C-2b の動作確認サンプル。",
     "input_schema": [
         {
             "name": "query",
@@ -41,7 +41,7 @@ Phase 3-a (旧 Phase C-2b) の動作確認用に作成された web_search_sub.j
         }
     ],
     "output_schema": [
-        "report_to_main",
+        "report_to_parent",
         "raw_results"
     ],
     "router_callable": false,
@@ -64,7 +64,7 @@ Phase 3-a (旧 Phase C-2b) の動作確認用に作成された web_search_sub.j
             "id": "summarize_for_main",
             "type": "llm",
             "action": "あなたはサブラインで web 検索を実行しました。検索結果を、メインラインのあなた自身に伝える形で要約してください。\n\n検索クエリ: {query}\n検索の目的: {purpose}\n\n検索結果:\n{raw_results}\n\n要約は以下の点を意識してください:\n- 何が分かったかを 1〜3 段落で\n- 取得した URL のうち重要なものを最大 3 つまで併記\n- 元の目的に対して結果が十分か / 追加検索が必要そうかも一言添える",
-            "output_key": "report_to_main",
+            "output_key": "report_to_parent",
             "memorize": {
                 "tags": [
                     "internal",

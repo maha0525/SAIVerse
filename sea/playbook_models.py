@@ -291,7 +291,7 @@ class SubPlayNodeDef(BaseModel):
             "'main' (default): inherits parent state['_messages'] reference and uses parent model "
             "(continues main-line cache). "
             "'sub': forks parent state['_messages'] by COPY (not reference share) and uses persona's "
-            "lightweight model. On completion, the sub-playbook's output_schema['report_to_main'] "
+            "lightweight model. On completion, the sub-playbook's output_schema['report_to_parent'] "
             "is appended to parent state['_messages'] as a system-tagged user message. "
             "See docs/intent/persona_action_tracks.md (v0.9) for the full spec."
         ),

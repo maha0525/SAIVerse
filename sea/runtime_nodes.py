@@ -185,7 +185,7 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
             # 共有のままだとサブラインの LLM I/O (検索 prompt や空の summarize 応答) が
             # 親メインライン側で context_profile 経由 (_pulse_ctx.get_protocol_messages())
             # で取得されメインラインの messages に流入してしまう。
-            # サブラインに渡したい情報は report_to_main に集約させる設計のため、
+            # サブラインに渡したい情報は report_to_parent に集約させる設計のため、
             # PulseContext は分離するのが正しい (Phase C-2a 修正、まはー指摘 2026-04-28)。
             isolate = (
                 (execution == "subagent")
@@ -226,9 +226,9 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
         if getattr(node_def, "propagate_output", False) and sub_outputs and outputs is not None:
             outputs.extend(sub_outputs)
 
-        # サブライン → メインラインへの結果報告 (Intent B v0.9)
-        # output_schema 経由で伝播された report_to_main を親メインラインに渡す。
-        # 親メインラインの LLM ノードが messages を組み立てる経路は 2 通り:
+        # サブライン → 親ラインへの結果報告 (Intent B v0.9, Phase 3 段階 4-B)
+        # output_schema 経由で伝播された report_to_parent を親ラインに渡す。
+        # 親ラインの LLM ノードが messages を組み立てる経路は 2 通り:
         #   (1) context_profile 不使用 → state["_messages"] を直接使う
         #   (2) context_profile 使用 → _profile_base + _pulse_ctx.get_protocol_messages()
         #                              つまり state["_messages"] への append は無視される
@@ -236,7 +236,7 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
         # (Phase C-2a の最初の実装では state["_messages"] のみで context_profile 経由は
         # 届かない不具合だった。まはー指摘 2026-04-28 で修正。)
         if sub_line == "sub":
-            report = state.get("report_to_main")
+            report = state.get("report_to_parent")
             if report:
                 report_text = str(report).strip()
                 if report_text:
@@ -262,35 +262,40 @@ def lg_subplay_node(runtime: Any, node_def: Any, persona: Any, building_id: str,
                             playbook_name=playbook.name,
                         ))
 
-                    # (3) SAIMemory にメインライン会話として記録 (次の Pulse 以降の参照用)
-                    # 現在の Pulse 内の context_profile=conversation 経由の _prepare_context は
-                    # exclude_pulse_id=現在のPulseId で現在の Pulse エントリを除外するため、
-                    # ここで書いても今の Pulse 内では (1)(2) と重複しない。
-                    # 次の Pulse からは SAIMemory に「メインライン会話の一部」として残り、
-                    # ペルソナの長期記憶として参照可能になる。
-                    # まはー指摘 2026-04-28: サブラインの応答が internal タグで埋もれて
-                    # メインライン記憶に残らない問題への対処。
+                    # (3) SAIMemory に親ラインの会話の一部として記録 (次の Pulse 以降の参照用)
+                    # Phase 3 段階 4-B (2026-05-01): 旧 `tags=["conversation"]` ハード
+                    # コードを廃止し、line メタデータで親ラインへの所属を表現する。
+                    # `line_role="main_line"` + `scope="committed"` により、4-A 後の
+                    # context 構築 (required_line_roles=['main_line'] + required_scopes=
+                    # ['committed']) で次の Pulse から自動的に親ラインのプロンプトに載る。
+                    # 意味分類タグは渡さず (`tags=None`)、`_store_memory` が自動付与する
+                    # `playbook:{name}` のみが metadata.tags に残る。
+                    # まはー指摘 2026-04-28 (旧経緯): サブラインの応答が internal タグで
+                    # 埋もれてメインライン記憶に残らない問題への対処。line ベースで
+                    # 同じ目的を達成する。
                     pulse_id_for_memory = state.get("_pulse_id")
                     runtime._store_memory(
                         persona,
                         formatted,
                         role="user",
-                        tags=["conversation"],
+                        line_role="main_line",
+                        scope="committed",
                         pulse_id=pulse_id_for_memory,
                         playbook_name=playbook.name,
                     )
 
                     LOGGER.info(
-                        "[sea][subplay] line='sub': appended report_to_main (%d chars) "
-                        "from '%s' to parent _messages + parent PulseContext + SAIMemory (conversation)",
+                        "[sea][subplay] line='sub': appended report_to_parent (%d chars) "
+                        "from '%s' to parent _messages + parent PulseContext + SAIMemory "
+                        "(line_role=main_line, scope=committed)",
                         len(report_text), sub_name,
                     )
                 # 親 state に残ると次のサブ Playbook 呼び出しでも誤解されるためクリア
-                state.pop("report_to_main", None)
+                state.pop("report_to_parent", None)
             else:
                 LOGGER.warning(
-                    "[sea][subplay] line='sub' for '%s' but no 'report_to_main' in output. "
-                    "Sub-line playbooks should include 'report_to_main' in output_schema.",
+                    "[sea][subplay] line='sub' for '%s' but no 'report_to_parent' in output. "
+                    "Sub-line playbooks should include 'report_to_parent' in output_schema.",
                     sub_name,
                 )
         return state

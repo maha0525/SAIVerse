@@ -1,10 +1,11 @@
-"""SubPlay line='main'/'sub' 動作確認テスト (Phase C-2a)。
+"""SubPlay line='main'/'sub' 動作確認テスト (Phase C-2a, Phase 3 段階 4-B 更新)。
 
 ライン分岐ロジックの最小ユニットテスト:
 - SubPlayNodeDef.line デフォルト = "main"
 - line='sub' 指定時に run_playbook が parent _messages のコピーを base_messages として使う
 - line='sub' で _force_lightweight_model フラグが立つ
-- subplay 完了時に report_to_main が親 _messages に system タグ付き user として append される
+- subplay 完了時に report_to_parent が親 _messages に system タグ付き user として append される
+- SAIMemory には line_role="main_line" + scope="committed" で記録される (Phase 3 段階 4-B)
 
 実 LLM は呼ばず、runtime のロジック分岐のみを検証する。
 """
@@ -147,7 +148,7 @@ def test_run_playbook_line_main_calls_prepare_context():
 
 
 # ---------------------------------------------------------------------------
-# subplay node の line='sub' 完了処理: report_to_main を 2 経路で親に渡す
+# subplay node の line='sub' 完了処理: report_to_parent を 2 経路で親に渡す
 #
 # (1) state["_messages"] への append (context_profile 不使用ノード向け)
 # (2) 親 PulseContext への append (context_profile 使用ノード向け)
@@ -171,11 +172,11 @@ def _make_subplay_test_env(report_value=None, sub_line="sub"):
     runtime._effective_building_id = lambda persona, building_id: building_id
     runtime._start_subagent_thread = lambda persona, label: (None, None)
 
-    # _run_playbook の副作用として state に report_to_main を入れる
+    # _run_playbook の副作用として state に report_to_parent を入れる
     def fake_run_playbook(sub_pb, persona, eff_bid, sub_input, auto_mode, record_history,
                          state, event_callback, **kwargs):
         if report_value is not None:
-            state["report_to_main"] = report_value
+            state["report_to_parent"] = report_value
         return ["ok"]
 
     runtime._run_playbook = MagicMock(side_effect=fake_run_playbook)
@@ -200,7 +201,7 @@ def _make_subplay_test_env(report_value=None, sub_line="sub"):
     )
 
     # sub_pb (最低限あればよい)
-    runtime._load_playbook_for = lambda name, p, b: SimpleNamespace(name=name, output_schema=["report_to_main"])
+    runtime._load_playbook_for = lambda name, p, b: SimpleNamespace(name=name, output_schema=["report_to_parent"])
 
     # state
     pulse_ctx = PulseContext(pulse_id="test-pulse", thread_id="test-thread")
@@ -216,7 +217,7 @@ def _make_subplay_test_env(report_value=None, sub_line="sub"):
 
 
 def test_subplay_line_sub_appends_report_to_both_messages_and_pulse_ctx():
-    """report_to_main があれば state['_messages'] と PulseContext と SAIMemory の3経路で記録される。"""
+    """report_to_parent があれば state['_messages'] と PulseContext と SAIMemory の3経路で記録される。"""
     node_fn, state, pulse_ctx = _make_subplay_test_env(report_value="検索結果のまとめ。")
     runtime = node_fn.__closure__[0].cell_contents if False else None  # noqa: F841
     asyncio.run(node_fn(state))
@@ -225,22 +226,22 @@ def test_subplay_line_sub_appends_report_to_both_messages_and_pulse_ctx():
     assert any(
         msg["role"] == "user" and "検索結果のまとめ。" in msg["content"]
         for msg in state["_messages"]
-    ), "report_to_main should be in state['_messages']"
+    ), "report_to_parent should be in state['_messages']"
 
     # (2) 親 PulseContext にも append された
     appended_in_pulse = [e for e in pulse_ctx.logs if "検索結果のまとめ。" in (e.content or "")]
     assert len(appended_in_pulse) == 1, (
-        f"report_to_main should be appended to parent PulseContext exactly once "
+        f"report_to_parent should be appended to parent PulseContext exactly once "
         f"(got {len(appended_in_pulse)})"
     )
     assert appended_in_pulse[0].role == "user"
 
-    # state["report_to_main"] はクリアされる
-    assert "report_to_main" not in state
+    # state["report_to_parent"] はクリアされる
+    assert "report_to_parent" not in state
 
 
-def test_subplay_line_sub_stores_report_to_saimemory_with_conversation_tag():
-    """report_to_main は SAIMemory にも conversation タグで記録される (次の Pulse 以降の参照用)。"""
+def test_subplay_line_sub_stores_report_to_saimemory_with_main_line_metadata():
+    """report_to_parent は SAIMemory に line_role='main_line' + scope='committed' で記録される (次の Pulse 以降の参照用、Phase 3 段階 4-B)。"""
     from sea.runtime_nodes import lg_subplay_node
     from sea.pulse_context import PulseContext
 
@@ -250,13 +251,13 @@ def test_subplay_line_sub_stores_report_to_saimemory_with_conversation_tag():
 
     def fake_run_playbook(sub_pb, persona, eff_bid, sub_input, auto_mode, record_history,
                          state, event_callback, **kwargs):
-        state["report_to_main"] = "重要なまとめ"
+        state["report_to_parent"] = "重要なまとめ"
         return ["ok"]
 
     runtime._run_playbook = MagicMock(side_effect=fake_run_playbook)
     runtime._store_memory = MagicMock(return_value=True)
     runtime._load_playbook_for = lambda name, p, b: SimpleNamespace(
-        name=name, output_schema=["report_to_main"]
+        name=name, output_schema=["report_to_parent"]
     )
 
     persona = MagicMock()
@@ -278,11 +279,15 @@ def test_subplay_line_sub_stores_report_to_saimemory_with_conversation_tag():
     node_fn = lg_subplay_node(runtime, node_def, persona, "b1", playbook, False, [], None)
     asyncio.run(node_fn(state))
 
-    # _store_memory が conversation タグ + 現在の pulse_id で 1 回呼ばれる
+    # _store_memory が line_role='main_line' + scope='committed' + 現在の pulse_id で 1 回呼ばれる
     runtime._store_memory.assert_called_once()
     call_kwargs = runtime._store_memory.call_args.kwargs
     assert call_kwargs["role"] == "user"
-    assert "conversation" in call_kwargs["tags"]
+    # Phase 3 段階 4-B: タグハードコードを line メタデータに置換
+    assert call_kwargs["line_role"] == "main_line"
+    assert call_kwargs["scope"] == "committed"
+    # 意味分類タグは渡さない (playbook:{name} は _store_memory 内で自動付与される)
+    assert "tags" not in call_kwargs or not call_kwargs.get("tags")
     assert call_kwargs["pulse_id"] == "test-pulse-xyz"
     # content は formatted な system タグ付きメッセージ
     call_args = runtime._store_memory.call_args.args
@@ -302,13 +307,13 @@ def test_subplay_line_main_does_not_call_store_memory():
 
     def fake_run_playbook(sub_pb, persona, eff_bid, sub_input, auto_mode, record_history,
                          state, event_callback, **kwargs):
-        state["report_to_main"] = "should-not-store"
+        state["report_to_parent"] = "should-not-store"
         return ["ok"]
 
     runtime._run_playbook = MagicMock(side_effect=fake_run_playbook)
     runtime._store_memory = MagicMock(return_value=True)
     runtime._load_playbook_for = lambda name, p, b: SimpleNamespace(
-        name=name, output_schema=["report_to_main"]
+        name=name, output_schema=["report_to_parent"]
     )
 
     persona = MagicMock()
@@ -335,7 +340,7 @@ def test_subplay_line_main_does_not_call_store_memory():
 
 
 def test_subplay_line_sub_no_report_logs_warning_and_no_append():
-    """report_to_main が空なら何も append しない。"""
+    """report_to_parent が空なら何も append しない。"""
     node_fn, state, pulse_ctx = _make_subplay_test_env(report_value=None)
     asyncio.run(node_fn(state))
 
@@ -345,8 +350,8 @@ def test_subplay_line_sub_no_report_logs_warning_and_no_append():
     assert len(pulse_ctx.logs) == 0
 
 
-def test_subplay_line_main_does_not_touch_report_to_main():
-    """line='main' なら report_to_main の処理は行われない (state にも残る)。"""
+def test_subplay_line_main_does_not_touch_report_to_parent():
+    """line='main' なら report_to_parent の処理は行われない (state にも残る)。"""
     node_fn, state, pulse_ctx = _make_subplay_test_env(
         report_value="should-not-be-appended", sub_line="main"
     )
@@ -356,5 +361,5 @@ def test_subplay_line_main_does_not_touch_report_to_main():
     assert len(state["_messages"]) == 1
     # PulseContext にも append されてない
     assert len(pulse_ctx.logs) == 0
-    # report_to_main は state に残る (main ライン継続なので親のロジックが消費する)
-    assert state.get("report_to_main") == "should-not-be-appended"
+    # report_to_parent は state に残る (main ライン継続なので親のロジックが消費する)
+    assert state.get("report_to_parent") == "should-not-be-appended"
