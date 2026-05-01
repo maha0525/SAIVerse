@@ -103,6 +103,10 @@ python -m pytest --cov=./ --cov-report=html
 
 `htmlcov/index.html` でカバレッジレポートを確認。
 
+## 既知の腐食テスト
+
+`pytest tests/` で常時失敗する 9 件はテスト側のモック追従漏れ (本番コードの regression ではない)。一覧と症状: [known_test_failures.md](./known_test_failures.md)。
+
 ## 次のステップ
 
 - [コントリビューション](./contributing.md) - プルリクエストの作成
