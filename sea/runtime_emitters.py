@@ -50,6 +50,8 @@ class RuntimeEmitters:
 
         msg["metadata"] = metadata
         building_msg: Optional[Dict[str, Any]] = None
+        building_content_for_hook: Optional[str] = None
+        msg_id_for_hook: Optional[str] = None
         if record_history:
             try:
                 from saiverse.content_tags import resolve_item_slot_uris, strip_in_heart
@@ -66,6 +68,7 @@ class RuntimeEmitters:
                     building_content = resolve_item_slot_uris(
                         building_content, item_service, persona.persona_id, building_id
                     )
+                building_content_for_hook = building_content
                 building_msg_dict = {**msg, "content": building_content}
                 building_msg = persona.history_manager.add_to_building_only(
                     building_id, building_msg_dict, heard_by=heard_by_list
@@ -77,10 +80,30 @@ class RuntimeEmitters:
                 if msg_id:
                     from tools.context import set_active_message_id
                     set_active_message_id(str(msg_id))
+                    msg_id_for_hook = str(msg_id)
                 self.runtime.manager.gateway_handle_ai_replies(building_id, persona, [building_content])
             except Exception:
                 LOGGER.exception("Failed to emit speak message")
         self.notify_unity_speak(persona, text)
+        # アドオン向けサーバー側 hook (persona_speak イベント) を発火する。
+        # ThreadPoolExecutor で隔離実行されるため本関数は即座に return する。
+        # See docs/intent/addon_speak_hooks.md.
+        if record_history and msg_id_for_hook:
+            try:
+                from saiverse.addon_hooks import dispatch_hook
+                dispatch_hook(
+                    "persona_speak",
+                    persona_id=persona.persona_id,
+                    building_id=building_id,
+                    text_raw=text,
+                    text_for_voice=building_content_for_hook if building_content_for_hook is not None else text,
+                    message_id=msg_id_for_hook,
+                    pulse_id=pulse_id,
+                    source="speak",
+                    metadata=dict(metadata),
+                )
+            except Exception:
+                LOGGER.warning("persona_speak hook dispatch failed", exc_info=True)
         return building_msg
 
     def emit_say(
@@ -117,6 +140,8 @@ class RuntimeEmitters:
         if msg_metadata:
             msg["metadata"] = msg_metadata
         building_msg: Optional[Dict[str, Any]] = None
+        building_content_for_hook: Optional[str] = None
+        msg_id_for_hook: Optional[str] = None
         try:
             from saiverse.content_tags import resolve_item_slot_uris, strip_in_heart, wrap_spell_blocks
             heard_by_list = list(occupants)
@@ -130,6 +155,7 @@ class RuntimeEmitters:
                 building_content = resolve_item_slot_uris(
                     building_content, item_service, persona.persona_id, building_id
                 )
+            building_content_for_hook = building_content
             building_msg_for_hist = {**msg, "content": building_content}
             building_msg = persona.history_manager.add_to_building_only(
                 building_id, building_msg_for_hist, heard_by=heard_by_list
@@ -141,10 +167,30 @@ class RuntimeEmitters:
             if msg_id:
                 from tools.context import set_active_message_id
                 set_active_message_id(str(msg_id))
+                msg_id_for_hook = str(msg_id)
             self.runtime.manager.gateway_handle_ai_replies(building_id, persona, [building_content])
         except Exception:
             LOGGER.exception("Failed to emit say message")
         self.notify_unity_speak(persona, text)
+        # アドオン向けサーバー側 hook (persona_speak イベント) を発火する。
+        # emit_speak と同一イベントに統合し、source="say" で区別する。
+        # See docs/intent/addon_speak_hooks.md.
+        if msg_id_for_hook:
+            try:
+                from saiverse.addon_hooks import dispatch_hook
+                dispatch_hook(
+                    "persona_speak",
+                    persona_id=persona.persona_id,
+                    building_id=building_id,
+                    text_raw=text,
+                    text_for_voice=building_content_for_hook if building_content_for_hook is not None else text,
+                    message_id=msg_id_for_hook,
+                    pulse_id=pulse_id,
+                    source="say",
+                    metadata=dict(msg_metadata) if msg_metadata else {},
+                )
+            except Exception:
+                LOGGER.warning("persona_speak hook dispatch failed", exc_info=True)
         return building_msg
 
     def emit_think(self, persona: Any, pulse_id: str, text: str, record_history: bool = True) -> None:

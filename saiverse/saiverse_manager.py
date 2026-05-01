@@ -433,6 +433,14 @@ class SAIVerseManager(
         except Exception:
             logging.exception("Failed to load addon integrations")
 
+        # Load server-side hooks (addon.json の server_hooks セクション) for
+        # any enabled addon. See docs/intent/addon_speak_hooks.md §D.
+        try:
+            from saiverse.addon_loader import load_addon_server_hooks
+            load_addon_server_hooks()
+        except Exception:
+            logging.exception("Failed to load addon server hooks")
+
     def _emit_trigger(self, trigger_type: TriggerType, data: Dict[str, Any]) -> None:
         """Emit a trigger event to the PhenomenonManager."""
         if not hasattr(self, "phenomenon_manager") or not self.phenomenon_manager:

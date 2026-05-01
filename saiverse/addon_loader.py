@@ -1,21 +1,28 @@
 """アドオン拡張点の自動ロードモジュール。
 
-API ルーター（api_routes.py）と外部連携（integrations/*.py）を
+API ルーター（api_routes.py）、外部連携（integrations/*.py）、
+サーバー側 hook（addon.json の server_hooks セクション）を
 ``expansion_data/<addon_name>/`` 配下から自動discoveryして登録する。
 
 main.py で呼ぶ:
-    from saiverse.addon_loader import load_addon_routers, load_addon_integrations
+    from saiverse.addon_loader import (
+        load_addon_routers,
+        load_addon_integrations,
+        load_addon_server_hooks,
+    )
     load_addon_routers(app)
     load_addon_integrations(integration_manager)
+    load_addon_server_hooks()
 """
 from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
 import logging
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Type
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Tuple, Type
 
 if TYPE_CHECKING:
     from saiverse.integration_manager import IntegrationManager
@@ -26,6 +33,10 @@ LOGGER = logging.getLogger(__name__)
 # addon_name -> 登録済みの integration.name のリスト。
 # アドオン無効化時にこのマップから unregister 対象を引く。
 _addon_integration_registry: Dict[str, List[str]] = {}
+
+# addon_name -> [(event_name, handler_callable), ...] のリスト。
+# アドオン無効化時にこのマップから unregister 対象を引く。
+_addon_server_hooks_registry: Dict[str, List[Tuple[str, Callable[..., Any]]]] = {}
 
 
 def _register_addon_externals() -> None:
@@ -291,3 +302,205 @@ def unregister_addon_integrations(
             len(names), addon_name,
         )
     return len(names)
+
+
+# ---------------------------------------------------------------------------
+# Server-side hooks auto-discovery
+# ---------------------------------------------------------------------------
+
+def _load_addon_manifest(addon_dir: Path) -> Dict[str, Any]:
+    """addon.json を読んで dict を返す (存在しない / 壊れていれば空 dict)。"""
+    manifest_path = addon_dir / "addon.json"
+    if not manifest_path.exists():
+        return {}
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        LOGGER.warning(
+            "addon_loader: failed to read manifest %s", manifest_path, exc_info=True,
+        )
+        return {}
+
+
+def _import_addon_module(addon_name: str, py_file: Path):
+    """expansion_data/<addon>/<module>.py を動的にロードする。"""
+    module_key = (
+        f"_addon_{addon_name.replace('-', '_')}_module_{py_file.stem}"
+    )
+    spec = importlib.util.spec_from_file_location(module_key, py_file)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Failed to load spec for {py_file}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_key] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _resolve_hook_handler(
+    addon_dir: Path,
+    handler_spec: str,
+) -> Callable[..., Any]:
+    """``"module:function"`` 形式のハンドラ仕様をコール可能オブジェクトに解決する。
+
+    Raises:
+        ValueError: 形式が不正
+        ImportError: モジュールがロードできない
+        AttributeError: 関数が見つからない
+    """
+    module_name, sep, fn_name = handler_spec.partition(":")
+    if not sep or not module_name or not fn_name:
+        raise ValueError(
+            f"invalid handler spec {handler_spec!r}; expected 'module:function'"
+        )
+    py_file = addon_dir / f"{module_name}.py"
+    if not py_file.exists():
+        raise ImportError(f"handler module not found: {py_file}")
+    module = _import_addon_module(addon_dir.name, py_file)
+    handler = getattr(module, fn_name, None)
+    if handler is None:
+        raise AttributeError(
+            f"function {fn_name!r} not found in {py_file}"
+        )
+    if not callable(handler):
+        raise TypeError(
+            f"{handler_spec!r} resolved to non-callable object"
+        )
+    return handler
+
+
+def _register_addon_server_hooks_for(addon_dir: Path) -> int:
+    """単一アドオンの addon.json から server_hooks を読んで register する。
+
+    Returns:
+        登録した hook の数
+    """
+    from saiverse.addon_hooks import register_hook
+
+    manifest = _load_addon_manifest(addon_dir)
+    hooks_spec = manifest.get("server_hooks") or []
+    if not isinstance(hooks_spec, list):
+        LOGGER.warning(
+            "addon_loader: server_hooks for addon '%s' is not a list, skipping",
+            addon_dir.name,
+        )
+        return 0
+
+    addon_name = addon_dir.name
+    registered: List[Tuple[str, Callable[..., Any]]] = []
+
+    for hook_def in hooks_spec:
+        if not isinstance(hook_def, dict):
+            LOGGER.warning(
+                "addon_loader: server_hooks entry is not an object (addon=%s): %r",
+                addon_name, hook_def,
+            )
+            continue
+        event = hook_def.get("event")
+        handler_spec = hook_def.get("handler")
+        if not event or not handler_spec:
+            LOGGER.warning(
+                "addon_loader: server_hooks entry missing 'event' or 'handler' "
+                "(addon=%s): %r",
+                addon_name, hook_def,
+            )
+            continue
+        try:
+            handler = _resolve_hook_handler(addon_dir, handler_spec)
+        except Exception:
+            LOGGER.exception(
+                "addon_loader: failed to resolve hook handler %r (addon=%s)",
+                handler_spec, addon_name,
+            )
+            continue
+
+        try:
+            register_hook(event, handler)
+        except Exception:
+            LOGGER.exception(
+                "addon_loader: failed to register hook %r → %s (addon=%s)",
+                event, handler_spec, addon_name,
+            )
+            continue
+
+        registered.append((event, handler))
+
+    if registered:
+        existing = _addon_server_hooks_registry.setdefault(addon_name, [])
+        existing.extend(registered)
+
+    return len(registered)
+
+
+def load_addon_server_hooks() -> None:
+    """有効なアドオンの ``addon.json`` から ``server_hooks`` をすべて自動 register する。
+
+    起動時に main.py から1回だけ呼ぶ想定。
+    アドオンが無効（AddonConfig.is_enabled == False）ならスキップする。
+    """
+    from saiverse.addon_config import is_addon_enabled
+    from saiverse.data_paths import EXPANSION_DATA_DIR
+
+    if not EXPANSION_DATA_DIR.exists():
+        LOGGER.debug("addon_loader: expansion_data/ not found, skipping server_hooks")
+        return
+
+    total = 0
+    for addon_dir in sorted(EXPANSION_DATA_DIR.iterdir()):
+        if not addon_dir.is_dir():
+            continue
+        addon_name = addon_dir.name
+        if not is_addon_enabled(addon_name):
+            LOGGER.debug(
+                "addon_loader: skipping disabled addon '%s' for server_hooks",
+                addon_name,
+            )
+            continue
+        total += _register_addon_server_hooks_for(addon_dir)
+
+    LOGGER.info("addon_loader: %d addon server_hook(s) registered", total)
+
+
+def register_addon_server_hooks(addon_name: str) -> int:
+    """指定アドオンの server_hooks をランタイムで register する（有効化時用）。
+
+    Returns:
+        登録した hook の数
+    """
+    from saiverse.data_paths import EXPANSION_DATA_DIR
+
+    addon_dir = EXPANSION_DATA_DIR / addon_name
+    if not addon_dir.is_dir():
+        LOGGER.warning(
+            "addon_loader: addon '%s' not found for server_hook registration",
+            addon_name,
+        )
+        return 0
+    return _register_addon_server_hooks_for(addon_dir)
+
+
+def unregister_addon_server_hooks(addon_name: str) -> int:
+    """指定アドオンの server_hooks をランタイムで unregister する（無効化時用）。
+
+    Returns:
+        解除した hook の数
+    """
+    from saiverse.addon_hooks import unregister_hook
+
+    pairs = _addon_server_hooks_registry.pop(addon_name, [])
+    removed = 0
+    for event, handler in pairs:
+        try:
+            if unregister_hook(event, handler):
+                removed += 1
+        except Exception:
+            LOGGER.exception(
+                "addon_loader: failed to unregister hook %r (addon=%s)",
+                event, addon_name,
+            )
+    if removed:
+        LOGGER.info(
+            "addon_loader: %d server_hook(s) unregistered for addon '%s'",
+            removed, addon_name,
+        )
+    return removed

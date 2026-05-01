@@ -386,6 +386,24 @@ def set_addon_enabled(addon_name: str, body: SetEnabledRequest, manager=Depends(
             exc,
         )
 
+    # Notify server-hook layer so addon.json の server_hooks ハンドラが
+    # 有効化/無効化と連動して register/unregister される。
+    # See docs/intent/addon_speak_hooks.md §D.
+    try:
+        if body.is_enabled:
+            from saiverse.addon_loader import register_addon_server_hooks
+            register_addon_server_hooks(addon_name)
+        else:
+            from saiverse.addon_loader import unregister_addon_server_hooks
+            unregister_addon_server_hooks(addon_name)
+    except Exception as exc:
+        LOGGER.warning(
+            "addon: server_hook notification failed for '%s' (enabled=%s): %s",
+            addon_name,
+            body.is_enabled,
+            exc,
+        )
+
     # Broadcast to frontend subscribers as well so UIs can react
     try:
         from saiverse.addon_events import emit_addon_event
