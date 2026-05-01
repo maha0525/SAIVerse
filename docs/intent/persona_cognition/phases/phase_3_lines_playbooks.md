@@ -44,7 +44,7 @@
 | 項目 | 状態 | 備考 |
 |------|------|------|
 | intent doc 起草 | ✅ | `line_tag_responsibility.md` v0.1 |
-| 段階 4-A: context 構築を line ベースに切替 (`required_tags` 廃止) | 🔲 | `sea/runtime_context.py` |
+| 段階 4-A: context 構築を line ベースに切替 (`required_tags` 廃止) | ✅ | `sea/runtime_context.py`, `saiverse_memory/adapter.py`, `persona/history_manager.py`, `sai_memory/memory/storage.py`, `sea/runtime.py:1559`, `persona/mixins/generation.py:170` (v0.21, 2026-05-01) |
 | 段階 4-B: `sub_play` の `report_to_main` を line ベースに統一 | 🔲 | `sea/runtime_nodes.py:265-281`、`report_to_parent` リネームと一体 |
 | 段階 4-C: 既存 Playbook の `memorize.tags` 整理 | 🔲 | `migrate_playbooks_to_lines.py` で一括変換 |
 | 段階 4-D: 旧 DEPRECATED コードの削除 (`include_internal` / `pulse:{uuid}` タグ併行記録) | 🔲 | runtime + storage |

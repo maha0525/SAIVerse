@@ -189,11 +189,15 @@
 
 ## 8. 段階別の完了基準
 
-### 段階 4-A 完了基準
+### 段階 4-A 完了基準 (✅ 達成 — v0.21, 2026-05-01)
 
-- [ ] `_prepare_context` が `line_role` / `scope` のみで context を組み立てる
-- [ ] `required_tags` パラメータを受け取る関数が存在しない (内部で使われていない)
-- [ ] 既存テスト + 実機で context 構築の挙動が変わらないこと
+- [x] `_prepare_context` が `line_role` / `scope` のみで context を組み立てる
+  - `sea/runtime_context.py`: `required_line_roles=["main_line"]` + `required_scopes=["committed"]` に置換。`include_internal=True` のときは `sub_line` を許可するフォールバック (4-C で memorize.tags 整理時に廃止予定)
+- [x] context 構築経路 (`_prepare_context`, `runtime.py:1559` metabolism anchor, `persona/mixins/generation.py:170` persona generation) は `required_tags` を渡さない
+  - search/recall 経路 (api/recall, memopedia/generator, memory_search_brief, record_wait, recall_conversation_with) は `required_tags` を残置 (意味分類フィルタ、4-D で整理予定)
+- [x] 既存テスト + 実機で context 構築の挙動が変わらないこと
+  - tests: subplay_line 11 / meta_layer + track_manager + storage 70 / context + history 42 件パス、629 passed / 5 既存 failed (本変更前から)
+  - 実機 air_city_a: `[sea][prepare-context] Fetching history: ... line_roles=['main_line'], scopes=['committed']` ログで置換動作確認、`Got 60 history messages` で legacy 互換 (line_role IS NULL → main_line) も確認
 
 ### 段階 4-B 完了基準
 

@@ -10,6 +10,41 @@
 
 ## Intent A: persona_cognitive_model.md の改訂
 
+### v0.21 (2026-05-01) — 段階 4-A 完了: context 構築を line_role/scope ベースに切替
+
+**確定事項**:
+
+- `_prepare_context` (sea/runtime_context.py) の `required_tags = ["conversation", "event_message"]` ハードコードを廃止
+- 代わりに `required_line_roles=["main_line"]` + `required_scopes=["committed"]` で context を組み立てるよう統一
+- adapter / history_manager / storage 層に `required_line_roles` / `required_scopes` 引数を追加し、context 経路から渡す
+- `sea/runtime.py:1559` (metabolism anchor) と `persona/mixins/generation.py:170` (persona generation) の `required_tags=["conversation"]` も同様に line ベース化
+- `Message` データクラスに `line_role` / `line_id` / `scope` / `pulse_id` を追加、`_row_to_message` を可変列対応に。context 経路の SELECT (`get_messages_paginated`, `get_messages_from_id`) を 11 列拡張
+
+**設計判断**:
+
+- **legacy 互換**: line_role IS NULL → 'main_line' 扱い、scope IS NULL → 'committed' 扱い。Phase 1 以前の大量データが context から消えるのを防ぐ
+- **Pulse-scoped overrides**: `exclude_pulse_id` 一致は line/scope 関係なく除外、`pulse_id` 一致は line/scope 関係なく強制包含 (従来挙動維持)
+- **`include_internal` フォールバック**: 4-C で Playbook 側の memorize.tags が整理されるまでの暫定措置として、`include_internal=True` のときは `sub_line` を許可。完全廃止は 4-D
+- **search/recall 経路の `required_tags` は残置**: api/recall, memopedia/generator, memory_search_brief, record_wait, recall_conversation_with は意味分類フィルタとしてタグを使い続ける (4-D で整理予定)
+- **Python 側フィルタ統一**: adapter.py に `_payload_passes_context_filter` ヘルパを新設、4 関数 (`recent_persona_messages` / `_by_count` / `_balanced` / `persona_messages_from_anchor`) の Python 側フィルタロジックを共通化
+
+**実装ファイル**:
+
+- `sea/runtime_context.py` — `_prepare_context` の line ベース化
+- `saiverse_memory/adapter.py` — `_payload_passes_context_filter` ヘルパ + 4 関数のシグネチャ拡張
+- `persona/history_manager.py` — 4 関数のシグネチャ拡張 (`required_line_roles` / `required_scopes` 追加)
+- `sai_memory/memory/storage.py` — `Message` データクラス拡張 + 2 関数の SELECT 拡張
+- `sea/runtime.py:1559` — metabolism anchor の `required_tags` 廃止
+- `persona/mixins/generation.py:170` — persona generation の `required_tags` 廃止
+
+**検証**:
+
+- ruff check: All checks passed
+- tests: 629 passed / 5 failed (failed 5 件は本変更前から既存で失敗、stash で確認済)
+- 実機 air_city_a: ログに `line_roles=['main_line'], scopes=['committed']` が出力、`Got 60 history messages` で legacy 互換動作も確認
+
+**次の段階**: 4-B (`sub_play` の `report_to_main` を line ベースに統一 + `report_to_parent` リネーム)、4-C (`memorize.tags` 整理 + `migrate_playbooks_to_lines.py`)、4-D (DEPRECATED コード削除) を継続実施。
+
 ### v0.20 (2026-05-01) — line と memorize タグの責務分離 + 入れ子サブライン Spell の Intent 起草
 
 **確定事項**:
