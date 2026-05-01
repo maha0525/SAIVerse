@@ -360,22 +360,25 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
         history_mgr = getattr(persona, "history_manager", None)
         if history_mgr:
             try:
-                # Determine which tags to include
-                # event_message: conversationと同様に常に表示（ただし想起・Chronicle対象外）
+                # Phase 3 段階 4-A (line vs tag responsibility separation,
+                # 2026-05-01): context construction filters on line_role / scope
+                # instead of metadata.tags. Tags are now reserved for semantic
+                # classification (search / recall / Chronicle / Memopedia).
                 #
-                # P0-7 (Intent A v0.14, Intent B v0.11): legacy tag-based filter
-                # is kept for backward compatibility while line_role/scope-based
-                # message metadata is being populated by P0-4/P0-5/P0-6. The
-                # commit/discard property of meta-judgment branches is enforced
-                # at the SAIMemory query layer (`scope != 'discardable'` in
-                # storage.get_messages_last / get_messages_paginated), so
-                # discarded meta-judgment turns never reach this filter.
-                # Full migration to a line_role-based filter is deferred until
-                # the new Track machinery (action_tracks switching + meta-judgment
-                # branching) is wired in for live persona runs.
-                required_tags = ["conversation", "event_message"]
+                # Default policy:
+                #   - line_role IN ('main_line') AND scope IN ('committed')
+                #     → ペルソナのメインラインの会話履歴のみを context に含める
+                #   - meta_judgment Pulse の discardable メッセージは別経路
+                #     (MetaLayer._build_recent_judgments_block) で動的注入される
+                #     ので、ここでは載せない
+                #
+                # ``include_internal`` は段階 4-C で Playbook 側の
+                # memorize.tags が整理されるまで暫定的に sub_line を許可する
+                # フォールバック。完全廃止は段階 4-D。
+                required_line_roles = ["main_line"]
                 if reqs.include_internal:
-                    required_tags.append("internal")
+                    required_line_roles.append("sub_line")
+                required_scopes = ["committed"]
 
                 # Parse history_depth format
                 # - "full": use max_history_messages (message count) or context_length (character limit)
@@ -396,7 +399,10 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                         if anchor_id:
                             # Case 1 or 2: valid anchor found
                             recent_from_anchor = history_mgr.get_history_from_anchor(
-                                anchor_id, required_tags=required_tags, pulse_id=pulse_id,
+                                anchor_id,
+                                required_line_roles=required_line_roles,
+                                required_scopes=required_scopes,
+                                pulse_id=pulse_id,
                                 exclude_pulse_id=exclude_pulse_id,
                             )
                             if recent_from_anchor:
@@ -461,7 +467,10 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                         anchor_id, resolution = runtime._resolve_metabolism_anchor(persona)
                         if anchor_id:
                             recent_from_anchor = history_mgr.get_history_from_anchor(
-                                anchor_id, required_tags=required_tags, pulse_id=pulse_id,
+                                anchor_id,
+                                required_line_roles=required_line_roles,
+                                required_scopes=required_scopes,
+                                pulse_id=pulse_id,
                                 exclude_pulse_id=exclude_pulse_id,
                             )
                             if recent_from_anchor:
@@ -503,14 +512,19 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
 
                 # Fetch history if not already retrieved via anchor
                 if not used_anchor:
-                    LOGGER.debug("[sea][prepare-context] Fetching history: limit=%d, mode=%s, pulse_id=%s, balanced=%s, tags=%s",
-                                limit_value, "messages" if use_message_count else "chars", pulse_id, reqs.history_balanced, required_tags)
+                    LOGGER.debug(
+                        "[sea][prepare-context] Fetching history: limit=%d, mode=%s, pulse_id=%s, "
+                        "balanced=%s, line_roles=%s, scopes=%s",
+                        limit_value, "messages" if use_message_count else "chars", pulse_id,
+                        reqs.history_balanced, required_line_roles, required_scopes,
+                    )
 
                     if use_message_count:
                         # Message count mode - balanced not supported yet
                         recent = history_mgr.get_recent_history_by_count(
                             limit_value,
-                            required_tags=required_tags,
+                            required_line_roles=required_line_roles,
+                            required_scopes=required_scopes,
                             pulse_id=pulse_id,
                             exclude_pulse_id=exclude_pulse_id,
                         )
@@ -526,15 +540,16 @@ def prepare_context(runtime, persona: Any, building_id: str, user_input: Optiona
                         recent = history_mgr.get_recent_history_balanced(
                             limit_value,
                             participant_ids,
-                            required_tags=required_tags,
+                            required_line_roles=required_line_roles,
+                            required_scopes=required_scopes,
                             pulse_id=pulse_id,
                             exclude_pulse_id=exclude_pulse_id,
                         )
                     else:
-                        # Filter by required tags or current pulse_id
                         recent = history_mgr.get_recent_history(
                             limit_value,
-                            required_tags=required_tags,
+                            required_line_roles=required_line_roles,
+                            required_scopes=required_scopes,
                             pulse_id=pulse_id,
                             exclude_pulse_id=exclude_pulse_id,
                         )

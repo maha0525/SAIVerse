@@ -1555,9 +1555,11 @@ class SEARuntime:
         if high_wm is None:
             return
 
-        # Get current message count from anchor
+        # Get current message count from anchor (Phase 3 段階 4-A: line ベース)
         current_messages = history_mgr.get_history_from_anchor(
-            anchor, required_tags=["conversation"],
+            anchor,
+            required_line_roles=["main_line"],
+            required_scopes=["committed"],
         )
         if len(current_messages) <= high_wm:
             return  # Haven't reached high watermark yet

@@ -315,10 +315,17 @@ class HistoryManager:
         max_chars: int,
         *,
         required_tags: Optional[List[str]] = None,
+        required_line_roles: Optional[List[str]] = None,
+        required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
         exclude_pulse_id: Optional[str] = None,
     ) -> List[Dict[str, str]]:
-        """Retrieves recent messages from persona history up to a character limit."""
+        """Retrieves recent messages from persona history up to a character limit.
+
+        Context-construction callers should pass ``required_line_roles`` /
+        ``required_scopes`` (line-based, Phase 1+). ``required_tags`` is
+        retained for search/recall compatibility (4-D will retire it).
+        """
         if self.memory_adapter is not None:
             if not self.memory_adapter.is_ready():
                 LOGGER.debug("SAIMemory adapter not ready for %s; falling back to in-memory", self.persona_id)
@@ -331,6 +338,8 @@ class HistoryManager:
                 msgs = self.memory_adapter.recent_persona_messages(
                     max_chars,
                     required_tags=required_tags,
+                    required_line_roles=required_line_roles,
+                    required_scopes=required_scopes,
                     pulse_id=pulse_id,
                     exclude_pulse_id=exclude_pulse_id,
                 )
@@ -359,6 +368,8 @@ class HistoryManager:
         max_messages: int,
         *,
         required_tags: Optional[List[str]] = None,
+        required_line_roles: Optional[List[str]] = None,
+        required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
         exclude_pulse_id: Optional[str] = None,
     ) -> List[Dict[str, str]]:
@@ -375,6 +386,8 @@ class HistoryManager:
                 msgs = self.memory_adapter.recent_persona_messages_by_count(
                     max_messages,
                     required_tags=required_tags,
+                    required_line_roles=required_line_roles,
+                    required_scopes=required_scopes,
                     pulse_id=pulse_id,
                     exclude_pulse_id=exclude_pulse_id,
                 )
@@ -398,6 +411,8 @@ class HistoryManager:
         anchor_message_id: str,
         *,
         required_tags: Optional[List[str]] = None,
+        required_line_roles: Optional[List[str]] = None,
+        required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
         exclude_pulse_id: Optional[str] = None,
     ) -> List[Dict[str, str]]:
@@ -414,6 +429,8 @@ class HistoryManager:
                 msgs = self.memory_adapter.persona_messages_from_anchor(
                     anchor_message_id,
                     required_tags=required_tags,
+                    required_line_roles=required_line_roles,
+                    required_scopes=required_scopes,
                     pulse_id=pulse_id,
                     exclude_pulse_id=exclude_pulse_id,
                 )
@@ -442,6 +459,8 @@ class HistoryManager:
         participant_ids: List[str],
         *,
         required_tags: Optional[List[str]] = None,
+        required_line_roles: Optional[List[str]] = None,
+        required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
         exclude_pulse_id: Optional[str] = None,
     ) -> List[Dict[str, str]]:
@@ -450,7 +469,9 @@ class HistoryManager:
         Args:
             max_chars: Total character budget
             participant_ids: List of partner IDs to balance (e.g., ["user", "persona_b"])
-            required_tags: Only include messages with these tags
+            required_tags: Optional legacy tag filter (search/recall compat)
+            required_line_roles: Line-role filter for context construction
+            required_scopes: Scope filter for context construction
             pulse_id: Always include messages with this pulse ID
             exclude_pulse_id: Exclude messages with this pulse ID
 
@@ -468,6 +489,8 @@ class HistoryManager:
                 max_chars,
                 participant_ids,
                 required_tags=required_tags,
+                required_line_roles=required_line_roles,
+                required_scopes=required_scopes,
                 pulse_id=pulse_id,
                 exclude_pulse_id=exclude_pulse_id,
             )
@@ -482,6 +505,8 @@ class HistoryManager:
         return self.get_recent_history(
             max_chars,
             required_tags=required_tags,
+            required_line_roles=required_line_roles,
+            required_scopes=required_scopes,
             pulse_id=pulse_id,
             exclude_pulse_id=exclude_pulse_id,
         )

@@ -165,9 +165,11 @@ class PersonaGenerationMixin:
 
         history_limit = max(0, self.context_length - base_chars)
         pulse_id = getattr(self, "_current_pulse_id", None)
+        # Phase 3 段階 4-A (2026-05-01): line ベースに切替
         history_msgs = self.history_manager.get_recent_history(
             history_limit,
-            required_tags=["conversation"],
+            required_line_roles=["main_line"],
+            required_scopes=["committed"],
             pulse_id=pulse_id,
         )
         logging.debug(

@@ -307,6 +307,13 @@ class Message:
     resource_id: Optional[str]
     created_at: int
     metadata: Optional[Dict[str, Any]] = None
+    # 7-layer storage metadata (Phase 1, Intent A v0.14 / Intent B v0.11).
+    # Populated only when SELECT statements include the corresponding columns
+    # (legacy 7-column SELECTs leave them as None for compatibility).
+    line_role: Optional[str] = None
+    line_id: Optional[str] = None
+    scope: Optional[str] = None
+    pulse_id: Optional[str] = None
 
 
 def _decode_metadata(raw: Any) -> Optional[Dict[str, Any]]:
@@ -326,6 +333,11 @@ def _decode_metadata(raw: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+# Column suffix for SELECTs that want line metadata. Append after the 7 base
+# columns (id, thread_id, role, content, resource_id, created_at, metadata).
+_LINE_METADATA_COLUMNS = "line_role, line_id, scope, pulse_id"
+
+
 def _row_to_message(row: Tuple[Any, ...]) -> Message:
     return Message(
         id=row[0],
@@ -335,6 +347,10 @@ def _row_to_message(row: Tuple[Any, ...]) -> Message:
         resource_id=row[4],
         created_at=int(row[5]),
         metadata=_decode_metadata(row[6]) if len(row) > 6 else None,
+        line_role=row[7] if len(row) > 7 else None,
+        line_id=row[8] if len(row) > 8 else None,
+        scope=row[9] if len(row) > 9 else None,
+        pulse_id=row[10] if len(row) > 10 else None,
     )
 
 
@@ -447,7 +463,8 @@ def get_messages_last(conn: sqlite3.Connection, thread_id: str, limit: int) -> L
 def get_messages_paginated(conn: sqlite3.Connection, thread_id: str, page: int, page_size: int) -> List[Message]:
     offset = max(0, page) * max(1, page_size)
     cur = conn.execute(
-        "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+        f"SELECT id, thread_id, role, content, resource_id, created_at, metadata, "
+        f"{_LINE_METADATA_COLUMNS} "
         "FROM messages WHERE thread_id=? "
         "AND (scope IS NULL OR scope != 'discardable') "
         "ORDER BY created_at ASC LIMIT ? OFFSET ?",
@@ -465,7 +482,8 @@ def get_messages_from_id(
     then returns all messages in the thread at or after that time.
     """
     cur = conn.execute(
-        "SELECT id, thread_id, role, content, resource_id, created_at, metadata "
+        f"SELECT id, thread_id, role, content, resource_id, created_at, metadata, "
+        f"{_LINE_METADATA_COLUMNS} "
         "FROM messages "
         "WHERE thread_id = ? AND created_at >= ("
         "  SELECT created_at FROM messages WHERE id = ?"

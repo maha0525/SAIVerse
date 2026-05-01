@@ -377,6 +377,8 @@ class SAIMemoryAdapter:
         max_chars: int,
         *,
         required_tags: Optional[List[str]] = None,
+        required_line_roles: Optional[List[str]] = None,
+        required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
         exclude_pulse_id: Optional[str] = None,
     ) -> List[dict]:
@@ -393,31 +395,15 @@ class SAIMemoryAdapter:
 
         selected: List[dict] = []
         consumed = 0
-        required_tags = required_tags or []
-        pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
-        exclude_tag = f"pulse:{exclude_pulse_id}" if exclude_pulse_id else None
-
         for payload in reversed(payloads):
-            tags = []
-            metadata = payload.get("metadata")
-            if isinstance(metadata, dict):
-                raw_tags = metadata.get("tags")
-                if isinstance(raw_tags, list):
-                    tags = [str(tag) for tag in raw_tags if tag]
-
-            # Exclude messages belonging to the specified pulse
-            if exclude_tag and exclude_tag in tags:
-                continue
-
-            include = True
-            if required_tags:
-                include = any(tag in tags for tag in required_tags)
-            if pulse_tag and pulse_tag in tags:
-                include = True
-            if not tags and required_tags:
-                # fallback: include legacy entries without tags only if we expect conversation logs
-                include = not required_tags or "conversation" not in required_tags
-            if not include:
+            if not _payload_passes_context_filter(
+                payload,
+                required_tags=required_tags,
+                required_line_roles=required_line_roles,
+                required_scopes=required_scopes,
+                pulse_id=pulse_id,
+                exclude_pulse_id=exclude_pulse_id,
+            ):
                 continue
             text = payload.get("content", "") or ""
             consumed += len(text)
@@ -431,6 +417,8 @@ class SAIMemoryAdapter:
         max_messages: int,
         *,
         required_tags: Optional[List[str]] = None,
+        required_line_roles: Optional[List[str]] = None,
+        required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
         exclude_pulse_id: Optional[str] = None,
     ) -> List[dict]:
@@ -447,30 +435,15 @@ class SAIMemoryAdapter:
             return []
 
         selected: List[dict] = []
-        required_tags = required_tags or []
-        pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
-        exclude_tag = f"pulse:{exclude_pulse_id}" if exclude_pulse_id else None
-
         for payload in reversed(payloads):
-            tags = []
-            metadata = payload.get("metadata")
-            if isinstance(metadata, dict):
-                raw_tags = metadata.get("tags")
-                if isinstance(raw_tags, list):
-                    tags = [str(tag) for tag in raw_tags if tag]
-
-            # Exclude messages belonging to the specified pulse
-            if exclude_tag and exclude_tag in tags:
-                continue
-
-            include = True
-            if required_tags:
-                include = any(tag in tags for tag in required_tags)
-            if pulse_tag and pulse_tag in tags:
-                include = True
-            if not tags and required_tags:
-                include = not required_tags or "conversation" not in required_tags
-            if not include:
+            if not _payload_passes_context_filter(
+                payload,
+                required_tags=required_tags,
+                required_line_roles=required_line_roles,
+                required_scopes=required_scopes,
+                pulse_id=pulse_id,
+                exclude_pulse_id=exclude_pulse_id,
+            ):
                 continue
             selected.insert(0, payload)
             if len(selected) >= max_messages:
@@ -482,6 +455,8 @@ class SAIMemoryAdapter:
         anchor_message_id: str,
         *,
         required_tags: Optional[List[str]] = None,
+        required_line_roles: Optional[List[str]] = None,
+        required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
         exclude_pulse_id: Optional[str] = None,
     ) -> List[dict]:
@@ -503,32 +478,16 @@ class SAIMemoryAdapter:
             LOGGER.warning("Failed to fetch persona messages from anchor %s: %s", anchor_message_id, exc)
             return []
 
-        # Tag filtering (same logic as recent_persona_messages_by_count)
         selected: List[dict] = []
-        required_tags = required_tags or []
-        pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
-        exclude_tag = f"pulse:{exclude_pulse_id}" if exclude_pulse_id else None
-
         for payload in payloads:  # already in chronological order
-            tags = []
-            metadata = payload.get("metadata")
-            if isinstance(metadata, dict):
-                raw_tags = metadata.get("tags")
-                if isinstance(raw_tags, list):
-                    tags = [str(tag) for tag in raw_tags if tag]
-
-            # Exclude messages belonging to the specified pulse
-            if exclude_tag and exclude_tag in tags:
-                continue
-
-            include = True
-            if required_tags:
-                include = any(tag in tags for tag in required_tags)
-            if pulse_tag and pulse_tag in tags:
-                include = True
-            if not tags and required_tags:
-                include = not required_tags or "conversation" not in required_tags
-            if not include:
+            if not _payload_passes_context_filter(
+                payload,
+                required_tags=required_tags,
+                required_line_roles=required_line_roles,
+                required_scopes=required_scopes,
+                pulse_id=pulse_id,
+                exclude_pulse_id=exclude_pulse_id,
+            ):
                 continue
             selected.append(payload)
 
@@ -540,6 +499,8 @@ class SAIMemoryAdapter:
         participant_ids: List[str],
         *,
         required_tags: Optional[List[str]] = None,
+        required_line_roles: Optional[List[str]] = None,
+        required_scopes: Optional[List[str]] = None,
         pulse_id: Optional[str] = None,
         exclude_pulse_id: Optional[str] = None,
     ) -> List[dict]:
@@ -551,9 +512,11 @@ class SAIMemoryAdapter:
         Args:
             max_chars: Total character budget
             participant_ids: List of partner IDs to balance (e.g., ["user", "persona_b"])
-            required_tags: Only include messages with these tags
+            required_tags: Optional legacy tag filter (kept for search/recall compatibility)
+            required_line_roles: Line-role filter (e.g. ['main_line']) — preferred for context construction
+            required_scopes: Scope filter (e.g. ['committed']) — preferred for context construction
             pulse_id: Always include messages with this pulse ID
-            exclude_pulse_id: Exclude messages with this pulse ID (for mid-pulse context_profile reads)
+            exclude_pulse_id: Exclude messages with this pulse ID
 
         Returns:
             List of messages, sorted by timestamp, balanced across participants
@@ -570,32 +533,24 @@ class SAIMemoryAdapter:
             LOGGER.warning("Failed to fetch persona messages for balancing: %s", exc)
             return []
 
-        required_tags = required_tags or []
-        pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
-        exclude_tag = f"pulse:{exclude_pulse_id}" if exclude_pulse_id else None
-
         # Group messages by participant
         # Key: participant_id, Value: list of (index, payload) tuples
         participant_groups: Dict[str, List[tuple]] = {pid: [] for pid in participant_ids}
         other_messages: List[tuple] = []  # Messages without "with" or with unknown participants
 
         for idx, payload in enumerate(payloads):
+            if not _payload_passes_context_filter(
+                payload,
+                required_tags=required_tags,
+                required_line_roles=required_line_roles,
+                required_scopes=required_scopes,
+                pulse_id=pulse_id,
+                exclude_pulse_id=exclude_pulse_id,
+            ):
+                continue
+
             metadata = payload.get("metadata") or {}
-            tags = metadata.get("tags", [])
-            with_list = metadata.get("with", [])
-
-            # Exclude messages belonging to the specified pulse
-            if exclude_tag and exclude_tag in tags:
-                continue
-
-            # Check if message matches required tags
-            include = True
-            if required_tags:
-                include = any(tag in tags for tag in required_tags)
-            if pulse_tag and pulse_tag in tags:
-                include = True
-            if not include:
-                continue
+            with_list = metadata.get("with", []) if isinstance(metadata, dict) else []
 
             # Assign to participant groups
             if with_list:
@@ -1125,6 +1080,17 @@ class SAIMemoryAdapter:
         }
         if msg.metadata:
             payload["metadata"] = msg.metadata
+        # Line metadata (Phase 1, Intent A v0.14): expose for line-based context
+        # construction. None when SELECT didn't include the columns or when
+        # legacy rows predating Phase 1 lack the values.
+        if msg.line_role is not None:
+            payload["line_role"] = msg.line_role
+        if msg.line_id is not None:
+            payload["line_id"] = msg.line_id
+        if msg.scope is not None:
+            payload["scope"] = msg.scope
+        if msg.pulse_id is not None:
+            payload["pulse_id"] = msg.pulse_id
         return payload
 
     def _active_persona_suffix(self) -> Optional[str]:
@@ -1842,3 +1808,73 @@ def _fetch_all_messages(conn, thread_id: str, page_size: int = 200):
         rows.extend(batch)
         page += 1
     return rows
+
+
+def _payload_passes_context_filter(
+    payload: Dict[str, Any],
+    *,
+    required_tags: Optional[List[str]] = None,
+    required_line_roles: Optional[List[str]] = None,
+    required_scopes: Optional[List[str]] = None,
+    pulse_id: Optional[str] = None,
+    exclude_pulse_id: Optional[str] = None,
+) -> bool:
+    """Decide if a payload should be included in context construction.
+
+    Filtering is line-based first (line_role / scope), with legacy tags as a
+    fallback for messages predating Phase 1. Pulse-scoped overrides:
+    - exclude_pulse_id always wins (excluded)
+    - matching pulse_id always wins (included, bypasses line/scope/tag filters)
+
+    Legacy compatibility:
+    - line_role IS NULL is treated as 'main_line' (pre-Phase-1 rows)
+    - scope IS NULL is treated as 'committed' (pre-Phase-1 rows)
+    - For tag fallback, legacy entries without any tags are included unless the
+      caller explicitly requires the 'conversation' tag.
+    """
+    payload_pulse_id = payload.get("pulse_id")
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    raw_tags = metadata.get("tags") if isinstance(metadata, dict) else None
+    tags = [str(t) for t in raw_tags if t] if isinstance(raw_tags, list) else []
+
+    legacy_pulse_tag = f"pulse:{pulse_id}" if pulse_id else None
+    legacy_exclude_pulse_tag = f"pulse:{exclude_pulse_id}" if exclude_pulse_id else None
+
+    # Pulse-based overrides (precede line/scope/tag filtering)
+    if exclude_pulse_id:
+        if payload_pulse_id == exclude_pulse_id:
+            return False
+        if legacy_exclude_pulse_tag and legacy_exclude_pulse_tag in tags:
+            return False
+
+    if pulse_id:
+        if payload_pulse_id == pulse_id:
+            return True
+        if legacy_pulse_tag and legacy_pulse_tag in tags:
+            return True
+
+    # Line-role filter (preferred). Legacy line_role IS NULL maps to 'main_line'.
+    if required_line_roles:
+        payload_role = payload.get("line_role")
+        effective_role = payload_role if payload_role is not None else "main_line"
+        if effective_role not in required_line_roles:
+            return False
+
+    # Scope filter. Legacy scope IS NULL maps to 'committed'.
+    if required_scopes:
+        payload_scope = payload.get("scope")
+        effective_scope = payload_scope if payload_scope is not None else "committed"
+        if effective_scope not in required_scopes:
+            return False
+
+    # Tag filter (legacy / opt-in). Kept for callers that haven't migrated to
+    # line-based filtering yet (e.g. search/recall paths). When line filters
+    # are already in play, tag filter is typically not used.
+    if required_tags:
+        if not tags:
+            # legacy entries without tags: include unless caller asked for "conversation"
+            return "conversation" not in required_tags
+        if not any(tag in tags for tag in required_tags):
+            return False
+
+    return True
